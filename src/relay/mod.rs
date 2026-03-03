@@ -1,7 +1,6 @@
-use dolos_core::Driver as _;
+use dolos_core::{config::RelayConfig, Driver as _};
 use futures_util::stream::FuturesUnordered;
 use pallas::network::facades::PeerServer;
-use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info, instrument, warn};
@@ -16,12 +15,6 @@ mod hanshake;
 // TODO: add tests
 // #[cfg(test)]
 // mod tests;
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Config {
-    pub listen_address: String,
-    pub magic: u64,
-}
 
 async fn handle_session<D: Domain, C: CancelToken>(
     domain: D,
@@ -49,7 +42,7 @@ async fn handle_session<D: Domain, C: CancelToken>(
 
 async fn accept_peer_connections<D: Domain, C: CancelToken>(
     domain: D,
-    config: &Config,
+    config: &RelayConfig,
     tasks: &mut TaskTracker,
     cancel: C,
 ) -> Result<(), ServeError> {
@@ -79,7 +72,7 @@ async fn accept_peer_connections<D: Domain, C: CancelToken>(
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = Config;
+    type Config = RelayConfig;
 
     #[instrument(skip_all)]
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
@@ -111,7 +104,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
 pub fn load_drivers(
     all_drivers: &FuturesUnordered<tokio::task::JoinHandle<Result<(), ServeError>>>,
-    config: Option<Config>,
+    config: Option<RelayConfig>,
     domain: DomainAdapter,
     exit: CancellationToken,
 ) {

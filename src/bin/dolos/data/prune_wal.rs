@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
@@ -14,14 +15,14 @@ pub struct Args {
     max_prune: Option<u64>,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let mut wal = crate::common::open_wal_store(config)?;
 
     let max_slots = match args.max_slots {
         Some(x) => x,
-        None => match config.storage.max_wal_history {
+        None => match config.storage.wal.max_history() {
             Some(x) => x,
             None => bail!("neither args or config provided for max_slots"),
         },
@@ -30,7 +31,6 @@ pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
     info!(max_slots, "prunning to max slots");
 
     wal.prune_history(max_slots, args.max_prune)
-        .map_err(WalError::from)
         .into_diagnostic()
         .context("removing range from WAL")?;
 

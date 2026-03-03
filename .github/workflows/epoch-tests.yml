@@ -1,0 +1,97 @@
+name: Epoch Tests
+
+on:
+  workflow_dispatch:
+
+jobs:
+  epoch-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          # mainnet: seed 200, upstream 200-400
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 242, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 243, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 245, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 250, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 278, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 279, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 280, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 285, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 286, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 287, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 288, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 289, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 290, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 300, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 325, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 326, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 350, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 352, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 375, upstream_range: "200-400" }
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 400, upstream_range: "200-400" }
+          # mainnet: seed 200, upstream 200-500
+          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 500, upstream_range: "200-500" }
+          # preview: seed 500, upstream 500-700
+          - { network: preview, seed_epoch: 500, ground_truth_epoch: 550, upstream_range: "500-700" }
+          - { network: preview, seed_epoch: 500, ground_truth_epoch: 649, upstream_range: "500-700" }
+          - { network: preview, seed_epoch: 500, ground_truth_epoch: 700, upstream_range: "500-700" }
+
+    name: "${{ matrix.network }}-${{ matrix.ground_truth_epoch }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-epoch-tests-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-epoch-tests-
+
+      - name: Download seed
+        run: |
+          mkdir -p /tmp/fixtures/seeds
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/seeds/${{ matrix.network }}-${{ matrix.seed_epoch }}.tar" /tmp/seed.tar
+          tar xf /tmp/seed.tar -C /tmp/fixtures/seeds
+          rm /tmp/seed.tar
+
+      - name: Download ground truth
+        run: |
+          mkdir -p /tmp/fixtures/ground-truth
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/ground-truth/${{ matrix.network }}-${{ matrix.ground_truth_epoch }}.tar" /tmp/ground-truth.tar
+          tar xf /tmp/ground-truth.tar -C /tmp/fixtures/ground-truth
+          rm /tmp/ground-truth.tar
+
+      - name: Download upstream
+        run: |
+          mkdir -p /tmp/fixtures/upstream
+          aws s3 cp "s3://${{ vars.S3_BUCKET }}/upstream/${{ matrix.network }}-${{ matrix.upstream_range }}.tar" /tmp/upstream.tar
+          tar xf /tmp/upstream.tar -C /tmp/fixtures/upstream
+          rm /tmp/upstream.tar
+
+      - name: Run epoch test
+        env:
+          DOLOS_FIXTURE_DIR: /tmp/fixtures
+        run: cargo test --test epoch_pots -- --nocapture
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf /tmp/fixtures

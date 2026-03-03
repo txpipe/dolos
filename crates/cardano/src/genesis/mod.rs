@@ -1,11 +1,20 @@
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
-
-use crate::{
-    mutable_slots, sweep::Pots, EpochState, EraBoundary, EraSummary, Nonces, PParamsSet,
-    EPOCH_KEY_MARK,
+use dolos_core::{
+    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, Genesis, IndexStore as _,
+    IndexWriter as _, StateStore as _, StateWriter as _,
 };
 
-fn get_utxo_amount(genesis: &Genesis) -> u64 {
+use crate::{
+    indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EpochState,
+    EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
+    CURRENT_EPOCH_KEY,
+};
+
+mod staking;
+pub mod work_unit;
+
+pub use work_unit::GenesisWorkUnit;
+
+fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
         .iter()
         .fold(0, |acc, (_, _, amount)| acc + amount);
@@ -17,24 +26,8 @@ fn get_utxo_amount(genesis: &Genesis) -> u64 {
     byron_utxo + shelley_utxo
 }
 
-const SHELLEY_PROTOCOL: u16 = 2;
-
-fn bootstrap_pots(
-    protocol: u16,
-    genesis: &Genesis,
-    pparams: &PParamsSet,
-) -> Result<Pots, ChainError> {
+fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, ChainError> {
     let utxos = get_utxo_amount(genesis);
-
-    // for any era before shelley, we don't have the concept of reserves or
-    // treasury, so we just return the initial utxos
-    if protocol < SHELLEY_PROTOCOL {
-        return Ok(Pots {
-            reserves: 0,
-            treasury: 0,
-            utxos,
-        });
-    }
 
     let max_supply = genesis
         .shelley
@@ -43,18 +36,14 @@ fn bootstrap_pots(
             "max_lovelace_supply".to_string(),
         ))?;
 
-    let initial_reserves = max_supply.saturating_sub(utxos);
-
-    let tau = pparams.ensure_tau()?;
-    let rho = pparams.ensure_rho()?;
-    let eta = num_rational::BigRational::from_integer(num_bigint::BigInt::from(1));
-
-    let pots = crate::pots::compute_pot_delta(initial_reserves, 0, &rho, &tau, eta);
+    let reserves = max_supply - utxos;
 
     Ok(Pots {
-        reserves: initial_reserves - pots.incentives + pots.available_rewards,
-        treasury: pots.treasury_tax,
+        reserves,
         utxos,
+        deposit_per_pool: pparams.pool_deposit_or_default(),
+        deposit_per_account: pparams.key_deposit_or_default(),
+        ..Default::default()
     })
 }
 
@@ -68,45 +57,44 @@ pub fn bootstrap_epoch<D: Domain>(
     if let Some(force_protocol) = genesis.force_protocol {
         pparams = crate::forks::force_pparams_version(&pparams, genesis, 0, force_protocol as u16)?;
 
-        // TODO: why do we set nonces only if there's a force protocol?
-        nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
+        if force_protocol >= 2 {
+            // When we start on Shelley or beyond, we need to bootstrap the nonces.
+            nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
+        }
     }
 
-    let protocol = pparams.protocol_major().unwrap_or_default();
+    let pots = bootstrap_pots(&pparams, genesis)?;
+    let protocol = pparams.ensure_protocol_major()?;
 
-    let pots = bootstrap_pots(protocol, genesis, &pparams)?;
+    let pparams = EpochValue::with_genesis(pparams);
 
     let epoch = EpochState {
         pparams,
-        pparams_update: PParamsSet::default(),
-        number: 0,
-        reserves: pots.reserves,
-        treasury: pots.treasury,
-        utxos: pots.utxos,
-        deposits: 0,
-        gathered_fees: 0,
-        gathered_deposits: 0,
-        decayed_deposits: 0,
-        blocks_minted: 0,
-        effective_rewards: None,
-        unspendable_rewards: None,
-        treasury_tax: None,
-        largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64 - mutable_slots(genesis),
+        initial_pots: pots,
+        largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64
+            - nonce_stability_window(protocol as u16, genesis),
         nonces,
+        previous_nonce_tail: None,
+        number: 0,
+        rolling: EpochValue::with_live(0, RollingStats::default()),
+        end: None,
+        incentives: None,
     };
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EntityKey::from(EPOCH_KEY_MARK), &epoch)?;
+    writer.write_entity_typed(&EntityKey::from(CURRENT_EPOCH_KEY), &epoch)?;
     writer.commit()?;
 
     Ok(epoch)
 }
 
 pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
-    let system_start = epoch.pparams.system_start().unwrap_or_default();
-    let epoch_length = epoch.pparams.epoch_length().unwrap_or_default();
-    let slot_length = epoch.pparams.slot_length().unwrap_or_default();
-    let protocol_major = epoch.pparams.protocol_major().unwrap_or_default();
+    let pparams = epoch.pparams.unwrap_live();
+
+    let system_start = pparams.ensure_system_start()?;
+    let epoch_length = pparams.ensure_epoch_length()?;
+    let slot_length = pparams.ensure_slot_length()?;
+    let protocol_major = pparams.protocol_major_or_default();
 
     let era = EraSummary {
         start: EraBoundary {
@@ -117,6 +105,7 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
         end: None,
         epoch_length,
         slot_length,
+        protocol: protocol_major,
     };
 
     let key = protocol_major.to_be_bytes();
@@ -128,22 +117,48 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     Ok(())
 }
 
-pub fn bootstrap_utxos<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
-    let delta = crate::utxoset::compute_origin_delta(genesis);
+pub fn bootstrap_utxos<D: Domain>(
+    state: &D::State,
+    indexes: &D::Indexes,
+    genesis: &Genesis,
+    config: &CardanoConfig,
+) -> Result<(), ChainError> {
+    let state_writer = state.start_writer()?;
+    let index_writer = indexes.start_writer()?;
 
-    let writer = state.start_writer()?;
-    writer.apply_utxoset(&delta)?;
-    writer.commit()?;
+    // Genesis UTxOs from Byron and Shelley genesis files
+    let origin_delta = crate::utxoset::compute_origin_delta(genesis);
+    state_writer.apply_utxoset(&origin_delta)?;
+
+    let origin_index_delta = index_delta_from_utxo_delta(ChainPoint::Origin, &origin_delta);
+    index_writer.apply(&origin_index_delta)?;
+
+    // Custom UTxOs from config (e.g., for testing)
+    let custom_delta = crate::utxoset::build_custom_utxos_delta(config)?;
+    state_writer.apply_utxoset(&custom_delta)?;
+
+    let custom_index_delta = index_delta_from_utxo_delta(ChainPoint::Origin, &custom_delta);
+    index_writer.apply(&custom_index_delta)?;
+
+    state_writer.commit()?;
+    index_writer.commit()?;
 
     Ok(())
 }
 
-pub fn execute<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+pub fn execute<D: Domain>(
+    state: &D::State,
+    indexes: &D::Indexes,
+    genesis: &Genesis,
+    config: &CardanoConfig,
+) -> Result<(), ChainError> {
     let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
     bootstrap_eras::<D>(state, &epoch)?;
 
-    bootstrap_utxos::<D>(state, genesis)?;
+    bootstrap_utxos::<D>(state, indexes, genesis, config)?;
+
+    staking::bootstrap::<D>(state, genesis)?;
 
     Ok(())
 }

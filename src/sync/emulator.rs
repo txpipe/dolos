@@ -9,7 +9,7 @@ use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::info;
 
 use crate::adapters::WalAdapter;
-use crate::mempool::Mempool;
+use crate::adapters::storage::MempoolBackend;
 use crate::prelude::*;
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
@@ -21,7 +21,7 @@ pub fn empty_bytes() -> Bytes {
 pub struct Worker {
     block_production_interval_seconds: u64,
     block_production_timer: tokio::time::Interval,
-    mempool: Mempool,
+    mempool: MempoolBackend,
 }
 
 impl Worker {
@@ -31,12 +31,16 @@ impl Worker {
     ) -> Result<(Tip, RawBlock), WorkerError> {
         let (block_number, slot, prev_hash) = match current {
             Some(raw) => {
-                let block = MultiEraBlock::decode(&raw).unwrap();
-                (
-                    block.number() + 1,
-                    block.slot() + self.block_production_interval_seconds,
-                    Some(block.hash()),
-                )
+                if raw.is_empty() {
+                    (1, self.block_production_interval_seconds, None)
+                } else {
+                    let block = MultiEraBlock::decode(&raw).unwrap();
+                    (
+                        block.number() + 1,
+                        block.slot() + self.block_production_interval_seconds,
+                        Some(block.hash()),
+                    )
+                }
             }
             None => (1, self.block_production_interval_seconds, None),
         };
@@ -45,11 +49,18 @@ impl Worker {
         let mut transaction_witness_sets = vec![];
         let mut auxiliary_data_set = BTreeMap::new();
 
-        let txs = self.mempool.request(10);
+        let txs = self.mempool.peek_pending(10);
 
         for (i, tx) in txs.iter().enumerate() {
             info!(tx = hex::encode(tx.hash), "adding tx to emulated block");
-            let MultiEraTx::Conway(conway) = MultiEraTx::decode(&tx.bytes).or_panic()? else {
+
+            let EraCbor(era, cbor) = &tx.payload;
+
+            let era = pallas::ledger::traverse::Era::try_from(*era).or_panic()?;
+
+            let tx = MultiEraTx::decode_for_era(era, cbor).or_panic()?;
+
+            let Some(conway) = tx.as_conway() else {
                 return Err(WorkerError::Panic);
             };
 
@@ -61,7 +72,9 @@ impl Worker {
             }
         }
 
-        self.mempool.acknowledge(transaction_bodies.len());
+        let hashes: Vec<TxHash> = txs.iter().map(|tx| tx.hash).collect();
+        self.mempool.mark_inflight(&hashes).or_panic()?;
+        self.mempool.mark_acknowledged(&hashes).or_panic()?;
 
         let block = pallas::ledger::primitives::conway::Block {
             header: pallas::ledger::primitives::babbage::Header {
@@ -162,7 +175,7 @@ pub struct Stage {
     // block_production_interval: std::time::Duration,
     block_production_interval: u64,
     wal: WalAdapter,
-    mempool: Mempool,
+    mempool: MempoolBackend,
 
     pub downstream: DownstreamPort,
 
@@ -174,7 +187,7 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(wal: WalAdapter, mempool: Mempool, block_production_interval: u64) -> Self {
+    pub fn new(wal: WalAdapter, mempool: MempoolBackend, block_production_interval: u64) -> Self {
         Self {
             downstream: Default::default(),
             block_count: Default::default(),

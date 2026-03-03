@@ -1,3 +1,5 @@
+use dolos_core::config::RootConfig;
+use dolos_core::ImportExt;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 
@@ -11,8 +13,8 @@ pub struct Args {
     pub chunk: usize,
 }
 
-pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    //crate::common::setup_tracing(&config.logging)?;
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    //crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let progress = feedback.slot_progress_bar();
     progress.set_message("rebuilding stores");
@@ -37,7 +39,7 @@ pub fn run(config: &crate::Config, args: &Args, feedback: &Feedback) -> miette::
     for chunk in remaining.chunks(args.chunk).into_iter() {
         let collected = chunk.into_iter().map(|(_, x)| x).collect_vec();
 
-        let Ok(cursor) = dolos_core::facade::import_blocks(&domain, collected) else {
+        let Ok(cursor) = domain.import_blocks(collected) else {
             miette::bail!("failed to apply block chunk");
         };
 

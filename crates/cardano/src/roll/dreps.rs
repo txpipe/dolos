@@ -1,15 +1,16 @@
-use std::ops::Deref as _;
+use std::{collections::HashMap, ops::Deref as _};
 
-use dolos_core::{batch::WorkDeltas, BlockSlot, ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, NsKey, TxOrder, TxoRef};
 use pallas::ledger::{
-    primitives::{conway::{self, Anchor, DRep}},
+    primitives::conway::{self, Anchor, DRep, Voter},
     traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
 
+use super::WorkDeltas;
 use crate::{
-    drep_to_entity_key, model::DRepState, pallas_extras::stake_cred_to_drep, roll::BlockVisitor,
-    CardanoLogic, FixedNamespace as _,
+    drep_to_entity_key, model::DRepState, owned::OwnedMultiEraOutput,
+    pallas_extras::stake_cred_to_drep, roll::BlockVisitor, FixedNamespace as _,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -18,10 +19,6 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
             conway::Certificate::RegDRepCert(cert, _, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UnRegDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
             conway::Certificate::UpdateDRepCert(cert, _) => Some(stake_cred_to_drep(cert)),
-            conway::Certificate::StakeVoteDeleg(_, _, drep) => Some(drep.clone()),
-            conway::Certificate::StakeVoteRegDeleg(_, _, drep, _) => Some(drep.clone()),
-            conway::Certificate::VoteRegDeleg(_, drep, _) => Some(drep.clone()),
-            conway::Certificate::VoteDeleg(_, drep) => Some(drep.clone()),
             _ => None,
         },
         _ => None,
@@ -31,7 +28,8 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepRegistration {
     drep: DRep,
-    slot: u64,
+    slot: BlockSlot,
+    txorder: TxOrder,
     deposit: u64,
     anchor: Option<Anchor>,
 
@@ -40,10 +38,17 @@ pub struct DRepRegistration {
 }
 
 impl DRepRegistration {
-    pub fn new(drep: DRep, slot: u64, deposit: u64, anchor: Option<Anchor>) -> Self {
+    pub fn new(
+        drep: DRep,
+        slot: BlockSlot,
+        txorder: TxOrder,
+        deposit: u64,
+        anchor: Option<Anchor>,
+    ) -> Self {
         Self {
             drep,
             slot,
+            txorder,
             deposit,
             anchor,
             prev_deposit: None,
@@ -59,17 +64,18 @@ impl dolos_core::EntityDelta for DRepRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // apply changes
-        entity.initial_slot = Some(self.slot);
+        entity.registered_at = Some((self.slot, self.txorder));
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
-        entity.initial_slot = None;
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
+        entity.registered_at = None;
         entity.voting_power = 0;
         entity.deposit = self.prev_deposit.unwrap_or(0);
     }
@@ -78,19 +84,21 @@ impl dolos_core::EntityDelta for DRepRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnRegistration {
     drep: DRep,
-    unregistered_at: BlockSlot,
+    slot: BlockSlot,
+    txorder: TxOrder,
 
     // undo data
     prev_voting_power: Option<u64>,
     prev_deposit: Option<u64>,
-    prev_unregistered_at: Option<BlockSlot>
+    prev_unregistered_at: Option<(BlockSlot, TxOrder)>,
 }
 
 impl DRepUnRegistration {
-    pub fn new(drep: DRep, unregistered_at: BlockSlot) -> Self {
+    pub fn new(drep: DRep, slot: BlockSlot, txorder: TxOrder) -> Self {
         Self {
             drep,
-            unregistered_at,
+            slot,
+            txorder,
             prev_voting_power: None,
             prev_deposit: None,
             prev_unregistered_at: None,
@@ -106,14 +114,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let Some(entity) = entity.as_mut() else {
-            tracing::error!(
-                key = self.key().to_string(),
-                delta = "DRepUnRegistration",
-                "failed to apply delta to entity, not found."
-            );
-            panic!("entity not found")
-        };
+        let entity = entity.as_mut().expect("can't unregister missing drep");
 
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
@@ -122,12 +123,13 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
 
         // apply changes
         entity.voting_power = 0;
-        entity.unregistered_at = Some(self.unregistered_at);
+        entity.unregistered_at = Some((self.slot, self.txorder));
         entity.deposit = 0;
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't undo missing drep");
+
         entity.voting_power = self.prev_voting_power.unwrap();
         entity.unregistered_at = self.prev_unregistered_at;
         entity.deposit = self.prev_deposit.unwrap_or(0);
@@ -159,7 +161,7 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn apply(&mut self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // save undo info
         self.previous_last_active_slot = entity.last_active_slot;
@@ -169,7 +171,8 @@ impl dolos_core::EntityDelta for DRepActivity {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let entity = entity.get_or_insert_default();
+        let entity = entity.as_mut().expect("can't undo missing drep");
+
         entity.last_active_slot = self.previous_last_active_slot;
     }
 }
@@ -178,18 +181,45 @@ impl dolos_core::EntityDelta for DRepActivity {
 pub struct DRepStateVisitor;
 
 impl BlockVisitor for DRepStateVisitor {
+    fn visit_tx(
+        &mut self,
+        deltas: &mut WorkDeltas,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        _: &HashMap<TxoRef, OwnedMultiEraOutput>,
+    ) -> Result<(), ChainError> {
+        let MultiEraTx::Conway(conway_tx) = tx else {
+            return Ok(());
+        };
+
+        let Some(voting_procedures) = &conway_tx.transaction_body.voting_procedures else {
+            return Ok(());
+        };
+
+        for (voter, _) in voting_procedures.iter() {
+            let drep = match voter {
+                Voter::DRepKey(hash) => DRep::Key(*hash),
+                Voter::DRepScript(hash) => DRep::Script(*hash),
+                _ => continue,
+            };
+
+            deltas.add_for_entity(DRepActivity::new(drep, block.slot()));
+        }
+
+        Ok(())
+    }
+
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
+        order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         let Some(drep) = cert_drep(cert) else {
             return Ok(());
         };
-
-        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
 
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
@@ -197,16 +227,23 @@ impl BlockVisitor for DRepStateVisitor {
                     deltas.add_for_entity(DRepRegistration::new(
                         drep.clone(),
                         block.slot(),
+                        *order,
                         *deposit,
                         anchor.clone(),
                     ));
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
-                    deltas.add_for_entity(DRepUnRegistration::new(drep.clone(), block.slot()));
+                    deltas.add_for_entity(DRepUnRegistration::new(
+                        drep.clone(),
+                        block.slot(),
+                        *order,
+                    ));
                 }
                 _ => (),
             }
         };
+
+        deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
 
         Ok(())
     }

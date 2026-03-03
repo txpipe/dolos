@@ -1,7 +1,12 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
-use dolos_core::*;
-use futures_util::stream::StreamExt;
+use dolos_cardano::indexes::index_delta_from_utxo_delta;
+use dolos_core::{
+    config::{CardanoConfig, StorageConfig},
+    sync::execute_work_unit,
+    BootstrapExt, LogKey, TemporalKey, *,
+};
 use std::sync::Arc;
+use std::sync::RwLock;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store =
@@ -20,68 +25,105 @@ pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl Stat
 }
 
 #[derive(Clone)]
-pub struct Mempool {}
-
-pub struct MempoolStream {
-    inner: tokio_stream::wrappers::BroadcastStream<MempoolEvent>,
+pub struct Mempool {
+    pending: Arc<RwLock<Vec<MempoolTx>>>,
 }
 
-impl futures_core::Stream for MempoolStream {
+pub struct EmptyMempoolStream;
+
+impl futures_core::Stream for EmptyMempoolStream {
     type Item = Result<MempoolEvent, MempoolError>;
 
     fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        match self.inner.poll_next_unpin(cx) {
-            std::task::Poll::Ready(Some(x)) => match x {
-                Ok(x) => std::task::Poll::Ready(Some(Ok(x))),
-                Err(err) => {
-                    std::task::Poll::Ready(Some(Err(MempoolError::Internal(Box::new(err)))))
-                }
-            },
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        }
+        std::task::Poll::Ready(None)
     }
 }
 
 impl dolos_core::MempoolStore for Mempool {
-    type Stream = MempoolStream;
+    type Stream = EmptyMempoolStream;
 
-    fn receive_raw<D: Domain>(&self, _domain: &D, _cbor: &[u8]) -> Result<TxHash, MempoolError> {
-        todo!()
+    fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
+        let mut pending = self.pending.write().map_err(|_| {
+            MempoolError::Internal(Box::new(std::io::Error::other("mempool lock poisoned")))
+        })?;
+        pending.push(tx);
+        Ok(())
     }
 
-    fn apply(&self, _seen_txs: &[TxHash], _unseen_txs: &[TxHash]) {
-        // do nothing for now
+    fn has_pending(&self) -> bool {
+        self.pending
+            .read()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false)
     }
 
-    fn check_stage(&self, _tx_hash: &TxHash) -> MempoolTxStage {
-        todo!()
+    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+        self.pending
+            .read()
+            .map(|p| p.iter().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn mark_acknowledged(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn find_inflight(&self, _tx_hash: &TxHash) -> Option<MempoolTx> {
+        None
+    }
+
+    fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        vec![]
+    }
+
+    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+        Ok(())
+    }
+
+    fn check_status(&self, tx_hash: &TxHash) -> TxStatus {
+        let stage = if let Ok(pending) = self.pending.read() {
+            if pending.iter().any(|tx| &tx.hash == tx_hash) {
+                MempoolTxStage::Pending
+            } else {
+                MempoolTxStage::Unknown
+            }
+        } else {
+            MempoolTxStage::Unknown
+        };
+
+        TxStatus {
+            stage,
+            confirmations: 0,
+            non_confirmations: 0,
+            confirmed_at: None,
+        }
+    }
+
+    fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
+        dolos_core::MempoolPage { items: vec![], next_cursor: None }
     }
 
     fn subscribe(&self) -> Self::Stream {
-        todo!()
-    }
-
-    fn evaluate_raw<D: Domain>(
-        &self,
-        _domain: &D,
-        _cbor: &[u8],
-    ) -> Result<EvalReport, MempoolError> {
-        todo!()
+        EmptyMempoolStream
     }
 }
 
 #[derive(Clone)]
 pub struct ToyDomain {
-    wal: dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
-    chain: dolos_cardano::CardanoLogic,
+    wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
+    chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
     archive: dolos_redb3::archive::ArchiveStore,
+    indexes: dolos_redb3::indexes::IndexStore,
     mempool: Mempool,
-    storage_config: dolos_core::StorageConfig,
+    storage_config: StorageConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -89,39 +131,102 @@ pub struct ToyDomain {
 impl ToyDomain {
     /// Create a new MockDomain with the provided state implementation
     pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
+        let genesis = Arc::new(dolos_cardano::include::devnet::load());
+        Self::new_with_genesis(genesis, initial_delta, storage_config)
+    }
+
+    pub fn new_with_genesis(
+        genesis: Arc<dolos_core::Genesis>,
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+    ) -> Self {
+        Self::new_with_genesis_and_config(
+            genesis,
+            CardanoConfig::default(),
+            initial_delta,
+            storage_config,
+        )
+    }
+
+    pub fn new_with_genesis_and_config(
+        genesis: Arc<dolos_core::Genesis>,
+        config: CardanoConfig,
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+    ) -> Self {
         let state = dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema())
             .unwrap();
 
-        let genesis = Arc::new(dolos_cardano::include::devnet::load());
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
         let archive =
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
-            dolos_cardano::Config::default(),
-            &state,
-        )
-        .unwrap();
+        let indexes = dolos_redb3::indexes::IndexStore::in_memory().unwrap();
 
+        let chain =
+            dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
+                .unwrap();
+
+        // Create the domain first (genesis work unit needs it for execution)
         let domain = Self {
             state,
-            wal: dolos_redb::wal::RedbWalStore::memory().unwrap(),
-            chain,
+            wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
+            chain: Arc::new(RwLock::new(chain)),
             archive,
-            mempool: Mempool {},
+            indexes,
+            mempool: Mempool {
+                pending: Arc::new(RwLock::new(Vec::new())),
+            },
             storage_config: storage_config.unwrap_or_default(),
-            genesis,
+            genesis: genesis.clone(),
             tip_broadcast,
         };
 
-        dolos_core::facade::bootstrap(&domain).unwrap();
+        // Apply genesis state using the work unit pattern.
+        // Note: We're bypassing the normal pop_work flow here, so we need to
+        // manually trigger the cache refresh that would normally happen.
+        let mut genesis_work = dolos_cardano::CardanoWorkUnit::Genesis(Box::new(
+            dolos_cardano::genesis::GenesisWorkUnit::new(config, genesis),
+        ));
+        execute_work_unit(&domain, &mut genesis_work).unwrap();
+
+        // Manually refresh the chain cache after genesis since we bypassed pop_work.
+        // In normal operation, the cache refresh happens automatically via the
+        // needs_cache_refresh flag in CardanoLogic::pop_work.
+        {
+            let mut chain = domain.chain.write().expect("chain lock poisoned");
+            chain.refresh_cache::<Self>(&domain.state).unwrap();
+        }
+
+        domain.bootstrap().unwrap();
+
+        // Ensure the current epoch state is available as an archive log entry.
+        let chain = dolos_cardano::eras::load_era_summary::<Self>(&domain.state).unwrap();
+        let epoch = dolos_cardano::load_epoch::<Self>(&domain.state).unwrap();
+        let epoch_start = chain.epoch_start(epoch.number);
+        let log_key = LogKey::from(TemporalKey::from(epoch_start));
+        let writer = domain.archive.start_writer().unwrap();
+        writer.write_log_typed(&log_key, &epoch).unwrap();
+        writer.commit().unwrap();
 
         if let Some(delta) = initial_delta {
             let writer = domain.state.start_writer().unwrap();
+            let index_writer = domain.indexes.start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
+
+            // Build index delta from UTxO delta using Cardano-specific helper
+            let cursor = domain
+                .state
+                .read_cursor()
+                .unwrap()
+                .unwrap_or(ChainPoint::Origin);
+            let index_delta = index_delta_from_utxo_delta(cursor, &delta);
+            index_writer.apply(&index_delta).unwrap();
+
             writer.commit().unwrap();
+            index_writer.commit().unwrap();
         }
 
         domain
@@ -148,23 +253,29 @@ impl dolos_core::TipSubscription for TipSubscription {
 impl dolos_core::Domain for ToyDomain {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
-    type Wal = dolos_redb::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
+    type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
     type Archive = dolos_redb3::archive::ArchiveStore;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
+    type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
+    type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;
 
-    fn storage_config(&self) -> &dolos_core::StorageConfig {
+    fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
     }
 
-    fn genesis(&self) -> &dolos_core::Genesis {
-        &self.genesis
+    fn genesis(&self) -> Arc<dolos_core::Genesis> {
+        self.genesis.clone()
     }
 
-    fn chain(&self) -> &Self::Chain {
-        &self.chain
+    fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
+        self.chain.read().expect("chain lock poisoned")
+    }
+
+    fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain> {
+        self.chain.write().expect("chain lock poisoned")
     }
 
     fn wal(&self) -> &Self::Wal {
@@ -177,6 +288,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {

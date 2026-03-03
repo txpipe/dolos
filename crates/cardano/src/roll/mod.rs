@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    batch::{WorkBatch, WorkBlock, WorkDeltas},
-    ChainError, Domain, InvariantViolation, StateError, TxoRef,
+    config::{CardanoConfig, TrackConfig},
+    ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -14,25 +14,32 @@ use pallas::{
         },
     },
 };
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
-    Cache, CardanoLogic, Config, PParamsSet,
+    Cache, PParamsSet,
 };
 
-use super::TrackConfig;
-
+// Sub-modules
 pub mod accounts;
 pub mod assets;
+pub mod batch;
+pub mod datums;
 pub mod dreps;
 pub mod epochs;
 pub mod pools;
 pub mod proposals;
 pub mod txs;
+pub mod work_unit;
+
+// Re-exports
+pub use batch::{WorkBatch, WorkBlock, WorkDeltas};
+pub use work_unit::RollWorkUnit;
 
 use accounts::AccountVisitor;
 use assets::AssetStateVisitor;
+use datums::DatumVisitor;
 use dreps::DRepStateVisitor;
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
@@ -40,12 +47,16 @@ use txs::TxLogVisitor;
 
 pub trait BlockVisitor {
     #[allow(unused_variables)]
+    #[allow(clippy::too_many_arguments)]
     fn visit_root(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
+        genesis: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        epoch_start: u64,
+        protocol: u16,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -53,9 +64,10 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_tx(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Result<(), ChainError> {
         Ok(())
     }
@@ -63,7 +75,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_input(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         input: &MultiEraInput,
@@ -75,7 +87,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_output(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         index: u32,
@@ -87,7 +99,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_mint(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
@@ -98,9 +110,10 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
+        order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -109,7 +122,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_withdrawal(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         account: &[u8],
@@ -121,7 +134,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_update(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: Option<&MultiEraTx>,
         update: &MultiEraUpdate,
@@ -134,7 +147,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_datums(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         data: &KeepRaw<'_, PlutusData>,
@@ -145,7 +158,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_proposal(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         proposal: &MultiEraProposal,
@@ -157,7 +170,7 @@ pub trait BlockVisitor {
     #[allow(unused_variables)]
     fn visit_redeemers(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         proposal: &MultiEraRedeemer,
@@ -166,7 +179,7 @@ pub trait BlockVisitor {
     }
 
     #[allow(unused_variables)]
-    fn flush(&mut self, deltas: &mut WorkDeltas<CardanoLogic>) -> Result<(), ChainError> {
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
         Ok(())
     }
 }
@@ -183,6 +196,7 @@ macro_rules! visit_all {
     ($self:ident, $deltas:expr, $method:ident, $($args:tt)*) => {
         maybe_visit!($self, $deltas, account_state, $method, $($args)*);
         maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
+        maybe_visit!($self, $deltas, datum_state, $method, $($args)*);
         maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
         maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
         maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
@@ -193,13 +207,17 @@ macro_rules! visit_all {
 
 pub struct DeltaBuilder<'a> {
     config: TrackConfig,
-    work: &'a mut WorkBlock<CardanoLogic>,
+    genesis: Arc<Genesis>,
+    work: &'a mut WorkBlock,
     active_params: &'a PParamsSet,
     epoch: Epoch,
+    epoch_start: u64,
+    protocol: u16,
     utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
 
     account_state: AccountVisitor,
     asset_state: AssetStateVisitor,
+    datum_state: DatumVisitor,
     drep_state: DRepStateVisitor,
     epoch_state: EpochStateVisitor,
     pool_state: PoolStateVisitor,
@@ -208,21 +226,29 @@ pub struct DeltaBuilder<'a> {
 }
 
 impl<'a> DeltaBuilder<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: TrackConfig,
+        genesis: Arc<Genesis>,
+        protocol: u16,
         active_params: &'a PParamsSet,
         epoch: Epoch,
-        work: &'a mut WorkBlock<CardanoLogic>,
+        epoch_start: u64,
+        work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Self {
         Self {
             config,
+            genesis,
             work,
             active_params,
             epoch,
+            epoch_start,
+            protocol,
             utxos,
             account_state: Default::default(),
             asset_state: Default::default(),
+            datum_state: Default::default(),
             drep_state: Default::default(),
             epoch_state: Default::default(),
             pool_state: Default::default(),
@@ -241,12 +267,15 @@ impl<'a> DeltaBuilder<'a> {
             deltas,
             visit_root,
             block,
+            &self.genesis,
             self.active_params,
-            self.epoch
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
         );
 
-        for tx in block.txs() {
-            visit_all!(self, deltas, visit_tx, block, &tx);
+        for (order, tx) in block.txs().iter().enumerate() {
+            visit_all!(self, deltas, visit_tx, block, &tx, &self.utxos);
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -278,7 +307,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             for cert in tx.certs() {
-                visit_all!(self, deltas, visit_cert, block, &tx, &cert,);
+                visit_all!(self, deltas, visit_cert, block, &tx, &order, &cert,);
             }
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
@@ -286,7 +315,7 @@ impl<'a> DeltaBuilder<'a> {
             }
 
             if let Some(update) = tx.update() {
-                visit_all!(self, deltas, visit_update, block, Some(&tx), &update);
+                visit_all!(self, deltas, visit_update, block, Some(tx), &update);
             }
 
             for datum in tx.plutus_data() {
@@ -316,28 +345,34 @@ impl<'a> DeltaBuilder<'a> {
 
 #[instrument(name = "roll", skip_all)]
 pub fn compute_delta<D: Domain>(
-    config: &Config,
+    config: &CardanoConfig,
+    genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
-    batch: &mut WorkBatch<CardanoLogic>,
+    batch: &mut WorkBatch,
 ) -> Result<(), ChainError> {
-    info!(
-        from = batch.first_slot(),
-        to = batch.last_slot(),
-        "computing delta"
-    );
-
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
-    info!(epoch, "current epoch");
+    let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
+    let epoch_start = cache.eras.epoch_start(epoch);
+
+    debug!(
+        from = batch.first_slot(),
+        to = batch.last_slot(),
+        epoch,
+        "computing delta"
+    );
 
     let active_params = load_effective_pparams::<D>(state)?;
 
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
             config.track.clone(),
+            genesis.clone(),
+            *protocol,
             &active_params,
             epoch,
+            epoch_start,
             block,
             &batch.utxos_decoded,
         );

@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use itertools::*;
 use miette::{Context, IntoDiagnostic};
 use pallas::{
@@ -29,8 +30,9 @@ pub struct Args {
     network_id: u8,
 }
 
-pub fn run(config: &super::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+#[tokio::main]
+pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let domain = crate::common::setup_domain(config)?;
 

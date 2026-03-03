@@ -1,6 +1,5 @@
+use dolos_core::config::OuroborosConfig;
 use pallas::network::facades::NodeServer;
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use tokio::net::UnixListener;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, instrument, warn};
@@ -8,16 +7,12 @@ use tracing::{debug, info, instrument, warn};
 use crate::prelude::*;
 
 mod chainsync;
+mod statequery;
+mod utils;
 
 // TODO: fix tests
 //#[cfg(test)]
 //mod tests;
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Config {
-    pub listen_path: PathBuf,
-    pub magic: u64,
-}
 
 async fn handle_session<D: Domain, C: CancelToken>(
     domain: D,
@@ -25,24 +20,38 @@ async fn handle_session<D: Domain, C: CancelToken>(
     cancel: C,
 ) -> Result<(), ServeError> {
     let NodeServer {
-        plexer, chainsync, ..
+        plexer,
+        chainsync,
+        statequery,
+        ..
     } = connection;
 
-    // leaving this here since there's more threads to come
-    let l1 = tokio::spawn(chainsync::handle_session(domain.clone(), chainsync, cancel));
+    let chainsync_task = tokio::spawn(chainsync::handle_session(
+        domain.clone(),
+        chainsync,
+        cancel.clone(),
+    ));
 
-    let (l1,) = tokio::try_join!(l1).map_err(|e| ServeError::Internal(e.into()))?;
+    let statequery_task = tokio::spawn(statequery::handle_session(
+        domain.clone(),
+        statequery,
+        cancel.clone(),
+    ));
 
-    l1?;
-
+    let result = tokio::try_join!(chainsync_task, statequery_task);
     plexer.abort().await;
+
+    let (chainsync_res, statequery_res) = result.map_err(|e| ServeError::Internal(e.into()))?;
+
+    chainsync_res?;
+    statequery_res?;
 
     Ok(())
 }
 
 async fn accept_client_connections<D: Domain, C: CancelToken>(
     domain: D,
-    config: &Config,
+    config: &OuroborosConfig,
     tasks: &mut TaskTracker,
     cancel: C,
 ) -> Result<(), ServeError> {
@@ -74,7 +83,7 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = Config;
+    type Config = OuroborosConfig;
 
     #[instrument(skip_all)]
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {

@@ -1,10 +1,12 @@
+use dolos_core::config::RootConfig;
 use miette::{Context, IntoDiagnostic};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-pub fn run(config: &super::Config, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+#[tokio::main]
+pub async fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let domain = crate::common::setup_domain(config)?;
 

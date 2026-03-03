@@ -59,14 +59,19 @@ mod tests {
 
         for i in 0..=100 {
             let (_, block) = make_conway_block(i * 10);
-            dolos_core::facade::roll_forward(&domain, block).unwrap();
+
+            use dolos_core::SyncExt;
+            domain.roll_forward(block).unwrap();
         }
 
         let domain2 = domain.clone();
         let background = tokio::spawn(async move {
             for i in 101..=200 {
                 let (_, block) = make_conway_block(i * 10);
-                dolos_core::facade::roll_forward(&domain2, block).unwrap();
+
+                use dolos_core::SyncExt;
+                domain2.roll_forward(block).unwrap();
+
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
         });

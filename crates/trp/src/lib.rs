@@ -1,12 +1,11 @@
 use jsonrpsee::server::{RpcModule, Server};
-use serde::{Deserialize, Serialize};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use tokio::select;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use dolos_core::{CancelToken, Domain, ServeError};
+use dolos_core::{config::TrpConfig, CancelToken, Domain, ServeError, SubmitExt};
 
 mod compiler;
 mod error;
@@ -17,25 +16,17 @@ mod utxos;
 
 pub use error::Error;
 
-#[derive(Deserialize, Serialize, Clone)]
-pub struct Config {
-    pub listen_address: SocketAddr,
-    pub max_optimize_rounds: u8,
-    pub permissive_cors: Option<bool>,
-    pub extra_fees: Option<u64>,
-}
-
 #[derive(Clone)]
 pub struct Context<D: Domain> {
     pub domain: D,
-    pub config: Arc<Config>,
+    pub config: Arc<TrpConfig>,
     pub metrics: metrics::Metrics,
 }
 
 pub struct Driver;
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = Config;
+impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+    type Config = TrpConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
@@ -88,6 +79,70 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
                 response
             })
             .map_err(|_| ServeError::Internal("failed to register trp.submit".into()))?;
+
+        module
+            .register_async_method("trp.checkStatus", |params, context, _| async move {
+                let response = methods::trp_check_status(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-check-status",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.checkStatus".into()))?;
+
+        module
+            .register_async_method("trp.dumpLogs", |params, context, _| async move {
+                let response = methods::trp_dump_logs(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-dump-logs",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.dumpLogs".into()))?;
+
+        module
+            .register_async_method("trp.peekPending", |params, context, _| async move {
+                let response = methods::trp_peek_pending(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-peek-pending",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.peekPending".into()))?;
+
+        module
+            .register_async_method("trp.peekInflight", |params, context, _| async move {
+                let response = methods::trp_peek_inflight(params, context.clone()).await;
+
+                context.metrics.track_request(
+                    "trp-peek-inflight",
+                    match response.as_ref() {
+                        Ok(_) => 200,
+                        Err(err) => err.code(),
+                    },
+                );
+
+                response
+            })
+            .map_err(|_| ServeError::Internal("failed to register trp.peekInflight".into()))?;
 
         module
             .register_method("health", |_, context, _| methods::health(context))

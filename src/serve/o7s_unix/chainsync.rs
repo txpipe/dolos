@@ -26,9 +26,11 @@ impl<D: Domain> Session<D> {
 
     fn prepare_tip(&mut self) -> Result<Tip, Error> {
         let point = self
-            .assume_crawler()
+            .domain
+            .wal()
             .find_tip()
             .map_err(Error::server)?
+            .map(|(point, _)| point)
             .unwrap_or(ChainPoint::Origin);
 
         let point = Point::try_from(point).map_err(|_| Error::custom("invalid point"))?;

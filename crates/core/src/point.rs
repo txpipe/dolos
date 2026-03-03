@@ -1,6 +1,8 @@
-use std::fmt::Display;
+use std::{fmt::Display, str::FromStr};
 
+use hex;
 use pallas::{crypto::hash::Hash, network::miniprotocols::Point as PallasPoint};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{Block, BlockHash, BlockSlot};
@@ -141,6 +143,37 @@ impl ChainPoint {
     }
 }
 
+impl FromStr for ChainPoint {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+
+        // Handle "Origin" case
+        if s == "Origin" {
+            return Ok(ChainPoint::Origin);
+        }
+
+        // Regex to match slot(hash) format where hash is 64 hex characters (32 bytes)
+        let re = Regex::new(r"^(\d+)\(([0-9a-fA-F]{64})\)$").unwrap();
+
+        if let Some(caps) = re.captures(s) {
+            let slot: BlockSlot = caps[1].parse().map_err(|_| "invalid slot")?;
+            let hash_bytes = hex::decode(&caps[2]).map_err(|_| "invalid hash")?;
+            let hash_array: [u8; 32] = hash_bytes.try_into().map_err(|_| "invalid hash")?;
+            let hash = Hash::new(hash_array);
+            return Ok(ChainPoint::Specific(slot, hash));
+        }
+
+        // Try to parse as slot-only (no parentheses)
+        if let Ok(slot) = s.parse::<BlockSlot>() {
+            return Ok(ChainPoint::Slot(slot));
+        }
+
+        Err("invalid format".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -171,5 +204,41 @@ mod tests {
 
             assert_eq!(point_cmp, bytes_cmp);
         }
+    }
+
+    #[test]
+    fn test_from_str_origin() {
+        assert_eq!("Origin".parse::<ChainPoint>().unwrap(), ChainPoint::Origin);
+    }
+
+    #[test]
+    fn test_from_str_slot_only() {
+        assert_eq!(
+            "12345".parse::<ChainPoint>().unwrap(),
+            ChainPoint::Slot(12345)
+        );
+    }
+
+    #[test]
+    fn test_from_str_slot_hash() {
+        let hash_bytes = [1u8; 32];
+        let hash_hex = hex::encode(hash_bytes);
+        let input = format!("12345({})", hash_hex);
+
+        let result: ChainPoint = input.parse().unwrap();
+        match result {
+            ChainPoint::Specific(slot, hash) => {
+                assert_eq!(slot, 12345);
+                assert_eq!(hash.as_slice(), &hash_bytes);
+            }
+            _ => panic!("Expected Specific variant"),
+        }
+    }
+
+    #[test]
+    fn test_from_str_invalid() {
+        assert!("invalid".parse::<ChainPoint>().is_err());
+        assert!("12345(invalid)".parse::<ChainPoint>().is_err());
+        assert!("12345(short)".parse::<ChainPoint>().is_err());
     }
 }

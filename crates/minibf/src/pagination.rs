@@ -3,8 +3,11 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dolos_core::{BlockSlot, Domain};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use crate::{error::Error, Facade};
 
 #[derive(Debug, Serialize)]
 pub enum PaginationError {
@@ -16,6 +19,7 @@ pub enum PaginationError {
     PageNotAnInteger,
     OrderNotAllowed,
     InvalidFromTo,
+    ScanLimitExceeded,
 }
 
 impl IntoResponse for PaginationError {
@@ -33,6 +37,9 @@ impl IntoResponse for PaginationError {
             PaginationError::InvalidFromTo => {
                 "Invalid (malformed or out of range) from/to parameter(s)."
             }
+            PaginationError::ScanLimitExceeded => {
+                "pagination scan limit exceeded, reduce page number or count"
+            }
         };
         let body = Json(json!({
             "error": "Bad Request",
@@ -44,7 +51,7 @@ impl IntoResponse for PaginationError {
     }
 }
 
-#[derive(Default, Debug, Clone, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Order {
     #[default]
@@ -158,15 +165,28 @@ impl TryFrom<PaginationParameters> for Pagination {
             None => Default::default(),
         };
 
-        let from = match value.from {
+        let from: Option<PaginationNumberAndIndex> = match value.from {
             Some(x) => Some(x.try_into()?),
             None => None,
         };
 
-        let to = match value.to {
+        let to: Option<PaginationNumberAndIndex> = match value.to {
             Some(x) => Some(x.try_into()?),
             None => None,
         };
+
+        if let (Some(from), Some(to)) = (from.as_ref(), to.as_ref()) {
+            if from.number > to.number {
+                return Err(PaginationError::InvalidFromTo);
+            }
+            if from.number == to.number {
+                if let (Some(from_idx), Some(to_idx)) = (from.index, to.index) {
+                    if from_idx > to_idx {
+                        return Err(PaginationError::InvalidFromTo);
+                    }
+                }
+            }
+        }
 
         Ok(Self {
             count,
@@ -178,7 +198,24 @@ impl TryFrom<PaginationParameters> for Pagination {
     }
 }
 
+/// Default maximum number of items that can be scanned via page-based
+/// pagination. Endpoints that require decoding every block in the result set
+/// (sub-block pagination) are capped to this limit until we refactor the
+/// underlying data storage to support efficient offset-based access.
+pub const DEFAULT_MAX_SCAN_ITEMS: u64 = 3_000;
+
 impl Pagination {
+    /// Reject requests that would require scanning too many items. Call this
+    /// on endpoints where each result requires decoding block data (sub-block
+    /// element iteration) and efficient skipping is not yet supported.
+    pub fn enforce_max_scan_limit(&self, max_scan_items: Option<u64>) -> Result<(), PaginationError> {
+        let limit = max_scan_items.unwrap_or(DEFAULT_MAX_SCAN_ITEMS);
+        if self.page * self.count as u64 > limit {
+            return Err(PaginationError::ScanLimitExceeded);
+        }
+        Ok(())
+    }
+
     pub fn from(&self) -> usize {
         ((self.page - 1) * self.count as u64) as usize
     }
@@ -232,11 +269,38 @@ impl Pagination {
 
         false
     }
+
+    pub async fn start_and_end_slots<D: Domain>(
+        &self,
+        domain: &Facade<D>,
+    ) -> Result<(BlockSlot, BlockSlot), Error> {
+        let start_slot = match self.from.as_ref() {
+            Some(x) => domain
+                .query()
+                .slot_by_number(x.number)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::BAD_REQUEST)?,
+            None => 0,
+        };
+        let end_slot = match self.to.as_ref() {
+            Some(x) => domain
+                .query()
+                .slot_by_number(x.number)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::BAD_REQUEST)?,
+            None => domain.get_tip_slot()?,
+        };
+
+        Ok((start_slot, end_slot))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     #[test]
     fn test_should_skip() {
@@ -256,5 +320,23 @@ mod tests {
         assert!(!pagination.should_skip(124, 1));
         assert!(!pagination.should_skip(124, 3));
         assert!(pagination.should_skip(124, 4));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_from_to_message() {
+        let err = PaginationError::InvalidFromTo;
+        let response = err.into_response();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("failed to read response body")
+            .to_bytes();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).expect("failed to parse json");
+        assert_eq!(
+            parsed["message"],
+            "Invalid (malformed or out of range) from/to parameter(s)."
+        );
     }
 }

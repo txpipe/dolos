@@ -1,17 +1,17 @@
 use std::ops::Deref;
 
-use dolos_core::batch::WorkDeltas;
-use dolos_core::{BlockSlot, ChainError, NsKey};
+use dolos_core::{BlockSlot, ChainError, Genesis, NsKey, TxOrder};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
+use super::WorkDeltas;
 use crate::model::FixedNamespace as _;
 use crate::pallas_extras::MultiEraPoolRegistration;
 use crate::{model::PoolState, pallas_extras, roll::BlockVisitor};
-use crate::{CardanoLogic, EpochValue, PParamsSet};
+use crate::{EpochValue, PParamsSet, PoolParams, PoolSnapshot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolRegistration {
@@ -23,7 +23,22 @@ pub struct PoolRegistration {
     pool_deposit: u64,
 
     // undo
-    prev_entity: Option<PoolState>,
+    is_new: Option<bool>,
+}
+
+impl From<MultiEraPoolRegistration> for PoolParams {
+    fn from(cert: MultiEraPoolRegistration) -> Self {
+        PoolParams {
+            vrf_keyhash: cert.vrf_keyhash,
+            pledge: cert.pledge,
+            cost: cert.cost,
+            margin: cert.margin,
+            reward_account: cert.reward_account,
+            pool_owners: cert.pool_owners,
+            relays: cert.relays,
+            pool_metadata: cert.pool_metadata,
+        }
+    }
 }
 
 impl PoolRegistration {
@@ -38,7 +53,7 @@ impl PoolRegistration {
             slot,
             epoch,
             pool_deposit,
-            prev_entity: None,
+            is_new: None,
         }
     }
 }
@@ -52,38 +67,67 @@ impl dolos_core::EntityDelta for PoolRegistration {
     }
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
-        self.prev_entity = entity.clone();
-
-        debug!(
-            operator = hex::encode(self.cert.operator),
-            "applying pool registration",
-        );
-
         if let Some(entity) = entity {
-            entity.vrf_keyhash = self.cert.vrf_keyhash;
-            entity.reward_account = self.cert.reward_account.to_vec();
-            entity.pool_owners = self.cert.pool_owners.clone();
-            entity.relays = self.cert.relays.clone();
-            entity.declared_pledge = self.cert.pledge;
-            entity.margin_cost = self.cert.margin.clone();
-            entity.fixed_cost = self.cert.cost;
-            entity.metadata = self.cert.pool_metadata.clone();
+            debug!(
+                slot = self.slot,
+                operator = hex::encode(self.cert.operator),
+                "updating pool registration",
+            );
+
+            let is_currently_retired = entity.snapshot.unwrap_live().is_retired;
+
+            if is_currently_retired {
+                // if the pool is currently retired, we need to assume this overrides the record as a new registration.
+                // Preserve blocks_minted accrued in the current epoch so we don't lose leader rewards.
+                let preserved_blocks = entity.snapshot.unwrap_live().blocks_minted;
+                entity.snapshot.replace(
+                    PoolSnapshot {
+                        is_retired: false,
+                        is_new: true,
+                        blocks_minted: preserved_blocks,
+                        params: self.cert.clone().into(),
+                    },
+                    self.epoch,
+                );
+            } else {
+                entity.snapshot.schedule(
+                    self.epoch,
+                    Some(PoolSnapshot {
+                        is_retired: false,
+                        is_new: false,
+                        blocks_minted: 0,
+                        params: self.cert.clone().into(),
+                    }),
+                );
+            }
+
+            entity.retiring_epoch = None;
         } else {
+            debug!(
+                slot = self.slot,
+                operator = hex::encode(self.cert.operator),
+                "applying pool registration",
+            );
+
+            // save undo info
+            self.is_new = Some(true);
+
+            let snapshot = PoolSnapshot {
+                is_retired: false,
+                blocks_minted: 0,
+                params: self.cert.clone().into(),
+                is_new: true,
+            };
+
             let state = PoolState {
                 register_slot: self.slot,
-                vrf_keyhash: self.cert.vrf_keyhash,
-                reward_account: self.cert.reward_account.to_vec(),
-                pool_owners: self.cert.pool_owners.clone(),
-                relays: self.cert.relays.clone(),
-                declared_pledge: self.cert.pledge,
-                margin_cost: self.cert.margin.clone(),
-                fixed_cost: self.cert.cost,
-                metadata: self.cert.pool_metadata.clone(),
-                total_stake: EpochValue::new(0, self.epoch),
+                operator: self.cert.operator,
+                // please note that new pools will udpate its live snapshot directly. This differs
+                // from the behavior of existing pools where the change is scheduled for the next
+                // epoch.
+                snapshot: EpochValue::with_live(self.epoch, snapshot),
                 blocks_minted_total: 0,
-                blocks_minted_epoch: 0,
                 retiring_epoch: None,
-                is_retired: false,
                 deposit: self.pool_deposit,
             };
 
@@ -91,8 +135,9 @@ impl dolos_core::EntityDelta for PoolRegistration {
         }
     }
 
-    fn undo(&self, entity: &mut Option<PoolState>) {
-        *entity = self.prev_entity.clone();
+    fn undo(&self, _entity: &mut Option<PoolState>) {
+        // todo!()
+        // Placeholder undo logic. Ensure this does not panic.
     }
 }
 
@@ -112,14 +157,17 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
             entity.blocks_minted_total += self.count;
-            entity.blocks_minted_epoch += self.count;
+            let live = entity.snapshot.unwrap_live_mut();
+            live.blocks_minted += self.count;
+
+
         }
     }
 
     fn undo(&self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
-            entity.blocks_minted_total = entity.blocks_minted_total.saturating_sub(self.count);
-            entity.blocks_minted_epoch = entity.blocks_minted_epoch.saturating_sub(self.count);
+            entity.blocks_minted_total -= self.count;
+            entity.snapshot.unwrap_live_mut().blocks_minted -= self.count;
         }
     }
 }
@@ -158,8 +206,11 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
             self.prev_retiring_epoch = entity.retiring_epoch;
             self.prev_deposit = Some(entity.deposit);
 
-            // TODO: should be debug
-            warn!(operator = hex::encode(self.operator), "retiring pool");
+            debug!(
+                operator = hex::encode(self.operator),
+                epoch = self.epoch,
+                "retiring pool"
+            );
 
             // apply changes
             entity.retiring_epoch = Some(self.epoch);
@@ -184,10 +235,13 @@ pub struct PoolStateVisitor {
 impl BlockVisitor for PoolStateVisitor {
     fn visit_root(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
+        _: &Genesis,
         pparams: &PParamsSet,
         epoch: Epoch,
+        _: u64,
+        _: u16,
     ) -> Result<(), ChainError> {
         self.epoch = Some(epoch);
         self.deposit = pparams.ensure_pool_deposit().ok();
@@ -202,9 +256,10 @@ impl BlockVisitor for PoolStateVisitor {
 
     fn visit_cert(
         &mut self,
-        deltas: &mut WorkDeltas<CardanoLogic>,
+        deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
         _: &MultiEraTx,
+        _: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {

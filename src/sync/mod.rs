@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use dolos_core::config::{EmulatorConfig, PeerConfig, RetryConfig, SyncConfig, UpstreamConfig};
 use std::time::Duration;
 
 use crate::adapters::DomainAdapter;
@@ -11,50 +11,28 @@ pub mod submit;
 
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-#[derive(Serialize, Deserialize, Clone)]
-pub enum SyncLimit {
-    UntilTip,
-    NoLimit,
-    MaxBlocks(u64),
-}
-
-impl Default for SyncLimit {
-    fn default() -> Self {
-        Self::NoLimit
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct Config {
-    pub pull_batch_size: Option<usize>,
-
-    #[serde(default)]
-    pub sync_limit: SyncLimit,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            pull_batch_size: Some(100),
-            sync_limit: Default::default(),
-        }
-    }
-}
-
-fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::runtime::Policy {
-    let default_retries = gasket::retries::Policy {
+fn define_gasket_policy(config: &Option<RetryConfig>) -> gasket::runtime::Policy {
+    let default_retries = RetryConfig {
         max_retries: 20,
-        backoff_unit: Duration::from_secs(1),
+        backoff_unit_sec: 1,
         backoff_factor: 2,
-        max_backoff: Duration::from_secs(60),
+        max_backoff_sec: 60,
         dismissible: false,
     };
 
     let retries = config.clone().unwrap_or(default_retries);
 
+    let retries = gasket::retries::Policy {
+        max_retries: retries.max_retries,
+        backoff_unit: Duration::from_secs(retries.backoff_unit_sec),
+        backoff_factor: retries.backoff_factor,
+        max_backoff: Duration::from_secs(retries.max_backoff_sec),
+        dismissible: retries.dismissible,
+    };
+
     gasket::runtime::Policy {
-        //be generous with tick timeout to avoid timeout during block awaits
-        tick_timeout: std::time::Duration::from_secs(600).into(),
+        // TODO: we skip checking timeouts to avoid stalling the pipeline on slow work units. The long-term solution is to scope work units to fit within a particular quota.
+        tick_timeout: None,
         bootstrap_retry: retries.clone(),
         work_retry: retries.clone(),
         teardown_retry: retries.clone(),
@@ -63,10 +41,10 @@ fn define_gasket_policy(config: &Option<gasket::retries::Policy>) -> gasket::run
 
 #[allow(clippy::too_many_arguments)]
 pub fn pipeline(
-    config: &Config,
+    config: &SyncConfig,
     upstream: &UpstreamConfig,
     domain: DomainAdapter,
-    retries: &Option<gasket::retries::Policy>,
+    retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     match upstream {
         UpstreamConfig::Peer(cfg) => sync(config, cfg, domain.clone(), retries),
@@ -76,10 +54,10 @@ pub fn pipeline(
 
 #[allow(clippy::too_many_arguments)]
 pub fn sync(
-    config: &Config,
+    config: &SyncConfig,
     upstream: &PeerConfig,
     domain: DomainAdapter,
-    retries: &Option<gasket::retries::Policy>,
+    retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(config, upstream, domain.wal().clone());
 
@@ -111,7 +89,7 @@ pub fn sync(
 pub fn devnet(
     emulator_cfg: &EmulatorConfig,
     domain: DomainAdapter,
-    retries: &Option<gasket::retries::Policy>,
+    retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut emulator = emulator::Stage::new(
         domain.wal().clone(),

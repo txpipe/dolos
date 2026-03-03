@@ -1,0 +1,147 @@
+{
+  "pots": {
+    "reserves": 14000000000000000,
+    "treasury": 1000000000000000,
+    "fees": 250000000,
+    "deposit_per_pool": 500000000000,
+    "deposit_per_account": 2000000,
+    "nominal_deposits": 0,
+    "pool_count": 1,
+    "account_count": 1,
+    "utxos": 30000000000000000,
+    "rewards": 0,
+    "drep_deposits": 0,
+    "proposal_deposits": 0
+  },
+  "epoch_blocks": 21600,
+  "epoch_fee_ss": 250000000,
+  "epoch_eta": [
+    1,
+    1
+  ],
+  "pools": {
+    "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8": {
+      "blocks_minted": 150,
+      "params": {
+        "pledge": 50000000000000,
+        "cost": 340000000,
+        "margin": [
+          3,
+          100
+        ],
+        "reward_account": "1234567890abcdef1234567890abcdef1234567890abcdef12345678",
+        "pool_owners": [
+          "1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+        ]
+      }
+    },
+    "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9": {
+      "blocks_minted": 80,
+      "params": {
+        "pledge": 10000000000000,
+        "cost": 340000000,
+        "margin": [
+          5,
+          100
+        ],
+        "reward_account": "2345678901abcdef2345678901abcdef2345678901abcdef23456789",
+        "pool_owners": [
+          "2345678901abcdef2345678901abcdef2345678901abcdef23456789"
+        ]
+      }
+    },
+    "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0": {
+      "blocks_minted": 200,
+      "params": {
+        "pledge": 100000000000000,
+        "cost": 340000000,
+        "margin": [
+          2,
+          100
+        ],
+        "reward_account": "3456789012abcdef3456789012abcdef3456789012abcdef34567890",
+        "pool_owners": [
+          "3456789012abcdef3456789012abcdef3456789012abcdef34567890"
+        ]
+      }
+    }
+  },
+  "accounts": {
+    "1234567890abcdef1234567890abcdef1234567890abcdef12345678": {
+      "stake": 50000000000000,
+      "pool": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"
+    },
+    "abcdef1234567890abcdef1234567890abcdef1234567890abcdef12": {
+      "stake": 30000000000000,
+      "pool": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"
+    },
+    "fedcba0987654321fedcba0987654321fedcba0987654321fedcba09": {
+      "stake": 20000000000000,
+      "pool": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8"
+    },
+    "2345678901abcdef2345678901abcdef2345678901abcdef23456789": {
+      "stake": 25000000000000,
+      "pool": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
+    },
+    "bcdef2345678901abcdef2345678901abcdef2345678901abcdef23": {
+      "stake": 20000000000000,
+      "pool": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
+    },
+    "cdef23456789012abcdef23456789012abcdef23456789012abcdef": {
+      "stake": 15000000000000,
+      "pool": "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9"
+    },
+    "3456789012abcdef3456789012abcdef3456789012abcdef34567890": {
+      "stake": 100000000000000,
+      "pool": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
+    },
+    "def3456789012abcdef3456789012abcdef3456789012abcdef3456": {
+      "stake": 30000000000000,
+      "pool": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
+    },
+    "ef456789012abcdef456789012abcdef456789012abcdef4567890a": {
+      "stake": 20000000000000,
+      "pool": "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0"
+    }
+  },
+  "pparams": {
+    "values": [
+      {
+        "DesiredNumberOfStakePools": 500
+      },
+      {
+        "PoolPledgeInfluence": [
+          3,
+          10
+        ]
+      },
+      {
+        "DecentralizationConstant": [
+          0,
+          1
+        ]
+      },
+      {
+        "ExpansionRate": [
+          3,
+          1000
+        ]
+      },
+      {
+        "TreasuryGrowthRate": [
+          20,
+          100
+        ]
+      },
+      {
+        "MinPoolCost": 340000000
+      },
+      {
+        "ProtocolVersion": [
+          8,
+          0
+        ]
+      }
+    ]
+  }
+}

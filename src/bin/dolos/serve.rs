@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use futures_util::stream::FuturesUnordered;
 use log::warn;
 use tracing::error;
@@ -6,8 +7,8 @@ use tracing::error;
 pub struct Args {}
 
 #[tokio::main]
-pub async fn run(config: super::Config, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let domain = crate::common::setup_domain(&config)?;
 

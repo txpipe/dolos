@@ -1,0 +1,653 @@
+use std::{collections::HashMap, marker::PhantomData};
+
+use dolos_core::ChainError;
+use pallas::ledger::primitives::StakeCredential;
+use rayon::prelude::*;
+use tracing::debug;
+
+use crate::{
+    add, pallas_extras, pallas_ratio,
+    pots::{EpochIncentives, Pots},
+    sub, Lovelace, PParamsSet, PoolHash, PoolParams,
+};
+
+mod formulas;
+
+#[cfg(test)]
+mod mocking;
+
+pub type TotalPoolRewards = u64;
+pub type OperatorShare = u64;
+
+#[derive(Debug, Clone)]
+pub struct MultiPoolReward {
+    is_spendable: bool,
+    as_leader: HashMap<PoolHash, u64>,
+    as_delegator: HashMap<PoolHash, u64>,
+}
+
+impl MultiPoolReward {
+    pub fn merge(mut self, other: Self) -> Self {
+        #[cfg(feature = "strict")]
+        assert_eq!(self.is_spendable, other.is_spendable);
+
+        self.as_leader.extend(other.as_leader);
+        self.as_delegator.extend(other.as_delegator);
+
+        self
+    }
+
+    pub fn total_value(&self) -> u64 {
+        self.as_leader.values().sum::<u64>() + self.as_delegator.values().sum::<u64>()
+    }
+
+    pub fn into_vec(&self) -> Vec<(PoolHash, u64, bool)> {
+        let leader = self
+            .as_leader
+            .iter()
+            .map(|(pool, value)| (*pool, *value, true));
+
+        let delegator = self
+            .as_delegator
+            .iter()
+            .map(|(pool, value)| (*pool, *value, false));
+
+        leader.chain(delegator).collect()
+    }
+
+    /// Get pools and values for leader rewards.
+    pub fn leader_rewards(&self) -> impl Iterator<Item = (PoolHash, u64)> + '_ {
+        self.as_leader.iter().map(|(p, v)| (*p, *v))
+    }
+
+    /// Get pools and values for delegator rewards.
+    pub fn delegator_rewards(&self) -> impl Iterator<Item = (PoolHash, u64)> + '_ {
+        self.as_delegator.iter().map(|(p, v)| (*p, *v))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PreAllegraReward {
+    is_spendable: bool,
+    as_leader: bool,
+    pool: PoolHash,
+    value: u64,
+}
+
+impl PreAllegraReward {
+    /// Merge two pre-Allegra rewards, keeping the minimum per Haskell Ord instance.
+    ///
+    /// The Haskell Ord for Reward is:
+    ///   1. LeaderReward < MemberReward (leader takes priority)
+    ///   2. Same type → smaller pool ID wins
+    ///
+    /// We keep the minimum because Set.deleteFindMin keeps the min element.
+    pub fn merge(self, other: Self) -> Self {
+        // Leader rewards take priority over member rewards
+        match (self.as_leader, other.as_leader) {
+            (true, false) => self,  // self is leader, wins
+            (false, true) => other, // other is leader, wins
+            _ => {
+                // Same type (both leader or both member): keep smaller pool ID
+                if self.pool <= other.pool {
+                    self
+                } else {
+                    other
+                }
+            }
+        }
+    }
+
+    /// Get the pool and value for this pre-allegra reward.
+    pub fn pool_and_value(&self) -> (PoolHash, u64) {
+        (self.pool, self.value)
+    }
+
+    /// Whether this reward was earned as a pool leader.
+    pub fn is_leader(&self) -> bool {
+        self.as_leader
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum Reward {
+    MultiPool(MultiPoolReward),
+
+    // during pre-allegra, if multiple rewards were assigned to the same account,
+    // only the last one would be considered. The order in which the override took
+    // place is based on the pool hash. This behavior is considered a "bug"
+    // which was later removed.
+    PreAllegra(PreAllegraReward),
+}
+
+impl Reward {
+    pub fn new<C: RewardsContext>(
+        ctx: &C,
+        account: &StakeCredential,
+        reward_value: u64,
+        from_pool: PoolHash,
+        as_leader: bool,
+    ) -> Self {
+        if ctx.pre_allegra() {
+            Self::PreAllegra(PreAllegraReward {
+                is_spendable: ctx.is_account_registered(account),
+                as_leader,
+                pool: from_pool,
+                value: reward_value,
+            })
+        } else if as_leader {
+            Self::MultiPool(MultiPoolReward {
+                is_spendable: ctx.is_account_registered(account),
+                as_leader: HashMap::from([(from_pool, reward_value)]),
+                as_delegator: HashMap::new(),
+            })
+        } else {
+            Self::MultiPool(MultiPoolReward {
+                is_spendable: ctx.is_account_registered(account),
+                as_leader: HashMap::new(),
+                as_delegator: HashMap::from([(from_pool, reward_value)]),
+            })
+        }
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::MultiPool(a), Self::MultiPool(b)) => Self::MultiPool(a.merge(b)),
+            (Self::PreAllegra(a), Self::PreAllegra(b)) => Self::PreAllegra(a.merge(b)),
+            _ => unreachable!("trying to merge rewards of different eras"),
+        }
+    }
+
+    pub fn is_spendable(&self) -> bool {
+        match self {
+            Self::MultiPool(r) => r.is_spendable,
+            Self::PreAllegra(r) => r.is_spendable,
+        }
+    }
+
+    pub fn total_value(&self) -> u64 {
+        match self {
+            Self::MultiPool(r) => r.total_value(),
+            Self::PreAllegra(r) => r.value,
+        }
+    }
+
+    pub fn into_vec(&self) -> Vec<(PoolHash, u64, bool)> {
+        match self {
+            Self::MultiPool(r) => r.into_vec(),
+            Self::PreAllegra(r) => vec![(r.pool, r.value, r.as_leader)],
+        }
+    }
+
+    /// Create a Reward from a PendingRewardState.
+    /// Since we only persist MultiPool rewards (PreAllegra is historical),
+    /// this always creates a MultiPool variant.
+    pub fn from_pending_state(state: &crate::PendingRewardState) -> Self {
+        Self::MultiPool(MultiPoolReward {
+            is_spendable: state.is_spendable,
+            as_leader: state.as_leader.iter().cloned().collect(),
+            as_delegator: state.as_delegator.iter().cloned().collect(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct RewardMap<C: RewardsContext> {
+    incentives: EpochIncentives,
+    pending: HashMap<StakeCredential, Reward>,
+    applied_effective: u64,
+    /// Unspendable rewards that go to treasury (accounts that deregistered late after RUPD).
+    applied_unspendable_to_treasury: u64,
+    /// Unspendable rewards that return to reserves (accounts that deregistered soon after RUPD).
+    applied_unspendable_to_reserves: u64,
+    _phantom: PhantomData<C>,
+}
+
+impl<C: RewardsContext> std::fmt::Display for RewardMap<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (account, reward) in self.pending.iter() {
+            if reward.total_value() > 0 {
+                let address = pallas_extras::stake_credential_to_address(
+                    pallas::ledger::addresses::Network::Testnet,
+                    account,
+                )
+                .to_bech32()
+                .unwrap();
+
+                writeln!(
+                    f,
+                    "{},{},{}",
+                    address,
+                    reward.is_spendable(),
+                    reward.total_value()
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<C: RewardsContext> Default for RewardMap<C> {
+    fn default() -> Self {
+        Self {
+            incentives: EpochIncentives::default(),
+            pending: HashMap::new(),
+            applied_effective: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<C: RewardsContext> Clone for RewardMap<C> {
+    fn clone(&self) -> Self {
+        Self {
+            incentives: self.incentives.clone(),
+            pending: self.pending.clone(),
+            applied_effective: self.applied_effective,
+            applied_unspendable_to_treasury: self.applied_unspendable_to_treasury,
+            applied_unspendable_to_reserves: self.applied_unspendable_to_reserves,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<C: RewardsContext> RewardMap<C> {
+    fn new(incentives: EpochIncentives) -> Self {
+        Self {
+            incentives,
+            pending: HashMap::new(),
+            applied_effective: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
+            _phantom: PhantomData,
+        }
+    }
+
+    // TODO: this is very inefficient. We should should probably revisit the data
+    // structure.
+    pub fn aggregate_pool_rewards(&self) -> HashMap<PoolHash, (TotalPoolRewards, OperatorShare)> {
+        let mut rewards = HashMap::new();
+
+        for reward in self.pending.values() {
+            for (pool, value, as_leader) in reward.into_vec() {
+                let (total_rewards, operator_share) = rewards.entry(pool).or_insert((0u64, 0u64));
+
+                *total_rewards = add!(*total_rewards, value);
+
+                if as_leader {
+                    *operator_share = add!(*operator_share, value);
+                }
+            }
+        }
+
+        rewards
+    }
+
+    fn include(
+        &mut self,
+        ctx: &C,
+        account: &StakeCredential,
+        reward_value: u64,
+        from_pool: PoolHash,
+        as_leader: bool,
+    ) {
+        let new = Reward::new(ctx, account, reward_value, from_pool, as_leader);
+
+        let prev = self.pending.remove(account);
+
+        let merged = match prev {
+            Some(prev) => prev.merge(new),
+            None => new,
+        };
+
+        self.pending.insert(account.clone(), merged);
+    }
+
+    /// Remove a reward from the pending map and add it to the applied totals.
+    pub fn take_for_apply(&mut self, account: &StakeCredential) -> Option<Reward> {
+        let reward = self.pending.remove(account)?;
+
+        self.applied_effective += reward.total_value();
+
+        Some(reward)
+    }
+
+    /// Return an unspendable reward to treasury (for accounts that deregistered late after RUPD).
+    pub fn return_reward_to_treasury(&mut self, amount: Lovelace) {
+        self.applied_effective = sub!(self.applied_effective, amount);
+        self.applied_unspendable_to_treasury = add!(self.applied_unspendable_to_treasury, amount);
+    }
+
+    /// Return an unspendable reward to reserves (for accounts that deregistered soon after RUPD).
+    pub fn return_reward_to_reserves(&mut self, amount: Lovelace) {
+        self.applied_effective = sub!(self.applied_effective, amount);
+        self.applied_unspendable_to_reserves = add!(self.applied_unspendable_to_reserves, amount);
+    }
+
+    /// Drain rewards marked as unspendable at RUPD time (is_spendable: false).
+    /// Pre-Babbage: all unspendable returns to reserves.
+    /// Post-Babbage: all unspendable goes to treasury.
+    pub fn drain_unspendable(&mut self, to_reserves: bool) -> Vec<StakeCredential> {
+        let unspendable: Vec<_> = self
+            .pending
+            .extract_if(|_, reward| !reward.is_spendable())
+            .collect();
+
+        let mut credentials = Vec::with_capacity(unspendable.len());
+
+        for (credential, reward) in unspendable {
+            if to_reserves {
+                self.applied_unspendable_to_reserves += reward.total_value();
+            } else {
+                self.applied_unspendable_to_treasury += reward.total_value();
+            }
+            credentials.push(credential);
+        }
+
+        credentials
+    }
+
+    pub fn drain_all(&mut self) {
+        let all = self.pending.drain();
+
+        for (_, reward) in all {
+            if reward.is_spendable() {
+                self.applied_effective += reward.total_value();
+            } else {
+                // RUPD-time unspendable goes to treasury
+                self.applied_unspendable_to_treasury += reward.total_value();
+            }
+        }
+    }
+
+    pub fn incentives(&self) -> &EpochIncentives {
+        &self.incentives
+    }
+
+    pub fn applied_effective(&self) -> u64 {
+        #[cfg(feature = "strict")]
+        assert!(self.pending.is_empty());
+        self.applied_effective
+    }
+
+    /// Get unspendable rewards that go to treasury.
+    pub fn applied_unspendable_to_treasury(&self) -> u64 {
+        #[cfg(feature = "strict")]
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_treasury
+    }
+
+    /// Get unspendable rewards that return to reserves.
+    pub fn applied_unspendable_to_reserves(&self) -> u64 {
+        #[cfg(feature = "strict")]
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_reserves
+    }
+
+    /// Get total unspendable rewards (both treasury and reserves).
+    pub fn applied_unspendable(&self) -> u64 {
+        #[cfg(feature = "strict")]
+        assert!(self.pending.is_empty());
+        self.applied_unspendable_to_treasury + self.applied_unspendable_to_reserves
+    }
+
+    /// Iterate over all pending rewards (for persistence).
+    pub fn iter_pending(&self) -> impl Iterator<Item = (&StakeCredential, &Reward)> {
+        self.pending.iter()
+    }
+
+    /// Check if there are any pending rewards.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Get the count of pending rewards.
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+impl<C: RewardsContext> RewardMap<C> {
+    /// Create a RewardMap from pre-loaded pending rewards and incentives.
+    /// Used by EWRAP to reconstruct the reward map from state store.
+    pub fn from_pending(
+        pending: HashMap<StakeCredential, Reward>,
+        incentives: EpochIncentives,
+    ) -> Self {
+        Self {
+            incentives,
+            pending,
+            applied_effective: 0,
+            applied_unspendable_to_treasury: 0,
+            applied_unspendable_to_reserves: 0,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+pub trait RewardsContext: Sync {
+    fn incentives(&self) -> &EpochIncentives;
+    fn pots(&self) -> &Pots;
+
+    fn pre_allegra(&self) -> bool;
+    fn active_stake(&self) -> u64;
+    fn epoch_blocks(&self) -> u64;
+    fn pool_blocks(&self, pool: PoolHash) -> u64;
+    fn pool_stake(&self, pool: PoolHash) -> u64;
+    fn account_stake(&self, pool: &PoolHash, account: &StakeCredential) -> u64;
+    fn is_account_registered(&self, account: &StakeCredential) -> bool;
+    fn iter_all_pools(&self) -> impl Iterator<Item = PoolHash>;
+    fn pool_params(&self, pool: PoolHash) -> &PoolParams;
+    fn pool_delegators(&self, pool_id: PoolHash) -> impl Iterator<Item = StakeCredential>;
+    fn pparams(&self) -> &PParamsSet;
+
+    fn live_pledge(&self, pool: PoolHash, owners: &[StakeCredential]) -> u64 {
+        let mut live_pledge = 0;
+
+        for owner in owners.iter() {
+            let owner_stake = self.account_stake(&pool, owner);
+
+            live_pledge += owner_stake;
+        }
+
+        live_pledge
+    }
+}
+
+/// Chunk size for parallel delegator processing.
+const DELEGATOR_CHUNK_SIZE: usize = 25;
+
+/// Compute delegator rewards for a chunk of delegators.
+/// This is a pure function that can be executed in parallel.
+#[allow(clippy::too_many_arguments)]
+fn compute_delegator_chunk<C: RewardsContext>(
+    ctx: &C,
+    pool: PoolHash,
+    total_pool_reward: u64,
+    pool_stake: u64,
+    circulating_supply: u64,
+    pool_cost: u64,
+    pool_margin: formulas::Ratio,
+    owners: &[StakeCredential],
+    babbage_or_later: bool,
+    chunk: &[StakeCredential],
+) -> Vec<(StakeCredential, u64)> {
+    chunk
+        .iter()
+        .filter_map(|delegator| {
+            // Skip owners - they already get paid via operator share
+            if owners.contains(delegator) {
+                return None;
+            }
+
+            // Member rewards are only computed if:
+            // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+            // 2. The delegator account is registered
+            let delegator_registered = ctx.is_account_registered(delegator);
+            if !babbage_or_later && !delegator_registered {
+                return None;
+            }
+
+            let delegator_stake = ctx.account_stake(&pool, delegator);
+
+            let delegator_reward = formulas::delegator_reward(
+                total_pool_reward,
+                delegator_stake,
+                pool_stake,
+                circulating_supply,
+                pool_cost,
+                pool_margin.clone(),
+            );
+
+            Some((delegator.clone(), delegator_reward))
+        })
+        .collect()
+}
+
+pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError> {
+    let mut map = RewardMap::<C>::new(ctx.incentives().clone());
+
+    // Sequential pool iteration with parallel delegator processing
+    for pool in ctx.iter_all_pools() {
+        let pool_params = ctx.pool_params(pool);
+
+        let operator_account = pallas_extras::parse_reward_account(&pool_params.reward_account)
+            .expect("invalid pool reward account");
+
+        let owners: Vec<_> = pool_params
+            .pool_owners
+            .iter()
+            .map(|owner| pallas_extras::keyhash_to_stake_cred(*owner))
+            .collect();
+
+        let live_pledge = ctx.live_pledge(pool, &owners);
+        let circulating_supply = ctx.pots().circulating();
+        let pool_stake = ctx.pool_stake(pool);
+        let epoch_rewards = ctx.incentives().available_rewards;
+        let total_active_stake = ctx.active_stake();
+        let epoch_blocks = ctx.epoch_blocks();
+        let pool_blocks = ctx.pool_blocks(pool);
+
+        // Pools that made no blocks this epoch get no rewards.
+        if pool_blocks == 0 {
+            continue;
+        }
+
+        let k = ctx.pparams().ensure_k()?;
+        let a0 = ctx.pparams().ensure_a0()?;
+        let d = ctx.pparams().ensure_d()?;
+
+        let total_pool_reward = formulas::pool_rewards(
+            epoch_rewards,
+            circulating_supply,
+            total_active_stake,
+            pool_stake,
+            pool_params.pledge,
+            live_pledge,
+            k,
+            pallas_ratio!(a0),
+            pallas_ratio!(d),
+            pool_blocks,
+            epoch_blocks,
+        );
+
+        let operator_share = formulas::pool_operator_share(
+            total_pool_reward,
+            pool_params.cost,
+            pallas_ratio!(pool_params.margin),
+            pool_stake,
+            live_pledge,
+            circulating_supply,
+        );
+
+        debug!(
+            %pool_blocks,
+            %epoch_blocks,
+            %total_active_stake,
+            %pool_stake,
+            %circulating_supply,
+            %k,
+            %epoch_rewards,
+            %total_pool_reward,
+            %operator_share,
+            %live_pledge,
+            "computed pool rewards"
+        );
+
+        // Leader rewards are only computed if:
+        // 1. Protocol >= 7 (Babbage hardfork removes prefilter), OR
+        // 2. The operator's reward account is registered
+        let protocol_major = ctx.pparams().protocol_major().unwrap_or(0);
+        let babbage_or_later = protocol_major >= 7;
+        let is_operator_registered = ctx.is_account_registered(&operator_account);
+
+        if babbage_or_later || is_operator_registered {
+            map.include(ctx, &operator_account, operator_share, pool, true);
+        }
+
+        // Collect delegators and process in parallel chunks
+        let delegators: Vec<_> = ctx.pool_delegators(pool).collect();
+        let pool_margin = pallas_ratio!(pool_params.margin);
+
+        // Parallel processing of delegator chunks
+        let delegator_rewards: Vec<_> = delegators
+            .par_chunks(DELEGATOR_CHUNK_SIZE)
+            .map(|chunk| {
+                compute_delegator_chunk(
+                    ctx,
+                    pool,
+                    total_pool_reward,
+                    pool_stake,
+                    circulating_supply,
+                    pool_params.cost,
+                    pool_margin.clone(),
+                    &owners,
+                    babbage_or_later,
+                    chunk,
+                )
+            })
+            .flatten()
+            .collect();
+
+        // Sequential merge of results
+        for (delegator, reward) in delegator_rewards {
+            map.include(ctx, &delegator, reward, pool, false);
+        }
+    }
+
+    Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mocking::MockContext;
+    use super::*;
+
+    const MAX_SUPPLY: u64 = 45000000000000000;
+
+    #[test]
+    fn test_preview_epoch_3() {
+        use std::path::PathBuf;
+
+        let test_data = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test_data")
+            .join("preview")
+            .join("rewards")
+            .join("epoch3.json");
+
+        let ctx = MockContext::from_json_file(test_data.to_str().unwrap())
+            .expect("Failed to load mock context");
+
+        assert!(ctx.pots().is_consistent(MAX_SUPPLY));
+
+        let mut reward_map = define_rewards(&ctx).unwrap();
+
+        reward_map.drain_all();
+
+        let unspendable = reward_map.applied_unspendable();
+
+        assert_eq!(unspendable, 295063003292);
+    }
+}

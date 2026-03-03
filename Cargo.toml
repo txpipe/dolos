@@ -33,11 +33,17 @@ tower.workspace = true
 tracing.workspace = true
 trait-variant.workspace = true
 xxhash-rust.workspace = true
+axum = { version = "0.8.4", optional = true }
+http-body-util = { version = "0.1.2", optional = true }
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
 
 dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
-dolos-redb = { path = "crates/redb" }
 dolos-redb3 = { path = "crates/redb3" }
+dolos-fjall = { path = "crates/fjall" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
 
@@ -47,14 +53,17 @@ gasket = { version = "^0.9", features = ["derive"] }
 
 clap = { version = "4.5.37", features = ["derive"] }
 log = "0.4.18"
-config = { version = "0.14.1", default-features = false, features = ["toml", "json"] }
+config = { version = "0.15.19", default-features = false, features = [
+    "toml",
+    "json",
+] }
 lazy_static = "1.4.0"
 tracing-subscriber = "0.3.17"
+tracing-log = "0.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 async-trait = "0.1.81"
 bytes = "1.9.0"
 async-stream = "0.3.5"
-serde_with = "3.8.1"
 protoc-wkt = "1.0.0"
 indicatif = "0.17.8"
 comfy-table = { version = "7.1.1", optional = true }
@@ -64,6 +73,7 @@ console-subscriber = { version = "0.3.0", optional = true }
 flate2 = "1.0.34"
 tar = "0.4.41"
 paste = "1.0.15"
+redb-extras = "0.6.1"
 
 
 # gRPC dependencies
@@ -75,36 +85,64 @@ tonic-reflection = { version = "0.12.3", optional = true }
 http = "1.3.1"
 hyper = "1.5"
 
-
-[target.'cfg(not(windows))'.dependencies.mithril-client]
-version = "0.12.2"
-optional = true
-default-features = false
-features = ["fs", "rug-backend", "rustls-tls", "rustls-tls-webpki-roots"]
-
-[target.'cfg(windows)'.dependencies.mithril-client]
-version = "0.12.2"
-optional = true
-default-features = false
-features = ["fs", "num-integer-backend", "rustls-tls", "rustls-tls-native-roots"]
+mithril-client = { version = "0.12.2", optional = true, default-features = false, features = [
+    "fs",
+    "num-integer-backend",
+    "rustls-tls",
+    "rustls-tls-webpki-roots",
+] }
 
 [dev-dependencies]
+anyhow = "1.0"
+comfy-table = "7.1.1"
+csv = "1"
+csv-diff = "0.1"
 nix = { version = "0.30.1", features = ["signal"] }
+serde = { workspace = true }
 tempfile = "3.20.0"
-dolos-testing = { path = "crates/testing", features = ["toy-domain"] }
+toml = "0.8.13"
+dolos-cardano = { path = "crates/cardano" }
+dolos-core = { path = "crates/core" }
+dolos-testing = { path = "crates/testing" }
+bech32 = { workspace = true }
+hex = { workspace = true }
+pallas = { workspace = true }
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+stats_alloc = "0.1"
+dolos-redb3 = { path = "crates/redb3" }
 
 [[test]]
 name = "smoke"
 path = "tests/external/smoke.rs"
 
+[[test]]
+name = "epoch_pots"
+path = "tests/epoch_pots/main.rs"
+
+[[test]]
+name = "memory"
+path = "tests/memory.rs"
+
+[[test]]
+name = "mempool"
+path = "tests/mempool.rs"
+
 [features]
+strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 
 # Service features
 grpc = ["tonic", "tonic-web", "tonic-reflection", "tower-http/cors"]
-minibf = ["dolos-minibf", "tower-http/cors", "tower-http/trace", "tower-http/normalize-path"]
+minibf = [
+    "dolos-minibf",
+    "axum",
+    "http-body-util",
+    "tower-http/cors",
+    "tower-http/trace",
+    "tower-http/normalize-path",
+]
 trp = ["dolos-trp"]
 
 # Default features - includes all services
@@ -119,16 +157,15 @@ lto = "thin"
 members = [
     "crates/cardano",
     "crates/core",
+    "crates/fjall",
     "crates/testing",
     "crates/minibf",
-    "crates/redb",
-    "xtask",
     "crates/redb3",
-    "crates/test-vectors",
+    "xtask",
 ]
 
 [workspace.package]
-version = "1.0.0-beta.5"
+version = "1.0.0-rc.11"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -138,14 +175,15 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { git = "https://github.com/txpipe/pallas.git", rev = "38546da", features = ["hardano", "phase2"] }
-# pallas = { version = "1.0.0-alpha.2", features = ["hardano", "phase2"] }
+# pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
+pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"
 hex = "0.4.3"
+regex = "1.10.0"
 tracing = "0.1.37"
-itertools = "0.13.0"
+itertools = "0.14.0"
 bincode = "1.3.3"
 futures-core = "0.3.31"
 futures-util = "0.3.28"
@@ -156,22 +194,40 @@ tokio = { version = "^1.47", features = ["rt", "rt-multi-thread", "signal"] }
 tokio-util = { version = "0.7.11", features = ["rt"] }
 tokio-stream = { version = "0.1.14", features = ["sync"] }
 tower = "0.4"
-tower-http = { version = "0.6.1", features = ["cors", "trace", "normalize-path"] }
+tower-http = { version = "0.6.1", features = [
+    "cors",
+    "trace",
+    "normalize-path",
+] }
 serde_json = "1.0.122"
 base64 = "0.22.1"
-bech32 = "0.11.0"
-reqwest = { version = "0.12.7", default-features = false, features = ["blocking", "rustls-tls"] }
+bech32 = "0.11.1"
+reqwest = { version = "0.12.7", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+] }
 rayon = "1.11.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3", "const_xxh3"] }
 num-rational = "0.4.2"
 num-bigint = "0.4.6"
+opentelemetry = "0.30.0"
+opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30.0", features = ["grpc-tonic"] }
+tracing-opentelemetry = "0.31"
 
 [workspace.metadata.release]
 push = false
 publish = false
 tag-name = "v{{version}}"
 pre-release-commit-message = "release: v{{version}}"
-pre-release-hook = ["git", "cliff", "-o", "CHANGELOG.md", "--tag", "{{version}}"]
+pre-release-hook = [
+    "git",
+    "cliff",
+    "-o",
+    "CHANGELOG.md",
+    "--tag",
+    "{{version}}",
+]
 
 [lints.clippy]
 result_large_err = "allow"

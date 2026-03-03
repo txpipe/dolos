@@ -14,13 +14,19 @@ use blockfrost_openapi::models::{
     address_utxo_content_inner::AddressUtxoContentInner,
 };
 
-use dolos_cardano::{model::AccountState, pallas_extras, ChainSummary, RewardLog};
-use dolos_core::{ArchiveStore, Domain, EntityKey, StateStore};
+use dolos_cardano::{
+    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
+    model::{AccountState, DRepState},
+    pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+    PoolDepositRefundLog,
+};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
+use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        addresses::{Address, Network, StakeAddress, StakePayload},
+        addresses::{Address, Network, StakeAddress},
         primitives::Epoch,
         traverse::{MultiEraBlock, MultiEraCert, MultiEraTx},
     },
@@ -88,38 +94,39 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
 
         let active_epoch = self
             .account_state
-            .registered_at.or(self.account_state.deregistered_at)
+            .registered_at
+            .or(self.account_state.deregistered_at)
             .map(|x| chain.slot_epoch(x))
             .map(|(x, _)| x);
 
         let pool_id = self
             .account_state
-            .pool
-            .latest
-            .as_ref()
+            .delegated_pool_at(current_epoch)
+            .or(self.account_state.retired_pool.as_ref())
             .map(bech32_pool)
             .transpose()?;
 
         let drep_id = self
             .account_state
-            .drep
-            .latest
-            .as_ref()
+            .delegated_drep_at(current_epoch)
             .map(bech32_drep)
             .transpose()?;
 
-        let active = active_epoch.map(|x| x < current_epoch).unwrap_or(false) && pool_id.is_some();
+        let active = pool_id.is_some();
+
+        let stake = self.account_state.stake.live().cloned().unwrap_or_default();
 
         let out = AccountContent {
             stake_address,
             active,
+            registered: self.account_state.is_registered(),
             active_epoch: active_epoch.map(|x| x as i32),
-            controlled_amount: self.account_state.live_stake().to_string(),
-            rewards_sum: self.account_state.rewards_sum.to_string(),
-            withdrawals_sum: self.account_state.withdrawals_sum.to_string(),
-            reserves_sum: self.account_state.reserves_sum.to_string(),
-            treasury_sum: self.account_state.treasury_sum.to_string(),
-            withdrawable_amount: self.account_state.withdrawable_amount().to_string(),
+            controlled_amount: stake.total().to_string(),
+            rewards_sum: stake.rewards_sum.to_string(),
+            withdrawals_sum: stake.withdrawals_sum.to_string(),
+            reserves_sum: "0".to_string(),
+            treasury_sum: "0".to_string(),
+            withdrawable_amount: stake.withdrawable().to_string(),
             pool_id,
             drep_id,
         };
@@ -141,12 +148,14 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
     }
 }
 
-pub async fn by_stake<D: Domain>(
+pub async fn by_stake<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<AccountContent>, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(&stake_address)?;
 
@@ -177,32 +186,45 @@ where
     Ok(Json(model))
 }
 
-pub async fn by_stake_addresses<D: Domain>(
+pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
     let account_key = parse_account_key_param(&stake_address)?;
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
-    let mut blocks = domain
-        .archive()
-        .iter_blocks_with_stake(&account_key.address.to_vec())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+    let stream = domain.query().blocks_by_stake_stream(
+        &account_key.address.to_vec(),
+        start_slot,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    );
 
     let mut items = vec![];
     let mut skipped = 0;
     let mut seen = BTreeSet::new();
 
-    while items.len() < pagination.count {
-        let Some(block) = blocks.next() else {
+    let mut stream = Box::pin(stream);
+
+    while let Some(res) = stream.next().await {
+        if items.len() >= pagination.count {
             break;
-        };
-        let Ok((_, Some(block))) = block else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        }
+
+        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let Some(block) = block else {
+            continue;
         };
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -226,34 +248,38 @@ where
                     items.push(AccountAddressesContentInner {
                         address: address.to_string(),
                     });
+                    if items.len() >= pagination.count {
+                        break;
+                    }
                 }
             }
+        }
+        if items.len() >= pagination.count {
+            break;
         }
     }
 
     Ok(Json(items))
 }
 
-pub async fn by_stake_utxos<D: Domain>(
+pub async fn by_stake_utxos<D>(
     Path(address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<AddressUtxoContentInner>>, Error> {
+) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
     let pagination = Pagination::try_from(params)?;
 
     let account_key = parse_account_key_param(&address)?;
 
-    let payload = match account_key.address.payload() {
-        StakePayload::Stake(payload) => payload.as_slice(),
-        StakePayload::Script(payload) => payload.as_slice(),
-    };
-
     let refs = domain
-        .state()
-        .get_utxo_by_stake(payload)
+        .indexes()
+        .utxos_by_stake(&account_key.address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination)?;
+    let utxos = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
 
     Ok(Json(utxos))
 }
@@ -434,7 +460,7 @@ impl IntoModel<Vec<AccountAddressesContentInner>>
     }
 }
 
-pub async fn by_stake_actions<D: Domain, F, T>(
+pub async fn by_stake_actions<D, F, T>(
     stake_address: &str,
     pagination: Pagination,
     domain: Facade<D>,
@@ -449,8 +475,13 @@ where
         Epoch,
         Network,
     ) -> Result<Option<T>, StatusCode>,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(stake_address)?;
+
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let chain = domain
         .get_chain_summary()
@@ -467,18 +498,25 @@ where
         pagination.page as usize,
     );
 
-    let mut blocks = domain
-        .archive()
-        .iter_blocks_with_account_certs(&account_key.entity_key)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+    let stream = domain.query().blocks_by_account_certs_stream(
+        &account_key.entity_key,
+        start_slot,
+        end_slot,
+        SlotOrder::from(pagination.order),
+    );
 
-    while builder.needs_more() {
-        let Some(block) = blocks.next() else {
+    let mut stream = Box::pin(stream);
+
+    while let Some(res) = stream.next().await {
+        if !builder.needs_more() {
             break;
-        };
+        }
 
-        let Ok((slot, Some(block))) = block else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
+        let (slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let Some(block) = block else {
+            continue;
         };
 
         let (epoch, _) = chain.slot_epoch(slot);
@@ -491,15 +529,17 @@ where
     Ok(builder.items)
 }
 
-pub async fn by_stake_delegations<D: Domain>(
+pub async fn by_stake_delegations<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountDelegationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
 
     let items = by_stake_actions::<D, _, AccountDelegationContentInner>(
         &stake_address,
@@ -512,15 +552,17 @@ where
     Ok(Json(items))
 }
 
-pub async fn by_stake_registrations<D: Domain>(
+pub async fn by_stake_registrations<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
 
     let items = by_stake_actions::<D, _, AccountRegistrationContentInner>(
         &stake_address,
@@ -533,49 +575,632 @@ where
     Ok(Json(items))
 }
 
-pub async fn by_stake_rewards<D: Domain>(
+enum AccountRewardWrapper {
+    Leader((Epoch, LeaderRewardLog)),
+    Member((Epoch, MemberRewardLog)),
+    PoolDepositRefund((Epoch, PoolDepositRefundLog)),
+}
+
+impl From<(Epoch, LeaderRewardLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, LeaderRewardLog)) -> Self {
+        AccountRewardWrapper::Leader(value)
+    }
+}
+
+impl From<(Epoch, MemberRewardLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, MemberRewardLog)) -> Self {
+        AccountRewardWrapper::Member(value)
+    }
+}
+
+impl From<(Epoch, PoolDepositRefundLog)> for AccountRewardWrapper {
+    fn from(value: (Epoch, PoolDepositRefundLog)) -> Self {
+        AccountRewardWrapper::PoolDepositRefund(value)
+    }
+}
+
+impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
+    type Error = StatusCode;
+
+    fn try_from(value: AccountRewardWrapper) -> Result<Self, Self::Error> {
+        match value {
+            AccountRewardWrapper::Leader((epoch, x)) => {
+                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let pool_id = mapping::bech32_pool(operator)?;
+
+                Ok(AccountRewardContentInner {
+                    epoch: epoch as i32 - 1,
+                    amount: x.amount.to_string(),
+                    pool_id,
+                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Leader,
+                })
+            }
+            AccountRewardWrapper::Member((epoch, x)) => {
+                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let pool_id = mapping::bech32_pool(operator)?;
+
+                Ok(AccountRewardContentInner {
+                    epoch: epoch as i32 - 1,
+                    amount: x.amount.to_string(),
+                    pool_id,
+                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Member,
+                })
+            }
+            AccountRewardWrapper::PoolDepositRefund((epoch, x)) => {
+                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let pool_id = mapping::bech32_pool(operator)?;
+
+                Ok(AccountRewardContentInner {
+                    epoch: epoch as i32 - 1,
+                    amount: x.amount.to_string(),
+                    pool_id,
+                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund,
+                })
+            }
+        }
+    }
+}
+
+pub async fn by_stake_rewards<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountRewardContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     let account_key = parse_account_key_param(&stake_address)?;
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (epoch, _) = summary.slot_epoch(tip);
 
-    let rewards = domain
-        .iter_cardano_logs_per_epoch::<RewardLog>(account_key.entity_key.into(), 0..epoch)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let entity_key: EntityKey = account_key.entity_key.into();
+    let mut items = Vec::new();
+    let mut skipped = 0;
+    let skip = pagination.skip();
 
-    let mapped: Vec<_> = rewards
-        .into_iter()
-        .filter(|(_, reward)| reward.amount > 0)
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|(epoch, reward)| {
-            let operator = Hash::<28>::from(EntityKey::from(reward.pool_id));
-            let pool_id = mapping::bech32_pool(operator)?;
+    for reward_epoch in 0..epoch {
+        let slot = summary.epoch_start(reward_epoch);
+        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
 
-            let r#type = if reward.as_leader {
-                blockfrost_openapi::models::account_reward_content_inner::Type::Leader
+        let leader = domain
+            .archive()
+            .read_log_typed::<LeaderRewardLog>(LeaderRewardLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(reward) = leader.filter(|reward| reward.amount > 0) {
+            if skipped < skip {
+                skipped += 1;
             } else {
-                blockfrost_openapi::models::account_reward_content_inner::Type::Member
-            };
+                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            }
+        }
 
-            let out = AccountRewardContentInner {
-                epoch: epoch as i32,
-                amount: reward.amount.to_string(),
-                pool_id,
-                r#type,
-            };
+        if items.len() >= pagination.count {
+            break;
+        }
 
-            Ok(out)
-        })
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+        let member = domain
+            .archive()
+            .read_log_typed::<MemberRewardLog>(MemberRewardLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(mapped))
+        if let Some(reward) = member.filter(|reward| reward.amount > 0) {
+            if skipped < skip {
+                skipped += 1;
+            } else {
+                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            }
+        }
+
+        if items.len() >= pagination.count {
+            break;
+        }
+
+        let pool_deposit_refund = domain
+            .archive()
+            .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {
+            if skipped < skip {
+                skipped += 1;
+            } else {
+                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            }
+        }
+
+        if items.len() >= pagination.count {
+            break;
+        }
+    }
+
+    Ok(Json(items))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::{
+        account_addresses_content_inner::AccountAddressesContentInner,
+        account_content::AccountContent,
+        account_delegation_content_inner::AccountDelegationContentInner,
+        account_registration_content_inner::AccountRegistrationContentInner,
+        account_reward_content_inner::AccountRewardContentInner,
+    };
+
+    fn invalid_stake_address() -> &'static str {
+        "not-a-stake"
+    }
+
+    fn missing_stake_address() -> &'static str {
+        "stake_test1uqysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgeeww5k"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: AccountContent =
+            serde_json::from_slice(&bytes).expect("failed to parse account content");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_paginated() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path_page_1 = format!("/accounts/{stake_address}/addresses?page=1&count=1");
+        let path_page_2 = format!("/accounts/{stake_address}/addresses?page=2&count=1");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse account addresses page 1");
+        let page_2: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse account addresses page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].address, page_2[0].address);
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_order_asc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses asc");
+        if asc.is_empty() {
+            return;
+        }
+        let address_bounds = |addr: &str| {
+            app.vectors()
+                .account_address_bounds
+                .iter()
+                .find_map(|(known, min, max)| (known == addr).then_some((*min, *max)))
+                .expect("missing address in vectors")
+        };
+
+        let asc_blocks: Vec<_> = asc.iter().map(|x| address_bounds(&x.address).0).collect();
+
+        assert!(asc_blocks.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_order_desc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
+        if desc.is_empty() {
+            return;
+        }
+        let address_bounds = |addr: &str| {
+            app.vectors()
+                .account_address_bounds
+                .iter()
+                .find_map(|(known, min, max)| (known == addr).then_some((*min, *max)))
+                .expect("missing address in vectors")
+        };
+
+        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).1).collect();
+
+        assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/addresses", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/addresses", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account delegations");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_slot_constrained() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!(
+            "/accounts/{stake_address}/delegations?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account delegations");
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_order_asc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse delegations asc");
+        if asc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let asc_pos: Vec<_> = asc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_order_desc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AccountDelegationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse delegations desc");
+        if desc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/delegations", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/delegations", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_delegations_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/delegations");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_slot_constrained() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!(
+            "/accounts/{stake_address}/registrations?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_order_asc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse registrations asc");
+        if asc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let asc_pos: Vec<_> = asc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] <= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_order_desc() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse registrations desc");
+        if desc.len() < 2 {
+            return;
+        }
+        let tx_pos = |hash: &str| {
+            app.vectors()
+                .blocks
+                .iter()
+                .find_map(|block| {
+                    block
+                        .tx_hashes
+                        .iter()
+                        .position(|x| x == hash)
+                        .map(|idx| (block.block_number, idx))
+                })
+                .expect("missing tx hash in vectors")
+        };
+        let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/registrations", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/registrations", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let _: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_paginated() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path_page_1 = format!("/accounts/{stake_address}/rewards?page=1&count=1");
+        let path_page_2 = format!("/accounts/{stake_address}/rewards?page=2&count=1");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse account rewards page 1");
+        let page_2: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse account rewards page 2");
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1[0].epoch, page_2[0].epoch);
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/rewards", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/rewards", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
 }

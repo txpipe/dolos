@@ -1,145 +1,114 @@
+use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
+use dolos_core::BootstrapExt;
 use miette::{Context as _, IntoDiagnostic};
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
-use dolos::adapters::{ChainConfig, DomainAdapter, WalAdapter};
+use dolos::adapters::DomainAdapter;
 use dolos::core::Genesis;
 use dolos::prelude::*;
+use dolos::storage;
 
-use crate::{GenesisConfig, LoggingConfig};
+pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 
-pub struct Stores {
-    pub wal: WalAdapter,
-    pub state: dolos_redb3::state::StateStore,
-    pub archive: dolos_redb3::archive::ArchiveStore,
+/// Ensure the storage root directory exists.
+pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
+    storage::ensure_storage_path(config)
 }
 
-pub fn ensure_storage_path(config: &crate::Config) -> Result<PathBuf, Error> {
-    let root = config.storage.path.as_ref().ok_or(Error::config(
-        "can't define storage path for ephemeral config",
-    ))?;
-
-    std::fs::create_dir_all(root)?;
-
-    Ok(root.to_path_buf())
+pub fn open_wal_store(
+    config: &RootConfig,
+) -> Result<storage::WalStoreBackend<dolos_cardano::CardanoDelta>, Error> {
+    storage::open_wal_store(config)
 }
 
-pub fn open_wal_store(config: &crate::Config) -> Result<WalAdapter, Error> {
-    let root = ensure_storage_path(config)?;
-
-    let wal = dolos_redb::wal::RedbWalStore::open(root.join("wal"), config.storage.wal_cache)?;
-
-    Ok(wal)
+pub fn open_archive_store(config: &RootConfig) -> Result<storage::ArchiveStoreBackend, Error> {
+    storage::open_archive_store(config)
 }
 
-pub fn open_archive_store(
-    config: &crate::Config,
-) -> Result<dolos_redb3::archive::ArchiveStore, Error> {
-    let root = ensure_storage_path(config)?;
-    let schema = dolos_cardano::model::build_schema();
-
-    let archive = dolos_redb3::archive::ArchiveStore::open(
-        schema,
-        root.join("chain"),
-        config.storage.chain_cache,
-    )
-    .map_err(ArchiveError::from)?;
-
-    Ok(archive)
+pub fn open_state_store(config: &RootConfig) -> Result<storage::StateStoreBackend, Error> {
+    storage::open_state_store(config)
 }
 
-pub fn open_state_store(config: &crate::Config) -> Result<dolos_redb3::state::StateStore, Error> {
-    let root = ensure_storage_path(config)?;
-    let schema = dolos_cardano::model::build_schema();
-
-    let state3 = dolos_redb3::state::StateStore::open(
-        schema,
-        root.join("state"),
-        config.storage.ledger_cache,
-    )
-    .map_err(StateError::from)?;
-
-    Ok(state3)
+pub fn open_data_stores(config: &RootConfig) -> Result<Stores, Error> {
+    storage::open_data_stores(config)
 }
 
-pub fn open_persistent_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    if config.storage.version == StorageVersion::V0 {
-        error!("Storage should be removed and init procedure run again.");
-        return Err(Error::StorageError("Invalid store version".to_string()));
+pub fn load_config(
+    explicit_file: &Option<std::path::PathBuf>,
+) -> Result<RootConfig, ::config::ConfigError> {
+    let mut s = ::config::Config::builder();
+
+    // our base config will always be in /etc/dolos
+    s = s.add_source(::config::File::with_name("/etc/dolos/daemon.toml").required(false));
+
+    // but we can override it by having a file in the working dir
+    s = s.add_source(::config::File::with_name("dolos.toml").required(false));
+
+    // if an explicit file was passed, then we load it as mandatory
+    if let Some(explicit) = explicit_file.as_ref().and_then(|x| x.to_str()) {
+        s = s.add_source(::config::File::with_name(explicit).required(true));
     }
 
-    let wal = open_wal_store(config)?;
+    // finally, we use env vars to make some last-step overrides
+    s = s.add_source(::config::Environment::with_prefix("DOLOS").separator("_"));
 
-    let state = open_state_store(config)?;
-
-    let archive = open_archive_store(config)?;
-
-    Ok(Stores {
-        wal,
-        state,
-        archive,
-    })
+    s.build()?.try_deserialize()
 }
 
-pub fn create_ephemeral_data_stores() -> Result<Stores, Error> {
-    let wal = dolos_redb::wal::RedbWalStore::memory()?;
-
-    let schema = dolos_cardano::model::build_schema();
-    let state =
-        dolos_redb3::state::StateStore::in_memory(schema.clone()).map_err(StateError::from)?;
-
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(schema).map_err(ArchiveError::from)?;
-
-    Ok(Stores {
-        wal,
-        archive,
-        state,
-    })
-}
-
-pub fn setup_data_stores(config: &crate::Config) -> Result<Stores, Error> {
-    if config.storage.is_ephemeral() {
-        create_ephemeral_data_stores()
-    } else {
-        open_persistent_data_stores(config)
-    }
-}
-
-pub fn setup_domain(config: &crate::Config) -> miette::Result<DomainAdapter> {
-    let stores = setup_data_stores(config)?;
+pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
+    let stores = open_data_stores(config)?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
-    let mempool = dolos::mempool::Mempool::new();
+    let mempool = stores.mempool.clone();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 
     let ChainConfig::Cardano(chain_config) = chain;
 
-    let chain =
-        dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(chain_config, &stores.state)
-            .into_diagnostic()?;
+    let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
+        chain_config,
+        &stores.state,
+        &genesis,
+    )
+    .into_diagnostic()?;
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
         genesis,
-        chain,
+        chain: Arc::new(std::sync::RwLock::new(chain)),
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
+        indexes: stores.indexes,
         mempool,
         tip_broadcast,
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    dolos_core::facade::bootstrap(&domain).map_err(|x| miette::miette!("{:?}", x))?;
+    domain.bootstrap().map_err(|x| miette::miette!("{:?}", x))?;
 
     Ok(domain)
 }
 
-pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
+pub fn setup_tracing_error_only() -> miette::Result<()> {
+    let filter = Targets::new().with_default(tracing::Level::ERROR);
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .init();
+
+    tracing_log::LogTracer::init().ok();
+
+    Ok(())
+}
+
+pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> miette::Result<()> {
     let level = config.max_level;
 
     let mut filter = Targets::new()
@@ -168,10 +137,46 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         filter = filter.with_target("tower_http", level);
     }
 
+    if config.include_fjall {
+        filter = filter
+            .with_target("fjall", level)
+            .with_target("lsm_tree", level);
+    }
+
+    if config.include_otlp {
+        filter = filter.with_target("opentelemetry", level);
+    }
+
+    let otel_layer = if telemetry.enabled {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(&telemetry.otlp_endpoint)
+            .build()
+            .into_diagnostic()
+            .context("building OTLP span exporter")?;
+
+        let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder()
+                    .with_service_name(telemetry.service_name.clone())
+                    .build(),
+            )
+            .build();
+
+        opentelemetry::global::set_tracer_provider(tracer.clone());
+
+        let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
+        Some(layer)
+    } else {
+        None
+    };
+
     #[cfg(not(feature = "debug"))]
     {
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
+            .with(otel_layer)
             .with(filter)
             .init();
     }
@@ -181,9 +186,15 @@ pub fn setup_tracing(config: &LoggingConfig) -> miette::Result<()> {
         tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
             .with(console_subscriber::spawn())
+            .with(otel_layer)
             .with(filter)
             .init();
     }
+
+    // Initialize the log-to-tracing bridge AFTER the tracing subscriber is set up.
+    // This allows crates using the `log` crate (like fjall) to have their messages
+    // forwarded to the tracing subscriber.
+    tracing_log::LogTracer::init().ok();
 
     Ok(())
 }
@@ -258,10 +269,8 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
     pipeline.teardown();
 }
 
-pub fn cleanup_data(config: &crate::Config) -> Result<(), std::io::Error> {
-    let Some(root) = &config.storage.path else {
-        return Ok(());
-    };
+pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
+    let root = &config.storage.path;
 
     if root.is_dir() {
         for entry_result in fs::read_dir(root)? {

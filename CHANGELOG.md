@@ -2,6 +2,420 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0-rc.11] - 2026-02-27
+
+### 🚀 Features
+
+- *(o7s)* Implement missing queries to support ogmios connection (#913)
+
+### 🐛 Bug Fixes
+
+- Adjust inconsistencies in mempool tracking (#915)
+- *(trp)* Fix mapping of plutus maps (#921)
+
+### 📚 Documentation
+
+- Update config and minibf sections to match latest changes (#914)
+- Add relevant maintenance / debugging skills
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump tx3 to v0.15.0 (#916)
+- Bump tx3 to v0.15.1 (#917)
+- *(minibf)* Upgrade openapi spec to 0.1.85 (#922)
+- Update latest hacks
+
+## [1.0.0-rc.10] - 2026-02-17
+
+### 🚀 Features
+
+- Introduce OTLP integration with focus on mempool (#891)
+- Introduce comprehensive mempool support (#901)
+- *(cli)* Improve flags for the bootstrap command (#909)
+- *(minibf)* Adjust max scan limit via config (#911)
+
+### 🐛 Bug Fixes
+
+- Unregistered dreps should not figure as expired (#887)
+- *(minibf)* Follow redirects for pool offchain metadata (#888)
+- *(minbf)* Compute Byron tx fees during mapping (#886)
+- *(cardano)* Add strict metadata checks for CIP25 (#882)
+- *(minibf)* Improve handling of tx metadata on AssetState (#881)
+- *(index)* Fine-tune fjall default for expected write throughput (#896)
+- Adapt data export command to new storage structure (#892)
+- *(cardano)* Apply mainnet-specific historical edge-cases (#895)
+- *(cli)* Remove wal from snapshot (#897)
+- Hook mempool confirm in sync pipeline (#904)
+- Avoid excessive mem increase during boundary (#905)
+- *(trp)* Adjust interface to match available mempool data (#910)
+
+### 🚜 Refactor
+
+- Formalize `strict` feature flag (ex `relaxed`) (#902)
+- Move rollback logic to core (#907)
+
+### 🧪 Testing
+
+- Treat epoch tests as best-effort (#903)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Fallback to genesis tx if hash not found (#884)
+- Bump fjall to v3.0.2 (#906)
+
+### Release
+
+- V1.0.0-rc.10
+
+## [1.0.0-rc.9] - 2026-02-09
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Add guard for inconsistent range params (#879)
+
+### 🔧 Continuous Integration
+
+- Enable automatic publishing to npm (#873)
+
+### 🧪 Testing
+
+- *(minibf)* Implement endpoint unit test full coverage via synthetic data (#877)
+- *(minibf)* Include pagination, range and order in unit tests (#878)
+- Relax constraints of smoke test to avoid flaky results (#880)
+
+### ⚙️ Miscellaneous Tasks
+
+- Remove toy-domain feature flag (#885)
+
+### Release
+
+- V1.0.0-rc.9
+
+## [1.0.0-rc.8] - 2026-02-07
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Support parsing of byron addresses when required (#863)
+- *(minibf)* Add memory cache for heavy network query (#865)
+- *(minibf)* Improve active epoch logic on pool_updates mapping (#862)
+- *(minibf)* Add mainnet genesis block (#867)
+- *(minibf)* Parse complex onchain metadata for assets (#860)
+- *(minibf)* Track drep drop on account when retires (#868)
+- *(minibf)* Skip invalid plutus-v1 proposal preview (#871)
+- *(cardano)* Separate reward log types into different namespaces (#875)
+
+### 🚜 Refactor
+
+- Introduce block streaming query extensions (#864)
+- *(minibf)* Improve mem of first-by-tag type of queries (#866)
+- *(minibf)* Improve memory usage on utxo queries (#869)
+- *(minibf)* Relax max pagination limit (#876)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Make better use of from/to pagination filters (#870)
+
+### Release
+
+- V1.0.0-rc.8
+
+## [1.0.0-rc.7] - 2026-02-04
+
+### 🚀 Features
+
+- Track and ref-count witness-set datum values (#807)
+- *(grpc)* Upgrade u5c server to 0.18.1 specs (#813)
+- *(redb3)* Use bucketed keys for indexes (#836)
+- *(redb3)* Turn tx index into single value table (#837)
+- *(bin)* Add cardinality stats command
+- Introduce LSM engine just for indexes (#843)
+- Introduce LSM engine for state store
+- Support storage backend switch via config
+- Support fjall-specific storage configs
+- *(fjall)* Expose engine settings via config (#845)
+- Support per-store location paths
+- *(cli)* Add command to import archive from immutable db
+- Support no-op stores for index and archive
+- *(redb)* Off-load block data to flat files (#848)
+- *(bin)* Force warn+ logs on mithril bootstrap
+- *(o7s)* Implement many missing LocalState queries to support cardano cli (#858)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Map metadata numeric values to json numbers
+- *(fjall)* Use snapshot for reads instead of direct keyspace access
+- *(cardano)* Avoid write-during-iter in estart and ewrap
+- Add graceful domain shutdown procedure
+- Make sure fjall logs show up on tracing output
+- *(fjall)* Reduce number of keyspaces by using prefixed keys
+- *(cardano)* Use whole chain summary for epoch calculation (#844)
+- *(cli)* Skip starting point when resuming Mithril import
+- *(cardano)* Use entity streaming for mem-heavy work units (#846)
+- *(minibf)* Show logs on internal 500 errors
+- *(cli)* Avoid scanning the skipped epoch during archive import
+- *(minibf)* Add max scan limit for paginated endpoints (#849)
+- Reduce level of excesive traces
+- Introduce async query facade to avoid starving the runtime
+- *(minibf)* Improve conformance tests coverage (#847)
+- *(cardano)* Take into account drained rewards in epoch state (#855)
+- *(cardano)* Use mark protocol version for babbage pot calc (#857)
+- *(cardano)* Bootstrap nonce in genesis if chain starts on Shelley
+- Improve conformance tests coverage (#853)
+- *(minibf)* Format special dreps on accounts (#861)
+
+### 🚜 Refactor
+
+- Isolate indexes into its own storage (#841)
+- Formalize work unit concept (#842)
+- Make index interface chain-agnostic
+- Turn datum state trackig into an entity
+- Use persistent state for sharing reward data
+- Remove async from domain trait
+- Simplify adapter boilerplate
+
+### 📚 Documentation
+
+- Introduce basic AGENTS.md
+
+### 🧪 Testing
+
+- Fix toy domain implementation
+- Add comprehensive flow for cardano integration tests (#852)
+- Fix nonce ground-truth checks
+- Revisit cardano integration tests to include stake, delegation and rewards (#854)
+- *(cardano)* Remove many false positives from ground-truth checks
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings
+- Gitignore opencode files
+- Fix clippy warnings across the board (#851)
+- Tidy up xtask for shared use (#856)
+- Update pallas v1.0.0-alpha.4 (#859)
+
+### Release
+
+- V1.0.0-rc.6
+- V1.0.0-rc.7
+
+## [1.0.0-rc.5] - 2026-01-07
+
+### 🚀 Features
+
+- *(trp)* Update tx3 framework to v0.14 (#824)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Handle pool re-registrations (#822)
+
+### 🚜 Refactor
+
+- *(trp)* Remove dependency on tx3-sdk (#816)
+
+### 🧪 Testing
+
+- *(trp)* Use tx3 sdk just for testing (#821)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 deps to v0.14.2
+
+### Release
+
+- V1.0.0-rc.5
+
+## [1.0.0-rc.4] - 2025-12-18
+
+### 🚀 Features
+
+- Introduce mempool-aware utxo store
+
+### 🐛 Bug Fixes
+
+- Remove stage timeout (#811)
+- Use correct condition for notifying tip events (#812)
+- *(cardano)* Drop delegators for retiring dreps (#817)
+- *(cardano)* Avoid dropping delegators on retired pools (#818)
+- *(cardano)* Improve speed of RUPD work log (#819)
+
+### 🔧 Continuous Integration
+
+- Include adhoc branches on docker builds
+- Remove x86 apple binary build
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix lint warnings (#820)
+
+### Release
+
+- V1.0.0-rc.4
+
+## [1.0.0-rc.3] - 2025-12-04
+
+### 🚀 Features
+
+- *(cardano)* Introduce custom utxos via config (#796)
+- *(trp)* Implement utxo temp locking mechanism (#800)
+- Introduce relaxed arithmetic option (#809)
+- *(minibf)* Introduce metrics endpoint (#810)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Fetch pool metadata in parallel (#790)
+- Enable relaxed mode for Pallas (#792)
+- Honor until-tip sync option (#545)
+- *(cardano)* Burn fees for Byron epoch pots (#804)
+- *(cardano)* Track MIRs as part of epoch rewards (#806)
+- Apply pending refactors to windows code
+
+### 🚜 Refactor
+
+- Adjust Mithril features to simplify build process (#795)
+- Unify all configs into single core location (#799)
+- Turn on relaxed mode by default
+
+### 📚 Documentation
+
+- Update chain config schema reference (#794)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Update missing hack for preview network (#791)
+- Update Pallas to v1.0.0-alpha.3
+- Remove legacy test-vectors crate (#797)
+- Unify both redb crates (#798)
+- *(minibf)* Update blockfrost-openapi to v0.1.83 (#801)
+
+### Release
+
+- V1.0.0-rc.3
+
+## [1.0.0-rc.2] - 2025-11-13
+
+### 🚀 Features
+
+- *(cardano)* Support genesis bootstrap of custom staking (#788)
+
+### 🐛 Bug Fixes
+
+- *(cli)* Remove bad force protocol in preprod init (#782)
+- *(cardano)* Make sure sync can continue after stop epoch (#786)
+- *(cardano)* Make genesis nonce aware of protocol (#783)
+- *(minibf)* Adjust conformance of pools and rewards endpoints (#784)
+- *(minibf)* Map circulating supply to BF semantics (#789)
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix broken tests (#781)
+- *(trp)* Update tx3 deps to v0.12 (#785)
+- *(cardano)* Reduce excessive log levels (#787)
+
+### Release
+
+- V1.0.0-rc.2
+
+## [1.0.0-rc.1] - 2025-11-06
+
+### 🚀 Features
+
+- *(cli)* Add proposal state dump command
+- *(cli)* Add single entitty dump command
+- *(cli)* Add update entity command
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Move era transition to estart (#777)
+- *(cardano)* Force protocol version value on forks
+- *(cardano)* Adjust pot logic to support pre-shelley eras
+- *(cardano)* Skip nonce calc before Shelley
+- *(cardano)* Take into account Byron tx fees
+- *(cardano)* Support era transition hacks
+- *(cardano)* Assign rewards using only account state at ewrap
+- *(cardano)* Compute eta using mark pparams
+- Handle default wal log on emulator pipeline (#780)
+- Take into account empty WAL during origin sync
+- *(cli)* Remove double async runtime in bootstrap command
+
+### 🚜 Refactor
+
+- *(core)* Remove chain-specific batching from core
+- *(cardano)* Use genesis data for protocol constants instead of epoch state
+- *(cardano)* Move params migration to inside delta on estart
+- *(cardano)* Simplify genesis pot logic
+- *(cardano)* Treat pre-conway protocol updates as proposals
+- *(cardano)* Materialize proposal lifecycle as state
+- *(core)* Make chain logic safe for async runtimes
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Remove excessive logs
+- Fix lint warnings
+- Bump Pallas to latest main branch (#779)
+
+### Release
+
+- V1.0.0-rc.1
+
+## [1.0.0-beta.8] - 2025-10-27
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Use correct timing for pool params activation (#764)
+- *(cardano)* Skip retired pools from active stake snapshot (#765)
+- *(cardano)* Treat pool retire epoch as inclusive
+- *(cardano)* Adjust multiple reward-related issues (#766)
+- *(cardano)* Fix multiple accounting details (#767)
+- *(cardano)* Make sure all staking rules are followed (#771)
+- *(cardano)* Take into account preprod pointer addresses
+- *(minibf)* Fix `/network` endpoint mappings (#773)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Avoid panic on undo logic (#772)
+
+### Release
+
+- V1.0.0-beta.8
+
+## [1.0.0-beta.7] - 2025-10-17
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Treat pool params as an epoch-dependant value (#759)
+- *(cardano)* Move reward apply after epoch snapshot (#761)
+- *(minibf)* Use inaccurate but compatible pool fees value (#762)
+- *(cardano)* Allow delegation to unregistered dreps (#763)
+- *(cardano)* Fix incentives calc on epoch 0
+
+### Release
+
+- V1.0.0-beta.7
+
+## [1.0.0-beta.6] - 2025-10-16
+
+### 🚀 Features
+
+- *(cardano)* Implement pixel-perfect reward calc (#757)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Don't forget about Byron pparams updates (#752)
+- *(minibf)* Offset constructor index on datums (#755)
+- *(cardano)* Make reward data optional on ewrap
+
+### ⚙️ Miscellaneous Tasks
+
+- Fix broken tests and lint warning (#753)
+- Disable publish for test-vectors crate
+- Fix failing tests and lint warnings (#754)
+- Formalize v2 as new internal storage version (#758)
+- *(cli)* Make storage v2 the default during init
+
+### Release
+
+- V1.0.0-beta.6
+
 ## [1.0.0-beta.5] - 2025-10-06
 
 ### 🚀 Features
@@ -35,6 +449,10 @@ All notable changes to this project will be documented in this file.
 
 - Fix lint warnings across the board (#732)
 - Fix build errors on support crates
+
+### Release
+
+- V1.0.0-beta.5
 
 ## [1.0.0-beta.4] - 2025-09-29
 

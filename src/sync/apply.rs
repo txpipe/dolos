@@ -1,7 +1,8 @@
+use dolos_core::SyncExt;
 use gasket::{framework::*, messaging::Message};
 use tracing::debug;
 
-use crate::{adapters::DomainAdapter, facade::DomainExt as _, prelude::*};
+use crate::{adapters::DomainAdapter, prelude::*};
 
 pub type UpstreamPort = gasket::messaging::InputPort<PullEvent>;
 
@@ -52,7 +53,7 @@ impl Stage {
     fn on_roll_forward(&self, block: RawBlock) -> Result<(), WorkerError> {
         debug!("handling roll forward");
 
-        dolos_core::facade::roll_forward(&self.domain, block).or_panic()?;
+        self.domain.roll_forward(block).or_panic()?;
 
         Ok(())
     }

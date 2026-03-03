@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use miette::{Context, IntoDiagnostic};
 use pallas::ledger::traverse::MultiEraBlock;
@@ -33,8 +34,8 @@ impl Default for Feedback {
 #[derive(Debug, clap::Args)]
 pub struct Args {}
 
-pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
-    //crate::common::setup_tracing(&config.logging)?;
+pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
+    //crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let feedback = Feedback::default();
 

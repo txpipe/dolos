@@ -1,3 +1,4 @@
+use dolos_core::config::RootConfig;
 use dolos_core::Domain;
 use miette::bail;
 
@@ -11,8 +12,9 @@ pub struct Args {
     max_rounds: Option<u64>,
 }
 
-pub fn run(config: &crate::Config, args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+#[tokio::main]
+pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let domain = setup_domain(config)?;
 

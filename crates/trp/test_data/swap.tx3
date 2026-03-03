@@ -1,0 +1,19 @@
+party Sender;
+party Receiver;
+
+tx swap(quantity: Int) {
+    input source {
+        from: Sender,
+        min_amount: Ada(quantity) + fees,
+    }
+
+    output {
+        to: Receiver,
+        amount: Ada(quantity),
+    }
+
+    output {
+        to: Sender,
+        amount: source - Ada(quantity) - fees,
+    }
+}

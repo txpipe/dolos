@@ -1,5 +1,6 @@
 use comfy_table::Table;
 use dolos_cardano::model::AccountState;
+use dolos_core::config::RootConfig;
 use dolos_core::StateStore;
 use miette::IntoDiagnostic as _;
 use pallas::crypto::hash::Hash;
@@ -50,8 +51,8 @@ pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<Hash<28>,
     for record in all_accounts {
         let (_, value) = record.into_diagnostic()?;
 
-        if let Some(pool_id) = value.pool.latest {
-            let entry = by_pool.entry(pool_id).or_insert(0);
+        if let Some(pool_id) = value.delegated_pool_live() {
+            let entry = by_pool.entry(*pool_id).or_insert(0);
             *entry += value.live_stake() as u128;
         }
     }
@@ -59,8 +60,8 @@ pub fn compute_spdd(store: &impl StateStore) -> miette::Result<HashMap<Hash<28>,
     Ok(by_pool)
 }
 
-pub fn run(config: &crate::Config, _args: &Args) -> miette::Result<()> {
-    crate::common::setup_tracing(&config.logging)?;
+pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
     let state = crate::common::open_state_store(config)?;
 

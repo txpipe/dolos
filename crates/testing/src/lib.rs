@@ -18,9 +18,14 @@ use rand::Rng;
 use dolos_core::*;
 
 pub mod blocks;
+pub mod faults;
+pub mod synthetic;
 
-#[cfg(feature = "toy-domain")]
 pub mod toy_domain;
+
+pub mod harness;
+pub mod mempool;
+pub mod streams;
 
 pub trait UtxoGenerator {
     fn generate(&self, address: &TestAddress) -> EraCbor;
