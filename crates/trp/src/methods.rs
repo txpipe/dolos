@@ -118,6 +118,7 @@ struct DumpLogsParams {
 
 #[derive(Deserialize)]
 struct PeekPendingParams {
+    #[allow(dead_code)]
     limit: Option<usize>,
     #[serde(rename = "includePayload")]
     include_payload: Option<bool>,
@@ -127,6 +128,7 @@ struct PeekPendingParams {
 
 #[derive(Deserialize)]
 struct PeekInflightParams {
+    #[allow(dead_code)]
     limit: Option<usize>,
     #[serde(rename = "includePayload")]
     include_payload: Option<bool>,
@@ -242,17 +244,13 @@ pub async fn trp_peek_pending<D: Domain>(
 ) -> Result<PeekPendingResponse, Error> {
     let params: PeekPendingParams = params.parse()?;
 
-    let limit = params.limit.unwrap_or(50);
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
     let peeked = mempool.peek_pending().await;
 
-    let has_more = peeked.len() > limit;
-
     let entries = peeked
         .iter()
-        .take(limit)
         .map(|tx| PendingTx {
             hash: hex::encode(tx.hash.as_ref()),
             payload: if include_payload {
@@ -263,7 +261,10 @@ pub async fn trp_peek_pending<D: Domain>(
         })
         .collect();
 
-    Ok(PeekPendingResponse { entries, has_more })
+    Ok(PeekPendingResponse {
+        entries,
+        has_more: false,
+    })
 }
 
 // ── trp.peekInflight ────────────────────────────────────────────────────
@@ -274,17 +275,13 @@ pub async fn trp_peek_inflight<D: Domain>(
 ) -> Result<PeekInflightResponse, Error> {
     let params: PeekInflightParams = params.parse()?;
 
-    let limit = params.limit.unwrap_or(50);
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
     let peeked = mempool.peek_inflight().await;
 
-    let has_more = peeked.len() > limit;
-
     let entries = peeked
         .iter()
-        .take(limit)
         .map(|tx| InflightTx {
             hash: hex::encode(tx.hash.as_ref()),
             stage: stage_to_string(&tx.stage).to_string(),
@@ -299,7 +296,10 @@ pub async fn trp_peek_inflight<D: Domain>(
         })
         .collect();
 
-    Ok(PeekInflightResponse { entries, has_more })
+    Ok(PeekInflightResponse {
+        entries,
+        has_more: false,
+    })
 }
 
 // ── health ──────────────────────────────────────────────────────────────
@@ -475,17 +475,7 @@ mod tests {
             dolos_core::MempoolStore::receive(context.domain.mempool(), tx).await.unwrap();
         }
 
-        // Peek with limit 2 — should get 2 items and has_more = true
-        let req = json!({ "limit": 2 }).to_string();
-        let params = Params::new(Some(req.as_str()));
-
-        let response = trp_peek_pending(params, context.clone()).await.unwrap();
-
-        assert_eq!(response.entries.len(), 2);
-        assert!(response.has_more);
-        assert!(response.entries.iter().all(|e| e.payload.is_none()));
-
-        // Peek with default limit — should get all 3
+        // Peek returns all items (limit is ignored)
         let req = json!({}).to_string();
         let params = Params::new(Some(req.as_str()));
 
@@ -493,6 +483,7 @@ mod tests {
 
         assert_eq!(response.entries.len(), 3);
         assert!(!response.has_more);
+        assert!(response.entries.iter().all(|e| e.payload.is_none()));
 
         // Peek with include_payload — should include cbor
         let req = json!({ "includePayload": true }).to_string();
