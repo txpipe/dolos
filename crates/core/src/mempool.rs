@@ -174,9 +174,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Returns `true` if there is at least one transaction in the pending queue.
     fn has_pending(&self) -> bool;
 
-    /// Returns up to `limit` transactions from the pending queue in insertion
-    /// order. Does not remove them.
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx>;
+    /// Returns all transactions from the pending queue in insertion order.
+    /// Does not remove them.
+    fn peek_pending(&self) -> Vec<MempoolTx>;
 
     /// Moves matching transactions from pending to the inflight table
     /// (initial sub-stage: `Propagated`).
@@ -197,9 +197,9 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// Used to retrieve the payload for re-submission checks.
     fn find_inflight(&self, tx_hash: &TxHash) -> Option<MempoolTx>;
 
-    /// Returns up to `limit` inflight transactions (Propagated, Acknowledged,
+    /// Returns all inflight transactions (Propagated, Acknowledged,
     /// or Confirmed) in arbitrary order. Does not remove them.
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx>;
+    fn peek_inflight(&self) -> Vec<MempoolTx>;
 
     /// Called after each chain-sync event.
     ///
@@ -295,7 +295,10 @@ where
 {
     let mut refs = HashSet::new();
 
-    for mtx in mempool.peek_pending(usize::MAX) {
+    let mut all_txs = mempool.peek_pending();
+    all_txs.extend(mempool.peek_inflight());
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
@@ -318,7 +321,10 @@ where
 fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) {
     debug!("excluding inflight stxis");
 
-    for mtx in mempool.peek_pending(usize::MAX) {
+    let mut all_txs = mempool.peek_pending();
+    all_txs.extend(mempool.peek_inflight());
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             warn!("invalid inflight tx");
@@ -339,7 +345,10 @@ fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Me
 fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Mempool) -> UtxoMap {
     let mut map = HashMap::new();
 
-    for mtx in mempool.peek_pending(usize::MAX) {
+    let mut all_txs = mempool.peek_pending();
+    all_txs.extend(mempool.peek_inflight());
+
+    for mtx in all_txs {
         let era_cbor = &mtx.payload;
         let Some(tx) = MultiEraTx::try_from(era_cbor).ok() else {
             continue;
@@ -459,7 +468,7 @@ mod tests {
             false
         }
 
-        fn peek_pending(&self, _limit: usize) -> Vec<MempoolTx> {
+        fn peek_pending(&self) -> Vec<MempoolTx> {
             vec![]
         }
 
@@ -475,7 +484,7 @@ mod tests {
             None
         }
 
-        fn peek_inflight(&self, _limit: usize) -> Vec<MempoolTx> {
+        fn peek_inflight(&self) -> Vec<MempoolTx> {
             vec![]
         }
 

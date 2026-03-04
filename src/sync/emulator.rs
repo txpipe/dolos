@@ -49,7 +49,7 @@ impl Worker {
         let mut transaction_witness_sets = vec![];
         let mut auxiliary_data_set = BTreeMap::new();
 
-        let txs = self.mempool.peek_pending(10);
+        let txs: Vec<_> = self.mempool.peek_pending().into_iter().take(10).collect();
 
         for (i, tx) in txs.iter().enumerate() {
             info!(tx = hex::encode(tx.hash), "adding tx to emulated block");

@@ -266,7 +266,7 @@ pub async fn trp_peek_pending<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_pending(limit);
+    let peeked: Vec<_> = mempool.peek_pending().into_iter().take(limit).collect();
 
     let entries = peeked
         .iter()
@@ -295,7 +295,7 @@ pub async fn trp_peek_inflight<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_inflight(limit);
+    let peeked: Vec<_> = mempool.peek_inflight().into_iter().take(limit).collect();
 
     let entries = peeked
         .iter()
