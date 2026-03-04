@@ -67,7 +67,10 @@ pub trait SubmitExt: Domain {
         chain: &Self::Chain,
         cbor: &[u8],
     ) -> Result<TxHash, DomainError> {
-        let _guard = SUBMIT_LOCK.lock().expect("submit lock poisoned");
+        let _guard = match SUBMIT_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
 
         let tx = self.validate_tx(chain, cbor)?;
         let hash = tx.hash;
