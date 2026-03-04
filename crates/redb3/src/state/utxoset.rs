@@ -382,7 +382,11 @@ mod tests {
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
         let indexes = build_indexes(&store);
 
-        let addresses: Vec<_> = TestAddress::everyone().into_iter().enumerate().collect();
+        let addresses: Vec<_> = ADDRESS_TYPE_VECTORS
+            .iter()
+            .enumerate()
+            .map(|(i, addr)| (i, TestAddress::Custom(addr.to_string())))
+            .collect();
 
         let initial_utxos = addresses
             .iter()

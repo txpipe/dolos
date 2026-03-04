@@ -326,9 +326,13 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 #[cfg(test)]
 mod tests {
     use dolos_core::config::TrpConfig;
+    use dolos_core::import::ImportExt;
+    use dolos_core::{MempoolStore, MempoolTxStage, TxoRef};
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
     use dolos_testing::toy_domain::ToyDomain;
-    use dolos_testing::TestAddress::{Alice, Bob};
+    use dolos_testing::TestAddress;
     use jsonrpsee::types::ErrorObjectOwned;
+    use rand::Rng;
     use serde_json::json;
 
     use crate::metrics::Metrics;
@@ -336,15 +340,60 @@ mod tests {
     use super::*;
 
     async fn setup_test_context() -> Arc<Context<ToyDomain>> {
-        let delta = dolos_testing::make_custom_utxo_delta(
-            dolos_testing::TestAddress::everyone(),
-            2..4,
-            |x: &dolos_testing::TestAddress| {
-                dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
-            },
-        );
+        // Use devnet genesis (protocol 9 = Conway, has Plutus cost models needed by tx3 compiler)
+        let genesis = std::sync::Arc::new(dolos_cardano::include::devnet::load());
 
-        let domain = ToyDomain::new(Some(delta), None);
+        // Compute minimum slot for the genesis era summary
+        let min_slot = {
+            let temp = ToyDomain::new_with_genesis_and_config(
+                genesis.clone(),
+                dolos_core::config::CardanoConfig::default(),
+                None,
+                None,
+            );
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(
+                dolos_core::Domain::state(&temp),
+            )
+            .expect("era summary");
+            summary.epoch_start(2)
+        };
+
+        // Build synthetic blocks (3 blocks × 2 txs, uses tx hash sequences 1-7)
+        let mut cfg = SyntheticBlockConfig::default();
+        cfg.slot = min_slot;
+        let (blocks, _vectors, chain_config) = build_synthetic_blocks(cfg);
+
+        // Build sender/receiver UTxOs with offset hashes (100+) to avoid collision
+        // with synthetic block sequences (1-7).
+        // Use Carol/Dave to avoid colliding with synthetic block addresses (Alice/Bob).
+        let delta = {
+            let sender = TestAddress::Carol;
+            let receiver = TestAddress::Dave;
+            let mut utxos = dolos_core::UtxoMap::new();
+            for (i, address) in [sender, receiver].iter().enumerate() {
+                let utxo_count = rand::rng().random_range(2u64..4);
+                for ordinal in 0..utxo_count {
+                    let tx = dolos_testing::tx_sequence_to_hash(100 + i as u64);
+                    let key = TxoRef(tx, ordinal as u32);
+                    let cbor =
+                        dolos_testing::utxo_with_random_amount(address, 4_000_000..5_000_000);
+                    utxos.insert(key, std::sync::Arc::new(cbor));
+                }
+            }
+            dolos_core::UtxoSetDelta {
+                produced_utxo: utxos,
+                ..Default::default()
+            }
+        };
+
+        // Pass delta through domain — applied after genesis, before block import
+        let domain =
+            ToyDomain::new_with_genesis_and_config(genesis, chain_config, Some(delta), None);
+
+        // Import blocks to give the domain a cursor/tip
+        domain
+            .import_blocks(blocks)
+            .expect("failed to import synthetic blocks");
 
         Arc::new(Context {
             domain,
@@ -387,8 +436,8 @@ mod tests {
     async fn test_resolve_happy_path() {
         let args = json!({
             "quantity": 100,
-            "sender": Alice.as_str(),
-            "receiver": Bob.as_str(),
+            "sender": TestAddress::Carol.as_str().to_string(),
+            "receiver": TestAddress::Dave.as_str().to_string(),
         });
 
         let resolved = attempt_resolve(&args).await.unwrap();
@@ -541,5 +590,61 @@ mod tests {
 
         assert!(response.entries.is_empty());
         assert!(response.next_cursor.is_none());
+    }
+
+    // ── trp.submit tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_submit_with_signature() {
+        let context = setup_test_context().await;
+
+        // 1. Resolve a valid unsigned tx using test sender
+        let args = json!({
+            "quantity": 2_000_000,
+            "sender": TestAddress::Carol.as_str().to_string(),
+            "receiver": TestAddress::Dave.as_str().to_string(),
+        });
+        let req = json!({
+            "tir": {
+                "version": "v1beta0",
+                "content": SUBJECT_PROTOCOL,
+                "encoding": "hex"
+            },
+            "args": args,
+            "env": {},
+        })
+        .to_string();
+        let resolved = trp_resolve(Params::new(Some(req.as_str())), context.clone())
+            .await
+            .unwrap();
+
+        // 2. Sign the tx body hash with the test sender key
+        let (sk, pk) = TestAddress::Carol.keypair();
+        let body_hash_bytes = hex::decode(&resolved.hash).unwrap();
+        let signature = sk.sign(&body_hash_bytes);
+
+        // 3. Submit with signature witness
+        let req = json!({
+            "tx": { "content": resolved.tx, "contentType": "hex" },
+            "witnesses": [{
+                "Signature": {
+                    "key": { "content": hex::encode(pk.as_ref()), "contentType": "hex" },
+                    "signature": { "content": hex::encode(signature.as_ref()), "contentType": "hex" },
+                    "type": "ed25519"
+                }
+            }]
+        })
+        .to_string();
+        let response = trp_submit(Params::new(Some(req.as_str())), context.clone())
+            .await
+            .unwrap();
+        assert!(!response.hash.is_empty(), "submit should return a tx hash");
+
+        // 4. Verify the tx is in the mempool as pending
+        let tx_hash_bytes = hex::decode(&response.hash).unwrap();
+        let tx_hash: pallas::crypto::hash::Hash<32> =
+            tx_hash_bytes.as_slice().try_into().expect("invalid hash length");
+        let status = MempoolStore::check_status(context.domain.mempool(), &tx_hash);
+        assert_eq!(status.stage, MempoolTxStage::Pending);
     }
 }
