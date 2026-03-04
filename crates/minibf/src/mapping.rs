@@ -28,6 +28,7 @@ use std::{
 };
 
 use blockfrost_openapi::models::{
+    address_content::{AddressContent, Type as AddressType},
     address_utxo_content_inner::AddressUtxoContentInner,
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
@@ -184,7 +185,6 @@ where
     }
 }
 
-#[allow(unused)]
 pub fn aggregate_assets<'a>(
     txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
 ) -> Vec<TxContentOutputAmountInner> {
@@ -258,6 +258,46 @@ pub fn list_assets<'a>(
     assets.sort_by_key(|a| a.unit.clone());
 
     std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub enum AddressKind {
+    Payment {
+        script: bool,
+    },
+    Shelley {
+        stake_address: Option<String>,
+        script: bool,
+    },
+    Byron,
+}
+
+pub struct AddressModelBuilder {
+    pub address: String,
+    pub amount: Vec<TxContentOutputAmountInner>,
+    pub kind: AddressKind,
+}
+
+impl IntoModel<AddressContent> for AddressModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<AddressContent, StatusCode> {
+        let (stake_address, r#type, script) = match self.kind {
+            AddressKind::Payment { script } => (None, AddressType::Shelley, script),
+            AddressKind::Shelley {
+                stake_address,
+                script,
+            } => (stake_address, AddressType::Shelley, script),
+            AddressKind::Byron => (None, AddressType::Byron, false),
+        };
+
+        Ok(AddressContent {
+            address: self.address,
+            amount: self.amount,
+            stake_address,
+            r#type,
+            script,
+        })
+    }
 }
 
 impl IntoModel<Vec<TxContentOutputAmountInner>> for MultiEraValue<'_> {
