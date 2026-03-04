@@ -4,7 +4,7 @@ use axum::{
     routing::{get, post},
     Router, ServiceExt,
 };
-use axum_otel_metrics::{HttpMetricsLayerBuilder, PathSkipper};
+use axum_otel_metrics::HttpMetricsLayerBuilder;
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
     ChainSummary, PParamsSet,
