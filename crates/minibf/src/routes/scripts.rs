@@ -11,11 +11,10 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage};
 use dolos_core::Domain;
-use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
+use pallas::{codec::minicbor, ledger::primitives::ToCanonicalJson};
 use reqwest::StatusCode;
-use serde_json::json;
 
 use crate::{
     error::Error,
@@ -92,7 +91,8 @@ where
         ScriptLanguage::Native => {
             let native: NativeScript =
                 minicbor::decode(&script.script).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            Some(native_script_json(&native)?)
+            // Some(native_script_json(&native)?)
+            Some(native.to_json())
         }
         _ => None,
     };
@@ -157,43 +157,4 @@ where
     Ok(Json(ScriptDatumCbor {
         cbor: hex::encode(minicbor::to_vec(&datum).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?),
     }))
-}
-
-fn native_script_json(script: &NativeScript) -> Result<serde_json::Value, StatusCode> {
-    match script {
-        NativeScript::ScriptPubkey(hash) => Ok(json!({
-            "type": "sig",
-            "keyHash": hex::encode(hash.as_slice()),
-        })),
-        NativeScript::ScriptAll(scripts) => Ok(json!({
-            "type": "all",
-            "scripts": scripts
-                .iter()
-                .map(native_script_json)
-                .collect::<Result<Vec<_>, _>>()?,
-        })),
-        NativeScript::ScriptAny(scripts) => Ok(json!({
-            "type": "any",
-            "scripts": scripts
-                .iter()
-                .map(native_script_json)
-                .collect::<Result<Vec<_>, _>>()?,
-        })),
-        NativeScript::ScriptNOfK(required, scripts) => Ok(json!({
-            "type": "atLeast",
-            "required": required,
-            "scripts": scripts
-                .iter()
-                .map(native_script_json)
-                .collect::<Result<Vec<_>, _>>()?,
-        })),
-        NativeScript::InvalidBefore(slot) => Ok(json!({
-            "type": "after",
-            "slot": slot,
-        })),
-        NativeScript::InvalidHereafter(slot) => Ok(json!({
-            "type": "before",
-            "slot": slot,
-        })),
-    }
 }
