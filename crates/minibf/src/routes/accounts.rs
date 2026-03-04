@@ -439,6 +439,9 @@ impl<T> AccountActivityModelBuilder<T> {
         }
 
         for item in block_items {
+            if !self.needs_more() {
+                break;
+            }
             self.add(item);
         }
 
