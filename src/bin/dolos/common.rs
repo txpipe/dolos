@@ -148,6 +148,10 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     }
 
     let otel_layer = if telemetry.enabled {
+        let resource = opentelemetry_sdk::Resource::builder()
+            .with_service_name(telemetry.service_name.clone())
+            .build();
+
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .with_endpoint(&telemetry.otlp_endpoint)
@@ -157,14 +161,28 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
 
         let tracer = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder()
-                    .with_service_name(telemetry.service_name.clone())
-                    .build(),
-            )
+            .with_resource(resource.clone())
             .build();
 
         opentelemetry::global::set_tracer_provider(tracer.clone());
+
+        let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(&telemetry.otlp_endpoint)
+            .build()
+            .into_diagnostic()
+            .context("building OTLP metrics exporter")?;
+
+        let metrics_reader = opentelemetry_sdk::metrics::PeriodicReader::builder(metrics_exporter)
+            .with_interval(Duration::from_secs(30))
+            .build();
+
+        let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(metrics_reader)
+            .with_resource(resource)
+            .build();
+
+        opentelemetry::global::set_meter_provider(meter_provider);
 
         let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
         Some(layer)

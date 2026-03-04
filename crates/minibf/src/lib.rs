@@ -4,6 +4,7 @@ use axum::{
     routing::{get, post},
     Router, ServiceExt,
 };
+use axum_otel_metrics::{HttpMetricsLayerBuilder, PathSkipper};
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
     ChainSummary, PParamsSet,
@@ -33,6 +34,15 @@ mod pagination;
 mod routes;
 #[cfg(test)]
 mod test_support;
+
+const HTTP_REQ_DURATION_BUCKETS: [f64; 15] = [
+    0.0, 0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
+];
+
+const HTTP_REQ_SIZE_BUCKETS: [f64; 10] = [
+    1024.0, 2048.0, 5120.0, 10240.0, 102400.0, 512000.0, 1048576.0, 2621440.0, 5242880.0,
+    10485760.0,
+];
 
 pub(crate) fn log_and_500<E: std::fmt::Debug>(context: &str) -> impl Fn(E) -> StatusCode + '_ {
     move |err| {
@@ -295,6 +305,11 @@ where
     Option<DRepState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
+    let metrics_layer = HttpMetricsLayerBuilder::new()
+        .with_duration_buckets(HTTP_REQ_DURATION_BUCKETS.to_vec())
+        .with_size_buckets(HTTP_REQ_SIZE_BUCKETS.to_vec())
+        .build();
+
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -455,6 +470,7 @@ where
                 .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
         )
+        .layer(metrics_layer)
         .layer(if permissive_cors {
             CorsLayer::permissive()
         } else {
