@@ -3,6 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use serde::Serialize;
 
 use crate::pagination::PaginationError;
 
@@ -15,6 +16,23 @@ pub enum Error {
     InvalidBlockHash,
 }
 
+#[derive(Serialize)]
+struct ErrorBody {
+    status_code: u16,
+    error: &'static str,
+    message: &'static str,
+}
+
+impl ErrorBody {
+    fn new(status_code: u16, error: &'static str, message: &'static str) -> Self {
+        Self {
+            status_code,
+            error,
+            message,
+        }
+    }
+}
+
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         match self {
@@ -23,11 +41,11 @@ impl IntoResponse for Error {
                 if matches!(status, StatusCode::NOT_FOUND) {
                     (
                         status,
-                        Json(serde_json::json!({
-                            "status_code": 404,
-                            "error": "Not Found",
-                            "message": "The requested component has not been found."
-                        })),
+                        Json(ErrorBody::new(
+                            404,
+                            "Not Found",
+                            "The requested component has not been found.",
+                        )),
                     )
                         .into_response()
                 } else {
@@ -36,38 +54,38 @@ impl IntoResponse for Error {
             }
             Error::InvalidAddress => (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "status_code": 400,
-                    "error": "Bad Request",
-                    "message": "Invalid address for this network or malformed address format."
-                })),
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid address for this network or malformed address format.",
+                )),
             )
                 .into_response(),
             Error::InvalidAsset => (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "status_code": 400,
-                    "error": "Bad Request",
-                    "message": "Invalid or malformed asset format."
-                })),
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid or malformed asset format.",
+                )),
             )
                 .into_response(),
             Error::InvalidBlockNumber => (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                  "error": "Bad Request",
-                  "message": "Missing, out of range or malformed block number.",
-                  "status_code": 400,
-                })),
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Missing, out of range or malformed block number.",
+                )),
             )
                 .into_response(),
             Error::InvalidBlockHash => (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                  "error": "Bad Request",
-                  "message": "Missing or malformed block hash.",
-                  "status_code": 400,
-                })),
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Missing or malformed block hash.",
+                )),
             )
                 .into_response(),
         }

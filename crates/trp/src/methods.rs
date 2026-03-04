@@ -1,13 +1,16 @@
 use jsonrpsee::types::Params;
-use pallas::{codec::utils::NonEmptySet, ledger::primitives::conway::VKeyWitness};
+use pallas::{
+    codec::utils::NonEmptySet,
+    ledger::primitives::conway::{VKeyWitness, WitnessSet},
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tx3_resolver::trp::{
     ChainPoint, CheckStatusResponse, DumpLogsResponse, InflightTx, PeekInflightResponse,
-    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope, TxLog,
-    TxStatus, TxWitness,
+    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope,
+    TxLog, TxStatus, TxWitness,
 };
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
@@ -54,10 +57,27 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
 
     let mut tx = tx.as_conway().ok_or(Error::UnsupportedTxEra)?.to_owned();
 
-    let map_witness = |witness: &TxWitness| VKeyWitness {
-        vkey: Vec::<u8>::from(witness.key.clone()).into(),
-        signature: Vec::<u8>::from(witness.signature.clone()).into(),
-    };
+    let mut new_vkeys = Vec::new();
+
+    for witness in witnesses {
+        match witness {
+            TxWitness::Signature(w) => {
+                new_vkeys.push(VKeyWitness {
+                    vkey: Vec::<u8>::from(w.key.clone()).into(),
+                    signature: Vec::<u8>::from(w.signature.clone()).into(),
+                });
+            }
+            TxWitness::RawWitness(h) => {
+                let bytes: Vec<u8> = h.clone().into();
+                let witness_set: WitnessSet = pallas::codec::minicbor::decode(&bytes)
+                    .map_err(|e| Error::InvalidParams(format!("invalid witness set cbor: {e}")))?;
+
+                if let Some(vkeys) = witness_set.vkeywitness {
+                    new_vkeys.extend(vkeys.to_vec());
+                }
+            }
+        }
+    }
 
     let mut witness_set = tx.transaction_witness_set.unwrap();
 
@@ -67,9 +87,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
         .flat_map(|x| x.iter())
         .cloned();
 
-    let new = witnesses.iter().map(map_witness);
-
-    let all: Vec<_> = old.chain(new).collect();
+    let all: Vec<_> = old.chain(new_vkeys).collect();
 
     witness_set.vkeywitness = NonEmptySet::from_vec(all);
 
@@ -104,6 +122,34 @@ pub async fn trp_submit<D: Domain + SubmitExt>(
 #[derive(Deserialize)]
 struct CheckStatusParams {
     hashes: Vec<String>,
+}
+
+// ── trp.dumpLogs ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct DumpLogsParams {
+    cursor: Option<u64>,
+    limit: Option<usize>,
+    #[serde(rename = "includePayload")]
+    include_payload: Option<bool>,
+}
+
+// ── trp.peekPending ─────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekPendingParams {
+    limit: Option<usize>,
+    #[serde(rename = "includePayload")]
+    include_payload: Option<bool>,
+}
+
+// ── trp.peekInflight ────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct PeekInflightParams {
+    limit: Option<usize>,
+    #[serde(rename = "includePayload")]
+    include_payload: Option<bool>,
 }
 
 fn stage_to_string(stage: &dolos_core::MempoolTxStage) -> &'static str {
@@ -171,13 +217,6 @@ pub async fn trp_check_status<D: Domain>(
 
 // ── trp.dumpLogs ────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct DumpLogsParams {
-    cursor: Option<u64>,
-    limit: Option<usize>,
-    include_payload: Option<bool>,
-}
-
 pub async fn trp_dump_logs<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
@@ -217,12 +256,6 @@ pub async fn trp_dump_logs<D: Domain>(
 
 // ── trp.peekPending ─────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
-struct PeekPendingParams {
-    limit: Option<usize>,
-    include_payload: Option<bool>,
-}
-
 pub async fn trp_peek_pending<D: Domain>(
     params: Params<'_>,
     context: Arc<Context<D>>,
@@ -233,13 +266,10 @@ pub async fn trp_peek_pending<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_pending(limit + 1);
-
-    let has_more = peeked.len() > limit;
+    let peeked = mempool.peek_pending(limit);
 
     let entries = peeked
         .iter()
-        .take(limit)
         .map(|tx| PendingTx {
             hash: hex::encode(tx.hash.as_ref()),
             payload: if include_payload {
@@ -250,16 +280,10 @@ pub async fn trp_peek_pending<D: Domain>(
         })
         .collect();
 
-    Ok(PeekPendingResponse { entries, has_more })
+    Ok(PeekPendingResponse { entries })
 }
 
 // ── trp.peekInflight ────────────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct PeekInflightParams {
-    limit: Option<usize>,
-    include_payload: Option<bool>,
-}
 
 pub async fn trp_peek_inflight<D: Domain>(
     params: Params<'_>,
@@ -271,13 +295,10 @@ pub async fn trp_peek_inflight<D: Domain>(
     let include_payload = params.include_payload.unwrap_or(false);
 
     let mempool = context.domain.mempool();
-    let peeked = mempool.peek_inflight(limit + 1);
-
-    let has_more = peeked.len() > limit;
+    let peeked = mempool.peek_inflight(limit);
 
     let entries = peeked
         .iter()
-        .take(limit)
         .map(|tx| InflightTx {
             hash: hex::encode(tx.hash.as_ref()),
             stage: stage_to_string(&tx.stage).to_string(),
@@ -292,7 +313,7 @@ pub async fn trp_peek_inflight<D: Domain>(
         })
         .collect();
 
-    Ok(PeekInflightResponse { entries, has_more })
+    Ok(PeekInflightResponse { entries })
 }
 
 // ── health ──────────────────────────────────────────────────────────────
@@ -304,9 +325,13 @@ pub fn health<D: Domain>(context: &Context<D>) -> bool {
 #[cfg(test)]
 mod tests {
     use dolos_core::config::TrpConfig;
+    use dolos_core::import::ImportExt;
+    use dolos_core::{MempoolStore, MempoolTxStage, TxoRef};
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
     use dolos_testing::toy_domain::ToyDomain;
-    use dolos_testing::TestAddress::{Alice, Bob};
+    use dolos_testing::TestAddress;
     use jsonrpsee::types::ErrorObjectOwned;
+    use rand::Rng;
     use serde_json::json;
 
     use crate::metrics::Metrics;
@@ -314,15 +339,60 @@ mod tests {
     use super::*;
 
     async fn setup_test_context() -> Arc<Context<ToyDomain>> {
-        let delta = dolos_testing::make_custom_utxo_delta(
-            dolos_testing::TestAddress::everyone(),
-            2..4,
-            |x: &dolos_testing::TestAddress| {
-                dolos_testing::utxo_with_random_amount(x, 4_000_000..5_000_000)
-            },
-        );
+        // Use devnet genesis (protocol 9 = Conway, has Plutus cost models needed by tx3 compiler)
+        let genesis = std::sync::Arc::new(dolos_cardano::include::devnet::load());
 
-        let domain = ToyDomain::new(Some(delta), None);
+        // Compute minimum slot for the genesis era summary
+        let min_slot = {
+            let temp = ToyDomain::new_with_genesis_and_config(
+                genesis.clone(),
+                dolos_core::config::CardanoConfig::default(),
+                None,
+                None,
+            );
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(
+                dolos_core::Domain::state(&temp),
+            )
+            .expect("era summary");
+            summary.epoch_start(2)
+        };
+
+        // Build synthetic blocks (3 blocks × 2 txs, uses tx hash sequences 1-7)
+        let mut cfg = SyntheticBlockConfig::default();
+        cfg.slot = min_slot;
+        let (blocks, _vectors, chain_config) = build_synthetic_blocks(cfg);
+
+        // Build sender/receiver UTxOs with offset hashes (100+) to avoid collision
+        // with synthetic block sequences (1-7).
+        // Use Carol/Dave to avoid colliding with synthetic block addresses (Alice/Bob).
+        let delta = {
+            let sender = TestAddress::Carol;
+            let receiver = TestAddress::Dave;
+            let mut utxos = dolos_core::UtxoMap::new();
+            for (i, address) in [sender, receiver].iter().enumerate() {
+                let utxo_count = rand::rng().random_range(2u64..4);
+                for ordinal in 0..utxo_count {
+                    let tx = dolos_testing::tx_sequence_to_hash(100 + i as u64);
+                    let key = TxoRef(tx, ordinal as u32);
+                    let cbor =
+                        dolos_testing::utxo_with_random_amount(address, 4_000_000..5_000_000);
+                    utxos.insert(key, std::sync::Arc::new(cbor));
+                }
+            }
+            dolos_core::UtxoSetDelta {
+                produced_utxo: utxos,
+                ..Default::default()
+            }
+        };
+
+        // Pass delta through domain — applied after genesis, before block import
+        let domain =
+            ToyDomain::new_with_genesis_and_config(genesis, chain_config, Some(delta), None);
+
+        // Import blocks to give the domain a cursor/tip
+        domain
+            .import_blocks(blocks)
+            .expect("failed to import synthetic blocks");
 
         Arc::new(Context {
             domain,
@@ -365,8 +435,8 @@ mod tests {
     async fn test_resolve_happy_path() {
         let args = json!({
             "quantity": 100,
-            "sender": Alice.as_str(),
-            "receiver": Bob.as_str(),
+            "sender": TestAddress::Carol.as_str().to_string(),
+            "receiver": TestAddress::Dave.as_str().to_string(),
         });
 
         let resolved = attempt_resolve(&args).await.unwrap();
@@ -455,7 +525,6 @@ mod tests {
         let response = trp_peek_pending(params, context).await.unwrap();
 
         assert!(response.entries.is_empty());
-        assert!(!response.has_more);
     }
 
     #[tokio::test]
@@ -468,14 +537,13 @@ mod tests {
             dolos_core::MempoolStore::receive(context.domain.mempool(), tx).unwrap();
         }
 
-        // Peek with limit 2 — should get 2 items and has_more = true
+        // Peek with limit 2 — should get 2 items
         let req = json!({ "limit": 2 }).to_string();
         let params = Params::new(Some(req.as_str()));
 
         let response = trp_peek_pending(params, context.clone()).await.unwrap();
 
         assert_eq!(response.entries.len(), 2);
-        assert!(response.has_more);
         assert!(response.entries.iter().all(|e| e.payload.is_none()));
 
         // Peek with default limit — should get all 3
@@ -485,10 +553,9 @@ mod tests {
         let response = trp_peek_pending(params, context.clone()).await.unwrap();
 
         assert_eq!(response.entries.len(), 3);
-        assert!(!response.has_more);
 
         // Peek with include_payload — should include cbor
-        let req = json!({ "include_payload": true }).to_string();
+        let req = json!({ "includePayload": true }).to_string();
         let params = Params::new(Some(req.as_str()));
 
         let response = trp_peek_pending(params, context).await.unwrap();
@@ -508,7 +575,6 @@ mod tests {
         let response = trp_peek_inflight(params, context).await.unwrap();
 
         assert!(response.entries.is_empty());
-        assert!(!response.has_more);
     }
 
     // ── trp.dumpLogs tests ──────────────────────────────────────────────
@@ -523,5 +589,59 @@ mod tests {
 
         assert!(response.entries.is_empty());
         assert!(response.next_cursor.is_none());
+    }
+
+    // ── trp.submit tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_submit_with_signature() {
+        let context = setup_test_context().await;
+
+        // 1. Resolve a valid unsigned tx using test sender
+        let args = json!({
+            "quantity": 2_000_000,
+            "sender": TestAddress::Carol.as_str().to_string(),
+            "receiver": TestAddress::Dave.as_str().to_string(),
+        });
+        let req = json!({
+            "tir": {
+                "version": "v1beta0",
+                "content": SUBJECT_PROTOCOL,
+                "encoding": "hex"
+            },
+            "args": args,
+            "env": {},
+        })
+        .to_string();
+        let resolved = trp_resolve(Params::new(Some(req.as_str())), context.clone())
+            .await
+            .unwrap();
+
+        // 2. Sign the tx body hash with the test sender key
+        let (sk, pk) = TestAddress::Carol.keypair();
+        let body_hash_bytes = hex::decode(&resolved.hash).unwrap();
+        let signature = sk.sign(&body_hash_bytes);
+
+        // 3. Submit with signature witness
+        let req = json!({
+            "tx": { "content": resolved.tx, "contentType": "hex" },
+            "witnesses": [{
+                "key": { "content": hex::encode(pk.as_ref()), "contentType": "hex" },
+                "signature": { "content": hex::encode(signature.as_ref()), "contentType": "hex" },
+                "type": "ed25519"
+            }]
+        })
+        .to_string();
+        let response = trp_submit(Params::new(Some(req.as_str())), context.clone())
+            .await
+            .unwrap();
+        assert!(!response.hash.is_empty(), "submit should return a tx hash");
+
+        // 4. Verify the tx is in the mempool as pending
+        let tx_hash_bytes = hex::decode(&response.hash).unwrap();
+        let tx_hash: pallas::crypto::hash::Hash<32> =
+            tx_hash_bytes.as_slice().try_into().expect("invalid hash length");
+        let status = MempoolStore::check_status(context.domain.mempool(), &tx_hash);
+        assert_eq!(status.stage, MempoolTxStage::Pending);
     }
 }

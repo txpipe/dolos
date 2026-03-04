@@ -165,7 +165,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.11"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"

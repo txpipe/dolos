@@ -208,7 +208,10 @@ impl Pagination {
     /// Reject requests that would require scanning too many items. Call this
     /// on endpoints where each result requires decoding block data (sub-block
     /// element iteration) and efficient skipping is not yet supported.
-    pub fn enforce_max_scan_limit(&self, max_scan_items: Option<u64>) -> Result<(), PaginationError> {
+    pub fn enforce_max_scan_limit(
+        &self,
+        max_scan_items: Option<u64>,
+    ) -> Result<(), PaginationError> {
         let limit = max_scan_items.unwrap_or(DEFAULT_MAX_SCAN_ITEMS);
         if self.page * self.count as u64 > limit {
             return Err(PaginationError::ScanLimitExceeded);

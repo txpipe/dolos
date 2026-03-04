@@ -119,6 +119,7 @@ impl<'a> IntoModel<AccountContent> for AccountModelBuilder<'a> {
         let out = AccountContent {
             stake_address,
             active,
+            registered: self.account_state.is_registered(),
             active_epoch: active_epoch.map(|x| x as i32),
             controlled_amount: stake.total().to_string(),
             rewards_sum: stake.rewards_sum.to_string(),
@@ -411,6 +412,7 @@ impl<T> AccountActivityModelBuilder<T> {
         epoch: Epoch,
         block: &MultiEraBlock,
         mapper: F,
+        order: crate::pagination::Order,
     ) -> Result<(), StatusCode>
     where
         F: Fn(
@@ -422,17 +424,25 @@ impl<T> AccountActivityModelBuilder<T> {
         ) -> Result<Option<T>, StatusCode>,
     {
         let txs = block.txs();
+        let mut block_items = vec![];
 
         for tx in txs {
-            let certs = tx.certs();
-
-            for cert in certs {
-                let model = mapper(&self.stake_address, &tx, &cert, epoch, self.network)?;
-
-                if let Some(model) = model {
-                    self.add(model);
+            for cert in tx.certs() {
+                if let Some(model) = mapper(&self.stake_address, &tx, &cert, epoch, self.network)? {
+                    block_items.push(model);
                 }
             }
+        }
+
+        if matches!(order, crate::pagination::Order::Desc) {
+            block_items.reverse();
+        }
+
+        for item in block_items {
+            if !self.needs_more() {
+                break;
+            }
+            self.add(item);
         }
 
         Ok(())
@@ -522,7 +532,7 @@ where
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        builder.scan_block_certs(epoch, &block, &mapper)?;
+        builder.scan_block_certs(epoch, &block, &mapper, pagination.order)?;
     }
 
     Ok(builder.items)
@@ -998,7 +1008,11 @@ mod tests {
                 .expect("missing tx hash in vectors")
         };
         let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
-        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+        assert!(
+            desc_pos.windows(2).all(|w| w[0] >= w[1]),
+            "positions should be in descending order: {:?}",
+            desc_pos
+        );
     }
 
     #[tokio::test]
@@ -1116,7 +1130,11 @@ mod tests {
                 .expect("missing tx hash in vectors")
         };
         let desc_pos: Vec<_> = desc.iter().map(|x| tx_pos(&x.tx_hash)).collect();
-        assert!(desc_pos.windows(2).all(|w| w[0] >= w[1]));
+        assert!(
+            desc_pos.windows(2).all(|w| w[0] >= w[1]),
+            "positions should be in descending order: {:?}",
+            desc_pos
+        );
     }
 
     #[tokio::test]
