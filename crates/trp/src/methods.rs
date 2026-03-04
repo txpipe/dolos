@@ -70,7 +70,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
             TxWitness::RawWitness(h) => {
                 let bytes: Vec<u8> = h.clone().into();
                 let witness_set: WitnessSet = pallas::codec::minicbor::decode(&bytes)
-                    .map_err(|_| Error::InternalError("invalid witness set cbor".into()))?;
+                    .map_err(|e| Error::InvalidParams(format!("invalid witness set cbor: {e}")))?;
 
                 if let Some(vkeys) = witness_set.vkeywitness {
                     new_vkeys.extend(vkeys.to_vec());
