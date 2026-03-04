@@ -5737,24 +5737,24 @@ checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "tx3-cardano"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9014ec5dd2af743ea7eb56b6f7182e7f752162f894cd0013b53479f59e4e5470"
+checksum = "39a2074d76a3da98221fd91d64ecd48c37a6b3842b56bfaa93ca9bf1e7038eac"
 dependencies = [
  "hex",
  "pallas",
  "serde",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.16.0",
+ "tx3-tir 0.16.1",
  "utxorpc",
 ]
 
 [[package]]
 name = "tx3-resolver"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce62a8c66003dfcdcaddd7eacb48b00f4ff38f7f9574be57ca4adbdb184c6fdf"
+checksum = "552776ebc1bb87109fe4562db27e8a432e2519e8e71db7bc1d5fa3a00fc34171"
 dependencies = [
  "approx",
  "base64 0.22.1",
@@ -5764,7 +5764,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.16.0",
+ "tx3-tir 0.16.1",
 ]
 
 [[package]]
@@ -5800,9 +5800,9 @@ dependencies = [
 
 [[package]]
 name = "tx3-tir"
-version = "0.16.0"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd7c91f1e868d78fd45d8c11cd9b685e8e4c747dfb36dd626e7856f117e46f91"
+checksum = "4f696ab4d335127db9b30dfa5cda7dff368184778f18b6d3fba95fa46a94c0b6"
 dependencies = [
  "ciborium",
  "hex",
