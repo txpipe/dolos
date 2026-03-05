@@ -2,8 +2,8 @@ use clap::Parser;
 use dolos_cardano::{include, mutable_slots};
 use dolos_core::{
     config::{
-        GenesisConfig, GrpcConfig, MinibfConfig, MithrilConfig, PeerConfig, RelayConfig,
-        RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
+        GenesisConfig, GrpcConfig, KupoConfig, MinibfConfig, MithrilConfig, PeerConfig,
+        RelayConfig, RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
     },
     Genesis,
 };
@@ -224,6 +224,10 @@ pub struct Args {
     #[arg(long)]
     serve_minibf: Option<bool>,
 
+    /// Serve clients via a Kupo-compatible HTTP endpoint
+    #[arg(long)]
+    serve_kupo: Option<bool>,
+
     /// Serve clients TRP
     #[arg(long)]
     serve_trp: Option<bool>,
@@ -340,6 +344,22 @@ impl ConfigEditor {
         self
     }
 
+    fn apply_serve_kupo(mut self, value: Option<bool>) -> Self {
+        if let Some(value) = value {
+            if value {
+                self.0.serve.kupo = KupoConfig {
+                    listen_address: "[::]:1442".parse().unwrap(),
+                    permissive_cors: Some(true),
+                }
+                .into();
+            } else {
+                self.0.serve.kupo = None;
+            }
+        }
+
+        self
+    }
+
     fn apply_serve_trp(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
@@ -405,6 +425,7 @@ impl ConfigEditor {
             .apply_history_pruning(args.max_chain_history.into())
             .apply_serve_grpc(args.serve_grpc)
             .apply_serve_minibf(args.serve_minibf)
+            .apply_serve_kupo(args.serve_kupo)
             .apply_serve_trp(args.serve_trp)
             .apply_serve_ouroboros(args.serve_ouroboros)
             .apply_enable_relay(args.enable_relay)
@@ -497,6 +518,17 @@ impl ConfigEditor {
         Ok(self.apply_serve_minibf(Some(value)))
     }
 
+    fn prompt_serve_kupo(self) -> miette::Result<Self> {
+        let value =
+            Confirm::new("Do you want to serve clients via a Kupo-compatible HTTP endpoint?")
+                .with_default(self.0.serve.kupo.is_some())
+                .prompt()
+                .into_diagnostic()
+                .context("asking for serve kupo")?;
+
+        Ok(self.apply_serve_kupo(Some(value)))
+    }
+
     fn prompt_serve_trp(self) -> miette::Result<Self> {
         let value = Confirm::new("Do you want to serve clients a TRP endpoint?")
             .with_default(self.0.serve.trp.is_some())
@@ -555,6 +587,7 @@ impl ConfigEditor {
             .prompt_history_pruning()?
             .prompt_serve_grpc()?
             .prompt_serve_minibf()?
+            .prompt_serve_kupo()?
             .prompt_serve_trp()?
             .prompt_serve_ouroboros()?
             .prompt_enable_relay()?;
