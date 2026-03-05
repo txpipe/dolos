@@ -4,11 +4,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_cardano::indexes::AsyncCardanoQueryExt;
 use dolos_core::Domain;
-use pallas::{codec::minicbor, crypto::hash::Hash};
+use pallas::crypto::hash::Hash;
 
-use crate::{bad_request, types::Datum, Facade};
+use crate::{bad_request, Facade};
 
 pub async fn by_hash<D: Domain>(
     State(facade): State<Facade<D>>,
@@ -19,18 +18,9 @@ pub async fn by_hash<D: Domain>(
         Err(_) => return bad_request(datum_hash_hint()).into_response(),
     };
 
-    match facade.query().plutus_data(&bytes).await {
-        Ok(Some(datum)) => match minicbor::to_vec(datum) {
-            Ok(bytes) => (
-                StatusCode::OK,
-                Json(Datum {
-                    datum: hex::encode(bytes.as_slice()),
-                }),
-            )
-                .into_response(),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        },
-        Ok(None) => (StatusCode::OK, Json(None::<Datum>)).into_response(),
+    match facade.resolve_datum(&bytes).await {
+        Ok(Some(datum)) => (StatusCode::OK, Json(datum)).into_response(),
+        Ok(None) => (StatusCode::OK, Json(None::<crate::types::Datum>)).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }

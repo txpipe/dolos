@@ -4,12 +4,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_cardano::{
-    indexes::{
-        AsyncCardanoQueryExt, CardanoIndexExt, ScriptData, ScriptLanguage as CardanoLanguage,
-    },
-    network_from_genesis, pallas_extras,
-};
+use dolos_cardano::{indexes::CardanoIndexExt, network_from_genesis, pallas_extras};
 use dolos_core::{Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet};
 use pallas::codec::minicbor;
 use pallas::ledger::{
@@ -565,8 +560,32 @@ async fn resolve_output_extras<D: Domain>(
     resolve_hashes: bool,
 ) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>), MatchError> {
     if resolve_hashes {
-        let datum = resolve_datum(facade, output.datum()).await?;
-        let script = resolve_script(facade, script_hash).await?;
+        let datum = match output.datum() {
+            None => serde_json::Value::Null,
+            Some(DatumOption::Data(data)) => minicbor::to_vec(&data.0)
+                .map(hex::encode)
+                .map(serde_json::Value::String)
+                .map_err(|_| MatchError::Internal)?,
+            Some(DatumOption::Hash(hash)) => facade
+                .resolve_datum(&hash)
+                .await
+                .map_err(|_| MatchError::Internal)?
+                .map(|datum| serde_json::Value::String(datum.datum))
+                .unwrap_or(serde_json::Value::Null),
+        };
+
+        let script = match script_hash {
+            None => serde_json::Value::Null,
+            Some(script_hash) => facade
+                .resolve_script(&script_hash)
+                .await
+                .map_err(|_| MatchError::Internal)?
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|_| MatchError::Internal)?
+                .unwrap_or(serde_json::Value::Null),
+        };
+
         Ok((Some(datum), Some(script)))
     } else {
         Ok((None, None))
@@ -593,71 +612,6 @@ fn map_value(value: MultiEraValue<'_>) -> ValueResponse {
         coins: value.coin(),
         assets,
     }
-}
-
-async fn resolve_datum<D: Domain>(
-    facade: &Facade<D>,
-    datum: Option<DatumOption<'_>>,
-) -> Result<serde_json::Value, MatchError> {
-    let Some(datum) = datum else {
-        return Ok(serde_json::Value::Null);
-    };
-
-    match datum {
-        DatumOption::Data(data) => minicbor::to_vec(&data.0)
-            .map(hex::encode)
-            .map(serde_json::Value::String)
-            .map_err(|_| MatchError::Internal),
-        DatumOption::Hash(hash) => {
-            let resolved = facade
-                .query()
-                .plutus_data(&hash)
-                .await
-                .map_err(|_| MatchError::Internal)?;
-            Ok(resolved
-                .map(minicbor::to_vec)
-                .transpose()
-                .map_err(|_| MatchError::Internal)?
-                .map(hex::encode)
-                .map(serde_json::Value::String)
-                .unwrap_or(serde_json::Value::Null))
-        }
-    }
-}
-
-async fn resolve_script<D: Domain>(
-    facade: &Facade<D>,
-    script_hash: Option<pallas::crypto::hash::Hash<28>>,
-) -> Result<serde_json::Value, MatchError> {
-    let Some(script_hash) = script_hash else {
-        return Ok(serde_json::Value::Null);
-    };
-
-    let script = facade
-        .query()
-        .script_by_hash(&script_hash)
-        .await
-        .map_err(|_| MatchError::Internal)?;
-
-    Ok(script
-        .map(map_script_json)
-        .unwrap_or(serde_json::Value::Null))
-}
-
-fn map_script_json(data: ScriptData) -> serde_json::Value {
-    let language = match data.language {
-        CardanoLanguage::Native => crate::types::ScriptLanguage::Native,
-        CardanoLanguage::PlutusV1 => crate::types::ScriptLanguage::PlutusV1,
-        CardanoLanguage::PlutusV2 => crate::types::ScriptLanguage::PlutusV2,
-        CardanoLanguage::PlutusV3 => crate::types::ScriptLanguage::PlutusV3,
-    };
-
-    let script = crate::types::Script {
-        language,
-        script: hex::encode(data.script),
-    };
-
-    serde_json::to_value(script).unwrap_or(serde_json::Value::Null)
 }
 
 fn apply_filters(mut matches: Vec<MatchResponse>, filters: &MatchesFilters) -> Vec<MatchResponse> {

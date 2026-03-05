@@ -5,7 +5,9 @@ use axum::{
     routing::get,
     Json, Router, ServiceExt,
 };
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLanguage};
 use dolos_core::{config::KupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
+use pallas::{codec::minicbor, crypto::hash::Hash};
 use std::ops::Deref;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
@@ -36,6 +38,58 @@ impl<D: Domain> Facade<D> {
         D: Clone + Send + Sync + 'static,
     {
         AsyncQueryFacade::new(self.inner.clone())
+    }
+
+    pub async fn resolve_script(
+        &self,
+        script_hash: &Hash<28>,
+    ) -> Result<Option<types::Script>, StatusCode>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
+        let script = self
+            .query()
+            .script_by_hash(script_hash)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(script.map(|data| {
+            let language = match data.language {
+                CardanoLanguage::Native => types::ScriptLanguage::Native,
+                CardanoLanguage::PlutusV1 => types::ScriptLanguage::PlutusV1,
+                CardanoLanguage::PlutusV2 => types::ScriptLanguage::PlutusV2,
+                CardanoLanguage::PlutusV3 => types::ScriptLanguage::PlutusV3,
+            };
+
+            types::Script {
+                language,
+                script: hex::encode(data.script),
+            }
+        }))
+    }
+
+    pub async fn resolve_datum(
+        &self,
+        datum_hash: &Hash<32>,
+    ) -> Result<Option<types::Datum>, StatusCode>
+    where
+        D: Clone + Send + Sync + 'static,
+    {
+        let datum = self
+            .query()
+            .plutus_data(datum_hash)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let datum = datum
+            .map(minicbor::to_vec)
+            .transpose()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .map(|bytes| types::Datum {
+                datum: hex::encode(bytes.as_slice()),
+            });
+
+        Ok(datum)
     }
 }
 
