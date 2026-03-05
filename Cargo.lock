@@ -1331,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-kupo"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "axum 0.8.4",
  "base58",
