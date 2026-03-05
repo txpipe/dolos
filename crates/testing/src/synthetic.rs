@@ -53,10 +53,36 @@ pub struct SyntheticBlockConfig {
     pub drep_deposit: u64,
 }
 
+/// Build a testnet Shelley address with both payment and stake key parts.
+/// Used by SyntheticBlockConfig to create addresses that carry a stake
+/// credential (required for stake registration certificates in synthetic blocks).
+fn synthetic_address_with_stake(seed: [u8; 64]) -> String {
+    let sk = unsafe { SecretKeyExtended::from_bytes_unchecked(seed) };
+    let pk = sk.public_key();
+    let keyhash = keyhash_from_pubkey(pk.as_ref());
+    let mut stake_seed = seed;
+    stake_seed[0] ^= 0xFF;
+    let stake_sk = unsafe { SecretKeyExtended::from_bytes_unchecked(stake_seed) };
+    let stake_pk = stake_sk.public_key();
+    let stake_keyhash = keyhash_from_pubkey(stake_pk.as_ref());
+    ShelleyAddress::new(
+        Network::Testnet,
+        ShelleyPaymentPart::key_hash(keyhash),
+        ShelleyDelegationPart::Key(stake_keyhash),
+    )
+    .to_bech32()
+    .expect("bech32 encode")
+}
+
 impl Default for SyntheticBlockConfig {
     fn default() -> Self {
-        let address = crate::TestAddress::Alice.as_str().to_string();
-        let seed_address = crate::TestAddress::Bob.as_str().to_string();
+        // Use dedicated seeds to avoid collision with person seeds (11-15)
+        // and the submit key seed (3) used inside build_synthetic_blocks.
+        // address has a stake part (needed for stake registration certs in synthetic txs).
+        // seed_address is payment-only (its UTxOs are consumed as inputs and its
+        // stake account is never registered, so no stake part is needed).
+        let address = synthetic_address_with_stake([20u8; 64]);
+        let seed_address = crate::TestAddress::Eve.as_str().to_string();
         Self {
             seed_address,
             address,

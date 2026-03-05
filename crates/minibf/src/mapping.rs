@@ -28,6 +28,7 @@ use std::{
 };
 
 use blockfrost_openapi::models::{
+    address_content::{AddressContent, Type as AddressType},
     address_utxo_content_inner::AddressUtxoContentInner,
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
@@ -184,7 +185,6 @@ where
     }
 }
 
-#[allow(unused)]
 pub fn aggregate_assets<'a>(
     txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
 ) -> Vec<TxContentOutputAmountInner> {
@@ -258,6 +258,46 @@ pub fn list_assets<'a>(
     assets.sort_by_key(|a| a.unit.clone());
 
     std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub enum AddressKind {
+    Payment {
+        script: bool,
+    },
+    Shelley {
+        stake_address: Option<String>,
+        script: bool,
+    },
+    Byron,
+}
+
+pub struct AddressModelBuilder {
+    pub address: String,
+    pub amount: Vec<TxContentOutputAmountInner>,
+    pub kind: AddressKind,
+}
+
+impl IntoModel<AddressContent> for AddressModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<AddressContent, StatusCode> {
+        let (stake_address, r#type, script) = match self.kind {
+            AddressKind::Payment { script } => (None, AddressType::Shelley, script),
+            AddressKind::Shelley {
+                stake_address,
+                script,
+            } => (stake_address, AddressType::Shelley, script),
+            AddressKind::Byron => (None, AddressType::Byron, false),
+        };
+
+        Ok(AddressContent {
+            address: self.address,
+            amount: self.amount,
+            stake_address,
+            r#type,
+            script,
+        })
+    }
 }
 
 impl IntoModel<Vec<TxContentOutputAmountInner>> for MultiEraValue<'_> {
@@ -580,8 +620,14 @@ impl<'a> TxModelBuilder<'a> {
     ) -> Result<Self, StatusCode> {
         let epoch = self.tx_epoch()?;
         let chain = self.chain_or_500()?;
+        let tip = facade.get_tip_slot()?;
+        let (curr, _) = chain.slot_epoch(tip);
 
-        let pparams = facade.get_historical_effective_pparams(epoch, chain)?;
+        let pparams = if epoch == curr {
+            facade.get_current_effective_pparams()?
+        } else {
+            facade.get_historical_effective_pparams(epoch, chain)?
+        };
 
         Ok(self.with_pparams(pparams))
     }
@@ -2272,21 +2318,21 @@ impl PlutusDataWrapper {
             }
 
             PlutusData::Map(x) => {
-                let mut map = serde_json::Map::new();
-                for (k, v) in x.iter() {
-                    let key_opt = PlutusDataWrapper(k.clone())
-                        .as_value()?
-                        .as_str()
-                        .map(|s| s.to_owned());
-
-                    if let Some(key) = key_opt {
-                        map.insert(key, PlutusDataWrapper(v.clone()).as_value()?);
-                    }
-                }
+                let values = x
+                    .iter()
+                    .map(|(k, v)| -> Result<serde_json::Value, StatusCode> {
+                        let key = PlutusDataWrapper(k.clone()).as_value()?;
+                        let value = PlutusDataWrapper(v.clone()).as_value()?;
+                        Ok(serde_json::Value::Object(serde_json::Map::from_iter([
+                            ("k".to_string(), key),
+                            ("v".to_string(), value),
+                        ])))
+                    })
+                    .collect::<Result<Vec<serde_json::Value>, StatusCode>>()?;
 
                 Ok(serde_json::Value::Object(serde_json::Map::from_iter([(
                     "map".to_string(),
-                    serde_json::Value::Object(map),
+                    serde_json::Value::Array(values),
                 )])))
             }
 

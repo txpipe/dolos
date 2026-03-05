@@ -510,9 +510,9 @@ dependencies = [
 
 [[package]]
 name = "blockfrost-openapi"
-version = "0.1.83"
+version = "0.1.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62cc79368dcc9d7119091630b6a7b2b2801591836678261b4a79b7a62b559778"
+checksum = "2df52ea7e461021beebe0289c8982bca064c25183945c398341f330334025943"
 dependencies = [
  "reqwest",
  "serde",
@@ -566,9 +566,9 @@ checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
 name = "byteview"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dda4398f387cc6395a3e93b3867cd9abda914c97a0b344d1eefb2e5c51785fca"
+checksum = "1c53ba0f290bfc610084c05582d9c5d421662128fc69f4bf236707af6fd321b9"
 
 [[package]]
 name = "cc"
@@ -1191,7 +1191,7 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dolos"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "dolos-testing",
  "futures-core",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1349,7 +1349,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "bincode",
  "dolos-core",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -1439,6 +1439,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "pallas",
+ "rand 0.9.1",
  "serde",
  "serde_json",
  "thiserror 2.0.12",
@@ -1593,9 +1594,8 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "fjall"
-version = "3.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a2799b4198427a08c774838e44d0b77f677208f19a1927671cd2cd36bb30d69"
+version = "3.0.3"
+source = "git+https://github.com/fjall-rs/fjall.git?branch=recovery%2Fchange-flush-queueing#2443c7bcf6f53920efef836518d76e865974c4ca"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -2671,9 +2671,9 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "lsm-tree"
-version = "3.0.2"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86e8d0b8e0cf2531a437788ce94d95570dbaabfe9888db20022c2d5ccec9b221"
+checksum = "341e13fa389d2e24023c2c2c110ae556b29fa59a2e734872de295863e11a6741"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -5755,24 +5755,24 @@ checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "tx3-cardano"
-version = "0.14.2"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ea4ab925f51c6b2b8261dc5adbee901d2f64a9c90c43d2643c9b9b40722783"
+checksum = "39a2074d76a3da98221fd91d64ecd48c37a6b3842b56bfaa93ca9bf1e7038eac"
 dependencies = [
  "hex",
  "pallas",
  "serde",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.14.2",
+ "tx3-tir 0.16.1",
  "utxorpc",
 ]
 
 [[package]]
 name = "tx3-resolver"
-version = "0.14.2"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea5a0a8587191fd2207341ba679a4179d1f1d11f46587a2dc006c26ccded404d"
+checksum = "552776ebc1bb87109fe4562db27e8a432e2519e8e71db7bc1d5fa3a00fc34171"
 dependencies = [
  "approx",
  "base64 0.22.1",
@@ -5782,7 +5782,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.12",
  "trait-variant",
- "tx3-tir 0.14.2",
+ "tx3-tir 0.16.1",
 ]
 
 [[package]]
@@ -5818,9 +5818,9 @@ dependencies = [
 
 [[package]]
 name = "tx3-tir"
-version = "0.14.2"
+version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed1dfb5f68fde6e552fdb1877e309cec4b9a56469ba94068dabd026660b911c3"
+checksum = "4f696ab4d335127db9b30dfa5cda7dff368184778f18b6d3fba95fa46a94c0b6"
 dependencies = [
  "ciborium",
  "hex",

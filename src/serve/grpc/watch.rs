@@ -43,16 +43,26 @@ fn outputs_match_asset(
     asset_pattern: &u5c::cardano::AssetPattern,
     outputs: &[u5c::cardano::TxOutput],
 ) -> bool {
-    (asset_pattern.asset_name.is_empty() && asset_pattern.policy_id.is_empty())
-        || outputs.iter().any(|o| {
-            o.assets.iter().any(|ma| {
-                ma.policy_id.eq(&asset_pattern.policy_id)
-                    && ma
-                        .assets
-                        .iter()
-                        .any(|a| a.name.eq(&asset_pattern.asset_name))
-            })
-        })
+    outputs
+        .iter()
+        .any(|o| matches_asset(asset_pattern, &o.assets))
+}
+
+fn matches_asset(
+    asset_pattern: &u5c::cardano::AssetPattern,
+    assets: &[u5c::cardano::Multiasset],
+) -> bool {
+    assets.iter().any(|ma| {
+        if !asset_pattern.policy_id.is_empty() && asset_pattern.policy_id.ne(&ma.policy_id) {
+            return false;
+        }
+        if asset_pattern.asset_name.is_empty() {
+            return true;
+        }
+        ma.assets
+            .iter()
+            .any(|ma| asset_pattern.asset_name.eq(&ma.name))
+    })
 }
 
 fn matches_output(
@@ -94,16 +104,10 @@ fn matches_cardano_pattern(tx_pattern: &u5c::cardano::TxPattern, tx: &u5c::carda
         matches_output(out_pattern, &inputs)
     });
 
-    let mints_asset_match = tx_pattern.mints_asset.as_ref().is_none_or(|asset_pattern| {
-        (asset_pattern.asset_name.is_empty() && asset_pattern.policy_id.is_empty())
-            || tx.mint.iter().any(|ma| {
-                ma.policy_id.eq(&asset_pattern.policy_id)
-                    && ma
-                        .assets
-                        .iter()
-                        .any(|a| a.name.eq(&asset_pattern.asset_name))
-            })
-    });
+    let mints_asset_match = tx_pattern
+        .mints_asset
+        .as_ref()
+        .is_none_or(|asset_pattern| matches_asset(asset_pattern, &tx.mint));
 
     let moves_asset_match = tx_pattern.moves_asset.as_ref().is_none_or(|asset_pattern| {
         let inputs: Vec<_> = tx
@@ -151,6 +155,7 @@ fn block_to_txs<C: LedgerContext>(
     mapper: &interop::Mapper<C>,
     request: &u5c::watch::WatchTxRequest,
 ) -> Vec<u5c::watch::AnyChainTx> {
+    let bytes = block;
     let block = MultiEraBlock::decode(block).unwrap();
     let txs = block.txs();
 
@@ -164,8 +169,12 @@ fn block_to_txs<C: LedgerContext>(
         })
         .map(|x| u5c::watch::AnyChainTx {
             chain: Some(u5c::watch::any_chain_tx::Chain::Cardano(x)),
-            // TODO(p): should it be none?
-            block: None,
+            block: Some(u5c::watch::AnyChainBlock {
+                native_bytes: bytes.to_vec().into(),
+                chain: Some(u5c::watch::any_chain_block::Chain::Cardano(
+                    mapper.map_block(&block),
+                )),
+            }),
         })
         .collect()
 }

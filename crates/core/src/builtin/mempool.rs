@@ -113,9 +113,9 @@ impl MempoolStore for EphemeralMempool {
         !state.pending.is_empty()
     }
 
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    fn peek_pending(&self) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
-        state.pending.iter().take(limit).cloned().collect()
+        state.pending.clone()
     }
 
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
@@ -178,20 +178,26 @@ impl MempoolStore for EphemeralMempool {
         state.acknowledged.get(tx_hash).cloned()
     }
 
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    fn peek_inflight(&self) -> Vec<MempoolTx> {
         let state = self.state.read().unwrap();
 
         state
             .inflight
             .iter()
             .chain(state.acknowledged.values())
-            .take(limit)
             .cloned()
             .collect()
     }
 
     fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
+
+        // Promote Propagated txs into the acknowledged map so the confirm
+        // logic below applies uniformly to every inflight tx.
+        let propagated: Vec<MempoolTx> = state.inflight.drain(..).collect();
+        for tx in propagated {
+            state.acknowledged.insert(tx.hash, tx);
+        }
 
         if state.acknowledged.is_empty() {
             return Ok(());
@@ -230,15 +236,31 @@ impl MempoolStore for EphemeralMempool {
                 info!(tx.hash = %tx_hash, "retry tx");
             } else {
                 let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
-                tx.mark_stale();
-                // Check if droppable
-                if tx.non_confirmations >= drop_threshold {
-                    let mut dropped = tx.clone();
-                    dropped.stage = MempoolTxStage::Dropped;
-                    state.finalized_log.push_back(dropped.clone());
-                    state.acknowledged.remove(&tx_hash);
-                    info!(tx.hash = %tx_hash, "tx dropped");
-                    self.notify(dropped);
+                if tx.stage == MempoolTxStage::Confirmed {
+                    // Already confirmed on-chain; treat subsequent blocks as
+                    // additional confirmations (increasing depth).
+                    tx.confirm(point);
+                    if tx.confirmations >= finalize_threshold {
+                        let mut finalized = tx.clone();
+                        finalized.stage = MempoolTxStage::Finalized;
+                        state.finalized_log.push_back(finalized.clone());
+                        state.acknowledged.remove(&tx_hash);
+                        info!(tx.hash = %tx_hash, "tx finalized");
+                        self.notify(finalized);
+                    } else {
+                        self.notify(tx.clone());
+                    }
+                } else {
+                    tx.mark_stale();
+                    // Check if droppable
+                    if tx.non_confirmations >= drop_threshold {
+                        let mut dropped = tx.clone();
+                        dropped.stage = MempoolTxStage::Dropped;
+                        state.finalized_log.push_back(dropped.clone());
+                        state.acknowledged.remove(&tx_hash);
+                        info!(tx.hash = %tx_hash, "tx dropped");
+                        self.notify(dropped);
+                    }
                 }
             }
         }

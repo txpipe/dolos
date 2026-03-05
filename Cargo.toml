@@ -174,7 +174,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.10"
+version = "1.0.0-rc.12"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -237,6 +237,9 @@ pre-release-hook = [
     "--tag",
     "{{version}}",
 ]
+
+[patch.crates-io]
+fjall = { git = "https://github.com/fjall-rs/fjall.git", branch = "recovery/change-flush-queueing" }
 
 [lints.clippy]
 result_large_err = "allow"

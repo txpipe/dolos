@@ -471,14 +471,11 @@ impl PendingTable {
         Ok(table.len()? > 0)
     }
 
-    fn peek(rx: &redb::ReadTransaction, limit: usize) -> Result<Vec<MempoolTx>, RedbMempoolError> {
+    fn peek(rx: &redb::ReadTransaction) -> Result<Vec<MempoolTx>, RedbMempoolError> {
         let table = rx.open_table(Self::DEF)?;
         let iter = table.iter()?;
-        let mut result = Vec::with_capacity(limit);
+        let mut result = Vec::new();
         for entry in iter {
-            if result.len() >= limit {
-                break;
-            }
             let entry = entry?;
             let key = entry.0.value();
             let payload = entry.1.value().0;
@@ -609,13 +606,10 @@ impl InflightTable {
         Ok(entries)
     }
 
-    fn peek(rx: &redb::ReadTransaction, limit: usize) -> Result<Vec<MempoolTx>, RedbMempoolError> {
+    fn peek(rx: &redb::ReadTransaction) -> Result<Vec<MempoolTx>, RedbMempoolError> {
         let table = rx.open_table(Self::DEF)?;
         let mut result = Vec::new();
         for entry in table.iter()? {
-            if result.len() >= limit {
-                break;
-            }
             let entry = entry?;
             let hash = entry.0.value().to_tx_hash();
             let record = entry.1.value();
@@ -808,12 +802,12 @@ impl MempoolStore for RedbMempool {
         PendingTable::has_any(&rx).unwrap_or(false)
     }
 
-    fn peek_pending(&self, limit: usize) -> Vec<MempoolTx> {
+    fn peek_pending(&self) -> Vec<MempoolTx> {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => return vec![],
         };
-        PendingTable::peek(&rx, limit).unwrap_or_default()
+        PendingTable::peek(&rx).unwrap_or_default()
     }
 
     fn mark_inflight(&self, hashes: &[TxHash]) -> Result<(), MempoolError> {
@@ -860,12 +854,12 @@ impl MempoolStore for RedbMempool {
         Some(record.to_mempool_tx(*tx_hash))
     }
 
-    fn peek_inflight(&self, limit: usize) -> Vec<MempoolTx> {
+    fn peek_inflight(&self) -> Vec<MempoolTx> {
         let rx = match self.db.begin_read() {
             Ok(rx) => rx,
             Err(_) => return vec![],
         };
-        InflightTable::peek(&rx, limit).unwrap_or_default()
+        InflightTable::peek(&rx).unwrap_or_default()
     }
 
     fn confirm(
@@ -909,6 +903,23 @@ impl MempoolStore for RedbMempool {
                     tx.retry();
                     info!(tx.hash = %tx.hash, "retry tx (redb)");
                     events.push(tx);
+                } else if record.stage == InflightStage::Confirmed {
+                    // Already confirmed on-chain; treat subsequent blocks as
+                    // additional confirmations (increasing depth).
+                    record.confirm(&point);
+                    if record.is_finalizable(finalize_threshold) {
+                        let mut tx = record.to_mempool_tx(tx_hash);
+                        let log_entry = record.into_finalized_entry(tx_hash);
+                        InflightTable::remove(wx, &tx_hash)?;
+                        FinalizedTable::append(wx, log_entry)?;
+                        tx.stage = MempoolTxStage::Finalized;
+                        info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                        events.push(tx);
+                    } else {
+                        InflightTable::write(wx, &tx_hash, &record)?;
+                        let tx = record.to_mempool_tx(tx_hash);
+                        events.push(tx);
+                    }
                 } else {
                     record.mark_stale();
                     // Check if this tx should be dropped
@@ -1017,7 +1028,7 @@ mod tests {
     fn test_empty_store() {
         let store = test_store();
         assert!(!store.has_pending());
-        assert!(store.peek_pending(10).is_empty());
+        assert!(store.peek_pending().is_empty());
     }
 
     #[test]
@@ -1031,21 +1042,10 @@ mod tests {
 
         assert!(store.has_pending());
 
-        let peeked = store.peek_pending(10);
+        let peeked = store.peek_pending();
         assert_eq!(peeked.len(), 1);
         assert_eq!(peeked[0].hash, hash);
         assert_eq!(peeked[0].payload, payload);
-    }
-
-    #[test]
-    fn test_peek_pending_respects_limit() {
-        let store = test_store();
-        for n in 0..3 {
-            store.receive(test_tx(n)).unwrap();
-        }
-
-        let peeked = store.peek_pending(2);
-        assert_eq!(peeked.len(), 2);
     }
 
     #[test]
@@ -1056,7 +1056,7 @@ mod tests {
 
         let err = store.receive(tx).unwrap_err();
         assert!(matches!(err, MempoolError::DuplicateTx));
-        assert_eq!(store.peek_pending(10).len(), 1);
+        assert_eq!(store.peek_pending().len(), 1);
     }
 
     #[test]
@@ -1225,7 +1225,7 @@ mod tests {
         store.mark_inflight(&[h1, h2, h3]).unwrap();
 
         // All three start as Propagated
-        let listing = store.peek_inflight(usize::MAX);
+        let listing = store.peek_inflight();
         assert_eq!(listing.len(), 3);
         assert!(listing
             .iter()
@@ -1233,7 +1233,7 @@ mod tests {
 
         // Acknowledge h2
         store.mark_acknowledged(&[h2]).unwrap();
-        let listing = store.peek_inflight(usize::MAX);
+        let listing = store.peek_inflight();
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
             .iter()
@@ -1245,7 +1245,7 @@ mod tests {
 
         // Confirm h2
         store.confirm(&test_point(), &[h2], &[], u32::MAX, u32::MAX).unwrap();
-        let listing = store.peek_inflight(usize::MAX);
+        let listing = store.peek_inflight();
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
             .iter()
@@ -1257,7 +1257,7 @@ mod tests {
 
         // Finalize h2 — second confirm with finalize_threshold=2
         store.confirm(&test_point_2(), &[h2], &[], 2, u32::MAX).unwrap();
-        let listing = store.peek_inflight(usize::MAX);
+        let listing = store.peek_inflight();
         assert_eq!(listing.len(), 2);
         assert!(!listing.iter().any(|tx| tx.hash == h2));
     }

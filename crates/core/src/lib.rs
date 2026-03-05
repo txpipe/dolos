@@ -429,7 +429,7 @@ pub enum ChainError {
     #[error("invalid proposal params")]
     InvalidProposalParams,
 
-    #[error("phase-1 script rejected the transaction")]
+    #[error("phase-1 script rejected the transaction: {0}")]
     Phase1ValidationRejected(#[from] pallas::ledger::validate::utils::ValidationError),
 
     #[error("couldn't evaluate phase-2 script: {0}")]
