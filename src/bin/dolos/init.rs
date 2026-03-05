@@ -311,6 +311,7 @@ impl ConfigEditor {
                     listen_address: "[::]:50051".into(),
                     tls_client_ca_root: None,
                     permissive_cors: Some(true),
+                    max_dump_history_items: None,
                 }
                 .into();
             } else {

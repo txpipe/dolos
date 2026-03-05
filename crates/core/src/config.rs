@@ -618,6 +618,7 @@ pub struct GrpcConfig {
     pub listen_address: String,
     pub tls_client_ca_root: Option<PathBuf>,
     pub permissive_cors: Option<bool>,
+    pub max_dump_history_items: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
