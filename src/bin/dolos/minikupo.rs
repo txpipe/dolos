@@ -8,18 +8,18 @@ use tower::ServiceExt;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
-    /// Kupo path (supports querystrings)
+    /// MiniKupo path (supports querystrings)
     #[arg(value_name = "PATH")]
     path: String,
 }
 
 #[tokio::main]
 pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let kupo = config
+    let minikupo = config
         .serve
-        .kupo
+        .minikupo
         .as_ref()
-        .ok_or(miette::miette!("missing kupo config"))?;
+        .ok_or(miette::miette!("missing minikupo config"))?;
 
     let domain = crate::common::setup_domain(config)?;
 
@@ -32,22 +32,22 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let uri: Uri = path
         .parse()
         .into_diagnostic()
-        .context("invalid kupo path")?;
+        .context("invalid minikupo path")?;
 
-    let app = dolos_kupo::build_router(kupo.clone(), domain);
+    let app = dolos_minikupo::build_router(minikupo.clone(), domain);
 
     let request = Request::builder()
         .method("GET")
         .uri(uri)
         .body(Body::empty())
         .into_diagnostic()
-        .context("building kupo request")?;
+        .context("building minikupo request")?;
 
     let response = app
         .oneshot(request)
         .await
         .into_diagnostic()
-        .context("executing kupo query")?;
+        .context("executing minikupo query")?;
 
     let status = response.status();
     let body = response
@@ -55,19 +55,19 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .collect()
         .await
         .into_diagnostic()
-        .context("reading kupo response body")?
+        .context("reading minikupo response body")?
         .to_bytes();
 
     if status.is_success() {
         std::io::stdout()
             .write_all(&body)
             .into_diagnostic()
-            .context("writing kupo response")?;
+            .context("writing minikupo response")?;
         Ok(())
     } else {
         let message = String::from_utf8_lossy(&body);
         Err(miette::miette!(
-            "kupo query failed with status {}: {}",
+            "minikupo query failed with status {}: {}",
             status,
             message
         ))

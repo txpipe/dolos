@@ -630,7 +630,7 @@ pub struct MinibfConfig {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-pub struct KupoConfig {
+pub struct MinikupoConfig {
     pub listen_address: SocketAddr,
     pub permissive_cors: Option<bool>,
 }
@@ -648,7 +648,7 @@ pub struct ServeConfig {
     pub ouroboros: Option<OuroborosConfig>,
     pub grpc: Option<GrpcConfig>,
     pub minibf: Option<MinibfConfig>,
-    pub kupo: Option<KupoConfig>,
+    pub minikupo: Option<MinikupoConfig>,
     pub trp: Option<TrpConfig>,
 }
 

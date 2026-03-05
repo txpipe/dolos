@@ -1211,8 +1211,8 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",
- "dolos-kupo",
  "dolos-minibf",
+ "dolos-minikupo",
  "dolos-redb3",
  "dolos-testing",
  "dolos-trp",
@@ -1330,24 +1330,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dolos-kupo"
-version = "1.0.0-rc.12"
-dependencies = [
- "axum 0.8.4",
- "base58",
- "bech32 0.11.1",
- "dolos-cardano",
- "dolos-core",
- "hex",
- "pallas",
- "serde",
- "serde_json",
- "tokio",
- "tower-http 0.6.6",
- "tracing",
-]
-
-[[package]]
 name = "dolos-minibf"
 version = "1.0.0-rc.12"
 dependencies = [
@@ -1376,6 +1358,24 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower 0.4.13",
+ "tower-http 0.6.6",
+ "tracing",
+]
+
+[[package]]
+name = "dolos-minikupo"
+version = "1.0.0-rc.12"
+dependencies = [
+ "axum 0.8.4",
+ "base58",
+ "bech32 0.11.1",
+ "dolos-cardano",
+ "dolos-core",
+ "hex",
+ "pallas",
+ "serde",
+ "serde_json",
+ "tokio",
  "tower-http 0.6.6",
  "tracing",
 ]

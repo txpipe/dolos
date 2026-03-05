@@ -6,7 +6,7 @@ use axum::{
     Json, Router, ServiceExt,
 };
 use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLanguage};
-use dolos_core::{config::KupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
+use dolos_core::{config::MinikupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
 use pallas::{codec::minicbor, crypto::hash::Hash};
 use std::ops::Deref;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
@@ -21,7 +21,7 @@ mod types;
 #[derive(Clone)]
 pub struct Facade<D: Domain> {
     pub inner: D,
-    pub config: KupoConfig,
+    pub config: MinikupoConfig,
 }
 
 impl<D: Domain> Deref for Facade<D> {
@@ -95,7 +95,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: KupoConfig, domain: D) -> Router
+pub fn build_router<D>(cfg: MinikupoConfig, domain: D) -> Router
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -135,7 +135,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
     D: Clone + Send + Sync + 'static,
 {
-    type Config = KupoConfig;
+    type Config = MinikupoConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let app = build_router(cfg.clone(), domain);

@@ -1,5 +1,5 @@
 ---
-title: Kupo
+title: MiniKupo
 sidebar:
   order: 5
 ---
@@ -56,7 +56,7 @@ $ curl -H "Accept: text/plain" http://localhost:1442/health
 
 ## Configuration
 
-The `serve.kupo` section controls the options for the Kupo endpoint that can be used by clients.
+The `serve.minikupo` section controls the options for the MiniKupo endpoint that can be used by clients.
 
 | property        | type    | example        |
 |-----------------|---------|----------------|
@@ -66,10 +66,10 @@ The `serve.kupo` section controls the options for the Kupo endpoint that can be 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
 
-This is an example of the `serve.kupo` fragment with a `dolos.toml` configuration file.
+This is an example of the `serve.minikupo` fragment with a `dolos.toml` configuration file.
 
 ```toml
-[serve.kupo]
+[serve.minikupo]
 listen_address = "[::]:1442"
 permissive_cors = true
 ```
