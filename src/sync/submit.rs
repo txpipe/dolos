@@ -178,7 +178,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 self.acknowledge_propagated(&stage.mempool, ack)?;
 
                 if stage.mempool.has_pending() {
-                    let txs = stage.mempool.peek_pending(req);
+                    let txs: Vec<_> = stage.mempool.peek_pending().into_iter().take(req).collect();
                     self.propagate_txs(&stage.mempool, txs).await?;
                 } else {
                     debug!(req, "not enough txs to fulfill request");
@@ -190,7 +190,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
 
-                let txs = stage.mempool.peek_pending(*req as usize);
+                let txs: Vec<_> = stage.mempool.peek_pending().into_iter().take(*req as usize).collect();
                 self.propagate_txs(&stage.mempool, txs).await?;
             }
             Request::Txs(ids) => {
