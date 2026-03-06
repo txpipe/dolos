@@ -129,19 +129,21 @@ The endpoints required for most tx builders to work are supported. Libraries lik
 
 The `serve.minibf` section controls the options for the MiniBF endpoint that can be used by clients.
 
-| property           | type    | example                          |
-| ------------------ | ------- | -------------------------------- |
-| listen_address     | string  | "[::]:3000"                     |
-| permissive_cors    | boolean | true                             |
-| token_registry_url | string  | "https://token-registry.io"     |
-| url                | string  | "https://minibf.local"          |
-| max_scan_items     | integer | 3000                             |
+| property           | type    | example                          | description                                                       |
+| ------------------ | ------- | -------------------------------- | ----------------------------------------------------------------- |
+| listen_address     | string  | "[::]:3000"                     | Local address to listen for incoming connections                  |
+| permissive_cors    | boolean | true                             | Allow cross-origin requests from any origin                       |
+| token_registry_url | string  | "https://token-registry.io"     | Optional token registry base URL for off-chain asset metadata     |
+| url                | string  | "https://minibf.local"          | Optional public URL used in the `/` root response                 |
+| max_scan_items     | integer | 3000                             | Caps page-based scans for heavy endpoints (defaults to 3000)      |
+| base_path          | string  | "/api/v0"                       | Optional base path for API endpoints (Blockfrost spec compliance) |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
-- `token_registry_url`: optional token registry base URL used for off-chain asset metadata. 
+- `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `base_path`: optional base path prefix for all endpoints. Set to `"/api/v0"` for full Blockfrost OpenAPI specification compliance. When configured, **all routes** (including health and metrics) will be available under this prefix (e.g., `/api/v0/blocks/latest`, `/api/v0/health`, `/api/v0/metrics`). If omitted, endpoints are served at the root (default behavior for backward compatibility).
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
 
@@ -152,6 +154,7 @@ permissive_cors = true
 token_registry_url = "https://token-registry.io"
 url = "https://minibf.local"
 max_scan_items = 3000
+# base_path = "/api/v0"  # Uncomment for Blockfrost OpenAPI spec compliance
 ```
 
 Some endpoints require additional data tracked under the `chain.track` configuration. Tracking defaults to `true` for all fields, but you can disable specific datasets to reduce storage and CPU costs. Disabling a dataset can cause related endpoints to return `404` or empty results.

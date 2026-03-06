@@ -269,7 +269,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Result<Router, ServeError>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -477,7 +477,22 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+    
+        // Optionally nest all routes under base_path
+        if let Some(base_path) = &cfg.base_path {
+            // Validate before using
+            if base_path.is_empty() || base_path == "/" || !base_path.starts_with('/') || base_path.contains('*') {
+                return Err(ServeError::ConfigError(format!(
+                    "base_path must start with '/', must not be just '/', and must not contain wildcards; got: \"{}\"",
+                    base_path
+                )));
+            }
+            // Only reach here if valid
+            Ok(Router::new().nest(base_path, app).layer(NormalizePathLayer::trim_trailing_slash()))
+        } else {
+            // No base_path configured
+            Ok(app.layer(NormalizePathLayer::trim_trailing_slash()))
+        }
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -492,7 +507,7 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        let app = build_router(cfg.clone(), domain);
+        let app = build_router(cfg.clone(), domain)?;
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
             .await
