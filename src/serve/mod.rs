@@ -24,6 +24,9 @@ pub use o7s_win as o7s;
 #[cfg(feature = "minibf")]
 pub use dolos_minibf as minibf;
 
+#[cfg(feature = "minikupo")]
+pub use dolos_minikupo as minikupo;
+
 #[cfg(feature = "trp")]
 pub use dolos_trp as trp;
 
@@ -71,6 +74,18 @@ pub fn load_drivers(
 
         let driver =
             minibf::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
+
+        let task = tokio::spawn(driver);
+
+        all_drivers.push(task);
+    }
+
+    #[cfg(feature = "minikupo")]
+    if let Some(cfg) = config.minikupo {
+        info!("found minikupo config");
+
+        let driver =
+            minikupo::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
 
         let task = tokio::spawn(driver);
 

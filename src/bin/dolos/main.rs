@@ -21,6 +21,9 @@ mod bootstrap;
 #[cfg(feature = "minibf")]
 mod minibf;
 
+#[cfg(feature = "minikupo")]
+mod minikupo;
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Initialize the node configuration
@@ -53,6 +56,10 @@ enum Command {
     /// runs a minibf query in-process
     #[cfg(feature = "minibf")]
     Minibf(minibf::Args),
+
+    /// runs a minikupo query in-process
+    #[cfg(feature = "minikupo")]
+    Minikupo(minikupo::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -97,6 +104,9 @@ fn main() -> Result<()> {
 
         #[cfg(feature = "minibf")]
         (Ok(config), Command::Minibf(x)) => minibf::run(&config, &x),
+
+        #[cfg(feature = "minikupo")]
+        (Ok(config), Command::Minikupo(x)) => minikupo::run(&config, &x),
 
         (Err(x), _) => Err(x),
     }

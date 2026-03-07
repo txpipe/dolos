@@ -1,0 +1,75 @@
+---
+title: MiniKupo
+sidebar:
+  order: 5
+---
+
+Dolos provides an HTTP endpoint compatible with the [Kupo](https://github.com/cardanosolutions/kupo) API. The implementation is read-only and equivalent to a pruned Kupo instance.
+
+## Coverage
+
+Dolos supports a subset of the Kupo endpoints. All write operations are intentionally disabled.
+
+| Endpoint                     | Method | Description                                |
+|------------------------------|--------|--------------------------------------------|
+| `/matches/{pattern}`         | GET    | Query matches for a pattern                 |
+| `/datums/{datum-hash}`       | GET    | Resolve datum by hash                       |
+| `/scripts/{script-hash}`     | GET    | Resolve script by hash                      |
+| `/metadata/{slot-no}`        | GET    | Metadata by slot (optional transaction id)  |
+| `/health`                    | GET    | Health and sync status (JSON or Prometheus) |
+
+Not supported (read-only limitation and subset):
+
+- `PUT` and `DELETE` operations for `/patterns` and `/patterns/{pattern}`
+- `DELETE` for `/matches/{pattern}`
+- `GET /matches` (without a pattern)
+- `GET /patterns`
+- `GET /checkpoints`
+- `GET /metrics`
+
+## Usage
+
+If enabled via configuration, _Dolos_ will expose a TCP port accepting HTTP connections. The default port number is `1442`, but this value can be changed via configuration.
+
+Once you have the daemon running you can hit the endpoint using any HTTP client (cURL, Postman, your browser, etc).
+
+This is an example of querying for matches by address using `curl`:
+
+```shell
+$ curl "http://localhost:1442/matches/addr1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9calxn8tdudjgz4xq9p?unspent&resolve_hashes" | jq -S
+```
+
+### Filters and limitations
+
+- `spent`, `spent_after`, and `spent_before` are not supported. Only unspent results are available.
+- Wildcard patterns (`*`) are not supported.
+- When using `asset_name`, you must also provide `policy_id`.
+- When using `output_index`, you must also provide `transaction_id`.
+
+### Health and Prometheus output
+
+The `/health` endpoint returns JSON by default. If you send `Accept: text/plain`, it returns Prometheus-formatted output instead:
+
+```shell
+$ curl -H "Accept: text/plain" http://localhost:1442/health
+```
+
+## Configuration
+
+The `serve.minikupo` section controls the options for the MiniKupo endpoint that can be used by clients.
+
+| property        | type    | example        |
+|-----------------|---------|----------------|
+| listen_address  | string  | "[::]:1442"   |
+| permissive_cors | boolean | true           |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
+- `permissive_cors`: allow cross-origin requests from any origin.
+
+This is an example of the `serve.minikupo` fragment with a `dolos.toml` configuration file.
+
+```toml
+[serve.minikupo]
+listen_address = "[::]:1442"
+permissive_cors = true
+```

@@ -1,0 +1,2276 @@
+openapi: 3.0.0
+
+servers:
+  - url: http://localhost:1442/
+
+info:
+  title: Kupo
+  version: v2.11.0
+  license:
+    name: MPL-2.0
+    url: https://raw.githubusercontent.com/cardanosolutions/kupo/master/LICENSE
+  x-logo:
+    url: ./kupo.png
+    altText: Kupo!
+
+  description: |
+    > **Disclaimer**
+    >
+    > This version of the documentation might contain features that **haven't been**
+    > **released yet**. This is meant to preview what's coming.
+    >
+    > If you're using a specific version, please refer to the appropriate
+    > documentation's revision as well _(see buttons at the top)_.
+
+    # Overview
+
+    **Kupo** is fast, lightweight and configurable **chain-index** for the Cardano blockchain. It synchronizes data from the blockchain according to **patterns** matching addresses present in transaction outputs and builds a **lookup table** from matches to their associated **output references**, **values**, **datums** and **scripts**.
+
+    # Installation
+
+    ## Via Homebrew
+
+    ```console
+    $ brew tap CardanoSolutions/formulas
+    $ brew install kupo
+    ```
+
+    ## Manually
+
+    Pre-compiled static binaries can be downloaded as build artifacts from
+    [latest releases](https://github.com/CardanoSolutions/kupo/releases) or the
+    continuous [`Build` Github workflow](https://github.com/CardanoSolutions/kupo/actions/workflow/build.yaml).
+
+    ```
+    kupo-{x.y.z}-{arch}-{os}.tar.gz
+    │
+    ├── bin
+    │   └── kupo
+    │
+    └── share
+        ├── kupo
+        │   ├── LICENSE
+        │   └── api.yaml
+        │
+        ├── bash-completion
+        │   └── completions
+        │       └── kupo
+        ├── zsh
+        │   └── site-functions
+        │       └── _kupo
+        │
+        └── man
+            └── man1
+                └── kupo.1
+    ```
+
+    Once installed, `man kupo` or `kupo --help` comes in handy.
+
+    ## From docker
+
+    Kupo is available as a standalone Docker image on [DockerHub](https://hub.docker.com/repository/docker/cardanosolutions/kupo).
+
+    ```console
+    $ docker pull cardanosolutions/kupo
+    ```
+
+    ## From source
+
+    ### Pre-requisite
+
+    Make sure to have [nix](https://nixos.org/download.html#nix-install-linux) installed with a cache:
+
+    ```
+    trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= hydra.iohk.io:f/Ea+s+dFdN+3Y/G+FDgSq+a5NEWhJGzdjvKNGv0/EQ=
+    substituters = https://cache.iog.io/ https://cache.nixos.org/
+    ```
+
+    On MacOS, you'll need to install `libffi` and `bzip2` if they aren't already installed.
+
+    ### Building
+
+    ```console
+    $ make
+    ```
+
+    # Getting started
+
+    Kupo connects to a _local [cardano-node](https://github.com/input-output-hk/cardano-node/)_
+    in order to receive information from the blockchain. It goes without saying
+    that an up-and-running cardano-node (or an equivalent Ogmios connection) is
+    required to run Kupo!
+
+    A single Kupo server is meant to build an index for a specific set of outputs.
+    Outputs are matched according to flexible patterns. Once
+    matched, results can be queried as JSON via HTTP GET requests.  For
+    instance, it is possible to synchronize all addresses associated with a
+    given stake key (e.g.  `stake_vkh14hkp0sncfkt76spuqydtww4r900hfmsseezztzlh9sjkkjx6d7q`).
+
+    Provided that the configuration and IPC socket for a cardano-node are
+    available in `some-folder/cardano-node`, one can start a Kupo server as
+    follows:
+
+    ```console
+    $ kupo \
+      --node-socket some-folder/cardano-node/node.socket \
+      --node-config some-folder/cardano-node/config.json \
+      --since origin \
+      --defer-db-indexes \
+      --match "*/stake_vkh14hkp0sncfkt76spuqydtww4r900hfmsseezztzlh9sjkkjx6d7q" \
+      --in-memory
+    ```
+
+    ## --in-memory / --workdir {dir}
+
+    This will build an index from the beginning of the blockchain (i.e.`origin`)
+    of all transaction outputs where that stake key has been involved in. The
+    `--in-memory` option tells Kupo to not persist the index on-disk but to
+    build it fully in-memory. When building such a large index (from origin!),
+    this is not recommended as it may cause the program memory usage to grow
+    unbounded.
+
+    Let's fix that:
+
+    ```console
+    $ kupo \
+      --node-socket some-folder/cardano-node/node.socket \
+      --node-config some-folder/cardano-node/config.json \
+      --since origin \
+      --defer-db-indexes \
+      --match "*/stake_vkh14hkp0sncfkt76spuqydtww4r900hfmsseezztzlh9sjkkjx6d7q" \
+      --workdir ./db
+    ```
+
+    Perfect, now Kupo will store all the information in a database on-disk at
+    the location pointed by `--workdir`. Incidentally, this also allows Kupo to
+    resume its work from where it lefts it in case the server is interrupted.
+    Neat!
+
+    ## --since {slot-no.header_hash}
+
+    What if we only need to synchronize from a given point in time? For
+    example, we may want to skip the entire Byron and Shelley eras because we
+    know that this stake key may only have been used starting from the Allegra
+    era onwards.  Fortunately, we can use the `--since` to provide a different
+    starting point!
+
+    ```console
+    $ kupo \
+      --node-socket some-folder/cardano-node/node.socket \
+      --node-config some-folder/cardano-node/config.json \
+      --since 16588737.4e9bbbb67e3ae262133d94c3da5bffce7b1127fc436e7433b87668dba34c354a \
+      --defer-db-indexes \
+      --match "*/stake_vkh14hkp0sncfkt76spuqydtww4r900hfmsseezztzlh9sjkkjx6d7q" \
+      --workdir ./db
+    ```
+
+    Points are given as `{slot_no}.{header_hash}` and define an exclusive
+    boundary. Said differently, Kupo will start synchronizing from the **next**
+    block **following the given point**. In case you need them, see the section
+    [#era-boundaries] which references points at which era ends for mainnet and
+    testnet; useful to start syncing from a specific era.
+
+    > <sup><strong>TIP</strong></sup> <br/>
+    > If you just want to start synchronize from _now_, you can pass simply
+    > pass <code>tip</code> as a value (i.e. `--since tip`).
+
+    ## --match {pattern}
+
+    Kupo can accept one or more matching patterns using the `--match` option.
+    In case multiple patterns are provided, they'll ALL be used when looking
+    for addresses. This allows for example to build an index for a list of
+    payment keys known of a wallet. The syntax for patterns is explained in
+    greater details in the [Patterns](#section/Patterns) section below.
+
+    ## --defer-db-indexes
+
+    The careful reader that you are would have noticed the `--defer-db-indexes`
+    flag that we've been passing around. This is a little trick to speed up the
+    initial indexer synchronization. Indeed, when synchronizing over large chunks
+    of the chain, Kupo needs to ingest and filter a lot of data. Later, to serve
+    this data back through structured queries, Kupo leverages fast lookup indexes
+    in the database. Yet, lookup indexes come with a little extra cost for writing
+    stuff into the database.
+
+    Deferring the creation of indexes only to when you'll need to query therefore
+    comes in handy and can reduce overall synchronization time by a factor of 2 or
+    3. The creation of each index is relatively fast (few seconds to a couple of
+    minutes) and can therefore happen only after a full synchronization by restarting
+    Kupo without the `--defer-db-indexes` flag.
+
+    ## --prune-utxo
+
+    Sometimes, it isn't necessary to keep old data around. Fear not, Kupo has
+    got you covered! Using the `--prune-utxo` command-line flag, you can
+    instrument Kupo to automatically remove inputs that are spent on-chain.
+
+    This makes sure to keep only what's truly available on-chain and has a
+    positive effect on both the final size of the index and the synchronization
+    time. If you don't set that flag, then all data are kept in the database
+    and spent inputs are instead marked to know if and when they were spent.
+
+    Note that spent inputs aren't removed immediately but only after _at least_
+    36h (or 2160 guaranteed blocks). This is because data on-chain only becomes
+    truly immutable after 2160 blocks (though it is stable with a high probability
+    much before that).
+
+    You can then use query flags in the API (`?spent` or `?unspent`) to filter
+    results based on whether or not they've been spent.
+
+    ## --ogmios-host {hostname} / --ogmios-port {port-number}
+
+    So far, we've connected Kupo to a local cardano-node, using a unix domain
+    socket as a communication channel. However, Kupo can also connect through
+    [Ogmios](https://github.com/CardanoSolutions/ogmios#readme); and this works
+    for either a local or remote instance of Ogmios! To do so, simply swap the
+    `--node-socket` and `--node-config` options for `--ogmios-host` and
+    `--ogmios-port`.
+
+    For example:
+
+    ```console
+    $ kupo \
+      --ogmios-host my-ogmios-server.io \
+      --ogmios-port 443 \
+      --since 16588737.4e9bbbb67e3ae262133d94c3da5bffce7b1127fc436e7433b87668dba34c354a \
+      --match "*/stake_vkh14hkp0sncfkt76spuqydtww4r900hfmsseezztzlh9sjkkjx6d7q" \
+      --workdir ./db
+    ```
+
+    Kupo will synchronize data directly from Ogmios! Neat isn't it?
+
+    ## --hydra-host {hostname} / --hydra-port {port-number}
+
+    Kupo can also be used to index the layer two ledger available in a
+    [Hydra](https://github.com/input-output-hk/hydra/#readme) head. For this, we
+    need to use `--hydra-host` and `--hydra-port` to point to a machine running
+    a `hydra-node` of a head you want to index and the port of the websocket
+    API.
+
+    For example:
+
+    ```console
+    $ kupo \
+      --hydra-host 0.0.0.0 \
+      --hydra-port 4001 \
+      --since origin \
+      --match * \
+      --workdir ./db
+    ```
+
+    ## --help
+
+    In case you're lost, don't forget that a summary of this manual is available by running:
+
+    ```console
+    $ kupo --help
+    ```
+
+    Should you have installed Kupo using the pre-packaged archive from releases, you should also have
+    access to the user manual through
+
+    ```console
+    $ man kupo
+    ```
+
+    # Patterns
+
+    ## Overview
+
+    Kupo can construct patterns from pretty much every constituant of an
+    address, an asset id or an output reference, in any kind of format
+    (bech32, base16, base58, you name it!).
+
+    It also accepts wildcards using the asterisk symbol `*` in certain places.
+    Conceptually, patterns match the logical structure of addresses, asset ids
+    or output references. Each are divided in two parts:
+
+    - for addresses: a payment part and a delegation part, separated by a `/`;
+    - for asset ids: a policy id and an asset name, separated by a `.`;
+    - for output references: an output index and a transaction id, separated by a `@`
+
+    > **Note**
+    >
+    > To learn more about Cardano addresses, feel free to look [CIP-0019](https://github.com/cardano-foundation/CIPs/tree/master/CIP-0019#readme)
+    for a deep dive!
+
+    Here below is summarized the general syntax for valid patterns. Note that
+    different patterns may match the same object. By convention `*` will match
+    _any Cardano address (Byron included)_, whereby `*/*` will match only
+    Shelley-based addresses (since legacy Byron addresses do not have any
+    delegation part!).
+
+    ```
+    PATTERN =
+
+           ┏━━━━━━━━━┓
+        ╾┬─┫ ADDRESS ┣───────────────────────────────┬╼
+         │ ┗━━━━━━━━━┛                               │
+         │ ┏━━━━━━━━━━━━┓   ╭───╮ ┏━━━━━━━━━━━━┓     │
+         ├─┫ CREDENTIAL ┣───┤ / ├─┫ CREDENTIAL ┣─────┤
+         │ ┗━━━━━━━━━━━━┛   ╰───╯ ┗━━━━━━━━━━━━┛     │
+         │ ┏━━━━━━━━━━━┓    ╭───╮ ┏━━━━━━━━━━━━┓     │
+         ├─┫ POLICY_ID ┣────┤ . ├─┫ ASSET_NAME ┣─────┤
+         │ ┗━━━━━━━━━━━┛    ╰───╯ ┗━━━━━━━━━━━━┛     │
+         │ ┏━━━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━━━━━┓ │
+         ├─┫ OUTPUT_INDEX ┣─┤ @ ├─┫ TRANSACTION_ID ┣─┤
+         │ ┗━━━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━━━━━┛ │
+         │ ┏━━━━━━━━━━━━━━┓                          │
+         └─┫ METADATA_TAG ┣──────────────────────────┘
+           ┗━━━━━━━━━━━━━━┛
+    ```
+
+    ## Address
+
+    ```
+    ADDRESS =
+
+           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ╾┬─┫ ADDRESS OR LEGACY ADDRESS ┣─────────────┬╼
+         │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━┛             │
+         │ ┏━━━━━━━━━━━━━━━┓                         │
+         ├─┫ STAKE ADDRESS ┣─────────────────────────┤
+         │ ┗━━━━━━━━━━━━━━━┛                         │
+         │ ╭───╮                                     │
+         └─┤ * ├─────────────────────────────────────┘
+           ╰───╯
+    ```
+
+    ### Examples
+
+    | Pattern                                                       | Description                                                    |
+    | ---                                                           | ---                                                            |
+    | `addr1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9calxn8tdudjgz4xq9p`  | Outputs to a specific address                                  |
+    | `stake1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9calxn8tdudjgydsx9n` | Outputs whose address is delegated to a specific stake address |
+    | `*`                                                           | Any output (incl. to legacy addresses)                         |
+
+    ## Credential
+
+    ```
+    CREDENTIAL =
+
+           ┏━━━━━━━━━━━┓
+        ╾┬─┫ 64 HEXDIG ┣───────────────────────────────────────────┬╼
+         │ ┗━━━━━━━━━━━┛                                           │
+         │ ┏━━━━━━━━━━━━━━━━━━━━━━━━━┓              ┏━━━━━━━━━━━━┓ │
+         ├─┫ vk / addr_vk / stake_vk ┣──────────────┫ *BECH32DIG ┣─┤
+         │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━┛              ┗━━━━━━━━━━━━┛ │
+         │ ┏━━━━━━━━━━━┓                                           │
+         ├─┫ 56 HEXDIG ┣───────────────────────────────────────────┤
+         │ ┗━━━━━━━━━━━┛                                           │
+         │ ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━┓ │
+         ├─┫ vkh / addr_vkh / stake_vkh / script ┣──┫ *BECH32DIG ┣─┤
+         │ ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━┛ │
+         │ ╭───╮                                                   │
+         └─┤ * ├───────────────────────────────────────────────────┘
+           ╰───╯
+
+    HEXDIG = %x30–39 / %x41-%46
+
+    BECH32DIG = %x61 / %x63-68 / %x6A-6E / %x70-7A / 0-9
+    ```
+
+    ### Examples
+
+    Examples below are given for patterns in the form of `CREDENTIAL / CREDENTIAL` since a `CREDENTIAL` is never specified alone.
+
+    | Pattern                                                                    | Description                                                           |
+    | ---                                                                        | ---                                                                   |
+    | `*/*`                                                                      | Any output to a Shelley-based address                                 |
+    | `addr_vk1x7da0l25j04my8sej5ntrgdn38wmshxhplxdfjskn07ufavsgtkqn5hljl/*`     | Outputs whose address carries a specific payment key (bech32 encoded) |
+    | `dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e/*`       | Outputs whose address carries a specific payment key (hex encoded)    |
+    | `*/script1cda3khwqv60360rp5m7akt50m6ttapacs8rqhn5w342z7r35m37`             | Outputs whose stake is governed by a specific script                  |
+
+    ## Asset id
+
+    ```
+    POLICY_ID =                             ASSET_NAME =
+
+           ┏━━━━━━━━━━━┓                           ┏━━━━━━━━━━━━━┓
+        ╾┬─┫ 56 HEXDIG ┣─┬╼                     ╾┬─┫ 0*64 HEXDIG ┣─┬╼
+         │ ┗━━━━━━━━━━━┛ │                       │ ┗━━━━━━━━━━━━━┛ │
+         │ ╭───╮         │                       │ ╭───╮           │
+         └─┤ * ├─────────┘                       └─┤ * ├───────────┘
+           ╰───╯                                   ╰───╯
+
+    HEXDIG = %x30–39 / %x41-%46
+    ```
+
+    ### Examples
+
+    | Pattern                                                                   | Description                                            |
+    | ---                                                                       | ---                                                    |
+    | `dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e.*`      | Outputs that contains any asset from a specific policy |
+    | `dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e.FFCC00` | Outputs that contains any quantity of a specific asset |
+
+    ## Output reference
+
+    ```
+    OUTPUT_INDEX =                          TRANSACTION_ID =
+
+           ┏━━━━━━━━━━━┓                          ┏━━━━━━━━━━━┓
+        ╾┬─┫ 1*3 DIGIT ┣─┬╼                     ╾─┫ 64 HEXDIG ┣─╼
+         │ ┗━━━━━━━━━━━┛ │                        ┗━━━━━━━━━━━┛
+         │ ╭───╮         │
+         └─┤ * ├─────────┘
+           ╰───╯
+
+    HEXDIG = %x30–39 / %x41-%46
+    ```
+
+    ## Metadata tag
+
+    > <sup><strong>WARNING</strong></sup> <br/>
+    >
+    > This pattern can only be used for indexing, not for querying.
+
+    ```
+    METADATA_TAG =
+
+          ╭───╮  ┏━━━━━━━━━━━━━━┓  ╭───╮
+        ╾─┤ { ├──┫ METADATA TAG ┣──┤ } ├─╼
+          ╰───╯  ┗━━━━━━━━━━━━━━┛  ╰───╯
+    ```
+
+    ### Examples
+
+    | Pattern | Description                                                |
+    | ---     | ---                                                        |
+    | `{25}`  | Outputs of any transaction that has metadata with label 25 |
+    | `{42}`  | Outputs of any transaction that has metadata with label 42 |
+
+    # Accessing results
+
+    Matches can be queried from the server via HTTP GET requests. For example:
+
+    ```console
+    $ curl http://localhost:1442/matches
+    ```
+
+    will return all matches currently present in the database (be careful when
+    combined with very permissive patterns and wildcards!). The `/matches`
+    endpoint actually accept patterns, which may be different from the one
+    provided in the command-line. So it for instance possible to build an index
+    for all addresses but then, lookup only a single address as:
+
+    ```console
+    $ curl http://localhost:1442/matches/addr1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9calxn8tdudjgz4xq9p
+    ```
+
+    Optionally, you can query only `unspent` or `spent` results using the respective query flags:
+
+    ```console
+    $ curl http://localhost:1442/matches/*/*?unspent
+    ```
+
+    The complete API reference is available below.
+
+    # Rollbacks & chain forks
+
+    ## Problem
+
+    Cardano is a distributed permissionless ledger and, as such, provides only
+    eventual consensus. This means that information in the system only becomes
+    immutable after some delay—however, the probability of something remaining
+    true increases exponentially as time passes.
+
+    This matters for client applications using an indexer like Kupo. Indeed,
+    any information obtained from Kupo only reflects the local view of the
+    global system that Kupo has (or, more specifically, the node it is
+    connected to). Recent information that enters the system may therefore be
+    invalidated at a later stage. This is typically called _a rollback_, which
+    happens when the node switches to a different version of the chain.
+
+    ## How Kupo deals with rollbacks
+
+    Rollbacks are relatively frequent on Cardano, but they remain usually small
+    (a couple of blocks) because the network resolves them promptly. Yet, in
+    theory, rollbacks can go as far as the protocol's security parameter,
+    defined in each network's genesis configuration. For example, on `mainnet`
+    and `preprod`, this security parameter equals `2160`; on `preview`, it
+    equals `432`. Furthermore, the Ouroboros Praos protocol (used by Cardano at
+    the moment) guarantees that there are at least `k` blocks in a window of
+    `3k / f` slots where `f` is the _active slot coefficient_.
+
+    Said differently, we can't guarantee that information newer than ~36h will
+    be immutable. However, the probability of non-settlement approaches 0
+    extremely fast, much sooner (after a hundred blocks, the likelihood of
+    rollback is typically less than 0.01%). This is why Kupo does not get rid
+    of any data immediately, even when `--prune-utxo` is specified. Instead,
+    Kupo takes a _mark and sweep_ approach akin to garbage collectors. First,
+    spent UTxO entries are marked until it is safe to remove them and such that
+    the indexer database can constantly be rolled back when necessary. Then,
+    after a rollback, Kupo automatically (and quickly) catches up with the
+    chain.
+
+    ## How can your application deal with rollbacks
+
+    As a client application, you have to care extra about using information
+    from the indexer and use patterns that are resilient to rollbacks. So
+    naturally, Kupo provides mechanisms to help you deal with rollbacks.
+
+    First, any results from Kupo are delivered with a timestamp `created_at`,
+    which gives you the absolute slot number at which an entry has been created
+    and the block header hash that contains the associated output. These pieces
+    of information are crucial to detect whether something has changed. Indeed,
+    when switching to a different fork of the chain, outputs may or may not
+    disappear. Yet, they may end up in another block than the one they were
+    initially advertised in. Thus controlling both the slot number and the
+    header hash between requests gives your application ways to notice if
+    something has changed. Plus, comparing the absolute slot number with the
+    network tip helps you build confidence about how immutable some information
+    is.
+
+    Second, any response from the server contains some practical header fields:
+
+    - `X-Most-Recent-Checkpoint`: an absolute slot number of the most recent block indexed by Kupo at the moment of the request.
+    - `ETag`: a hex-encoded block header hash digest of that same most recent block.
+
+    With this, client applications can know precisely which point on the chain
+    a query is accurate. Knowing this is also helpful when polling a specific
+    endpoint to see whether something has changed, particularly when combined
+    with standard HTTP caching practices. For example, a client application can
+    specify a [`If-None-Match`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching#etagif-none-match)
+    header in requests to only fetch a response if it has changed.
+
+    # Era boundaries
+
+    <div class="tabs">
+      <input type="radio" checked name="tab" id="tab-mainnet">
+      <label for="tab-mainnet">Mainnet</label>
+
+      <input type="radio" name="tab" id="tab-preview">
+      <label for="tab-preview">Preview</label>
+
+      <input type="radio" name="tab" id="tab-preprod">
+      <label for="tab-preprod">Preprod</label>
+
+      <div class="tab">
+
+      | Era Bound          | SlotNo    | Block Header Hash                                                |
+      | ---                | ---       | ---                                                              |
+      | Last Byron block   | 4492799   | f8084c61b6a238acec985b59310b6ecec49c0ab8352249afd7268da5cff2a457 |
+      | Last Shelley block | 16588737  | 4e9bbbb67e3ae262133d94c3da5bffce7b1127fc436e7433b87668dba34c354a |
+      | Last Allegra block | 23068793  | 69c44ac1dda2ec74646e4223bc804d9126f719b1c245dadc2ad65e8de1b276d7 |
+      | Last Mary block    | 39916796  | e72579ff89dc9ed325b723a33624b596c08141c7bd573ecfff56a1f7229e4d09 |
+      | Last Alonzo block  | 72316796  | c58a24ba8203e7629422a24d9dc68ce2ed495420bf40d9dab124373655161a20 |
+      | Last Babbage block | 133660799 | e757d57eb8dc9500a61c60a39fadb63d9be6973ba96ae337fd24453d4d15c343 |
+      | Last Conway block  | N/A       | N/A                                                              |
+
+      See <a target="_blank" href="https://github.com/input-output-hk/cardano-configurations/tree/master/network/mainnet">configuration files for <strong>Mainnet</strong></a>.
+      </div>
+
+      <div class="tab">
+
+      | Era Bound          | SlotNo   | Block Header Hash                                                |
+      | ---                | ---      | ---                                                              |
+      | Last Byron block   | N/A      | N/A                                                              |
+      | Last Shelley block | N/A      | N/A                                                              |
+      | Last Allegra block | N/A      | N/A                                                              |
+      | Last Mary block    | N/A      | N/A                                                              |
+      | Last Alonzo block  | 259180   | 0ad91d3bbe350b1cfa05b13dba5263c47c5eca4f97b3a3105eba96416785a487 |
+      | Last Babbage block | 55814394 | bdd4baa2c81d0500a695f836332193ea06c2ce364e585057142220fc0782144c |
+      | Last Conway block  | N/A      | N/A                                                              |
+
+      See <a target="_blank" href="https://github.com/input-output-hk/cardano-configurations/tree/master/network/preview">configuration files for <strong>Preview</strong></a>.
+      </div>
+
+      <div class="tab">
+
+      | Era Bound          | SlotNo   | Block Header Hash                                                |
+      | ---                | ---      | ---                                                              |
+      | Last Byron block   | 84242    | 45899e8002b27df291e09188bfe3aeb5397ac03546a7d0ead93aa2500860f1af |
+      | Last Shelley block | 518360   | f9d8b6c77fedd60c3caf5de0ce63a0aeb9d1753269c9c07503d9aa09d5144481 |
+      | Last Allegra block | 950340   | 74c03af754bcde9cd242c5a168689edcab1756a3f7ae4d5dca1a31d86839c7b1 |
+      | Last Mary block    | 1382348  | af5fddc7d16a349e1a2af8ba89f4f5d3273955a13095b3709ef6e3db576a0b33 |
+      | Last Alonzo block  | 3542390  | f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f |
+      | Last Babbage block | 68774372 | 36f5b4a370c22fd4a5c870248f26ac72c0ac0ecc34a42e28ced1a4e15136efa4 |
+      | Last Conway block  | N/A      | N/A                                                              |
+
+      See <a target="_blank" href="https://github.com/input-output-hk/cardano-configurations/tree/master/network/preprod">configuration files for <strong>Preprod</strong></a>.
+      </div>
+    </div>
+
+    <div align="center">
+    <pre style="background: none; border: none; color: inherit; display: inline-block; text-align: left;">
+               ●
+            /\__\__/\
+           /✿        \
+        \ (ﾐ  ⌒ ● ⌒  ﾐ) つ ━✫ ✧･ﾟ* KUPO! *:･ﾟ✧*:･ﾟ💖
+      </pre>
+    </div>
+
+x-tagGroups:
+  - name: General
+    tags:
+      - Matches
+      - Patterns
+  - name: Auxiliary Data
+    tags:
+      - Scripts
+      - Datums
+      - Metadata
+  - name: Monitoring
+    tags:
+      - Checkpoints
+      - Health
+
+components:
+  headers: &default-headers
+    Content-Type:
+      schema:
+        type: string
+        enum:
+          - "application/json;charset=utf-8"
+
+    X-Most-Recent-Checkpoint:
+      description: |
+        Kupo's most recent indexed block's slot number. This allows to know which slot a query is accurate of.
+      schema:
+        type: integer
+        minimum: 0
+
+    ETag:
+      description: |
+        A cache value generated by the server to indicate whether a response has changed or not. The `ETag` always corresponds to the block header hash of the most recent indexed block.
+        This can be used in combination with [`If-None-Match`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching#etagif-none-match) to provide some efficient client-side caching.
+      schema:
+        type: string
+        contentEncoding: base16
+
+  responses:
+    304:
+      description: |
+        Not Modified
+
+        Returned when a `If-None-Match` request header matches the current `ETag` for the response.
+        This is meant to provide efficient caching and polling. The `ETag` corresponds to the most
+        recent block header hash processed by Kupo.
+      headers: *default-headers
+
+  schemas:
+    Address_Shelley: &Address_Shelley
+      title: Shelley
+      oneOf:
+        - title: bech32
+          type: string
+          contentEncoding: bech32
+          description: A standard payment address, in bech32 (i.e. starting with `addr|addr_test`).
+          example: addr1vy3qpx09uscywhpp0ekg9zwmq2yj5vp08husfq6qyh2mpps865j6t
+        - title: base16
+          type: string
+          contentEncoding: base16
+          description: A standard payment address, in base16
+          example: 7a5e61936081db3b2117cbf59bd2123748f58ac96786567067f3314661
+
+    Address_Stake: &Address_Stake
+      title: Stake
+      oneOf:
+        - title: bech32
+          type: string
+          contentEncoding: bech32
+          description: A stake address, in bech32 (i.e. starting with `stake|stake_test`).
+          example: stake1vyc29pvl2uyzqt8nwxrcxnf558ffm27u3d9calxn8tdudjgydsx9n
+        - title: base16
+          type: string
+          contentEncoding: bech32
+          description: A stake address, in base16.
+          example: 7a5e61936081db3b2117cbf59bd2123748f58ac96786567067f3314661
+
+    Address_Bootstrap: &Address_Bootstrap
+      title: Bootstrap
+      oneOf:
+        - title: base58
+          description: A Bootstrap (a.k.a Byron) address (legacy), in base58.
+          type: string
+          contentEncoding: base58
+          example: DdzFFzCqrhsnWCKDVxHipmLW7acroB11zWxe1BGP1gCh7EqmgjVPe2qes6HrsQs
+        - title: base16
+          description: A Bootstrap (a.k.a Byron) address (legacy), in base16.
+          type: string
+          contentEncoding: base16
+          example: 73b81dc65c31ab02195bb9264982233513cabc14df8ff07ed7c55cc326833753a5c23b10ef4121f1757cdf3c0038
+
+    Address_Credentials: &Address_Credentials
+      type: string
+      title: Credentials
+      description: |
+        ```
+          ┏━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━┓
+        ╾─┫ CREDENTIAL ┣─┤ / ├─┫ CREDENTIAL ┣─╼
+          ┗━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━┛
+        ```
+
+        One or two address credentials, separated by a `/`. The left-side identifies the payment
+        part of the address, and the right-side identifies the delegation part. Both are optional
+        an can be instead a wildcard (`*`).
+
+        Examples:
+        - `addr_vk1x7da0l25j04my8sej5ntrgdn38wmshxhplxdfjskn07ufavsgtkqn5hljl/*`
+        - `*/script1cda3khwqv60360rp5m7akt50m6ttapacs8rqhn5w342z7r35m37`
+        - `dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e/*`
+        - `*/4fc6bb0c93780ad706425d9f7dc1d3c5e3ddbf29ba8486dce904a5fc`
+        - `*/*`
+      examples:
+        - "addr_vk1x7da0l25j04my8sej5ntrgdn38wmshxhplxdfjskn07ufavsgtkqn5hljl/*"
+        - "*/script1cda3khwqv60360rp5m7akt50m6ttapacs8rqhn5w342z7r35m37"
+        - "dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e/*"
+        - "*/4fc6bb0c93780ad706425d9f7dc1d3c5e3ddbf29ba8486dce904a5fc"
+        - "*/*"
+
+    Address:
+      description: A Cardano address, in any era.
+      anyOf:
+        - <<: *Address_Shelley
+        - <<: *Address_Bootstrap
+
+    AddressPattern:
+      title: Address
+      description: A Cardano address or stake address.
+      anyOf:
+        - <<: *Address_Credentials
+        - <<: *Address_Shelley
+        - <<: *Address_Stake
+        - <<: *Address_Bootstrap
+
+    AssetIdPattern:
+      type: string
+      title: AssetId
+      pattern: "[0-9a-f]{56}\\.(*|[0-9a-f]{2,64})"
+      description: |
+        ```
+          ┏━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━┓
+        ╾─┫ POLICY_ID ┣─┤ . ├─┫ ASSET_NAME ┣─╼
+          ┗━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━┛
+        ```
+
+        A policy id (base16-encoded) and an optional asset name (base16-encoded), dot-separated.
+
+        Examples:
+        - `1220099e5e430475c219518179efc7e6c8289db028904834025d5b086.*`
+        - `1220099e5e430475c219518179efc7e6c8289db028904834025d5b086.08661220099e`
+      examples:
+        - "1220099e5e430475c219518179efc7e6c8289db028904834025d5b086.*"
+        - "1220099e5e430475c219518179efc7e6c8289db028904834025d5b086.08661220099e"
+
+    BadRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        hint:
+          type: string
+          description: Some hint about what went wrong.
+
+    BinaryData: &BinaryData
+      type: string
+      description: A serialized Plutus' Data (datum or redeemer).
+      contentEncoding: base16
+      example: d87980
+
+    Datum:
+      title: Datum
+      type: object
+      required:
+        - datum
+      additionalProperties: false
+      properties:
+        datum:
+          $ref: "#/components/schemas/BinaryData"
+
+    DatumHash:
+      description: A blake2b-256 hash digest of a Plutus' datum, if any.
+      oneOf:
+        - title: Digest
+          type: string
+          description: A blake2b-256 hash digest of a Plutus' datum.
+          contentEncoding: base16
+          example: 3097...b635
+          minLength: 64
+          maxLength: 64
+        - title: Nothing
+          description: N/A
+          type: "null"
+
+    DatumType:
+      description: |
+        Categorize the type of datum in the output:
+
+        - `hash`: means that the output only contains a reference to the datum;
+        - `inline`: means that the ouput originally contained a full inline datum.
+
+        In both cases however, Kupo returns only a `datum_hash`, and full datums
+        can be retrieved via the [`GET /datums/{datum-hash}`](#tag/Datums/paths/~1datums~1{datum-hash}/get)
+        endpoint.
+
+        This field is only present when `datum_hash` is not `null`.
+      type: string
+      enum:
+        - hash
+        - inline
+
+    Deleted:
+      type: object
+      required:
+        - deleted
+      properties:
+        deleted:
+          description: Number of entities effectively deleted.
+          type: integer
+          minimum: 0
+
+    ForcedRollback:
+      type: object
+      additionalProperties: false
+      required:
+        - rollback_to
+      properties:
+        rollback_to:
+          type: object
+          required:
+            - slot_no
+          description: |
+            A mandatory point to rollback the synchronization to.
+            Note that the synchronization will therefore begin starting from the point **immediately after** the provided point!
+
+            > <sup><strong>NOTE (1)</strong></sup> <br/>
+            > If you need to query ancestors from any given known point, see [`GET /checkpoints/{slot-no}`](#operation/getCheckpointBySlot)
+
+            > <sup><strong>NOTE (2)</strong></sup> <br/>
+            > The `header_hash` is **optional**! However if provided, Kupo will check that it rolls back exactly to the specified point by comparing header hashes.
+            > If it's omitted, Kupo will rollback to the given slot number or, any closest ancestor if no point is found at the given slot.
+          properties:
+            slot_no:
+              $ref: "#/components/schemas/SlotNo"
+            header_hash:
+              $ref: "#/components/schemas/HeaderHash"
+        limit:
+          type: string
+          description: |
+            Specify the server behavior when rolling back out of the _safe
+            zone_. As mentioned in the user manual, when running Kupo with
+            `--prune-utxo` enabled, the server gets rid of spent UTxOs, but it
+            only does so after a certain time. That time is exactly `129600`
+            slots (or 36h on Mainnet/Testnet). This is because the core
+            protocol cannot roll back further than this particular depth and it
+            is the point after which it is 100% safe to remove data from the
+            database.
+
+            However, this endpoint allows you to break this invariant and
+            rollback to points that are even older in the past. As a
+            consequence, while syncing, the index may be in a somewhat
+            inconsistent state because some inputs spent at a later time may
+            not have been recovered during the rollback. This may be surprising
+            if you're expecting to see and query those transient inputs after
+            rolling back.
+
+            By default, you won't be allowed to rollback beyond the safe zone.
+            If, however, you know what you're doing, you're kindly asked to
+            pass `unsafe_allow_beyond_safe_zone` as a token of acknowledgment.
+            Passing `within_safe_zone` has no effects other than the default.
+
+            Note that, once synchronized again, the index will always be in the
+            expected state and problems reflecting reality only occurs _while
+            catching up_, after a long rollback.
+          default: within_safe_zone
+          enum:
+            - unsafe_allow_beyond_safe_zone
+            - within_safe_zone
+
+    HeaderHash: &HeaderHash
+      type: string
+      description: A blake2b-256 hash digest of a block header.
+      contentEncoding: base16
+      example: 9d09...31bf
+      minLength: 64
+      maxLength: 64
+
+    InputIndex:
+      type: integer
+      description: The index of the input within the transaction carrying it.
+      minimum: 0
+      example: 1
+
+    Metadata:
+      type: object
+      additionalProperties: false
+      required:
+        - hash
+        - schema
+        - raw
+      properties:
+        hash:
+          type: string
+          description: A blake2b-256 hash digest of the raw serialized data
+          contentEncoding: base16
+          example: cd6a5d31bf9d309706b92ad83402e682fdab9fc889b1b63565ee3de14e09dedf
+          minLength: 64
+          maxLength: 64
+
+        raw:
+          type: string
+          description: A [CBOR](https://www.rfc-editor.org/rfc/rfc8949.html)-encoded binary payload.
+          contentEncoding: base16
+
+        schema:
+          type: object
+          description: |
+            A high-level description of the raw data. The top-level object is an object where all keys are integers (possibly negative) and points to objects representing one of 5 primitives:
+
+            - int
+            - string
+            - bytes
+            - list
+            - map
+
+            This schema is meant to give a faithful representation of the underlying [CBOR](https://www.rfc-editor.org/rfc/rfc8949.html) encoding, which is slightly more expressive than pure JSON (e.g. keys of maps can be arbitrary CBOR objects).
+
+            This is why it is generally not possible to ensure a 1:1 conversion between low-level CBOR and JSON, and why this intermediate representation is necessary to safely represent **any** metadata object.
+          propertyNames:
+            type: integer
+          additionalProperties:
+            x-additionalPropertiesName: "label (integer)"
+            $ref: "#/components/schemas/Metadatum"
+          example:
+            {
+              "64": { "string": "some text" },
+              "32": { "int": 42 },
+              "16":
+                {
+                  "map":
+                    [
+                      {
+                        "k": { "string": "numbers" },
+                        "v":
+                          {
+                            "list":
+                              [
+                                { "int": 1 },
+                                { "int": 2 },
+                                { "int": 4 },
+                                { "int": 8 },
+                              ],
+                          },
+                      },
+                      {
+                        "k": { "string": "alphabet" },
+                        "v":
+                          {
+                            "map":
+                              [
+                                { "k": { "string": "A" }, "v": { "int": 65 } },
+                                { "k": { "string": "B" }, "v": { "int": 66 } },
+                                { "k": { "string": "C" }, "v": { "int": 67 } },
+                              ],
+                          },
+                      },
+                    ],
+                },
+              "-8": { "bytes": "48656c6c6f2c2043617264616e6f21" },
+            }
+
+    Metadatum:
+      oneOf:
+        - $ref: "#/components/schemas/Metadatum_Int"
+        - $ref: "#/components/schemas/Metadatum_String"
+        - $ref: "#/components/schemas/Metadatum_Bytes"
+        - $ref: "#/components/schemas/Metadatum_List"
+        - $ref: "#/components/schemas/Metadatum_Map"
+
+    Metadatum_Int:
+      title: int
+      type: object
+      additionalProperties: false
+      required:
+        - int
+      properties:
+        int:
+          type: integer
+          description: |
+            An integer or arbitrary size.
+
+            Example:
+
+            ```json
+            { "int": 42 }
+            ```
+
+    Metadatum_String:
+      title: string
+      type: object
+      additionalProperties: false
+      required:
+        - string
+      properties:
+        string:
+          type: string
+          contentEncoding: utf-8
+          maxLength: 64
+          description: |
+            A text string, which is at most 64 bytes.
+
+            Example:
+
+            ```json
+            { "string": "kupo!" }
+            ```
+
+    Metadatum_Bytes:
+      title: bytes
+      type: object
+      additionalProperties: false
+      required:
+        - bytes
+      properties:
+        bytes:
+          type: string
+          contentEncoding: base16
+          maxLength: 128
+          description: |
+            A base16 byte string, which is at most 64 bytes
+
+            Example:
+
+            ```json
+            { "bytes": "6b75706f21" }
+            ```
+
+    Metadatum_List:
+      title: list
+      type: object
+      additionalProperties: false
+      required:
+        - list
+      properties:
+        list:
+          type: array
+          additionalItems: false
+          items:
+            $ref: "#/components/schemas/Metadatum"
+          description: |
+            A (possibly heterogeneous) list of metadatum
+
+            Example:
+
+            ```json
+            {
+              "list": [
+                {
+                  "int": 14
+                },
+                {
+                  "list": [
+                    { "string": "kupo!" },
+                    { "bytes": "6b75706f21" }
+                  ]
+                }
+              ]
+            }
+            ```
+
+    Metadatum_Map:
+      title: map
+      type: object
+      additionalProperties: false
+      required:
+        - map
+      properties:
+        map:
+          type: array
+          items:
+            type: object
+            additionalItems: false
+            required:
+              - k
+              - v
+            properties:
+              k:
+                $ref: "#/components/schemas/Metadatum"
+              v:
+                $ref: "#/components/schemas/Metadatum"
+          description: |
+            A list of key:value objects. Both keys and values can be any sort metadatum.
+
+            Example:
+
+            ```json
+            {
+              "map": [
+                {
+                  "k": { "int": 14 },
+                  "v": {
+                    "list": [
+                      { "string": "kupo!" },
+                      { "bytes": "6b75706f21" }
+                    ]
+                  }
+                }
+              ]
+            }
+            ```
+
+    OutputIndex:
+      type: integer
+      description: The index of the output within the transaction carrying it.
+      minimum: 0
+      example: 2
+
+    OutputReferencePattern:
+      title: OutputReference
+      type: string
+      pattern: (*|[0-9]+)@[0-9a-f]{64}
+      description: |
+        ```
+          ┏━━━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━━━━━┓
+        ╾─┫ OUTPUT_INDEX ┣─┤ @ ├─┫ TRANSACTION_ID ┣─╼
+          ┗━━━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━━━━━┛
+        ```
+
+        An (optional) output index and transaction id (base16-encoded), separated by a `@`.
+
+        Examples:
+          - `42@35d8340cd6a5d31bf9d09706b92adedf9b1b632e682fdab9fc8865ee3de14e09`
+          - `*@35d8340cd6a5d31bf9d09706b92adedf9b1b632e682fdab9fc8865ee3de14e09`
+      examples:
+        - "42@35d8340cd6a5d31bf9d09706b92adedf9b1b632e682fdab9fc8865ee3de14e09"
+        - "*@35d8340cd6a5d31bf9d09706b92adedf9b1b632e682fdab9fc8865ee3de14e09"
+
+    Pattern:
+      description: |
+        A matching pattern for addresses, assets or transactions.
+
+        See [Patterns](#section/Patterns) for more details.
+      title:
+      anyOf:
+        - $ref: "#/components/schemas/Wildcard"
+        - $ref: "#/components/schemas/AddressPattern"
+        - $ref: "#/components/schemas/AssetIdPattern"
+        - $ref: "#/components/schemas/OutputReferencePattern"
+
+    Point: &Point
+      title: Point
+      type: object
+      additionalProperties: false
+      required:
+        - slot_no
+        - header_hash
+      properties:
+        slot_no:
+          $ref: "#/components/schemas/SlotNo"
+        header_hash:
+          $ref: "#/components/schemas/HeaderHash"
+
+    Script:
+      title: Script
+      type: object
+      required:
+        - script
+        - language
+      additionalProperties: false
+      properties:
+        language:
+          type: string
+          description: The type of script. `native` refers to pre-Alonzo scripts made of the native DSL to combine keys.
+          enum:
+            - native
+            - "plutus:v1"
+            - "plutus:v2"
+            - "plutus:v3"
+        script:
+          type: string
+          description: A serialized script (native or Plutus).
+          contentEncoding: base16
+          example: 4d01000033222220051200120011
+      examples:
+        - language: "native"
+          script: 8201838200581c3c07030e36bfffe67e2e2ec09e5293d384637cd2f004356ef320f3fe8204186482051896
+        - language: "plutus:v1"
+          script: 4d01000033222220051200120011
+
+    ScriptHash:
+      description: A blake2b-224 hash digest of a Native or Plutus script, if any.
+      oneOf:
+        - title: Digest
+          description: A blake2b-224 hash digest of a Native or Plutus script.
+          type: string
+          contentEncoding: base16
+          example: 3097...9ded
+          minLength: 56
+          maxLength: 56
+        - title: Nothing
+          description: N/A
+          type: "null"
+
+    SlotNo: &slotNo
+      type: integer
+      description: An absolut slot number.
+      minimum: 0
+      example: 51540727
+
+    SpentAt:
+      title: SpentAt
+      type: object
+      additionalProperties: false
+      required:
+        - slot_no
+        - header_hash
+        - transaction_id
+        - input_index
+        - redeemer
+      properties:
+        slot_no:
+          $ref: "#/components/schemas/SlotNo"
+        header_hash:
+          $ref: "#/components/schemas/HeaderHash"
+        transaction_id:
+          oneOf:
+            - $ref: "#/components/schemas/TransactionId"
+            - type: "null"
+        input_index:
+          oneOf:
+            - $ref: "#/components/schemas/InputIndex"
+            - type: "null"
+        redeemer:
+          oneOf:
+            - $ref: "#/components/schemas/BinaryData"
+            - type: "null"
+
+    TransactionId:
+      type: string
+      description: A blake2b-256 hash digest of a transaction body.
+      contentEncoding: base16
+      example: 35d8...4e09
+      minLength: 64
+      maxLength: 64
+
+    TransactionIndex:
+      type: integer
+      description: The index of the transaction within the block including it.
+      minimum: 0
+      example: 14
+
+    Value:
+      type: object
+      description: A (multi-asset) value of a transaction's output.
+      additionalProperties: false
+      required:
+        - coins
+      properties:
+        coins:
+          type: integer
+          description: A quantity of Lovelace.
+          example: 42
+        assets:
+          type: object
+          description: A _key:value_ map of asset identifier → quantity.
+          propertyNames:
+            type: string
+            pattern: ^[a-f0-9]{56}(.[a-f0-9]{2,64})?$
+          additionalProperties:
+            x-additionalPropertiesName: "{policy-id}.{asset-name}"
+            type: integer
+            description: A quantity of some asset.
+          example:
+            1220099e5e430475c219518179efc7e6c8289db028904834025d5b086: 231
+            289db028904834025d5b085d5b08661220099e5e430475c2195181796.08661220099e: 1
+
+    Wildcard:
+      type: string
+      title: Wildcard
+      enum: ["*"]
+
+    Match:
+      type: object
+      additionalProperties: false
+      required:
+        - transaction_index
+        - transaction_id
+        - output_index
+        - address
+        - value
+        - datum_hash
+        - script_hash
+        - created_at
+        - spent_at
+      properties:
+        transaction_index:
+          $ref: "#/components/schemas/TransactionIndex"
+        transaction_id:
+          $ref: "#/components/schemas/TransactionId"
+        output_index:
+          $ref: "#/components/schemas/OutputIndex"
+        address:
+          $ref: "#/components/schemas/Address"
+        value:
+          $ref: "#/components/schemas/Value"
+        datum_hash:
+          $ref: "#/components/schemas/DatumHash"
+        datum:
+          description: The resolved datum, if available. The field is only and always present (yet may be `null`) if `?resolve_hashes` was set.
+          oneOf:
+            - <<: *BinaryData
+              description: A serialized Plutus' Data.
+            - type: "null"
+              description: None or unknown datum.
+        datum_type:
+          $ref: "#/components/schemas/DatumType"
+        script_hash:
+          $ref: "#/components/schemas/ScriptHash"
+        script:
+          description: The resolved script, if available. The field is only and always present (yet may be `null`) if `?resolve_hashes` was set.
+          oneOf:
+            - $ref: "#/components/schemas/Script"
+            - type: "null"
+              description: None or unknown script.
+        created_at:
+          <<: *Point
+          description: Block reference at which this transaction was included in the ledger.
+        spent_at:
+          description: Block reference at which this transaction input was spent, if any.
+          oneOf:
+            - $ref: "#/components/schemas/SpentAt"
+            - type: "null"
+
+    Health:
+      type: object
+      description: An overview of the server & connection status. Note that, when `most_recent_checkpoint` and `most_recent_node_tip` are equal, the index is fully synchronized.
+      additionalProperties: false
+      required:
+        - connection_status
+        - most_recent_checkpoint
+        - most_recent_node_tip
+        - seconds_since_last_block
+        - network_synchronization
+        - configuration
+        - version
+      properties:
+        connection_status:
+          type: string
+          description: Condition of the connection with the underlying node.
+          enum:
+            - connected
+            - disconnected
+        most_recent_checkpoint:
+          oneOf:
+            - <<: *slotNo
+              description: Absolute slot number of the most recent database checkpoint.
+            - type: "null"
+              description: Absolute slot number of the most recent database checkpoint.
+        most_recent_node_tip:
+          oneOf:
+            - <<: *slotNo
+              description: Absolute slot number of the current tip of the node.
+            - type: "null"
+              description: Absolute slot number of the current tip of the node.
+        seconds_since_last_block:
+          oneOf:
+            - type: integer
+              description: Number of seconds elapsed since the last block was ingested by Kupo.
+            - type: "null"
+              description: Number of seconds elapsed since the last block was ingested by Kupo.
+        network_synchronization:
+          oneOf:
+            - type: number
+              minimum: 0
+              maximum: 1
+              description: A progress percentage of the synchronization towards the node tip.
+            - type: "null"
+              description: A progress percentage of the synchronization towards the node tip.
+        configuration:
+          type: object
+          description: A summary of hand-picked configuration parameters.
+          additionalProperties: false
+          required:
+            - indexes
+          properties:
+            indexes:
+              type: string
+              description: Behaviour surrounding the database query indexes.
+              enum:
+                - deferred
+                - installed
+        version:
+          type: string
+          description: Current software version.
+
+    HealthPrometheus:
+      type: string
+      description: |
+        A key-value export compatible with Prometheus.
+
+        - `connected` and `disconnected` (from `connection_status`) are encoded as `1.0` and `0.0` respectively.
+        - `installed` and `deferred` (from `configuration.indexes`) are encoded as `1.0` and `0.0` respectively.
+        - `version` is not present in the Prometheus metrics.
+
+  parameters:
+    asset-name:
+      name: asset_name
+      in: query
+      required: false
+      allowEmptyValue: false
+      schema:
+        type: string
+        contentEncoding: base16
+        minLength: 2
+        maxLength: 64
+        pattern: ^[a-f0-9]{2,64}$
+      description: |
+        Filters results to only those containing assets of a specific asset id. This parameter can't
+        be used alone and must be provided alongside a `policy_id`.
+
+    created-after:
+      name: created_after
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Fetch only results created after (inclusive) some point.
+
+        > <sup><strong>NOTE</strong></sup> <br/>
+        >
+        > This can be combined with an upper bound (e.g. `{created, spent}_before`)
+        > but cannot be combined with another lower bound.
+      schema:
+        oneOf:
+          - title: By Slot
+            type: integer
+            minimum: 1
+            description: |
+              Only fetch results that were created at and after the given slot.
+          - title: By Point
+            type: string
+            pattern: "[0-9]+.[0-9a-f]{64}"
+            description: |
+              Only fetch results that were created at and after the given
+              point. This fails if the provided point doesn't exist. It is
+              handy to fetch a collection of results by pages while ensuring
+              that the collection isn't being altered to due alternative chain
+              forks being adopted. The last known fetch point can be used as
+              starting point for the next range.
+
+              Points are defined in the usual format (same as the command-line):
+
+              ```
+                        ┏━━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━━┓
+              POINT = ╾─┫ SLOT-NUMBER ┣─┤ . ├─┫ HEADER-HASH ┣─╼
+                        ┗━━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━━┓
+              HEADER-HASH = ╾─┫ 64 HEXDIG ┣───────────────────╼
+                              ┗━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━┓
+              SLOT-NUMBER = ╾─┫ 1* DIGIT ┣────────────────────╼
+                              ┗━━━━━━━━━━┛
+              ```
+
+              For example:
+
+              `5999990.dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e`
+
+    created-before:
+      name: created_before
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Fetch only results created before (inclusive) some point.
+
+        > <sup><strong>NOTE</strong></sup> <br/>
+        >
+        > This can be combined with a lower bound (e.g. `{created, spent}_after`)
+        > but cannot be combined with another upper bound.
+      schema:
+        oneOf:
+          - title: By Slot
+            type: integer
+            minimum: 1
+            description: |
+              Only fetch results that were created at and before the given slot.
+          - title: By Point
+            type: string
+            pattern: "[0-9]+.[0-9a-f]{64}"
+            description: |
+              Only fetch results that were created at and before the given
+              point. This fails if the provided point doesn't exist. It is
+              handy to fetch a collection of results by pages while ensuring
+              that the collection isn't being altered to due alternative chain
+              forks being adopted. The last known fetch point can be used as
+              starting point for the next range.
+
+              Points are defined in the usual format (same as the command-line):
+
+              ```
+                        ┏━━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━━┓
+              POINT = ╾─┫ SLOT-NUMBER ┣─┤ . ├─┫ HEADER-HASH ┣─╼
+                        ┗━━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━━┓
+              HEADER-HASH = ╾─┫ 64 HEXDIG ┣───────────────────╼
+                              ┗━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━┓
+              SLOT-NUMBER = ╾─┫ 1* DIGIT ┣────────────────────╼
+                              ┗━━━━━━━━━━┛
+              ```
+
+              For example:
+
+              `5999990.dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e`
+
+    datum-hash:
+      name: datum_hash
+      in: path
+      required: true
+      schema:
+        type: string
+        contentEncoding: base16
+        minLength: 64
+        maxLength: 64
+        pattern: ^[a-f0-9]{64}$
+        example: 3097...b635
+      description: A datum blake2b-256 hash digest.
+
+    order:
+      name: order
+      in: query
+      required: false
+      schema:
+        type: string
+        enum:
+          - most_recent_first
+          - oldest_first
+        description: |
+          Order results by their location on-chain. By default, most recent results are returned first (i.e. by descending `created_at.slot_no`).
+          Within a same slot, results are ordered in function of their position in the block (i.e. `transaction_index`).
+
+    output-index:
+      name: output_index
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 0
+        description: |
+          Restrict results to a particular output index of a transaction. This parameter can't be used alone and must be provided alongside a `transaction_id`.
+
+    pattern:
+      name: pattern
+      in: path
+      required: true
+      schema:
+        title: pattern
+        anyOf:
+          - $ref: "#/components/schemas/Wildcard"
+          - $ref: "#/components/schemas/AddressPattern"
+          - $ref: "#/components/schemas/AssetIdPattern"
+          - $ref: "#/components/schemas/OutputReferencePattern"
+      description: |
+        A matching pattern on addresses, assets or transactions.
+
+        See [Patterns](#section/Patterns) for more details.
+
+    policy-id:
+      name: policy_id
+      in: query
+      required: false
+      allowEmptyValue: false
+      schema:
+        type: string
+        contentEncoding: base16
+        minLength: 56
+        maxLength: 56
+        pattern: ^[a-f0-9]{56}$
+      description: |
+        Filters results to only those containing assets of a specific policy id.
+        Useful when combined with a pattern as path-parameter.
+
+        > <sup><strong>WARNING</strong></sup> <br/>
+        >
+        > Query filters are slower than path-parameters. If you only need to match for a
+        > specific policy id, use an explicit [Pattern](#section/Patterns) as _path-parameter_ instead.
+
+    resolve-hashes:
+      name: resolve_hashes
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        A query flag (i.e. `?resolve_hashes`) to resolve hash references and include `datum` and `script` when available.
+
+    script-hash:
+      name: script_hash
+      in: path
+      required: true
+      schema:
+        type: string
+        contentEncoding: base16
+        minLength: 56
+        maxLength: 56
+        pattern: ^[a-f0-9]{56}$
+        example: 3097...9ded
+      description: A script blake2b-224 hash digest of a script.
+
+    slot-no:
+      name: slot_no
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+
+    spent:
+      name: spent
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        A query flag (i.e. `?spent`) to filter matches by status, to get only 'spent' matches.  Note that, when running kupo with `--prune-utxo`, this will always return an empty list of results.
+
+    spent-after:
+      name: spent_after
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Fetch only results spent after (inclusive) some point.
+
+        > <sup><strong>NOTE</strong></sup> <br/>
+        >
+        > This can be combined with an upper bound (e.g. `{created, spent}_before`)
+        > but cannot be combined with another lower bound.
+      schema:
+        oneOf:
+          - title: By Slot
+            type: integer
+            minimum: 1
+            description: |
+              Only fetch results that were spent at and after the given slot.
+          - title: By Point
+            type: string
+            pattern: "[0-9]+.[0-9a-f]{64}"
+            description: |
+              Only fetch results that were spent at and after the given
+              point. This fails if the provided point doesn't exist. It is
+              handy to fetch a collection of results by pages while ensuring
+              that the collection isn't being altered to due alternative chain
+              forks being adopted. The last known fetch point can be used as
+              starting point for the next range.
+
+              Points are defined in the usual format (same as the command-line):
+
+              ```
+                        ┏━━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━━┓
+              POINT = ╾─┫ SLOT-NUMBER ┣─┤ . ├─┫ HEADER-HASH ┣─╼
+                        ┗━━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━━┓
+              HEADER-HASH = ╾─┫ 64 HEXDIG ┣───────────────────╼
+                              ┗━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━┓
+              SLOT-NUMBER = ╾─┫ 1* DIGIT ┣────────────────────╼
+                              ┗━━━━━━━━━━┛
+              ```
+
+              For example:
+
+              `5999990.dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e`
+
+    spent-before:
+      name: spent_before
+      in: query
+      required: false
+      allowEmptyValue: false
+      description: |
+        Fetch only results spent before (inclusive) some point.
+
+        > <sup><strong>NOTE</strong></sup> <br/>
+        >
+        > This can be combined with a lower bound (e.g. `{created, spent}_after`)
+        > but cannot be combined with another upper bound.
+      schema:
+        oneOf:
+          - title: By Slot
+            type: integer
+            minimum: 1
+            description: |
+              Only fetch results that were spent at and before the given slot.
+          - title: By Point
+            type: string
+            pattern: "[0-9]+.[0-9a-f]{64}"
+            description: |
+              Only fetch results that were spent at and before the given
+              point. This fails if the provided point doesn't exist. It is
+              handy to fetch a collection of results by pages while ensuring
+              that the collection isn't being altered to due alternative chain
+              forks being adopted. The last known fetch point can be used as
+              starting point for the next range.
+
+              Points are defined in the usual format (same as the command-line):
+
+              ```
+                        ┏━━━━━━━━━━━━━┓ ╭───╮ ┏━━━━━━━━━━━━━┓
+              POINT = ╾─┫ SLOT-NUMBER ┣─┤ . ├─┫ HEADER-HASH ┣─╼
+                        ┗━━━━━━━━━━━━━┛ ╰───╯ ┗━━━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━━┓
+              HEADER-HASH = ╾─┫ 64 HEXDIG ┣───────────────────╼
+                              ┗━━━━━━━━━━━┛
+                              ┏━━━━━━━━━━┓
+              SLOT-NUMBER = ╾─┫ 1* DIGIT ┣────────────────────╼
+                              ┗━━━━━━━━━━┛
+              ```
+
+              For example:
+
+              `5999990.dca1e44765b9f80c8b18105e17de90d4a07e4d5a83de533e53fee32e0502d17e`
+
+    strict:
+      name: strict
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        A query flag (i.e. `?strict`) to only look for checkpoints that strictly match the provided slot. The behavior otherwise is to look for the largest nearest slot smaller or equal to the one provided.
+
+    transaction-id: &transaction-id
+      name: transaction_id
+      in: query
+      required: false
+      schema:
+        $ref: "#/components/schemas/TransactionId"
+      description: |
+        Filters results by transaction id to retrieve items originating from that transaction only.
+        Useful when combined with a pattern as path-parameter.
+
+        > <sup><strong>WARNING</strong></sup> <br/>
+        >
+        > Query filters are slower than path-parameters. If you only need to match for a
+        > specific transaction id, use an explicit [Pattern](#section/Patterns) as _path-parameter_ instead.
+
+    unspent:
+      name: unspent
+      in: query
+      required: false
+      allowEmptyValue: true
+      description: |
+        A query flag (i.e. `?unspent`) filter matches by status, to get only 'unspent' matches.
+
+tags:
+  - name: Matches
+    description: |
+      Accessing results matched by a certain configuration. Results can be retrieve using **any** pattern (and not only those defined in configuration). So it is possible for example to
+      index data using quite wide patterns (e.g. `*`) but only query a single address later on.
+  - name: Checkpoints
+    description: |
+      An API for inspecting checkpoints known of the database. A checkpoint really is a point on-chain that directly references a block. They are comprised of an absolute slot
+      number and a block header hash. Kupo records all such points as it processes blocks. In particular, they are also used to resume synchronization upon restart.
+  - name: Datums
+    description: |
+      Accessing datums indexed by the server. By default, the engine indexes **every** datum present in transaction witnesses and inline datums present in **matched** transaction outputs. However,
+      a periodic garbage collector will automatically remove datums that aren't associated to any matched output. Said differently, any datum hash present in a matched output can be queried (so long
+      as its datum has been seen on-chain one way or another). Other hashes _may_ work but aren't guaranteed.
+  - name: Scripts
+    description: |
+      Accessing scripts indexed by the server. By default, the engine indexes **every** script present in transaction witnesses and inline scripts present in **matched** transaction outputs. However,
+      a periodic garbage collector will automatically remove scripts that aren't associated to any matched output. Said differently, any script hash present in a matched output can be queried (so long
+      as its script has been seen on-chain one way or another). Other hashes _may_ work but aren't guaranteed.
+  - name: Metadata
+    description: |
+      Accessing metadata present in blocks/transactions. Unlike most other resources, metadata are **not** indexed by the server and are retrieved on-the-fly directly from the node. This is generally quite fast but likely not suitable for fetching large batches of metadata.
+  - name: Patterns
+    description: |
+      Dynamically managing the server's configuration. Note that modifying patterns after the server has started indexing may break the server's data integrity -- or more exactly, data completeness.
+      The server does not re-synchronize past blocks unless explicitly told so.
+  - name: Health
+    description: |
+      Monitoring endpoints to assess the server's health.
+
+paths:
+  /matches:
+    get:
+      operationId: getAllMatches
+      tags: ["Matches"]
+      summary: Get All Matches
+      description: |
+        Retrieve all matches from the database, in descending `slot_no` order. Results are streamed to the client for more efficiency.
+
+        Optionally, use `?resolve_hashes` to automatically resolve and include `datum` and `script` associated with hash references, if available. Datums and scripts can otherwise be fetched using the [_Get Datum by Hash_](#tag/Datums/paths/~1datums~1{datum-hash}/get) and [_Get Script by Hash_](#tag/Scripts/paths/~1scripts~1{script-hash}/get) endpoints respectively.
+
+        Note that it is generally a bad idea to fetch **ALL matches** for indexes built off permissive patterns (e.g. `*`), for the server will yield a large response.
+      parameters:
+        - $ref: "#/components/parameters/resolve-hashes"
+        - $ref: "#/components/parameters/spent"
+        - $ref: "#/components/parameters/unspent"
+        - $ref: "#/components/parameters/order"
+        - $ref: "#/components/parameters/created-after"
+        - $ref: "#/components/parameters/spent-after"
+        - $ref: "#/components/parameters/created-before"
+        - $ref: "#/components/parameters/spent-before"
+        - $ref: "#/components/parameters/policy-id"
+        - $ref: "#/components/parameters/asset-name"
+        - $ref: "#/components/parameters/transaction-id"
+        - $ref: "#/components/parameters/output-index"
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Match"
+        304:
+          $ref: "#/components/responses/304"
+
+  /matches/{pattern}:
+    get: &getMatches
+      operationId: getMatches
+      tags: ["Matches"]
+      summary: Get Matches (*)
+      description: |
+        Retrieve matches from the database matching the given pattern, in descending `slot_no` order. Results are streamed to the client for more efficiency.
+        See [Patterns](#section/Patterns) for more information about constructing patterns.
+      parameters:
+        - $ref: "#/components/parameters/pattern"
+        - $ref: "#/components/parameters/resolve-hashes"
+        - $ref: "#/components/parameters/spent"
+        - $ref: "#/components/parameters/unspent"
+        - $ref: "#/components/parameters/order"
+        - $ref: "#/components/parameters/created-after"
+        - $ref: "#/components/parameters/spent-after"
+        - $ref: "#/components/parameters/created-before"
+        - $ref: "#/components/parameters/spent-before"
+        - $ref: "#/components/parameters/policy-id"
+        - $ref: "#/components/parameters/asset-name"
+        - $ref: "#/components/parameters/transaction-id"
+        - $ref: "#/components/parameters/output-index"
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Match"
+        304:
+          $ref: "#/components/responses/304"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+    delete: &deleteMatches
+      operationId: deleteMatches
+      tags: ["Matches"]
+      summary: Delete Matches (*)
+      description: |
+        Delete all matches matching the given pattern. Note that this operation is only allowed if the provided pattern isn't a currently active pattern.
+      parameters:
+        - $ref: "#/components/parameters/pattern"
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/Deleted"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+  /datums/{datum-hash}:
+    get:
+      operationdId: getDatumByHash
+      tags: ["Datums"]
+      summary: Get Datum by Hash
+      description: |
+        Retrieve the datum pre-image (i.e. full resolved datum) associated to a given datum hash digest.
+      parameters:
+        - $ref: "#/components/parameters/datum-hash"
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Datum"
+                  - title: Nothing
+                    type: "null"
+        304:
+          $ref: "#/components/responses/304"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+  /scripts/{script-hash}:
+    get:
+      operationdId: getScriptByHash
+      tags: ["Scripts"]
+      summary: Get Script by Hash
+      description: |
+        Retrieve the raw script (i.e. full resolved script) associated to a given script hash digest.
+
+        > <sup><strong>NOTE</strong></sup> <br/>
+        >
+        > Raw scripts aren't exact pre-image of their hash digest. Before hashing, scripts are prefixed with a
+        > certain discriminator byte depending on the language. For instance, any native script is prefixed with
+        > `00` before hashing.
+        >
+        > Here's a table summarizing all discriminators:
+        >
+        > | Language    | Discriminator Byte |
+        > | ---         | ---                |
+        > | `native`    | `00`               |
+        > | `plutus:v1` | `01`               |
+        > | `plutus:v2` | `02`               |
+      parameters:
+        - $ref: "#/components/parameters/script-hash"
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Script"
+                  - title: Nothing
+                    type: "null"
+        304:
+          $ref: "#/components/responses/304"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+  /patterns:
+    get:
+      operationId: getPatterns
+      tags: ["Patterns"]
+      summary: Get Patterns
+      description: |
+        Retrieve all patterns currently configured on the server.
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pattern"
+
+    put: &putPatterns
+      operationId: putPatterns
+      tags: ["Patterns"]
+      summary: Bulk Add Patterns
+      description: |
+        Add many patterns at once. See [Add Pattern (*)](#operation/putPattern) for more details.
+      requestBody:
+        content:
+          "application/json;charset=utf-8":
+            schema:
+              type: object
+
+              additionalProperties: false
+              required:
+                - patterns
+                - rollback_to
+              properties:
+                patterns:
+                  type: array
+                  description: A list of patterns on addresses, assets or transactions as described in [Patterns](#section/Patterns).
+                  items:
+                    $ref: "#/components/schemas/Pattern"
+                rollback_to:
+                  $ref: "#/components/schemas/ForcedRollback/properties/rollback_to"
+                limit:
+                  $ref: "#/components/schemas/ForcedRollback/properties/limit"
+      responses:
+        200:
+          description: OK
+          headers:
+            Content-Type:
+              $ref: "#/components/headers/Content-Type"
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pattern"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+  /patterns/{pattern}:
+    get: &getPattern
+      operationId: matchPattern
+      tags: ["Patterns"]
+      summary: Get Pattern (*)
+      description: |
+        Retrieve all patterns that include<sup>*</sup> the provided pattern. Remember that an address is itself a pattern!
+        This endpoint is thereby useful to check is an address is matched by a given pattern configuration (the returned
+        list would be non-empty).
+
+        > <sup><strong>(*) Definition</strong></sup> <br/>
+        > If all results matched by `y` are also matched by `x`, then `x` is said to include `y`.
+      parameters:
+        - $ref: "#/components/parameters/pattern"
+      responses:
+        200:
+          description: OK
+          Content-Type:
+            $ref: "#/components/headers/Content-Type"
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pattern"
+
+    delete: &deletePattern
+      operationId: deletePattern
+      tags: ["Patterns"]
+      summary: Delete Pattern (*)
+      description: |
+        Removes patterns from the database and active filtering. Note that this does
+        **NOT** remove the corresponding matches nor will it halt or restart synchronization.
+        The server will continue filtering new blocks but, will that pattern removed.
+      parameters:
+        - $ref: "#/components/parameters/pattern"
+      responses:
+        200:
+          description: OK
+          Content-Type:
+            $ref: "#/components/headers/Content-Type"
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/Deleted"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+    put: &putPattern
+      operationId: putPattern
+      tags: ["Patterns"]
+      summary: Add Pattern (*)
+      description: |
+        Add a new pattern to watch and force the server to re-sync from a given point. Only blocks discovered from that point will be matched against the new pattern.
+
+        This endpoint may not be instantaneous as the forced rollback may only occur after the next block arrives in the indexer. On the main network, this takes usually
+        no more than 20 seconds. On test networks however where the block density tends to be much lower, this may take longer.
+
+        Note also that, very long rollback will take a substantial amount of time to be processed by the server; if the server is shut down while a rollback is ongoing, the
+        rollback will be aborted and the server will remain where it was, although with the extra pattern added.
+      parameters:
+        - $ref: "#/components/parameters/pattern"
+      requestBody:
+        content:
+          "application/json;charset=utf-8":
+            schema:
+              $ref: "#/components/schemas/ForcedRollback"
+      responses:
+        200:
+          description: OK
+          Content-Type:
+            $ref: "#/components/headers/Content-Type"
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pattern"
+        400:
+          description: Bad Request
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/BadRequest"
+
+  /checkpoints:
+    get:
+      operationId: sampleCheckpoints
+      tags: ["Checkpoints"]
+      summary: Sample Checkpoints
+      description: |
+        Retrieve a **sample of** all checkpoints currently in the database, in descending `slot_no` order.
+        This is useful to know where the synchronization is at. On restart, the synchronization will continue from the most recent
+        checkpoints that is also valid on the network.
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Point"
+        304:
+          $ref: "#/components/responses/304"
+
+  /checkpoints/{slot-no}:
+    get:
+      operationId: getCheckpointBySlot
+      tags: ["Checkpoints"]
+      summary: Get Checkpoint By Slot
+      description: |
+        Retrieve a checkpoint by its (absolute) slot number. The query is flexible by default. Meaning that, if there's no checkpoint at the given slot, the server
+        will for for the closest (i.e. most recent) slot that is **before** the provided slot number. This is particularly useful to find ancestors to known slots
+        in order to use them for references on-chain.
+      parameters:
+        - $ref: "#/components/parameters/slot-no"
+        - $ref: "#/components/parameters/strict"
+      responses:
+        200:
+          description: OK
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Point"
+                  - type: "null"
+        304:
+          $ref: "#/components/responses/304"
+
+  /metadata/{slot-no}:
+    get:
+      operationId: getMetadataBySlot
+      tags: ["Metadata"]
+      summary: Get Metadata By Slot
+      description: |
+        Retrieve all metadata data seen in a block at the given slot, possibly filtered by transaction id.
+
+        Metadata are ordered according to their respective transaction's order in the block.
+      parameters:
+        - <<: *transaction-id
+          description: |
+            Filters results by transaction id to retrieve items originating from that transaction only.
+      responses:
+        200:
+          description: OK
+          headers:
+            <<: *default-headers
+            X-Block-Header-Hash:
+              <<: *HeaderHash
+              description: |
+                The block's header hash digest (`blake2b-256`) of the corresponding block at the provided slot. Clients are expected to control that this hash matches the one they expect, especially when fetching metadata from blocks in the unstable region (i.e. less than `k=2160` blocks from the network tip). Indeed, Cardano is a distributed system after all and data isn't guaranteed to be immediately immutable. Data present in very recent blocks may therefore be different between two successive requests.
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Metadata"
+        304:
+          $ref: "#/components/responses/304"
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: ["Health"]
+      summary: Get Health
+      description: |
+        Retrieve Kupo's application health status. Note that this call is cheap and does not halt the various concurrent tasks performed by the Kupo.
+
+        This endpoint has two possible content-types: `application/json` or `text/plain`. The latter returns health in a format suitable for [Prometheus](https://prometheus.io/docs/introduction/overview/). The server defaults to `application/json`, but you can control this behavior by passing a corresponding `Accept` header.
+
+        In addition, the server may return any of the following response codes:
+        - 200: when healthy
+        - 202: when connected to a chain producer but still syncing
+        - 503: when disconnected from a chain producer
+      responses:
+        200:
+          description: Healthy
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/Health"
+
+            "text/plain;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/HealthPrometheus"
+              example: &HealthPrometheusExample |
+                # TYPE kupo_configuration_indexes gauge
+                kupo_configuration_indexes  1.0
+
+                # TYPE kupo_connection_status gauge
+                kupo_connection_status  1.0
+
+                # TYPE kupo_most_recent_checkpoint counter
+                kupo_most_recent_checkpoint  61264845
+
+                # TYPE kupo_most_recent_node_tip counter
+                kupo_most_recent_node_tip  82838775
+
+                # TYPE kupo_network_synchronization gauge
+                kupo_network_synchronization  0.73956
+
+                # TYPE kupo_seconds_since_last_block gauge
+                kupo_seconds_since_last_block  2.0
+
+        202:
+          description: Syncing
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/Health"
+
+            "text/plain;charset=utf-8":
+              example: *HealthPrometheusExample
+              schema:
+                $ref: "#/components/schemas/HealthPrometheus"
+
+        503:
+          description: Unavailable
+          headers: *default-headers
+          content:
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/Health"
+
+            "text/plain;charset=utf-8":
+              example: *HealthPrometheusExample
+              schema:
+                $ref: "#/components/schemas/HealthPrometheus"
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: ["Health"]
+      summary: Get Metrics
+      description: |
+        Like [`/health`](#operation/getHealth), but always return `200 OK` as a status.
+      responses:
+        200:
+          description: Metrics
+          headers: *default-headers
+          content:
+            "text/plain;charset=utf-8":
+              example: *HealthPrometheusExample
+              schema:
+                $ref: "#/components/schemas/HealthPrometheus"
+
+            "application/json;charset=utf-8":
+              schema:
+                $ref: "#/components/schemas/Health"

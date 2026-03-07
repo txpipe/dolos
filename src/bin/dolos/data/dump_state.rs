@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{
-    model::AccountState, EpochState, EpochValue, EraSummary, PendingRewardState, PoolSnapshot,
-    PoolState, ProposalAction, ProposalState,
+    model::AccountState, DatumState, EpochState, EpochValue, EraSummary, PendingRewardState,
+    PoolSnapshot, PoolState, ProposalAction, ProposalState,
 };
 use miette::{Context, IntoDiagnostic};
 use tracing_subscriber::{filter::Targets, prelude::*};
@@ -243,6 +243,20 @@ impl TableRow for PendingRewardState {
     }
 }
 
+impl TableRow for DatumState {
+    fn header(_format: OutputFormat) -> Vec<&'static str> {
+        vec!["hash", "refcount", "bytes"]
+    }
+
+    fn row(&self, key: &EntityKey, _network: AddressNetwork, _format: OutputFormat) -> Vec<String> {
+        vec![
+            hex::encode(key.as_ref()),
+            self.refcount.to_string(),
+            hex::encode(&self.bytes),
+        ]
+    }
+}
+
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 
 fn format_pool_epoch(values: &EpochValue<PoolSnapshot>, epoch_delta: u64) -> String {
@@ -469,6 +483,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
                 args.format,
             )?;
         }
+        "datums" => dump_state::<DatumState>(&state, "datums", args.count, network, args.format)?,
         _ => todo!(),
     }
 
