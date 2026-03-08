@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/assets/logo2.png" alt="Dolos Logo" width="200">
+  <img src="docs/assets/logo.png" alt="Dolos Logo" width="200">
   <p><strong>A Cardano Data Node</strong></p>
   
   <a href="https://github.com/txpipe/dolos/blob/main/LICENSE"><img src="https://img.shields.io/github/license/txpipe/dolos?style=for-the-badge&color=blue" alt="License: Apache-2.0"></a>
