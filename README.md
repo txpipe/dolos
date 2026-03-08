@@ -5,11 +5,14 @@
   <a href="https://github.com/txpipe/dolos/blob/main/LICENSE"><img src="https://img.shields.io/github/license/txpipe/dolos?style=for-the-badge&color=blue" alt="License: Apache-2.0"></a>
   <a href="https://github.com/txpipe/dolos/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/txpipe/dolos/ci.yml?style=for-the-badge&label=CI" alt="CI Status"></a>
   <a href="https://crates.io/crates/dolos"><img src="https://img.shields.io/crates/v/dolos?style=for-the-badge&color=orange" alt="Crates.io"></a>
-  <a href="https://dolos.txpipe.io"><img src="https://img.shields.io/badge/docs-dolos.txpipe.io-blue?style=for-the-badge" alt="Documentation"></a>
+  <a href="https://docs.txpipe.io/dolos"><img src="https://img.shields.io/badge/docs-docs.txpipe.io/dolos-blue?style=for-the-badge" alt="Documentation"></a>
   
   <br>
   <br>
 </div>
+
+> [!TIP]
+> Looking for detailed guides and tutorials? The complete user guide for Dolos is available at [docs.txpipe.io/dolos](https://docs.txpipe.io/dolos).
 
 ## What is Dolos?
 
@@ -52,7 +55,7 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 - **Stake distribution snapshots** — Historical stake snapshots and epoch boundary logic
 - **Pool registry & metadata** — Pool registration, retirement handling, and delegator tracking
 - **Asset registry** — Token and NFT metadata tracking with CIP-25 support
-- **Script indexing** — Support for Native scripts and Plutus V1/V2/V3
+- **Script indexing** — Support of search / retrieval of scripts / datums by hash
 - **Governance data** — DRep registration, proposals, and voting state (Conway era)
 
 ### Developer Experience
@@ -83,7 +86,7 @@ Data is organized into four isolated storage layers: State (current ledger), Arc
 
 ## Quick Start
 
-We highly recommend following the [quick start guide](https://dolos.txpipe.io) on our documentation site for detailed step-by-step instructions.
+We highly recommend following the [quick start guide](https://docs.txpipe.io/dolos) on our documentation site for detailed step-by-step instructions.
 
 ```bash
 # macOS
@@ -109,7 +112,7 @@ Once installed:
 dolos init       # Interactive configuration and bootstrapping
 ```
 
-📖 **Full documentation**: [https://dolos.txpipe.io](https://dolos.txpipe.io)
+📖 **Full documentation**: [https://docs.txpipe.io/dolos](https://docs.txpipe.io/dolos)
 
 ## Contributing
 
