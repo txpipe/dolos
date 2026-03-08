@@ -17,6 +17,15 @@ Cardano nodes traditionally assume one of two roles: block producer or relay. Do
 
 Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N) mini-protocols (via [Pallas](https://github.com/txpipe/pallas)). It relies on honest upstream peers rather than performing full consensus validation, enabling significant resource savings.
 
+## Why Dolos?
+
+- **Low resource footprint** — Runs with a small fraction of the memory and CPU required by a traditional Cardano node
+- **Rich API surface** — Multiple protocols to match your existing stack: REST, gRPC, HTTP, JSON-RPC, and Ouroboros
+- **Flexible storage mode** — Choose your data retention: ledger-only, sliding window, or full archive
+- **Full multi-era support** — Handles all Cardano eras from Byron through Conway, including full governance support (DReps, proposals, voting)
+
+## Flexibility
+
 **Choose your storage profile:**
 
 | Profile | Description | Best For |
@@ -34,13 +43,6 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 | **UTxO RPC** | gRPC / gRPC-Web | High-performance streaming, browser clients |
 | **TRP** | JSON-RPC (Tx3) | Transaction building with Tx3 framework |
 | **Ouroboros** | Node-to-Client | cardano-cli compatibility, Ogmios workflows |
-
-## Why Dolos?
-
-- **Low resource footprint** — Runs with a small fraction of the memory and CPU required by a traditional Cardano node
-- **Rich API surface** — Multiple protocols to match your existing stack: REST, gRPC, HTTP, JSON-RPC, and Ouroboros
-- **Flexible storage mode** — Choose your data retention: ledger-only, sliding window, or full archive
-- **Full multi-era support** — Handles all Cardano eras from Byron through Conway, including full governance support (DReps, proposals, voting)
 
 ## Features
 
