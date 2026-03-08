@@ -101,8 +101,7 @@ impl<D: Domain> SyncExt for D {
 
             let block = Arc::new(log.block);
 
-            let undo_data =
-                D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
+            let undo_data = D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
 
             // Apply UTxO undo to state
             writer.apply_utxoset(&undo_data.utxo_delta)?;

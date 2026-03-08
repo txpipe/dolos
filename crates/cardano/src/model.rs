@@ -1501,7 +1501,6 @@ pub struct RollingStats {
     #[n(21)]
     #[cbor(default)]
     pub treasury_mirs: Lovelace,
-
 }
 
 impl TransitionDefault for RollingStats {

@@ -96,7 +96,10 @@ pub use state::*;
 pub use wal::*;
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct EraCbor(#[n(0)] pub Era, #[cbor(n(1), with = "minicbor::bytes")] pub Cbor);
+pub struct EraCbor(
+    #[n(0)] pub Era,
+    #[cbor(n(1), with = "minicbor::bytes")] pub Cbor,
+);
 
 impl EraCbor {
     pub fn era(&self) -> Era {

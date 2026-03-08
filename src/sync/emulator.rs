@@ -8,8 +8,8 @@ use pallas::ledger::traverse::{ComputeHash, Era, MultiEraBlock, MultiEraTx};
 use pallas::network::miniprotocols::chainsync::Tip;
 use tracing::info;
 
-use crate::adapters::WalAdapter;
 use crate::adapters::storage::MempoolBackend;
+use crate::adapters::WalAdapter;
 use crate::prelude::*;
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;

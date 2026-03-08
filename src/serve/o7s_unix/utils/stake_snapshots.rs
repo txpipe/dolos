@@ -1,6 +1,6 @@
 use crate::prelude::*;
-use dolos_cardano::{load_epoch, load_era_summary, AccountState, EraProtocol, PoolState};
 use dolos_cardano::FixedNamespace as _;
+use dolos_cardano::{load_epoch, load_era_summary, AccountState, EraProtocol, PoolState};
 use dolos_core::StateStore;
 use pallas::codec::minicbor;
 use pallas::codec::utils::{AnyCbor, Bytes, KeyValuePairs, TagWrap};

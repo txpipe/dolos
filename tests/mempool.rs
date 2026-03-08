@@ -100,7 +100,10 @@ fn assert_drop_after_threshold<S: MempoolStore>(store: &S) {
     }
 
     let dropped = find_in_finalized(store, &hash);
-    assert!(dropped.is_some(), "dropped tx should appear in the finalized log");
+    assert!(
+        dropped.is_some(),
+        "dropped tx should appear in the finalized log"
+    );
     assert_eq!(
         dropped.unwrap().stage,
         MempoolTxStage::Dropped,
@@ -118,13 +121,7 @@ fn assert_confirm_resets_non_confirmations<S: MempoolStore>(store: &S) {
 
     // One non-confirmation (not in seen or unseen)
     store
-        .confirm(
-            &test_point(1),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
+        .confirm(&test_point(1), &[], &[], FINALIZE_THRESHOLD, DROP_THRESHOLD)
         .unwrap();
 
     let status = store.check_status(&hash);
@@ -150,13 +147,7 @@ fn assert_confirm_resets_non_confirmations<S: MempoolStore>(store: &S) {
 
     // Another non-confirmation should NOT drop (counter was reset)
     store
-        .confirm(
-            &test_point(3),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
+        .confirm(&test_point(3), &[], &[], FINALIZE_THRESHOLD, DROP_THRESHOLD)
         .unwrap();
 
     let status = store.check_status(&hash);
@@ -269,7 +260,10 @@ fn assert_re_confirm_after_rollback<S: MempoolStore>(store: &S) {
     }
 
     let finalized = find_in_finalized(store, &hash);
-    assert!(finalized.is_some(), "re-submitted tx should appear in finalized log");
+    assert!(
+        finalized.is_some(),
+        "re-submitted tx should appear in finalized log"
+    );
     assert_eq!(
         finalized.unwrap().stage,
         MempoolTxStage::Finalized,
@@ -317,7 +311,10 @@ fn assert_not_finalized_before_threshold<S: MempoolStore>(store: &S) {
         .unwrap();
 
     let finalized = find_in_finalized(store, &hash);
-    assert!(finalized.is_some(), "tx should be in finalized log after threshold");
+    assert!(
+        finalized.is_some(),
+        "tx should be in finalized log after threshold"
+    );
     assert_eq!(finalized.unwrap().stage, MempoolTxStage::Finalized);
 }
 
@@ -330,13 +327,7 @@ fn assert_not_dropped_before_threshold<S: MempoolStore>(store: &S) {
 
     // 1 non-confirmation
     store
-        .confirm(
-            &test_point(1),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
+        .confirm(&test_point(1), &[], &[], FINALIZE_THRESHOLD, DROP_THRESHOLD)
         .unwrap();
 
     let status = store.check_status(&hash);
@@ -353,13 +344,7 @@ fn assert_not_dropped_before_threshold<S: MempoolStore>(store: &S) {
 
     // 2nd non-confirmation drops
     store
-        .confirm(
-            &test_point(2),
-            &[],
-            &[],
-            FINALIZE_THRESHOLD,
-            DROP_THRESHOLD,
-        )
+        .confirm(&test_point(2), &[], &[], FINALIZE_THRESHOLD, DROP_THRESHOLD)
         .unwrap();
 
     let dropped = find_in_finalized(store, &hash);

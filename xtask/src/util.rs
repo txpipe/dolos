@@ -17,11 +17,10 @@ pub fn resolve_path(base: &Path, path: &Path) -> PathBuf {
 
 /// Recursively copy a directory tree from `src` to `dst`.
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)
-        .with_context(|| format!("creating dir: {}", dst.display()))?;
+    std::fs::create_dir_all(dst).with_context(|| format!("creating dir: {}", dst.display()))?;
 
-    for entry in std::fs::read_dir(src)
-        .with_context(|| format!("reading dir: {}", src.display()))?
+    for entry in
+        std::fs::read_dir(src).with_context(|| format!("reading dir: {}", src.display()))?
     {
         let entry = entry?;
         let src_path = entry.path();
@@ -31,11 +30,7 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path).with_context(|| {
-                format!(
-                    "copying {} -> {}",
-                    src_path.display(),
-                    dst_path.display()
-                )
+                format!("copying {} -> {}", src_path.display(), dst_path.display())
             })?;
         }
     }

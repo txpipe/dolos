@@ -2,8 +2,8 @@ use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
 
 use dolos_core::{
-    config::FjallStateConfig, EntityKey, NamespaceType, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter,
+    config::FjallStateConfig, EntityKey, NamespaceType, StateSchema, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter,
 };
 
 #[global_allocator]
@@ -52,7 +52,10 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
     );
 
     let count = iter.count();
-    assert_eq!(count, ENTITY_COUNT as usize, "iterator should yield all entities");
+    assert_eq!(
+        count, ENTITY_COUNT as usize,
+        "iterator should yield all entities"
+    );
 }
 
 #[test]

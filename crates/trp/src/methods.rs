@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use tx3_resolver::trp::{
     ChainPoint, CheckStatusResponse, DumpLogsResponse, InflightTx, PeekInflightResponse,
-    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope,
-    TxLog, TxStatus, TxWitness,
+    PeekPendingResponse, PendingTx, ResolveParams, SubmitParams, SubmitResponse, TxEnvelope, TxLog,
+    TxStatus, TxWitness,
 };
 
 use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
@@ -639,8 +639,7 @@ mod tests {
 
         // 4. Verify the tx is in the mempool as pending
         let tx_hash_bytes = hex::decode(&response.hash).unwrap();
-        let tx_hash: pallas::crypto::hash::Hash<32> =
-            tx_hash_bytes.as_slice().try_into().expect("invalid hash length");
+        let tx_hash: pallas::crypto::hash::Hash<32> = tx_hash_bytes.as_slice().into();
         let status = MempoolStore::check_status(context.domain.mempool(), &tx_hash);
         assert_eq!(status.stage, MempoolTxStage::Pending);
     }

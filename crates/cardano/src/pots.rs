@@ -382,7 +382,10 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     // treasury pot
     pots.treasury = add!(pots.treasury, incentives.treasury_tax);
     pots.treasury = add!(pots.treasury, delta.incentives_back_to_treasury());
-    pots.treasury = add!(pots.treasury, delta.pool_invalid_refund_count * pots.deposit_per_pool);
+    pots.treasury = add!(
+        pots.treasury,
+        delta.pool_invalid_refund_count * pots.deposit_per_pool
+    );
     pots.treasury = add!(pots.treasury, delta.proposal_invalid_refunds);
     pots.treasury = add!(pots.treasury, delta.treasury_donations);
     pots.treasury = sub!(pots.treasury, delta.treasury_mirs);
@@ -394,7 +397,10 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     // rewards pot
     pots.rewards = add!(pots.rewards, delta.effective_rewards);
     pots.rewards = sub!(pots.rewards, delta.withdrawals);
-    pots.rewards = add!(pots.rewards, delta.pool_refund_count * pots.deposit_per_pool);
+    pots.rewards = add!(
+        pots.rewards,
+        delta.pool_refund_count * pots.deposit_per_pool
+    );
     pots.rewards = add!(pots.rewards, delta.proposal_refunds);
     pots.rewards = add!(pots.rewards, delta.reserve_mirs);
     pots.rewards = add!(pots.rewards, delta.treasury_mirs);

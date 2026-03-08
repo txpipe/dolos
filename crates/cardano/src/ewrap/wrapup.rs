@@ -132,11 +132,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     let invalid_reserve_mirs = ctx.invalid_reserve_mirs;
 
     // Log comparison with rolling stats for debugging
-    let rolling_treasury_mirs = ctx
-        .ending_state()
-        .rolling
-        .unwrap_live()
-        .treasury_mirs;
+    let rolling_treasury_mirs = ctx.ending_state().rolling.unwrap_live().treasury_mirs;
     if treasury_mirs != rolling_treasury_mirs {
         tracing::info!(
             epoch = ctx.ending_state().number,

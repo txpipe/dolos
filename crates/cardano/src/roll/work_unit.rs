@@ -8,8 +8,6 @@ use std::sync::Arc;
 use dolos_core::{Domain, DomainError, Genesis, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
 use tracing::{debug, info};
 
-use dolos_core::config::CardanoConfig;
-
 use crate::roll::batch::WorkBatch;
 use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoLogic};
 
@@ -24,9 +22,6 @@ pub struct RollWorkUnit {
     /// Whether this is live mode (emit tip notifications)
     live_mode: bool,
 
-    /// Chain config needed for delta computation
-    config: CardanoConfig,
-
     /// Cached era info needed for delta computation
     cache: Cache,
 }
@@ -37,14 +32,12 @@ impl RollWorkUnit {
         batch: WorkBatch,
         genesis: Arc<Genesis>,
         live_mode: bool,
-        config: CardanoConfig,
         cache: Cache,
     ) -> Self {
         Self {
             batch,
             genesis,
             live_mode,
-            config,
             cache,
         }
     }
@@ -59,16 +52,12 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(
-            blocks = self.batch.blocks.len(),
-            "loading roll batch UTxOs"
-        );
+        debug!(blocks = self.batch.blocks.len(), "loading roll batch UTxOs");
 
         self.batch.load_utxos(domain)?;
         self.batch.decode_utxos()?;
 
         roll::compute_delta::<D>(
-            &self.config,
             self.genesis.clone(),
             &self.cache,
             domain.state(),
@@ -155,7 +144,13 @@ where
             .iter()
             .map(|block| MempoolUpdate {
                 point: block.point(),
-                seen_txs: block.block.view().txs().iter().map(|tx| tx.hash()).collect(),
+                seen_txs: block
+                    .block
+                    .view()
+                    .txs()
+                    .iter()
+                    .map(|tx| tx.hash())
+                    .collect(),
             })
             .collect()
     }

@@ -43,19 +43,6 @@ force_protocol = 2
 type = "cardano"
 stop_epoch = 400
 
-[chain.track]
-account_state = true
-asset_state = true
-pool_state = true
-epoch_state = true
-datum_state = true
-proposal_logs = true
-tx_logs = true
-account_logs = true
-pool_logs = true
-epoch_logs = true
-drep_state = true
-
 [[chain.custom_utxos]]
 ref = ["8d910e3a410a353787d50a708e24c6ba2cc2b6b86ec6d8cb5bf9bbec20bfc937", 0]
 era = 7
@@ -280,34 +267,6 @@ Custom UTxOs can be injected at startup (useful for testing). Each entry is an o
 - `ref`: transaction hash and output index tuple.
 - `era`: optional era number for the CBOR payload.
 - `cbor`: CBOR bytes for the UTxO output.
-
-## `chain.track` section
-
-| property        | type    | default |
-| --------------- | ------- | ------- |
-| account_state   | boolean | true    |
-| asset_state     | boolean | true    |
-| pool_state      | boolean | true    |
-| epoch_state     | boolean | true    |
-| drep_state      | boolean | true    |
-| datum_state     | boolean | true    |
-| proposal_logs   | boolean | true    |
-| tx_logs         | boolean | true    |
-| account_logs    | boolean | true    |
-| pool_logs       | boolean | true    |
-| epoch_logs      | boolean | true    |
-
-- `account_state`: Tracks account state for stake addresses.
-- `asset_state`: Monitors the state of assets.
-- `pool_state`: Keeps track of the state of pools.
-- `epoch_state`: Tracks the state of epochs.
-- `drep_state`: Keeps track of DRep registration state.
-- `datum_state`: Keeps track of datum entries.
-- `proposal_logs`: Tracks governance proposal logs.
-- `tx_logs`: Tracks transaction logs for historical lookups.
-- `account_logs`: Tracks account history logs.
-- `pool_logs`: Tracks pool history logs.
-- `epoch_logs`: Tracks epoch history logs.
 
 ## `sync` section
 

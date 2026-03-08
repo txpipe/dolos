@@ -23,11 +23,11 @@ use dolos_core::{
         MempoolStoreConfig, RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    IndexDelta, IndexError, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry,
-    LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace,
-    RawBlock, StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
-    TagDimension, TxHash, TxStatus, TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, IndexDelta, IndexError,
+    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry, LogValue, MempoolError,
+    MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxHash, TxStatus,
+    TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -1091,10 +1091,29 @@ impl MempoolStore for MempoolBackend {
         }
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(
+        &self,
+        point: &ChainPoint,
+        seen_txs: &[TxHash],
+        unseen_txs: &[TxHash],
+        finalize_threshold: u32,
+        drop_threshold: u32,
+    ) -> Result<(), MempoolError> {
         match self {
-            Self::Ephemeral(s) => s.confirm(point, seen_txs, unseen_txs, finalize_threshold, drop_threshold),
-            Self::Redb(s) => s.confirm(point, seen_txs, unseen_txs, finalize_threshold, drop_threshold),
+            Self::Ephemeral(s) => s.confirm(
+                point,
+                seen_txs,
+                unseen_txs,
+                finalize_threshold,
+                drop_threshold,
+            ),
+            Self::Redb(s) => s.confirm(
+                point,
+                seen_txs,
+                unseen_txs,
+                finalize_threshold,
+                drop_threshold,
+            ),
         }
     }
 

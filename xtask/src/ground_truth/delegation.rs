@@ -50,9 +50,7 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<PoolDelegationRo
             let pool_hash: String = row.get(1);
             let amount: i64 = row.get(2);
 
-            let entry = pools
-                .entry(pool_bech32)
-                .or_insert_with(|| (pool_hash, 0));
+            let entry = pools.entry(pool_bech32).or_insert_with(|| (pool_hash, 0));
             entry.1 += amount as u64;
         }
 
