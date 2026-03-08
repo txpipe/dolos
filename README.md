@@ -83,6 +83,8 @@ Data is organized into four isolated storage layers: State (current ledger), Arc
 
 ## Quick Start
 
+We highly recommend following the [quick start guide](https://dolos.txpipe.io) on our documentation site for detailed step-by-step instructions.
+
 ```bash
 # macOS
 brew install txpipe/tap/dolos
