@@ -18,32 +18,30 @@ Cardano nodes traditionally assume one of two roles: block producer or relay. Do
 
 Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N) mini-protocols (via [Pallas](https://github.com/txpipe/pallas)). It relies on honest upstream peers rather than performing full consensus validation, enabling significant resource savings.
 
+**Choose your storage profile:**
+
+| Profile | Description | Best For |
+|---------|-------------|----------|
+| **Ledger-only** | Current state only (UTxO set, pools, protocol params) — minimal disk | Services needing only current ledger state |
+| **Sliding history** | Configurable retention window for recent data | Most dApps that need recent history |
+| **Full archive** | Complete chain history from genesis | Explorers, analytics, archival |
+
+**Choose your API surface:**
+
+| API | Protocol | Best For |
+|-----|----------|----------|
+| **MiniBF** | REST (Blockfrost-compatible) | Existing Blockfrost integrations, wallets, SDKs |
+| **MiniKupo** | HTTP (Kupo-compatible) | Pattern-based UTxO matching, chain indexing |
+| **UTxO RPC** | gRPC / gRPC-Web | High-performance streaming, browser clients |
+| **TRP** | JSON-RPC (Tx3) | Transaction building with Tx3 framework |
+| **Ouroboros** | Node-to-Client | cardano-cli compatibility, Ogmios workflows |
+
+**Core capabilities:**
+
 - **Low resource footprint** — Runs with a small fraction of the memory and CPU required by a traditional Cardano node
-- **Rich API surface** — Everything needed to build dApps, wallets, and explorers: UTxOs, transactions, blocks, accounts, assets, pools, governance data, and scripts
 - **Full multi-era support** — Handles all Cardano eras from Byron through Conway, including full governance support (DReps, proposals, voting)
 
-## Operating Modes
-
-Dolos offers three distinct operating profiles, allowing you to choose the right trade-off between storage requirements and query capabilities:
-
-| Mode | Description | Best For |
-|------|-------------|----------|
-| **Ledger-only** | Current chain state only (UTxO set, pools, stake distribution, protocol params, reference scripts) — minimal disk footprint | Services that only need the current ledger state |
-| **Sliding history** | Configurable retention window for historical data (transactions, blocks, rewards, delegations within window) | Most dApps that need recent history |
-| **Full archive** | Complete chain history from genesis | Explorers, analytics, and archival services |
-
 ## Features
-
-### APIs & Integrations
-
-Dolos provides multiple interfaces for accessing Cardano data, making it compatible with existing tooling:
-
-- **Blockfrost-compatible REST API (MiniBF)** — Drop-in replacement for Blockfrost with endpoints for blocks, transactions, accounts, addresses, assets, pools, governance, and scripts
-- **Kupo-compatible HTTP (MiniKupo)** — Pattern-based UTxO matching for chain-indexing workflows
-- **gRPC (UTxO RPC)** — High-performance streaming API following the [UTxO RPC](https://utxorpc.org) specification, with gRPC-Web support for browser clients
-- **TRP (Transaction Resolver Protocol)** — JSON-RPC endpoint for Tx3 framework integration
-- **Ogmios compatibility** — Supports Ogmios-style queries for familiar local state query workflows
-- **Cardano CLI compatibility** — Use `cardano-cli` local state queries against Dolos
 
 ### Data Capabilities
 
