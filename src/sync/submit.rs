@@ -190,7 +190,12 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
 
-                let txs: Vec<_> = stage.mempool.peek_pending().into_iter().take(*req as usize).collect();
+                let txs: Vec<_> = stage
+                    .mempool
+                    .peek_pending()
+                    .into_iter()
+                    .take(*req as usize)
+                    .collect();
                 self.propagate_txs(&stage.mempool, txs).await?;
             }
             Request::Txs(ids) => {

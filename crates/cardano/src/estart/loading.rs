@@ -64,10 +64,7 @@ impl super::WorkContext {
         let avvm_utxos = pallas::ledger::configs::byron::genesis_avvm_utxos(&genesis.byron);
 
         // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
-        let refs: Vec<TxoRef> = avvm_utxos
-            .iter()
-            .map(|(tx, _, _)| TxoRef(*tx, 0))
-            .collect();
+        let refs: Vec<TxoRef> = avvm_utxos.iter().map(|(tx, _, _)| TxoRef(*tx, 0)).collect();
 
         // Query the UTxO set to find which are still unspent
         let remaining = state.get_utxos(refs)?;
@@ -97,16 +94,15 @@ impl super::WorkContext {
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
 
         // Check for AVVM reclamation at Shelley→Allegra boundary
-        let avvm_reclamation =
-            if let Some(transition) = ended_state.pparams.era_transition() {
-                if transition.entering_allegra() {
-                    Self::compute_avvm_reclamation::<D>(state, &genesis)?
-                } else {
-                    0
-                }
+        let avvm_reclamation = if let Some(transition) = ended_state.pparams.era_transition() {
+            if transition.entering_allegra() {
+                Self::compute_avvm_reclamation::<D>(state, &genesis)?
             } else {
                 0
-            };
+            }
+        } else {
+            0
+        };
 
         let mut boundary = Self {
             ended_state,

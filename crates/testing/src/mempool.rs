@@ -50,7 +50,14 @@ impl MempoolStore for MockMempoolStore {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(
+        &self,
+        _point: &ChainPoint,
+        _seen: &[TxHash],
+        _unseen: &[TxHash],
+        _finalize_threshold: u32,
+        _drop_threshold: u32,
+    ) -> Result<(), MempoolError> {
         Ok(())
     }
 
@@ -64,7 +71,10 @@ impl MempoolStore for MockMempoolStore {
     }
 
     fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
-        dolos_core::MempoolPage { items: vec![], next_cursor: None }
+        dolos_core::MempoolPage {
+            items: vec![],
+            next_cursor: None,
+        }
     }
 
     fn subscribe(&self) -> Self::Stream {

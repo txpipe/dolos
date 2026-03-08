@@ -488,7 +488,14 @@ mod tests {
             vec![]
         }
 
-        fn confirm(&self, _point: &ChainPoint, _seen: &[TxHash], _unseen: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+        fn confirm(
+            &self,
+            _point: &ChainPoint,
+            _seen: &[TxHash],
+            _unseen: &[TxHash],
+            _finalize_threshold: u32,
+            _drop_threshold: u32,
+        ) -> Result<(), MempoolError> {
             Ok(())
         }
 
@@ -502,7 +509,10 @@ mod tests {
         }
 
         fn dump_finalized(&self, _cursor: u64, _limit: usize) -> MempoolPage {
-            MempoolPage { items: vec![], next_cursor: None }
+            MempoolPage {
+                items: vec![],
+                next_cursor: None,
+            }
         }
 
         fn subscribe(&self) -> Self::Stream {

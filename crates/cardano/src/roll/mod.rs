@@ -1,9 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{
-    config::{CardanoConfig, TrackConfig},
-    ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef,
-};
+use dolos_core::{ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
@@ -184,29 +181,7 @@ pub trait BlockVisitor {
     }
 }
 
-macro_rules! maybe_visit {
-    ($self:expr, $deltas:expr, $visitor:ident, $method:ident, $($args:tt)*) => {{
-        if $self.config.$visitor {
-            $self.$visitor.$method(&mut $deltas, $($args)*)?;
-        }
-    }};
-}
-
-macro_rules! visit_all {
-    ($self:ident, $deltas:expr, $method:ident, $($args:tt)*) => {
-        maybe_visit!($self, $deltas, account_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, asset_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, datum_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, drep_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, epoch_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, pool_state, $method, $($args)*);
-        maybe_visit!($self, $deltas, tx_logs, $method, $($args)*);
-        maybe_visit!($self, $deltas, proposal_logs, $method, $($args)*);
-    };
-}
-
 pub struct DeltaBuilder<'a> {
-    config: TrackConfig,
     genesis: Arc<Genesis>,
     work: &'a mut WorkBlock,
     active_params: &'a PParamsSet,
@@ -228,7 +203,6 @@ pub struct DeltaBuilder<'a> {
 impl<'a> DeltaBuilder<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        config: TrackConfig,
         genesis: Arc<Genesis>,
         protocol: u16,
         active_params: &'a PParamsSet,
@@ -238,7 +212,6 @@ impl<'a> DeltaBuilder<'a> {
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
     ) -> Self {
         Self {
-            config,
             genesis,
             work,
             active_params,
@@ -262,20 +235,95 @@ impl<'a> DeltaBuilder<'a> {
         let block = block.view();
         let mut deltas = WorkDeltas::default();
 
-        visit_all!(
-            self,
-            deltas,
-            visit_root,
+        self.account_state.visit_root(
+            &mut deltas,
             block,
             &self.genesis,
             self.active_params,
             self.epoch,
             self.epoch_start,
             self.protocol,
-        );
+        )?;
+        self.asset_state.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.datum_state.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.drep_state.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.epoch_state.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.pool_state.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.tx_logs.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
+        self.proposal_logs.visit_root(
+            &mut deltas,
+            block,
+            &self.genesis,
+            self.active_params,
+            self.epoch,
+            self.epoch_start,
+            self.protocol,
+        )?;
 
         for (order, tx) in block.txs().iter().enumerate() {
-            visit_all!(self, deltas, visit_tx, block, &tx, &self.utxos);
+            self.account_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.asset_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.datum_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.drep_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.epoch_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.pool_state
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.tx_logs.visit_tx(&mut deltas, block, tx, self.utxos)?;
+            self.proposal_logs
+                .visit_tx(&mut deltas, block, tx, self.utxos)?;
 
             for input in tx.consumes() {
                 let txoref = TxoRef::from(&input);
@@ -285,57 +333,199 @@ impl<'a> DeltaBuilder<'a> {
                 })?;
 
                 resolved.with_dependent(|_, resolved| {
-                    visit_all!(self, deltas, visit_input, block, &tx, &input, &resolved);
+                    self.account_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.asset_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.datum_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.drep_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.epoch_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.pool_state
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.tx_logs
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
+                    self.proposal_logs
+                        .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     Result::<_, ChainError>::Ok(())
                 })?;
             }
 
             for (index, output) in tx.produces() {
-                visit_all!(
-                    self,
-                    deltas,
-                    visit_output,
-                    block,
-                    &tx,
-                    index as u32,
-                    &output
-                );
+                self.account_state
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.asset_state
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.datum_state
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.drep_state
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.epoch_state
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.pool_state
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.tx_logs
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
+                self.proposal_logs
+                    .visit_output(&mut deltas, block, tx, index as u32, &output)?;
             }
 
             for mint in tx.mints() {
-                visit_all!(self, deltas, visit_mint, block, &tx, &mint);
+                self.account_state
+                    .visit_mint(&mut deltas, block, tx, &mint)?;
+                self.asset_state.visit_mint(&mut deltas, block, tx, &mint)?;
+                self.datum_state.visit_mint(&mut deltas, block, tx, &mint)?;
+                self.drep_state.visit_mint(&mut deltas, block, tx, &mint)?;
+                self.epoch_state.visit_mint(&mut deltas, block, tx, &mint)?;
+                self.pool_state.visit_mint(&mut deltas, block, tx, &mint)?;
+                self.tx_logs.visit_mint(&mut deltas, block, tx, &mint)?;
+                self.proposal_logs
+                    .visit_mint(&mut deltas, block, tx, &mint)?;
             }
 
             for cert in tx.certs() {
-                visit_all!(self, deltas, visit_cert, block, &tx, &order, &cert,);
+                self.account_state
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.asset_state
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.datum_state
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.drep_state
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.epoch_state
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.pool_state
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.tx_logs
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                self.proposal_logs
+                    .visit_cert(&mut deltas, block, tx, &order, &cert)?;
             }
 
             for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {
-                visit_all!(self, deltas, visit_withdrawal, block, &tx, &account, amount);
+                self.account_state
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.asset_state
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.datum_state
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.drep_state
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.epoch_state
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.pool_state
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.tx_logs
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
+                self.proposal_logs
+                    .visit_withdrawal(&mut deltas, block, tx, account, amount)?;
             }
 
             if let Some(update) = tx.update() {
-                visit_all!(self, deltas, visit_update, block, Some(tx), &update);
+                self.account_state
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.asset_state
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.datum_state
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.drep_state
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.epoch_state
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.pool_state
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.tx_logs
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
+                self.proposal_logs
+                    .visit_update(&mut deltas, block, Some(tx), &update)?;
             }
 
             for datum in tx.plutus_data() {
-                visit_all!(self, deltas, visit_datums, block, &tx, &datum);
+                self.account_state
+                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.asset_state
+                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.datum_state
+                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.drep_state
+                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.epoch_state
+                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.pool_state
+                    .visit_datums(&mut deltas, block, tx, datum)?;
+                self.tx_logs.visit_datums(&mut deltas, block, tx, datum)?;
+                self.proposal_logs
+                    .visit_datums(&mut deltas, block, tx, datum)?;
             }
 
             for (idx, proposal) in tx.gov_proposals().iter().enumerate() {
-                visit_all!(self, deltas, visit_proposal, block, &tx, &proposal, idx);
+                self.account_state
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.asset_state
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.datum_state
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.drep_state
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.epoch_state
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.pool_state
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.tx_logs
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
+                self.proposal_logs
+                    .visit_proposal(&mut deltas, block, tx, proposal, idx)?;
             }
 
             for redeemer in tx.redeemers() {
-                visit_all!(self, deltas, visit_redeemers, block, &tx, &redeemer);
+                self.account_state
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.asset_state
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.datum_state
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.drep_state
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.epoch_state
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.pool_state
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.tx_logs
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
+                self.proposal_logs
+                    .visit_redeemers(&mut deltas, block, tx, &redeemer)?;
             }
         }
 
         if let Some(update) = block.update() {
-            visit_all!(self, deltas, visit_update, block, None, &update);
+            self.account_state
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.asset_state
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.datum_state
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.drep_state
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.epoch_state
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.pool_state
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.tx_logs
+                .visit_update(&mut deltas, block, None, &update)?;
+            self.proposal_logs
+                .visit_update(&mut deltas, block, None, &update)?;
         }
 
-        visit_all!(self, deltas, flush,);
+        self.account_state.flush(&mut deltas)?;
+        self.asset_state.flush(&mut deltas)?;
+        self.datum_state.flush(&mut deltas)?;
+        self.drep_state.flush(&mut deltas)?;
+        self.epoch_state.flush(&mut deltas)?;
+        self.pool_state.flush(&mut deltas)?;
+        self.tx_logs.flush(&mut deltas)?;
+        self.proposal_logs.flush(&mut deltas)?;
 
         self.work.deltas = deltas;
 
@@ -345,7 +535,6 @@ impl<'a> DeltaBuilder<'a> {
 
 #[instrument(name = "roll", skip_all)]
 pub fn compute_delta<D: Domain>(
-    config: &CardanoConfig,
     genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
@@ -367,7 +556,6 @@ pub fn compute_delta<D: Domain>(
 
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
-            config.track.clone(),
             genesis.clone(),
             *protocol,
             &active_params,

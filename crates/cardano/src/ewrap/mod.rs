@@ -182,7 +182,6 @@ impl BoundaryWork {
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
     }
-
 }
 
 #[instrument("epoch", skip_all, fields(slot = %slot))]

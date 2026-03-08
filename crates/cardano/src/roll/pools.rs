@@ -159,8 +159,6 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
             entity.blocks_minted_total += self.count;
             let live = entity.snapshot.unwrap_live_mut();
             live.blocks_minted += self.count;
-
-
         }
     }
 

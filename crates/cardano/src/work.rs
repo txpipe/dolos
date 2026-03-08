@@ -449,13 +449,8 @@ mod tests {
         // Sequence that crosses RUPD boundary (slot 40) and epoch boundary (slot 100)
         let slots: Vec<BlockSlot> = vec![0, 10, 30, 50, 70, 90, 110, 130];
 
-        let full = feed_drain_with_cursors(
-            WorkBuffer::Empty,
-            &slots,
-            &eras,
-            stability_window,
-            None,
-        );
+        let full =
+            feed_drain_with_cursors(WorkBuffer::Empty, &slots, &eras, stability_window, None);
 
         let full_tags: Vec<_> = full.iter().map(|(t, _)| t.clone()).collect();
 
@@ -468,23 +463,15 @@ mod tests {
             // so we replay from that slot inclusive. Specific cursors mean the block
             // at that slot was fully committed, so we replay strictly after.
             let (restart_buf, replay_slots) = match cursor {
-                ChainPoint::Origin => {
-                    (WorkBuffer::Empty, slots.to_vec())
-                }
+                ChainPoint::Origin => (WorkBuffer::Empty, slots.to_vec()),
                 ChainPoint::Slot(s) => {
-                    let filtered: Vec<_> = slots
-                        .iter()
-                        .copied()
-                        .filter(|&slot| slot >= *s)
-                        .collect();
+                    let filtered: Vec<_> =
+                        slots.iter().copied().filter(|&slot| slot >= *s).collect();
                     (WorkBuffer::Restart(cursor.clone()), filtered)
                 }
                 ChainPoint::Specific(s, _) => {
-                    let filtered: Vec<_> = slots
-                        .iter()
-                        .copied()
-                        .filter(|&slot| slot > *s)
-                        .collect();
+                    let filtered: Vec<_> =
+                        slots.iter().copied().filter(|&slot| slot > *s).collect();
                     (WorkBuffer::Restart(cursor.clone()), filtered)
                 }
             };
@@ -532,9 +519,7 @@ mod tests {
         );
 
         // Find the RUPD work unit
-        let rupd_idx = full
-            .iter()
-            .position(|(t, _)| matches!(t, WorkTag::Rupd(_)));
+        let rupd_idx = full.iter().position(|(t, _)| matches!(t, WorkTag::Rupd(_)));
 
         if let Some(idx) = rupd_idx {
             // The cursor at the Blocks before RUPD should allow RUPD to replay
@@ -601,9 +586,7 @@ mod tests {
                 restart_tags
             );
             assert!(
-                restart_tags
-                    .iter()
-                    .any(|t| matches!(t, WorkTag::EStart(_))),
+                restart_tags.iter().any(|t| matches!(t, WorkTag::EStart(_))),
                 "EStart should replay after restart. Got: {:?}",
                 restart_tags
             );

@@ -724,39 +724,6 @@ impl Default for TelemetryConfig {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct TrackConfig {
-    pub account_state: bool,
-    pub asset_state: bool,
-    pub pool_state: bool,
-    pub epoch_state: bool,
-    pub drep_state: bool,
-    pub datum_state: bool,
-    pub proposal_logs: bool,
-    pub tx_logs: bool,
-    pub account_logs: bool,
-    pub pool_logs: bool,
-    pub epoch_logs: bool,
-}
-
-impl Default for TrackConfig {
-    fn default() -> Self {
-        Self {
-            account_state: true,
-            asset_state: true,
-            pool_state: true,
-            epoch_state: true,
-            drep_state: true,
-            datum_state: true,
-            tx_logs: true,
-            account_logs: true,
-            pool_logs: true,
-            epoch_logs: true,
-            proposal_logs: true,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone)]
 pub struct CustomUtxo {
     #[serde(rename = "ref")]
     pub ref_: TxoRef,
@@ -766,9 +733,6 @@ pub struct CustomUtxo {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct CardanoConfig {
-    #[serde(default)]
-    pub track: TrackConfig,
-
     pub stop_epoch: Option<Epoch>,
 
     #[serde(default)]

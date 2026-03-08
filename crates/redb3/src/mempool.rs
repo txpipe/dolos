@@ -1140,7 +1140,9 @@ mod tests {
         assert!(status.confirmed_at.is_none());
 
         // Confirmed (1st confirmation)
-        store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).unwrap();
+        store
+            .confirm(&point, &[hash], &[], u32::MAX, u32::MAX)
+            .unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 1);
@@ -1148,14 +1150,18 @@ mod tests {
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Confirmed (2nd confirmation — confirmed_at stays the same)
-        store.confirm(&test_point_2(), &[hash], &[], u32::MAX, u32::MAX).unwrap();
+        store
+            .confirm(&test_point_2(), &[hash], &[], u32::MAX, u32::MAX)
+            .unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Confirmed));
         assert_eq!(status.confirmations, 2);
         assert_eq!(status.confirmed_at.as_ref().unwrap().slot(), point.slot());
 
         // Finalized — trigger via confirm with finalize_threshold=2
-        store.confirm(&test_point(), &[hash], &[], 2, u32::MAX).unwrap();
+        store
+            .confirm(&test_point(), &[hash], &[], 2, u32::MAX)
+            .unwrap();
         let status = store.check_status(&hash);
         assert!(matches!(status.stage, MempoolTxStage::Unknown));
         assert_eq!(status.confirmations, 0);
@@ -1182,9 +1188,13 @@ mod tests {
             store.receive(tx).unwrap();
             store.mark_inflight(&[hash]).unwrap();
             store.mark_acknowledged(&[hash]).unwrap();
-            store.confirm(&point, &[hash], &[], u32::MAX, u32::MAX).unwrap();
+            store
+                .confirm(&point, &[hash], &[], u32::MAX, u32::MAX)
+                .unwrap();
             // Second confirm with finalize_threshold=2 triggers finalization
-            store.confirm(&test_point_2(), &[hash], &[], 2, u32::MAX).unwrap();
+            store
+                .confirm(&test_point_2(), &[hash], &[], 2, u32::MAX)
+                .unwrap();
         }
 
         // Read all
@@ -1244,7 +1254,9 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Acknowledged);
 
         // Confirm h2
-        store.confirm(&test_point(), &[h2], &[], u32::MAX, u32::MAX).unwrap();
+        store
+            .confirm(&test_point(), &[h2], &[], u32::MAX, u32::MAX)
+            .unwrap();
         let listing = store.peek_inflight();
         assert_eq!(listing.len(), 3);
         let h2_stage = listing
@@ -1256,10 +1268,11 @@ mod tests {
         assert_eq!(h2_stage, MempoolTxStage::Confirmed);
 
         // Finalize h2 — second confirm with finalize_threshold=2
-        store.confirm(&test_point_2(), &[h2], &[], 2, u32::MAX).unwrap();
+        store
+            .confirm(&test_point_2(), &[h2], &[], 2, u32::MAX)
+            .unwrap();
         let listing = store.peek_inflight();
         assert_eq!(listing.len(), 2);
         assert!(!listing.iter().any(|tx| tx.hash == h2));
     }
-
 }

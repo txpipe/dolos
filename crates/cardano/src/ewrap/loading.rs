@@ -10,8 +10,8 @@ use crate::{
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
     rupd::{credential_to_key, RupdWork},
-    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState,
-    PendingRewardState, PoolState, ProposalState,
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
+    PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -370,8 +370,16 @@ impl BoundaryWork {
         }
 
         let pending_total: u64 = pending.values().map(|r| r.total_value()).sum();
-        let spendable_total: u64 = pending.values().filter(|r| r.is_spendable()).map(|r| r.total_value()).sum();
-        let unspendable_total: u64 = pending.values().filter(|r| !r.is_spendable()).map(|r| r.total_value()).sum();
+        let spendable_total: u64 = pending
+            .values()
+            .filter(|r| r.is_spendable())
+            .map(|r| r.total_value())
+            .sum();
+        let unspendable_total: u64 = pending
+            .values()
+            .filter(|r| !r.is_spendable())
+            .map(|r| r.total_value())
+            .sum();
         let spendable_count = pending.values().filter(|r| r.is_spendable()).count();
         let unspendable_count = pending.len() - spendable_count;
 

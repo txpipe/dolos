@@ -54,17 +54,11 @@ impl dolos_core::MempoolStore for Mempool {
     }
 
     fn has_pending(&self) -> bool {
-        self.pending
-            .read()
-            .map(|p| !p.is_empty())
-            .unwrap_or(false)
+        self.pending.read().map(|p| !p.is_empty()).unwrap_or(false)
     }
 
     fn peek_pending(&self) -> Vec<MempoolTx> {
-        self.pending
-            .read()
-            .map(|p| p.to_vec())
-            .unwrap_or_default()
+        self.pending.read().map(|p| p.to_vec()).unwrap_or_default()
     }
 
     fn mark_inflight(&self, _hashes: &[TxHash]) -> Result<(), MempoolError> {
@@ -83,7 +77,14 @@ impl dolos_core::MempoolStore for Mempool {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(
+        &self,
+        _point: &ChainPoint,
+        _seen_txs: &[TxHash],
+        _unseen_txs: &[TxHash],
+        _finalize_threshold: u32,
+        _drop_threshold: u32,
+    ) -> Result<(), MempoolError> {
         Ok(())
     }
 
@@ -107,7 +108,10 @@ impl dolos_core::MempoolStore for Mempool {
     }
 
     fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
-        dolos_core::MempoolPage { items: vec![], next_cursor: None }
+        dolos_core::MempoolPage {
+            items: vec![],
+            next_cursor: None,
+        }
     }
 
     fn subscribe(&self) -> Self::Stream {

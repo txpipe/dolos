@@ -6,9 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError,
-    EntityKey, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock,
-    StateStore, TipEvent, WorkUnit,
+    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EntityKey,
+    EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore,
+    TipEvent, WorkUnit,
 };
 
 use crate::{
@@ -304,7 +304,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
                     batch,
                     domain.genesis(),
                     true, // live mode
-                    self.config.clone(),
                     self.cache.clone(),
                 ))))
             }
@@ -347,8 +346,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
             })
             .collect::<Result<_, _>>()?;
 
-        let utxo_delta =
-            crate::utxoset::compute_undo_delta(blockv, &decoded_inputs).map_err(ChainError::from)?;
+        let utxo_delta = crate::utxoset::compute_undo_delta(blockv, &decoded_inputs)
+            .map_err(ChainError::from)?;
 
         let index_delta = crate::indexes::index_delta_from_utxo_delta(point, &utxo_delta);
 

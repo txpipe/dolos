@@ -20,7 +20,7 @@ pub struct Config {
     pub immutable_dir: PathBuf,
     /// Pre-loaded genesis data.
     pub genesis: Genesis,
-    /// Cardano chain config (stop_epoch, track, etc).
+    /// Cardano chain config (stop_epoch, custom_utxos, etc).
     pub chain: CardanoConfig,
     /// Fjall state store configuration.
     pub fjall_config: FjallStateConfig,
@@ -77,7 +77,14 @@ impl MempoolStore for Mempool {
         vec![]
     }
 
-    fn confirm(&self, _point: &ChainPoint, _seen_txs: &[TxHash], _unseen_txs: &[TxHash], _finalize_threshold: u32, _drop_threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(
+        &self,
+        _point: &ChainPoint,
+        _seen_txs: &[TxHash],
+        _unseen_txs: &[TxHash],
+        _finalize_threshold: u32,
+        _drop_threshold: u32,
+    ) -> Result<(), MempoolError> {
         Ok(())
     }
 
@@ -91,7 +98,10 @@ impl MempoolStore for Mempool {
     }
 
     fn dump_finalized(&self, _cursor: u64, _limit: usize) -> dolos_core::MempoolPage {
-        dolos_core::MempoolPage { items: vec![], next_cursor: None }
+        dolos_core::MempoolPage {
+            items: vec![],
+            next_cursor: None,
+        }
     }
 
     fn subscribe(&self) -> Self::Stream {

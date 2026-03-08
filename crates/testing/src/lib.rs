@@ -7,9 +7,7 @@ use pallas::{
         key::ed25519::{PublicKey, SecretKeyExtended},
     },
     ledger::{
-        addresses::{
-            Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
-        },
+        addresses::{Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart},
         primitives::{
             babbage::GenTransactionOutput,
             conway::{PostAlonzoTransactionOutput, Value},
@@ -65,11 +63,9 @@ pub const SHELLEY_PAYMENT_STAKE_ADDR: &str =
 pub const SHELLEY_PAYMENT_ONLY_ADDR: &str =
     "addr1vx2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzers66hrl8";
 /// Shelley stake address (mainnet)
-pub const STAKE_ADDR: &str =
-    "stake178phkx6acpnf78fuvxn0mkew3l0fd058hzquvz7w36x4gtcccycj5";
+pub const STAKE_ADDR: &str = "stake178phkx6acpnf78fuvxn0mkew3l0fd058hzquvz7w36x4gtcccycj5";
 /// Shelley script address (mainnet)
-pub const SCRIPT_ADDR: &str =
-    "addr1w9jx45flh83z6wuqypyash54mszwmdj8r64fydafxtfc6jgrw4rm3";
+pub const SCRIPT_ADDR: &str = "addr1w9jx45flh83z6wuqypyash54mszwmdj8r64fydafxtfc6jgrw4rm3";
 /// Byron-era address
 pub const BYRON_ADDR: &str =
     "37btjrVyb4KDXBNC4haBVPCrro8AQPHwvCMp3RFhhSVWwfFmZ6wwzSK6JK1hY6wHNmtrpTf1kdbva8TCneM2YsiXT7mrzT21EacHnPpz5YyUdj64na";
@@ -84,13 +80,7 @@ pub const ADDRESS_TYPE_VECTORS: [&str; 5] = [
 ];
 
 /// Key seeds for person addresses (offset to avoid collision with synthetic.rs which uses [3u8; 64])
-const PERSON_SEEDS: [[u8; 64]; 5] = [
-    [11u8; 64],
-    [12u8; 64],
-    [13u8; 64],
-    [14u8; 64],
-    [15u8; 64],
-];
+const PERSON_SEEDS: [[u8; 64]; 5] = [[11u8; 64], [12u8; 64], [13u8; 64], [14u8; 64], [15u8; 64]];
 
 fn make_person_address(seed: [u8; 64]) -> String {
     let sk = unsafe { SecretKeyExtended::from_bytes_unchecked(seed) };
@@ -105,9 +95,8 @@ fn make_person_address(seed: [u8; 64]) -> String {
     .unwrap()
 }
 
-static PERSON_ADDRESSES: LazyLock<[String; 5]> = LazyLock::new(|| {
-    PERSON_SEEDS.map(make_person_address)
-});
+static PERSON_ADDRESSES: LazyLock<[String; 5]> =
+    LazyLock::new(|| PERSON_SEEDS.map(make_person_address));
 
 impl TestAddress {
     pub fn everyone() -> Vec<Self> {

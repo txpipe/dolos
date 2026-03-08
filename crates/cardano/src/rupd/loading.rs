@@ -40,12 +40,7 @@ fn define_eta(
     let d_param = epoch.pparams.mark().unwrap().ensure_d()?;
     let epoch_length = epoch.pparams.mark().unwrap().ensure_epoch_length()?;
 
-    let eta = pots::calculate_eta(
-        pool_blocks,
-        pallas_ratio!(d_param),
-        f_param,
-        epoch_length,
-    );
+    let eta = pots::calculate_eta(pool_blocks, pallas_ratio!(d_param), f_param, epoch_length);
 
     Ok(eta)
 }
@@ -187,7 +182,6 @@ impl StakeSnapshot {
                 .map(|x| x.total_for_era(protocol))
                 .unwrap_or_default();
 
-
             snapshot.track_stake(&account.credential, *pool, stake)?;
         }
 
@@ -276,8 +270,7 @@ impl RupdWork {
             None
         };
 
-        let incentives =
-            define_epoch_incentives(genesis, &epoch, pots.reserves, blocks_made_opt)?;
+        let incentives = define_epoch_incentives(genesis, &epoch, pots.reserves, blocks_made_opt)?;
 
         let chain = crate::load_era_summary::<D>(state)?;
 
@@ -313,8 +306,8 @@ impl RupdWork {
             // slots into the epoch, capturing addrsRew (registered accounts) at that point.
             // Pre-Babbage pre-filtering uses this to exclude unregistered accounts from
             // reward computation.
-            let rupd_slot =
-                work.chain.epoch_start(current_epoch) + crate::utils::randomness_stability_window(genesis);
+            let rupd_slot = work.chain.epoch_start(current_epoch)
+                + crate::utils::randomness_stability_window(genesis);
 
             work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol, rupd_slot)?;
 
@@ -327,7 +320,6 @@ impl RupdWork {
                 active_stake = %work.snapshot.active_stake_sum,
                 "RUPD epoch info"
             );
-
         }
 
         Ok(work)

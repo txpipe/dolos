@@ -205,7 +205,10 @@ impl BlockVisitor for EpochStateVisitor {
         epoch_start: u64,
         _: u16,
     ) -> Result<(), ChainError> {
-        self.stats_delta = Some(EpochStatsUpdate { epoch, ..Default::default() });
+        self.stats_delta = Some(EpochStatsUpdate {
+            epoch,
+            ..Default::default()
+        });
         if let Some(stats) = self.stats_delta.as_mut() {
             let is_overlay = match pparams.ensure_d().ok() {
                 Some(d) => is_overlay_slot(epoch_start, &d, block.header().slot()),
@@ -313,7 +316,10 @@ impl BlockVisitor for EpochStateVisitor {
             let MoveInstantaneousReward { source, target, .. } = cert;
 
             match (source, target) {
-                (InstantaneousRewardSource::Reserves, InstantaneousRewardTarget::StakeCredentials(creds)) => {
+                (
+                    InstantaneousRewardSource::Reserves,
+                    InstantaneousRewardTarget::StakeCredentials(creds),
+                ) => {
                     for (cred, amount) in creds {
                         if amount < 0 {
                             tracing::warn!(
@@ -327,7 +333,10 @@ impl BlockVisitor for EpochStateVisitor {
                         self.stats_delta.as_mut().unwrap().reserve_mirs += amount;
                     }
                 }
-                (InstantaneousRewardSource::Treasury, InstantaneousRewardTarget::StakeCredentials(creds)) => {
+                (
+                    InstantaneousRewardSource::Treasury,
+                    InstantaneousRewardTarget::StakeCredentials(creds),
+                ) => {
                     for (cred, amount) in creds {
                         if amount < 0 {
                             tracing::warn!(

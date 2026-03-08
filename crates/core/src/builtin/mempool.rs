@@ -189,7 +189,14 @@ impl MempoolStore for EphemeralMempool {
             .collect()
     }
 
-    fn confirm(&self, point: &ChainPoint, seen_txs: &[TxHash], unseen_txs: &[TxHash], finalize_threshold: u32, drop_threshold: u32) -> Result<(), MempoolError> {
+    fn confirm(
+        &self,
+        point: &ChainPoint,
+        seen_txs: &[TxHash],
+        unseen_txs: &[TxHash],
+        finalize_threshold: u32,
+        drop_threshold: u32,
+    ) -> Result<(), MempoolError> {
         let mut state = self.state.write().unwrap();
 
         // Promote Propagated txs into the acknowledged map so the confirm
