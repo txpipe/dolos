@@ -1,56 +1,125 @@
 <div align="center">
-    <h1>Dolos: Cardano Data Node</h1>
-    <img alt="GitHub" src="https://img.shields.io/github/license/txpipe/dolos" />
-    <img alt="GitHub Workflow Status" src="https://img.shields.io/github/actions/workflow/status/txpipe/dolos/validate.yml" />
-    <hr/>
+  <img src="docs/assets/logo.png" alt="Dolos Logo" width="200">
+  <p><strong>A Cardano Data Node</strong></p>
+  
+  <a href="https://github.com/txpipe/dolos/blob/main/LICENSE"><img src="https://img.shields.io/github/license/txpipe/dolos?style=for-the-badge&color=blue" alt="License: Apache-2.0"></a>
+  <a href="https://github.com/txpipe/dolos/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/txpipe/dolos/ci.yml?style=for-the-badge&label=CI" alt="CI Status"></a>
+  <a href="https://crates.io/crates/dolos"><img src="https://img.shields.io/crates/v/dolos?style=for-the-badge&color=orange" alt="Crates.io"></a>
+  <a href="https://docs.txpipe.io/dolos"><img src="https://img.shields.io/badge/docs-docs.txpipe.io/dolos-blue?style=for-the-badge" alt="Documentation"></a>
+  
+  <br>
+  <br>
 </div>
 
-## Introduction
+> [!TIP]
+> Looking for detailed guides and tutorials? The complete user guide for Dolos is available at [docs.txpipe.io/dolos](https://docs.txpipe.io/dolos).
 
-Dolos is a new type of Cardano node, fine-tuned to solve a very narrow scope: keeping an updated copy of the ledger and replying to queries from trusted clients, while requiring a small fraction of the resources
+## What is Dolos?
 
-## Getting started
+Cardano nodes traditionally assume one of two roles: block producer or relay. Dolos introduces a third role: the **data node** — optimized for keeping an updated ledger and responding to queries while requiring a fraction of the resources.
 
-You can find comprehensive instructions on how to use Dolos in our [end-user documentation site](https://dolos.txpipe.io). The simplest way to get started is following our [quickstart guide](https://dolos.txpipe.io/quickstart).
+Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N) mini-protocols (via [Pallas](https://github.com/txpipe/pallas)). It relies on honest upstream peers rather than performing full consensus validation, enabling significant resource savings.
 
-## For Contributors
+## Why Dolos?
 
-PRs are welcome. Start by cloning the repo and using cargo to run a local node. We use `cargo release` for release management and `cliff` for changelog updates.
+- **Low resource footprint** — Runs with a small fraction of the memory and CPU required by a traditional Cardano node
+- **Rich API surface** — Multiple protocols to match your existing stack: REST, gRPC, HTTP, JSON-RPC, and Ouroboros
+- **Flexible storage mode** — Choose your data retention: ledger-only, sliding window, or full archive
+- **Full multi-era support** — Handles all Cardano eras from Byron through Conway, including full governance support (DReps, proposals, voting)
 
-### Running Tokio Console
+## Flexibility
 
-Some times is useful to observe the details of all running tokio tasks. Dolos supports [tokio console](https://github.com/tokio-rs/console) as a dev-only feature. Follow these instructions to get it running:
+**Choose your storage profile:**
 
-1. Ensure you have enable tokio traces in dolos.toml:
+| Profile | Description | Best For |
+|---------|-------------|----------|
+| **Ledger-only** | Current state only (UTxO set, pools, protocol params) — minimal disk | Services needing only current ledger state |
+| **Sliding history** | Configurable retention window for recent data | Most dApps that need recent history |
+| **Full archive** | Complete chain history from genesis | Explorers, analytics, archival |
 
-```toml
-[logging]
-max_level=trace
-include_tokio=true
+**Choose your API surface:**
+
+| API | Protocol | Best For |
+|-----|----------|----------|
+| **MiniBF** | REST (Blockfrost-compatible) | Existing Blockfrost integrations, wallets, SDKs |
+| **MiniKupo** | HTTP (Kupo-compatible) | Pattern-based UTxO matching, chain indexing |
+| **UTxO RPC** | gRPC / gRPC-Web | High-performance streaming, browser clients |
+| **TRP** | JSON-RPC (Tx3) | Transaction building with Tx3 framework |
+| **Ouroboros** | Node-to-Client | cardano-cli compatibility, Ogmios workflows |
+
+## Features
+
+### Data Capabilities
+
+- **Full historical reward logs** — Complete reward distribution calculations and epoch state management
+- **Stake distribution snapshots** — Historical stake snapshots and epoch boundary logic
+- **Pool registry & metadata** — Pool registration, retirement handling, and delegator tracking
+- **Asset registry** — Token and NFT metadata tracking with CIP-25 support
+- **Script indexing** — Support of search / retrieval of scripts / datums by hash
+- **Governance data** — DRep registration, proposals, and voting state (Conway era)
+
+### Developer Experience
+
+- **Mempool-aware transaction submit** — Tracks pending, inflight, and finalized UTxO states, enabling transaction chaining workflows
+- **Local devnet mode** — Ephemeral single-node network via for offline development
+- **Fast Mithril bootstrap** — Sync mainnet from Mithril snapshot in under 20 hours
+- **Dolos snapshots** — Export and load node state in minutes for rapid deployment
+- **Multi-platform binaries** — Native packages for macOS (Apple Silicon), Linux (ARM64/x64), Windows x64, plus Docker images
+
+### Operations & Observability
+
+- **Dual storage backends** — Choose between Redb v3 or Fjall LSM-tree based on your workload
+- **OpenTelemetry integration** — Distributed tracing with OTLP export
+- **Prometheus metrics** — Health and performance monitoring endpoints
+- **Rust implementation** — Memory safety, high performance, and small binary size
+
+## Architecture
+
+Dolos follows a modular, layered architecture:
+
+- **Core abstractions** (`dolos-core`) — Storage traits (State, Archive, WAL, Index), entity-delta system, and batch processing pipeline
+- **Cardano logic** (`dolos-cardano`) — Era-specific block processing, validation, reward calculation, and UTxO delta computation
+- **Storage backends** — Pluggable implementations: Redb v3 or Fjall LSM-tree
+- **Service layer** — gRPC, REST, and Ouroboros protocol servers
+
+Data is organized into four isolated storage layers: State (current ledger), Archive (historical blocks), WAL (crash recovery), and Index (fast lookups). State mutations use an entity-delta pattern enabling efficient rollbacks without full snapshots.
+
+## Quick Start
+
+We highly recommend following the [quick start guide](https://docs.txpipe.io/dolos) on our documentation site for detailed step-by-step instructions.
+
+```bash
+# macOS
+brew install txpipe/tap/dolos
+
+# Linux
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.sh | sh
+
+# Windows (PowerShell)
+powershell -c "irm https://github.com/txpipe/dolos/releases/latest/download/dolos-installer.ps1 | iex"
+
+# Docker
+docker run ghcr.io/txpipe/dolos:latest
+
+# Node
+npm install @txpipe/dolos
 ```
 
-2. Start Dolos' process using this command:
+Once installed:
 
-```
-RUSTFLAGS="--cfg tokio_unstable" cargo --features debug run
-```
-
-3. Start tokio console in a different terminal:
-
-```
-tokio-console
+```bash
+dolos init       # Interactive configuration and bootstrapping
 ```
 
-### Check build for windows (from non-windows box)
+📖 **Full documentation**: [https://docs.txpipe.io/dolos](https://docs.txpipe.io/dolos)
 
-1. Install the rustup target
+## Contributing
 
-```
-rustup target add x86_64-pc-windows-gnu
-```
+PRs are welcome! Please ensure your changes pass CI checks.
 
-2. Use the `check` (skips problematic link phase)
+See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for guidelines.
 
-```
-cargo check --target x86_64-pc-windows-gnu
-```
+## License
+
+Dolos is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
