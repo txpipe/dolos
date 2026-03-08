@@ -154,20 +154,4 @@ url = "https://minibf.local"
 max_scan_items = 3000
 ```
 
-Some endpoints require additional data tracked under the `chain.track` configuration. Tracking defaults to `true` for all fields, but you can disable specific datasets to reduce storage and CPU costs. Disabling a dataset can cause related endpoints to return `404` or empty results.
-
-Available `chain.track` flags:
-
-- `account_state`: Tracks account state for stake addresses.
-- `asset_state`: Monitors the state of assets.
-- `pool_state`: Keeps track of the state of pools.
-- `epoch_state`: Tracks the state of epochs.
-- `drep_state`: Tracks DRep registration state.
-- `datum_state`: Tracks datum entries.
-- `proposal_logs`: Tracks governance proposal logs.
-- `tx_logs`: Tracks transaction logs for historical lookups.
-- `account_logs`: Tracks account history logs.
-- `pool_logs`: Tracks pool history logs.
-- `epoch_logs`: Tracks epoch history logs.
-
 Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.
