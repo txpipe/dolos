@@ -1,6 +1,5 @@
 <div align="center">
   <img src="docs/assets/logo2.png" alt="Dolos Logo" width="200">
-  <h1>Dolos</h1>
   <p><strong>A Cardano Data Node</strong></p>
   
   <a href="https://github.com/txpipe/dolos/blob/main/LICENSE"><img src="https://img.shields.io/github/license/txpipe/dolos?style=for-the-badge&color=blue" alt="License: Apache-2.0"></a>
@@ -36,9 +35,11 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 | **TRP** | JSON-RPC (Tx3) | Transaction building with Tx3 framework |
 | **Ouroboros** | Node-to-Client | cardano-cli compatibility, Ogmios workflows |
 
-**Core capabilities:**
+## Why Dolos?
 
 - **Low resource footprint** — Runs with a small fraction of the memory and CPU required by a traditional Cardano node
+- **Rich API surface** — Multiple protocols to match your existing stack: REST, gRPC, HTTP, JSON-RPC, and Ouroboros
+- **Flexible storage mode** — Choose your data retention: ledger-only, sliding window, or full archive
 - **Full multi-era support** — Handles all Cardano eras from Byron through Conway, including full governance support (DReps, proposals, voting)
 
 ## Features
@@ -55,7 +56,7 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 ### Developer Experience
 
 - **Mempool-aware transaction submit** — Tracks pending, inflight, and finalized UTxO states, enabling transaction chaining workflows
-- **Local devnet mode** — Ephemeral single-node network via Tx3 tooling for offline development (resets on restart)
+- **Local devnet mode** — Ephemeral single-node network via for offline development
 - **Fast Mithril bootstrap** — Sync mainnet from Mithril snapshot in under 20 hours
 - **Dolos snapshots** — Export and load node state in minutes for rapid deployment
 - **Multi-platform binaries** — Native packages for macOS (Apple Silicon), Linux (ARM64/x64), Windows x64, plus Docker images
@@ -63,7 +64,7 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 ### Operations & Observability
 
 - **Dual storage backends** — Choose between Redb v3 or Fjall LSM-tree based on your workload
-- **OpenTelemetry integration** — Distributed tracing with OTLP export, focused on mempool operations
+- **OpenTelemetry integration** — Distributed tracing with OTLP export
 - **Prometheus metrics** — Health and performance monitoring endpoints
 - **Rust implementation** — Memory safety, high performance, and small binary size
 
@@ -93,26 +94,22 @@ powershell -c "irm https://github.com/txpipe/dolos/releases/latest/download/dolo
 
 # Docker
 docker run ghcr.io/txpipe/dolos:latest
+
+# Node
+npm install @txpipe/dolos
 ```
 
 Once installed:
 
 ```bash
-dolos init       # Interactive configuration
-dolos bootstrap  # Sync from Mithril snapshot
-dolos daemon     # Start the node
+dolos init       # Interactive configuration and bootstrapping
 ```
 
 📖 **Full documentation**: [https://dolos.txpipe.io](https://dolos.txpipe.io)
 
 ## Contributing
 
-PRs are welcome! Please ensure your changes pass CI checks:
-
-```bash
-cargo clippy --workspace --all-targets --all-features
-cargo test --workspace --all-features
-```
+PRs are welcome! Please ensure your changes pass CI checks.
 
 See [CONTRIBUTING.md](.github/CONTRIBUTING.md) for guidelines.
 
