@@ -111,11 +111,8 @@ where
 {
     let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
     let app = Router::new()
-        .route("/matches/{*pattern}", get(routes::matches::by_pattern::<D>))
-        .route("/datums/{datum-hash}", get(routes::datums::by_hash::<D>))
-        .route("/scripts/{script-hash}", get(routes::scripts::by_hash::<D>))
-        .route("/metadata/{slot-no}", get(routes::metadata::by_slot::<D>))
-        .route("/health", get(routes::health::health::<D>))
+        .merge(api_router::<D>())
+        .nest("/v1", api_router::<D>())
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -150,6 +147,18 @@ where
         });
 
     app.layer(NormalizePathLayer::trim_trailing_slash())
+}
+
+fn api_router<D>() -> Router<Facade<D>>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/matches/{*pattern}", get(routes::matches::by_pattern::<D>))
+        .route("/datums/{datum-hash}", get(routes::datums::by_hash::<D>))
+        .route("/scripts/{script-hash}", get(routes::scripts::by_hash::<D>))
+        .route("/metadata/{slot-no}", get(routes::metadata::by_slot::<D>))
+        .route("/health", get(routes::health::health::<D>))
 }
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
