@@ -62,21 +62,12 @@ pub enum SyncLimit {
     MaxBlocks(u64),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct SyncConfig {
     pub pull_batch_size: Option<usize>,
 
     #[serde(default)]
     pub sync_limit: SyncLimit,
-}
-
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            pull_batch_size: Some(100),
-            sync_limit: Default::default(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
