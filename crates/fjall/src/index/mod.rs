@@ -46,6 +46,14 @@ pub use history::SlotIterator as SlotIter;
 
 /// Default cache size in MB
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
+/// Default max journal size in MB for index store
+const DEFAULT_MAX_JOURNAL_SIZE_MB: usize = 1024;
+/// Default background worker threads for index store
+const DEFAULT_WORKER_THREADS: usize = 8;
+/// Default L0 compaction threshold for index store
+const DEFAULT_L0_THRESHOLD: u8 = 8;
+/// Default memtable size in MB for index store
+const DEFAULT_MEMTABLE_SIZE_MB: usize = 128;
 
 /// Keyspace names for index store
 mod keyspace_names {
@@ -91,22 +99,22 @@ impl IndexStore {
 
         let mut builder = Database::builder(path.as_ref()).cache_size(cache_bytes);
 
-        // Apply optional max journal size (otherwise use Fjall default of 512 MiB)
-        if let Some(journal_mb) = config.max_journal_size {
-            builder = builder.max_journaling_size((journal_mb as u64) * 1024 * 1024);
-        }
+        let max_journal_size = config
+            .max_journal_size
+            .unwrap_or(DEFAULT_MAX_JOURNAL_SIZE_MB);
+        builder = builder.max_journaling_size((max_journal_size as u64) * 1024 * 1024);
 
-        // Apply optional worker threads (otherwise use Fjall default of min(cores, 4))
-        if let Some(threads) = config.worker_threads {
-            builder = builder.worker_threads(threads);
-        }
+        let worker_threads = config.worker_threads.unwrap_or(DEFAULT_WORKER_THREADS);
+        builder = builder.worker_threads(worker_threads);
 
         let db = builder.open()?;
 
-        // Use Fjall default (false) if not specified
+        // Use false if not specified
         let flush = config.flush_on_commit.unwrap_or(false);
+        let l0_threshold = config.l0_threshold.unwrap_or(DEFAULT_L0_THRESHOLD);
+        let memtable_size_mb = config.memtable_size_mb.unwrap_or(DEFAULT_MEMTABLE_SIZE_MB);
 
-        Self::from_database(db, flush, config.l0_threshold, config.memtable_size_mb)
+        Self::from_database(db, flush, Some(l0_threshold), Some(memtable_size_mb))
     }
 
     /// Create an index store from an existing database

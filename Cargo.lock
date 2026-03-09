@@ -6698,8 +6698,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "fjall"
-version = "3.0.3"
-source = "git+https://github.com/fjall-rs/fjall.git?branch=recovery%2Fchange-flush-queueing#2443c7bcf6f53920efef836518d76e865974c4ca"
