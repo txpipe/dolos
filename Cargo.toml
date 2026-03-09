@@ -238,8 +238,5 @@ pre-release-hook = [
     "{{version}}",
 ]
 
-[patch.crates-io]
-fjall = { git = "https://github.com/fjall-rs/fjall.git", branch = "recovery/change-flush-queueing" }
-
 [lints.clippy]
 result_large_err = "allow"

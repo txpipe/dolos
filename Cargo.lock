@@ -1594,8 +1594,9 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
 name = "fjall"
-version = "3.0.3"
-source = "git+https://github.com/fjall-rs/fjall.git?branch=recovery%2Fchange-flush-queueing#2443c7bcf6f53920efef836518d76e865974c4ca"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40cb1eb0cef3792900897b32c8282f6417bc978f6af46400a2f14bf0e649ae30"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -2671,9 +2672,9 @@ checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "lsm-tree"
-version = "3.0.3"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "341e13fa389d2e24023c2c2c110ae556b29fa59a2e734872de295863e11a6741"
+checksum = "fc5fa40c207eed45c811085aaa1b0a25fead22e298e286081cd4b98785fe759b"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -6697,3 +6698,8 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
+
+[[patch.unused]]
+name = "fjall"
+version = "3.0.3"
+source = "git+https://github.com/fjall-rs/fjall.git?branch=recovery%2Fchange-flush-queueing#2443c7bcf6f53920efef836518d76e865974c4ca"
