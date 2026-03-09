@@ -42,3 +42,4 @@ max_level = "INFO"
 include_tokio = false
 include_pallas = false
 include_grpc = false
+include_minikupo = false

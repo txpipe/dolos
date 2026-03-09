@@ -119,8 +119,29 @@ where
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
-                .make_span_with(trace::DefaultMakeSpan::new().level(Level::INFO))
-                .on_response(trace::DefaultOnResponse::new().level(Level::INFO)),
+                .make_span_with(|request: &Request<_>| {
+                    tracing::info_span!(
+                        target: "minikupo",
+                        "request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        version = ?request.version(),
+                    )
+                })
+                .on_response(
+                    |response: &axum::http::Response<_>,
+                     latency: std::time::Duration,
+                     span: &tracing::Span| {
+                        tracing::event!(
+                            target: "minikupo",
+                            parent: span,
+                            Level::INFO,
+                            status = %response.status(),
+                            latency_ms = latency.as_millis(),
+                            "finished processing request"
+                        );
+                    },
+                ),
         )
         .layer(if permissive_cors {
             CorsLayer::permissive()

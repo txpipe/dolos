@@ -134,7 +134,11 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     }
 
     if config.include_minibf {
-        filter = filter.with_target("tower_http", level);
+        filter = filter.with_target("minibf", level);
+    }
+
+    if config.include_minikupo {
+        filter = filter.with_target("minikupo", level);
     }
 
     if config.include_fjall {
