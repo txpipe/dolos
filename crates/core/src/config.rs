@@ -351,7 +351,7 @@ pub struct RedbIndexConfig {
 }
 
 /// Configuration for the Fjall index backend.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct FjallIndexConfig {
     /// Optional path override. If relative, resolved from storage root.
     /// If not specified, defaults to `<storage.path>/index`.
@@ -375,20 +375,6 @@ pub struct FjallIndexConfig {
     /// Memtable size in MB before flush (default: 128).
     #[serde(default)]
     pub memtable_size_mb: Option<usize>,
-}
-
-impl Default for FjallIndexConfig {
-    fn default() -> Self {
-        Self {
-            path: None,
-            cache: None,
-            max_journal_size: Some(1024),
-            flush_on_commit: Some(false),
-            l0_threshold: Some(8),
-            worker_threads: Some(8),
-            memtable_size_mb: Some(128),
-        }
-    }
 }
 
 /// Index store configuration.
