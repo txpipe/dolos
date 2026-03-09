@@ -111,11 +111,8 @@ where
 {
     let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
     let app = Router::new()
-        .route("/matches/{*pattern}", get(routes::matches::by_pattern::<D>))
-        .route("/datums/{datum-hash}", get(routes::datums::by_hash::<D>))
-        .route("/scripts/{script-hash}", get(routes::scripts::by_hash::<D>))
-        .route("/metadata/{slot-no}", get(routes::metadata::by_slot::<D>))
-        .route("/health", get(routes::health::health::<D>))
+        .merge(api_router::<D>())
+        .nest("/v1", api_router::<D>())
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -129,6 +126,18 @@ where
         });
 
     app.layer(NormalizePathLayer::trim_trailing_slash())
+}
+
+fn api_router<D>() -> Router<Facade<D>>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/matches/{*pattern}", get(routes::matches::by_pattern::<D>))
+        .route("/datums/{datum-hash}", get(routes::datums::by_hash::<D>))
+        .route("/scripts/{script-hash}", get(routes::scripts::by_hash::<D>))
+        .route("/metadata/{slot-no}", get(routes::metadata::by_slot::<D>))
+        .route("/health", get(routes::health::health::<D>))
 }
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -161,4 +170,81 @@ pub(crate) fn bad_request(hint: impl Into<String>) -> Response {
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Method, Request, StatusCode},
+    };
+    use dolos_core::config::MinikupoConfig;
+    use dolos_testing::toy_domain::ToyDomain;
+    use tower::util::ServiceExt;
+
+    fn test_router() -> Router {
+        let facade = Facade {
+            inner: ToyDomain::new(None, None),
+            config: MinikupoConfig {
+                listen_address: "[::]:0".parse().expect("invalid listen address"),
+                permissive_cors: None,
+            },
+        };
+
+        build_router_with_facade(facade)
+    }
+
+    async fn get_response(path: &str) -> (StatusCode, Vec<u8>) {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .expect("failed to build request");
+
+        let response = test_router()
+            .oneshot(request)
+            .await
+            .expect("request failed");
+
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("failed to read response body");
+
+        (status, bytes.to_vec())
+    }
+
+    async fn assert_same_response(path: &str) {
+        let (root_status, root_body) = get_response(path).await;
+        let (v1_status, v1_body) = get_response(&format!("/v1{path}")).await;
+
+        assert_eq!(root_status, v1_status);
+        assert_eq!(root_body, v1_body);
+    }
+
+    #[tokio::test]
+    async fn exposes_health_under_v1() {
+        assert_same_response("/health").await;
+    }
+
+    #[tokio::test]
+    async fn exposes_matches_under_v1() {
+        assert_same_response("/matches/not-a-valid-pattern").await;
+    }
+
+    #[tokio::test]
+    async fn exposes_datums_under_v1() {
+        assert_same_response("/datums/not-a-valid-hash").await;
+    }
+
+    #[tokio::test]
+    async fn exposes_scripts_under_v1() {
+        assert_same_response("/scripts/not-a-valid-hash").await;
+    }
+
+    #[tokio::test]
+    async fn exposes_metadata_under_v1() {
+        assert_same_response("/metadata/99999999").await;
+    }
 }
