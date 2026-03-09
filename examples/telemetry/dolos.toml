@@ -227,3 +227,4 @@ include_pallas = false
 include_grpc = true
 include_trp = false
 include_minibf = false
+include_minikupo = false

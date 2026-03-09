@@ -78,6 +78,7 @@ include_pallas = false
 include_grpc = false
 include_trp = false
 include_minibf = false
+include_minikupo = false
 include_otlp = false
 include_fjall = false
 

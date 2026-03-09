@@ -44,3 +44,4 @@ service_name = "dolos"
 max_level = "DEBUG"
 include_pallas = false
 include_grpc = false
+include_minikupo = false
