@@ -15,7 +15,6 @@ use dolos_testing::{
         build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig,
         SyntheticVectors,
     },
-    toy_domain::advance_epoch_state_to_slot,
     toy_domain::ToyDomain,
 };
 use http_body_util::BodyExt;
@@ -49,21 +48,6 @@ impl TestDomainBuilder {
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
 
         let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
-        advance_epoch_state_to_slot(&domain, vectors.blocks[0].slot);
-        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
-            .expect("era summary");
-        let (expected_epoch, _) = summary.slot_epoch(vectors.blocks[0].slot);
-        let current_epoch =
-            dolos_cardano::load_epoch::<ToyDomain>(domain.state()).expect("current epoch");
-        assert_eq!(
-            current_epoch.number, expected_epoch,
-            "epoch preconditioning failed"
-        );
-        assert_eq!(
-            current_epoch.rolling.epoch(),
-            Some(expected_epoch),
-            "rolling epoch preconditioning failed"
-        );
         domain
             .import_blocks(blocks.clone())
             .expect("failed to import synthetic blocks");

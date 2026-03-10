@@ -12,7 +12,7 @@ use dolos_core::{
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
-    toy_domain::{advance_epoch_state_to_slot, ToyDomain},
+    toy_domain::ToyDomain,
 };
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
@@ -47,7 +47,6 @@ impl TestDomainBuilder {
 
         let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
         let domain = ToyDomain::new_with_genesis_and_config(genesis, chain_config, None, None);
-        advance_epoch_state_to_slot(&domain, vectors.blocks[0].slot);
         domain
             .import_blocks(blocks)
             .expect("failed to import synthetic blocks");
