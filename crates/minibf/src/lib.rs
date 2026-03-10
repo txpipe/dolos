@@ -294,7 +294,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
+    let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))

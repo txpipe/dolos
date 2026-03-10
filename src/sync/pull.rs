@@ -283,7 +283,7 @@ impl Stage {
             peer_address: upstream.peer_address.clone(),
             network_magic,
             quota: config.sync_limit.clone().into(),
-            block_fetch_batch_size: config.pull_batch_size.unwrap_or(100),
+            block_fetch_batch_size: config.pull_batch_size(),
             wal,
             downstream: Default::default(),
             block_count: Default::default(),

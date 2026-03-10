@@ -29,7 +29,7 @@ impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver 
     type Config = TrpConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
+        let cors_layer = if cfg.permissive_cors() {
             CorsLayer::permissive()
         } else {
             CorsLayer::new()

@@ -109,7 +109,7 @@ pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
+    let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .merge(api_router::<D>())
         .nest("/v1", api_router::<D>())

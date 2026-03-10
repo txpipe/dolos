@@ -34,29 +34,23 @@ era = 7
 cbor = [162, 0, 88, 29]
 
 [sync]
-pull_batch_size = 100
 max_history = 10000
 max_rollback = 10000
-sync_limit = "NoLimit"
 
 [submit]
 prune_height = 200
 
 [serve.grpc]
 listen_address = "[::]:50051"
-permissive_cors = true
 
 [serve.minibf]
 listen_address = "[::]:3000"
-permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
 
 [serve.trp]
 listen_address = "[::]:8164"
-max_optimize_rounds = 10
-permissive_cors = true
 
 [relay]
 listen_address = "[::]:30031"
@@ -235,21 +229,23 @@ Custom UTxOs can be injected at startup (useful for testing). Each entry is an o
 - `era`: optional era number for the CBOR payload.
 - `cbor`: CBOR bytes for the UTxO output.
 
+If `custom_utxos` is omitted, it defaults to an empty list.
+
 ## `sync` section
 
 The `sync` section controls how Dolos synchronizes the chain from upstream peers. This involves fetching a batch of blocks from the upstream node and updating the corresponding local storage.
 
 | property        | type    | example |
 | --------------- | ------- | ------- |
-| pull_batch_size | integer | 200     |
+| pull_batch_size | integer | 100 (default) |
 | max_history     | integer | 10000   |
 | max_rollback    | integer | 10000   |
-| sync_limit      | string  | "NoLimit" |
+| sync_limit      | string  | "NoLimit" (default) |
 
-- `pull_batch_size`: the number of blocks that are fetched per batch.
+- `pull_batch_size`: the number of blocks that are fetched per batch (defaults to `100`).
 - `max_history`: maximum number of slots to keep in archive history before housekeeping prunes old data.
 - `max_rollback`: maximum number of slots to keep in WAL history before housekeeping prunes old entries.
-- `sync_limit`: one of `"NoLimit"`, `"UntilTip"`, or `{ MaxBlocks = <number> }`.
+- `sync_limit`: one of `"NoLimit"`, `"UntilTip"`, or `{ MaxBlocks = <number> }` (defaults to `"NoLimit"`).
 
 ## `submit` section
 
@@ -269,11 +265,11 @@ The `serve.grpc` section controls the options for the gRPC endpoint that can be 
 | ------------------ | ------- | ------------------- |
 | listen_address     | string  | "[::]:50051"        |
 | tls_client_ca_root | string  | "./ca.pem"          |
-| permissive_cors    | boolean | true                |
+| permissive_cors    | boolean | true (default)      |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
 - `tls_client_ca_root`: optional path to a CA root file for client TLS authentication.
-- `permissive_cors`: allow cross-origin requests from any origin.
+- `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 
 ## `serve.minibf` section
 
@@ -282,13 +278,13 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 | property           | type    | example                          |
 | ------------------ | ------- | -------------------------------- |
 | listen_address     | string  | "[::]:3000"                     |
-| permissive_cors    | boolean | true                             |
+| permissive_cors    | boolean | true (default)                   |
 | token_registry_url | string  | "https://token-registry.io"     |
 | url                | string  | "https://minibf.local"          |
 | max_scan_items     | integer | 3000                             |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
-- `permissive_cors`: allow cross-origin requests from any origin.
+- `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
@@ -300,13 +296,13 @@ The `serve.trp` section controls the options for the Transaction Resolver Protoc
 | property           | type    | example      |
 | ------------------ | ------- | ------------ |
 | listen_address      | string  | "[::]:8164" |
-| max_optimize_rounds | integer | 10          |
-| permissive_cors    | boolean | true        |
+| max_optimize_rounds | integer | 10 (default) |
+| permissive_cors    | boolean | true (default) |
 | extra_fees         | integer | 200000      |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming TRP connections.
-- `max_optimize_rounds`: maximum optimization rounds for transactions.
-- `permissive_cors`: allow cross-origin requests from any origin.
+- `max_optimize_rounds`: maximum optimization rounds for transactions (defaults to `10`).
+- `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `extra_fees`: optional extra fees (lovelace) to add during optimization.
 
 ## `serve.ouroboros` section

@@ -21,7 +21,6 @@ prune_height = 10000
 
 [serve.grpc]
 listen_address = "[::]:50051"
-permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"

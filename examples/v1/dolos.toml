@@ -15,29 +15,21 @@ force_protocol = 6
 [sync]
 max_history = 604800
 max_rollback = 25920
-sync_limit = "NoLimit"
-
-[submit]
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
 
 [serve.grpc]
 listen_address = "[::]:50051"
-permissive_cors = true
 
 [serve.minibf]
 listen_address = "[::]:3000"
-permissive_cors = true
 
 [serve.minikupo]
 listen_address = "[::]:1442"
-permissive_cors = true
 
 [serve.trp]
 listen_address = "[::]:8000"
-max_optimize_rounds = 10
-permissive_cors = true
 
 [relay]
 listen_address = "[::]:30031"
@@ -51,4 +43,3 @@ ancillary_key = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c32313
 type = "cardano"
 magic = 2
 is_testnet = true
-custom_utxos = []

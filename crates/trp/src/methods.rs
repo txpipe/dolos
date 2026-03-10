@@ -42,7 +42,7 @@ pub async fn trp_resolve<D: Domain>(
         &args,
         &mut compiler,
         &utxos,
-        context.config.max_optimize_rounds.into(),
+        context.config.max_optimize_rounds().into(),
     )
     .await?;
 
@@ -396,14 +396,14 @@ mod tests {
 
         Arc::new(Context {
             domain,
-            config: Arc::new(TrpConfig {
-                max_optimize_rounds: 3,
-                extra_fees: None,
-
-                // next are dummy, not used
-                listen_address: "[::]:1234".parse().unwrap(),
-                permissive_cors: None,
-            }),
+            config: Arc::new(
+                TrpConfig::new(
+                    // next is dummy, not used
+                    "[::]:1234".parse().unwrap(),
+                    None,
+                )
+                .with_max_optimize_rounds(3),
+            ),
             metrics: Metrics::default(),
         })
     }

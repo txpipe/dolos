@@ -15,7 +15,6 @@ force_protocol = 6
 [serve]
 
 [sync]
-pull_batch_size = 100
 max_history = 86400
 max_rollback = 25920
 

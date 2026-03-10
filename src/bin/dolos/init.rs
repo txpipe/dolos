@@ -326,12 +326,7 @@ impl ConfigEditor {
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.grpc = GrpcConfig {
-                    listen_address: "[::]:50051".into(),
-                    tls_client_ca_root: None,
-                    permissive_cors: Some(true),
-                }
-                .into();
+                self.0.serve.grpc = GrpcConfig::new("[::]:50051".into(), None).into();
             } else {
                 self.0.serve.grpc = None;
             }
@@ -343,14 +338,7 @@ impl ConfigEditor {
     fn apply_serve_minibf(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.minibf = MinibfConfig {
-                    listen_address: "[::]:3000".parse().unwrap(),
-                    permissive_cors: Some(true),
-                    token_registry_url: None,
-                    url: None,
-                    max_scan_items: None,
-                }
-                .into();
+                self.0.serve.minibf = MinibfConfig::new("[::]:3000".parse().unwrap()).into();
             } else {
                 self.0.serve.minibf = None;
             }
@@ -362,11 +350,7 @@ impl ConfigEditor {
     fn apply_serve_minikupo(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.minikupo = MinikupoConfig {
-                    listen_address: "[::]:1442".parse().unwrap(),
-                    permissive_cors: Some(true),
-                }
-                .into();
+                self.0.serve.minikupo = MinikupoConfig::new("[::]:1442".parse().unwrap()).into();
             } else {
                 self.0.serve.minikupo = None;
             }
@@ -378,13 +362,7 @@ impl ConfigEditor {
     fn apply_serve_trp(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.trp = TrpConfig {
-                    listen_address: "[::]:8000".parse().unwrap(),
-                    max_optimize_rounds: 10,
-                    permissive_cors: Some(true),
-                    extra_fees: None,
-                }
-                .into();
+                self.0.serve.trp = TrpConfig::new("[::]:8000".parse().unwrap(), None).into();
             } else {
                 self.0.serve.trp = None;
             }

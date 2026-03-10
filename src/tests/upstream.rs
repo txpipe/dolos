@@ -60,12 +60,7 @@ fn test_mainnet_upstream() {
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
-        &SyncConfig {
-            pull_batch_size: Some(20),
-            max_history: None,
-            max_rollback: None,
-            sync_limit: Default::default(),
-        },
+        &SyncConfig::default().with_pull_batch_size(20),
         &PeerConfig {
             peer_address: "relays-new.cardano-mainnet.iohk.io:3001".into(),
         },
