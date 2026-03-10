@@ -613,6 +613,10 @@ pub struct MinibfConfig {
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
     pub max_scan_items: Option<u64>,
+    /// Optional base path for all Blockfrost API endpoints (e.g., "/api/v0").
+    /// When set, all API routes will be nested under this path.
+    /// Set to "/api/v0" for full Blockfrost OpenAPI specification compliance.
+    pub base_path: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
