@@ -39,3 +39,71 @@ fn parse_script_hash(value: &str) -> Result<Hash<28>, StatusCode> {
 fn script_hash_hint() -> String {
     "Invalid script hash. Hash must be 56 lowercase hex characters.".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::{
+        test_support::{TestApp, TestFault},
+        types::{Script, ScriptLanguage},
+    };
+
+    fn missing_hash() -> &'static str {
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn scripts_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/scripts/{}", app.vectors().script_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let script: Script =
+            serde_json::from_slice(&bytes).expect("failed to parse script response");
+        assert_eq!(script.language, ScriptLanguage::Native);
+        assert_eq!(script.script, app.vectors().script_cbor_hex);
+    }
+
+    #[tokio::test]
+    async fn scripts_missing_returns_null() {
+        let app = TestApp::new();
+        let path = format!("/scripts/{}", missing_hash());
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let script: Option<Script> =
+            serde_json::from_slice(&bytes).expect("failed to parse null script response");
+        assert_eq!(script, None);
+    }
+
+    #[tokio::test]
+    async fn scripts_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/scripts/not-a-hash", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn scripts_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = format!("/scripts/{}", app.vectors().script_hash);
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}

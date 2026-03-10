@@ -237,6 +237,43 @@ impl ToyDomain {
     }
 }
 
+pub fn advance_epoch_state_to_slot(domain: &ToyDomain, slot: u64) {
+    let summary =
+        dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state()).expect("era summary");
+    let mut epoch = dolos_cardano::load_epoch::<ToyDomain>(domain.state()).expect("current epoch");
+    let current = epoch.number;
+    let (target, _) = summary.slot_epoch(slot);
+
+    if target <= current {
+        return;
+    }
+
+    epoch.number = target;
+    epoch.rolling =
+        dolos_cardano::EpochValue::with_live(target, epoch.rolling.unwrap_live().clone());
+    epoch.pparams =
+        dolos_cardano::EpochValue::with_live(target, epoch.pparams.unwrap_live().clone());
+
+    let writer = domain.state.start_writer().expect("state writer");
+    writer
+        .write_entity_typed(&EntityKey::from(dolos_cardano::CURRENT_EPOCH_KEY), &epoch)
+        .expect("write current epoch");
+    writer
+        .set_cursor(ChainPoint::Slot(summary.epoch_start(target)))
+        .expect("set epoch cursor");
+    writer.commit().expect("commit epoch state");
+
+    let new_chain = dolos_cardano::CardanoLogic::initialize::<ToyDomain>(
+        CardanoConfig::default(),
+        domain.state(),
+        domain.genesis.as_ref(),
+    )
+    .expect("reinitialize chain logic");
+
+    let mut chain = domain.chain.write().expect("chain lock poisoned");
+    *chain = new_chain;
+}
+
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
     receiver: tokio::sync::broadcast::Receiver<TipEvent>,
