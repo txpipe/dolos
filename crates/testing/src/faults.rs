@@ -466,6 +466,10 @@ impl Domain for FaultyToyDomain {
         self.inner.storage_config()
     }
 
+    fn sync_config(&self) -> &dolos_core::config::SyncConfig {
+        self.inner.sync_config()
+    }
+
     fn genesis(&self) -> Arc<dolos_core::Genesis> {
         self.genesis_override
             .as_ref()

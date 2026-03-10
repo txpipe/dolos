@@ -13,7 +13,6 @@ max_history = 129600
 
 [storage.archive]
 backend = "redb"
-max_history = 86400
 
 [genesis]
 byron_path = "byron.json"
@@ -23,6 +22,7 @@ conway_path = "conway.json"
 
 [sync]
 pull_batch_size = 10
+max_history = 86400
 sync_limit = { MaxBlocks = 10 }
 
 [submit]

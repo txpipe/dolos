@@ -13,7 +13,6 @@ max_history = 25920
 
 [storage.archive]
 backend = "redb"
-max_history = 86400
 
 [genesis]
 byron_path = "byron.json"
@@ -24,6 +23,7 @@ force_protocol = 6
 
 [sync]
 pull_batch_size = 100
+max_history = 86400
 
 [submit]
 prune_height = 200

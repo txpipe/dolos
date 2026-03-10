@@ -10,9 +10,6 @@ path = "data"
 [storage.wal]
 max_history = 25920
 
-[storage.archive]
-max_history = 2592000
-
 [genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"
@@ -22,6 +19,7 @@ force_protocol = 6
 
 [sync]
 pull_batch_size = 100
+max_history = 2592000
 
 [submit]
 prune_height = 200

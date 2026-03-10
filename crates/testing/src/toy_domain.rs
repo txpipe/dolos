@@ -1,7 +1,7 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
-    config::{CardanoConfig, StorageConfig},
+    config::{CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
     BootstrapExt, LogKey, TemporalKey, *,
 };
@@ -128,6 +128,7 @@ pub struct ToyDomain {
     indexes: dolos_redb3::indexes::IndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
+    sync_config: SyncConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -184,6 +185,7 @@ impl ToyDomain {
                 pending: Arc::new(RwLock::new(Vec::new())),
             },
             storage_config: storage_config.unwrap_or_default(),
+            sync_config: SyncConfig::default(),
             genesis: genesis.clone(),
             tip_broadcast,
         };
@@ -268,6 +270,10 @@ impl dolos_core::Domain for ToyDomain {
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
+    }
+
+    fn sync_config(&self) -> &SyncConfig {
+        &self.sync_config
     }
 
     fn genesis(&self) -> Arc<dolos_core::Genesis> {

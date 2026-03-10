@@ -62,6 +62,7 @@ fn test_mainnet_upstream() {
     let mut upstream = crate::sync::pull::Stage::new(
         &SyncConfig {
             pull_batch_size: Some(20),
+            max_history: None,
             sync_limit: Default::default(),
         },
         &PeerConfig {
