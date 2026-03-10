@@ -212,9 +212,4 @@ service_name = "dolos"
 
 [logging]
 max_level = "DEBUG"
-include_tokio = false
-include_pallas = false
 include_grpc = true
-include_trp = false
-include_minibf = false
-include_minikupo = false

@@ -43,6 +43,3 @@ service_name = "dolos"
 
 [logging]
 max_level = "DEBUG"
-include_pallas = false
-include_grpc = false
-include_minikupo = false

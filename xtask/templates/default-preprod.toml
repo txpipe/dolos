@@ -32,9 +32,3 @@ genesis_key = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c32303
 type = "cardano"
 magic = 1
 is_testnet = true
-
-[logging]
-max_level = "INFO"
-include_tokio = false
-include_pallas = false
-include_grpc = false

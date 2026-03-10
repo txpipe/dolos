@@ -53,17 +53,6 @@ magic = 2
 is_testnet = true
 custom_utxos = []
 
-[logging]
-max_level = "INFO"
-include_tokio = false
-include_pallas = false
-include_grpc = false
-include_trp = false
-include_minibf = false
-include_minikupo = false
-include_otlp = false
-include_fjall = false
-
 [telemetry]
 enabled = false
 otlp_endpoint = "http://localhost:4317"

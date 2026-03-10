@@ -689,37 +689,55 @@ pub struct ServeConfig {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
     #[serde_as(as = "DisplayFromStr")]
+    #[serde(
+        default = "default_log_level",
+        skip_serializing_if = "is_default_log_level"
+    )]
     pub max_level: tracing::Level,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_tokio: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_pallas: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_grpc: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_trp: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_minibf: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_minikupo: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_otlp: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub include_fjall: bool,
+}
+
+impl LoggingConfig {
+    pub fn is_default(&self) -> bool {
+        is_default_log_level(&self.max_level)
+            && !self.include_tokio
+            && !self.include_pallas
+            && !self.include_grpc
+            && !self.include_trp
+            && !self.include_minibf
+            && !self.include_minikupo
+            && !self.include_otlp
+            && !self.include_fjall
+    }
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            max_level: tracing::Level::INFO,
+            max_level: default_log_level(),
             include_tokio: Default::default(),
             include_pallas: Default::default(),
             include_grpc: Default::default(),
@@ -730,6 +748,18 @@ impl Default for LoggingConfig {
             include_otlp: Default::default(),
         }
     }
+}
+
+fn default_log_level() -> tracing::Level {
+    tracing::Level::INFO
+}
+
+fn is_default_log_level(level: &tracing::Level) -> bool {
+    *level == default_log_level()
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn default_otlp_endpoint() -> String {
@@ -845,7 +875,7 @@ pub struct RootConfig {
 
     pub chain: ChainConfig,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "LoggingConfig::is_default")]
     pub logging: LoggingConfig,
 
     #[serde(default)]
