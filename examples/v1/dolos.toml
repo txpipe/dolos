@@ -52,8 +52,3 @@ type = "cardano"
 magic = 2
 is_testnet = true
 custom_utxos = []
-
-[telemetry]
-enabled = false
-otlp_endpoint = "http://localhost:4317"
-service_name = "dolos"

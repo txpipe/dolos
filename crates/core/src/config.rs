@@ -772,12 +772,26 @@ fn default_service_name() -> String {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TelemetryConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub enabled: bool,
-    #[serde(default = "default_otlp_endpoint")]
+    #[serde(
+        default = "default_otlp_endpoint",
+        skip_serializing_if = "is_default_otlp_endpoint"
+    )]
     pub otlp_endpoint: String,
-    #[serde(default = "default_service_name")]
+    #[serde(
+        default = "default_service_name",
+        skip_serializing_if = "is_default_service_name"
+    )]
     pub service_name: String,
+}
+
+impl TelemetryConfig {
+    pub fn is_default(&self) -> bool {
+        !self.enabled
+            && is_default_otlp_endpoint(&self.otlp_endpoint)
+            && is_default_service_name(&self.service_name)
+    }
 }
 
 impl Default for TelemetryConfig {
@@ -788,6 +802,14 @@ impl Default for TelemetryConfig {
             service_name: default_service_name(),
         }
     }
+}
+
+fn is_default_otlp_endpoint(value: &String) -> bool {
+    *value == default_otlp_endpoint()
+}
+
+fn is_default_service_name(value: &String) -> bool {
+    *value == default_service_name()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -878,6 +900,6 @@ pub struct RootConfig {
     #[serde(default, skip_serializing_if = "LoggingConfig::is_default")]
     pub logging: LoggingConfig,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
     pub telemetry: TelemetryConfig,
 }
