@@ -1,7 +1,5 @@
 [upstream]
 peer_address = "preview-node.world.dev.cardano.org:30002"
-network_magic = 2
-is_testnet = true
 
 [storage]
 version = "v3"
@@ -23,7 +21,6 @@ sync_limit = "NoLimit"
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
-magic = 2
 
 [serve.grpc]
 listen_address = "[::]:50051"
@@ -44,7 +41,6 @@ permissive_cors = true
 
 [relay]
 listen_address = "[::]:30031"
-magic = 2
 
 [mithril]
 aggregator = "https://aggregator.pre-release-preview.api.mithril.network/aggregator"
@@ -53,6 +49,8 @@ ancillary_key = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c32313
 
 [chain]
 type = "cardano"
+magic = 2
+is_testnet = true
 custom_utxos = []
 
 [logging]

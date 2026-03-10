@@ -14,13 +14,6 @@ pub enum UpstreamConfig {
 }
 
 impl UpstreamConfig {
-    pub fn network_magic(&self) -> Option<u64> {
-        match self {
-            Self::Peer(peer) => Some(peer.network_magic),
-            Self::Emulator(_) => None,
-        }
-    }
-
     pub fn peer_address(&self) -> Option<&str> {
         match self {
             Self::Peer(peer) => Some(&peer.peer_address),
@@ -48,10 +41,6 @@ pub struct EmulatorConfig {
 #[derive(Serialize, Deserialize)]
 pub struct PeerConfig {
     pub peer_address: String,
-    pub network_magic: u64,
-
-    #[serde(default)]
-    pub is_testnet: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -655,7 +644,6 @@ pub struct SnapshotConfig {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OuroborosConfig {
     pub listen_path: PathBuf,
-    pub magic: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -782,6 +770,8 @@ pub struct CustomUtxo {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct CardanoConfig {
+    pub magic: u64,
+    pub is_testnet: bool,
     pub stop_epoch: Option<Epoch>,
 
     #[serde(default)]
@@ -800,10 +790,35 @@ impl Default for ChainConfig {
     }
 }
 
+impl ChainConfig {
+    pub fn magic(&self) -> u64 {
+        match self {
+            Self::Cardano(cfg) => cfg.magic,
+        }
+    }
+
+    pub fn set_magic(&mut self, magic: u64) {
+        match self {
+            Self::Cardano(cfg) => cfg.magic = magic,
+        }
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        match self {
+            Self::Cardano(cfg) => cfg.is_testnet,
+        }
+    }
+
+    pub fn set_is_testnet(&mut self, is_testnet: bool) {
+        match self {
+            Self::Cardano(cfg) => cfg.is_testnet = is_testnet,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RelayConfig {
     pub listen_address: String,
-    pub magic: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
@@ -828,7 +843,6 @@ pub struct RootConfig {
     pub mithril: Option<MithrilConfig>,
     pub snapshot: Option<SnapshotConfig>,
 
-    #[serde(default)]
     pub chain: ChainConfig,
 
     #[serde(default)]

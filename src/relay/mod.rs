@@ -16,6 +16,12 @@ mod hanshake;
 // #[cfg(test)]
 // mod tests;
 
+#[derive(Clone)]
+pub struct DriverConfig {
+    pub service: RelayConfig,
+    pub network_magic: u64,
+}
+
 async fn handle_session<D: Domain, C: CancelToken>(
     domain: D,
     peer: PeerServer,
@@ -42,18 +48,18 @@ async fn handle_session<D: Domain, C: CancelToken>(
 
 async fn accept_peer_connections<D: Domain, C: CancelToken>(
     domain: D,
-    config: &RelayConfig,
+    config: &DriverConfig,
     tasks: &mut TaskTracker,
     cancel: C,
 ) -> Result<(), ServeError> {
-    let listener = TcpListener::bind(&config.listen_address)
+    let listener = TcpListener::bind(&config.service.listen_address)
         .await
         .map_err(ServeError::BindError)?;
 
-    info!(addr = &config.listen_address, "ouroboros listening");
+    info!(addr = &config.service.listen_address, "ouroboros listening");
 
     loop {
-        let peer = PeerServer::accept(&listener, config.magic)
+        let peer = PeerServer::accept(&listener, config.network_magic)
             .await
             .map_err(|e| ServeError::Internal(e.into()))?;
 
@@ -72,7 +78,7 @@ async fn accept_peer_connections<D: Domain, C: CancelToken>(
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = RelayConfig;
+    type Config = DriverConfig;
 
     #[instrument(skip_all)]
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
@@ -105,13 +111,21 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 pub fn load_drivers(
     all_drivers: &FuturesUnordered<tokio::task::JoinHandle<Result<(), ServeError>>>,
     config: Option<RelayConfig>,
+    network_magic: u64,
     domain: DomainAdapter,
     exit: CancellationToken,
 ) {
     if let Some(cfg) = config {
         info!("found Ouroboros config");
 
-        let driver = Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
+        let driver = Driver::run(
+            DriverConfig {
+                service: cfg.clone(),
+                network_magic,
+            },
+            domain.clone(),
+            CancelTokenImpl(exit.clone()),
+        );
 
         let task = tokio::spawn(driver);
 

@@ -11,8 +11,7 @@ pub struct Args {
 }
 
 fn infer_network(config: &RootConfig) -> Option<KnownNetwork> {
-    let magic = config.upstream.network_magic()?;
-    KnownNetwork::from_magic(magic)
+    KnownNetwork::from_magic(config.chain.magic())
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {

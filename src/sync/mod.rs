@@ -1,4 +1,6 @@
-use dolos_core::config::{EmulatorConfig, PeerConfig, RetryConfig, SyncConfig, UpstreamConfig};
+use dolos_core::config::{
+    ChainConfig, EmulatorConfig, PeerConfig, RetryConfig, SyncConfig, UpstreamConfig,
+};
 use std::time::Duration;
 
 use crate::adapters::DomainAdapter;
@@ -42,12 +44,13 @@ fn define_gasket_policy(config: &Option<RetryConfig>) -> gasket::runtime::Policy
 #[allow(clippy::too_many_arguments)]
 pub fn pipeline(
     config: &SyncConfig,
+    chain: &ChainConfig,
     upstream: &UpstreamConfig,
     domain: DomainAdapter,
     retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     match upstream {
-        UpstreamConfig::Peer(cfg) => sync(config, cfg, domain.clone(), retries),
+        UpstreamConfig::Peer(cfg) => sync(config, chain.magic(), cfg, domain.clone(), retries),
         UpstreamConfig::Emulator(cfg) => devnet(cfg, domain.clone(), retries),
     }
 }
@@ -55,17 +58,18 @@ pub fn pipeline(
 #[allow(clippy::too_many_arguments)]
 pub fn sync(
     config: &SyncConfig,
+    network_magic: u64,
     upstream: &PeerConfig,
     domain: DomainAdapter,
     retries: &Option<RetryConfig>,
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
-    let mut pull = pull::Stage::new(config, upstream, domain.wal().clone());
+    let mut pull = pull::Stage::new(config, upstream, network_magic, domain.wal().clone());
 
     let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
 
     let submit = submit::Stage::new(
         upstream.peer_address.clone(),
-        upstream.network_magic,
+        network_magic,
         domain.mempool().clone(),
     );
 

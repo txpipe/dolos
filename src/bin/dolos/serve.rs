@@ -15,8 +15,15 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     let exit = crate::common::hook_exit_token();
 
     let drivers = FuturesUnordered::new();
+    let network_magic = config.chain.magic();
 
-    dolos::serve::load_drivers(&drivers, config.serve, domain.clone(), exit.clone());
+    dolos::serve::load_drivers(
+        &drivers,
+        config.serve,
+        network_magic,
+        domain.clone(),
+        exit.clone(),
+    );
 
     for result in drivers {
         if let Err(e) = result.await.unwrap() {
