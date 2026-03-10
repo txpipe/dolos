@@ -9,7 +9,7 @@ path = "data"
 
 [storage.wal]
 backend = "redb"
-max_history = 25920
+
 
 [storage.archive]
 backend = "redb"
@@ -26,6 +26,7 @@ force_protocol = 6
 [sync]
 pull_batch_size = 100
 max_history = 86400
+max_rollback = 25920
 
 [submit]
 prune_height = 200

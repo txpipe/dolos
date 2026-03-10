@@ -18,7 +18,6 @@ version = "v3"
 path = "data"
 
 [storage.wal]
-max_history = 10000
 
 [storage.state]
 backend = "fjall"
@@ -50,6 +49,7 @@ cbor = [162, 0, 88, 29]
 [sync]
 pull_batch_size = 100
 max_history = 10000
+max_rollback = 10000
 sync_limit = "NoLimit"
 
 [submit]
@@ -151,12 +151,10 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | backend     | string  | "redb"   |
 | path        | string  | "wal"    |
 | cache       | integer | 50       |
-| max_history | integer | 10000    |
 
 - `backend`: `redb` or `in_memory`.
 - `path`: optional override for the WAL path (defaults to `<storage.path>/wal`).
 - `cache`: size (MB) of the WAL cache (Redb only).
-- `max_history`: maximum number of slots to keep in the WAL (Redb only).
 
 ### `storage.state` section
 
@@ -274,10 +272,12 @@ The `sync` section controls how Dolos synchronizes the chain from upstream peers
 | --------------- | ------- | ------- |
 | pull_batch_size | integer | 200     |
 | max_history     | integer | 10000   |
+| max_rollback    | integer | 10000   |
 | sync_limit      | string  | "NoLimit" |
 
 - `pull_batch_size`: the number of blocks that are fetched per batch.
 - `max_history`: maximum number of slots to keep in archive history before housekeeping prunes old data.
+- `max_rollback`: maximum number of slots to keep in WAL history before housekeeping prunes old entries.
 - `sync_limit`: one of `"NoLimit"`, `"UntilTip"`, or `{ MaxBlocks = <number> }`.
 
 ## `submit` section

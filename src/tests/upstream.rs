@@ -63,6 +63,7 @@ fn test_mainnet_upstream() {
         &SyncConfig {
             pull_batch_size: Some(20),
             max_history: None,
+            max_rollback: None,
             sync_limit: Default::default(),
         },
         &PeerConfig {
