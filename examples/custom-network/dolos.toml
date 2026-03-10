@@ -38,8 +38,6 @@ is_testnet = true
 
 [telemetry]
 enabled = true
-otlp_endpoint = "http://localhost:4317"
-service_name = "dolos"
 
 [logging]
 max_level = "DEBUG"
