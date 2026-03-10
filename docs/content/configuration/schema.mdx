@@ -75,16 +75,6 @@ genesis_key = "5b3...45d" # redacted
 [snapshot]
 download_url = "https://example.com/snapshot.tar.zst"
 
-[logging]
-max_level = "INFO"
-include_tokio = false
-include_pallas = false
-include_grpc = false
-include_trp = false
-include_minibf = false
-include_otlp = false
-include_fjall = false
-
 [telemetry]
 enabled = false
 otlp_endpoint = "http://localhost:4317"
@@ -389,7 +379,7 @@ The `snapshot` section controls bootstrap from a snapshot archive.
 
 The `logging` section controls the logging options to define the level of details to output.
 
-| property        | type    | example |
+| property        | type    | default |
 | --------------- | ------- | ------- |
 | max_level       | string  | "info" |
 | include_tokio   | boolean | false  |
@@ -397,6 +387,7 @@ The `logging` section controls the logging options to define the level of detail
 | include_grpc    | boolean | false  |
 | include_trp     | boolean | false  |
 | include_minibf  | boolean | false  |
+| include_minikupo| boolean | false  |
 | include_otlp    | boolean | false  |
 | include_fjall   | boolean | false  |
 
@@ -408,6 +399,8 @@ The `logging` section controls the logging options to define the level of detail
 - `include_minibf`: include logs from the MiniBF server.
 - `include_otlp`: include logs from OpenTelemetry exporters.
 - `include_fjall`: include logs from Fjall storage.
+
+All logging fields are optional in TOML; omitted values use these defaults.
 
 ## `telemetry` section
 
