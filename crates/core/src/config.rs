@@ -70,6 +70,9 @@ pub struct SyncConfig {
     pub max_history: Option<u64>,
 
     #[serde(default)]
+    pub max_rollback: Option<u64>,
+
+    #[serde(default)]
     pub sync_limit: SyncLimit,
 }
 
@@ -137,9 +140,6 @@ pub struct RedbWalConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
-    /// Maximum number of slots to keep in the WAL.
-    #[serde(default)]
-    pub max_history: Option<u64>,
 }
 
 /// WAL store configuration.
@@ -163,19 +163,6 @@ impl WalStoreConfig {
         match self {
             Self::Redb(cfg) => cfg.path.as_ref(),
             Self::InMemory => None,
-        }
-    }
-
-    pub fn max_history(&self) -> Option<u64> {
-        match self {
-            Self::Redb(cfg) => cfg.max_history,
-            Self::InMemory => None,
-        }
-    }
-
-    pub fn set_max_history(&mut self, value: Option<u64>) {
-        if let Self::Redb(cfg) = self {
-            cfg.max_history = value;
         }
     }
 }

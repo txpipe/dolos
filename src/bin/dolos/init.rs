@@ -279,12 +279,9 @@ impl ConfigEditor {
             self.0.mithril = Some(network.into());
             self.1 = Some(network.clone());
 
-            // Add max wal history for network from Genesis.
+            // Add max rollback window for network from Genesis.
             let genesis = network.load_included_genesis();
-            self.0
-                .storage
-                .wal
-                .set_max_history(Some(mutable_slots(&genesis)));
+            self.0.sync.max_rollback = Some(mutable_slots(&genesis));
         }
 
         self

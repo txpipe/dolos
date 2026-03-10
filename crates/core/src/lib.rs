@@ -631,7 +631,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         let mut wal_pruned = true;
 
-        if let Some(max_slots) = self.storage_config().wal.max_history() {
+        if let Some(max_slots) = self.sync_config().max_rollback {
             info!(max_slots, "pruning wal for excess history");
 
             wal_pruned = self

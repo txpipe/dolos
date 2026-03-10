@@ -7,7 +7,7 @@ path = "data"
 
 [storage.wal]
 backend = "redb"
-max_history = 10000
+
 
 [genesis]
 byron_path = "byron.json"
@@ -18,6 +18,7 @@ force_protocol = 6
 
 [sync]
 pull_batch_size = 100
+max_rollback = 10000
 
 [submit]
 prune_height = 200

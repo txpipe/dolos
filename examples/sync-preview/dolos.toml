@@ -7,9 +7,6 @@ is_testnet = true
 version = "v3"
 path = "data"
 
-[storage.wal]
-max_history = 25920
-
 [genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"
@@ -20,6 +17,7 @@ force_protocol = 6
 [sync]
 pull_batch_size = 100
 max_history = 2592000
+max_rollback = 25920
 
 [submit]
 prune_height = 200
