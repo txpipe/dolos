@@ -161,3 +161,105 @@ fn metadatum_to_model(datum: &alonzo::Metadatum) -> Result<Metadatum, StatusCode
 fn transaction_id_hint() -> String {
     "Invalid or incomplete filter query parameters! 'transaction_id' query value must be encoded in base16. In case of doubts, check the documentation at: <https://cardanosolutions.github.io/kupo>!".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::{
+        test_support::{TestApp, TestFault},
+        types::Metadata,
+    };
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, _, bytes) = app.get_response(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_happy_path() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/metadata/{}", block.slot);
+        let (status, headers, bytes) = app.get_response(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(
+            headers
+                .get("x-block-header-hash")
+                .and_then(|x| x.to_str().ok()),
+            Some(block.block_hash.as_str())
+        );
+
+        let items: Vec<Metadata> =
+            serde_json::from_slice(&bytes).expect("failed to parse metadata response");
+        assert_eq!(items.len(), 1);
+        assert!(hex::decode(&items[0].raw).is_ok());
+        assert!(items[0].schema.contains_key(&app.vectors().metadata_label));
+    }
+
+    #[tokio::test]
+    async fn metadata_transaction_id_filter_happy_path() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let tx_hash = block.tx_hashes.first().expect("missing tx hash");
+        let path = format!("/metadata/{}?transaction_id={tx_hash}", block.slot);
+        let (status, _, bytes) = app.get_response(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<Metadata> =
+            serde_json::from_slice(&bytes).expect("failed to parse filtered metadata");
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn metadata_transaction_id_filter_empty() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let tx_hash = block
+            .tx_hashes
+            .get(1)
+            .expect("missing tx hash without metadata");
+        let path = format!("/metadata/{}?transaction_id={tx_hash}", block.slot);
+        let (status, _, bytes) = app.get_response(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<Metadata> =
+            serde_json::from_slice(&bytes).expect("failed to parse empty metadata response");
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_bad_request_invalid_transaction_id() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/metadata/{}?transaction_id=not-a-hash", block.slot);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_not_found() {
+        let app = TestApp::new();
+        assert_status(&app, "/metadata/999999999", StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/metadata/{}", block.slot);
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}
