@@ -14,22 +14,14 @@ pub mod submit;
 const HOUSEKEEPING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn define_gasket_policy(config: &Option<RetryConfig>) -> gasket::runtime::Policy {
-    let default_retries = RetryConfig {
-        max_retries: 20,
-        backoff_unit_sec: 1,
-        backoff_factor: 2,
-        max_backoff_sec: 60,
-        dismissible: false,
-    };
-
-    let retries = config.clone().unwrap_or(default_retries);
+    let retries = config.clone().unwrap_or_default();
 
     let retries = gasket::retries::Policy {
-        max_retries: retries.max_retries,
-        backoff_unit: Duration::from_secs(retries.backoff_unit_sec),
-        backoff_factor: retries.backoff_factor,
-        max_backoff: Duration::from_secs(retries.max_backoff_sec),
-        dismissible: retries.dismissible,
+        max_retries: retries.max_retries(),
+        backoff_unit: Duration::from_secs(retries.backoff_unit_sec()),
+        backoff_factor: retries.backoff_factor(),
+        max_backoff: Duration::from_secs(retries.max_backoff_sec()),
+        dismissible: retries.dismissible(),
     };
 
     gasket::runtime::Policy {

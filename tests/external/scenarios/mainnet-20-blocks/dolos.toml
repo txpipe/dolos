@@ -17,23 +17,17 @@ max_history = 86400
 max_rollback = 129600
 sync_limit = { MaxBlocks = 50 }
 
-[submit]
-
 [serve.grpc]
 listen_address = "[::]:6470"
-permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
 
 [serve.minibf]
 listen_address = "[::]:6471"
-permissive_cors = true
 
 [serve.trp]
 listen_address = "[::]:6472"
-max_optimize_rounds = 10
-permissive_cors = true
 
 [mithril]
 aggregator = "https://aggregator.release-mainnet.api.mithril.network/aggregator"

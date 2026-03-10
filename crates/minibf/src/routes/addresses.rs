@@ -467,7 +467,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let address_str = address.clone();
@@ -531,7 +531,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit(domain.config.max_scan_items)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let (stream, address) = blocks_for_address_stream(

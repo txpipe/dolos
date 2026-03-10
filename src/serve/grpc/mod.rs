@@ -54,7 +54,7 @@ where
             .build_v1()
             .unwrap();
 
-        let cors_layer = if cfg.permissive_cors.unwrap_or_default() {
+        let cors_layer = if cfg.permissive_cors() {
             CorsLayer::permissive()
         } else {
             CorsLayer::new()

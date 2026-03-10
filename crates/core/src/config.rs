@@ -43,7 +43,7 @@ pub struct PeerConfig {
     pub peer_address: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub enum SyncLimit {
     #[default]
     NoLimit,
@@ -51,9 +51,16 @@ pub enum SyncLimit {
     MaxBlocks(u64),
 }
 
+impl SyncLimit {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::NoLimit)
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SyncConfig {
-    pub pull_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_batch_size: Option<usize>,
 
     #[serde(default)]
     pub max_history: Option<u64>,
@@ -61,13 +68,35 @@ pub struct SyncConfig {
     #[serde(default)]
     pub max_rollback: Option<u64>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SyncLimit::is_default")]
     pub sync_limit: SyncLimit,
+}
+
+impl SyncConfig {
+    pub fn with_pull_batch_size(mut self, pull_batch_size: usize) -> Self {
+        self.pull_batch_size = Some(pull_batch_size);
+        self
+    }
+
+    pub fn pull_batch_size(&self) -> usize {
+        self.pull_batch_size.unwrap_or(default_pull_batch_size())
+    }
+}
+
+fn default_pull_batch_size() -> usize {
+    100
 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct SubmitConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prune_height: Option<u64>,
+}
+
+impl SubmitConfig {
+    pub fn is_default(&self) -> bool {
+        self.prune_height.is_none()
+    }
 }
 
 #[derive(Serialize, Default, PartialEq, Clone, Debug)]
@@ -650,30 +679,144 @@ pub struct OuroborosConfig {
 pub struct GrpcConfig {
     pub listen_address: String,
     pub tls_client_ca_root: Option<PathBuf>,
-    pub permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
+}
+
+impl GrpcConfig {
+    pub fn new(listen_address: String, tls_client_ca_root: Option<PathBuf>) -> Self {
+        Self {
+            listen_address,
+            tls_client_ca_root,
+            permissive_cors: None,
+        }
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct MinibfConfig {
     pub listen_address: SocketAddr,
-    pub permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
-    pub max_scan_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_scan_items: Option<u64>,
+}
+
+impl MinibfConfig {
+    pub fn new(listen_address: SocketAddr) -> Self {
+        Self {
+            listen_address,
+            permissive_cors: None,
+            token_registry_url: None,
+            url: None,
+            max_scan_items: None,
+        }
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
+
+    pub fn with_max_scan_items(mut self, max_scan_items: u64) -> Self {
+        self.max_scan_items = Some(max_scan_items);
+        self
+    }
+
+    pub fn max_scan_items(&self) -> u64 {
+        self.max_scan_items.unwrap_or(default_max_scan_items())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct MinikupoConfig {
     pub listen_address: SocketAddr,
-    pub permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
+}
+
+impl MinikupoConfig {
+    pub fn new(listen_address: SocketAddr) -> Self {
+        Self {
+            listen_address,
+            permissive_cors: None,
+        }
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct TrpConfig {
     pub listen_address: SocketAddr,
-    pub max_optimize_rounds: u8,
-    pub permissive_cors: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_optimize_rounds: Option<u8>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
+
     pub extra_fees: Option<u64>,
+}
+
+impl TrpConfig {
+    pub fn new(listen_address: SocketAddr, extra_fees: Option<u64>) -> Self {
+        Self {
+            listen_address,
+            max_optimize_rounds: None,
+            permissive_cors: None,
+            extra_fees,
+        }
+    }
+
+    pub fn with_max_optimize_rounds(mut self, max_optimize_rounds: u8) -> Self {
+        self.max_optimize_rounds = Some(max_optimize_rounds);
+        self
+    }
+
+    pub fn max_optimize_rounds(&self) -> u8 {
+        self.max_optimize_rounds
+            .unwrap_or(default_max_optimize_rounds())
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
+}
+
+fn default_max_optimize_rounds() -> u8 {
+    10
+}
+
+fn default_max_scan_items() -> u64 {
+    3000
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -695,28 +838,28 @@ pub struct LoggingConfig {
     )]
     pub max_level: tracing::Level,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_tokio: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_pallas: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_grpc: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_trp: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_minibf: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_minikupo: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_otlp: bool,
 
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_fjall: bool,
 }
 
@@ -758,10 +901,6 @@ fn is_default_log_level(level: &tracing::Level) -> bool {
     *level == default_log_level()
 }
 
-fn is_false(value: &bool) -> bool {
-    !value
-}
-
 fn default_otlp_endpoint() -> String {
     "http://localhost:4317".to_string()
 }
@@ -772,7 +911,7 @@ fn default_service_name() -> String {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TelemetryConfig {
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub enabled: bool,
     #[serde(
         default = "default_otlp_endpoint",
@@ -826,7 +965,7 @@ pub struct CardanoConfig {
     pub is_testnet: bool,
     pub stop_epoch: Option<Epoch>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_utxos: Vec<CustomUtxo>,
 }
 
@@ -875,11 +1014,38 @@ pub struct RelayConfig {
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
 pub struct RetryConfig {
-    pub max_retries: usize,
-    pub backoff_unit_sec: u64,
-    pub backoff_factor: u32,
-    pub max_backoff_sec: u64,
-    pub dismissible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_retries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backoff_unit_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backoff_factor: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_backoff_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dismissible: Option<bool>,
+}
+
+impl RetryConfig {
+    pub fn max_retries(&self) -> usize {
+        self.max_retries.unwrap_or(20)
+    }
+
+    pub fn backoff_unit_sec(&self) -> u64 {
+        self.backoff_unit_sec.unwrap_or(2)
+    }
+
+    pub fn backoff_factor(&self) -> u32 {
+        self.backoff_factor.unwrap_or(2)
+    }
+
+    pub fn max_backoff_sec(&self) -> u64 {
+        self.max_backoff_sec.unwrap_or(60)
+    }
+
+    pub fn dismissible(&self) -> bool {
+        self.dismissible.unwrap_or(false)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -888,6 +1054,7 @@ pub struct RootConfig {
     pub storage: StorageConfig,
     pub genesis: GenesisConfig,
     pub sync: SyncConfig,
+    #[serde(default, skip_serializing_if = "SubmitConfig::is_default")]
     pub submit: SubmitConfig,
     pub serve: ServeConfig,
     pub relay: Option<RelayConfig>,
