@@ -5,10 +5,6 @@ block_production_interval = 10
 version = "v3"
 path = "data"
 
-[storage.wal]
-backend = "redb"
-
-
 [genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"

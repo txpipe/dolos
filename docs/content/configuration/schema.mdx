@@ -17,19 +17,6 @@ is_testnet = true
 version = "v3"
 path = "data"
 
-[storage.wal]
-
-[storage.state]
-backend = "fjall"
-
-[storage.archive]
-
-[storage.index]
-backend = "fjall"
-
-[storage.mempool]
-backend = "in_memory"
-
 [genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"
@@ -152,7 +139,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | path        | string  | "wal"    |
 | cache       | integer | 50       |
 
-- `backend`: `redb` or `in_memory`.
+- `backend`: `redb` or `in_memory` (defaults to `redb`).
 - `path`: optional override for the WAL path (defaults to `<storage.path>/wal`).
 - `cache`: size (MB) of the WAL cache (Redb only).
 
@@ -170,7 +157,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `redb`, `fjall`, or `in_memory`.
+- `backend`: `redb`, `fjall`, or `in_memory` (defaults to `fjall`).
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
 - `cache`: size (MB) of the state cache (Redb/Fjall only).
 - `max_history`: maximum number of slots to keep before pruning (Redb/Fjall only).
@@ -185,7 +172,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | blocks_path | string  | "blocks" |
 | cache       | integer | 500       |
 
-- `backend`: `redb`, `in_memory`, or `no_op`.
+- `backend`: `redb`, `in_memory`, or `no_op` (defaults to `redb`).
 - `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
 - `blocks_path`: optional override for block segment files (Redb only).
 - `cache`: size (MB) of the archive cache (Redb only).
@@ -203,7 +190,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | worker_threads   | integer | 8       |
 | memtable_size_mb | integer | 128     |
 
-- `backend`: `redb`, `fjall`, `in_memory`, or `no_op`.
+- `backend`: `redb`, `fjall`, `in_memory`, or `no_op` (defaults to `fjall`).
 - `path`: optional override for the index path (defaults to `<storage.path>/index`).
 - `cache`: size (MB) of the index cache (Redb/Fjall only).
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
@@ -216,7 +203,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | path     | string  | "mempool"   |
 | cache    | integer | 50          |
 
-- `backend`: `redb` or `in_memory`.
+- `backend`: `redb` or `in_memory` (defaults to `in_memory`).
 - `path`: optional override for the mempool path (defaults to `<storage.path>/mempool`).
 - `cache`: size (MB) of the mempool cache (Redb only).
 
