@@ -50,7 +50,7 @@ fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
         return None;
     }
 
-    let magic = config.upstream.network_magic()?;
+    let magic = config.chain.magic();
 
     let download_url_template = config
         .snapshot

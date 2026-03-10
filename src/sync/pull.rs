@@ -273,10 +273,15 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(config: &SyncConfig, upstream: &PeerConfig, wal: WalAdapter) -> Self {
+    pub fn new(
+        config: &SyncConfig,
+        upstream: &PeerConfig,
+        network_magic: u64,
+        wal: WalAdapter,
+    ) -> Self {
         Self {
             peer_address: upstream.peer_address.clone(),
-            network_magic: upstream.network_magic,
+            network_magic,
             quota: config.sync_limit.clone().into(),
             block_fetch_batch_size: config.pull_batch_size.unwrap_or(100),
             wal,

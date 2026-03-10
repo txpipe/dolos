@@ -10,9 +10,15 @@ pub async fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
 
     let domain = crate::common::setup_domain(config)?;
 
-    let sync = dolos::sync::pipeline(&config.sync, &config.upstream, domain, &config.retries)
-        .into_diagnostic()
-        .context("bootstrapping sync pipeline")?;
+    let sync = dolos::sync::pipeline(
+        &config.sync,
+        &config.chain,
+        &config.upstream,
+        domain,
+        &config.retries,
+    )
+    .into_diagnostic()
+    .context("bootstrapping sync pipeline")?;
 
     gasket::daemon::Daemon::new(sync).block();
 

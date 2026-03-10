@@ -33,6 +33,8 @@ permissive_cors = true
 
 [chain]
 type = "cardano"
+magic = 2
+is_testnet = true
 
 [chain.track]
 account_state = true

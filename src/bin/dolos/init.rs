@@ -2,8 +2,9 @@ use clap::Parser;
 use dolos_cardano::{include, mutable_slots};
 use dolos_core::{
     config::{
-        GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig, MithrilConfig, PeerConfig,
-        RelayConfig, RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
+        CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
+        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion,
+        TrpConfig, UpstreamConfig,
     },
     Genesis,
 };
@@ -40,6 +41,18 @@ impl KnownNetwork {
             2 => Some(KnownNetwork::CardanoPreview),
             _ => None,
         }
+    }
+
+    pub fn magic(&self) -> u64 {
+        match self {
+            KnownNetwork::CardanoMainnet => 764824073,
+            KnownNetwork::CardanoPreProd => 1,
+            KnownNetwork::CardanoPreview => 2,
+        }
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        !matches!(self, KnownNetwork::CardanoMainnet)
     }
 
     pub fn load_included_genesis(&self) -> Genesis {
@@ -90,20 +103,24 @@ impl From<&KnownNetwork> for PeerConfig {
         match value {
             KnownNetwork::CardanoMainnet => PeerConfig {
                 peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
-                network_magic: 764824073,
-                is_testnet: false,
             },
             KnownNetwork::CardanoPreProd => PeerConfig {
                 peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
-                network_magic: 1,
-                is_testnet: true,
             },
             KnownNetwork::CardanoPreview => PeerConfig {
                 peer_address: "preview-node.world.dev.cardano.org:30002".into(),
-                network_magic: 2,
-                is_testnet: true,
             },
         }
+    }
+}
+
+impl From<&KnownNetwork> for ChainConfig {
+    fn from(value: &KnownNetwork) -> Self {
+        ChainConfig::Cardano(CardanoConfig {
+            magic: value.magic(),
+            is_testnet: value.is_testnet(),
+            ..Default::default()
+        })
     }
 }
 
@@ -264,7 +281,7 @@ impl Default for ConfigEditor {
                 retries: Default::default(),
                 logging: Default::default(),
                 telemetry: Default::default(),
-                chain: Default::default(),
+                chain: ChainConfig::from(&KnownNetwork::CardanoMainnet),
             },
             None,
         )
@@ -276,6 +293,7 @@ impl ConfigEditor {
         if let Some(network) = network {
             self.0.genesis = network.into();
             self.0.upstream = network.into();
+            self.0.chain = network.into();
             self.0.mithril = Some(network.into());
             self.1 = Some(network.clone());
 
@@ -383,7 +401,6 @@ impl ConfigEditor {
 
                 self.0.serve.ouroboros = OuroborosConfig {
                     listen_path: "dolos.socket".into(),
-                    magic: self.0.upstream.network_magic().unwrap_or_default(),
                 }
                 .into();
             } else {
@@ -405,7 +422,6 @@ impl ConfigEditor {
             if value {
                 self.0.relay = RelayConfig {
                     listen_address: "[::]:30031".into(),
-                    magic: self.0.upstream.network_magic().unwrap_or_default(),
                 }
                 .into();
             } else {
@@ -451,11 +467,7 @@ impl ConfigEditor {
     fn prompt_known_network(self) -> miette::Result<Self> {
         let options = KnownNetwork::VARIANTS.to_vec();
 
-        let selected = self
-            .0
-            .upstream
-            .network_magic()
-            .and_then(KnownNetwork::from_magic);
+        let selected = KnownNetwork::from_magic(self.0.chain.magic());
 
         let starting_cursor = selected
             .and_then(|x| options.iter().position(|y| y.eq(&x)))

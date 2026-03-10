@@ -25,12 +25,16 @@ permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
-magic = 2
 
 [serve.trp]
 listen_address = "[::]:8000"
 max_optimize_rounds = 10
 permissive_cors = true
+
+[chain]
+type = "cardano"
+magic = 2
+is_testnet = true
 
 [telemetry]
 enabled = true

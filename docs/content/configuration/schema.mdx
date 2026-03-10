@@ -7,8 +7,6 @@ This is an example configuration file for dolos:
 ```toml
 [upstream]
 peer_address = "preprod-node.world.dev.cardano.org:30000"
-network_magic = 1
-is_testnet = true
 
 # Emulator mode (omit peer_* fields when using this)
 # block_production_interval = 5
@@ -26,6 +24,8 @@ force_protocol = 2
 
 [chain]
 type = "cardano"
+magic = 1
+is_testnet = true
 stop_epoch = 400
 
 [[chain.custom_utxos]]
@@ -52,7 +52,6 @@ permissive_cors = true
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
-magic = 1
 
 [serve.trp]
 listen_address = "[::]:8164"
@@ -61,7 +60,6 @@ permissive_cors = true
 
 [relay]
 listen_address = "[::]:30031"
-magic = 1
 
 [retries]
 max_retries = 6
@@ -104,12 +102,8 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 | property      | type    | example                                    |
 | ------------- | ------- | ------------------------------------------ |
 | peer_address  | string  | "preprod-node.world.dev.cardano.org:30000" |
-| network_magic | integer | 1                                          |
-| is_testnet    | boolean | true                                       |
 
 - `peer_address`: network address of peer node using `{host}:{port}` syntax.
-- `network_magic`: the magic number of the network we're connecting to.
-- `is_testnet`: flag to indicate if this network is a testnet.
 
 ### Emulator mode
 
@@ -229,12 +223,16 @@ Dolos requires Cardano genesis data to operate. For simplicity sake, we've decid
 
 The `chain` section specifies the type of blockchain to connect to.
 
-| property | type   | example   |
-| -------- | ------ | --------- |
-| type     | string | "cardano" |
-| stop_epoch | integer | 400     |
+| property   | type    | example   |
+| ---------- | ------- | --------- |
+| type       | string  | "cardano" |
+| magic      | integer | 1         |
+| is_testnet | boolean | true      |
+| stop_epoch | integer | 400       |
 
 - `type`: the type of chain network.
+- `magic`: Cardano network magic used across upstream sync, relay, and Ouroboros services.
+- `is_testnet`: whether the configured chain is testnet.
 - `stop_epoch`: optional epoch number to stop syncing at.
 
 ## `chain.custom_utxos` section
@@ -332,10 +330,8 @@ The `serve.ouroboros` section controls the options for the Ouroboros mini-protoc
 | property    | type    | example        |
 | ----------- | ------- | -------------- |
 | listen_path | string  | "dolos.socket" |
-| magic       | integer | 1              |
 
 - `listen_path`: the file path for the unix socket that will listen for Ouroboros node-to-client mini-protocols.
-- `magic`: the network magic for node-to-client queries.
 
 ## `relay` section
 
@@ -344,10 +340,8 @@ The `relay` section controls the options for handling inbound connection from ot
 | property       | type    | example      |
 | -------------- | ------- | ------------ |
 | listen_address | string  | "[::]:50051" |
-| magic          | integer | 1            |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming Ouroboros connections (`[::]` represents any IP address).
-- `magic`: the network magic for node-to-node connections.
 
 ## `retries` section
 
