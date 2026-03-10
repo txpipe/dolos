@@ -62,9 +62,12 @@ pub enum SyncLimit {
     MaxBlocks(u64),
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SyncConfig {
     pub pull_batch_size: Option<usize>,
+
+    #[serde(default)]
+    pub max_history: Option<u64>,
 
     #[serde(default)]
     pub sync_limit: SyncLimit,
@@ -280,9 +283,6 @@ pub struct RedbArchiveConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
-    /// Maximum number of slots to keep.
-    #[serde(default)]
-    pub max_history: Option<u64>,
 }
 
 /// Archive store configuration.
@@ -308,19 +308,6 @@ impl ArchiveStoreConfig {
         match self {
             Self::Redb(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
-        }
-    }
-
-    pub fn max_history(&self) -> Option<u64> {
-        match self {
-            Self::Redb(cfg) => cfg.max_history,
-            Self::InMemory | Self::NoOp => None,
-        }
-    }
-
-    pub fn set_max_history(&mut self, value: Option<u64>) {
-        if let Self::Redb(cfg) = self {
-            cfg.max_history = value;
         }
     }
 }

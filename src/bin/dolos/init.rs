@@ -303,7 +303,7 @@ impl ConfigEditor {
     }
 
     fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
-        self.0.storage.archive.set_max_history(value.into());
+        self.0.sync.max_history = value.into();
 
         self
     }

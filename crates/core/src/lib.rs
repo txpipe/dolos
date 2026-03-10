@@ -593,6 +593,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &config::StorageConfig;
+    fn sync_config(&self) -> &config::SyncConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain>;
@@ -620,7 +621,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.storage_config().archive.max_history() {
+        if let Some(max_slots) = self.sync_config().max_history {
             info!(max_slots, "pruning archive for excess history");
 
             archive_pruned = self

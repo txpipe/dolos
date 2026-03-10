@@ -24,7 +24,6 @@ max_history = 10000
 backend = "fjall"
 
 [storage.archive]
-max_history = 10000
 
 [storage.index]
 backend = "fjall"
@@ -50,6 +49,7 @@ cbor = [162, 0, 88, 29]
 
 [sync]
 pull_batch_size = 100
+max_history = 10000
 sync_limit = "NoLimit"
 
 [submit]
@@ -186,13 +186,11 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | path        | string  | "archive" |
 | blocks_path | string  | "blocks" |
 | cache       | integer | 500       |
-| max_history | integer | 10000     |
 
 - `backend`: `redb`, `in_memory`, or `no_op`.
 - `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
 - `blocks_path`: optional override for block segment files (Redb only).
 - `cache`: size (MB) of the archive cache (Redb only).
-- `max_history`: maximum number of slots to keep (Redb only).
 
 ### `storage.index` section
 
@@ -275,9 +273,11 @@ The `sync` section controls how Dolos synchronizes the chain from upstream peers
 | property        | type    | example |
 | --------------- | ------- | ------- |
 | pull_batch_size | integer | 200     |
+| max_history     | integer | 10000   |
 | sync_limit      | string  | "NoLimit" |
 
 - `pull_batch_size`: the number of blocks that are fetched per batch.
+- `max_history`: maximum number of slots to keep in archive history before housekeeping prunes old data.
 - `sync_limit`: one of `"NoLimit"`, `"UntilTip"`, or `{ MaxBlocks = <number> }`.
 
 ## `submit` section

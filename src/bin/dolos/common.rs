@@ -79,6 +79,7 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
+        sync_config: Arc::new(config.sync.clone()),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
         wal: stores.wal,
