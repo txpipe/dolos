@@ -5,18 +5,6 @@ block_production_interval = 5
 version = "v3"
 path = "data"
 
-[storage.wal]
-backend = "redb"
-
-[storage.state]
-backend = "fjall"
-
-[storage.archive]
-backend = "redb"
-
-[storage.index]
-backend = "fjall"
-
 [genesis]
 byron_path = "./byron.json"
 shelley_path = "./shelley.json"

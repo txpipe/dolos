@@ -7,19 +7,6 @@ is_testnet = false
 version = "v3"
 path = "data"
 
-[storage.wal]
-backend = "redb"
-
-
-[storage.state]
-backend = "fjall"
-
-[storage.index]
-backend = "fjall"
-
-[storage.archive]
-backend = "redb"
-
 [genesis]
 byron_path = "byron.json"
 shelley_path = "shelley.json"

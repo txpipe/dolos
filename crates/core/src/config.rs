@@ -142,6 +142,12 @@ pub struct RedbWalConfig {
     pub cache: Option<usize>,
 }
 
+impl RedbWalConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none()
+    }
+}
+
 /// WAL store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
@@ -165,6 +171,13 @@ impl WalStoreConfig {
             Self::InMemory => None,
         }
     }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -184,6 +197,12 @@ pub struct RedbStateConfig {
     /// Maximum number of slots to keep before pruning.
     #[serde(default)]
     pub max_history: Option<u64>,
+}
+
+impl RedbStateConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none() && self.max_history.is_none()
+    }
 }
 
 /// Configuration for the Fjall state backend.
@@ -214,6 +233,19 @@ pub struct FjallStateConfig {
     /// Memtable size in MB before flush (default: 64).
     #[serde(default)]
     pub memtable_size_mb: Option<usize>,
+}
+
+impl FjallStateConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.cache.is_none()
+            && self.max_history.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
 }
 
 /// State store configuration.
@@ -249,6 +281,14 @@ impl StateStoreConfig {
             Self::InMemory => None,
         }
     }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Fjall(cfg) => cfg.is_default(),
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -270,6 +310,12 @@ pub struct RedbArchiveConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
+}
+
+impl RedbArchiveConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.blocks_path.is_none() && self.cache.is_none()
+    }
 }
 
 /// Archive store configuration.
@@ -297,6 +343,13 @@ impl ArchiveStoreConfig {
             Self::InMemory | Self::NoOp => None,
         }
     }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory | Self::NoOp => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -313,6 +366,12 @@ pub struct RedbIndexConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
+}
+
+impl RedbIndexConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none()
+    }
 }
 
 /// Configuration for the Fjall index backend.
@@ -342,6 +401,18 @@ pub struct FjallIndexConfig {
     pub memtable_size_mb: Option<usize>,
 }
 
+impl FjallIndexConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.cache.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
+}
+
 /// Index store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
@@ -369,6 +440,14 @@ impl IndexStoreConfig {
             Self::InMemory | Self::NoOp => None,
         }
     }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Fjall(cfg) => cfg.is_default(),
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory | Self::NoOp => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -387,6 +466,12 @@ pub struct RedbMempoolConfig {
     pub cache: Option<usize>,
 }
 
+impl RedbMempoolConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none()
+    }
+}
+
 /// Mempool store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(tag = "backend", rename_all = "lowercase")]
@@ -396,6 +481,15 @@ pub enum MempoolStoreConfig {
     #[serde(rename = "in_memory")]
     #[default]
     InMemory,
+}
+
+impl MempoolStoreConfig {
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::InMemory => true,
+            Self::Redb(_) => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -411,23 +505,23 @@ pub struct StorageConfig {
     pub path: std::path::PathBuf,
 
     /// WAL store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "WalStoreConfig::is_default")]
     pub wal: WalStoreConfig,
 
     /// State store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "StateStoreConfig::is_default")]
     pub state: StateStoreConfig,
 
     /// Archive store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ArchiveStoreConfig::is_default")]
     pub archive: ArchiveStoreConfig,
 
     /// Index store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "IndexStoreConfig::is_default")]
     pub index: IndexStoreConfig,
 
     /// Mempool store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MempoolStoreConfig::is_default")]
     pub mempool: MempoolStoreConfig,
 }
 
