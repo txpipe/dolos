@@ -114,7 +114,11 @@ dolos-redb3 = { path = "crates/redb3" }
 
 [[test]]
 name = "smoke"
-path = "tests/external/smoke.rs"
+path = "tests/e2e/smoke.rs"
+
+[[test]]
+name = "sync"
+path = "tests/e2e/sync.rs"
 
 [[test]]
 name = "epoch_pots"

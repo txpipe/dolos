@@ -1,5 +1,5 @@
 [upstream]
-peer_address = "preview-node.world.dev.cardano.org:30002"
+peer_address = "relay.cnode-m1.demeter.run:3002"
 
 [storage]
 version = "v3"
@@ -13,23 +13,21 @@ conway_path = "conway.json"
 force_protocol = 6
 
 [sync]
-max_history = 86400
-max_rollback = 25920
-
-[submit]
-prune_height = 200
-
-[serve.grpc]
-listen_address = "[::]:6440"
 
 [serve.ouroboros]
 listen_path = "dolos.socket"
 
+[serve.grpc]
+listen_address = "[::]:6550"
+
 [serve.minibf]
-listen_address = "[::]:6441"
+listen_address = "[::]:6551"
 
 [serve.trp]
-listen_address = "[::]:6442"
+listen_address = "[::]:6552"
+
+[serve.minikupo]
+listen_address = "[::]:6553"
 
 [mithril]
 aggregator = "https://aggregator.pre-release-preview.api.mithril.network/aggregator"
@@ -40,6 +38,3 @@ ancillary_key = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c32313
 type = "cardano"
 magic = 2
 is_testnet = true
-
-[logging]
-max_level = "DEBUG"
