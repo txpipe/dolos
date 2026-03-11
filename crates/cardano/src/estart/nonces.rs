@@ -2,7 +2,7 @@ use dolos_core::{BlockSlot, ChainError, EntityDelta, NsKey};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    utils::nonce_stability_window, EpochState, FixedNamespace as _, Nonces, CURRENT_EPOCH_KEY,
+    sub, utils::nonce_stability_window, EpochState, FixedNamespace as _, Nonces, CURRENT_EPOCH_KEY,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +38,7 @@ fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
     let stability_window = nonce_stability_window(ctx.active_protocol.into(), &ctx.genesis);
     let epoch_finish_slot = ctx.chain_summary.epoch_start(ctx.starting_epoch_no() + 1);
 
-    epoch_finish_slot - stability_window
+    sub!(epoch_finish_slot, stability_window)
 }
 
 fn initial_nonces(ctx: &super::WorkContext) -> Option<Nonces> {

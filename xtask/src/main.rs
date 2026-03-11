@@ -18,8 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run external tests
-    ExternalTest,
+    /// Run e2e tests
+    E2eTest,
 
     /// Bootstrap a local Mithril snapshot into an instance
     BootstrapMithrilLocal(bootstrap::BootstrapArgs),
@@ -38,9 +38,12 @@ fn main() -> Result<()> {
     let sh = Shell::new()?;
 
     match cli.command {
-        Commands::ExternalTest => {
+        Commands::E2eTest => {
             println!("Running smoke tests...");
             cmd!(sh, "cargo test --test smoke -- --ignored --nocapture").run()?;
+
+            println!("Running sync tests...");
+            cmd!(sh, "cargo test --test sync -- --ignored --nocapture").run()?;
         }
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,

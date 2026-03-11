@@ -132,15 +132,18 @@ Output fields per entity:
 - **accounts** — `stake,pool,lovelace`
 - **rewards** — `stake,pool,amount,type,earned_epoch`
 
-### `external-test`
+### `e2e-test`
 
-Run the external smoke test suite.
+Run the e2e smoke + sync test suites.
 
 ```
-cargo xtask external-test
+cargo xtask e2e-test
 ```
 
-Executes `cargo test --test smoke -- --ignored --nocapture`.
+Executes:
+
+- `cargo test --test smoke -- --ignored --nocapture`
+- `cargo test --test sync -- --ignored --nocapture`
 
 ## Typical workflow
 

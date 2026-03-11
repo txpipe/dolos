@@ -1,0 +1,35 @@
+[upstream]
+block_production_interval = 10
+
+[storage]
+version = "v3"
+path = "data"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+force_protocol = 6
+
+[sync]
+
+[serve.ouroboros]
+listen_path = "dolos.socket"
+
+[serve.grpc]
+listen_address = "[::]:6590"
+
+[serve.minibf]
+listen_address = "[::]:6591"
+
+[serve.trp]
+listen_address = "[::]:6592"
+
+[serve.minikupo]
+listen_address = "[::]:6593"
+
+[chain]
+type = "cardano"
+magic = 2
+is_testnet = true
