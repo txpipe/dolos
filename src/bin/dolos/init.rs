@@ -607,6 +607,7 @@ impl ConfigEditor {
         let value = match selected {
             RemotePeerChoice::Preset(preset) => preset.address.to_string(),
             RemotePeerChoice::Other => Text::new("Custom remote peer (relay address host:port):")
+                .with_default(current)
                 .with_help_message("Format: host:port")
                 .prompt()
                 .into_diagnostic()
