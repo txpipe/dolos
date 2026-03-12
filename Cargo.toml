@@ -112,6 +112,9 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 dolos-redb3 = { path = "crates/redb3" }
 
+[build-dependencies]
+vergen-gitcl = "9.1.0"
+
 [[test]]
 name = "smoke"
 path = "tests/e2e/smoke.rs"
