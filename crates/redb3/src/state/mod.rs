@@ -129,6 +129,7 @@ impl StateStore {
     pub fn initialize_schema(&self) -> Result<(), Error> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Immediate)?;
+        wx.set_quick_repair(true);
 
         let _ = wx.open_table(CURSOR_TABLE)?;
 
@@ -176,7 +177,8 @@ pub struct StateWriter {
 
 impl StateWriter {
     fn new(db: &Database, tables: HashMap<Namespace, Table>) -> Self {
-        let wx = db.begin_write().unwrap();
+        let mut wx = db.begin_write().unwrap();
+        wx.set_quick_repair(true);
         Self { tables, wx }
     }
 }
