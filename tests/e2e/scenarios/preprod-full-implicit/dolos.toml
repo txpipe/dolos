@@ -11,8 +11,6 @@ shelley_path = "shelley.json"
 alonzo_path = "alonzo.json"
 conway_path = "conway.json"
 
-[sync]
-
 [serve.ouroboros]
 listen_path = "dolos.socket"
 

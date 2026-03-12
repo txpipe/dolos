@@ -81,6 +81,13 @@ impl SyncConfig {
     pub fn pull_batch_size(&self) -> usize {
         self.pull_batch_size.unwrap_or(default_pull_batch_size())
     }
+
+    pub fn is_default(&self) -> bool {
+        self.pull_batch_size.is_none()
+            && self.max_history.is_none()
+            && self.max_rollback.is_none()
+            && self.sync_limit.is_default()
+    }
 }
 
 fn default_pull_batch_size() -> usize {
@@ -828,6 +835,16 @@ pub struct ServeConfig {
     pub trp: Option<TrpConfig>,
 }
 
+impl ServeConfig {
+    pub fn is_default(&self) -> bool {
+        self.ouroboros.is_none()
+            && self.grpc.is_none()
+            && self.minibf.is_none()
+            && self.minikupo.is_none()
+            && self.trp.is_none()
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
@@ -1051,15 +1068,26 @@ impl RetryConfig {
 #[derive(Serialize, Deserialize)]
 pub struct RootConfig {
     pub upstream: UpstreamConfig,
+
     pub storage: StorageConfig,
+
     pub genesis: GenesisConfig,
+
+    #[serde(default, skip_serializing_if = "SyncConfig::is_default")]
     pub sync: SyncConfig,
+
     #[serde(default, skip_serializing_if = "SubmitConfig::is_default")]
     pub submit: SubmitConfig,
+
+    #[serde(default, skip_serializing_if = "ServeConfig::is_default")]
     pub serve: ServeConfig,
+
     pub relay: Option<RelayConfig>,
+
     pub retries: Option<RetryConfig>,
+
     pub mithril: Option<MithrilConfig>,
+
     pub snapshot: Option<SnapshotConfig>,
 
     pub chain: ChainConfig,

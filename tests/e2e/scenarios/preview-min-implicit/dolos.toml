@@ -12,10 +12,6 @@ alonzo_path = "alonzo.json"
 conway_path = "conway.json"
 force_protocol = 6
 
-[sync]
-
-[serve]
-
 [chain]
 type = "cardano"
 magic = 2
