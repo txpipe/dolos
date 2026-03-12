@@ -374,11 +374,19 @@ impl CoreIndexStore for IndexStore {
                 u64::from_be_bytes(key.try_into().map_err(|_| {
                     IndexError::CodecError("metadata key must be 8 bytes".to_string())
                 })?);
-            return SlotIter::from_hash(&snapshot, &self.block_tags, dimension, metadata, start, end)
-                .map_err(IndexError::from);
+            return SlotIter::from_hash(
+                &snapshot,
+                &self.block_tags,
+                dimension,
+                metadata,
+                start,
+                end,
+            )
+            .map_err(IndexError::from);
         }
 
         // Pass dimension string directly - chain-agnostic
-        SlotIter::new(&snapshot, &self.block_tags, dimension, key, start, end).map_err(IndexError::from)
+        SlotIter::new(&snapshot, &self.block_tags, dimension, key, start, end)
+            .map_err(IndexError::from)
     }
 }
