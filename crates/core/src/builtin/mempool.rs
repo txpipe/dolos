@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::{
     ChainPoint, MempoolError, MempoolEvent, MempoolPage, MempoolStore, MempoolTx, MempoolTxStage,
@@ -100,7 +100,7 @@ impl MempoolStore for EphemeralMempool {
             return Err(MempoolError::DuplicateTx);
         }
 
-        info!(tx.hash = %tx.hash, "tx received");
+        debug!(tx.hash = %tx.hash, "tx received");
         state.pending.push(tx.clone());
         self.notify(tx);
         self.log_state(&state);
@@ -133,7 +133,7 @@ impl MempoolStore for EphemeralMempool {
         });
 
         for mut tx in moved {
-            info!(tx.hash = %tx.hash, "tx inflight");
+            debug!(tx.hash = %tx.hash, "tx inflight");
             tx.stage = MempoolTxStage::Propagated;
             state.inflight.push(tx.clone());
             self.notify(tx);
@@ -158,7 +158,7 @@ impl MempoolStore for EphemeralMempool {
         });
 
         for mut tx in moved {
-            info!(tx.hash = %tx.hash, "tx acknowledged");
+            debug!(tx.hash = %tx.hash, "tx acknowledged");
             tx.stage = MempoolTxStage::Acknowledged;
             state.acknowledged.insert(tx.hash, tx.clone());
             self.notify(tx);
@@ -225,11 +225,11 @@ impl MempoolStore for EphemeralMempool {
                     finalized.stage = MempoolTxStage::Finalized;
                     state.finalized_log.push_back(finalized.clone());
                     state.acknowledged.remove(&tx_hash);
-                    info!(tx.hash = %tx_hash, "tx finalized");
+                    debug!(tx.hash = %tx_hash, "tx finalized");
                     self.notify(finalized);
                 } else {
                     self.notify(tx.clone());
-                    info!(tx.hash = %tx_hash, "tx confirmed");
+                    debug!(tx.hash = %tx_hash, "tx confirmed");
                 }
             } else if unseen_set.contains(&tx_hash) {
                 let mut tx = state.acknowledged.remove(&tx_hash).unwrap();
@@ -240,7 +240,7 @@ impl MempoolStore for EphemeralMempool {
 
                 tx.retry();
                 state.pending.push(tx);
-                info!(tx.hash = %tx_hash, "retry tx");
+                debug!(tx.hash = %tx_hash, "retry tx");
             } else {
                 let tx = state.acknowledged.get_mut(&tx_hash).unwrap();
                 if tx.stage == MempoolTxStage::Confirmed {
@@ -252,7 +252,7 @@ impl MempoolStore for EphemeralMempool {
                         finalized.stage = MempoolTxStage::Finalized;
                         state.finalized_log.push_back(finalized.clone());
                         state.acknowledged.remove(&tx_hash);
-                        info!(tx.hash = %tx_hash, "tx finalized");
+                        debug!(tx.hash = %tx_hash, "tx finalized");
                         self.notify(finalized);
                     } else {
                         self.notify(tx.clone());
@@ -265,7 +265,7 @@ impl MempoolStore for EphemeralMempool {
                         dropped.stage = MempoolTxStage::Dropped;
                         state.finalized_log.push_back(dropped.clone());
                         state.acknowledged.remove(&tx_hash);
-                        info!(tx.hash = %tx_hash, "tx dropped");
+                        debug!(tx.hash = %tx_hash, "tx dropped");
                         self.notify(dropped);
                     }
                 }

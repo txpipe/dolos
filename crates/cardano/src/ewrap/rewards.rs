@@ -125,7 +125,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         // Debug: log accounts with both registered_at and deregistered_at
         if account.registered_at.is_some() && account.deregistered_at.is_some() {
-            tracing::info!(
+            tracing::debug!(
                 account=%id,
                 registered_at=?account.registered_at,
                 deregistered_at=?account.deregistered_at,
@@ -146,7 +146,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             // (epoch_start + randomness_stability_window) are pre-filtered during
             // reward computation and never appear here. Their share stays in reserves
             // implicitly through returned_rewards.
-            warn!(
+            debug!(
                 account=%id,
                 credential=?account.credential,
                 amount=total,
@@ -219,7 +219,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 .map(|(_, r)| r.total_value())
                 .sum();
 
-            tracing::warn!(
+            tracing::debug!(
                 epoch = ctx.ending_state().number,
                 %pending_before_drain,
                 %pending_spendable,

@@ -1,5 +1,5 @@
 use gasket::{framework::*, runtime::Policy};
-use tracing::{error, info};
+use tracing::{debug, info};
 
 use dolos_core::{
     config::{PeerConfig, SyncConfig},
@@ -33,7 +33,7 @@ impl Worker<WitnessStage> for WitnessWorker {
         &mut self,
         stage: &mut WitnessStage,
     ) -> Result<WorkSchedule<PullEvent>, WorkerError> {
-        error!("dequeing form witness");
+        debug!("dequeing form witness");
         let msg = stage.input.recv().await.or_panic()?;
         Ok(WorkSchedule::Unit(msg.payload))
     }

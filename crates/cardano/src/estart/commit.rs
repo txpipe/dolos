@@ -36,7 +36,7 @@ impl super::WorkContext {
             return Ok(None);
         };
 
-        tracing::warn!(from=%transition.prev_version, to=%transition.new_version, "era transition detected");
+        tracing::info!(from=%transition.prev_version, to=%transition.new_version, "era transition detected");
 
         let previous = state.read_entity_typed::<EraSummary>(
             EraSummary::NS,
@@ -115,7 +115,7 @@ impl super::WorkContext {
         archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
-        debug!("committing estart changes (streaming mode)");
+        debug!("committing estart changes");
 
         // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;

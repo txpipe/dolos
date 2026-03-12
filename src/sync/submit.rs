@@ -111,7 +111,7 @@ impl Worker {
     }
 
     async fn schedule_next(&mut self) -> Result<WorkSchedule<Request<EraTxId>>, WorkerError> {
-        info!("waiting for request from upstream peer");
+        debug!("waiting for request from upstream peer");
 
         let req = self
             .peer_session
@@ -173,7 +173,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 let ack = *ack as usize;
                 let req = *req as usize;
 
-                info!(req, ack, "blocking tx ids request");
+                debug!(req, ack, "blocking tx ids request");
 
                 self.acknowledge_propagated(&stage.mempool, ack)?;
 
@@ -186,7 +186,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 }
             }
             Request::TxIdsNonBlocking(ack, req) => {
-                info!(req, ack, "non-blocking tx ids request");
+                debug!(req, ack, "non-blocking tx ids request");
 
                 self.acknowledge_propagated(&stage.mempool, *ack as usize)?;
 
@@ -199,7 +199,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 self.propagate_txs(&stage.mempool, txs).await?;
             }
             Request::Txs(ids) => {
-                info!("tx batch request");
+                debug!("tx batch request");
 
                 let found: Vec<MempoolTx> = ids
                     .iter()

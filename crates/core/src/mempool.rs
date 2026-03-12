@@ -5,7 +5,7 @@ pub use pallas::ledger::validate::phase2::EvalReport;
 
 use futures_core::Stream;
 use std::pin::Pin;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug)]
 pub struct MempoolTx {
@@ -336,7 +336,7 @@ fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Me
         for locked in tx.consumes() {
             let txoref = TxoRef::from(&locked);
             if refs.remove(&txoref) {
-                info!(txoref = %txoref, "excluded stxi");
+                debug!(txoref = %txoref, "excluded stxi");
             }
         }
     }
@@ -362,7 +362,7 @@ fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Memp
 
             if refs.contains(&txoref) {
                 let era_cbor = EraCbor::from(inflight);
-                warn!(txoref = %txoref, "selected utxo available inmempool tx");
+                debug!(txoref = %txoref, "selected utxo available inmempool tx");
                 refs.remove(&txoref);
                 map.insert(txoref, Arc::new(era_cbor));
             }

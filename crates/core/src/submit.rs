@@ -3,7 +3,7 @@
 //! This module provides functionality for validating transactions against
 //! the current ledger state and submitting them to the mempool.
 
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 use crate::{
     ChainLogic, Domain, DomainError, MempoolAwareUtxoStore, MempoolStore, MempoolTx, StateStore,
@@ -71,7 +71,7 @@ pub trait SubmitExt: Domain {
         let tx = self.validate_tx(chain, cbor)?;
         let hash = tx.hash;
 
-        info!(tx.hash = %hash, source=source, "tx received");
+        debug!(tx.hash = %hash, source=source, "tx received");
 
         self.mempool().receive(tx)?;
 

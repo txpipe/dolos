@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use dolos_core::{config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis};
-use tracing::{debug, instrument};
+use dolos_core::{ChainError, EntityKey, Genesis};
 
 use crate::{
     eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState,
@@ -98,23 +97,4 @@ impl WorkContext {
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
     }
-}
-
-#[instrument("estart", skip_all, fields(slot = %slot))]
-pub fn execute<D: Domain>(
-    state: &D::State,
-    archive: &D::Archive,
-    slot: BlockSlot,
-    _config: &CardanoConfig,
-    genesis: Arc<Genesis>,
-) -> Result<(), ChainError> {
-    debug!("executing ESTART work unit");
-
-    let mut work = WorkContext::load::<D>(state, genesis)?;
-
-    work.commit::<D>(state, archive, slot)?;
-
-    debug!("ESTART work unit committed");
-
-    Ok(())
 }

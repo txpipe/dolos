@@ -8,7 +8,7 @@ use pallas::ledger::{
     primitives::{NetworkId, TransactionInput},
     traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
 };
-use tracing::info;
+use tracing::debug;
 
 pub fn validate_tx<D: Domain>(
     cbor: &[u8],
@@ -79,7 +79,7 @@ pub fn validate_tx<D: Domain>(
         }
     }
 
-    info!(
+    debug!(
         phase1 = true,
         phase2 = true,
         redeemer_count = report.len(),

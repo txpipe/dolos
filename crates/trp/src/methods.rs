@@ -358,8 +358,10 @@ mod tests {
         };
 
         // Build synthetic blocks (3 blocks × 2 txs, uses tx hash sequences 1-7)
-        let mut cfg = SyntheticBlockConfig::default();
-        cfg.slot = min_slot;
+        let cfg = SyntheticBlockConfig {
+            slot: min_slot,
+            ..Default::default()
+        };
         let (blocks, _vectors, chain_config) = build_synthetic_blocks(cfg);
 
         // Build sender/receiver UTxOs with offset hashes (100+) to avoid collision
