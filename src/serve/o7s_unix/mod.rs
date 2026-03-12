@@ -114,8 +114,11 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
         // removing socket file so that it's free for next run
         debug!("removing socket file");
-        std::fs::remove_file(&cfg.service.listen_path)
-            .map_err(|e| ServeError::Internal(e.into()))?;
+        if let Err(error) = std::fs::remove_file(&cfg.service.listen_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(ServeError::Internal(error.into()));
+            }
+        }
 
         // notify the tracker that we're done receiving new tasks. Without this explicit
         // close, the wait will block forever.
