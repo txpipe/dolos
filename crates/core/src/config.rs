@@ -943,12 +943,12 @@ impl Default for TelemetryConfig {
     }
 }
 
-fn is_default_otlp_endpoint(value: &String) -> bool {
-    *value == default_otlp_endpoint()
+fn is_default_otlp_endpoint(value: &str) -> bool {
+    value == default_otlp_endpoint()
 }
 
-fn is_default_service_name(value: &String) -> bool {
-    *value == default_service_name()
+fn is_default_service_name(value: &str) -> bool {
+    value == default_service_name()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
