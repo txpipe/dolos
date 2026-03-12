@@ -298,8 +298,10 @@ impl ConfigEditor {
             self.1 = Some(network.clone());
 
             // Add max rollback window for network from Genesis.
-            let genesis = network.load_included_genesis();
-            self.0.sync.max_rollback = Some(mutable_slots(&genesis));
+            if self.0.sync.max_rollback.is_none() {
+                let genesis = network.load_included_genesis();
+                self.0.sync.max_rollback = Some(mutable_slots(&genesis));
+            }
         }
 
         self
@@ -362,7 +364,7 @@ impl ConfigEditor {
     fn apply_serve_trp(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.trp = TrpConfig::new("[::]:8000".parse().unwrap(), None).into();
+                self.0.serve.trp = TrpConfig::new("[::]:8164".parse().unwrap(), None).into();
             } else {
                 self.0.serve.trp = None;
             }
