@@ -183,7 +183,7 @@ impl gasket::framework::Worker<Stage> for Worker {
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
         match unit {
             WorkUnit::Pull => {
-                info!("pulling block batch from upstream peer");
+                debug!("pulling block batch from upstream peer");
                 let batch = self.gather_pull_batch(stage).await?;
 
                 match batch {
@@ -195,7 +195,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                             .await
                             .or_restart()?;
 
-                        info!(len = blocks.len(), "block batch pulled from peer");
+                        debug!(len = blocks.len(), "block batch pulled from peer");
 
                         stage.quota.consume_blocks(blocks.len() as u64);
                         stage.flush_blocks(blocks).await?;
@@ -210,7 +210,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                 }
             }
             WorkUnit::Await => {
-                info!("waiting for new block");
+                debug!("waiting for new block");
 
                 let next = self
                     .peer_session
@@ -224,7 +224,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         let header = to_traverse(&header).or_panic()?;
                         let point = Point::Specific(header.slot(), header.hash().to_vec());
 
-                        info!(?point, "new block sent by upstream peer");
+                        debug!(?point, "new block sent by upstream peer");
 
                         let block = self
                             .peer_session
@@ -238,7 +238,7 @@ impl gasket::framework::Worker<Stage> for Worker {
                         stage.track_tip(&tip);
                     }
                     NextResponse::RollBackward(point, tip) => {
-                        info!(?point, "rollback sent by upstream peer");
+                        debug!(?point, "rollback sent by upstream peer");
 
                         stage.flush_rollback(point).await?;
                         stage.track_tip(&tip);

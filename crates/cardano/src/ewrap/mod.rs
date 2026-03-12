@@ -3,11 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{
-    config::CardanoConfig, BlockSlot, ChainError, Domain, EntityKey, Genesis, TxOrder,
-};
+use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
 use pallas::ledger::primitives::{conway::DRep, StakeCredential};
-use tracing::{debug, instrument};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
@@ -182,23 +179,4 @@ impl BoundaryWork {
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
     }
-}
-
-#[instrument("epoch", skip_all, fields(slot = %slot))]
-pub fn execute<D: Domain>(
-    state: &D::State,
-    archive: &D::Archive,
-    slot: BlockSlot,
-    _: &CardanoConfig,
-    genesis: Arc<Genesis>,
-) -> Result<(), ChainError> {
-    debug!("executing EWRAP work unit");
-
-    let mut boundary = BoundaryWork::load::<D>(state, genesis)?;
-
-    boundary.commit::<D>(state, archive)?;
-
-    debug!("EWRAP work unit committed");
-
-    Ok(())
 }

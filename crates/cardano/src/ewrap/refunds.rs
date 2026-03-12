@@ -72,7 +72,7 @@ impl dolos_core::EntityDelta for ProposalDepositRefund {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing account");
 
-        tracing::error!(cred=?self.account, deposit=%self.proposal_deposit, "applying proposal deposit refund");
+        tracing::debug!(cred=?self.account, deposit=%self.proposal_deposit, "applying proposal deposit refund");
 
         let stake = entity.stake.scheduled_or_default();
 
@@ -109,7 +109,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         proposal: &ProposalState,
         account: Option<&AccountState>,
     ) -> Result<(), ChainError> {
-        tracing::error!(proposal=%id, "visiting dropped proposal");
+        tracing::debug!(proposal=%id, "visiting dropped proposal");
 
         if let Some(deposit) = proposal.deposit {
             if let Some(account) = account {

@@ -178,7 +178,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         avvm_reclamation: ctx.avvm_reclamation,
     };
 
-    tracing::warn!(
+    tracing::debug!(
         epoch = epoch.number,
         initial_reserves = epoch.initial_pots.reserves,
         initial_treasury = epoch.initial_pots.treasury,

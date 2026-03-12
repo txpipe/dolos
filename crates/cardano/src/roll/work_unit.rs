@@ -98,6 +98,11 @@ where
         // Commit state changes
         self.batch.commit_state(domain)?;
 
+        info!(
+            point = %self.batch.first_point(),
+            "rolling forward"
+        );
+
         Ok(())
     }
 
@@ -128,7 +133,7 @@ where
             .map(|block| {
                 let point = block.point();
                 let raw: RawBlock = block.raw();
-                info!(%point, "roll forward");
+                debug!(%point, "roll forward");
                 TipEvent::Apply(point, raw)
             })
             .collect()

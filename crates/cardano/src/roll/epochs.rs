@@ -347,7 +347,7 @@ impl BlockVisitor for EpochStateVisitor {
                             );
                         }
                         let amount_u64 = amount.max(0) as u64;
-                        tracing::info!(
+                        tracing::debug!(
                             source = "treasury",
                             credential = ?cred,
                             amount = amount,
@@ -372,7 +372,7 @@ impl BlockVisitor for EpochStateVisitor {
         proposal: &pallas::ledger::traverse::MultiEraProposal,
         _: usize,
     ) -> Result<(), ChainError> {
-        tracing::warn!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
+        tracing::debug!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
 
         self.stats_delta.as_mut().unwrap().proposal_deposits += proposal.deposit();
 

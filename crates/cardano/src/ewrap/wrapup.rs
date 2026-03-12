@@ -160,7 +160,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         effective as i64 - applied_rewards_sum as i64
     );
 
-    tracing::info!(
+    tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
         %effective,

@@ -6,7 +6,7 @@ use pallas::codec::minicbor;
 use pallas::codec::utils::{Bytes, Nullable};
 use pallas::ledger::traverse::{ComputeHash, Era, MultiEraBlock, MultiEraTx};
 use pallas::network::miniprotocols::chainsync::Tip;
-use tracing::info;
+use tracing::debug;
 
 use crate::adapters::storage::MempoolBackend;
 use crate::adapters::WalAdapter;
@@ -52,7 +52,7 @@ impl Worker {
         let txs: Vec<_> = self.mempool.peek_pending().into_iter().take(10).collect();
 
         for (i, tx) in txs.iter().enumerate() {
-            info!(tx = hex::encode(tx.hash), "adding tx to emulated block");
+            debug!(tx = hex::encode(tx.hash), "adding tx to emulated block");
 
             let EraCbor(era, cbor) = &tx.payload;
 
@@ -148,7 +148,7 @@ impl gasket::framework::Worker<Stage> for Worker {
 
     async fn schedule(&mut self, _stage: &mut Stage) -> Result<WorkSchedule<()>, WorkerError> {
         self.block_production_timer.tick().await;
-        info!("creating new block");
+        debug!("creating new block");
         Ok(WorkSchedule::Unit(()))
     }
 

@@ -6,7 +6,7 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefiniti
 use thiserror::Error;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use dolos_core::{
     config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolError, MempoolEvent, MempoolPage,
@@ -789,7 +789,7 @@ impl MempoolStore for RedbMempool {
     type Stream = RedbMempoolStream;
 
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError> {
-        info!(tx.hash = %tx.hash, "tx received (redb)");
+        debug!(tx.hash = %tx.hash, "tx received");
         self.receive_inner(tx)?;
         Ok(())
     }
@@ -820,7 +820,7 @@ impl MempoolStore for RedbMempool {
                 let record = InflightRecord::new(payload);
                 let tx = record.to_mempool_tx(hash);
                 InflightTable::write(wx, &hash, &record)?;
-                info!(tx.hash = %tx.hash, "tx inflight (redb)");
+                debug!(tx.hash = %tx.hash, "tx inflight");
                 events.push(tx);
             }
             Ok(events)
@@ -837,7 +837,7 @@ impl MempoolStore for RedbMempool {
                     if record.acknowledge() {
                         let tx = record.to_mempool_tx(*hash);
                         InflightTable::write(wx, hash, &record)?;
-                        info!(tx.hash = %tx.hash, "tx acknowledged (redb)");
+                        debug!(tx.hash = %tx.hash, "tx acknowledged");
                         events.push(tx);
                     }
                 }
@@ -887,12 +887,12 @@ impl MempoolStore for RedbMempool {
                         InflightTable::remove(wx, &tx_hash)?;
                         FinalizedTable::append(wx, log_entry)?;
                         tx.stage = MempoolTxStage::Finalized;
-                        info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                        debug!(tx.hash = %tx.hash, "tx finalized");
                         events.push(tx);
                     } else {
                         InflightTable::write(wx, &tx_hash, &record)?;
                         let tx = record.to_mempool_tx(tx_hash);
-                        info!(tx.hash = %tx.hash, "tx confirmed (redb)");
+                        debug!(tx.hash = %tx.hash, "tx confirmed");
                         events.push(tx);
                     }
                 } else if unseen_set.contains(&tx_hash) {
@@ -901,7 +901,7 @@ impl MempoolStore for RedbMempool {
                     PendingTable::insert(wx, &tx_hash, &record.payload)?;
                     let mut tx = record.to_mempool_tx(tx_hash);
                     tx.retry();
-                    info!(tx.hash = %tx.hash, "retry tx (redb)");
+                    debug!(tx.hash = %tx.hash, "retry tx");
                     events.push(tx);
                 } else if record.stage == InflightStage::Confirmed {
                     // Already confirmed on-chain; treat subsequent blocks as
@@ -913,7 +913,7 @@ impl MempoolStore for RedbMempool {
                         InflightTable::remove(wx, &tx_hash)?;
                         FinalizedTable::append(wx, log_entry)?;
                         tx.stage = MempoolTxStage::Finalized;
-                        info!(tx.hash = %tx.hash, "tx finalized (redb)");
+                        debug!(tx.hash = %tx.hash, "tx finalized");
                         events.push(tx);
                     } else {
                         InflightTable::write(wx, &tx_hash, &record)?;
@@ -929,7 +929,7 @@ impl MempoolStore for RedbMempool {
                         InflightTable::remove(wx, &tx_hash)?;
                         FinalizedTable::append(wx, log_entry)?;
                         tx.stage = MempoolTxStage::Dropped;
-                        info!(tx.hash = %tx.hash, "tx dropped (redb)");
+                        debug!(tx.hash = %tx.hash, "tx dropped");
                         events.push(tx);
                     } else {
                         InflightTable::write(wx, &tx_hash, &record)?;

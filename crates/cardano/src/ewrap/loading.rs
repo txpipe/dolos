@@ -238,7 +238,7 @@ impl BoundaryWork {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             effective_treasury_mirs = self.effective_treasury_mirs,
             effective_reserve_mirs = self.effective_reserve_mirs,
             invalid_treasury_mirs = self.invalid_treasury_mirs,
@@ -383,7 +383,7 @@ impl BoundaryWork {
         let spendable_count = pending.values().filter(|r| r.is_spendable()).count();
         let unspendable_count = pending.len() - spendable_count;
 
-        tracing::info!(
+        tracing::debug!(
             pending_count = pending.len(),
             %pending_total,
             %spendable_count,
