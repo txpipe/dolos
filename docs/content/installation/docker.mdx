@@ -39,6 +39,8 @@ To use a versioned image, replace the `latest` tag by the desired version with t
 ghcr.io/txpipe/dolos:v1
 ```
 
+The `v1` tag is a floating alias that tracks the latest `1.x` release. For production deployments, consider pinning to a specific version (e.g. `v1.0.0`).
+
 ## Multiple Architectures
 
 _Dolos_ docker image is multi-arch, meaning that it can be used from different CPU architectures. We currently support `amd64` (aka `x86_64`) and `arm64`.

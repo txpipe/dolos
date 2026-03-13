@@ -14,7 +14,7 @@ Dolos is optimized for minimal CPU, memory, and storage consumption. It is desig
 
 ## Rich API surface
 
-Dolos provides multiple query interfaces so developers can use the tools they already know. Mini-Blockfrost offers a Blockfrost-compatible HTTP API where existing integrations work out of the box. UTxO-RPC exposes chain data over gRPC. Mini-Kupo provides pattern-matching UTxO queries. TRP enables real-time streaming of chain events. An Ouroboros node-to-client unix socket provides compatibility with `cardano-cli`, Ogmios, and other existing tooling — removing the need for a full node in established workflows.
+Dolos provides multiple query interfaces so developers can use the tools they already know. Mini-Blockfrost offers a Blockfrost-compatible HTTP API where existing integrations work out of the box. UTxO-RPC exposes chain data over gRPC. Mini-Kupo provides pattern-matching UTxO queries. TRP exposes the Transaction Resolver Protocol for resolving Tx3 templates into concrete transactions and submitting them. An Ouroboros node-to-client unix socket provides compatibility with `cardano-cli`, Ogmios, and other existing tooling — removing the need for a full node in established workflows.
 
 ## High query throughput
 
@@ -40,7 +40,7 @@ Dolos includes a mempool that performs phase-1 and phase-2 validations locally b
 
 ## Simple bootstrapping
 
-Dolos supports two bootstrapping mechanisms. Mithril bootstrapping syncs a full mainnet node in under 20 hours by importing a certified Mithril snapshot. For even faster setup, Dolos snapshots — portable exports of an already-synced node — can be loaded in minutes.
+Dolos supports two bootstrapping mechanisms. Mithril bootstrapping can initialize a mainnet Dolos node in under 20 hours by importing a certified Mithril snapshot. For even faster setup, Dolos snapshots — portable exports of an already-synced node — can be loaded in minutes.
 
 Prebuilt binaries are available for macOS (Apple Silicon), Linux (ARM64 and x64), and Windows x64, alongside Docker images.
 

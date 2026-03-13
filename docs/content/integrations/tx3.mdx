@@ -22,7 +22,7 @@ listen_address = "[::]:8164"
 |---------------------|---------|----------------------------------------------------------|
 | listen_address      | string  | Local address (`IP:PORT`) to listen for TRP connections  |
 | max_optimize_rounds | integer | Max optimization rounds for fee balancing (default: 10)  |
-| permissive_cors     | boolean | Allow cross-origin requests from any origin              |
+| permissive_cors     | boolean | Allow cross-origin requests from any origin (default: true) |
 | extra_fees          | integer | Optional extra lovelace to add during fee optimization   |
 
 Once the daemon is running, the TRP server accepts JSON-RPC requests at `http://localhost:8164`.
