@@ -49,6 +49,9 @@ listen_address = "[::]:3000"
 [serve.ouroboros]
 listen_path = "dolos.socket"
 
+[serve.minikupo]
+listen_address = "[::]:3100"
+
 [serve.trp]
 listen_address = "[::]:8164"
 
@@ -289,6 +292,18 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
 
+## `serve.minikupo` section
+
+The `serve.minikupo` section controls the options for the HTTP endpoint that hosts a Kupo-like endpoint.
+
+| property        | type    | example      |
+| --------------- | ------- | ------------ |
+| listen_address  | string  | "[::]:3100"  |
+| permissive_cors | boolean | true (default) |
+
+- `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
+- `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
+
 ## `serve.trp` section
 
 The `serve.trp` section controls the options for the Transaction Resolver Protocol endpoint.
@@ -396,7 +411,7 @@ All logging fields are optional in TOML; omitted values use these defaults.
 
 ## `telemetry` section
 
-The `telemetry` section controls OpenTelemetry trace export for mempool transaction lifecycle tracking. When enabled, Dolos sends per-transaction traces to an OTLP-compatible collector (e.g. Jaeger, Grafana Tempo). See the [tracing guide](../running/tracing) for a full walkthrough.
+The `telemetry` section controls OpenTelemetry trace export for mempool transaction lifecycle tracking. When enabled, Dolos sends per-transaction traces to an OTLP-compatible collector (e.g. Jaeger, Grafana Tempo). See the [tracing guide](../operations/tracing) for a full walkthrough.
 
 | property        | type    | default                   | description                              |
 | --------------- | ------- | ------------------------- | ---------------------------------------- |

@@ -1,0 +1,68 @@
+---
+title: Logging
+sidebar:
+  order: 2
+---
+
+Dolos outputs logs through stdout. Internally, it uses a tracing mechanism that groups logs into hierarchical blocks called _spans_ that holds data describing the context where the event occurred.
+
+Depending on your use-case, the amount and detail of these logs might be overwhelming. _Dolos_ provides a set of configuration values that allows you to opt-in into different levels of detail.
+
+## Log Levels
+
+Dolos follows a very common convention around log levels. These levels describe discrete categories of decreasing severity.
+
+| level   | description                                                                  |
+| ------- | ---------------------------------------------------------------------------- |
+| `error` | unexpected errors, stuff that shouldn't occur                                |
+| `warn`  | warning about things that are expected but require attention                 |
+| `info`  | normal operation events that are relevant for day-to-day operations          |
+| `debug` | normal operation events with a level of detail useful for debugging problems |
+| `trace` | extreme level of detail, usually including data being processed              |
+
+## Sub-components
+
+There are some sub-components within _Dolos_ that are more verbose than others. By default, logs from these components are suppressed. You can opt-in to include them as needed:
+
+| component  | description                                                          |
+| ---------- | -------------------------------------------------------------------- |
+| tokio      | The async runtime                                                    |
+| pallas     | Low-level Ouroboros interactions (mini-protocols, CBOR decoding)     |
+| grpc       | The gRPC server (UTxO RPC)                                          |
+| trp        | The Transaction Resolver Protocol server                             |
+| minibf     | The Mini-Blockfrost HTTP server                                      |
+| minikupo   | The Mini-Kupo HTTP server                                            |
+| otlp       | OpenTelemetry exporters                                              |
+| fjall      | The Fjall storage engine                                             |
+
+## Configuration
+
+The `[logging]` section within `dolos.toml` controls these options:
+
+| property         | type    | default  |
+| ---------------- | ------- | -------- |
+| max_level        | string  | `"info"` |
+| include_tokio    | boolean | `false`  |
+| include_pallas   | boolean | `false`  |
+| include_grpc     | boolean | `false`  |
+| include_trp      | boolean | `false`  |
+| include_minibf   | boolean | `false`  |
+| include_minikupo | boolean | `false`  |
+| include_otlp     | boolean | `false`  |
+| include_fjall    | boolean | `false`  |
+
+- `max_level`: the maximum severity level of events to include in the output. By selecting a specific level, you include that level and every level of higher severity.
+- `include_*`: flags that indicate if the output should include logs from the corresponding sub-component.
+
+All fields are optional. Omitted values use the defaults shown above.
+
+Example:
+
+```toml
+[logging]
+max_level = "debug"
+include_pallas = true
+include_grpc = true
+```
+
+You can find more detailed info about configuration in the [configuration schema section](../configuration/schema).

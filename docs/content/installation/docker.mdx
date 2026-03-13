@@ -18,7 +18,7 @@ The entry-point of the image points to _Dolos_ executable. You can pass the same
 docker run -it ghcr.io/txpipe/dolos:latest --help
 ```
 
-For more information on available command-line arguments, check the [usage](../running/modes) section.
+For more information on available command-line arguments, check the [usage](../operations/modes) section.
 
 ## Using a Configuration File
 
@@ -31,12 +31,12 @@ docker run -d -v $(pwd)/daemon.toml:/etc/dolos/daemon.toml \
 
 ## Versioned Images
 
-Images are also tagged with the corresponding version number. It is highly recommended to use a fixed image version in production environments to avoid the effects of new features being included in each release (please remember dolos hasn't reached v1 stability guarantees).
+Images are also tagged with the corresponding version number. It is highly recommended to use a fixed image version in production environments to avoid the effects of new features being included in each release.
 
-To use a versioned image, replace the `latest` tag by the desired version with the `v` prefix. For example, to use version `0.8.0`, use the following image:
+To use a versioned image, replace the `latest` tag by the desired version with the `v` prefix. For example, to use version `1`, use the following image:
 
 ```
-ghcr.io/txpipe/dolos:v0.8.0
+ghcr.io/txpipe/dolos:v1
 ```
 
 ## Multiple Architectures

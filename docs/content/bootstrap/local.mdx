@@ -4,7 +4,7 @@ title: Local Node
 
 import { Aside } from '@astrojs/starlight/components';
 
-Boostrapping from a local full node is an efficient way to synchronize Dolos from a trusted source. The downside is having to run two processes (the source node + dolos) where some overlap exist. This method involves connecting via Ouroboros node-to-node mini-protocols.
+Bootstrapping from a local full node is an efficient way to synchronize Dolos from a trusted source. The downside is having to run two processes (the source node + dolos) where some overlap exist. This method involves connecting via Ouroboros node-to-node mini-protocols.
 
 <Aside type="note">
 If you're looking for way of bootstrapping Dolos but you don't have a local full node, please refer to the alternative [Public Relay](./relay) option.
@@ -13,51 +13,54 @@ If you're looking for way of bootstrapping Dolos but you don't have a local full
 In essence, this bootstrapping procedure is just about starting Dolos and let it do its thing. From Dolos' perspective, the procedure involves the following:
 
 1. Read the genesis files to load initial data
-2. Connect to the configure upstream node using Ouroboros
+2. Connect to the configured upstream node using Ouroboros
 3. Start the chain-sync mini-protocol from origin
 4. Keep syncing until reaching the tip of the chain
 
-<Aside type="note">
-Syncing using node-to-client mini-protocols (aka: node socket) is being developed but not yet supported
-</Aside>
-
 ## Configuration
 
-To bootstrap using a public relay node, the only required configuration is the one inside the `upstream` section. You will probably have this configuration already since it's mandatory for almost every Dolos operation.
+To bootstrap using a local node, the required configuration includes the `upstream` section for the peer connection and the `chain` section for the network parameters:
 
-| property      | type    | example                                    |
-| ------------- | ------- | ------------------------------------------ |
-| peer_address  | string  | "localhost:30000"                          |
-| network_magic | integer | 1                                          |
-| is_testnet    | boolean | true                                       |
+```toml
+[upstream]
+peer_address = "localhost:30000"
+
+[chain]
+type = "cardano"
+magic = 1
+is_testnet = true
+```
+
+| section  | property     | type    | example           |
+| -------- | ------------ | ------- | ----------------- |
+| upstream | peer_address | string  | "localhost:30000" |
+| chain    | magic        | integer | 1                 |
+| chain    | is_testnet   | boolean | true              |
 
 - `peer_address`: network address of peer node using `{host}:{port}` syntax.
-- `network_magic`: the magic number of the network we're connecting to.
-- `is_tesnet`: flag to indicate if this network is a testent or not.
+- `magic`: the Cardano network magic number.
+- `is_testnet`: flag to indicate if this network is a testnet or not.
 
 <Aside type="tip">
 We use `localhost` as an example but it can also be a different hostname as long as the TCP port is reachable.
 </Aside>
 
-This is how the configuration fragment would look like inside a `dolos.toml` file:
-
-```toml
-[upstream]
-peer_address = "localhost:30000"
-network_magic = 1
-is_testnet = true
-```
-
 ## Execution
 
-To start the bootstrap procedure, you need to run the following command line:
+To initialize the data stores for syncing from origin, run:
 
 ```sh
-dolos sync
+dolos bootstrap relay
 ```
 
-The process will take several hours depending on the chain you're synchronizing. You'll see different log outputs, some lines will indicate the _slot_  of the latest block pulled from the relay node. Compare this value to the tip of the chain as shown in a public explorer to track the overall progress.
+Then start the daemon to begin syncing:
+
+```sh
+dolos daemon
+```
+
+The process will take several hours depending on the chain you're synchronizing. You'll see different log outputs, some lines will indicate the _slot_ of the latest block pulled from the relay node. Compare this value to the tip of the chain as shown in a public explorer to track the overall progress.
 
 <Aside type="note">
-The process support resuming from previous runs. You can safely interrupt the process and continue again from where you left off by just running the command again.
+The process supports resuming from previous runs. You can safely interrupt the process and continue again from where you left off by just running the command again.
 </Aside>

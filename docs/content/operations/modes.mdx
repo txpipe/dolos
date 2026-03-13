@@ -36,11 +36,10 @@ To start _Dolos_ in `serve` mode, use the following command:
 dolos serve
 ```
 
-## Sumary of Modes
+## Summary of Modes
 
-| feature                        | daemon | sync | serve |
-| ------------------------------ | ------ | ---- | ----- |
-| sync from upstream peer        | ✅      | ✅    | ❌     |
-| relay ouroboros node-to-node   | ✅      | ❌    | ❌     |
-| serve ouroboros node-to-client | ✅      | ❌    | ✅     |
-| serve gRPC                     | ✅      | ❌    | ✅     |
+| mode   | description                    |
+| ------ | ------------------------------ |
+| daemon | sync + serve + relay (all-in-one) |
+| sync   | sync from upstream peer only   |
+| serve  | serve data through APIs only   |
