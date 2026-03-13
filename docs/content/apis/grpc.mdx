@@ -1,12 +1,12 @@
 ---
-title: gRPC
+title: UTxO RPC
 sidebar:
   order: 1
 ---
 
-Dolos exposes a gRPC endpoint allowing clients to perform operations such as querying data, receiving notifications and submitting transactions.
+Dolos exposes a [UTxO RPC](https://utxorpc.org) endpoint over gRPC, allowing clients to perform operations such as querying data, receiving notifications and submitting transactions.
 
-The endpoint provide by _Dolos_ adheres to the [UTxO RPC](https://utxorpc.org) interface definition. UtxoRPC is a generic specification of how to exchange data with UTxO-based blockchains, such as Cardano.
+UTxO RPC is a generic specification of how to exchange data with UTxO-based blockchains, such as Cardano.
 
 If enabled via configuration, _Dolos_ will expose a TCP port accepting gRPC connections. The default port number is `50051`, but this value can be changed via configuration.
 

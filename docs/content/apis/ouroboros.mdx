@@ -4,4 +4,80 @@ sidebar:
   order: 3
 ---
 
-// TODO: explain how to connect using node-to-client Ouroboros mini-protocols through the unix socket.
+import { Aside } from '@astrojs/starlight/components';
+
+Dolos exposes a unix socket implementing Cardano's node-to-client Ouroboros mini-protocols. This provides drop-in compatibility with tools that normally connect to a Cardano full node, such as `cardano-cli`, Ogmios, and other ecosystem tooling.
+
+<Aside type="note">
+The Ouroboros endpoint is only available on Unix-based systems (Linux, macOS). It is not supported on Windows.
+</Aside>
+
+## Supported Mini-protocols
+
+Dolos implements the following node-to-client mini-protocols:
+
+| Mini-protocol   | Description                                              |
+|-----------------|----------------------------------------------------------|
+| ChainSync       | Follow the chain tip and receive new blocks in real time |
+| LocalStateQuery | Query the current ledger state                           |
+
+### LocalStateQuery Coverage
+
+The following local state queries are supported:
+
+| Query                | Description                                      |
+|----------------------|--------------------------------------------------|
+| GetSystemStart       | Get the system start time                        |
+| GetChainBlockNo      | Get the current chain block number               |
+| GetChainPoint        | Get the current chain tip point                  |
+| GetCurrentEra        | Get the current era index                        |
+| GetInterpreter       | Get the era history / interpreter summary        |
+| GetCurrentPParams    | Get the current protocol parameters              |
+| GetLedgerTip         | Get the ledger tip point                         |
+| GetEpochNo           | Get the current epoch number                     |
+| GetUTxOByAddress     | Query UTxOs for a set of addresses               |
+| GetStakePools        | List all registered stake pools                  |
+| GetStakePoolParams   | Get parameters for specific stake pools          |
+| GetPoolState         | Get detailed state for specific pools            |
+| GetStakeSnapshots    | Get stake snapshots for specific pools           |
+| GetAccountState      | Get the global account state (treasury/reserves) |
+
+## Usage
+
+If enabled via configuration, Dolos will create a unix socket file accepting Ouroboros node-to-client connections. The default socket path is `dolos.socket` in the working directory, but this can be changed via configuration.
+
+### Using with cardano-cli
+
+Point `cardano-cli` to the Dolos socket using the `CARDANO_NODE_SOCKET_PATH` environment variable:
+
+```sh
+export CARDANO_NODE_SOCKET_PATH=./dolos.socket
+cardano-cli query tip --testnet-magic 1
+```
+
+### Using with Ogmios
+
+Start Ogmios pointing to the Dolos socket:
+
+```sh
+ogmios --node-socket ./dolos.socket --node-config config.json
+```
+
+## Configuration
+
+The `serve.ouroboros` section controls the options for the Ouroboros endpoint.
+
+| property    | type   | example        |
+|-------------|--------|----------------|
+| listen_path | string | "dolos.socket" |
+
+- `listen_path`: the file path for the unix socket that will listen for Ouroboros node-to-client mini-protocols.
+
+This is an example of the `serve.ouroboros` fragment within a `dolos.toml` configuration file.
+
+```toml
+[serve.ouroboros]
+listen_path = "dolos.socket"
+```
+
+Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.
