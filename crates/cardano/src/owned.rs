@@ -32,7 +32,7 @@ impl dolos_core::Block for OwnedMultiEraBlock {
     }
 
     fn hash(&self) -> BlockHash {
-        self.view().hash()
+        crate::pallas_hash_to_core(self.view().hash())
     }
 
     fn raw(&self) -> RawBlock {
