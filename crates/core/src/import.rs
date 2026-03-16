@@ -31,11 +31,17 @@ pub trait ImportExt: Domain {
     /// # Returns
     ///
     /// The slot of the last imported block.
-    fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
+    fn import_blocks(
+        &self,
+        raw: Vec<RawBlock>,
+    ) -> Result<BlockSlot, DomainError<Self::ChainSpecificError>>;
 }
 
 impl<D: Domain> ImportExt for D {
-    fn import_blocks(&self, mut raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+    fn import_blocks(
+        &self,
+        mut raw: Vec<RawBlock>,
+    ) -> Result<BlockSlot, DomainError<Self::ChainSpecificError>> {
         let mut last = 0;
         let mut chain = self.write_chain();
 
@@ -55,7 +61,10 @@ impl<D: Domain> ImportExt for D {
 }
 
 /// Drain all pending work from the chain logic using import lifecycle.
-fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(), DomainError> {
+fn drain_pending_work<D: Domain>(
+    chain: &mut D::Chain,
+    domain: &D,
+) -> Result<(), DomainError<D::ChainSpecificError>> {
     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
         execute_work_unit(domain, &mut work)?;
     }
@@ -76,7 +85,10 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 /// - `commit_wal()` - Not needed for immutable data import
 /// - `notify_tip()` - No subscribers during bulk import
 #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
-fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+fn execute_work_unit<D: Domain>(
+    domain: &D,
+    work: &mut D::WorkUnit,
+) -> Result<(), DomainError<D::ChainSpecificError>> {
     debug!("executing work unit (import)");
 
     work.load(domain)?;
