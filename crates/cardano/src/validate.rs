@@ -1,26 +1,27 @@
 use std::borrow::Cow;
 
-use dolos_core::{
-    ChainError, ChainPoint, Domain, EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx,
-};
+use dolos_core::{ChainError, ChainPoint, Domain, EraCbor, MempoolAwareUtxoStore, MempoolTx};
 
+use crate::{CardanoError, CardanoGenesis};
 use pallas::ledger::{
     primitives::{NetworkId, TransactionInput},
     traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use tracing::debug;
 
-pub fn validate_tx<D: Domain>(
+pub fn validate_tx<D: Domain<ChainSpecificError = CardanoError>>(
     cbor: &[u8],
     utxos: &MempoolAwareUtxoStore<D>,
     tip: Option<ChainPoint>,
-    genesis: &Genesis,
-) -> Result<MempoolTx, ChainError> {
-    let tx = MultiEraTx::decode(cbor)?;
+    genesis: &CardanoGenesis,
+) -> Result<MempoolTx, ChainError<CardanoError>> {
+    let tx = MultiEraTx::decode(cbor)
+        .map_err(CardanoError::from)
+        .map_err(ChainError::ChainSpecific)?;
     let hash = tx.hash();
 
-    let pparams = crate::load_effective_pparams::<D>(utxos.state())?;
-    let pparams = crate::utils::pparams_to_pallas(&pparams);
+    let raw_pparams = crate::load_effective_pparams::<D>(utxos.state())?;
+    let pparams = crate::utils::pparams_to_pallas(&raw_pparams);
 
     let network_id = match genesis.shelley.network_id.as_ref() {
         Some(network) => match network.as_str() {
@@ -40,7 +41,11 @@ pub fn validate_tx<D: Domain>(
         acnt: Some(pallas::ledger::validate::utils::AccountState::default()),
     };
 
-    let input_refs = tx.requires().iter().map(From::from).collect();
+    let input_refs = tx
+        .requires()
+        .iter()
+        .map(crate::txo_ref_from_input)
+        .collect();
 
     let utxos_matches = utxos.get_utxos(input_refs)?;
 
@@ -48,7 +53,7 @@ pub fn validate_tx<D: Domain>(
 
     for (txoref, eracbor) in utxos_matches.iter() {
         let tx_in = TransactionInput {
-            transaction_id: txoref.0,
+            transaction_id: crate::core_hash_to_pallas(txoref.0),
             index: txoref.1.into(),
         };
 
@@ -58,7 +63,8 @@ pub fn validate_tx<D: Domain>(
 
         let eracbor = eracbor.as_ref();
 
-        let output = MultiEraOutput::try_from(eracbor)?;
+        let output = crate::multi_era_output_from_era_cbor(eracbor)
+            .map_err(ChainError::ChainSpecific)?;
 
         pallas_utxos.insert(input, output);
     }
@@ -69,13 +75,17 @@ pub fn validate_tx<D: Domain>(
         &env,
         &pallas_utxos,
         &mut pallas::ledger::validate::utils::CertState::default(),
-    )?;
+    )
+    .map_err(CardanoError::from)
+    .map_err(ChainError::ChainSpecific)?;
 
     let report = evaluate_tx::<D>(cbor, utxos)?;
 
     for eval in report.iter() {
         if !eval.success {
-            return Err(ChainError::Phase2ValidationRejected(eval.logs.clone()));
+            return Err(ChainError::ChainSpecific(
+                CardanoError::Phase2ValidationRejected(eval.logs.clone()),
+            ));
         }
     }
 
@@ -89,16 +99,20 @@ pub fn validate_tx<D: Domain>(
     let era = u16::from(tx.era());
     let payload = EraCbor(era, cbor.into());
 
-    let tx = MempoolTx::new(hash, payload, report);
+    let tx_hash = crate::pallas_hash_to_core(hash);
+    let encoded_report = format!("{report:?}").into_bytes();
+    let tx = MempoolTx::new(tx_hash, payload, encoded_report);
 
     Ok(tx)
 }
 
-pub fn evaluate_tx<D: Domain>(
+pub fn evaluate_tx<D: Domain<ChainSpecificError = CardanoError>>(
     cbor: &[u8],
     utxos: &MempoolAwareUtxoStore<D>,
-) -> Result<pallas::ledger::validate::phase2::EvalReport, ChainError> {
-    let tx = MultiEraTx::decode(cbor)?;
+) -> Result<pallas::ledger::validate::phase2::EvalReport, ChainError<CardanoError>> {
+    let tx = MultiEraTx::decode(cbor)
+        .map_err(CardanoError::from)
+        .map_err(ChainError::ChainSpecific)?;
 
     use dolos_core::TxoRef;
 
@@ -114,7 +128,11 @@ pub fn evaluate_tx<D: Domain>(
         zero_time: eras.edge().start.timestamp,
     };
 
-    let input_refs = tx.requires().iter().map(From::from).collect();
+    let input_refs = tx
+        .requires()
+        .iter()
+        .map(crate::txo_ref_from_input)
+        .collect();
 
     let utxos: pallas::ledger::validate::utils::UtxoMap = utxos
         .get_utxos(input_refs)?
@@ -123,14 +141,15 @@ pub fn evaluate_tx<D: Domain>(
             let era = eracbor.era().try_into().expect("era out of range");
 
             (
-                pallas::ledger::validate::utils::TxoRef::from((a, b)),
+                pallas::ledger::validate::utils::TxoRef::from((crate::core_hash_to_pallas(a), b)),
                 pallas::ledger::validate::utils::EraCbor::from((era, eracbor.cbor().into())),
             )
         })
         .collect();
 
-    let report = pallas::ledger::validate::phase2::evaluate_tx(&tx, &pparams, &utxos, &slot_config)
-        .map_err(|e| ChainError::Phase2EvaluationError(e.to_string()))?;
+    let report =
+        pallas::ledger::validate::phase2::evaluate_tx(&tx, &pparams, &utxos, &slot_config)
+            .map_err(|e| ChainError::ChainSpecific(CardanoError::Phase2EvaluationError(e.to_string())))?;
 
     Ok(report)
 }
