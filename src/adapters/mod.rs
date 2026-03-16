@@ -35,7 +35,7 @@ impl dolos_core::TipSubscription for TipSubscription {
 pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub sync_config: Arc<SyncConfig>,
-    pub genesis: Arc<Genesis>,
+    pub genesis: Arc<GenesisCardanoCardano>,
     pub wal: WalAdapter,
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
     pub state: StateStoreBackend,
@@ -110,7 +110,7 @@ impl Domain for DomainAdapter {
     type Mempool = MempoolBackend;
     type TipSubscription = TipSubscription;
 
-    fn genesis(&self) -> Arc<Genesis> {
+    fn genesis(&self) -> Arc<GenesisCardanoCardano> {
         self.genesis.clone()
     }
 

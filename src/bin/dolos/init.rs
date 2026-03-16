@@ -6,7 +6,7 @@ use dolos_core::{
         MithrilConfig, PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion,
         TrpConfig, UpstreamConfig,
     },
-    Genesis,
+    GenesisCardanoCardano,
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
@@ -84,7 +84,7 @@ impl KnownNetwork {
         ]
     }
 
-    pub fn load_included_genesis(&self) -> Genesis {
+    pub fn load_included_genesis(&self) -> GenesisCardanoCardano {
         match self {
             KnownNetwork::CardanoMainnet => include::mainnet::load(),
             KnownNetwork::CardanoPreProd => include::preprod::load(),

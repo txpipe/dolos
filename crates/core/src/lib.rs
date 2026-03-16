@@ -104,16 +104,29 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct EraCbor(
-    #[n(0)] pub Era,
-    // TODO: Rename the Cbor field later. Not necessary just yet
-    // We might have another way to do this. Not sure yet so let's keep it for the time being
-    #[cbor(n(1), with = "minicbor::bytes")] pub Cbor,
-);
+// TODO: ask santiago. Doubtful
+mod cbor_bytes {
+    use minicbor::{Decoder, Encoder};
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub struct EraBody(pub Era, pub Vec<u8>);
+    pub fn encode<W: minicbor::encode::Write, C>(
+        v: &Vec<u8>,
+        e: &mut Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.bytes(v)?;
+        Ok(())
+    }
+
+    pub fn decode<'b, C>(
+        d: &mut Decoder<'b>,
+        _: &mut C,
+    ) -> Result<Vec<u8>, minicbor::decode::Error> {
+        d.bytes().map(|b| b.to_vec())
+    }
+}
+
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize, Encode, Decode)]
+pub struct EraCbor(#[n(0)] pub Era, #[cbor(n(1), with = "cbor_bytes")] pub Cbor);
 
 impl EraCbor {
     pub fn era(&self) -> Era {
@@ -428,7 +441,7 @@ pub enum ChainError<E: std::error::Error + Send + Sync + 'static> {
 
     // keep
     #[error(transparent)]
-    ArchiveError(#[from] ArchiveError),
+    ArchiveError(#[from] ArchiveError<E>),
 
     // keep ?
     #[error("genesis field missing: {0}")]
@@ -580,7 +593,7 @@ pub enum DomainError<E: std::error::Error + Send + Sync + 'static> {
     StateError(#[from] StateError),
 
     #[error("archive error: {0}")]
-    ArchiveError(#[from] ArchiveError),
+    ArchiveError(#[from] ArchiveError<E>),
 
     #[error("index error: {0}")]
     IndexError(#[from] IndexError),
@@ -634,7 +647,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
-    type Archive: ArchiveStore;
+    type Archive: ArchiveStore<ChainSpecificError = Self::ChainSpecificError>;
     type Indexes: IndexStore;
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
