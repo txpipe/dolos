@@ -39,18 +39,24 @@ pub trait SyncExt: Domain {
     /// # Returns
     ///
     /// The slot of the processed block.
-    fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
+    fn roll_forward(
+        &self,
+        block: RawBlock,
+    ) -> Result<BlockSlot, DomainError<Self::ChainSpecificError>>;
 
     /// Roll back the chain to a previous point.
     ///
     /// Iterates WAL entries after the target point in reverse order,
     /// undoing each block's effects on state, UTxOs, and indexes.
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
+    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError<Self::ChainSpecificError>>;
 }
 
 impl<D: Domain> SyncExt for D {
     #[instrument(skip_all)]
-    fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
+    fn roll_forward(
+        &self,
+        block: RawBlock,
+    ) -> Result<BlockSlot, DomainError<Self::ChainSpecificError>> {
         let mut chain = self.write_chain();
 
         // Drain first in case there's previous work that needs to be applied (eg: initialization)
@@ -64,7 +70,7 @@ impl<D: Domain> SyncExt for D {
     }
 
     #[instrument(skip_all, fields(rollback_to = %to))]
-    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError> {
+    fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError<Self::ChainSpecificError>> {
         let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
 
         let writer = self.state().start_writer()?;
@@ -141,7 +147,7 @@ impl<D: Domain> SyncExt for D {
 pub(crate) fn drain_pending_work<D: Domain>(
     chain: &mut D::Chain,
     domain: &D,
-) -> Result<(), DomainError> {
+) -> Result<(), DomainError<D::ChainSpecificError>> {
     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
         execute_work_unit(domain, &mut work)?;
     }
@@ -163,7 +169,10 @@ pub(crate) fn drain_pending_work<D: Domain>(
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
 #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
-pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+pub fn execute_work_unit<D: Domain>(
+    domain: &D,
+    work: &mut D::WorkUnit,
+) -> Result<(), DomainError<D::ChainSpecificError>> {
     debug!("executing work unit");
 
     work.load(domain)?;
