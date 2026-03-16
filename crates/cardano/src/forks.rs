@@ -1,5 +1,5 @@
-use crate::{utils::float_to_rational, PParamValue, PParamsSet};
-use dolos_core::{BrokenInvariant, Genesis};
+use crate::{utils::float_to_rational, CardanoGenesis, PParamValue, PParamsSet};
+use dolos_core::BrokenInvariant;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -217,7 +217,7 @@ pub fn migrate_pparams_version(
     from: u16,
     to: u16,
     current: &PParamsSet,
-    genesis: &Genesis,
+    genesis: &CardanoGenesis,
 ) -> PParamsSet {
     debug!(from, to, "migrating pparams version");
 
@@ -251,7 +251,7 @@ pub fn migrate_pparams_version(
 
 pub fn force_pparams_version(
     initial: &PParamsSet,
-    genesis: &Genesis,
+    genesis: &CardanoGenesis,
     from: u16,
     to: u16,
 ) -> Result<PParamsSet, BrokenInvariant> {
@@ -269,7 +269,7 @@ pub struct ProtocolConstants {
     pub slot_length: u64,
 }
 
-pub fn protocol_constants(version: u16, genesis: &Genesis) -> ProtocolConstants {
+pub fn protocol_constants(version: u16, genesis: &CardanoGenesis) -> ProtocolConstants {
     match version {
         x if x < 2 => {
             let slot_length_in_secs = genesis.byron.block_version_data.slot_duration / 1000;
