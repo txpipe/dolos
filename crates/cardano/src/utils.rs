@@ -3,9 +3,9 @@ use dolos_core::*;
 use pallas::ledger::addresses::Network;
 use pallas::ledger::validate::utils::{ConwayProtParams, MultiEraProtocolParameters};
 
-use crate::PParamsSet;
+use crate::{CardanoGenesis, PParamsSet};
 
-pub fn network_from_genesis(genesis: &Genesis) -> Network {
+pub fn network_from_genesis(genesis: &CardanoGenesis) -> Network {
     match genesis.shelley.network_id.as_deref() {
         Some("Mainnet") => Network::Mainnet,
         _ => Network::Testnet,
@@ -17,7 +17,7 @@ pub fn network_from_genesis(genesis: &Genesis) -> Network {
 /// Reads the relevant genesis config values and uses the security window
 /// guarantee formula from consensus to calculate the latest slot that can be
 /// considered immutable.
-pub fn mutable_slots(genesis: &Genesis) -> u64 {
+pub fn mutable_slots(genesis: &CardanoGenesis) -> u64 {
     let k = genesis.byron.protocol_consts.k as f64;
     let f = genesis.shelley.active_slots_coeff.unwrap() as f64;
     ((3.0 * k) / f).ceil() as u64
@@ -29,7 +29,7 @@ pub fn mutable_slots(genesis: &Genesis) -> u64 {
 /// guarantee formula from consensus to calculate the latest slot that can be
 /// considered immutable. Same as `mutable_slots`, added for the code to be similar in naming
 /// convention to other implementations.
-pub fn stability_window(genesis: &Genesis) -> u64 {
+pub fn stability_window(genesis: &CardanoGenesis) -> u64 {
     mutable_slots(genesis)
 }
 
@@ -37,7 +37,7 @@ pub fn stability_window(genesis: &Genesis) -> u64 {
 ///
 /// Similar to `mutable_slots` but with 4 instead of 3 as the constant. See the following issue for
 /// refference: https://github.com/IntersectMBO/cardano-ledger/issues/1914
-pub fn randomness_stability_window(genesis: &Genesis) -> u64 {
+pub fn randomness_stability_window(genesis: &CardanoGenesis) -> u64 {
     let k = genesis.byron.protocol_consts.k as f64;
     let f = genesis.shelley.active_slots_coeff.unwrap() as f64;
     ((4.0 * k) / f).ceil() as u64
@@ -47,7 +47,7 @@ pub fn randomness_stability_window(genesis: &Genesis) -> u64 {
 ///
 /// This is supposed be `randomness_stability_window` but due to a bug in the code it is dependant
 /// on the protocol. See https://github.com/IntersectMBO/cardano-ledger/issues/1914.
-pub fn nonce_stability_window(protocol: u16, genesis: &Genesis) -> u64 {
+pub fn nonce_stability_window(protocol: u16, genesis: &CardanoGenesis) -> u64 {
     if protocol >= 9 {
         randomness_stability_window(genesis)
     } else {
@@ -61,7 +61,7 @@ pub fn nonce_stability_window(protocol: u16, genesis: &Genesis) -> u64 {
 /// uses the security window guarantee formula from consensus to calculate the
 /// latest slot that can be considered immutable. This is used mainly to define
 /// which slots can be finalized in the ledger store (aka: compaction).
-pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &Genesis) -> BlockSlot {
+pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &CardanoGenesis) -> BlockSlot {
     tip.saturating_sub(mutable_slots(genesis))
 }
 
@@ -84,8 +84,8 @@ pub fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-pub fn load_genesis(path: &std::path::Path) -> Genesis {
-    Genesis::from_file_paths(
+pub fn load_genesis(path: &std::path::Path) -> CardanoGenesis {
+    CardanoGenesis::from_file_paths(
         path.join("byron.json"),
         path.join("shelley.json"),
         path.join("alonzo.json"),
