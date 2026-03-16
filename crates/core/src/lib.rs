@@ -562,10 +562,13 @@ pub trait ChainLogic: Sized + Send + Sync {
     ) -> Result<Self::Utxo, ChainError<Self::ChainSpecificError>>;
 
     // TODO: remove from the interface - this is Cardano-specific
-    fn mutable_slots(domain: &impl Domain) -> BlockSlot;
+    fn mutable_slots(domain: &impl Domain<Genesis = Self::Genesis>) -> BlockSlot;
 
     // TODO: remove from the interface - this is Cardano-specific
-    fn last_immutable_slot(domain: &impl Domain, tip: BlockSlot) -> BlockSlot {
+    fn last_immutable_slot(
+        domain: &impl Domain<Genesis = Self::Genesis>,
+        tip: BlockSlot,
+    ) -> BlockSlot {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
@@ -578,7 +581,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     ) -> Result<Option<(EraCbor, TxOrder)>, Self::ChainSpecificError>;
 
     // Validate a transaction against the current ledger state.
-    fn validate_tx<D: Domain>(
+    fn validate_tx<D: Domain<ChainSpecificError = Self::ChainSpecificError>>(
         &self,
         cbor: &[u8],
         utxos: &MempoolAwareUtxoStore<D>,
