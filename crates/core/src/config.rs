@@ -1,10 +1,9 @@
 use std::{fmt::Display, net::SocketAddr, path::PathBuf};
 
-use pallas::ledger::primitives::Epoch;
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 
-use crate::{Cbor, Era, TxoRef};
+use crate::{Cbor, Epoch, Era, TxoRef};
 
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]

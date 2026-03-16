@@ -1,11 +1,11 @@
 use std::{fmt::Display, str::FromStr};
 
 use hex;
-use pallas::{crypto::hash::Hash, network::miniprotocols::Point as PallasPoint};
+//use pallas::{crypto::hash::Hash, network::miniprotocols::Point as PallasPoint};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::{Block, BlockHash, BlockSlot};
+use crate::{hash::Hash, Block, BlockHash, BlockSlot};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq)]
 pub enum ChainPoint {
@@ -81,26 +81,26 @@ impl PartialOrd for ChainPoint {
     }
 }
 
-impl From<PallasPoint> for ChainPoint {
-    fn from(value: PallasPoint) -> Self {
-        match value {
-            PallasPoint::Origin => ChainPoint::Origin,
-            PallasPoint::Specific(s, h) => ChainPoint::Specific(s, h.as_slice().into()),
-        }
-    }
-}
+//impl From<PallasPoint> for ChainPoint {
+//    fn from(value: PallasPoint) -> Self {
+//        match value {
+//            PallasPoint::Origin => ChainPoint::Origin,
+//            PallasPoint::Specific(s, h) => ChainPoint::Specific(s, h.as_slice().into()),
+//        }
+//    }
+//}
 
-impl TryFrom<ChainPoint> for PallasPoint {
-    type Error = ();
-
-    fn try_from(value: ChainPoint) -> Result<Self, Self::Error> {
-        match value {
-            ChainPoint::Origin => Ok(PallasPoint::Origin),
-            ChainPoint::Specific(s, h) => Ok(PallasPoint::Specific(s, h.to_vec())),
-            ChainPoint::Slot(_) => Err(()),
-        }
-    }
-}
+//impl TryFrom<ChainPoint> for PallasPoint {
+//    type Error = ();
+//
+//    fn try_from(value: ChainPoint) -> Result<Self, Self::Error> {
+//        match value {
+//            ChainPoint::Origin => Ok(PallasPoint::Origin),
+//            ChainPoint::Specific(s, h) => Ok(PallasPoint::Specific(s, h.to_vec())),
+//            ChainPoint::Slot(_) => Err(()),
+//        }
+//    }
+//}
 
 impl<T> From<&T> for ChainPoint
 where
@@ -118,8 +118,8 @@ impl ChainPoint {
         let slot = self.slot();
 
         let hash = match self.hash() {
-            Some(hash) => *hash,
-            None => [0u8; 32],
+            Some(hash) => hash,
+            None => Hash::new([0u8; 32]),
         };
 
         let mut out = [0u8; 40];
@@ -138,7 +138,7 @@ impl ChainPoint {
         let slot_half: [u8; 8] = value[0..8].try_into().unwrap();
         let hash_half: [u8; 32] = value[8..40].try_into().unwrap();
         let slot = u64::from_be_bytes(slot_half);
-        let hash = Hash::new(hash_half);
+        let hash = Hash::<32>::new(hash_half);
         ChainPoint::Specific(slot, hash)
     }
 }
