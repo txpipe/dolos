@@ -574,6 +574,11 @@ pub trait ChainLogic: Sized + Send + Sync {
     fn tx_produced_utxos(era_body: &EraCbor) -> Vec<(TxoRef, EraCbor)>;
     fn tx_consumed_ref(era_body: &EraCbor) -> Vec<TxoRef>;
 
+    fn find_tx_in_block(
+        block: &[u8],
+        tx_hash: &[u8],
+    ) -> Result<Option<(EraCbor, TxOrder)>, Self::ChainSpecificError>;
+
     // Validate a transaction against the current ledger state.
     fn validate_tx<D: Domain>(
         &self,

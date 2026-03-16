@@ -2,11 +2,9 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
-use pallas::ledger::traverse::MultiEraBlock;
-
 use crate::{
     archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension, TxOrder,
+    ChainLogic, ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension, TxOrder,
 };
 
 #[derive(Debug, Clone)]
@@ -48,10 +46,10 @@ where
         &self.options
     }
 
-    pub async fn run_blocking<T, F>(&self, f: F) -> Result<T, DomainError>
+    pub async fn run_blocking<T, F>(&self, f: F) -> Result<T, DomainError<D::ChainSpecificError>>
     where
         T: Send + 'static,
-        F: FnOnce(D) -> Result<T, DomainError> + Send + 'static,
+        F: FnOnce(D) -> Result<T, DomainError<D::ChainSpecificError>> + Send + 'static,
     {
         let permit = self.limiter.clone().acquire_owned().await.map_err(|_| {
             DomainError::ArchiveError(ArchiveError::InternalError(
@@ -69,12 +67,18 @@ where
             .map_err(|e| DomainError::ArchiveError(ArchiveError::InternalError(e.to_string())))?
     }
 
-    pub async fn block_by_slot(&self, slot: BlockSlot) -> Result<Option<BlockBody>, DomainError> {
+    pub async fn block_by_slot(
+        &self,
+        slot: BlockSlot,
+    ) -> Result<Option<BlockBody>, DomainError<D::ChainSpecificError>> {
         self.run_blocking(move |domain| Ok(domain.archive().get_block_by_slot(&slot)?))
             .await
     }
 
-    pub async fn block_by_hash(&self, hash: Vec<u8>) -> Result<Option<BlockBody>, DomainError> {
+    pub async fn block_by_hash(
+        &self,
+        hash: Vec<u8>,
+    ) -> Result<Option<BlockBody>, DomainError<D::ChainSpecificError>> {
         self.run_blocking(move |domain| {
             let slot = domain.indexes().slot_by_block_hash(&hash)?;
             match slot {
@@ -85,7 +89,10 @@ where
         .await
     }
 
-    pub async fn block_by_number(&self, number: u64) -> Result<Option<BlockBody>, DomainError> {
+    pub async fn block_by_number(
+        &self,
+        number: u64,
+    ) -> Result<Option<BlockBody>, DomainError<D::ChainSpecificError>> {
         self.run_blocking(move |domain| {
             let slot = domain.indexes().slot_by_block_number(number)?;
             match slot {
@@ -96,7 +103,10 @@ where
         .await
     }
 
-    pub async fn slot_by_number(&self, number: u64) -> Result<Option<BlockSlot>, DomainError> {
+    pub async fn slot_by_number(
+        &self,
+        number: u64,
+    ) -> Result<Option<BlockSlot>, DomainError<D::ChainSpecificError>> {
         self.run_blocking(move |domain| Ok(domain.indexes().slot_by_block_number(number)?))
             .await
     }
@@ -104,7 +114,7 @@ where
     pub async fn block_by_tx_hash(
         &self,
         tx_hash: Vec<u8>,
-    ) -> Result<Option<(BlockBody, TxOrder)>, DomainError> {
+    ) -> Result<Option<(BlockBody, TxOrder)>, DomainError<D::ChainSpecificError>> {
         let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {
@@ -120,21 +130,15 @@ where
             return Ok(None);
         };
 
-        let block = MultiEraBlock::decode(raw.as_slice())
-            .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
-        if let Some((idx, _)) = block
-            .txs()
-            .iter()
-            .enumerate()
-            .find(|(_, tx)| tx.hash().to_vec() == tx_hash)
-        {
-            return Ok(Some((raw, idx)));
-        }
-
-        Ok(None)
+        D::Chain::find_tx_in_block(&raw, &tx_hash)
+            .map_err(|err| DomainError::ChainError(ChainError::ChainSpecific(err)))
+            .map(|maybe_ix| maybe_ix.map(|(era_cbor, ix)| (era_cbor.cbor().to_vec(), ix)))
     }
 
-    pub async fn tx_cbor(&self, tx_hash: Vec<u8>) -> Result<Option<EraCbor>, DomainError> {
+    pub async fn tx_cbor(
+        &self,
+        tx_hash: Vec<u8>,
+    ) -> Result<Option<EraCbor>, DomainError<D::ChainSpecificError>> {
         let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {
@@ -150,13 +154,9 @@ where
             return Ok(None);
         };
 
-        let block = MultiEraBlock::decode(raw.as_slice())
-            .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
-        if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
-            return Ok(Some(EraCbor(block.era().into(), tx.encode())));
-        }
-
-        Ok(None)
+        D::Chain::find_tx_in_block(&raw, &tx_hash)
+            .map_err(|err| DomainError::ChainError(ChainError::ChainSpecific(err)))
+            .map(|maybe_ix| maybe_ix.map(|(era_cbor, _)| era_cbor))
     }
 
     pub async fn slots_by_tag(
@@ -165,7 +165,7 @@ where
         key: Vec<u8>,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<BlockSlot>, DomainError> {
+    ) -> Result<Vec<BlockSlot>, DomainError<D::ChainSpecificError>> {
         self.run_blocking(move |domain| {
             let slots = domain
                 .indexes()
@@ -179,7 +179,7 @@ where
     pub async fn find_intersect(
         &self,
         intersect: Vec<ChainPoint>,
-    ) -> Result<Option<ChainPoint>, DomainError> {
+    ) -> Result<Option<ChainPoint>, DomainError<D::ChainSpecificError>> {
         self.run_blocking(move |domain| Ok(domain.archive().find_intersect(&intersect)?))
             .await
     }
