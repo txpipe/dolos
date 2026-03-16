@@ -294,6 +294,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         &self,
         slot: &BlockSlot,
     ) -> Result<Option<BlockBody>, ArchiveError<Self::ChainSpecificError>>;
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

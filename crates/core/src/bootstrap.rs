@@ -19,25 +19,25 @@ pub trait BootstrapExt: Domain {
     ///
     /// Ensures WAL and archive are in sync with the state store.
     /// This should be called at startup before processing any new blocks.
-    fn check_integrity(&self) -> Result<(), DomainError>;
+    fn check_integrity(&self) -> Result<(), DomainError<Self::ChainSpecificError>>;
 
     /// Bootstrap the domain.
     ///
     /// Performs integrity checks and drains any pending initialization work.
     /// Uses the full sync lifecycle (WAL + tip notifications) since after
     /// bootstrap the node is considered "live".
-    fn bootstrap(&self) -> Result<(), DomainError>;
+    fn bootstrap(&self) -> Result<(), DomainError<Self::ChainSpecificError>>;
 }
 
 impl<D: Domain> BootstrapExt for D {
-    fn check_integrity(&self) -> Result<(), DomainError> {
+    fn check_integrity(&self) -> Result<(), DomainError<Self::ChainSpecificError>> {
         ensure_wal_in_sync_with_state(self)?;
         check_archive_in_sync_with_state(self)?;
 
         Ok(())
     }
 
-    fn bootstrap(&self) -> Result<(), DomainError> {
+    fn bootstrap(&self) -> Result<(), DomainError<Self::ChainSpecificError>> {
         self.check_integrity()?;
 
         // TODO: we should probably catch up stores here
@@ -55,7 +55,9 @@ impl<D: Domain> BootstrapExt for D {
 /// Ensure WAL is in sync with state store.
 ///
 /// If the WAL tip doesn't match the state cursor, reset WAL to match state.
-fn ensure_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
+fn ensure_wal_in_sync_with_state<D: Domain>(
+    domain: &D,
+) -> Result<(), DomainError<D::ChainSpecificError>> {
     let wal = domain.wal().find_tip()?.map(|(point, _)| point);
     let state = domain.state().read_cursor()?;
 
@@ -87,7 +89,9 @@ fn ensure_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainErro
 /// Check if archive is in sync with state store.
 ///
 /// Logs warnings/errors if there's a mismatch but doesn't attempt to fix it.
-fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
+fn check_archive_in_sync_with_state<D: Domain>(
+    domain: &D,
+) -> Result<(), DomainError<D::ChainSpecificError>> {
     let archive = domain.archive().get_tip()?.map(|(slot, _)| slot);
     let state = domain.state().read_cursor()?.map(|x| x.slot());
 
