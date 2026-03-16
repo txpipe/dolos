@@ -500,11 +500,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(out)
     }
 
-    fn mutable_slots(domain: &(impl Domain<Genesis = CardanoGenesis>)) -> BlockSlot {
+    fn mutable_slots(domain: &impl Domain<Genesis = CardanoGenesis>) -> BlockSlot {
         utils::mutable_slots(&domain.genesis())
     }
 
-    fn validate_tx<D: Domain<ChainSpecificError = Self::ChainSpecificError>>(
+    fn validate_tx<D: Domain<ChainSpecificError = CardanoError>>(
         &self,
         cbor: &[u8],
         utxos: &MempoolAwareUtxoStore<D>,
