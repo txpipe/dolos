@@ -126,7 +126,7 @@ impl<A: ArchiveStore, E: Entity> LogIterTyped<A, E> {
 }
 
 impl<A: ArchiveStore, E: Entity> Iterator for LogIterTyped<A, E> {
-    type Item = Result<(LogKey, E), ArchiveError>;
+    type Item = Result<(LogKey, E), ArchiveError<A::ChainSpecificError>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.inner.next()?;
@@ -142,15 +142,12 @@ impl<A: ArchiveStore, E: Entity> Iterator for LogIterTyped<A, E> {
 }
 
 #[derive(Debug, Error)]
-pub enum ArchiveError {
+pub enum ArchiveError<E: std::error::Error + Send + Sync + 'static> {
     #[error("broken invariant")]
     BrokenInvariant(#[from] BrokenInvariant),
 
     #[error("storage error")]
     InternalError(String),
-
-    #[error("address decoding error")]
-    AddressDecoding(#[from] pallas::ledger::addresses::Error),
 
     #[error("query not supported")]
     QueryNotSupported,
@@ -159,37 +156,53 @@ pub enum ArchiveError {
     InvalidStoreVersion,
 
     #[error("decoding error")]
-    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+    DecodingError(#[from] minicbor::decode::Error),
 
-    #[error("block decoding error")]
-    BlockDecodingError(#[from] pallas::ledger::traverse::Error),
+    //#[error("address decoding error")]
+    //AddressDecoding(#[from] pallas::ledger::addresses::Error),
+    //#[error("decoding error")]
+    //DecodingError(#[from] pallas::codec::minicbor::decode::Error),
 
+    //#[error("block decoding error")]
+    //BlockDecodingError(#[from] pallas::ledger::traverse::Error),
     #[error("entity decoding error")]
     EntityDecodingError(String),
 
     #[error("namespace {0} not found")]
     NamespaceNotFound(Namespace),
+
+    #[error("chain-specific error: {0}")]
+    ChainSpecifc(E),
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
-    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError>;
+    type ChainSpecificError: std::error::Error + Send + Sync;
+    fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+    ) -> Result<(), ArchiveError<Self::ChainSpecificError>>;
 
     fn write_log(
         &self,
         ns: Namespace,
         key: &LogKey,
         value: &EntityValue,
-    ) -> Result<(), ArchiveError>;
+    ) -> Result<(), ArchiveError<Self::ChainSpecificError>>;
 
-    fn write_log_typed<E: Entity>(&self, key: &LogKey, entity: &E) -> Result<(), ArchiveError> {
+    fn write_log_typed<E: Entity>(
+        &self,
+        key: &LogKey,
+        entity: &E,
+    ) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         let (ns, raw) = E::encode_entity(entity);
 
         self.write_log(ns, key, &raw)
     }
 
-    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError>;
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError<Self::ChainSpecificError>>;
 
-    fn commit(self) -> Result<(), ArchiveError>;
+    fn commit(self) -> Result<(), ArchiveError<Self::ChainSpecificError>>;
 }
 
 /// An iterator that supports efficient skipping without materializing items.
@@ -205,30 +218,38 @@ pub trait Skippable {
 }
 
 pub trait ArchiveStore: Clone + Send + Sync + 'static {
+    type ChainSpecificError: std::error::Error + Send + Sync;
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)>
         + DoubleEndedIterator
         + Skippable
         + 'a;
     type Writer: ArchiveWriter;
-    type LogIter: Iterator<Item = Result<(LogKey, EntityValue), ArchiveError>>;
-    type EntityValueIter: Iterator<Item = Result<EntityValue, ArchiveError>>;
+    type LogIter: Iterator<
+        Item = Result<(LogKey, EntityValue), ArchiveError<Self::ChainSpecificError>>,
+    >;
+    type EntityValueIter: Iterator<
+        Item = Result<EntityValue, ArchiveError<Self::ChainSpecificError>>,
+    >;
 
-    fn start_writer(&self) -> Result<Self::Writer, ArchiveError>;
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<Self::ChainSpecificError>>;
 
     fn read_logs(
         &self,
         ns: Namespace,
         keys: &[&LogKey],
-    ) -> Result<Vec<Option<EntityValue>>, ArchiveError>;
+    ) -> Result<Vec<Option<EntityValue>>, ArchiveError<Self::ChainSpecificError>>;
 
-    fn iter_logs(&self, ns: Namespace, range: Range<LogKey>)
-        -> Result<Self::LogIter, ArchiveError>;
+    fn iter_logs(
+        &self,
+        ns: Namespace,
+        range: Range<LogKey>,
+    ) -> Result<Self::LogIter, ArchiveError<Self::ChainSpecificError>>;
 
     fn read_logs_typed<E: Entity>(
         &self,
         ns: Namespace,
         keys: &[&LogKey],
-    ) -> Result<Vec<Option<E>>, ArchiveError> {
+    ) -> Result<Vec<Option<E>>, ArchiveError<Self::ChainSpecificError>> {
         let raw = self.read_logs(ns, keys)?;
 
         let decoded = raw
@@ -249,7 +270,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         &self,
         ns: Namespace,
         key: &LogKey,
-    ) -> Result<Option<E>, ArchiveError> {
+    ) -> Result<Option<E>, ArchiveError<Self::ChainSpecificError>> {
         let raw = self.read_logs_typed(ns, &[key])?;
 
         let first = raw.into_iter().next().unwrap();
@@ -261,7 +282,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         &self,
         ns: Namespace,
         range: Option<Range<LogKey>>,
-    ) -> Result<LogIterTyped<Self, E>, ArchiveError> {
+    ) -> Result<LogIterTyped<Self, E>, ArchiveError<Self::ChainSpecificError>> {
         let range = range.unwrap_or_else(LogKey::full_range);
 
         let inner = self.iter_logs(ns, range)?;
@@ -269,18 +290,33 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         Ok(LogIterTyped::<Self, E>::new(inner, ns))
     }
 
-    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;
+    fn get_block_by_slot(
+        &self,
+        slot: &BlockSlot,
+    ) -> Result<Option<BlockBody>, ArchiveError<Self::ChainSpecificError>>;
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError>;
+    ) -> Result<Self::BlockIter<'a>, ArchiveError<Self::ChainSpecificError>>;
 
-    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError>;
+    fn find_intersect(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError<Self::ChainSpecificError>>;
 
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError>;
+    fn get_tip(
+        &self,
+    ) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<Self::ChainSpecificError>>;
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<bool, ArchiveError<Self::ChainSpecificError>>;
 
-    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;
+    fn truncate_front(
+        &self,
+        after: &ChainPoint,
+    ) -> Result<(), ArchiveError<Self::ChainSpecificError>>;
 }
