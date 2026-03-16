@@ -69,7 +69,9 @@ pub fn pallas_hash_to_core<const N: usize>(
 }
 
 // Can the era integer be removed? Not sure. Santi said something about it.
-pub(crate) fn multi_era_tx_from_era_cbor(era_body: &EraCbor) -> Result<MultiEraTx<'_>, CardanoError> {
+pub(crate) fn multi_era_tx_from_era_cbor(
+    era_body: &EraCbor,
+) -> Result<MultiEraTx<'_>, CardanoError> {
     Ok(MultiEraTx::decode(era_body.cbor())?)
 }
 
@@ -346,7 +348,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         // into the epoch, capturing addrsRew (registered accounts) for the pre-Babbage
         // prefilter. Using 4k/f instead of 3k/f ensures the state at RUPD time includes
         // all deregistrations up to the correct threshold.
-        let stability_window = utils::randomness_stability_window(genesis);
+        let stability_window = utils::randomness_stability_window(&genesis);
 
         Ok(Self {
             config,
@@ -498,7 +500,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(out)
     }
 
-    fn mutable_slots(domain: &impl Domain) -> BlockSlot {
+    fn mutable_slots(domain: &(impl Domain<Genesis = CardanoGenesis>)) -> BlockSlot {
         utils::mutable_slots(&domain.genesis())
     }
 

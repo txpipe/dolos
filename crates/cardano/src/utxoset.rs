@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::owned::OwnedMultiEraOutput;
+use crate::{era_cbor_from_output, pallas_hash_to_core, txo_ref_from_input, CardanoError};
 
 pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap) -> Vec<TxoRef> {
     let txs: HashMap<_, _> = block.txs().into_iter().map(|tx| (tx.hash(), tx)).collect();
@@ -14,8 +15,8 @@ pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap
     // add all produced utxos to the loaded map
     for (tx_hash, tx) in txs.iter() {
         for (idx, utxo) in tx.produces() {
-            let utxo_ref = TxoRef(*tx_hash, idx as u32);
-            loaded.insert(utxo_ref, Arc::new(utxo.into()));
+            let utxo_ref = TxoRef(pallas_hash_to_core(*tx_hash), idx as u32);
+            loaded.insert(utxo_ref, Arc::new(era_cbor_from_output(&utxo)));
         }
     }
 
@@ -23,7 +24,7 @@ pub fn compute_block_dependencies(block: &MultiEraBlock, loaded: &mut RawUtxoMap
     let consumed: HashSet<_> = txs
         .values()
         .flat_map(MultiEraTx::consumes)
-        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+        .map(|utxo| txo_ref_from_input(&utxo))
         .collect();
 
     // find all missing utxos that are not already in the loaded map
@@ -58,14 +59,14 @@ pub fn compute_apply_delta(
 
     for (tx_hash, tx) in txs.iter() {
         for (idx, produced) in tx.produces() {
-            let uxto_ref = TxoRef(*tx_hash, idx as u32);
+            let uxto_ref = TxoRef(pallas_hash_to_core(*tx_hash), idx as u32);
             delta
                 .produced_utxo
-                .insert(uxto_ref, Arc::new(produced.into()));
+                .insert(uxto_ref, Arc::new(era_cbor_from_output(&produced)));
         }
 
         for consumed in tx.consumes() {
-            let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
+            let stxi_ref = txo_ref_from_input(&consumed);
 
             let stxi_body = loaded
                 .get(&stxi_ref)
@@ -90,14 +91,16 @@ pub fn compute_undo_delta(
 
     for (tx_hash, tx) in txs.iter() {
         for (idx, body) in tx.produces() {
-            let utxo_ref = TxoRef(*tx_hash, idx as u32);
-            delta.undone_utxo.insert(utxo_ref, Arc::new(body.into()));
+            let utxo_ref = TxoRef(pallas_hash_to_core(*tx_hash), idx as u32);
+            delta
+                .undone_utxo
+                .insert(utxo_ref, Arc::new(era_cbor_from_output(&body)));
         }
     }
 
     for (_, tx) in txs.iter() {
         for consumed in tx.consumes() {
-            let stxi_ref = TxoRef(*consumed.hash(), consumed.index() as u32);
+            let stxi_ref = txo_ref_from_input(&consumed);
 
             let stxi_body = context
                 .get(&stxi_ref)
@@ -112,7 +115,7 @@ pub fn compute_undo_delta(
     Ok(delta)
 }
 
-pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
+pub fn compute_origin_delta(genesis: &crate::CardanoGenesis) -> UtxoSetDelta {
     let mut delta = UtxoSetDelta::default();
 
     // byron
@@ -120,7 +123,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
         let utxos = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron);
 
         for (tx, addr, amount) in utxos {
-            let utxo_ref = TxoRef(tx, 0);
+            let utxo_ref = TxoRef(pallas_hash_to_core(tx), 0);
             let utxo_body = pallas::ledger::primitives::byron::TxOut {
                 address: pallas::ledger::primitives::byron::Address {
                     payload: addr.payload,
@@ -132,7 +135,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
             let utxo_body = MultiEraOutput::from_byron(&utxo_body).to_owned();
             delta
                 .produced_utxo
-                .insert(utxo_ref, Arc::new(utxo_body.into()));
+                .insert(utxo_ref, Arc::new(era_cbor_from_output(&utxo_body)));
         }
     }
     // shelley
@@ -140,7 +143,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
         let utxos = pallas::ledger::configs::shelley::shelley_utxos(&genesis.shelley);
 
         for (tx, addr, amount) in utxos {
-            let utxo_ref = TxoRef(tx, 0);
+            let utxo_ref = TxoRef(pallas_hash_to_core(tx), 0);
             let utxo_body = pallas::ledger::primitives::alonzo::TransactionOutput {
                 address: addr.to_vec().into(),
                 amount: pallas::ledger::primitives::alonzo::Value::Coin(amount),
@@ -153,14 +156,16 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
 
             delta
                 .produced_utxo
-                .insert(utxo_ref, Arc::new(utxo_body.into()));
+                .insert(utxo_ref, Arc::new(era_cbor_from_output(&utxo_body)));
         }
     }
 
     delta
 }
 
-pub fn build_custom_utxos_delta(config: &CardanoConfig) -> Result<UtxoSetDelta, ChainError> {
+pub fn build_custom_utxos_delta(
+    config: &CardanoConfig,
+) -> Result<UtxoSetDelta, ChainError<CardanoError>> {
     let mut delta = UtxoSetDelta::default();
 
     for utxo in config.custom_utxos.iter() {
@@ -187,6 +192,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use crate::multi_era_output_from_era_cbor;
 
     fn fake_slice_for_block(block: &MultiEraBlock) -> HashMap<TxoRef, OwnedMultiEraOutput> {
         let valid_utxo = block
@@ -202,7 +208,7 @@ mod tests {
             .txs()
             .iter()
             .flat_map(MultiEraTx::consumes)
-            .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+            .map(|utxo| txo_ref_from_input(&utxo))
             .map(|key| {
                 (
                     key,
@@ -221,11 +227,11 @@ mod tests {
     fn assert_genesis_utxo_exists(db: &UtxoSetDelta, tx_hex: &str, addr_base58: &str, amount: u64) {
         let tx = Hash::<32>::from_str(tx_hex).unwrap();
 
-        let utxo_body = db.produced_utxo.get(&TxoRef(tx, 0));
+        let utxo_body = db.produced_utxo.get(&TxoRef(pallas_hash_to_core(tx), 0));
 
         assert!(utxo_body.is_some(), "utxo not found");
         let utxo_body = utxo_body.unwrap();
-        let utxo_body = MultiEraOutput::try_from(utxo_body.as_ref()).unwrap();
+        let utxo_body = multi_era_output_from_era_cbor(utxo_body.as_ref()).unwrap();
 
         assert_eq!(utxo_body.era(), pallas::ledger::traverse::Era::Byron);
 
@@ -303,15 +309,17 @@ mod tests {
             for input in tx.consumes() {
                 let consumed = delta
                     .consumed_utxo
-                    .contains_key(&TxoRef(*input.hash(), input.index() as u32));
+                    .contains_key(&txo_ref_from_input(&input));
 
                 assert!(consumed);
             }
 
             for (idx, expected) in tx.produces() {
-                let utxo = delta.produced_utxo.get(&TxoRef(tx.hash(), idx as u32));
+                let utxo = delta
+                    .produced_utxo
+                    .get(&TxoRef(pallas_hash_to_core(tx.hash()), idx as u32));
                 let utxo = utxo.unwrap();
-                let utxo = MultiEraOutput::try_from(utxo.as_ref()).unwrap();
+                let utxo = multi_era_output_from_era_cbor(utxo.as_ref()).unwrap();
                 assert_eq!(utxo, expected);
             }
         }
