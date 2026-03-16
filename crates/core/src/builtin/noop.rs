@@ -121,7 +121,9 @@ impl IndexStore for NoOpIndexStore {
 pub struct NoOpArchiveWriter;
 
 impl ArchiveWriter for NoOpArchiveWriter {
-    fn apply(&self, _point: &ChainPoint, _block: &RawBlock) -> Result<(), ArchiveError> {
+    type ChainSpecificError = std::convert::Infallible;
+
+    fn apply(&self, _point: &ChainPoint, _block: &RawBlock) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         Ok(())
     }
 
@@ -130,15 +132,15 @@ impl ArchiveWriter for NoOpArchiveWriter {
         _ns: Namespace,
         _key: &LogKey,
         _value: &EntityValue,
-    ) -> Result<(), ArchiveError> {
+    ) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         Ok(())
     }
 
-    fn undo(&self, _point: &ChainPoint) -> Result<(), ArchiveError> {
+    fn undo(&self, _point: &ChainPoint) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         Ok(())
     }
 
-    fn commit(self) -> Result<(), ArchiveError> {
+    fn commit(self) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         Ok(())
     }
 }
@@ -152,7 +154,7 @@ impl NoOpArchiveStore {
         Self
     }
 
-    pub fn shutdown(&self) -> Result<(), ArchiveError> {
+    pub fn shutdown(&self) -> Result<(), ArchiveError<std::convert::Infallible>> {
         Ok(())
     }
 }
@@ -183,7 +185,7 @@ impl crate::archive::Skippable for EmptyBlockIter {
 pub struct EmptyLogIter;
 
 impl Iterator for EmptyLogIter {
-    type Item = Result<(LogKey, EntityValue), ArchiveError>;
+    type Item = Result<(LogKey, EntityValue), ArchiveError<std::convert::Infallible>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         None
@@ -194,7 +196,7 @@ impl Iterator for EmptyLogIter {
 pub struct EmptyEntityValueIter;
 
 impl Iterator for EmptyEntityValueIter {
-    type Item = Result<EntityValue, ArchiveError>;
+    type Item = Result<EntityValue, ArchiveError<std::convert::Infallible>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         None
@@ -202,12 +204,13 @@ impl Iterator for EmptyEntityValueIter {
 }
 
 impl ArchiveStore for NoOpArchiveStore {
+    type ChainSpecificError = std::convert::Infallible;
     type BlockIter<'a> = EmptyBlockIter;
     type Writer = NoOpArchiveWriter;
     type LogIter = EmptyLogIter;
     type EntityValueIter = EmptyEntityValueIter;
 
-    fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<Self::ChainSpecificError>> {
         Ok(NoOpArchiveWriter)
     }
 
@@ -215,7 +218,7 @@ impl ArchiveStore for NoOpArchiveStore {
         &self,
         _ns: Namespace,
         keys: &[&LogKey],
-    ) -> Result<Vec<Option<EntityValue>>, ArchiveError> {
+    ) -> Result<Vec<Option<EntityValue>>, ArchiveError<Self::ChainSpecificError>> {
         Ok(vec![None; keys.len()])
     }
 
@@ -223,11 +226,11 @@ impl ArchiveStore for NoOpArchiveStore {
         &self,
         _ns: Namespace,
         _range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    ) -> Result<Self::LogIter, ArchiveError<Self::ChainSpecificError>> {
         Ok(EmptyLogIter)
     }
 
-    fn get_block_by_slot(&self, _slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+    fn get_block_by_slot(&self, _slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError<Self::ChainSpecificError>> {
         Ok(None)
     }
 
@@ -235,18 +238,18 @@ impl ArchiveStore for NoOpArchiveStore {
         &self,
         _from: Option<BlockSlot>,
         _to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+    ) -> Result<Self::BlockIter<'a>, ArchiveError<Self::ChainSpecificError>> {
         Ok(EmptyBlockIter)
     }
 
     fn find_intersect(
         &self,
         _intersect: &[ChainPoint],
-    ) -> Result<Option<ChainPoint>, ArchiveError> {
+    ) -> Result<Option<ChainPoint>, ArchiveError<Self::ChainSpecificError>> {
         Ok(None)
     }
 
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<Self::ChainSpecificError>> {
         Ok(None)
     }
 
@@ -254,12 +257,12 @@ impl ArchiveStore for NoOpArchiveStore {
         &self,
         _max_slots: u64,
         _max_prune: Option<u64>,
-    ) -> Result<bool, ArchiveError> {
+    ) -> Result<bool, ArchiveError<Self::ChainSpecificError>> {
         // Nothing to prune, always "done"
         Ok(true)
     }
 
-    fn truncate_front(&self, _after: &ChainPoint) -> Result<(), ArchiveError> {
+    fn truncate_front(&self, _after: &ChainPoint) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         Ok(())
     }
 }
