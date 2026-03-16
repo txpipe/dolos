@@ -16,7 +16,6 @@
 //        traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
 //    },
 //};
-use hash::Hash;
 use minicbor::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -72,9 +71,9 @@ pub type BlockBody = Cbor;
 pub type RawBlock = Arc<BlockBody>;
 pub type RawBlockBatch = Vec<RawBlock>;
 pub type RawUtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
-pub type BlockHash = Hash<32>;
+pub type BlockHash = crate::hash::Hash<32>;
 pub type BlockHeader = Cbor;
-pub type TxHash = Hash<32>;
+pub type TxHash = crate::hash::Hash<32>;
 
 /// Data needed to undo a block during rollback.
 ///

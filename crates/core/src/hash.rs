@@ -53,7 +53,14 @@ impl<'de, const N: usize> Deserialize<'de> for Hash<N> {
     }
 }
 
-// TODO: add more methods here. Probably will need a bunch so hash is its own file
-//
-//
-//
+impl<const N: usize> From<[u8; N]> for Hash<N> {
+    fn from(bytes: [u8; N]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl<const N: usize> AsRef<[u8]> for Hash<N> {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
