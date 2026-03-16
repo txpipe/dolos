@@ -55,7 +55,7 @@ pub trait WorkUnit<D: Domain>: Send {
     ///
     /// Returns an error if data loading fails (e.g., storage errors,
     /// missing required data).
-    fn load(&mut self, domain: &D) -> Result<(), DomainError>;
+    fn load(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>>;
 
     /// Execute CPU-intensive computation over loaded data.
     ///
@@ -67,7 +67,7 @@ pub trait WorkUnit<D: Domain>: Send {
     ///
     /// Returns an error if computation fails (e.g., invalid data,
     /// computation errors).
-    fn compute(&mut self) -> Result<(), DomainError>;
+    fn compute(&mut self) -> Result<(), DomainError<D::ChainSpecificError>>;
 
     /// Persist to write-ahead log for crash recovery.
     ///
@@ -81,7 +81,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if WAL persistence fails.
-    fn commit_wal(&mut self, _domain: &D) -> Result<(), DomainError> {
+    fn commit_wal(&mut self, _domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         Ok(())
     }
 
@@ -94,7 +94,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if state persistence fails.
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError>;
+    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>>;
 
     /// Apply computed changes to the archive store.
     ///
@@ -104,7 +104,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if archive persistence fails.
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError>;
+    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>>;
 
     /// Apply computed changes to index stores.
     ///
@@ -115,7 +115,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if index persistence fails.
-    fn commit_indexes(&mut self, _domain: &D) -> Result<(), DomainError> {
+    fn commit_indexes(&mut self, _domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         Ok(())
     }
 

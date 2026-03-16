@@ -13,12 +13,12 @@ pub enum Batch<D: Domain> {
 }
 
 impl<D: Domain> Batch<D> {
-    fn from_tip(point: ChainPoint, domain: &D) -> Result<Self, DomainError> {
+    fn from_tip(point: ChainPoint, domain: &D) -> Result<Self, DomainError<D::ChainSpecificError>> {
         let subscription = domain.watch_tip(Some(point.clone()))?;
         Ok(Self::Tip(point, subscription))
     }
 
-    fn from_wal(point: ChainPoint, domain: &D) -> Result<Self, DomainError> {
+    fn from_wal(point: ChainPoint, domain: &D) -> Result<Self, DomainError<D::ChainSpecificError>> {
         let page = domain
             .wal()
             .iter_blocks(Some(point.clone()), None)?
@@ -35,7 +35,10 @@ impl<D: Domain> Batch<D> {
         Ok(Self::WalPage(point, page))
     }
 
-    fn from_archive(last_point: ChainPoint, domain: &D) -> Result<Self, DomainError> {
+    fn from_archive(
+        last_point: ChainPoint,
+        domain: &D,
+    ) -> Result<Self, DomainError<D::ChainSpecificError>> {
         let page = domain
             .archive()
             .get_range(Some(last_point.slot()), None)?
@@ -107,7 +110,7 @@ impl<D: Domain> ChainCrawler<D> {
     pub fn start(
         domain: &D,
         intersect: &[ChainPoint],
-    ) -> Result<Option<(Self, ChainPoint)>, DomainError> {
+    ) -> Result<Option<(Self, ChainPoint)>, DomainError<D::ChainSpecificError>> {
         let domain = domain.clone();
 
         if intersect.is_empty() {
@@ -138,7 +141,7 @@ impl<D: Domain> ChainCrawler<D> {
         Ok(None)
     }
 
-    fn load_next_batch(&mut self) -> Result<(), DomainError> {
+    fn load_next_batch(&mut self) -> Result<(), DomainError<D::ChainSpecificError>> {
         let next = match &self.batch {
             Batch::WalPage(point, _) => Batch::from_wal(point.clone(), &self.domain),
             Batch::ArchivePage(x, _) => Batch::from_archive(x.clone(), &self.domain),
@@ -169,7 +172,7 @@ impl<D: Domain> ChainCrawler<D> {
         }
     }
 
-    pub fn find_tip(&self) -> Result<Option<ChainPoint>, DomainError> {
+    pub fn find_tip(&self) -> Result<Option<ChainPoint>, DomainError<D::ChainSpecificError>> {
         let point = self.domain.wal().find_tip()?;
         Ok(point.map(|(x, _)| x))
     }
