@@ -21,11 +21,11 @@ impl From<&[u8]> for EntityKey {
     }
 }
 
-impl<const N: usize> From<pallas::crypto::hash::Hash<N>> for EntityKey {
-    fn from(value: pallas::crypto::hash::Hash<N>) -> Self {
-        EntityKey::from(value.as_slice())
-    }
-}
+//impl<const N: usize> From<pallas::crypto::hash::Hash<N>> for EntityKey {
+//    fn from(value: pallas::crypto::hash::Hash<N>) -> Self {
+//        EntityKey::from(value.as_slice())
+//    }
+//}
 
 impl<const N: usize> From<&[u8; N]> for EntityKey {
     fn from(value: &[u8; N]) -> Self {
@@ -60,14 +60,14 @@ impl EntityKey {
     }
 }
 
-impl<const HASH_SIZE: usize> From<EntityKey> for pallas::crypto::hash::Hash<HASH_SIZE> {
-    fn from(value: EntityKey) -> Self {
-        let mut array = [0u8; HASH_SIZE];
-        let source = &value.0[..HASH_SIZE];
-        array.copy_from_slice(source);
-        pallas::crypto::hash::Hash::<HASH_SIZE>::new(array)
-    }
-}
+//impl<const HASH_SIZE: usize> From<EntityKey> for pallas::crypto::hash::Hash<HASH_SIZE> {
+//    fn from(value: EntityKey) -> Self {
+//        let mut array = [0u8; HASH_SIZE];
+//        let source = &value.0[..HASH_SIZE];
+//        array.copy_from_slice(source);
+//        pallas::crypto::hash::Hash::<HASH_SIZE>::new(array)
+//    }
+//}
 
 /// A namespaced key
 ///
@@ -125,9 +125,13 @@ impl std::ops::Deref for StateSchema {
 }
 
 pub trait Entity: Sized + Send {
+    type ChainSpecificError: std::error::Error + Send + Sync + 'static;
     const KEY_SIZE: usize = 32;
 
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError>;
+    fn decode_entity(
+        ns: Namespace,
+        value: &EntityValue,
+    ) -> Result<Self, ChainError<Self::ChainSpecificError>>;
     fn encode_entity(value: &Self) -> (Namespace, EntityValue);
 }
 
@@ -190,11 +194,10 @@ pub enum StateError {
     InvalidNamespace(Namespace),
 
     #[error(transparent)]
-    DecodingError(#[from] pallas::codec::minicbor::decode::Error),
-
-    #[error(transparent)]
-    TraverseError(#[from] pallas::ledger::traverse::Error),
-
+    DecodingError(#[from] minicbor::decode::Error),
+    //DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+    // #[error(transparent)]
+    // TraverseError(#[from] pallas::ledger::traverse::Error),
     #[error(transparent)]
     InvariantViolation(#[from] InvariantViolation),
 
