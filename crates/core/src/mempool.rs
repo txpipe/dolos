@@ -5,7 +5,7 @@ use crate::TagDimension;
 
 use futures_core::Stream;
 use std::pin::Pin;
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub type Report = Vec<u8>;
 

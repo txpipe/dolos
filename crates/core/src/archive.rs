@@ -223,7 +223,7 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         + DoubleEndedIterator
         + Skippable
         + 'a;
-    type Writer: ArchiveWriter;
+    type Writer: ArchiveWriter<ChainSpecificError = Self::ChainSpecificError>;
     type LogIter: Iterator<
         Item = Result<(LogKey, EntityValue), ArchiveError<Self::ChainSpecificError>>,
     >;
