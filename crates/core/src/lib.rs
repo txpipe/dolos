@@ -571,7 +571,10 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    /// Validate a transaction against the current ledger state.
+    fn tx_produced_utxos(era_body: &EraCbor) -> Vec<(TxoRef, EraCbor)>;
+    fn tx_consumed_ref(era_body: &EraCbor) -> Vec<TxoRef>;
+
+    // Validate a transaction against the current ledger state.
     fn validate_tx<D: Domain>(
         &self,
         cbor: &[u8],
