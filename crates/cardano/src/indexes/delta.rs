@@ -201,8 +201,9 @@ impl CardanoIndexDeltaBuilder {
 
     /// Add a spent TxO reference to the current block.
     pub fn add_spent_input(&mut self, input: &MultiEraInput) {
-        let txo_ref: TxoRef = input.into();
-        let bytes: Vec<u8> = txo_ref.into();
+        let txo_ref = crate::txo_ref_from_input(input);
+        let mut bytes = txo_ref.0.as_slice().to_vec();
+        bytes.extend_from_slice(txo_ref.1.to_be_bytes().as_slice());
         self.current_block()
             .tags
             .push(Tag::new(archive::SPENT_TXO, bytes));
@@ -288,7 +289,7 @@ impl CardanoIndexDeltaBuilder {
 
     /// Extract UTxO filter tags from raw EraCbor.
     fn extract_tags_from_era_cbor(era_cbor: &EraCbor) -> Option<Vec<Tag>> {
-        let output = MultiEraOutput::try_from(era_cbor).ok()?;
+        let output = crate::multi_era_output_from_era_cbor(era_cbor).ok()?;
         Some(Self::extract_utxo_tags(&output))
     }
 }
