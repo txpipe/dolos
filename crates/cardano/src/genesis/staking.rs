@@ -1,4 +1,4 @@
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore as _, StateWriter as _};
+use dolos_core::{ChainError, Domain, EntityKey, StateStore as _, StateWriter as _};
 use pallas::codec::minicbor;
 use pallas::ledger::addresses::{Address, Network, StakeAddress, StakePayload};
 use pallas::ledger::primitives::StakeCredential;
@@ -67,7 +67,7 @@ fn parse_pool(dto: &ConfigPool) -> PoolState {
     }
 }
 
-fn find_initial_utxo_sum(credential: &StakeCredential, genesis: &Genesis) -> u64 {
+fn find_initial_utxo_sum(credential: &StakeCredential, genesis: &crate::CardanoGenesis) -> u64 {
     let Some(initial_funds) = &genesis.shelley.initial_funds else {
         return 0;
     };
@@ -85,7 +85,7 @@ fn find_initial_utxo_sum(credential: &StakeCredential, genesis: &Genesis) -> u64
     0
 }
 
-fn parse_delegation(account: &str, pool: &str, genesis: &Genesis) -> AccountState {
+fn parse_delegation(account: &str, pool: &str, genesis: &crate::CardanoGenesis) -> AccountState {
     let keyhash: Hash<28> = account.parse().unwrap();
     let credential = StakeCredential::AddrKeyhash(keyhash);
 
@@ -111,7 +111,7 @@ fn parse_delegation(account: &str, pool: &str, genesis: &Genesis) -> AccountStat
     }
 }
 
-pub fn bootstrap<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+pub fn bootstrap<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(state: &D::State, genesis: &crate::CardanoGenesis) -> Result<(), ChainError<crate::CardanoError>> {
     let writer = state.start_writer()?;
 
     let Some(staking) = &genesis.shelley.staking else {

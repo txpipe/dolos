@@ -1,5 +1,5 @@
 use dolos_core::{
-    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, Genesis, IndexStore as _,
+    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, IndexStore as _,
     IndexWriter as _, StateStore as _, StateWriter as _,
 };
 
@@ -14,7 +14,7 @@ pub mod work_unit;
 
 pub use work_unit::GenesisWorkUnit;
 
-fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
+fn get_utxo_amount(genesis: &crate::CardanoGenesis) -> Lovelace {
     let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
         .iter()
         .fold(0, |acc, (_, _, amount)| acc + amount);
@@ -26,7 +26,7 @@ fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
     byron_utxo + shelley_utxo
 }
 
-fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, ChainError> {
+fn bootstrap_pots(pparams: &PParamsSet, genesis: &crate::CardanoGenesis) -> Result<Pots, ChainError<crate::CardanoError>> {
     let utxos = get_utxo_amount(genesis);
 
     let max_supply = genesis
@@ -47,10 +47,10 @@ fn bootstrap_pots(pparams: &PParamsSet, genesis: &Genesis) -> Result<Pots, Chain
     })
 }
 
-pub fn bootstrap_epoch<D: Domain>(
+pub fn bootstrap_epoch<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
     state: &D::State,
-    genesis: &Genesis,
-) -> Result<EpochState, ChainError> {
+    genesis: &crate::CardanoGenesis,
+) -> Result<EpochState, ChainError<crate::CardanoError>> {
     let mut pparams = crate::forks::from_byron_genesis(&genesis.byron);
     let mut nonces = None;
 
@@ -88,7 +88,7 @@ pub fn bootstrap_epoch<D: Domain>(
     Ok(epoch)
 }
 
-pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError> {
+pub fn bootstrap_eras<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError<crate::CardanoError>> {
     let pparams = epoch.pparams.unwrap_live();
 
     let system_start = pparams.ensure_system_start()?;
@@ -117,12 +117,12 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     Ok(())
 }
 
-pub fn bootstrap_utxos<D: Domain>(
+pub fn bootstrap_utxos<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
     state: &D::State,
     indexes: &D::Indexes,
-    genesis: &Genesis,
+    genesis: &crate::CardanoGenesis,
     config: &CardanoConfig,
-) -> Result<(), ChainError> {
+) -> Result<(), ChainError<crate::CardanoError>> {
     let state_writer = state.start_writer()?;
     let index_writer = indexes.start_writer()?;
 
@@ -146,12 +146,12 @@ pub fn bootstrap_utxos<D: Domain>(
     Ok(())
 }
 
-pub fn execute<D: Domain>(
+pub fn execute<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
     state: &D::State,
     indexes: &D::Indexes,
-    genesis: &Genesis,
+    genesis: &crate::CardanoGenesis,
     config: &CardanoConfig,
-) -> Result<(), ChainError> {
+) -> Result<(), ChainError<crate::CardanoError>> {
     let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
     bootstrap_eras::<D>(state, &epoch)?;
