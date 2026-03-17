@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_core::{ChainError, Genesis, NsKey};
+use dolos_core::{ChainError, NsKey};
 use pallas::ledger::primitives::Epoch;
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +87,7 @@ pub struct EpochTransition {
     era_transition: Option<EraTransition>,
 
     #[serde(skip)]
-    genesis: Option<Arc<Genesis>>,
+    genesis: Option<Arc<crate::CardanoGenesis>>,
 }
 
 impl std::fmt::Debug for EpochTransition {
@@ -252,7 +252,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut super::WorkContext,
         id: &AccountId,
         _: &AccountState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.change(AccountTransition::new(id.clone(), ctx.starting_epoch_no()));
 
         Ok(())
@@ -263,13 +263,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut super::WorkContext,
         id: &PoolId,
         _: &PoolState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.change(PoolTransition::new(id.clone(), ctx.starting_epoch_no()));
 
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut WorkContext) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut WorkContext) -> Result<(), ChainError<crate::CardanoError>> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
         }

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_core::{ChainError, EntityKey, Genesis};
+use dolos_core::{ChainError, EntityKey};
 
 use crate::{
     eras::ChainSummary, roll::WorkDeltas, AccountState, CardanoDelta, CardanoEntity, DRepState,
@@ -24,7 +24,7 @@ pub trait BoundaryVisitor {
         ctx: &mut WorkContext,
         id: &PoolId,
         pool: &PoolState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -34,7 +34,7 @@ pub trait BoundaryVisitor {
         ctx: &mut WorkContext,
         id: &AccountId,
         account: &AccountState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -44,7 +44,7 @@ pub trait BoundaryVisitor {
         ctx: &mut WorkContext,
         id: &DRepId,
         drep: &DRepState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -54,12 +54,12 @@ pub trait BoundaryVisitor {
         ctx: &mut WorkContext,
         id: &ProposalId,
         proposal: &ProposalState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
     #[allow(unused_variables)]
-    fn flush(&mut self, ctx: &mut WorkContext) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut WorkContext) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 }
@@ -75,7 +75,7 @@ pub struct WorkContext {
 
     pub active_protocol: EraProtocol,
     pub chain_summary: ChainSummary,
-    pub genesis: Arc<Genesis>,
+    pub genesis: Arc<crate::CardanoGenesis>,
 
     /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary.
     pub avvm_reclamation: u64,
