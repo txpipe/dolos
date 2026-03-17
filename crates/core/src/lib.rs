@@ -542,7 +542,13 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// The returned work unit should be executed using `executor::execute_work_unit()`.
     fn pop_work<D>(&mut self, domain: &D) -> Option<Self::WorkUnit<D>>
     where
-        D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError, Genesis = Self::Genesis>;
+        D: Domain<
+            Chain = Self,
+            Entity = Self::Entity,
+            EntityDelta = Self::Delta,
+            ChainSpecificError = Self::ChainSpecificError,
+            Genesis = Self::Genesis,
+        >;
 
     /// Compute undo data for a block during rollback.
     ///

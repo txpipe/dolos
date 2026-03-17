@@ -2,6 +2,7 @@ use ::redb::{Database, ReadableDatabase};
 use redb::ReadTransaction;
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -48,6 +49,24 @@ impl std::error::Error for RedbArchiveError {}
 impl RedbArchiveError {
     pub fn from_io(e: std::io::Error) -> Self {
         Self(ArchiveError::InternalError(e.to_string()))
+    }
+
+    /// Convert to ArchiveError with any ChainSpecificError type.
+    /// Since this error type never produces a ChainSpecificError (it's Infallible),
+    /// this is safe to do.
+    pub fn into_archive_error<E: std::error::Error + Send + Sync + 'static>(
+        self,
+    ) -> ArchiveError<E> {
+        match self.0 {
+            ArchiveError::BrokenInvariant(e) => ArchiveError::BrokenInvariant(e),
+            ArchiveError::InternalError(e) => ArchiveError::InternalError(e),
+            ArchiveError::QueryNotSupported => ArchiveError::QueryNotSupported,
+            ArchiveError::InvalidStoreVersion => ArchiveError::InvalidStoreVersion,
+            ArchiveError::DecodingError(e) => ArchiveError::DecodingError(e),
+            ArchiveError::EntityDecodingError(e) => ArchiveError::EntityDecodingError(e),
+            ArchiveError::NamespaceNotFound(ns) => ArchiveError::NamespaceNotFound(ns),
+            ArchiveError::ChainSpecifc(infallible) => match infallible {},
+        }
     }
 }
 
@@ -113,15 +132,27 @@ impl From<BucketError> for RedbArchiveError {
 
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
 
-#[derive(Clone)]
-pub struct ArchiveStore {
+pub struct ArchiveStore<E: std::error::Error + Send + Sync + 'static = Infallible> {
     db: Arc<Database>,
     tables: HashMap<Namespace, Table>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
+    _phantom: PhantomData<E>,
 }
 
-impl ArchiveStore {
+impl<E: std::error::Error + Send + Sync + 'static> Clone for ArchiveStore<E> {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            tables: self.tables.clone(),
+            flatfiles: self.flatfiles.clone(),
+            _tempdir: self._tempdir.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<E: std::error::Error + Send + Sync + 'static> ArchiveStore<E> {
     /// Gracefully shutdown the archive store.
     pub fn shutdown(&self) -> Result<(), RedbArchiveError> {
         Ok(())
@@ -162,6 +193,7 @@ impl ArchiveStore {
             tables: HashMap::from_iter(tables),
             flatfiles: Arc::new(flatfiles),
             _tempdir: None,
+            _phantom: PhantomData,
         };
 
         store.initialize()?;
@@ -182,6 +214,7 @@ impl ArchiveStore {
             tables: HashMap::from_iter(tables),
             flatfiles: Arc::new(flatfiles),
             _tempdir: Some(Arc::new(tempdir)),
+            _phantom: PhantomData,
         };
 
         store.initialize()?;
@@ -229,7 +262,7 @@ impl ArchiveStore {
         })
     }
 
-    pub fn start_writer(&self) -> Result<ArchiveStoreWriter, RedbArchiveError> {
+    pub fn start_writer(&self) -> Result<ArchiveStoreWriter<E>, RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
         wx.set_durability(Durability::Immediate)?;
         wx.set_quick_repair(true);
@@ -239,6 +272,7 @@ impl ArchiveStore {
             tables: self.tables.clone(),
             flatfiles: self.flatfiles.clone(),
             pending_blocks: Mutex::new(Vec::new()),
+            _phantom: PhantomData,
         })
     }
 
@@ -789,17 +823,18 @@ impl ArchiveStore {
     }
 }
 
-pub struct ArchiveStoreWriter {
+pub struct ArchiveStoreWriter<E: std::error::Error + Send + Sync + 'static = Infallible> {
     wx: WriteTransaction,
     tables: HashMap<Namespace, Table>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
+    _phantom: PhantomData<E>,
 }
 
-impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
-    type ChainSpecificError = Infallible;
+impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveWriter for ArchiveStoreWriter<E> {
+    type ChainSpecificError = E;
 
-    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError<Infallible>> {
+    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError<E>> {
         self.pending_blocks
             .lock()
             .unwrap()
@@ -807,21 +842,26 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         Ok(())
     }
 
-    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError<Infallible>> {
-        tables::BlocksTable::undo(&self.wx, &self.flatfiles, point)?;
-        Ok(())
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError<E>> {
+        tables::BlocksTable::undo(&self.wx, &self.flatfiles, point)
+            .map_err(RedbArchiveError::from)
+            .map_err(|e| e.into_archive_error())
     }
 
-    fn commit(self) -> Result<(), ArchiveError<Infallible>> {
+    fn commit(self) -> Result<(), ArchiveError<E>> {
         // 1. Batch-append all pending blocks to flat files (fsync inside).
         // 2. Insert all index entries into redb.
         // 3. Commit redb transaction.
         let pending = self.pending_blocks.into_inner().unwrap();
         if !pending.is_empty() {
-            tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)?;
+            tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)
+                .map_err(RedbArchiveError::from)
+                .map_err(|e| e.into_archive_error())?;
         }
 
-        self.wx.commit().map_err(RedbArchiveError::from)?;
+        self.wx.commit()
+            .map_err(RedbArchiveError::from)
+            .map_err(|e| e.into_archive_error())?;
         Ok(())
     }
 
@@ -830,7 +870,7 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         ns: Namespace,
         key: &dolos_core::LogKey,
         value: &dolos_core::EntityValue,
-    ) -> Result<(), ArchiveError<Infallible>> {
+    ) -> Result<(), ArchiveError<E>> {
         let table = self
             .tables
             .get(&ns)
@@ -838,16 +878,20 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
 
         table
             .write(&self.wx, key, value)
-            .map_err(RedbArchiveError::from)?;
+            .map_err(RedbArchiveError::from)
+            .map_err(|e| e.into_archive_error())?;
 
         Ok(())
     }
 }
 
-pub struct LogIter(pub(crate) ::redb::Range<'static, &'static [u8], &'static [u8]>);
+pub struct LogIter<E: std::error::Error + Send + Sync + 'static = Infallible>(
+    pub(crate) ::redb::Range<'static, &'static [u8], &'static [u8]>,
+    PhantomData<E>,
+);
 
-impl Iterator for LogIter {
-    type Item = Result<(LogKey, EntityValue), ArchiveError<Infallible>>;
+impl<E: std::error::Error + Send + Sync + 'static> Iterator for LogIter<E> {
+    type Item = Result<(LogKey, EntityValue), ArchiveError<E>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.0.next()?;
@@ -856,16 +900,19 @@ impl Iterator for LogIter {
             .map(|(k, v)| (k.value().to_vec(), v.value().to_vec()))
             .map(|(k, v)| (LogKey::from(k), v))
             .map_err(RedbArchiveError::from)
-            .map_err(ArchiveError::from);
+            .map_err(|e: RedbArchiveError| e.into_archive_error());
 
         Some(entry)
     }
 }
 
-pub struct EntityValueIter(pub(crate) ::redb::MultimapValue<'static, &'static [u8]>);
+pub struct EntityValueIter<E: std::error::Error + Send + Sync + 'static = Infallible>(
+    pub(crate) ::redb::MultimapValue<'static, &'static [u8]>,
+    PhantomData<E>,
+);
 
-impl Iterator for EntityValueIter {
-    type Item = Result<EntityValue, ArchiveError<Infallible>>;
+impl<E: std::error::Error + Send + Sync + 'static> Iterator for EntityValueIter<E> {
+    type Item = Result<EntityValue, ArchiveError<E>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.0.next()?;
@@ -873,66 +920,76 @@ impl Iterator for EntityValueIter {
         let entry = next
             .map(|v| v.value().to_vec())
             .map_err(RedbArchiveError::from)
-            .map_err(ArchiveError::from);
+            .map_err(|e: RedbArchiveError| e.into_archive_error());
 
         Some(entry)
     }
 }
 
-impl dolos_core::ArchiveStore for ArchiveStore {
+impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveStore for ArchiveStore<E> {
     type BlockIter<'a> = ArchiveRangeIter;
-    type Writer = ArchiveStoreWriter;
-    type LogIter = LogIter;
-    type EntityValueIter = EntityValueIter;
-    type ChainSpecificError = Infallible;
+    type Writer = ArchiveStoreWriter<E>;
+    type LogIter = LogIter<E>;
+    type EntityValueIter = EntityValueIter<E>;
+    type ChainSpecificError = E;
 
-    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<Infallible>> {
-        Ok(Self::start_writer(self)?)
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<E>> {
+        Self::start_writer(self)
+            .map_err(|e| e.into_archive_error())
     }
 
     fn get_block_by_slot(
         &self,
         slot: &BlockSlot,
-    ) -> Result<Option<BlockBody>, ArchiveError<Infallible>> {
-        Ok(Self::get_block_by_slot(self, slot)?)
+    ) -> Result<Option<BlockBody>, ArchiveError<E>> {
+        Self::get_block_by_slot(self, slot)
+            .map_err(|e| e.into_archive_error())
     }
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError<Infallible>> {
-        Ok(Self::get_range(self, from, to)?)
+    ) -> Result<Self::BlockIter<'a>, ArchiveError<E>> {
+        Self::get_range(self, from, to)
+            .map_err(|e| e.into_archive_error())
     }
 
     fn find_intersect(
         &self,
         intersect: &[ChainPoint],
-    ) -> Result<Option<ChainPoint>, ArchiveError<Infallible>> {
-        Ok(Self::find_intersect(self, intersect)?)
+    ) -> Result<Option<ChainPoint>, ArchiveError<E>> {
+        Self::find_intersect(self, intersect)
+            .map_err(|e| e.into_archive_error())
     }
 
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<Infallible>> {
-        Ok(Self::get_tip(self)?)
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<E>> {
+        Self::get_tip(self)
+            .map_err(|e| e.into_archive_error())
     }
 
     fn prune_history(
         &self,
         max_slots: u64,
         max_prune: Option<u64>,
-    ) -> Result<bool, ArchiveError<Infallible>> {
-        Ok(Self::prune_history(self, max_slots, max_prune)?)
+    ) -> Result<bool, ArchiveError<E>> {
+        Self::prune_history(self, max_slots, max_prune)
+            .map_err(|e| e.into_archive_error())
     }
 
-    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError<Infallible>> {
-        Ok(Self::truncate_front(self, after)?)
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError<E>> {
+        Self::truncate_front(self, after)
+            .map_err(|e| e.into_archive_error())
     }
 
     fn read_logs(
         &self,
         ns: Namespace,
         keys: &[&dolos_core::LogKey],
-    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError<Infallible>> {
-        let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
+    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError<E>> {
+        let mut rx = self.db().begin_read().map_err(|e| {
+            let redb_err: RedbArchiveError = e.into();
+            redb_err.into_archive_error()
+        })?;
 
         let table = self
             .tables
@@ -944,7 +1001,10 @@ impl dolos_core::ArchiveStore for ArchiveStore {
         for key in keys {
             let value = table
                 .read_value(&mut rx, key.as_ref())
-                .map_err(RedbArchiveError::from)?;
+                .map_err(|e| {
+                    let redb_err: RedbArchiveError = e.into();
+                    redb_err.into_archive_error()
+                })?;
             out.push(value);
         }
 
@@ -955,8 +1015,11 @@ impl dolos_core::ArchiveStore for ArchiveStore {
         &self,
         ns: Namespace,
         range: std::ops::Range<dolos_core::LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError<Infallible>> {
-        let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
+    ) -> Result<Self::LogIter, ArchiveError<E>> {
+        let mut rx = self.db().begin_read().map_err(|e| {
+            let redb_err: RedbArchiveError = e.into();
+            redb_err.into_archive_error()
+        })?;
 
         let range = std::ops::Range {
             start: range.start.as_ref(),
@@ -970,9 +1033,12 @@ impl dolos_core::ArchiveStore for ArchiveStore {
 
         let values = table
             .range(&mut rx, range)
-            .map_err(RedbArchiveError::from)?;
+            .map_err(|e| {
+                let redb_err: RedbArchiveError = e.into();
+                redb_err.into_archive_error()
+            })?;
 
-        Ok(LogIter(values))
+        Ok(LogIter(values, PhantomData))
     }
 }
 
