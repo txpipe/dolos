@@ -80,7 +80,7 @@ pub(crate) fn txo_ref_from_pallas(hash: pallas::crypto::hash::Hash<32>, idx: u32
 }
 
 pub(crate) fn era_cbor_from_output(output: &MultiEraOutput<'_>) -> EraCbor {
-    EraCbor(output.era() as u16, output.encode())
+    EraCbor(output.era().into(), output.encode())
 }
 
 pub(crate) fn txo_ref_from_input(input: &MultiEraInput<'_>) -> TxoRef {
