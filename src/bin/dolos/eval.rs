@@ -11,6 +11,7 @@ use dolos::{
     adapters::DomainAdapter,
     core::{Domain, EraCbor, StateStore as _, TxoRef},
 };
+use dolos_cardano::{core_hash_to_pallas, pallas_hash_to_core};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -53,7 +54,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let refs = tx
         .consumes()
         .iter()
-        .map(|utxo| TxoRef(*utxo.hash(), utxo.index() as u32))
+        .map(|utxo| TxoRef(pallas_hash_to_core(*utxo.hash()), utxo.index() as u32))
         .collect_vec();
 
     let resolved = domain
@@ -73,7 +74,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             .context("era out of range")?;
 
         let txin = pallas::ledger::primitives::byron::TxIn::Variant0(
-            pallas::codec::utils::CborWrap((ref_.0, ref_.1)),
+            pallas::codec::utils::CborWrap((core_hash_to_pallas(ref_.0), ref_.1)),
         );
 
         let key = MultiEraInput::Byron(

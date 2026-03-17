@@ -341,7 +341,12 @@ impl TableRow for StakeLog {
 struct EpochPParams(EpochState);
 
 impl Entity for EpochPParams {
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, dolos_core::ChainError> {
+    type ChainSpecificError = dolos_cardano::CardanoError;
+
+    fn decode_entity(
+        ns: Namespace,
+        value: &EntityValue,
+    ) -> Result<Self, dolos_core::ChainError<dolos_cardano::CardanoError>> {
         EpochState::decode_entity(ns, value).map(EpochPParams)
     }
 
@@ -619,9 +624,9 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
     crate::common::setup_tracing(&config.logging, &config.telemetry)
 }
 
-fn decode_stake_credential(key: &EntityKey) -> Result<StakeCredential, dolos_core::ChainError> {
+fn decode_stake_credential(key: &EntityKey) -> Result<StakeCredential, Box<dyn std::error::Error>> {
     let mut decoder = minicbor::Decoder::new(key.as_ref());
-    decoder.decode().map_err(Into::into)
+    decoder.decode().map_err(|e| Box::new(e) as _)
 }
 
 fn log_slot_from_key(key: &LogKey) -> u64 {

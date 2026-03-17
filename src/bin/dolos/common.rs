@@ -10,7 +10,7 @@ use tracing::{debug, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
-use dolos::core::GenesisCardanoCardano;
+use dolos_cardano::CardanoGenesis;
 use dolos::prelude::*;
 use dolos::storage;
 
@@ -73,7 +73,7 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
         chain_config,
         &stores.state,
-        &genesis,
+        (*genesis).clone(),
     )
     .into_diagnostic()?;
 
@@ -204,8 +204,8 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     Ok(())
 }
 
-pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<GenesisCardanoCardano> {
-    GenesisCardanoCardano::from_file_paths(
+pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<CardanoGenesis> {
+    CardanoGenesis::from_file_paths(
         &config.byron_path,
         &config.shelley_path,
         &config.alonzo_path,

@@ -1,4 +1,5 @@
 use dolos_cardano::indexes::CardanoIndexExt;
+use dolos_cardano::CardanoError;
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
@@ -14,14 +15,14 @@ use dolos_cardano::indexes::AsyncCardanoQueryExt;
 pub fn point_to_u5c<T: LedgerContext>(_ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     u5c::query::ChainPoint {
         slot: point.slot(),
-        hash: point.hash().map(|h| h.to_vec()).unwrap_or_default().into(),
+        hash: point.hash().map(|h| h.as_slice().to_vec()).unwrap_or_default().into(),
         ..Default::default()
     }
 }
 
 pub struct QueryServiceImpl<D>
 where
-    D: Domain + LedgerContext,
+    D: Domain<ChainSpecificError = CardanoError> + LedgerContext,
 {
     domain: D,
     mapper: interop::Mapper<D>,
@@ -29,7 +30,7 @@ where
 
 impl<D> QueryServiceImpl<D>
 where
-    D: Domain + LedgerContext,
+    D: Domain<ChainSpecificError = CardanoError> + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
         let mapper = interop::Mapper::new(domain.clone());
@@ -203,7 +204,7 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
     Ok(TxoRef(hash, txo.index))
 }
 
-async fn into_u5c_utxo<S: Domain + LedgerContext>(
+async fn into_u5c_utxo<S: Domain<ChainSpecificError = CardanoError> + LedgerContext>(
     txo: &TxoRef,
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
@@ -213,7 +214,8 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
 
     let query = dolos_core::AsyncQueryFacade::new(domain.clone());
 
-    let parsed_output = MultiEraOutput::try_from(body)?;
+    let era = pallas::ledger::traverse::Era::try_from(body.0)?;
+    let parsed_output = MultiEraOutput::decode(era, &body.1)?;
     let mut parsed = mapper.map_tx_output(&parsed_output, None);
 
     // If the output has a datum hash, try to fetch the datum value from storage
@@ -261,7 +263,7 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
 
     Ok(u5c::query::AnyUtxoData {
         txo_ref: Some(u5c::query::TxoRef {
-            hash: txo.0.to_vec().into(),
+            hash: txo.0.as_slice().to_vec().into(),
             index: txo.1,
         }),
         native_bytes: body.1.clone().into(),
@@ -273,7 +275,7 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
 #[async_trait::async_trait]
 impl<D> u5c::query::query_service_server::QueryService for QueryServiceImpl<D>
 where
-    D: Domain + LedgerContext,
+    D: Domain<ChainSpecificError = CardanoError> + LedgerContext,
 {
     async fn read_params(
         &self,

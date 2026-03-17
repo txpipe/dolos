@@ -21,7 +21,7 @@ pub struct Driver;
 
 impl<D, C> dolos_core::Driver<D, C> for Driver
 where
-    D: Domain + LedgerContext,
+    D: Domain<ChainSpecificError = dolos_cardano::CardanoError> + LedgerContext,
     C: CancelToken,
 {
     type Config = GrpcConfig;

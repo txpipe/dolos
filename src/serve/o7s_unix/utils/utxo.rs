@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use dolos_cardano::core_hash_to_pallas;
 use dolos_core::{IndexStore, StateStore};
 use pallas::codec::utils::{AnyCbor, AnyUInt, KeyValuePairs};
 use pallas::ledger::addresses::Address;
@@ -60,10 +61,12 @@ pub fn build_utxo_by_address_response<D: Domain>(
 
     for utxo_ref in refs_vec {
         if let Some(era_cbor) = utxos.get(&utxo_ref) {
-            let output = MultiEraOutput::try_from(era_cbor.as_ref())
+            let era = pallas::ledger::traverse::Era::try_from(era_cbor.0)
+                .map_err(|e| Error::server(format!("failed to decode utxo era: {}", e)))?;
+            let output = MultiEraOutput::decode(era, &era_cbor.1)
                 .map_err(|e| Error::server(format!("failed to decode utxo: {}", e)))?;
             let q16_utxo = q16::UTxO {
-                transaction_id: utxo_ref.0,
+                transaction_id: core_hash_to_pallas(utxo_ref.0),
                 index: AnyUInt::U32(utxo_ref.1),
             };
 

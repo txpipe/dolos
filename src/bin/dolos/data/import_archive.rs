@@ -146,7 +146,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 break;
             }
 
-            let point = ChainPoint::Specific(block.slot, block.hash);
+            let point = ChainPoint::Specific(block.slot, dolos_cardano::pallas_hash_to_core(block.hash));
 
             writer
                 .apply(&point, &block.raw)

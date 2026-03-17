@@ -1,8 +1,28 @@
 pub use dolos_core::*;
 
 use miette::Diagnostic;
+use pallas::network::miniprotocols::Point;
 use std::fmt::Display;
 use thiserror::Error;
+
+pub fn pallas_point_to_chain(p: Point) -> ChainPoint {
+    match p {
+        Point::Origin => ChainPoint::Origin,
+        Point::Specific(slot, hash) => {
+            let arr: [u8; 32] = hash.as_slice().try_into().unwrap_or_default();
+            ChainPoint::Specific(slot, dolos_core::hash::Hash::new(arr))
+        }
+    }
+}
+
+#[allow(clippy::result_unit_err)]
+pub fn chain_point_to_pallas(p: ChainPoint) -> Result<Point, ()> {
+    match p {
+        ChainPoint::Origin => Ok(Point::Origin),
+        ChainPoint::Specific(slot, hash) => Ok(Point::Specific(slot, hash.as_slice().to_vec())),
+        ChainPoint::Slot(_) => Err(()),
+    }
+}
 
 #[derive(Error, Debug, Diagnostic)]
 pub enum Error {

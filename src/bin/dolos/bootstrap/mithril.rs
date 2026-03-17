@@ -164,8 +164,20 @@ fn define_starting_point(
 ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
     use dolos_core::StateStore;
 
+    fn chain_to_pallas(c: dolos_core::ChainPoint) -> pallas::network::miniprotocols::Point {
+        match c {
+            dolos_core::ChainPoint::Origin => pallas::network::miniprotocols::Point::Origin,
+            dolos_core::ChainPoint::Specific(slot, hash) => {
+                pallas::network::miniprotocols::Point::Specific(slot, hash.as_slice().to_vec())
+            }
+            dolos_core::ChainPoint::Slot(slot) => {
+                pallas::network::miniprotocols::Point::Specific(slot, vec![])
+            }
+        }
+    }
+
     if let Some(point) = &args.start_from {
-        Ok(point.clone().try_into().unwrap())
+        Ok(chain_to_pallas(point.clone()))
     } else {
         let cursor = state
             .read_cursor()
@@ -173,7 +185,7 @@ fn define_starting_point(
             .context("reading state cursor")?;
 
         let point = cursor
-            .map(|c| c.try_into().unwrap())
+            .map(chain_to_pallas)
             .unwrap_or(pallas::network::miniprotocols::Point::Origin);
 
         Ok(point)

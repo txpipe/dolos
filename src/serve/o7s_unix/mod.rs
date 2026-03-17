@@ -20,7 +20,7 @@ pub struct DriverConfig {
 //#[cfg(test)]
 //mod tests;
 
-async fn handle_session<D: Domain, C: CancelToken>(
+async fn handle_session<D: Domain<Genesis = dolos_cardano::CardanoGenesis>, C: CancelToken>(
     domain: D,
     connection: NodeServer,
     cancel: C,
@@ -55,7 +55,7 @@ async fn handle_session<D: Domain, C: CancelToken>(
     Ok(())
 }
 
-async fn accept_client_connections<D: Domain, C: CancelToken>(
+async fn accept_client_connections<D: Domain<Genesis = dolos_cardano::CardanoGenesis>, C: CancelToken>(
     domain: D,
     config: &DriverConfig,
     tasks: &mut TaskTracker,
@@ -89,7 +89,7 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
 
 pub struct Driver;
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+impl<D: Domain<Genesis = dolos_cardano::CardanoGenesis>, C: CancelToken> dolos_core::Driver<D, C> for Driver {
     type Config = DriverConfig;
 
     #[instrument(skip_all)]

@@ -83,7 +83,7 @@ impl<'a, C> minicbor::Encode<C> for EraHistoryResponse<'a> {
 
 pub fn build_era_history_response(
     eras: &[DolosEraSummary],
-    genesis: &GenesisCardanoCardano,
+    genesis: &dolos_cardano::CardanoGenesis,
 ) -> Result<AnyCbor, Error> {
     if eras.is_empty() {
         return Err(Error::server("era summary is empty"));

@@ -274,7 +274,10 @@ where
         let intersect = inner_req
             .intersect
             .iter()
-            .map(|x| ChainPoint::Specific(x.slot, x.hash.to_vec().as_slice().into()))
+            .map(|x| {
+                let arr: [u8; 32] = x.hash.as_ref().try_into().unwrap_or([0u8; 32]);
+                ChainPoint::Specific(x.slot, dolos_core::hash::Hash::new(arr))
+            })
             .collect::<Vec<ChainPoint>>();
 
         let stream =

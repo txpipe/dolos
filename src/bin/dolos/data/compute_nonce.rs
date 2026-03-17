@@ -1,4 +1,4 @@
-use dolos_cardano::{load_era_summary, utils::nonce_stability_window, EraSummary, Nonces};
+use dolos_cardano::{load_era_summary, utils::nonce_stability_window, CardanoGenesis, EraSummary, Nonces};
 use dolos_core::{ArchiveStore, Domain};
 use miette::{bail, Context, IntoDiagnostic};
 use pallas::{crypto::hash::Hash, ledger::traverse::MultiEraBlock};
@@ -27,7 +27,7 @@ pub fn get_nh<D: Domain>(epoch: u64, domain: &D, summary: &EraSummary) -> miette
     Ok(block.header().previous_hash().unwrap())
 }
 
-pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<32>> {
+pub fn compute_nonce<D: Domain<Genesis = CardanoGenesis>>(epoch: u64, domain: &D) -> miette::Result<Hash<32>> {
     let summary = load_era_summary::<D>(domain.state())
         .into_diagnostic()
         .context("loading era summary")?;
@@ -48,7 +48,7 @@ pub fn compute_nonce<D: Domain>(epoch: u64, domain: &D) -> miette::Result<Hash<3
 
     let (protocol, era) = summary.protocol_and_era_for_epoch(epoch);
     let largest_stable_slot =
-        era.epoch_start(epoch) - nonce_stability_window(*protocol, &domain.genesis());
+        era.epoch_start(epoch) - nonce_stability_window(*protocol, domain.genesis().as_ref());
 
     let mut nonces = Nonces::bootstrap(domain.genesis().shelley_hash);
 

@@ -1,12 +1,12 @@
 use clap::Parser;
 use dolos_cardano::{include, mutable_slots};
+use dolos_cardano::CardanoGenesis;
 use dolos_core::{
     config::{
         CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
         MithrilConfig, PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion,
         TrpConfig, UpstreamConfig,
     },
-    GenesisCardanoCardano,
 };
 use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
@@ -84,7 +84,7 @@ impl KnownNetwork {
         ]
     }
 
-    pub fn load_included_genesis(&self) -> GenesisCardanoCardano {
+    pub fn load_included_genesis(&self) -> CardanoGenesis {
         match self {
             KnownNetwork::CardanoMainnet => include::mainnet::load(),
             KnownNetwork::CardanoPreProd => include::preprod::load(),

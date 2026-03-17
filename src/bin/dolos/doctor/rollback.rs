@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use dolos_core::sync::SyncExt as _;
 use miette::IntoDiagnostic as _;
+use dolos_cardano::pallas_hash_to_core;
 use pallas::crypto::hash::Hash;
 
 use dolos_core::{config::RootConfig, ChainPoint};
@@ -24,7 +25,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let domain = crate::common::setup_domain(config)?;
 
     let hash: Hash<32> = Hash::from_str(&args.hash).into_diagnostic()?;
-    let point = ChainPoint::Specific(args.slot, hash);
+    let point = ChainPoint::Specific(args.slot, pallas_hash_to_core(hash));
 
     domain
         .rollback(&point)

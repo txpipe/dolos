@@ -74,7 +74,7 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
             assert_eq!(previous, last);
         }
 
-        last_hash = Some(hash);
+        last_hash = Some(hash.map(dolos_cardano::core_hash_to_pallas));
 
         feedback.global_pb.set_position(slot);
     }

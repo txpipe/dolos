@@ -124,8 +124,7 @@ impl gasket::framework::Worker<Stage> for Worker {
             .intersect_candidates(5)
             .or_panic()?
             .into_iter()
-            .map(TryFrom::try_from)
-            .filter_map(|x| x.ok())
+            .filter_map(|p| chain_point_to_pallas(p).ok())
             .collect_vec();
 
         if candidates.is_empty() {
@@ -309,7 +308,7 @@ impl Stage {
         };
 
         self.downstream
-            .send(PullEvent::Rollback(point.into()).into())
+            .send(PullEvent::Rollback(pallas_point_to_chain(point)).into())
             .await
             .or_panic()?;
 

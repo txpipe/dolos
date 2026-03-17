@@ -2,7 +2,6 @@ use std::collections::VecDeque;
 
 use gasket::framework::*;
 use itertools::Itertools as _;
-use pallas::crypto::hash::Hash;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::txsubmission::{EraTxBody, EraTxId, Request, TxIdAndSize};
 use std::time::Duration;
@@ -21,7 +20,7 @@ fn to_n2n_reply(mempool_tx: &MempoolTx) -> TxIdAndSize<EraTxId> {
 
     let era = to_n2n_era(*era);
 
-    let id = EraTxId(era, mempool_tx.hash.to_vec());
+    let id = EraTxId(era, mempool_tx.hash.as_slice().to_vec());
 
     TxIdAndSize(id, bytes.len() as u32)
 }
@@ -203,7 +202,10 @@ impl gasket::framework::Worker<Stage> for Worker {
 
                 let found: Vec<MempoolTx> = ids
                     .iter()
-                    .filter_map(|x| stage.mempool.find_inflight(&Hash::from(x.1.as_slice())))
+                    .filter_map(|x| {
+                        let arr: [u8; 32] = x.1.as_slice().try_into().ok()?;
+                        stage.mempool.find_inflight(&dolos_core::hash::Hash::new(arr))
+                    })
                     .collect_vec();
 
                 let to_send = found.into_iter().map(to_n2n_body).collect_vec();

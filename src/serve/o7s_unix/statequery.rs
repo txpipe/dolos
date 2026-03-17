@@ -8,6 +8,8 @@ use pallas::codec::minicbor;
 use pallas::network::miniprotocols::{localstate, localstate::queries_v16 as q16, Point as OPoint};
 use tracing::{debug, info, warn};
 
+use dolos_cardano::{pallas_hash_to_core, CardanoGenesis};
+
 use crate::prelude::*;
 use crate::serve::o7s_unix::utils;
 use utils::{
@@ -16,13 +18,13 @@ use utils::{
     build_stake_snapshots_response, build_utxo_by_address_response,
 };
 
-pub struct Session<D: Domain> {
+pub struct Session<D: Domain<Genesis = CardanoGenesis>> {
     domain: D,
     connection: localstate::Server,
     acquired_point: Option<ChainPoint>,
 }
 
-impl<D: Domain> Session<D> {
+impl<D: Domain<Genesis = CardanoGenesis>> Session<D> {
     fn tip_cursor(&self) -> Result<ChainPoint, Error> {
         let point = self
             .domain
@@ -43,7 +45,7 @@ impl<D: Domain> Session<D> {
                 let block =
                     MultiEraBlock::decode(&body).map_err(|e| Error::server(e.to_string()))?;
 
-                Ok(ChainPoint::Specific(slot, block.hash()))
+                Ok(ChainPoint::Specific(slot, pallas_hash_to_core(block.hash())))
             }
             _ => Ok(point),
         }
@@ -74,7 +76,7 @@ impl<D: Domain> Session<D> {
         debug!(?point, "handling acquire request");
 
         let chain_point = match point {
-            Some(p) => ChainPoint::from(p),
+            Some(p) => pallas_point_to_chain(p),
             None => {
                 // None means acquire the latest point
                 self.tip_cursor()?
@@ -215,7 +217,7 @@ impl<D: Domain> Session<D> {
 
                 AnyCbor::from_encode(match point {
                     ChainPoint::Origin => OPoint::Origin,
-                    ChainPoint::Specific(s, h) => OPoint::Specific(s, h.to_vec()),
+                    ChainPoint::Specific(s, h) => OPoint::Specific(s, h.as_slice().to_vec()),
                     ChainPoint::Slot(_) => OPoint::Origin,
                 })
             }
@@ -230,7 +232,7 @@ impl<D: Domain> Session<D> {
                 let eras: Vec<DolosEraSummary> = chain_summary.iter_all().cloned().collect();
 
                 let genesis = self.domain.genesis();
-                build_era_history_response(&eras, &genesis)?
+                build_era_history_response(&eras, genesis.as_ref())?
             }
             Ok(q16::Request::LedgerQuery(q16::LedgerQuery::HardForkQuery(
                 q16::HardForkQuery::GetCurrentEra,
@@ -263,7 +265,7 @@ impl<D: Domain> Session<D> {
 
                 let p = match point {
                     ChainPoint::Origin => OPoint::Origin,
-                    ChainPoint::Specific(s, h) => OPoint::Specific(s, h.to_vec()),
+                    ChainPoint::Specific(s, h) => OPoint::Specific(s, h.as_slice().to_vec()),
                     ChainPoint::Slot(_) => OPoint::Origin,
                 };
                 AnyCbor::from_encode((p,))
@@ -402,7 +404,7 @@ impl<D: Domain> Session<D> {
     }
 }
 
-pub async fn handle_session<D: Domain, C: CancelToken>(
+pub async fn handle_session<D: Domain<Genesis = CardanoGenesis>, C: CancelToken>(
     domain: D,
     connection: localstate::Server,
     cancel: C,
