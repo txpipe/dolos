@@ -11,7 +11,7 @@ use pallas::{
 
 use dolos_core::{
     archive::ArchiveStore, AsyncQueryFacade, BlockBody, BlockSlot, ChainError, Domain, DomainError,
-    EntityKey, IndexStore, StateStore as _, TagDimension, TxHash, TxoRef,
+    EntityKey, IndexStore, StateStore as _, TagDimension, TxHash,
 };
 
 use crate::indexes::dimensions::archive;
@@ -43,14 +43,14 @@ pub struct ScriptData {
 }
 
 #[async_trait::async_trait]
-pub trait AsyncCardanoQueryExt<D: Domain> {
+pub trait AsyncCardanoQueryExt<D: Domain<ChainSpecificError = crate::CardanoError>> {
     fn blocks_by_address_stream(
         &self,
         address: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static;
 
     fn blocks_by_payment_stream(
         &self,
@@ -58,7 +58,7 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static;
 
     fn blocks_by_stake_stream(
         &self,
@@ -66,7 +66,7 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static;
 
     fn blocks_by_asset_stream(
         &self,
@@ -74,7 +74,7 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static;
 
     fn blocks_by_account_certs_stream(
         &self,
@@ -82,7 +82,7 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static;
 
     fn blocks_by_metadata_stream(
         &self,
@@ -90,64 +90,64 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static;
 
     async fn blocks_by_address(
         &self,
         address: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>;
 
     async fn blocks_by_payment(
         &self,
         payment: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>;
 
     async fn blocks_by_stake(
         &self,
         stake: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>;
 
     async fn blocks_by_asset(
         &self,
         asset: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>;
 
     async fn blocks_by_account_certs(
         &self,
         account: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>;
 
     async fn blocks_by_metadata(
         &self,
         label: u64,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>;
 
-    async fn plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, DomainError>;
+    async fn plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, DomainError<crate::CardanoError>>;
 
-    async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError>;
+    async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError<crate::CardanoError>>;
 
     async fn script_by_hash(
         &self,
         script_hash: &Hash<28>,
-    ) -> Result<Option<ScriptData>, DomainError>;
+    ) -> Result<Option<ScriptData>, DomainError<crate::CardanoError>>;
 
-    async fn tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, DomainError>;
+    async fn tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, DomainError<crate::CardanoError>>;
 }
 
 #[async_trait::async_trait]
-impl<D: Domain> AsyncCardanoQueryExt<D> for AsyncQueryFacade<D>
+impl<D: Domain<ChainSpecificError = crate::CardanoError>> AsyncCardanoQueryExt<D> for AsyncQueryFacade<D>
 where
     D: Clone + Send + Sync + 'static,
 {
@@ -157,7 +157,7 @@ where
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
     {
         blocks_by_tag_stream(
             (*self).clone(),
@@ -175,7 +175,7 @@ where
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
     {
         blocks_by_tag_stream(
             (*self).clone(),
@@ -193,7 +193,7 @@ where
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
     {
         blocks_by_tag_stream(
             (*self).clone(),
@@ -211,7 +211,7 @@ where
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
     {
         blocks_by_tag_stream(
             (*self).clone(),
@@ -229,7 +229,7 @@ where
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
     {
         blocks_by_tag_stream(
             (*self).clone(),
@@ -247,7 +247,7 @@ where
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
-    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
     {
         blocks_by_tag_stream(
             (*self).clone(),
@@ -264,7 +264,7 @@ where
         address: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>> {
         blocks_by_tag(self, archive::ADDRESS, address, start_slot, end_slot).await
     }
 
@@ -273,7 +273,7 @@ where
         payment: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>> {
         blocks_by_tag(self, archive::PAYMENT, payment, start_slot, end_slot).await
     }
 
@@ -282,7 +282,7 @@ where
         stake: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>> {
         blocks_by_tag(self, archive::STAKE, stake, start_slot, end_slot).await
     }
 
@@ -291,7 +291,7 @@ where
         asset: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>> {
         blocks_by_tag(self, archive::ASSET, asset, start_slot, end_slot).await
     }
 
@@ -300,7 +300,7 @@ where
         account: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>> {
         blocks_by_tag(self, archive::ACCOUNT_CERTS, account, start_slot, end_slot).await
     }
 
@@ -309,7 +309,7 @@ where
         label: u64,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
-    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>> {
         blocks_by_tag(
             self,
             archive::METADATA,
@@ -320,7 +320,7 @@ where
         .await
     }
 
-    async fn plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, DomainError> {
+    async fn plutus_data(&self, datum_hash: &Hash<32>) -> Result<Option<PlutusData>, DomainError<crate::CardanoError>> {
         let end_slot = self
             .run_blocking(move |domain| {
                 Ok(domain
@@ -365,8 +365,8 @@ where
         .await
     }
 
-    async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError> {
-        let key = EntityKey::from(*datum_hash);
+    async fn get_datum(&self, datum_hash: &Hash<32>) -> Result<Option<Vec<u8>>, DomainError<crate::CardanoError>> {
+        let key = EntityKey::from(datum_hash.as_slice());
         self.run_blocking(move |domain| {
             let datum_state: Option<DatumState> =
                 domain.state().read_entity_typed(DATUM_NS, &key)?;
@@ -378,7 +378,7 @@ where
     async fn script_by_hash(
         &self,
         script_hash: &Hash<28>,
-    ) -> Result<Option<ScriptData>, DomainError> {
+    ) -> Result<Option<ScriptData>, DomainError<crate::CardanoError>> {
         let end_slot = self
             .run_blocking(move |domain| {
                 Ok(domain
@@ -479,7 +479,7 @@ where
         .await
     }
 
-    async fn tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, DomainError> {
+    async fn tx_by_spent_txo(&self, spent_txo: &[u8]) -> Result<Option<TxHash>, DomainError<crate::CardanoError>> {
         let spent = spent_txo.to_vec();
 
         let end_slot = self
@@ -501,9 +501,11 @@ where
             |block| {
                 for tx in block.txs().iter() {
                     for input in tx.inputs() {
-                        let bytes: Vec<u8> = TxoRef::from(&input).into();
+                        let txo_ref = crate::txo_ref_from_input(&input);
+                        let mut bytes = txo_ref.0.as_slice().to_vec();
+                        bytes.extend_from_slice(txo_ref.1.to_be_bytes().as_slice());
                         if bytes.as_slice() == spent.as_slice() {
-                            return Some(tx.hash());
+                            return Some(crate::pallas_hash_to_core(tx.hash()));
                         }
                     }
                 }
@@ -520,9 +522,9 @@ async fn blocks_by_tag<D>(
     key: &[u8],
     start_slot: BlockSlot,
     end_slot: BlockSlot,
-) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>
+) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError<crate::CardanoError>>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = crate::CardanoError> + Clone + Send + Sync + 'static,
 {
     let slots = facade
         .slots_by_tag(dimension, key.to_vec(), start_slot, end_slot)
@@ -546,9 +548,9 @@ async fn find_first_by_tag<D, F, T>(
     start_slot: BlockSlot,
     end_slot: BlockSlot,
     mut predicate: F,
-) -> Result<Option<T>, DomainError>
+) -> Result<Option<T>, DomainError<crate::CardanoError>>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = crate::CardanoError> + Clone + Send + Sync + 'static,
     F: FnMut(&MultiEraBlock) -> Option<T>,
 {
     let mut current_start = start_slot;
@@ -577,7 +579,7 @@ where
             };
 
             let block = MultiEraBlock::decode(raw.as_slice())
-                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
+                .map_err(|e| DomainError::ChainError(ChainError::ChainSpecific(crate::CardanoError::Traverse(e))))?;
 
             if let Some(result) = predicate(&block) {
                 return Ok(Some(result));
@@ -603,9 +605,9 @@ fn blocks_by_tag_stream<D>(
     mut start_slot: BlockSlot,
     mut end_slot: BlockSlot,
     order: SlotOrder,
-) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError<crate::CardanoError>>> + Send + 'static
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = crate::CardanoError> + Clone + Send + Sync + 'static,
 {
     async_stream::try_stream! {
         loop {
