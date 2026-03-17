@@ -13,13 +13,14 @@ use tx3_resolver::trp::{
     TxStatus, TxWitness,
 };
 
+use dolos_cardano::{CardanoError, CardanoGenesis};
 use dolos_core::{Domain, MempoolAwareUtxoStore, MempoolStore as _, StateStore as _, SubmitExt};
 
 use crate::{compiler::load_compiler, utxos::UtxoStoreAdapter};
 
 use super::{Context, Error};
 
-pub async fn trp_resolve<D: Domain>(
+pub async fn trp_resolve<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<TxEnvelope, Error> {
@@ -96,7 +97,7 @@ fn apply_witnesses(original: &[u8], witnesses: &[TxWitness]) -> Result<Vec<u8>, 
     Ok(pallas::codec::minicbor::to_vec(&tx).unwrap())
 }
 
-pub async fn trp_submit<D: Domain + SubmitExt>(
+pub async fn trp_submit<D: Domain<ChainSpecificError = CardanoError> + SubmitExt>(
     params: Params<'_>,
     context: Arc<Context<D>>,
 ) -> Result<SubmitResponse, Error> {

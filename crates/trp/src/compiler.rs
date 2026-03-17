@@ -1,11 +1,12 @@
 use pallas::ledger::primitives::conway::CostModels;
 use std::collections::HashMap;
 
-use dolos_core::{config::TrpConfig, Domain, Genesis, StateStore};
+use dolos_cardano::CardanoGenesis;
+use dolos_core::{config::TrpConfig, Domain, StateStore};
 
 use crate::Error;
 
-pub fn network_id_from_genesis(genesis: &Genesis) -> Option<tx3_cardano::Network> {
+pub fn network_id_from_genesis(genesis: &CardanoGenesis) -> Option<tx3_cardano::Network> {
     match genesis.shelley.network_id.as_ref() {
         Some(network) => match network.as_str() {
             "Mainnet" => Some(tx3_cardano::Network::Mainnet),
@@ -29,8 +30,8 @@ fn map_cost_models(original: CostModels) -> HashMap<u8, tx3_cardano::CostModel> 
     HashMap::from_iter(present)
 }
 
-fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
-    let network = network_id_from_genesis(&domain.genesis()).unwrap();
+fn build_pparams<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
+    let network = network_id_from_genesis(domain.genesis().as_ref()).unwrap();
 
     let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
 
@@ -47,7 +48,7 @@ fn build_pparams<D: Domain>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
     Ok(out)
 }
 
-pub fn find_cursor<D: Domain>(domain: &D) -> Result<tx3_cardano::ChainPoint, Error> {
+pub fn find_cursor<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>>(domain: &D) -> Result<tx3_cardano::ChainPoint, Error> {
     let cursor = domain
         .state()
         .read_cursor()
@@ -58,12 +59,12 @@ pub fn find_cursor<D: Domain>(domain: &D) -> Result<tx3_cardano::ChainPoint, Err
 
     Ok(tx3_cardano::ChainPoint {
         slot: cursor.slot(),
-        hash: cursor.hash().map(|h| h.to_vec()).unwrap_or_default(),
+        hash: cursor.hash().map(|h| h.as_slice().to_vec()).unwrap_or_default(),
         timestamp: era.slot_time(cursor.slot()) as u128,
     })
 }
 
-pub fn load_compiler<D: Domain>(
+pub fn load_compiler<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>>(
     domain: &D,
     config: &TrpConfig,
 ) -> Result<tx3_cardano::Compiler, Error> {

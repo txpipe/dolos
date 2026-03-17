@@ -1,3 +1,4 @@
+use dolos_cardano::CardanoError;
 use dolos_core::DomainError;
 use jsonrpsee::types::ErrorCode;
 use serde_json::Value;
@@ -66,10 +67,6 @@ impl Error {
         )))
     }
 
-    fn tx_script_failure(logs: Vec<String>) -> Self {
-        Error::Tx3Error(Box::new(tx3_resolver::Error::TxScriptFailure(logs)))
-    }
-
     fn internal(error: impl std::fmt::Display) -> Self {
         Error::InternalError(error.to_string())
     }
@@ -87,21 +84,18 @@ impl From<dolos_core::MempoolError> for Error {
     }
 }
 
-impl From<dolos_core::ChainError> for Error {
-    fn from(error: dolos_core::ChainError) -> Self {
+impl From<dolos_core::ChainError<CardanoError>> for Error {
+    fn from(error: dolos_core::ChainError<CardanoError>) -> Self {
         match error {
             dolos_core::ChainError::BrokenInvariant(x) => Error::tx_not_accepted(x),
-            dolos_core::ChainError::DecodingError(x) => Error::tx_not_accepted(x),
-            dolos_core::ChainError::CborDecodingError(x) => Error::tx_not_accepted(x),
-            dolos_core::ChainError::Phase1ValidationRejected(x) => Error::tx_not_accepted(x),
-            dolos_core::ChainError::Phase2ValidationRejected(x) => Error::tx_script_failure(x),
+            dolos_core::ChainError::ChainSpecific(x) => Error::tx_not_accepted(x.to_string()),
             x => Error::internal(x),
         }
     }
 }
 
-impl From<DomainError> for Error {
-    fn from(error: DomainError) -> Self {
+impl From<DomainError<CardanoError>> for Error {
+    fn from(error: DomainError<CardanoError>) -> Self {
         match error {
             dolos_core::DomainError::ChainError(e) => Error::from(e),
             dolos_core::DomainError::MempoolError(e) => Error::from(e),

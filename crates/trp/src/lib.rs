@@ -5,6 +5,7 @@ use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
+use dolos_cardano::{CardanoError, CardanoGenesis};
 use dolos_core::{config::TrpConfig, CancelToken, Domain, ServeError, SubmitExt};
 
 mod compiler;
@@ -25,7 +26,7 @@ pub struct Context<D: Domain> {
 
 pub struct Driver;
 
-impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+impl<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver {
     type Config = TrpConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
