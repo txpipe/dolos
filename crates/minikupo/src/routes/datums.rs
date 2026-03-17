@@ -4,12 +4,13 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dolos_cardano::CardanoError;
 use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 
 use crate::{bad_request, Facade};
 
-pub async fn by_hash<D: Domain>(
+pub async fn by_hash<D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static>(
     State(facade): State<Facade<D>>,
     Path(datum_hash): Path<String>,
 ) -> Response {

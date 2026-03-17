@@ -5,7 +5,7 @@ use axum::{
     routing::get,
     Json, Router, ServiceExt,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLanguage};
+use dolos_cardano::{indexes::{AsyncCardanoQueryExt, ScriptLanguage as CardanoLanguage}, CardanoError, CardanoGenesis};
 use dolos_core::{config::MinikupoConfig, AsyncQueryFacade, CancelToken, Domain, ServeError};
 use pallas::{codec::minicbor, crypto::hash::Hash};
 use std::ops::Deref;
@@ -45,7 +45,7 @@ impl<D: Domain> Facade<D> {
         script_hash: &Hash<28>,
     ) -> Result<Option<types::Script>, StatusCode>
     where
-        D: Clone + Send + Sync + 'static,
+        D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
     {
         let script = self
             .query()
@@ -73,7 +73,7 @@ impl<D: Domain> Facade<D> {
         datum_hash: &Hash<32>,
     ) -> Result<Option<types::Datum>, StatusCode>
     where
-        D: Clone + Send + Sync + 'static,
+        D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
     {
         let datum = self
             .query()
@@ -97,7 +97,7 @@ pub struct Driver;
 
 pub fn build_router<D>(cfg: MinikupoConfig, domain: D) -> Router
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     build_router_with_facade(Facade {
         inner: domain,
@@ -107,7 +107,7 @@ where
 
 pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
@@ -151,7 +151,7 @@ where
 
 fn api_router<D>() -> Router<Facade<D>>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     Router::new()
         .route("/matches/{*pattern}", get(routes::matches::by_pattern::<D>))
@@ -161,7 +161,7 @@ where
         .route("/health", get(routes::health::health::<D>))
 }
 
-impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver
+impl<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
     D: Clone + Send + Sync + 'static,
 {
