@@ -7,16 +7,17 @@ use blockfrost_openapi::models::{
     network_supply::NetworkSupply,
 };
 use dolos_cardano::{
-    model::EpochState, mutable_slots, AccountState, EraProtocol, EraSummary, FixedNamespace,
+    model::EpochState, mutable_slots, AccountState, CardanoGenesis, EraProtocol, EraSummary,
+    FixedNamespace,
 };
-use dolos_core::{BlockSlot, Domain, Genesis, StateStore};
+use dolos_core::{BlockSlot, Domain, StateStore};
 
 use crate::{mapping::IntoModel, routes::genesis::parse_datetime_into_timestamp, Facade};
 
 struct ChainModelBuilder<'a> {
     tip: BlockSlot,
     eras: Vec<(u16, EraSummary)>,
-    genesis: &'a Genesis,
+    genesis: &'a CardanoGenesis,
 }
 
 impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
@@ -182,7 +183,7 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
     }
 }
 
-pub async fn eras<D: Domain>(
+pub async fn eras<D: Domain<Genesis = CardanoGenesis>>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<NetworkErasInner>>, StatusCode> {
     let genesis = domain.genesis();
@@ -212,7 +213,7 @@ pub async fn eras<D: Domain>(
 }
 
 struct NetworkModelBuilder<'a> {
-    genesis: &'a Genesis,
+    genesis: &'a CardanoGenesis,
     active: EpochState,
     live_stake: u64,
     active_stake: u64,
@@ -248,7 +249,7 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     }
 }
 
-fn compute_network_sync<D: Domain>(domain: Facade<D>) -> Result<Network, StatusCode>
+fn compute_network_sync<D: Domain<Genesis = CardanoGenesis>>(domain: Facade<D>) -> Result<Network, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
 {
@@ -285,7 +286,7 @@ where
 pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     const TTL: std::time::Duration = std::time::Duration::from_secs(30);
 

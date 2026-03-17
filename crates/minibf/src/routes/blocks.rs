@@ -4,7 +4,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::block_content::BlockContent;
-use dolos_cardano::ChainSummary;
+use dolos_cardano::{CardanoGenesis, ChainSummary};
 use dolos_core::{archive::Skippable as _, ArchiveStore as _, BlockBody, Domain};
 use futures::future::try_join_all;
 use itertools::Either;
@@ -122,7 +122,7 @@ pub async fn by_hash_or_number<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<BlockContent>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
 
@@ -172,7 +172,7 @@ pub async fn by_hash_or_number_previous<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<BlockContent>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -250,7 +250,7 @@ pub async fn by_hash_or_number_next<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<BlockContent>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -330,7 +330,7 @@ where
 
 pub async fn latest<D>(State(domain): State<Facade<D>>) -> Result<Json<BlockContent>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let (_, tip) = domain
         .archive()
@@ -351,7 +351,7 @@ pub async fn by_slot<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<BlockContent>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let block = domain
         .archive()

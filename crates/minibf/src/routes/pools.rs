@@ -11,7 +11,7 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     model::{AccountState, PoolState},
-    FixedNamespace, PoolDelegation, StakeLog,
+    CardanoGenesis, FixedNamespace, PoolDelegation, StakeLog,
 };
 use dolos_core::{ArchiveStore, BlockSlot, Domain, EntityKey, TemporalKey};
 use futures::future::join_all;
@@ -218,7 +218,7 @@ impl IntoModel<PoolDelegatorsInner> for PoolDelegatorModelBuilder {
     }
 }
 
-pub async fn by_id_delegators<D: Domain>(
+pub async fn by_id_delegators<D: Domain<Genesis = CardanoGenesis>>(
     Path(id): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,

@@ -15,7 +15,10 @@ use blockfrost_openapi::models::{
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
 
-use dolos_cardano::{indexes::AsyncCardanoQueryExt, AccountState, DRepState, PoolState};
+use dolos_cardano::{
+    core_hash_to_pallas, indexes::AsyncCardanoQueryExt, pallas_hash_to_core, AccountState,
+    CardanoError, CardanoGenesis, DRepState, PoolState,
+};
 use dolos_core::Domain;
 
 use crate::{
@@ -29,7 +32,7 @@ pub async fn by_hash<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContent>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
@@ -76,7 +79,7 @@ pub async fn by_hash_utxos<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContentUtxo>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -94,7 +97,11 @@ where
 
     let mut consumed_deps = std::collections::HashMap::new();
     for x in builder.required_consumed_deps()? {
-        let bytes: Vec<u8> = x.clone().into();
+        let bytes = {
+            let mut v = x.0.as_slice().to_vec();
+            v.extend_from_slice(&x.1.to_be_bytes());
+            v
+        };
         let maybe = domain
             .query()
             .tx_by_spent_txo(&bytes)
@@ -107,11 +114,11 @@ where
     builder = builder.with_consumed_deps(consumed_deps);
 
     let deps = builder.required_deps()?;
-    let deps = domain.get_tx_batch(deps).await?;
+    let deps = domain.get_tx_batch(deps.into_iter().map(core_hash_to_pallas)).await?;
 
     for (key, cbor) in deps.iter() {
         if let Some(cbor) = cbor {
-            builder.load_dep(*key, cbor)?;
+            builder.load_dep(pallas_hash_to_core(*key), cbor)?;
         }
     }
 
@@ -168,11 +175,11 @@ where
         .with_historical_pparams::<D>(&domain)?;
 
     let deps = builder.required_deps()?;
-    let deps = domain.get_tx_batch(deps).await?;
+    let deps = domain.get_tx_batch(deps.into_iter().map(core_hash_to_pallas)).await?;
 
     for (key, cbor) in deps.iter() {
         if let Some(cbor) = cbor {
-            builder.load_dep(*key, cbor)?;
+            builder.load_dep(pallas_hash_to_core(*key), cbor)?;
         }
     }
 
@@ -200,7 +207,7 @@ pub async fn by_hash_delegations<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentDelegationsInner>>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -221,7 +228,7 @@ pub async fn by_hash_mirs<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentMirsInner>>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -255,7 +262,7 @@ pub async fn by_hash_pool_updates<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentPoolCertsInner>>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -280,7 +287,7 @@ pub async fn by_hash_stakes<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentStakeAddrInner>>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 

@@ -5,8 +5,7 @@ use crate::{
     routes::epochs::cost_models::get_named_cost_model,
 };
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
-use dolos_cardano::PParamsSet;
-use dolos_core::Genesis;
+use dolos_cardano::{CardanoGenesis, PParamsSet};
 use pallas::ledger::primitives::{conway::CostModels, Epoch};
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
@@ -68,7 +67,7 @@ fn map_cost_models_named(cost_models: &CostModels) -> Option<HashMap<String, ser
 pub struct ParametersModelBuilder<'a> {
     pub epoch: Epoch,
     pub params: PParamsSet,
-    pub genesis: &'a Genesis,
+    pub genesis: &'a CardanoGenesis,
     pub nonce: Option<String>,
 }
 

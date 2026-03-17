@@ -7,7 +7,7 @@ use blockfrost_openapi::models::{
     tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
     tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, SlotOrder};
+use dolos_cardano::{indexes::{AsyncCardanoQueryExt, SlotOrder}, CardanoError};
 use dolos_core::Domain;
 use futures_util::StreamExt;
 use pallas::{
@@ -128,7 +128,7 @@ async fn by_label<D>(
     domain: &Facade<D>,
 ) -> Result<MetadataHistoryModelBuilder, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let label: u64 = label.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let pagination = Pagination::try_from(pagination)?;
@@ -167,7 +167,7 @@ pub async fn by_label_json<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelJsonInner>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let builder = by_label(&label, params, &domain).await?;
 
@@ -185,7 +185,7 @@ pub async fn by_label_cbor<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxMetadataLabelCborInner>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let builder = by_label(&label, params, &domain).await?;
 

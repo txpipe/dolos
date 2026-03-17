@@ -6,7 +6,7 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    ChainSummary, PParamsSet,
+    CardanoError, CardanoGenesis, ChainSummary, PParamsSet,
 };
 use pallas::{
     crypto::hash::Hash,
@@ -92,7 +92,10 @@ impl<D: Domain> Facade<D> {
         Ok(tip.slot())
     }
 
-    pub fn get_network_id(&self) -> Result<Network, StatusCode> {
+    pub fn get_network_id(&self) -> Result<Network, StatusCode>
+    where
+        D: Domain<Genesis = CardanoGenesis>,
+    {
         match self.genesis().shelley.network_id.as_ref() {
             Some(x) if x == "Mainnet" => Ok(Network::Mainnet),
             Some(x) if x == "Testnet" => Ok(Network::Testnet),
@@ -271,7 +274,12 @@ pub struct Driver;
 
 pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
 where
-    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>
+        + SubmitExt
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
@@ -287,7 +295,12 @@ where
 
 pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
-    D: Domain + SubmitExt + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>
+        + SubmitExt
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
@@ -501,9 +514,14 @@ where
     app.layer(NormalizePathLayer::trim_trailing_slash())
 }
 
-impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
+impl<D, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
-    D: Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>
+        + SubmitExt
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,

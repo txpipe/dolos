@@ -2,10 +2,10 @@ use axum::http::StatusCode;
 use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
 use futures::future::join_all;
 use itertools::Itertools;
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraOutput};
 use std::collections::{HashMap, HashSet};
 
-use dolos_cardano::indexes::AsyncCardanoQueryExt;
+use dolos_cardano::{indexes::AsyncCardanoQueryExt, CardanoError};
 use dolos_core::{Domain, StateStore as _, TxHash, TxoRef};
 
 use crate::{
@@ -20,7 +20,7 @@ pub async fn load_utxo_models<D>(
     pagination: Pagination,
 ) -> Result<Vec<AddressUtxoContentInner>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let utxos = domain
         .state()
@@ -30,15 +30,20 @@ where
     // decoded
     let utxos: HashMap<_, _> = utxos
         .iter()
-        .map(|(k, v)| MultiEraOutput::try_from(v.as_ref()).map(|x| (k, x)))
+        .map(|(k, v)| {
+            let era = Era::try_from(v.0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let output =
+                MultiEraOutput::decode(era, &v.1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok::<_, StatusCode>((k, output))
+        })
         .try_collect()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e: StatusCode| e)?;
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
     let block_deps: HashMap<TxHash, UtxoBlockData> = join_all(tx_deps.iter().map(|tx| {
         let tx = *tx;
         async move {
-            match domain.query().block_by_tx_hash(tx.to_vec()).await {
+            match domain.query().block_by_tx_hash(tx.as_slice().to_vec()).await {
                 Ok(Some((cbor, txorder))) => {
                     let Ok(block) = MultiEraBlock::decode(&cbor) else {
                         return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
@@ -95,7 +100,12 @@ where
             continue;
         };
 
-        let key: Vec<u8> = builder.txo_ref().into();
+        let txo_ref = builder.txo_ref();
+        let key = {
+            let mut v = txo_ref.0.as_slice().to_vec();
+            v.extend_from_slice(&txo_ref.1.to_be_bytes());
+            v
+        };
         let consumed_by = domain
             .query()
             .tx_by_spent_txo(&key)

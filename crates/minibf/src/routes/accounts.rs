@@ -17,8 +17,8 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::{AccountState, DRepState},
-    pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-    PoolDepositRefundLog,
+    pallas_extras, CardanoError, CardanoGenesis, ChainSummary, FixedNamespace, LeaderRewardLog,
+    MemberRewardLog, PoolDepositRefundLog,
 };
 use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, TemporalKey};
 use futures_util::StreamExt;
@@ -193,7 +193,7 @@ pub async fn by_stake_addresses<D>(
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
@@ -268,7 +268,7 @@ pub async fn by_stake_utxos<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -484,7 +484,7 @@ where
         Epoch,
         Network,
     ) -> Result<Option<T>, StatusCode>,
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let account_key = parse_account_key_param(stake_address)?;
 
@@ -545,7 +545,7 @@ pub async fn by_stake_delegations<D>(
 ) -> Result<Json<Vec<AccountDelegationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
@@ -568,7 +568,7 @@ pub async fn by_stake_registrations<D>(
 ) -> Result<Json<Vec<AccountRegistrationContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
@@ -614,7 +614,10 @@ impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
     fn try_from(value: AccountRewardWrapper) -> Result<Self, Self::Error> {
         match value {
             AccountRewardWrapper::Leader((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let key = EntityKey::from(x.pool_id);
+                let arr: [u8; 28] = key.as_ref().try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let operator = Hash::<28>::from(arr);
                 let pool_id = mapping::bech32_pool(operator)?;
 
                 Ok(AccountRewardContentInner {
@@ -625,7 +628,10 @@ impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
                 })
             }
             AccountRewardWrapper::Member((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let key = EntityKey::from(x.pool_id);
+                let arr: [u8; 28] = key.as_ref().try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let operator = Hash::<28>::from(arr);
                 let pool_id = mapping::bech32_pool(operator)?;
 
                 Ok(AccountRewardContentInner {
@@ -636,7 +642,10 @@ impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
                 })
             }
             AccountRewardWrapper::PoolDepositRefund((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
+                let key = EntityKey::from(x.pool_id);
+                let arr: [u8; 28] = key.as_ref().try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                let operator = Hash::<28>::from(arr);
                 let pool_id = mapping::bech32_pool(operator)?;
 
                 Ok(AccountRewardContentInner {

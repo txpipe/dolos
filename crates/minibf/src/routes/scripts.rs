@@ -9,7 +9,7 @@ use blockfrost_openapi::models::{
     script_datum_cbor::ScriptDatumCbor,
     script_json::ScriptJson,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage};
+use dolos_cardano::{indexes::{AsyncCardanoQueryExt, ScriptLanguage}, CardanoError};
 use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
@@ -49,7 +49,7 @@ pub async fn by_hash<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Script>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let script = domain
         .query()
@@ -78,7 +78,7 @@ pub async fn by_hash_json<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<ScriptJson>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let script = domain
         .query()
@@ -105,7 +105,7 @@ pub async fn by_hash_cbor<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<ScriptCbor>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let script = domain
         .query()
@@ -127,7 +127,7 @@ pub async fn by_datum_hash<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<ScriptDatum>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let datum = domain
         .query()
@@ -146,7 +146,7 @@ pub async fn by_datum_hash_cbor<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<ScriptDatumCbor>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let datum = domain
         .query()

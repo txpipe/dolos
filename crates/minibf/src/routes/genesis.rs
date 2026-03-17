@@ -1,6 +1,7 @@
 use axum::{extract::State, http::StatusCode, Json};
 use blockfrost_openapi::models::genesis_content::GenesisContent;
-use dolos_core::{Domain, Genesis};
+use dolos_cardano::CardanoGenesis;
+use dolos_core::Domain;
 
 use crate::{
     mapping::{round_f64, IntoModel},
@@ -14,7 +15,7 @@ pub fn parse_datetime_into_timestamp(s: &str) -> Result<i32, axum::http::StatusC
 }
 
 pub struct GenesisModelBuilder<'a> {
-    pub genesis: &'a Genesis,
+    pub genesis: &'a CardanoGenesis,
 }
 
 impl<'a> IntoModel<GenesisContent> for GenesisModelBuilder<'a> {
@@ -54,11 +55,12 @@ impl<'a> IntoModel<GenesisContent> for GenesisModelBuilder<'a> {
     }
 }
 
-pub async fn naked<D: Domain>(
+pub async fn naked<D: Domain<Genesis = CardanoGenesis>>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<GenesisContent>, StatusCode> {
+    let genesis = domain.genesis();
     let model = GenesisModelBuilder {
-        genesis: &domain.genesis(),
+        genesis: &genesis,
     };
 
     model.into_response()

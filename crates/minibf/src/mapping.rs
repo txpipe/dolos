@@ -54,7 +54,8 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
+    pallas_extras, pallas_hash_to_core, AccountState, ChainSummary, DRepState,
+    PParamsSet, PoolHash, PoolState,
 };
 use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
@@ -841,15 +842,15 @@ impl<'a> TxModelBuilder<'a> {
         let mut deps = vec![];
 
         for i in tx.inputs() {
-            deps.push(*i.hash());
+            deps.push(pallas_hash_to_core(*i.hash()));
         }
 
         for i in tx.collateral() {
-            deps.push(*i.hash());
+            deps.push(pallas_hash_to_core(*i.hash()));
         }
 
         for i in tx.reference_inputs() {
-            deps.push(*i.hash());
+            deps.push(pallas_hash_to_core(*i.hash()));
         }
 
         let unique = deps.into_iter().unique().collect();
@@ -863,7 +864,7 @@ impl<'a> TxModelBuilder<'a> {
         let mut deps = vec![];
 
         for (i, _) in tx.produces() {
-            deps.push(TxoRef(tx.hash(), i as u32));
+            deps.push(TxoRef(pallas_hash_to_core(tx.hash()), i as u32));
         }
 
         Ok(deps)
@@ -889,7 +890,7 @@ impl<'a> TxModelBuilder<'a> {
     where
         'b: 'c,
     {
-        let tx = self.deps.get(input.hash());
+        let tx = self.deps.get(&pallas_hash_to_core(*input.hash()));
         let as_output = tx.and_then(|tx| tx.output_at(input.index() as usize));
 
         UtxoInputModelBuilder {
@@ -944,7 +945,7 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .outputs()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| UtxoOutputModelBuilder::from_output(tx.hash(), i as u32, o))
+            .map(|(i, o)| UtxoOutputModelBuilder::from_output(pallas_hash_to_core(tx.hash()), i as u32, o))
             .map(|b| {
                 let builder = if let Some(consumed_by) = self.consumed_deps.get(&b.txo_ref()) {
                     b.with_consumed_by(*consumed_by)
@@ -960,7 +961,7 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .into_iter()
             .enumerate()
             .map(|(i, o)| {
-                UtxoOutputModelBuilder::from_collateral(tx.hash(), outputs.len(), i as u32, o)
+                UtxoOutputModelBuilder::from_collateral(pallas_hash_to_core(tx.hash()), outputs.len(), i as u32, o)
             })
             .map(|b| {
                 let builder = if let Some(consumed_by) = self.consumed_deps.get(&b.txo_ref()) {
@@ -1224,7 +1225,7 @@ impl TxModelBuilder<'_> {
         let tx_hash = input.hash();
         let index = input.index() as usize;
 
-        let source = self.deps.get(tx_hash)?;
+        let source = self.deps.get(&pallas_hash_to_core(*tx_hash))?;
 
         let outputs = source.outputs();
         let output = outputs.get(index)?;

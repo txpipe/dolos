@@ -20,9 +20,10 @@ use pallas::ledger::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    pallas_extras, ChainSummary,
+    pallas_extras, CardanoError, ChainSummary,
 };
 use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, StateStore as _, TxoRef};
+use pallas::ledger::traverse::Era;
 
 use crate::{
     error::Error,
@@ -45,7 +46,7 @@ type VKeyOrAddress = Either<Vec<u8>, Vec<u8>>;
 
 /// Stream of blocks returned by address queries
 type BlockStream = std::pin::Pin<
-    Box<dyn Stream<Item = Result<(BlockSlot, Option<BlockBody>), dolos_core::DomainError>> + Send>,
+    Box<dyn Stream<Item = Result<(BlockSlot, Option<BlockBody>), dolos_core::DomainError<dolos_cardano::CardanoError>>> + Send>,
 >;
 
 enum ParsedAddress {
@@ -158,7 +159,7 @@ fn blocks_for_address_stream<D>(
     order: SlotOrder,
 ) -> Result<(BlockStream, VKeyOrAddress), Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     match parse_address(address)? {
         ParsedAddress::Payment { key, .. } => Ok((
@@ -211,9 +212,12 @@ fn amount_for_refs<D: Domain>(
 
     let outputs: Vec<MultiEraOutput<'_>> = utxos
         .values()
-        .map(|x| MultiEraOutput::try_from(x.as_ref()))
+        .map(|x| {
+            let era = Era::try_from(x.0).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            MultiEraOutput::decode(era, &x.1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
         .collect::<Result<_, _>>()
-        .map_err(|err| {
+        .map_err(|err: StatusCode| {
             tracing::error!(?err);
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
@@ -226,7 +230,7 @@ pub async fn by_address<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<AddressContent>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let parsed = parse_address(&address)?;
     let refs = refs_for_parsed_address(&domain, &parsed)?;
@@ -250,7 +254,7 @@ where
 
 async fn is_address_in_chain<D>(domain: &Facade<D>, address: &str) -> Result<bool, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
@@ -274,7 +278,7 @@ where
 
 async fn is_asset_in_chain<D>(domain: &Facade<D>, asset: &[u8]) -> Result<bool, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let end_slot = domain.get_tip_slot()?;
     let start_slot = 0;
@@ -297,7 +301,7 @@ pub async fn utxos<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -322,7 +326,7 @@ pub async fn utxos_with_asset<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressUtxoContentInner>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -464,7 +468,7 @@ pub async fn transactions<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AddressTransactionsContentInner>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
@@ -528,7 +532,7 @@ pub async fn txs<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;

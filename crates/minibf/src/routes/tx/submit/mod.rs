@@ -3,6 +3,7 @@ use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
 };
+use dolos_cardano::CardanoError;
 use dolos_core::{ChainError, Domain, DomainError, MempoolError, SubmitExt};
 
 use crate::Facade;
@@ -19,7 +20,7 @@ fn is_valid_cbor_content_type(headers: &HeaderMap) -> bool {
     content_type == "application/cbor"
 }
 
-pub async fn route<D: Domain + SubmitExt>(
+pub async fn route<D: Domain<ChainSpecificError = CardanoError> + SubmitExt>(
     State(domain): State<Facade<D>>,
     headers: HeaderMap,
     cbor: Bytes,
@@ -34,15 +35,10 @@ pub async fn route<D: Domain + SubmitExt>(
     let hash = result.map_err(|e| match e {
         DomainError::ChainError(x) => match x {
             ChainError::BrokenInvariant(_) => StatusCode::BAD_REQUEST,
-            ChainError::DecodingError(_) => StatusCode::BAD_REQUEST,
-            ChainError::CborDecodingError(_) => StatusCode::BAD_REQUEST,
-            ChainError::AddressDecoding(_) => StatusCode::BAD_REQUEST,
-            ChainError::Phase1ValidationRejected(_) => StatusCode::BAD_REQUEST,
-            ChainError::Phase2ValidationRejected(_) => StatusCode::BAD_REQUEST,
+            ChainError::ChainSpecific(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         },
         DomainError::MempoolError(x) => match x {
-            MempoolError::TraverseError(_) => StatusCode::BAD_REQUEST,
             MempoolError::InvalidTx(_) => StatusCode::BAD_REQUEST,
             MempoolError::DecodeError(_) => StatusCode::BAD_REQUEST,
             MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,

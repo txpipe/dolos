@@ -6,6 +6,7 @@ use axum::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use pallas::ledger::{primitives::Epoch, traverse::MultiEraBlock};
 
+use dolos_cardano::CardanoGenesis;
 use dolos_core::{archive::Skippable as _, ArchiveStore, Domain};
 
 use crate::{
@@ -18,7 +19,7 @@ use crate::{
 pub mod cost_models;
 pub mod mapping;
 
-pub async fn latest_parameters<D: Domain>(
+pub async fn latest_parameters<D: Domain<Genesis = CardanoGenesis>>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<EpochParamContent>, Error> {
     let tip = domain.get_tip_slot()?;
@@ -30,17 +31,18 @@ pub async fn latest_parameters<D: Domain>(
     let state = dolos_cardano::load_epoch::<D>(domain.state())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let genesis = domain.genesis();
     let model = mapping::ParametersModelBuilder {
         epoch,
         params: state.pparams.live().cloned().unwrap_or_default(),
-        genesis: &domain.genesis(),
+        genesis: &genesis,
         nonce: state.nonces.map(|x| x.active.to_string()),
     };
 
     Ok(model.into_response()?)
 }
 
-pub async fn by_number_parameters<D: Domain>(
+pub async fn by_number_parameters<D: Domain<Genesis = CardanoGenesis>>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<Epoch>,
 ) -> Result<Json<EpochParamContent>, Error> {
@@ -57,10 +59,11 @@ pub async fn by_number_parameters<D: Domain>(
             .ok_or(StatusCode::NOT_FOUND)?
     };
 
+    let genesis = domain.genesis();
     let model = mapping::ParametersModelBuilder {
         epoch: epoch.number,
         params: epoch.pparams.live().cloned().unwrap_or_default(),
-        genesis: &domain.genesis(),
+        genesis: &genesis,
         nonce: epoch.nonces.map(|x| x.active.to_string()),
     };
 
