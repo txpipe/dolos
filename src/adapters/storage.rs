@@ -10,6 +10,7 @@
 
 use std::{ops::Range, path::Path, path::PathBuf};
 
+use dolos_cardano::CardanoError;
 use dolos_core::{
     archive::{
         ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, LogKey,
@@ -538,6 +539,20 @@ impl CoreStateStore for StateStoreBackend {
 // Archive Store Backend
 // ============================================================================
 
+fn convert_archive_err(e: ArchiveError<std::convert::Infallible>) -> ArchiveError<CardanoError> {
+    match e {
+        ArchiveError::BrokenInvariant(e) => ArchiveError::BrokenInvariant(e),
+        ArchiveError::InternalError(s) => ArchiveError::InternalError(s),
+        ArchiveError::QueryNotSupported => ArchiveError::QueryNotSupported,
+        ArchiveError::InvalidStoreVersion => ArchiveError::InvalidStoreVersion,
+        ArchiveError::DecodingError(e) => ArchiveError::DecodingError(e),
+        ArchiveError::EntityDecodingError(s) => ArchiveError::EntityDecodingError(s),
+        ArchiveError::NamespaceNotFound(ns) => ArchiveError::NamespaceNotFound(ns),
+        // TODO: what
+        ArchiveError::ChainSpecifc(inf) => match inf {},
+    }
+}
+
 /// Enum wrapper for archive store backends.
 #[derive(Clone)]
 pub enum ArchiveStoreBackend {
@@ -551,10 +566,11 @@ impl ArchiveStoreBackend {
         path: impl AsRef<Path>,
         schema: StateSchema,
         config: &RedbArchiveConfig,
-    ) -> Result<Self, ArchiveError> {
-        Ok(Self::Redb(dolos_redb3::archive::ArchiveStore::open(
-            schema, path, config,
-        )?))
+    ) -> Result<Self, ArchiveError<CardanoError>> {
+        Ok(Self::Redb(
+            dolos_redb3::archive::ArchiveStore::open(schema, path, config)
+                .map_err(|e| ArchiveError::InternalError(e.to_string()))?,
+        ))
     }
 
     /// Create a no-op archive store that discards all writes.
@@ -563,10 +579,11 @@ impl ArchiveStoreBackend {
     }
 
     /// Create an in-memory archive store.
-    pub fn in_memory(schema: StateSchema) -> Result<Self, ArchiveError> {
-        Ok(Self::Redb(dolos_redb3::archive::ArchiveStore::in_memory(
-            schema,
-        )?))
+    pub fn in_memory(schema: StateSchema) -> Result<Self, ArchiveError<CardanoError>> {
+        Ok(Self::Redb(
+            dolos_redb3::archive::ArchiveStore::in_memory(schema)
+                .map_err(|e| ArchiveError::InternalError(e.to_string()))?,
+        ))
     }
 
     /// Open an archive store based on the config variant.
@@ -578,7 +595,7 @@ impl ArchiveStoreBackend {
         path: impl AsRef<Path>,
         schema: StateSchema,
         config: &ArchiveStoreConfig,
-    ) -> Result<Self, ArchiveError> {
+    ) -> Result<Self, ArchiveError<CardanoError>> {
         match config {
             ArchiveStoreConfig::Redb(cfg) => Self::open_redb(path, schema, cfg),
             ArchiveStoreConfig::InMemory => Self::in_memory(schema),
@@ -586,12 +603,12 @@ impl ArchiveStoreBackend {
         }
     }
 
-    pub fn shutdown(&self) -> Result<(), ArchiveError> {
+    pub fn shutdown(&self) -> Result<(), ArchiveError<CardanoError>> {
         match self {
             Self::Redb(s) => s
                 .shutdown()
                 .map_err(|e| ArchiveError::InternalError(e.to_string())),
-            Self::NoOp(s) => s.shutdown(),
+            Self::NoOp(s) => s.shutdown().map_err(convert_archive_err),
         }
     }
 }
@@ -602,10 +619,16 @@ pub enum ArchiveWriterBackend {
 }
 
 impl CoreArchiveWriter for ArchiveWriterBackend {
-    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
+    type ChainSpecificError = CardanoError;
+
+    fn apply(
+        &self,
+        point: &ChainPoint,
+        block: &RawBlock,
+    ) -> Result<(), ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(w) => w.apply(point, block),
-            Self::NoOp(w) => w.apply(point, block),
+            Self::Redb(w) => w.apply(point, block).map_err(convert_archive_err),
+            Self::NoOp(w) => w.apply(point, block).map_err(convert_archive_err),
         }
     }
 
@@ -614,24 +637,24 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
         ns: Namespace,
         key: &LogKey,
         value: &EntityValue,
-    ) -> Result<(), ArchiveError> {
+    ) -> Result<(), ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(w) => w.write_log(ns, key, value),
-            Self::NoOp(w) => w.write_log(ns, key, value),
+            Self::Redb(w) => w.write_log(ns, key, value).map_err(convert_archive_err),
+            Self::NoOp(w) => w.write_log(ns, key, value).map_err(convert_archive_err),
         }
     }
 
-    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(w) => w.undo(point),
-            Self::NoOp(w) => w.undo(point),
+            Self::Redb(w) => w.undo(point).map_err(convert_archive_err),
+            Self::NoOp(w) => w.undo(point).map_err(convert_archive_err),
         }
     }
 
-    fn commit(self) -> Result<(), ArchiveError> {
+    fn commit(self) -> Result<(), ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(w) => (*w).commit(),
-            Self::NoOp(w) => w.commit(),
+            Self::Redb(w) => (*w).commit().map_err(convert_archive_err),
+            Self::NoOp(w) => w.commit().map_err(convert_archive_err),
         }
     }
 }
@@ -682,11 +705,11 @@ pub enum ArchiveLogIterBackend {
 }
 
 impl Iterator for ArchiveLogIterBackend {
-    type Item = Result<(LogKey, EntityValue), ArchiveError>;
+    type Item = Result<(LogKey, EntityValue), ArchiveError<CardanoError>>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Redb(iter) => iter.next(),
-            Self::NoOp(iter) => iter.next(),
+            Self::Redb(iter) => iter.next().map(|r| r.map_err(convert_archive_err)),
+            Self::NoOp(iter) => iter.next().map(|r| r.map_err(convert_archive_err)),
         }
     }
 }
@@ -697,26 +720,30 @@ pub enum ArchiveEntityValueIterBackend {
 }
 
 impl Iterator for ArchiveEntityValueIterBackend {
-    type Item = Result<EntityValue, ArchiveError>;
+    type Item = Result<EntityValue, ArchiveError<CardanoError>>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Redb(iter) => iter.next(),
-            Self::NoOp(iter) => iter.next(),
+            Self::Redb(iter) => iter.next().map(|r| r.map_err(convert_archive_err)),
+            Self::NoOp(iter) => iter.next().map(|r| r.map_err(convert_archive_err)),
         }
     }
 }
 
 impl CoreArchiveStore for ArchiveStoreBackend {
+    type ChainSpecificError = CardanoError;
     type BlockIter<'a> = ArchiveBlockIterBackend;
     type Writer = ArchiveWriterBackend;
     type LogIter = ArchiveLogIterBackend;
     type EntityValueIter = ArchiveEntityValueIterBackend;
 
-    fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<CardanoError>> {
         match self {
             Self::Redb(s) => CoreArchiveStore::start_writer(s)
-                .map(|writer| ArchiveWriterBackend::Redb(Box::new(writer))),
-            Self::NoOp(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::NoOp),
+                .map(|writer| ArchiveWriterBackend::Redb(Box::new(writer)))
+                .map_err(convert_archive_err),
+            Self::NoOp(s) => CoreArchiveStore::start_writer(s)
+                .map(ArchiveWriterBackend::NoOp)
+                .map_err(convert_archive_err),
         }
     }
 
@@ -724,10 +751,10 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         &self,
         ns: Namespace,
         keys: &[&LogKey],
-    ) -> Result<Vec<Option<EntityValue>>, ArchiveError> {
+    ) -> Result<Vec<Option<EntityValue>>, ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(s) => CoreArchiveStore::read_logs(s, ns, keys),
-            Self::NoOp(s) => CoreArchiveStore::read_logs(s, ns, keys),
+            Self::Redb(s) => CoreArchiveStore::read_logs(s, ns, keys).map_err(convert_archive_err),
+            Self::NoOp(s) => CoreArchiveStore::read_logs(s, ns, keys).map_err(convert_archive_err),
         }
     }
 
@@ -735,20 +762,28 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         &self,
         ns: Namespace,
         range: Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    ) -> Result<Self::LogIter, ArchiveError<CardanoError>> {
         match self {
             Self::Redb(s) => CoreArchiveStore::iter_logs(s, ns, range)
-                .map(|iter| ArchiveLogIterBackend::Redb(Box::new(iter))),
-            Self::NoOp(s) => {
-                CoreArchiveStore::iter_logs(s, ns, range).map(ArchiveLogIterBackend::NoOp)
-            }
+                .map(|iter| ArchiveLogIterBackend::Redb(Box::new(iter)))
+                .map_err(convert_archive_err),
+            Self::NoOp(s) => CoreArchiveStore::iter_logs(s, ns, range)
+                .map(ArchiveLogIterBackend::NoOp)
+                .map_err(convert_archive_err),
         }
     }
 
-    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+    fn get_block_by_slot(
+        &self,
+        slot: &BlockSlot,
+    ) -> Result<Option<BlockBody>, ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(s) => CoreArchiveStore::get_block_by_slot(s, slot),
-            Self::NoOp(s) => CoreArchiveStore::get_block_by_slot(s, slot),
+            Self::Redb(s) => {
+                CoreArchiveStore::get_block_by_slot(s, slot).map_err(convert_archive_err)
+            }
+            Self::NoOp(s) => {
+                CoreArchiveStore::get_block_by_slot(s, slot).map_err(convert_archive_err)
+            }
         }
     }
 
@@ -756,41 +791,59 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+    ) -> Result<Self::BlockIter<'a>, ArchiveError<CardanoError>> {
         match self {
             Self::Redb(s) => CoreArchiveStore::get_range(s, from, to)
-                .map(|iter| ArchiveBlockIterBackend::Redb(Box::new(iter))),
+                .map(|iter| ArchiveBlockIterBackend::Redb(Box::new(iter)))
+                .map_err(convert_archive_err),
+            Self::NoOp(s) => CoreArchiveStore::get_range(s, from, to)
+                .map(ArchiveBlockIterBackend::NoOp)
+                .map_err(convert_archive_err),
+        }
+    }
+
+    fn find_intersect(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError<CardanoError>> {
+        match self {
+            Self::Redb(s) => {
+                CoreArchiveStore::find_intersect(s, intersect).map_err(convert_archive_err)
+            }
             Self::NoOp(s) => {
-                CoreArchiveStore::get_range(s, from, to).map(ArchiveBlockIterBackend::NoOp)
+                CoreArchiveStore::find_intersect(s, intersect).map_err(convert_archive_err)
             }
         }
     }
 
-    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(s) => CoreArchiveStore::find_intersect(s, intersect),
-            Self::NoOp(s) => CoreArchiveStore::find_intersect(s, intersect),
+            Self::Redb(s) => CoreArchiveStore::get_tip(s).map_err(convert_archive_err),
+            Self::NoOp(s) => CoreArchiveStore::get_tip(s).map_err(convert_archive_err),
         }
     }
 
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<bool, ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(s) => CoreArchiveStore::get_tip(s),
-            Self::NoOp(s) => CoreArchiveStore::get_tip(s),
+            Self::Redb(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune)
+                .map_err(convert_archive_err),
+            Self::NoOp(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune)
+                .map_err(convert_archive_err),
         }
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError<CardanoError>> {
         match self {
-            Self::Redb(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
-            Self::NoOp(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
-        }
-    }
-
-    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
-        match self {
-            Self::Redb(s) => CoreArchiveStore::truncate_front(s, after),
-            Self::NoOp(s) => CoreArchiveStore::truncate_front(s, after),
+            Self::Redb(s) => {
+                CoreArchiveStore::truncate_front(s, after).map_err(convert_archive_err)
+            }
+            Self::NoOp(s) => {
+                CoreArchiveStore::truncate_front(s, after).map_err(convert_archive_err)
+            }
         }
     }
 }

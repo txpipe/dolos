@@ -2,7 +2,7 @@ pub mod storage;
 
 use std::sync::Arc;
 
-use dolos_cardano::CardanoLogic;
+use dolos_cardano::{CardanoGenesis, CardanoLogic, core_hash_to_pallas, pallas_hash_to_core};
 use dolos_core::{
     config::{StorageConfig, SyncConfig},
     *,
@@ -35,7 +35,7 @@ impl dolos_core::TipSubscription for TipSubscription {
 pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
     pub sync_config: Arc<SyncConfig>,
-    pub genesis: Arc<GenesisCardanoCardano>,
+    pub genesis: Arc<CardanoGenesis>,
     pub wal: WalAdapter,
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
     pub state: StateStoreBackend,
@@ -52,7 +52,7 @@ impl DomainAdapter {
     /// especially after heavy write operations like bulk imports. This ensures
     /// that storage backends complete any pending background work before being
     /// dropped.
-    pub fn shutdown(&self) -> Result<(), DomainError> {
+    pub fn shutdown(&self) -> Result<(), DomainError<dolos_cardano::CardanoError>> {
         tracing::info!("domain adapter: starting graceful shutdown");
 
         self.wal.shutdown().map_err(DomainError::WalError)?;
@@ -73,15 +73,18 @@ impl DomainAdapter {
         }
 
         let mut result = std::collections::HashMap::new();
-        let refs_set: std::collections::HashSet<_> =
-            refs.iter().copied().map(TxoRef::from).collect();
+        let refs_set: std::collections::HashSet<_> = refs
+            .iter()
+            .copied()
+            .map(|(h, i)| TxoRef(pallas_hash_to_core(h), i))
+            .collect();
 
         let iter = self.wal().iter_logs(None, None).ok()?;
         for (_, log) in iter.rev() {
             for (txo_ref, era_cbor) in &log.inputs {
                 if refs_set.contains(txo_ref) {
                     let era = era_cbor.0.try_into().expect("era out of range");
-                    result.insert(txo_ref.clone().into(), (era, era_cbor.1.clone()));
+                    result.insert((core_hash_to_pallas(txo_ref.0), txo_ref.1), (era, era_cbor.1.clone()));
                 }
             }
 
@@ -99,6 +102,8 @@ impl DomainAdapter {
 }
 
 impl Domain for DomainAdapter {
+    type Genesis = CardanoGenesis;
+    type ChainSpecificError = dolos_cardano::CardanoError;
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Chain = CardanoLogic;
@@ -110,7 +115,7 @@ impl Domain for DomainAdapter {
     type Mempool = MempoolBackend;
     type TipSubscription = TipSubscription;
 
-    fn genesis(&self) -> Arc<GenesisCardanoCardano> {
+    fn genesis(&self) -> Arc<CardanoGenesis> {
         self.genesis.clone()
     }
 
@@ -150,7 +155,7 @@ impl Domain for DomainAdapter {
         &self.sync_config
     }
 
-    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
+    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError<dolos_cardano::CardanoError>> {
         // TODO: do a more thorough analysis to understand if this approach is
         // susceptible to race conditions. Things to explore:
         // - a mutex to block the sending of events while gathering the replay.
@@ -180,14 +185,17 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
         &self,
         refs: &[pallas::interop::utxorpc::TxoRef],
     ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+        let refs: Vec<_> = refs
+            .iter()
+            .map(|(h, i)| TxoRef(pallas_hash_to_core(*h), *i))
+            .collect();
 
         let some = dolos_core::StateStore::get_utxos(self.state(), refs)
             .ok()?
             .into_iter()
             .map(|(k, v)| {
                 let era = v.0.try_into().expect("era out of range");
-                (k.into(), (era, v.1.clone()))
+                ((core_hash_to_pallas(k.0), k.1), (era, v.1.clone()))
             })
             .collect();
 

@@ -257,7 +257,7 @@ impl ArchiveStore {
                 let decoded = MultiEraBlock::decode(&body)
                     .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
 
-                let decoded_hash: [u8; 32] = (*decoded.hash()).into();
+                let decoded_hash: [u8; 32] = *decoded.hash();
                 let decoded_hash = dolos_core::hash::Hash::from(decoded_hash);
                 if decoded_hash.eq(hash) {
                     return Ok(Some(ChainPoint::Specific(decoded.slot(), decoded_hash)));
@@ -632,7 +632,7 @@ impl ArchiveStore {
                     let mut bytes = input.hash().to_vec();
                     bytes.extend_from_slice(u32::to_be_bytes(input.index() as u32).as_slice());
                     if bytes.as_slice() == spent_txo {
-                        let hash_bytes: [u8; 32] = (*tx.hash()).into();
+                        let hash_bytes: [u8; 32] = *tx.hash();
                         return Ok(Some(dolos_core::hash::Hash::from(hash_bytes)));
                     }
                 }
