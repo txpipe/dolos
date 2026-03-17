@@ -24,9 +24,9 @@ impl BoundaryWork {
         &mut self,
         state: &D::State,
         writer: &<D::State as StateStore>::Writer,
-    ) -> Result<(), ChainError>
+    ) -> Result<(), ChainError<crate::CardanoError>>
     where
-        D: Domain,
+        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
         let records = state.iter_entities_typed::<E>(E::NS, None)?;
@@ -58,11 +58,11 @@ impl BoundaryWork {
     }
 
     #[instrument(skip_all)]
-    pub fn commit<D: Domain>(
+    pub fn commit<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         debug!("committing ewrap changes (streaming mode)");
 
         let writer = state.start_writer()?;

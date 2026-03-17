@@ -200,13 +200,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         pool_hash: PoolHash,
         _: &PoolState,
         _: Option<&AccountState>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.change(PoolWrapUp::new(pool_hash));
 
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
         }

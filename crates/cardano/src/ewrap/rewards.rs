@@ -111,7 +111,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut super::BoundaryWork,
         id: &super::AccountId,
         account: &AccountState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let Some(reward) = ctx.rewards.take_for_apply(&account.credential) else {
             return Ok(());
         };
@@ -193,7 +193,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
         let mark_protocol = ctx
             .ending_state()
             .pparams

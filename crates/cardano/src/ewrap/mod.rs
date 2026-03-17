@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
+use dolos_core::{BlockSlot, ChainError, EntityKey, TxOrder};
 use pallas::ledger::primitives::{conway::DRep, StakeCredential};
 
 use crate::{
@@ -42,7 +42,7 @@ pub trait BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &PoolId,
         pool: &PoolState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -53,7 +53,7 @@ pub trait BoundaryVisitor {
         pool_hash: PoolHash,
         pool: &PoolState,
         account: Option<&AccountState>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -63,7 +63,7 @@ pub trait BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &AccountId,
         account: &AccountState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -73,7 +73,7 @@ pub trait BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &DRepId,
         drep: &DRepState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -83,7 +83,7 @@ pub trait BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &ProposalId,
         proposal: &ProposalState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -94,7 +94,7 @@ pub trait BoundaryVisitor {
         id: &ProposalId,
         proposal: &ProposalState,
         account: Option<&AccountState>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -105,12 +105,12 @@ pub trait BoundaryVisitor {
         id: &ProposalId,
         proposal: &ProposalState,
         account: Option<&AccountState>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
     #[allow(unused_variables)]
-    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 }
@@ -125,7 +125,7 @@ pub struct BoundaryWork {
     ending_state: EpochState,
     pub active_protocol: EraProtocol,
     pub chain_summary: ChainSummary,
-    pub genesis: Arc<Genesis>,
+    pub genesis: Arc<crate::CardanoGenesis>,
     pub rewards: RewardMap<RupdWork>,
 
     // inferred

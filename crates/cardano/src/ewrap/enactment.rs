@@ -102,7 +102,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &ProposalId,
         proposal: &ProposalState,
         _: Option<&AccountState>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         tracing::debug!(proposal=%id, "visiting enacted proposal");
 
         // Apply proposal on ending state
@@ -129,7 +129,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
         }

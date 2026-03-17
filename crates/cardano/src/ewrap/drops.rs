@@ -157,7 +157,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &AccountId,
         account: &AccountState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let current_epoch = ctx.ending_state.number;
 
         // Notice that instead of dropping delegators when a pool is retired, we're moving the data to a different field to be able to still track the relationsihp between the pool and the delegators.
@@ -197,7 +197,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         ctx: &mut BoundaryWork,
         id: &DRepId,
         drep: &DRepState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         if ctx.expiring_dreps.contains(&drep.identifier) {
             self.change(DRepExpiration::new(id.clone()));
         }
@@ -205,7 +205,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
         }
