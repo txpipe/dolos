@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
+use dolos_core::{ChainError,  TxOrder, TxoRef};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
@@ -30,12 +30,12 @@ impl BlockVisitor for TxLogVisitor {
         &mut self,
         _deltas: &mut WorkDeltas,
         _block: &MultiEraBlock,
-        _: &Genesis,
+        _: &crate::CardanoGenesis,
         _: &PParamsSet,
         _: Epoch,
         _: u64,
         _: u16,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }
@@ -46,7 +46,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraBlock,
         _tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }
@@ -58,7 +58,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraTx,
         _input: &MultiEraInput,
         _resolved: &pallas::ledger::traverse::MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }
@@ -70,7 +70,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraTx,
         _: u32,
         _output: &pallas::ledger::traverse::MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }
@@ -81,7 +81,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _datum: &KeepRaw<'_, PlutusData>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }
@@ -93,7 +93,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraTx,
         _: &TxOrder,
         _cert: &MultiEraCert,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }
@@ -104,7 +104,7 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _redeemer: &MultiEraRedeemer,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
         Ok(())
     }

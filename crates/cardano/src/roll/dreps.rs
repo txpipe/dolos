@@ -187,7 +187,7 @@ impl BlockVisitor for DRepStateVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         _: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let MultiEraTx::Conway(conway_tx) = tx else {
             return Ok(());
         };
@@ -216,7 +216,7 @@ impl BlockVisitor for DRepStateVisitor {
         _: &MultiEraTx,
         order: &TxOrder,
         cert: &MultiEraCert,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let Some(drep) = cert_drep(cert) else {
             return Ok(());
         };

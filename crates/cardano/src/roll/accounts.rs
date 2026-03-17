@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError, Genesis, NsKey, TxOrder};
+use dolos_core::{BlockSlot, ChainError,  NsKey, TxOrder};
 
 use super::WorkDeltas;
 use pallas::codec::minicbor;
@@ -400,12 +400,12 @@ impl BlockVisitor for AccountVisitor {
         &mut self,
         _: &mut WorkDeltas,
         _: &MultiEraBlock,
-        _: &Genesis,
+        _: &crate::CardanoGenesis,
         pparams: &PParamsSet,
         epoch: Epoch,
         _: u64,
         _: u16,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.deposit = pparams.ensure_key_deposit().ok();
         self.epoch = Some(epoch);
         self.protocol_version = pparams.protocol_major();
@@ -419,7 +419,7 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraTx,
         _: &MultiEraInput,
         resolved: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let address = resolved.address().unwrap();
 
         let Some((cred, is_pointer)) = pallas_extras::address_as_stake_cred(&address) else {
@@ -442,7 +442,7 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraTx,
         _: u32,
         output: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let address = output.address().expect("valid address");
         let epoch = self.epoch.expect("value set in root");
 
@@ -467,7 +467,7 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraTx,
         order: &TxOrder,
         cert: &MultiEraCert,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let epoch = self.epoch.expect("value set in root");
 
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
@@ -532,8 +532,8 @@ impl BlockVisitor for AccountVisitor {
         _: &MultiEraTx,
         account: &[u8],
         amount: u64,
-    ) -> Result<(), ChainError> {
-        let address = Address::from_bytes(account)?;
+    ) -> Result<(), ChainError<crate::CardanoError>> {
+        let address = Address::from_bytes(account).map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Address(e)))?;
 
         let Some((cred, _)) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());

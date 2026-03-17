@@ -148,9 +148,9 @@ impl WorkBatch {
         start..=end
     }
 
-    pub fn load_utxos<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn load_utxos<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic>,
+        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
     {
         // TODO: paralelize in chunks
 
@@ -168,7 +168,7 @@ impl WorkBatch {
         Ok(())
     }
 
-    pub fn decode_utxos(&mut self) -> Result<(), DomainError> {
+    pub fn decode_utxos(&mut self) -> Result<(), DomainError<crate::CardanoError>> {
         let pairs: Vec<_> = self
             .utxos
             .iter()
@@ -181,16 +181,16 @@ impl WorkBatch {
             .map(|(k, v)| {
                 OwnedMultiEraOutput::decode(v.clone())
                     .map(|x| (k.clone(), x))
-                    .map_err(ChainError::from)
+                    .map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Traverse(e)))
             })
-            .collect::<Result<_, ChainError>>()?;
+            .collect::<Result<_, ChainError<crate::CardanoError>>>()?;
 
         self.utxos_decoded = decoded;
 
         Ok(())
     }
 
-    pub fn commit_wal<D>(&self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_wal<D>(&self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
         D: Domain<Chain = CardanoLogic, EntityDelta = CardanoDelta>,
     {
@@ -271,9 +271,9 @@ impl WorkBatch {
         Ok(())
     }
 
-    pub fn commit_state<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_state<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic>,
+        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
     {
         let writer = domain.state().start_writer()?;
 
@@ -297,9 +297,9 @@ impl WorkBatch {
         Ok(())
     }
 
-    pub fn commit_archive<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_archive<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic>,
+        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
     {
         let writer = domain.archive().start_writer()?;
 
@@ -320,7 +320,7 @@ impl WorkBatch {
     /// This traverses all blocks and extracts index tags using the
     /// CardanoIndexDeltaBuilder.
     pub fn build_index_delta(&self) -> IndexDelta {
-        use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+        use pallas::ledger::traverse::MultiEraBlock;
 
         let mut builder = CardanoIndexDeltaBuilder::new(self.last_point());
 
@@ -340,28 +340,28 @@ impl WorkBatch {
             if let Some(utxo_delta) = &work_block.utxo_delta {
                 // Produced UTxOs
                 for (txo_ref, body) in &utxo_delta.produced_utxo {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                    if let Ok(output) = crate::multi_era_output_from_era_cbor(body.as_ref()) {
                         builder.add_produced_utxo(txo_ref.clone(), &output);
                     }
                 }
 
                 // Consumed UTxOs
                 for (txo_ref, body) in &utxo_delta.consumed_utxo {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                    if let Ok(output) = crate::multi_era_output_from_era_cbor(body.as_ref()) {
                         builder.add_consumed_utxo(txo_ref.clone(), &output);
                     }
                 }
 
                 // Recovered stxis (for rollback support)
                 for (txo_ref, body) in &utxo_delta.recovered_stxi {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                    if let Ok(output) = crate::multi_era_output_from_era_cbor(body.as_ref()) {
                         builder.add_produced_utxo(txo_ref.clone(), &output);
                     }
                 }
 
                 // Undone UTxOs (for rollback support)
                 for (txo_ref, body) in &utxo_delta.undone_utxo {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
+                    if let Ok(output) = crate::multi_era_output_from_era_cbor(body.as_ref()) {
                         builder.add_consumed_utxo(txo_ref.clone(), &output);
                     }
                 }
@@ -381,7 +381,7 @@ impl WorkBatch {
                     builder.add_spent_input(&input);
 
                     // Try to get resolved input for address/asset tags
-                    let txo_ref: TxoRef = (&input).into();
+                    let txo_ref = crate::txo_ref_from_input(&input);
                     if let Some(resolved) = self.utxos_decoded.get(&txo_ref) {
                         resolved.with_dependent(|_, output| {
                             if let Ok(addr) = output.address() {
@@ -459,9 +459,9 @@ impl WorkBatch {
         builder.build()
     }
 
-    pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic>,
+        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
     {
         let delta = self.build_index_delta();
 

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
+use dolos_core::{BlockSlot, ChainError,  NsKey};
 use pallas::{
     codec::utils::Bytes,
     crypto::hash::Hash,
@@ -328,15 +328,15 @@ impl BlockVisitor for ProposalVisitor {
         &mut self,
         _: &mut WorkDeltas,
         _: &MultiEraBlock,
-        genesis: &Genesis,
+        genesis: &crate::CardanoGenesis,
         pparams: &PParamsSet,
         epoch: Epoch,
         _: u64,
         protocol: u16,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.validity_period = pparams.governance_action_validity_period();
         self.current_epoch = Some(epoch);
-        self.network_magic = Some(genesis.network_magic());
+        self.network_magic = Some(genesis.shelley.network_magic.unwrap_or_default());
         self.protocol = Some(protocol);
 
         Ok(())
@@ -348,7 +348,7 @@ impl BlockVisitor for ProposalVisitor {
         block: &MultiEraBlock,
         tx: Option<&MultiEraTx>,
         update: &MultiEraUpdate,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let action = pre_conway_to_pparamset(update);
 
         deltas.add_for_entity(NewProposal {
@@ -374,7 +374,7 @@ impl BlockVisitor for ProposalVisitor {
         tx: &MultiEraTx,
         proposal: &pallas::ledger::traverse::MultiEraProposal,
         idx: usize,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let Some(proposal) = proposal.as_conway() else {
             return Ok(());
         };
@@ -392,7 +392,7 @@ impl BlockVisitor for ProposalVisitor {
         };
 
         let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
-            .ok_or(ChainError::InvalidProposalParams)?;
+            .ok_or(ChainError::ChainSpecific(crate::CardanoError::InvalidProposalParams))?;
 
         deltas.add_for_entity(NewProposal {
             slot: block.slot(),

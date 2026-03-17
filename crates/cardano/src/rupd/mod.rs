@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, Genesis,
-    LogKey, TemporalKey,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, LogKey,
+    TemporalKey,
 };
 use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, instrument};
@@ -28,7 +28,7 @@ pub trait RupdVisitor: Default {
         ctx: &mut RupdWork,
         id: &PoolId,
         pool: &PoolState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -38,12 +38,12 @@ pub trait RupdVisitor: Default {
         ctx: &mut RupdWork,
         id: &AccountId,
         account: &AccountState,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
     #[allow(unused_variables)]
-    fn flush(&mut self, ctx: &mut RupdWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut RupdWork) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 }
@@ -128,11 +128,11 @@ pub struct RupdWork {
     pub pparams: Option<PParamsSet>,
 }
 
-fn log_work<D: Domain>(
+fn log_work<D: Domain<ChainSpecificError = crate::CardanoError>>(
     work: &RupdWork,
     rewards: &RewardMap<RupdWork>,
     archive: &D::Archive,
-) -> Result<(), ChainError> {
+) -> Result<(), ChainError<crate::CardanoError>> {
     let Some((_, epoch)) = work.relevant_epochs() else {
         return Ok(());
     };
@@ -186,12 +186,12 @@ fn log_work<D: Domain>(
 }
 
 #[instrument("rupd", skip_all, fields(slot = %slot))]
-pub fn execute<D: Domain>(
+pub fn execute<D: Domain<ChainSpecificError = crate::CardanoError>>(
     state: &D::State,
     archive: &D::Archive,
     slot: BlockSlot,
-    genesis: &Genesis,
-) -> Result<RewardMap<RupdWork>, ChainError> {
+    genesis: &crate::CardanoGenesis,
+) -> Result<RewardMap<RupdWork>, ChainError<crate::CardanoError>> {
     debug!(slot, "executing rupd work unit");
 
     let work = RupdWork::load::<D>(state, genesis)?;

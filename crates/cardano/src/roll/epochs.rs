@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{BrokenInvariant, ChainError, Genesis, NsKey, TxOrder, TxoRef};
+use dolos_core::{BrokenInvariant, ChainError,  NsKey, TxOrder, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -132,16 +132,16 @@ impl dolos_core::EntityDelta for NoncesUpdate {
 fn compute_collateral_value(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
-) -> Result<Lovelace, ChainError> {
+) -> Result<Lovelace, ChainError<crate::CardanoError>> {
     debug_assert!(!tx.is_valid());
 
     let mut total = 0;
 
     for input in tx.consumes() {
         let utxo = utxos
-            .get(&TxoRef::from(&input))
+            .get(&crate::txo_ref_from_input(&input))
             .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
-                TxoRef::from(&input),
+                crate::txo_ref_from_input(&input),
             )))?;
         utxo.with_dependent(|_, utxo| {
             total += utxo.value().coin();
@@ -158,7 +158,7 @@ fn compute_collateral_value(
 fn define_tx_fees(
     tx: &MultiEraTx,
     utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
-) -> Result<Lovelace, ChainError> {
+) -> Result<Lovelace, ChainError<crate::CardanoError>> {
     if let Some(byron) = tx.as_byron() {
         let fee = compute_byron_fee(byron, None);
         Ok(fee)
@@ -199,12 +199,12 @@ impl BlockVisitor for EpochStateVisitor {
         &mut self,
         _: &mut WorkDeltas,
         block: &MultiEraBlock,
-        _: &Genesis,
+        _: &crate::CardanoGenesis,
         pparams: &PParamsSet,
         epoch: Epoch,
         epoch_start: u64,
         _: u16,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.stats_delta = Some(EpochStatsUpdate {
             epoch,
             ..Default::default()
@@ -224,7 +224,7 @@ impl BlockVisitor for EpochStateVisitor {
             self.nonces_delta = Some(NoncesUpdate {
                 slot: block.header().slot(),
                 tail: block.header().previous_hash(),
-                nonce_vrf_output: block.header().nonce_vrf_output()?,
+                nonce_vrf_output: block.header().nonce_vrf_output().map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Traverse(e)))?,
                 previous: None,
             });
         }
@@ -238,7 +238,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraBlock,
         tx: &MultiEraTx,
         utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let fees = define_tx_fees(tx, utxos)?;
 
         self.stats_delta.as_mut().unwrap().block_fees += fees;
@@ -257,7 +257,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         _: &pallas::ledger::traverse::MultiEraInput,
         resolved: &pallas::ledger::traverse::MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let amount = resolved.value().coin();
         self.stats_delta.as_mut().unwrap().utxo_delta -= amount as i64;
 
@@ -271,7 +271,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         _: u32,
         output: &pallas::ledger::traverse::MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let amount = output.value().coin();
         self.stats_delta.as_mut().unwrap().utxo_delta += amount as i64;
 
@@ -285,7 +285,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         _: &TxOrder,
         cert: &MultiEraCert,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {
             self.stats_delta.as_mut().unwrap().new_accounts += 1;
         }
@@ -371,7 +371,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         proposal: &pallas::ledger::traverse::MultiEraProposal,
         _: usize,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         tracing::debug!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
 
         self.stats_delta.as_mut().unwrap().proposal_deposits += proposal.deposit();
@@ -386,12 +386,12 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraTx,
         _: &[u8],
         amount: u64,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.stats_delta.as_mut().unwrap().withdrawals += amount;
         Ok(())
     }
 
-    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError<crate::CardanoError>> {
         if let Some(delta) = self.stats_delta.take() {
             deltas.add_for_entity(delta);
         }

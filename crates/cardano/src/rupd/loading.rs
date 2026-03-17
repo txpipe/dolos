@@ -1,4 +1,4 @@
-use dolos_core::{ChainError, Domain, Genesis, StateStore};
+use dolos_core::{ChainError, Domain, StateStore};
 use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, trace};
 
@@ -17,10 +17,10 @@ use crate::{
 /// excluding federated/overlay blocks. The eta calculation uses this count
 /// to determine if pools are producing blocks at the expected rate.
 fn define_eta(
-    genesis: &Genesis,
+    genesis: &crate::CardanoGenesis,
     epoch: &EpochState,
     pool_blocks: Option<u64>,
-) -> Result<Eta, ChainError> {
+) -> Result<Eta, ChainError<crate::CardanoError>> {
     if epoch.pparams.mark().is_none_or(|x| x.is_byron()) {
         return Ok(ratio!(1));
     }
@@ -55,11 +55,11 @@ fn neutral_incentives() -> EpochIncentives {
 }
 
 fn define_epoch_incentives(
-    genesis: &Genesis,
+    genesis: &crate::CardanoGenesis,
     state: &EpochState,
     reserves: u64,
     pool_blocks: Option<u64>,
-) -> Result<EpochIncentives, ChainError> {
+) -> Result<EpochIncentives, ChainError<crate::CardanoError>> {
     let pparams = state.pparams.unwrap_live();
 
     if pparams.is_byron() {
@@ -96,7 +96,7 @@ impl StakeSnapshot {
         account: &StakeCredential,
         pool_id: PoolHash,
         stake: u64,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         self.accounts_by_pool
             .insert(pool_id, account.clone(), stake);
 
@@ -122,12 +122,12 @@ impl StakeSnapshot {
     /// * `protocol` - Era protocol for stake calculation
     /// * `rupd_slot` - The RUPD boundary slot, used to determine registration status.
     ///   Pre-Babbage filtering requires knowing which accounts were registered at RUPD time.
-    pub fn load<D: Domain>(
+    pub fn load<D: Domain<ChainSpecificError = crate::CardanoError>>(
         state: &D::State,
         stake_epoch: u64,
         protocol: EraProtocol,
         _rupd_slot: u64,
-    ) -> Result<Self, ChainError> {
+    ) -> Result<Self, ChainError<crate::CardanoError>> {
         let mut snapshot = Self::default();
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
@@ -243,7 +243,7 @@ impl RupdWork {
         self.snapshot.performance_epoch_pool_blocks
     }
 
-    pub fn load<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<RupdWork, ChainError> {
+    pub fn load<D: Domain<ChainSpecificError = crate::CardanoError>>(state: &D::State, genesis: &crate::CardanoGenesis) -> Result<RupdWork, ChainError<crate::CardanoError>> {
         let epoch = crate::load_epoch::<D>(state)?;
 
         let current_epoch = epoch.number;

@@ -510,7 +510,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     type ChainSpecificError: std::error::Error + Send + Sync;
 
     /// The concrete work unit type produced by this chain logic.
-    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>>: WorkUnit<D>;
+    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError>>: WorkUnit<D>;
 
     /// Initialize the chain logic with configuration and state.
     fn initialize<D: Domain>(
@@ -542,7 +542,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// The returned work unit should be executed using `executor::execute_work_unit()`.
     fn pop_work<D>(&mut self, domain: &D) -> Option<Self::WorkUnit<D>>
     where
-        D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>;
+        D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError, Genesis = Self::Genesis>;
 
     /// Compute undo data for a block during rollback.
     ///

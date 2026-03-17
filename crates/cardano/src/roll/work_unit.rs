@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use dolos_core::{Domain, DomainError, Genesis, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
+use dolos_core::{Domain, DomainError, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
 use tracing::{debug, info};
 
 use crate::roll::batch::WorkBatch;
-use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoLogic};
+use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoError, CardanoGenesis, CardanoLogic};
 
 /// Work unit for processing a batch of blocks ("rolling" the chain forward).
 pub struct RollWorkUnit {
@@ -17,7 +17,7 @@ pub struct RollWorkUnit {
     batch: WorkBatch,
 
     /// Genesis configuration
-    genesis: Arc<Genesis>,
+    genesis: Arc<CardanoGenesis>,
 
     /// Whether this is live mode (emit tip notifications)
     live_mode: bool,
@@ -30,7 +30,7 @@ impl RollWorkUnit {
     /// Create a new roll work unit.
     pub(crate) fn new(
         batch: WorkBatch,
-        genesis: Arc<Genesis>,
+        genesis: Arc<CardanoGenesis>,
         live_mode: bool,
         cache: Cache,
     ) -> Self {
@@ -45,13 +45,13 @@ impl RollWorkUnit {
 
 impl<D> WorkUnit<D> for RollWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta>,
+    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta, ChainSpecificError = CardanoError>,
 {
     fn name(&self) -> &'static str {
         "roll"
     }
 
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn load(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!(blocks = self.batch.blocks.len(), "loading roll batch UTxOs");
 
         self.batch.load_utxos(domain)?;
@@ -68,12 +68,12 @@ where
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
+    fn compute(&mut self) -> Result<(), DomainError<D::ChainSpecificError>> {
         // Deltas are computed during load() since they require state access.
         Ok(())
     }
 
-    fn commit_wal(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_wal(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!("committing roll batch to WAL");
 
         // Ensure blocks are sorted before WAL commit
@@ -84,7 +84,7 @@ where
         Ok(())
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!("loading entities for roll batch");
 
         // Load entities that will be modified
@@ -106,7 +106,7 @@ where
         Ok(())
     }
 
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!("committing roll batch to archive");
 
         self.batch.commit_archive(domain)?;
@@ -114,7 +114,7 @@ where
         Ok(())
     }
 
-    fn commit_indexes(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_indexes(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!("committing roll batch to indexes");
 
         self.batch.commit_indexes(domain)?;
@@ -154,7 +154,7 @@ where
                     .view()
                     .txs()
                     .iter()
-                    .map(|tx| tx.hash())
+                    .map(|tx| crate::pallas_hash_to_core(tx.hash()))
                     .collect(),
             })
             .collect()

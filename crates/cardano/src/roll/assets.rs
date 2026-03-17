@@ -115,7 +115,7 @@ impl BlockVisitor for AssetStateVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let policy = mint.policy();
         let has_metadata = has_cip25_metadata(tx);
         let cip25_metadata = if has_metadata {
@@ -161,7 +161,7 @@ impl BlockVisitor for AssetStateVisitor {
         tx: &MultiEraTx,
         _index: u32,
         output: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let Some(_datum_option) = output.datum() else {
             return Ok(());
         };

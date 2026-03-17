@@ -120,7 +120,7 @@ pub enum CardanoWorkUnit {
 
 impl<D> WorkUnit<D> for CardanoWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta>,
+    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta, ChainSpecificError = CardanoError>,
 {
     fn name(&self) -> &'static str {
         match self {
@@ -269,6 +269,12 @@ pub enum CardanoError {
 
     #[error("phase-2 script rejected the transaction")]
     Phase2ValidationRejected(Vec<String>),
+
+    #[error("invalid pool registration params")]
+    InvalidPoolParams,
+
+    #[error("invalid governance proposal params")]
+    InvalidProposalParams,
 }
 
 #[derive(Clone)]
@@ -322,7 +328,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Utxo = OwnedMultiEraOutput;
     type Delta = CardanoDelta;
     type Entity = CardanoEntity;
-    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>> =
+    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError>> =
         CardanoWorkUnit;
     type ChainSpecificError = CardanoError;
     type Genesis = CardanoGenesis;
@@ -341,7 +347,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             None => WorkBuffer::Empty,
         };
 
-        let eras = eras::load_era_summary::<D>(state)?;
+        let eras = eras::load_chain_summary_from_state(state)?;
 
         // Use randomness_stability_window (4k/f) for the RUPD trigger boundary.
         // The Haskell ledger's startStep fires at randomnessStabilisationWindow
@@ -391,7 +397,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn pop_work<D>(&mut self, domain: &D) -> Option<CardanoWorkUnit>
     where
-        D: Domain<Chain = Self, Entity = CardanoEntity, EntityDelta = CardanoDelta>,
+        D: Domain<Chain = Self, Entity = CardanoEntity, EntityDelta = CardanoDelta, ChainSpecificError = Self::ChainSpecificError, Genesis = Self::Genesis>,
     {
         // Refresh cache if needed (after previous genesis or estart execution)
         if self.needs_cache_refresh {

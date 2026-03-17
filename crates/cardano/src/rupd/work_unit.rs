@@ -6,12 +6,12 @@
 
 use std::sync::Arc;
 
-use dolos_core::{BlockSlot, Domain, DomainError, Genesis, StateStore, StateWriter, WorkUnit};
+use dolos_core::{BlockSlot, Domain, DomainError, StateStore, StateWriter, WorkUnit};
 use tracing::debug;
 
 use crate::{
     rewards::{Reward, RewardMap},
-    CardanoLogic, FixedNamespace, PendingRewardState,
+    CardanoError, CardanoGenesis, CardanoLogic, FixedNamespace, PendingRewardState,
 };
 
 use super::{credential_to_key, RupdWork};
@@ -19,7 +19,7 @@ use super::{credential_to_key, RupdWork};
 /// Work unit for computing rewards at the stability window.
 pub struct RupdWorkUnit {
     slot: BlockSlot,
-    genesis: Arc<Genesis>,
+    genesis: Arc<CardanoGenesis>,
 
     // Loaded
     work: Option<RupdWork>,
@@ -30,7 +30,7 @@ pub struct RupdWorkUnit {
 
 impl RupdWorkUnit {
     /// Create a new rupd work unit.
-    pub fn new(slot: BlockSlot, genesis: Arc<Genesis>) -> Self {
+    pub fn new(slot: BlockSlot, genesis: Arc<CardanoGenesis>) -> Self {
         Self {
             slot,
             genesis,
@@ -52,13 +52,13 @@ impl RupdWorkUnit {
 
 impl<D> WorkUnit<D> for RupdWorkUnit
 where
-    D: Domain<Chain = CardanoLogic>,
+    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError>,
 {
     fn name(&self) -> &'static str {
         "rupd"
     }
 
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn load(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!(slot = self.slot, "loading rupd work context");
 
         self.work = Some(RupdWork::load::<D>(domain.state(), &self.genesis)?);
@@ -67,7 +67,7 @@ where
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
+    fn compute(&mut self) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!(slot = self.slot, "computing rewards");
 
         let work = self
@@ -85,7 +85,7 @@ where
         Ok(())
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         let _work = self
             .work
             .as_ref()
@@ -155,7 +155,7 @@ where
         Ok(())
     }
 
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         let work = self
             .work
             .as_ref()

@@ -5,7 +5,7 @@ use dolos_core::{ChainError, ChainPoint, Domain, EraCbor, MempoolAwareUtxoStore,
 use crate::{CardanoError, CardanoGenesis};
 use pallas::ledger::{
     primitives::{NetworkId, TransactionInput},
-    traverse::{MultiEraInput, MultiEraOutput, MultiEraTx},
+    traverse::{MultiEraInput, MultiEraTx},
 };
 use tracing::debug;
 

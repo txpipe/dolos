@@ -51,7 +51,7 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, self.datum_hash))
+        NsKey::from((DATUM_NS, dolos_core::EntityKey::from(self.datum_hash.as_slice())))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {
@@ -105,7 +105,7 @@ impl dolos_core::EntityDelta for DatumRefDecrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, self.datum_hash))
+        NsKey::from((DATUM_NS, dolos_core::EntityKey::from(self.datum_hash.as_slice())))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {
@@ -148,7 +148,7 @@ impl BlockVisitor for DatumVisitor {
         _block: &MultiEraBlock,
         tx: &MultiEraTx,
         _utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Clear and collect witness datums for this transaction
         self.witness_datums.clear();
 
@@ -168,7 +168,7 @@ impl BlockVisitor for DatumVisitor {
         _tx: &MultiEraTx,
         _index: u32,
         output: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Check if this output references a datum by hash
         if let Some(DatumOption::Hash(datum_hash)) = output.datum() {
             // Only emit increment if the datum is in the witness set
@@ -187,7 +187,7 @@ impl BlockVisitor for DatumVisitor {
         _tx: &MultiEraTx,
         _input: &MultiEraInput,
         resolved: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         // Check if the consumed UTxO had a datum hash
         if let Some(DatumOption::Hash(datum_hash)) = resolved.datum() {
             deltas.add_for_entity(DatumRefDecrement::new(datum_hash));

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef};
+use dolos_core::{ChainError, Domain, InvariantViolation, StateError, TxOrder, TxoRef};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
@@ -49,12 +49,12 @@ pub trait BlockVisitor {
         &mut self,
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
-        genesis: &Genesis,
+        genesis: &crate::CardanoGenesis,
         pparams: &PParamsSet,
         epoch: Epoch,
         epoch_start: u64,
         protocol: u16,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -65,7 +65,7 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         utxos: &HashMap<TxoRef, OwnedMultiEraOutput>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -77,7 +77,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         input: &MultiEraInput,
         resolved: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -89,7 +89,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         index: u32,
         output: &MultiEraOutput,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -100,7 +100,7 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         mint: &MultiEraPolicyAssets,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -112,7 +112,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         order: &TxOrder,
         cert: &MultiEraCert,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -124,7 +124,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         account: &[u8],
         amount: u64,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -135,7 +135,7 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: Option<&MultiEraTx>,
         update: &MultiEraUpdate,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -148,7 +148,7 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         data: &KeepRaw<'_, PlutusData>,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -160,7 +160,7 @@ pub trait BlockVisitor {
         tx: &MultiEraTx,
         proposal: &MultiEraProposal,
         idx: usize,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
@@ -171,18 +171,18 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         proposal: &MultiEraRedeemer,
-    ) -> Result<(), ChainError> {
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 
     #[allow(unused_variables)]
-    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError<crate::CardanoError>> {
         Ok(())
     }
 }
 
 pub struct DeltaBuilder<'a> {
-    genesis: Arc<Genesis>,
+    genesis: Arc<crate::CardanoGenesis>,
     work: &'a mut WorkBlock,
     active_params: &'a PParamsSet,
     epoch: Epoch,
@@ -203,7 +203,7 @@ pub struct DeltaBuilder<'a> {
 impl<'a> DeltaBuilder<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        genesis: Arc<Genesis>,
+        genesis: Arc<crate::CardanoGenesis>,
         protocol: u16,
         active_params: &'a PParamsSet,
         epoch: Epoch,
@@ -230,7 +230,7 @@ impl<'a> DeltaBuilder<'a> {
         }
     }
 
-    pub fn crawl(&mut self) -> Result<(), ChainError> {
+    pub fn crawl(&mut self) -> Result<(), ChainError<crate::CardanoError>> {
         let block = self.work.decoded();
         let block = block.view();
         let mut deltas = WorkDeltas::default();
@@ -326,7 +326,7 @@ impl<'a> DeltaBuilder<'a> {
                 .visit_tx(&mut deltas, block, tx, self.utxos)?;
 
             for input in tx.consumes() {
-                let txoref = TxoRef::from(&input);
+                let txoref = crate::txo_ref_from_input(&input);
 
                 let resolved = self.utxos.get(&txoref).ok_or_else(|| {
                     StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
@@ -349,7 +349,7 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
                     self.proposal_logs
                         .visit_input(&mut deltas, block, tx, &input, resolved)?;
-                    Result::<_, ChainError>::Ok(())
+                    Result::<_, ChainError<crate::CardanoError>>::Ok(())
                 })?;
             }
 
@@ -534,12 +534,12 @@ impl<'a> DeltaBuilder<'a> {
 }
 
 #[instrument(name = "roll", skip_all)]
-pub fn compute_delta<D: Domain>(
-    genesis: Arc<Genesis>,
+pub fn compute_delta<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+    genesis: Arc<crate::CardanoGenesis>,
     cache: &Cache,
     state: &D::State,
     batch: &mut WorkBatch,
-) -> Result<(), ChainError> {
+) -> Result<(), ChainError<crate::CardanoError>> {
     let (epoch, _) = cache.eras.slot_epoch(batch.first_slot());
 
     let (protocol, _) = cache.eras.protocol_and_era_for_epoch(epoch);
