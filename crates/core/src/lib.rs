@@ -107,7 +107,7 @@ mod cbor_bytes {
     use minicbor::{Decoder, Encoder};
 
     pub fn encode<W: minicbor::encode::Write, C>(
-        v: &Vec<u8>,
+        v: &[u8],
         e: &mut Encoder<W>,
         _: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
