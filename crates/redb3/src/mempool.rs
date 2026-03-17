@@ -415,7 +415,7 @@ impl InflightRecord {
 
     fn into_finalized_entry(self, hash: TxHash) -> FinalizedEntry {
         FinalizedEntry {
-            hash: hash.to_vec(),
+            hash: hash.as_slice().to_vec(),
             confirmations: self.confirmations,
             confirmed_at: self.confirmed_at,
             payload: Some(self.payload),
@@ -425,7 +425,7 @@ impl InflightRecord {
 
     fn into_dropped_entry(self, hash: TxHash) -> FinalizedEntry {
         FinalizedEntry {
-            hash: hash.to_vec(),
+            hash: hash.as_slice().to_vec(),
             confirmations: self.confirmations,
             confirmed_at: self.confirmed_at,
             payload: Some(self.payload),

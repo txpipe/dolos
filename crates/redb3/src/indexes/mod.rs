@@ -204,7 +204,7 @@ impl FilterIndexes {
 
         // Insert produced UTxOs
         for (txo_ref, tags) in &delta.utxo.produced {
-            let v: (&[u8; 32], u32) = (&txo_ref.0, txo_ref.1);
+            let v: (&[u8; 32], u32) = (txo_ref.0.as_array(), txo_ref.1);
 
             for tag in tags {
                 match tag.dimension {
@@ -230,7 +230,7 @@ impl FilterIndexes {
 
         // Remove consumed UTxOs
         for (txo_ref, tags) in &delta.utxo.consumed {
-            let v: (&[u8; 32], u32) = (&txo_ref.0, txo_ref.1);
+            let v: (&[u8; 32], u32) = (txo_ref.0.as_array(), txo_ref.1);
 
             for tag in tags {
                 match tag.dimension {
@@ -269,7 +269,7 @@ impl FilterIndexes {
 
         // Remove produced UTxOs (undo insertion)
         for (txo_ref, tags) in &delta.utxo.produced {
-            let v: (&[u8; 32], u32) = (&txo_ref.0, txo_ref.1);
+            let v: (&[u8; 32], u32) = (txo_ref.0.as_array(), txo_ref.1);
 
             for tag in tags {
                 match tag.dimension {
@@ -295,7 +295,7 @@ impl FilterIndexes {
 
         // Restore consumed UTxOs (undo removal)
         for (txo_ref, tags) in &delta.utxo.consumed {
-            let v: (&[u8; 32], u32) = (&txo_ref.0, txo_ref.1);
+            let v: (&[u8; 32], u32) = (txo_ref.0.as_array(), txo_ref.1);
 
             for tag in tags {
                 match tag.dimension {

@@ -7,9 +7,11 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
+use std::convert::Infallible;
+
 use dolos_core::{
     config::RedbArchiveConfig, ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue,
-    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder, TxoRef,
+    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder,
 };
 
 use ::redb::Durability;
@@ -33,7 +35,7 @@ pub(crate) mod tables;
 mod tests;
 
 #[derive(Debug)]
-pub struct RedbArchiveError(ArchiveError);
+pub struct RedbArchiveError(ArchiveError<Infallible>);
 
 impl std::fmt::Display for RedbArchiveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,13 +57,13 @@ impl From<Error> for RedbArchiveError {
     }
 }
 
-impl From<ArchiveError> for RedbArchiveError {
-    fn from(value: ArchiveError) -> Self {
+impl From<ArchiveError<Infallible>> for RedbArchiveError {
+    fn from(value: ArchiveError<Infallible>) -> Self {
         Self(value)
     }
 }
 
-impl From<RedbArchiveError> for ArchiveError {
+impl From<RedbArchiveError> for ArchiveError<Infallible> {
     fn from(value: RedbArchiveError) -> Self {
         value.0
     }
@@ -252,11 +254,13 @@ impl ArchiveStore {
             };
 
             if let Some(body) = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)? {
-                let decoded =
-                    MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
+                let decoded = MultiEraBlock::decode(&body)
+                    .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
 
-                if decoded.hash().eq(hash) {
-                    return Ok(Some(ChainPoint::Specific(decoded.slot(), decoded.hash())));
+                let decoded_hash: [u8; 32] = (*decoded.hash()).into();
+                let decoded_hash = dolos_core::hash::Hash::from(decoded_hash);
+                if decoded_hash.eq(hash) {
+                    return Ok(Some(ChainPoint::Specific(decoded.slot(), decoded_hash)));
                 }
             }
         }
@@ -498,8 +502,8 @@ impl ArchiveStore {
             return Ok(None);
         };
 
-        let block =
-            MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+        let block = MultiEraBlock::decode(raw.as_slice())
+            .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
         for (idx, tx) in block.txs().iter().enumerate() {
             if tx.hash().to_vec() == tx_hash {
                 return Ok(Some((raw, idx)));
@@ -619,14 +623,17 @@ impl ArchiveStore {
             self.get_possible_blocks_by_spent_txo(spent_txo, start_slot, end_slot)?;
 
         for raw in possible {
-            let block =
-                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(raw.as_slice())
+                .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
 
             for tx in block.txs().iter() {
                 for input in tx.inputs() {
-                    let bytes: Vec<u8> = TxoRef::from(&input).into();
+                    // TODO: dudoso, ask Santiago
+                    let mut bytes = input.hash().to_vec();
+                    bytes.extend_from_slice(u32::to_be_bytes(input.index() as u32).as_slice());
                     if bytes.as_slice() == spent_txo {
-                        return Ok(Some(tx.hash()));
+                        let hash_bytes: [u8; 32] = (*tx.hash()).into();
+                        return Ok(Some(dolos_core::hash::Hash::from(hash_bytes)));
                     }
                 }
             }
@@ -645,8 +652,8 @@ impl ArchiveStore {
             return Ok(None);
         };
 
-        let block =
-            MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+        let block = MultiEraBlock::decode(raw.as_slice())
+            .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
         if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
             return Ok(Some(EraCbor(block.era().into(), tx.encode())));
         }
@@ -663,8 +670,8 @@ impl ArchiveStore {
             self.get_possible_blocks_by_datum_hash(datum_hash.as_slice(), start_slot, end_slot)?;
 
         for raw in possible {
-            let block =
-                MultiEraBlock::decode(raw.as_slice()).map_err(ArchiveError::BlockDecodingError)?;
+            let block = MultiEraBlock::decode(raw.as_slice())
+                .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
             for tx in block.txs() {
                 // Check witnesses
                 if let Some(plutus_data) = tx.find_plutus_data(datum_hash) {
@@ -790,7 +797,9 @@ pub struct ArchiveStoreWriter {
 }
 
 impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
-    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
+    type ChainSpecificError = Infallible;
+
+    fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError<Infallible>> {
         self.pending_blocks
             .lock()
             .unwrap()
@@ -798,12 +807,12 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         Ok(())
     }
 
-    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
+    fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError<Infallible>> {
         tables::BlocksTable::undo(&self.wx, &self.flatfiles, point)?;
         Ok(())
     }
 
-    fn commit(self) -> Result<(), ArchiveError> {
+    fn commit(self) -> Result<(), ArchiveError<Infallible>> {
         // 1. Batch-append all pending blocks to flat files (fsync inside).
         // 2. Insert all index entries into redb.
         // 3. Commit redb transaction.
@@ -821,7 +830,7 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         ns: Namespace,
         key: &dolos_core::LogKey,
         value: &dolos_core::EntityValue,
-    ) -> Result<(), ArchiveError> {
+    ) -> Result<(), ArchiveError<Infallible>> {
         let table = self
             .tables
             .get(&ns)
@@ -838,7 +847,7 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
 pub struct LogIter(pub(crate) ::redb::Range<'static, &'static [u8], &'static [u8]>);
 
 impl Iterator for LogIter {
-    type Item = Result<(LogKey, EntityValue), ArchiveError>;
+    type Item = Result<(LogKey, EntityValue), ArchiveError<Infallible>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.0.next()?;
@@ -856,7 +865,7 @@ impl Iterator for LogIter {
 pub struct EntityValueIter(pub(crate) ::redb::MultimapValue<'static, &'static [u8]>);
 
 impl Iterator for EntityValueIter {
-    type Item = Result<EntityValue, ArchiveError>;
+    type Item = Result<EntityValue, ArchiveError<Infallible>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.0.next()?;
@@ -875,35 +884,46 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     type Writer = ArchiveStoreWriter;
     type LogIter = LogIter;
     type EntityValueIter = EntityValueIter;
+    type ChainSpecificError = Infallible;
 
-    fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<Infallible>> {
         Ok(Self::start_writer(self)?)
     }
 
-    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+    fn get_block_by_slot(
+        &self,
+        slot: &BlockSlot,
+    ) -> Result<Option<BlockBody>, ArchiveError<Infallible>> {
         Ok(Self::get_block_by_slot(self, slot)?)
     }
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+    ) -> Result<Self::BlockIter<'a>, ArchiveError<Infallible>> {
         Ok(Self::get_range(self, from, to)?)
     }
 
-    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
+    fn find_intersect(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError<Infallible>> {
         Ok(Self::find_intersect(self, intersect)?)
     }
 
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<Infallible>> {
         Ok(Self::get_tip(self)?)
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<bool, ArchiveError<Infallible>> {
         Ok(Self::prune_history(self, max_slots, max_prune)?)
     }
 
-    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError<Infallible>> {
         Ok(Self::truncate_front(self, after)?)
     }
 
@@ -911,7 +931,7 @@ impl dolos_core::ArchiveStore for ArchiveStore {
         &self,
         ns: Namespace,
         keys: &[&dolos_core::LogKey],
-    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError> {
+    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError<Infallible>> {
         let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
 
         let table = self
@@ -935,7 +955,7 @@ impl dolos_core::ArchiveStore for ArchiveStore {
         &self,
         ns: Namespace,
         range: std::ops::Range<dolos_core::LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    ) -> Result<Self::LogIter, ArchiveError<Infallible>> {
         let mut rx = self.db().begin_read().map_err(RedbArchiveError::from)?;
 
         let range = std::ops::Range {
@@ -1015,7 +1035,7 @@ pub struct ArchiveSparseIter(
 );
 
 impl Iterator for ArchiveSparseIter {
-    type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError>;
+    type Item = Result<(BlockSlot, Option<BlockBody>), ArchiveError<Infallible>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.1.next()?;

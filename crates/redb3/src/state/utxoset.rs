@@ -58,7 +58,7 @@ impl UtxosTable {
         let mut out = HashMap::new();
 
         for key in refs {
-            if let Some(body) = table.get(&(&key.0 as &[u8; 32], key.1))? {
+            if let Some(body) = table.get(&(key.0.as_array(), key.1))? {
                 let (era, cbor) = body.value();
                 let cbor = cbor.to_owned();
                 let value = Arc::new(EraCbor(era, cbor));
@@ -74,24 +74,24 @@ impl UtxosTable {
         let mut table = wx.open_table(Self::DEF)?;
 
         for (k, v) in delta.produced_utxo.iter() {
-            let k: (&[u8; 32], u32) = (&k.0, k.1);
+            let k: (&[u8; 32], u32) = (k.0.as_array(), k.1);
             let v: (u16, &[u8]) = (v.0, &v.1);
             table.insert(k, v)?;
         }
 
         for (k, v) in delta.recovered_stxi.iter() {
-            let k: (&[u8; 32], u32) = (&k.0, k.1);
+            let k: (&[u8; 32], u32) = (k.0.as_array(), k.1);
             let v: (u16, &[u8]) = (v.0, &v.1);
             table.insert(k, v)?;
         }
 
         for (k, _) in delta.undone_utxo.iter() {
-            let k: (&[u8; 32], u32) = (&k.0, k.1);
+            let k: (&[u8; 32], u32) = (k.0.as_array(), k.1);
             table.remove(k)?;
         }
 
         for (k, _) in delta.consumed_utxo.iter() {
-            let k: (&[u8; 32], u32) = (&k.0, k.1);
+            let k: (&[u8; 32], u32) = (k.0.as_array(), k.1);
             table.remove(k)?;
         }
 

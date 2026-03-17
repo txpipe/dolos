@@ -12,6 +12,10 @@ impl<const N: usize> Hash<N> {
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
+
+    pub fn as_array(&self) -> &[u8; N] {
+        &self.0
+    }
 }
 
 impl<const N: usize> fmt::Display for Hash<N> {
