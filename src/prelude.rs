@@ -28,7 +28,7 @@ pub enum Error {
     WalError(#[from] WalError),
 
     #[error("chain error: {0}")]
-    ArchiveError(#[from] ArchiveError),
+    ArchiveError(#[from] ArchiveError<dolos_cardano::CardanoError>),
 
     #[error("state error: {0}")]
     StateError(#[from] StateError),
