@@ -1,4 +1,5 @@
 use dolos_core::config::RootConfig;
+use dolos_core::WalStore;
 use miette::{Context, IntoDiagnostic};
 use tracing::info;
 
@@ -13,10 +14,10 @@ pub struct Args {}
 pub async fn run(config: &RootConfig, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
     crate::common::setup_tracing(&config.logging, &config.telemetry)?;
 
-    let domain = crate::common::setup_domain(config)?;
+    let state = crate::common::open_state_store(config)?;
+    let wal = crate::common::open_wal_store(config)?;
 
-    let cursor = domain
-        .state
+    let cursor = state
         .read_cursor()
         .into_diagnostic()
         .context("getting state cursor")?;
@@ -33,9 +34,7 @@ pub async fn run(config: &RootConfig, _args: &Args, _feedback: &Feedback) -> mie
         ));
     }
 
-    domain
-        .wal()
-        .reset_to(&cursor)
+    wal.reset_to(&cursor)
         .into_diagnostic()
         .context("resetting wal")?;
 
