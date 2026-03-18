@@ -234,6 +234,29 @@ fn do_import(
     Ok(())
 }
 
+/// Seed the WAL with the archive tip block so that `find_intersect` works after bootstrap.
+fn seed_wal_from_archive(domain: &dolos::adapters::DomainAdapter) -> Result<(), miette::Error> {
+    let tip = domain
+        .archive()
+        .get_tip()
+        .map_err(|e| miette::miette!(e.to_string()))?;
+
+    if let Some((slot, body)) = tip {
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(&body)
+            .map_err(|e| miette::miette!(e.to_string()))
+            .context("decoding archive tip block")?;
+        let point = ChainPoint::Specific(slot, block.hash());
+        domain
+            .wal()
+            .reset_to(&point)
+            .map_err(|e| miette::miette!(e.to_string()))
+            .context("seeding WAL from archive tip")?;
+        info!(%point, "seeded WAL from archive tip");
+    }
+
+    Ok(())
+}
+
 fn import_hardano_into_domain(
     args: &Args,
     config: &RootConfig,
@@ -244,6 +267,15 @@ fn import_hardano_into_domain(
     let domain = crate::common::setup_domain(config)?;
 
     let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
+
+    // Seed WAL with the archive tip so the node can find intersection after bootstrap.
+    // Import skips WAL commits for performance, so the WAL is empty. Without this,
+    // the node would fail to intersect with the upstream peer.
+    if result.is_ok() {
+        if let Err(e) = seed_wal_from_archive(&domain) {
+            tracing::error!("failed to seed WAL from archive tip: {}", e);
+        }
+    }
 
     // Always shutdown the domain before it goes out of scope, regardless of
     // whether import succeeded or failed.

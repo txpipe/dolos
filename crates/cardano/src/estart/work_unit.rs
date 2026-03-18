@@ -76,7 +76,7 @@ where
         debug!(slot = self.slot, "committing estart state changes");
 
         let context = self.context.as_mut().ok_or_else(|| {
-            DomainError::InconsistentState("estart context not loaded".to_string())
+            DomainError::Internal("estart context not loaded".into())
         })?;
 
         context.commit::<D>(domain.state(), domain.archive(), self.slot)?;

@@ -32,7 +32,7 @@ pub trait BootstrapExt: Domain {
 
 impl<D: Domain> BootstrapExt for D {
     fn check_integrity(&self) -> Result<(), DomainError> {
-        ensure_wal_in_sync_with_state(self)?;
+        check_wal_in_sync_with_state(self)?;
         check_archive_in_sync_with_state(self)?;
 
         Ok(())
@@ -52,33 +52,52 @@ impl<D: Domain> BootstrapExt for D {
     }
 }
 
-/// Ensure WAL is in sync with state store.
+/// Check that WAL is consistent with the state store.
 ///
-/// If the WAL tip doesn't match the state cursor, reset WAL to match state.
-fn ensure_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
+/// WAL at or ahead of state is normal — the existing `catch_up_stores` handles
+/// replaying WAL entries to bring other stores up. State ahead of WAL is an
+/// error that requires explicit repair via `dolos doctor reset-wal`.
+fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let wal = domain.wal().find_tip()?.map(|(point, _)| point);
     let state = domain.state().read_cursor()?;
 
     match (wal, state) {
-        (Some(wal), Some(state)) => {
-            if wal != state {
-                warn!(%wal, %state, "wal is out of sync");
-                info!("resetting wal to match state");
-                domain.wal().reset_to(&state)?;
-            }
+        (Some(ref wal_tip), Some(ref state)) if wal_tip.slot() >= state.slot() => {
+            // WAL is at or ahead of state. Normal case (including post-crash
+            // where WAL committed but state didn't). catch_up_stores handles it.
+            info!(%wal_tip, %state, "WAL is in sync with state");
         }
-        (None, Some(state)) => {
-            warn!(%state, "missing wal, resetting to match state");
-            info!("resetting wal to match state");
-            domain.wal().reset_to(&state)?;
+        (Some(ref wal_tip), Some(ref state)) => {
+            // State is ahead of WAL — something wrote state without WAL
+            // (e.g. import mode, ESTART after OOM).
+            error!(%wal_tip, %state, "state is ahead of WAL");
+            return Err(DomainError::InconsistentState {
+                wal: Some(wal_tip.clone()),
+                state: Some(state.clone()),
+            });
         }
-        (Some(_), None) => {
-            // Weird case, strictly speaking, this should clear the wal rather than reset to origin
-            warn!("missing wal, resetting to origin");
-            info!("resetting wal to origin");
-            domain.wal().reset_to(&ChainPoint::Origin)?;
+        (None, Some(ref state)) => {
+            // WAL is missing but state exists (e.g. after import without WAL seeding).
+            error!(%state, "WAL is empty but state exists");
+            return Err(DomainError::InconsistentState {
+                wal: None,
+                state: Some(state.clone()),
+            });
         }
-        (None, None) => (),
+        (Some(ref wal_tip), None) if wal_tip == &ChainPoint::Origin => {
+            // WAL at Origin with no state cursor — fresh node after genesis.
+            info!(%wal_tip, "WAL at origin, no state cursor (post-genesis)");
+        }
+        (Some(ref wal_tip), None) => {
+            error!(%wal_tip, "WAL exists but no state found");
+            return Err(DomainError::InconsistentState {
+                wal: Some(wal_tip.clone()),
+                state: None,
+            });
+        }
+        (None, None) => {
+            // Fresh node, nothing to check.
+        }
     }
 
     Ok(())
@@ -111,7 +130,7 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
 
 /// Catch up archive and index stores by replaying WAL entries.
 ///
-/// After `ensure_wal_in_sync_with_state`, the WAL matches the state cursor.
+/// After `check_wal_in_sync_with_state`, the WAL is at or ahead of the state.
 /// If archive or index stores are behind (e.g., crash between state commit
 /// and archive/index commit), this function replays the missing WAL entries
 /// to bring them back in sync.
