@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1] - 2026-03-18
+
+### 🐛 Bug Fixes
+
+- Catch-up stores during init (#947)
+- Avoid slot-only chain intersection (#948)
+- *(cli)* Avoid bootstrap checks when trying to reset-wal (#949)
+
+### 📚 Documentation
+
+- Fix broken doc links (#945)
+
 ## [1.0.0] - 2026-03-13
 
 ### 🚀 Features
@@ -50,6 +62,10 @@ All notable changes to this project will be documented in this file.
 - *(trp)* Bump tx3 to v0.16.3 (#938)
 - Apply config changes review feedback
 - Improve log messages severity across the board (#941)
+
+### Release
+
+- V1.0.0
 
 ## [1.0.0-rc.12] - 2026-03-05
 
