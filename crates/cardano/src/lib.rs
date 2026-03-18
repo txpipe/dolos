@@ -360,6 +360,44 @@ impl dolos_core::ChainLogic for CardanoLogic {
         })
     }
 
+    fn compute_catchup(
+        block: &dolos_core::Cbor,
+        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        point: ChainPoint,
+    ) -> Result<dolos_core::CatchUpBlockData, ChainError> {
+        let block_arc = Arc::new(block.clone());
+        let blockd = OwnedMultiEraBlock::decode(block_arc)?;
+        let blockv = blockd.view();
+
+        let decoded_inputs: std::collections::HashMap<_, _> = inputs
+            .iter()
+            .map(|(k, v)| {
+                let out = (k.clone(), OwnedMultiEraOutput::decode(v.clone())?);
+                Result::<_, ChainError>::Ok(out)
+            })
+            .collect::<Result<_, _>>()?;
+
+        let utxo_delta = crate::utxoset::compute_apply_delta(blockv, &decoded_inputs)
+            .map_err(ChainError::from)?;
+
+        let mut builder = crate::indexes::CardanoIndexDeltaBuilder::new(point);
+
+        // UTxO filter changes
+        builder.add_produced_utxos_from_delta(&utxo_delta);
+        builder.add_consumed_utxos_from_delta(&utxo_delta);
+
+        // Archive indexes (shared logic)
+        builder.index_block(&blockv, &decoded_inputs);
+
+        let tx_hashes = blockv.txs().iter().map(|tx| tx.hash()).collect();
+
+        Ok(dolos_core::CatchUpBlockData {
+            utxo_delta,
+            index_delta: builder.build(),
+            tx_hashes,
+        })
+    }
+
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError> {
         let out = OwnedMultiEraOutput::decode(utxo)?;
 

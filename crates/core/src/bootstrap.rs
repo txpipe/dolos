@@ -7,7 +7,8 @@
 use tracing::{error, info, warn};
 
 use crate::{
-    sync::drain_pending_work, ArchiveStore, ChainPoint, Domain, DomainError, StateStore, WalStore,
+    sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, ChainLogic, ChainPoint, Domain,
+    DomainError, IndexStore, IndexWriter as _, StateStore, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -40,8 +41,7 @@ impl<D: Domain> BootstrapExt for D {
     fn bootstrap(&self) -> Result<(), DomainError> {
         self.check_integrity()?;
 
-        // TODO: we should probably catch up stores here
-        // catch_up_stores(self)?;
+        catch_up_stores(self)?;
 
         // Drain any work that might have been defined by the initialization
         // using the sync lifecycle (full WAL + tip notifications)
@@ -104,6 +104,114 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
             error!("found archive but no state");
         }
         (None, None) => (),
+    }
+
+    Ok(())
+}
+
+/// Catch up archive and index stores by replaying WAL entries.
+///
+/// After `ensure_wal_in_sync_with_state`, the WAL matches the state cursor.
+/// If archive or index stores are behind (e.g., crash between state commit
+/// and archive/index commit), this function replays the missing WAL entries
+/// to bring them back in sync.
+fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
+    let state_cursor = match domain.state().read_cursor()? {
+        Some(cursor) => cursor,
+        None => return Ok(()), // nothing to catch up
+    };
+
+    catch_up_archive(domain, &state_cursor)?;
+    catch_up_indexes(domain, &state_cursor)?;
+
+    Ok(())
+}
+
+/// Catch up archive store by replaying WAL blocks.
+fn catch_up_archive<D: Domain>(
+    domain: &D,
+    state_cursor: &ChainPoint,
+) -> Result<(), DomainError> {
+    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
+    let state_slot = state_cursor.slot();
+
+    if archive_tip == Some(state_slot) {
+        return Ok(());
+    }
+
+    // Find the WAL start point: if archive has data, start from a point
+    // corresponding to the archive tip; otherwise start from the beginning.
+    let start = match archive_tip {
+        Some(slot) => domain.wal().locate_point(slot)?,
+        None => None,
+    };
+
+    let blocks = domain
+        .wal()
+        .iter_blocks(start, Some(state_cursor.clone()))?;
+
+    let writer = domain.archive().start_writer()?;
+    let mut count = 0u64;
+
+    for (point, block) in blocks {
+        // Skip the start point itself (already in archive) and anything at or before it
+        if Some(point.slot()) <= archive_tip {
+            continue;
+        }
+
+        writer.apply(&point, &block)?;
+        count += 1;
+    }
+
+    if count > 0 {
+        writer.commit()?;
+        info!(count, "archive caught up from WAL");
+    }
+
+    Ok(())
+}
+
+/// Catch up index store by replaying WAL log entries.
+fn catch_up_indexes<D: Domain>(
+    domain: &D,
+    state_cursor: &ChainPoint,
+) -> Result<(), DomainError> {
+    let index_cursor = domain.indexes().cursor()?;
+
+    if index_cursor.as_ref() == Some(state_cursor) {
+        return Ok(());
+    }
+
+    let index_slot = index_cursor.as_ref().map(|p| p.slot());
+
+    // Find the WAL start point from the index cursor
+    let start = match index_slot {
+        Some(slot) => domain.wal().locate_point(slot)?,
+        None => None,
+    };
+
+    let logs = domain
+        .wal()
+        .iter_logs(start, Some(state_cursor.clone()))?;
+
+    let writer = domain.indexes().start_writer()?;
+    let mut count = 0u64;
+
+    for (point, log) in logs {
+        // Skip entries at or before the current index cursor
+        if Some(point.slot()) <= index_slot {
+            continue;
+        }
+
+        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point)?;
+
+        writer.apply(&catchup.index_delta)?;
+        count += 1;
+    }
+
+    if count > 0 {
+        writer.commit()?;
+        info!(count, "indexes caught up from WAL");
     }
 
     Ok(())
