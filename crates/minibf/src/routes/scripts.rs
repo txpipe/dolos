@@ -9,7 +9,10 @@ use blockfrost_openapi::models::{
     script_datum_cbor::ScriptDatumCbor,
     script_json::ScriptJson,
 };
-use dolos_cardano::{indexes::{AsyncCardanoQueryExt, ScriptLanguage}, CardanoError};
+use dolos_cardano::{
+    indexes::{AsyncCardanoQueryExt, ScriptLanguage},
+    CardanoError,
+};
 use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;

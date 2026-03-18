@@ -642,7 +642,8 @@ mod tests {
 
         // 4. Verify the tx is in the mempool as pending
         let tx_hash_bytes = hex::decode(&response.hash).unwrap();
-        let tx_hash: pallas::crypto::hash::Hash<32> = tx_hash_bytes.as_slice().into();
+        let tx_hash =
+            dolos_core::hash::Hash::<32>::new(tx_hash_bytes.as_slice().try_into().unwrap());
         let status = MempoolStore::check_status(context.domain.mempool(), &tx_hash);
         assert_eq!(status.stage, MempoolTxStage::Pending);
     }

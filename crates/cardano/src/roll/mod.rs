@@ -534,7 +534,9 @@ impl<'a> DeltaBuilder<'a> {
 }
 
 #[instrument(name = "roll", skip_all)]
-pub fn compute_delta<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+pub fn compute_delta<
+    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+>(
     genesis: Arc<crate::CardanoGenesis>,
     cache: &Cache,
     state: &D::State,

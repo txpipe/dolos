@@ -53,7 +53,11 @@ fn raw_to_blockref<C: LedgerContext>(
 
 fn point_to_blockref(point: &ChainPoint, timestamp: u64) -> u5c::sync::BlockRef {
     BlockRef {
-        hash: point.hash().map(|h| h.as_slice().to_vec()).unwrap_or_default().into(),
+        hash: point
+            .hash()
+            .map(|h| h.as_slice().to_vec())
+            .unwrap_or_default()
+            .into(),
         slot: point.slot(),
         timestamp,
         ..Default::default()

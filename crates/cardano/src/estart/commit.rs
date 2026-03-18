@@ -109,7 +109,9 @@ impl super::WorkContext {
     }
 
     #[instrument(skip_all)]
-    pub fn commit<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+    pub fn commit<
+        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+    >(
         &mut self,
         state: &D::State,
         archive: &D::Archive,

@@ -273,7 +273,7 @@ pub fn build_synthetic_blocks(
             tx_bodies.push(sample_transaction_body(
                 Bytes::from(output_address),
                 cfg.lovelace,
-                seed_tx_hash,
+                dolos_cardano::core_hash_to_pallas(seed_tx_hash),
                 policy_id,
                 asset_name.clone(),
                 cfg.asset_amount,
@@ -363,18 +363,23 @@ pub fn build_synthetic_blocks(
     (raw_blocks, vectors, chain_config)
 }
 
-pub fn seed_reward_logs<D: Domain>(
+pub fn seed_reward_logs<D>(
     domain: &D,
     stake_address: &str,
     pool_id: &str,
     epochs: &[u64],
-) -> Result<(), ChainError> {
-    let address = Address::from_bech32(stake_address)?;
-    let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
-        .ok_or(ChainError::InvalidPoolParams)?;
+) -> Result<(), ChainError<dolos_cardano::CardanoError>>
+where
+    D: Domain<ChainSpecificError = dolos_cardano::CardanoError>,
+{
+    let address = Address::from_bech32(stake_address)
+        .map_err(|_| ChainError::ChainSpecific(dolos_cardano::CardanoError::InvalidPoolParams))?;
+    let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address).ok_or(
+        ChainError::ChainSpecific(dolos_cardano::CardanoError::InvalidPoolParams),
+    )?;
     let entity_key = credential_to_key(&stake_cred);
-    let pool_keyhash =
-        pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
+    let pool_keyhash = pool_keyhash_from_bech32(pool_id)
+        .map_err(|_| ChainError::ChainSpecific(dolos_cardano::CardanoError::InvalidPoolParams))?;
 
     let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
     let writer = domain.archive().start_writer()?;
@@ -395,7 +400,13 @@ pub fn seed_reward_logs<D: Domain>(
     Ok(())
 }
 
-pub fn seed_epoch_logs<D: Domain>(domain: &D, epochs: &[u64]) -> Result<(), ChainError> {
+pub fn seed_epoch_logs<D>(
+    domain: &D,
+    epochs: &[u64],
+) -> Result<(), ChainError<dolos_cardano::CardanoError>>
+where
+    D: Domain<ChainSpecificError = dolos_cardano::CardanoError>,
+{
     let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
     let base = dolos_cardano::load_epoch::<D>(domain.state())?;
 
@@ -627,7 +638,7 @@ fn build_submit_tx_cbor(
     signing_key: &SecretKeyExtended,
 ) -> Vec<u8> {
     let input = TransactionInput {
-        transaction_id: input.0,
+        transaction_id: dolos_cardano::core_hash_to_pallas(input.0),
         index: input.1.into(),
     };
 

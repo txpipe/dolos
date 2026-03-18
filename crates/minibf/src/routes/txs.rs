@@ -79,7 +79,11 @@ pub async fn by_hash_utxos<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContentUtxo>, StatusCode>
 where
-    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -114,7 +118,9 @@ where
     builder = builder.with_consumed_deps(consumed_deps);
 
     let deps = builder.required_deps()?;
-    let deps = domain.get_tx_batch(deps.into_iter().map(core_hash_to_pallas)).await?;
+    let deps = domain
+        .get_tx_batch(deps.into_iter().map(core_hash_to_pallas))
+        .await?;
 
     for (key, cbor) in deps.iter() {
         if let Some(cbor) = cbor {
@@ -175,7 +181,9 @@ where
         .with_historical_pparams::<D>(&domain)?;
 
     let deps = builder.required_deps()?;
-    let deps = domain.get_tx_batch(deps.into_iter().map(core_hash_to_pallas)).await?;
+    let deps = domain
+        .get_tx_batch(deps.into_iter().map(core_hash_to_pallas))
+        .await?;
 
     for (key, cbor) in deps.iter() {
         if let Some(cbor) = cbor {

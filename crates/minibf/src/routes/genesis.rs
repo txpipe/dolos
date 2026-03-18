@@ -59,9 +59,7 @@ pub async fn naked<D: Domain<Genesis = CardanoGenesis>>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<GenesisContent>, StatusCode> {
     let genesis = domain.genesis();
-    let model = GenesisModelBuilder {
-        genesis: &genesis,
-    };
+    let model = GenesisModelBuilder { genesis: &genesis };
 
     model.into_response()
 }

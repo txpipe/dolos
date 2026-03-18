@@ -187,7 +187,9 @@ impl ChainSummary {
     }
 }
 
-pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, ChainError<D::ChainSpecificError>> {
+pub fn load_era_summary<D: Domain>(
+    state: &D::State,
+) -> Result<ChainSummary, ChainError<D::ChainSpecificError>> {
     let eras = state.iter_entities_typed(EraSummary::NS, None)?;
 
     let mut chain = ChainSummary::default();
@@ -201,7 +203,9 @@ pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, Cha
     Ok(chain)
 }
 
-pub fn load_chain_summary_from_state(state: &impl StateStore) -> Result<ChainSummary, ChainError<crate::CardanoError>> {
+pub fn load_chain_summary_from_state(
+    state: &impl StateStore,
+) -> Result<ChainSummary, ChainError<crate::CardanoError>> {
     let eras = state.iter_entities_typed(EraSummary::NS, None)?;
 
     let mut chain = ChainSummary::default();

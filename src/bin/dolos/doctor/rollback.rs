@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
+use dolos_cardano::pallas_hash_to_core;
 use dolos_core::sync::SyncExt as _;
 use miette::IntoDiagnostic as _;
-use dolos_cardano::pallas_hash_to_core;
 use pallas::crypto::hash::Hash;
 
 use dolos_core::{config::RootConfig, ChainPoint};

@@ -349,7 +349,10 @@ macro_rules! entity_boilerplate {
         impl dolos_core::Entity for $type {
             type ChainSpecificError = crate::CardanoError;
 
-            fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError<crate::CardanoError>> {
+            fn decode_entity(
+                ns: Namespace,
+                value: &EntityValue,
+            ) -> Result<Self, ChainError<crate::CardanoError>> {
                 assert_eq!(ns, $type::NS);
                 let value = pallas::codec::minicbor::decode(value)
                     .map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Cbor(e)))?;
@@ -1945,7 +1948,10 @@ variant_boilerplate!(PendingMirState);
 impl dolos_core::Entity for CardanoEntity {
     type ChainSpecificError = crate::CardanoError;
 
-    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError<crate::CardanoError>> {
+    fn decode_entity(
+        ns: Namespace,
+        value: &EntityValue,
+    ) -> Result<Self, ChainError<crate::CardanoError>> {
         match ns {
             EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),

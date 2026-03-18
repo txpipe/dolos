@@ -90,7 +90,7 @@ fn append_dir_filtered(
 }
 
 fn prepare_archive(
-    archive: &mut dolos_redb3::archive::ArchiveStore,
+    archive: &mut dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError>,
     pb: &crate::feedback::ProgressBar,
 ) -> miette::Result<()> {
     let db = archive.db_mut();

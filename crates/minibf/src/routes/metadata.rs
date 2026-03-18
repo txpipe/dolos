@@ -7,7 +7,10 @@ use blockfrost_openapi::models::{
     tx_metadata_label_cbor_inner::TxMetadataLabelCborInner,
     tx_metadata_label_json_inner::TxMetadataLabelJsonInner,
 };
-use dolos_cardano::{indexes::{AsyncCardanoQueryExt, SlotOrder}, CardanoError};
+use dolos_cardano::{
+    indexes::{AsyncCardanoQueryExt, SlotOrder},
+    CardanoError,
+};
 use dolos_core::Domain;
 use futures_util::StreamExt;
 use pallas::{

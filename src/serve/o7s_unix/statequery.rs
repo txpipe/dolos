@@ -45,7 +45,10 @@ impl<D: Domain<Genesis = CardanoGenesis>> Session<D> {
                 let block =
                     MultiEraBlock::decode(&body).map_err(|e| Error::server(e.to_string()))?;
 
-                Ok(ChainPoint::Specific(slot, pallas_hash_to_core(block.hash())))
+                Ok(ChainPoint::Specific(
+                    slot,
+                    pallas_hash_to_core(block.hash()),
+                ))
             }
             _ => Ok(point),
         }

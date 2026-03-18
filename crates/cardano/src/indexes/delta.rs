@@ -308,8 +308,7 @@ pub fn index_delta_from_utxo_delta(cursor: ChainPoint, utxo_delta: &UtxoSetDelta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_core::ChainPoint;
-    use pallas::crypto::hash::Hash;
+    use dolos_core::{hash::Hash, ChainPoint};
     use pallas::ledger::addresses::{
         Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
     };

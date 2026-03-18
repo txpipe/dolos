@@ -206,7 +206,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
+    fn flush(
+        &mut self,
+        ctx: &mut super::BoundaryWork,
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
         }

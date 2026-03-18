@@ -204,7 +204,9 @@ impl gasket::framework::Worker<Stage> for Worker {
                     .iter()
                     .filter_map(|x| {
                         let arr: [u8; 32] = x.1.as_slice().try_into().ok()?;
-                        stage.mempool.find_inflight(&dolos_core::hash::Hash::new(arr))
+                        stage
+                            .mempool
+                            .find_inflight(&dolos_core::hash::Hash::new(arr))
                     })
                     .collect_vec();
 

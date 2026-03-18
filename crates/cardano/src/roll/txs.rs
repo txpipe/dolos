@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use dolos_core::{ChainError,  TxOrder, TxoRef};
+use dolos_core::{ChainError, TxOrder, TxoRef};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{

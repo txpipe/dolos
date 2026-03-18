@@ -1,7 +1,10 @@
 use axum::http::StatusCode;
 use blockfrost_openapi::models::tx_content_utxo::TxContentUtxo;
 use blockfrost_openapi::models::{block_content::BlockContent, tx_content::TxContent};
-use dolos_cardano::{indexes::AsyncCardanoQueryExt, pallas_hash_to_core, core_hash_to_pallas, CardanoError, CardanoGenesis};
+use dolos_cardano::{
+    core_hash_to_pallas, indexes::AsyncCardanoQueryExt, pallas_hash_to_core, CardanoError,
+    CardanoGenesis,
+};
 use dolos_core::{ArchiveStore as _, Domain};
 use pallas::crypto::hash::Hash;
 use pallas::ledger::{
@@ -57,7 +60,9 @@ struct GenesisTxModel<'a> {
     consumed_by: Option<Hash<32>>,
 }
 
-pub fn genesis_hash_for_domain<D: Domain<Genesis = CardanoGenesis>>(domain: &Facade<D>) -> Option<&'static str> {
+pub fn genesis_hash_for_domain<D: Domain<Genesis = CardanoGenesis>>(
+    domain: &Facade<D>,
+) -> Option<&'static str> {
     match domain.genesis().shelley.network_magic {
         Some(1) => Some(GENESIS_HASH_PREPROD),
         Some(2) => Some(GENESIS_HASH_PREVIEW),
@@ -182,7 +187,11 @@ impl<'a> IntoModel<TxContentUtxo> for GenesisTxModel<'a> {
 
     fn into_model(self) -> Result<TxContentUtxo, StatusCode> {
         let output = self.output.as_output();
-        let builder = UtxoOutputModelBuilder::from_output(pallas_hash_to_core(self.output.tx_hash), 0, output);
+        let builder = UtxoOutputModelBuilder::from_output(
+            pallas_hash_to_core(self.output.tx_hash),
+            0,
+            output,
+        );
         let builder = if let Some(consumed_by) = self.consumed_by {
             builder.with_consumed_by(pallas_hash_to_core(consumed_by))
         } else {
@@ -218,7 +227,11 @@ pub async fn genesis_tx_utxos_for_hash<D>(
     hash: &[u8],
 ) -> Result<TxContentUtxo, StatusCode>
 where
-    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     let Some(block_meta) = genesis_block_metadata_for_domain(domain) else {
         return Err(StatusCode::NOT_FOUND);
@@ -272,7 +285,9 @@ pub fn genesis_block_for_domain<D: Domain<Genesis = CardanoGenesis>>(
     }
 }
 
-pub fn genesis_block_preview<D: Domain<Genesis = CardanoGenesis>>(domain: &Facade<D>) -> Result<BlockContent, StatusCode> {
+pub fn genesis_block_preview<D: Domain<Genesis = CardanoGenesis>>(
+    domain: &Facade<D>,
+) -> Result<BlockContent, StatusCode> {
     let confirmations = MultiEraBlock::decode(
         &domain
             .archive()
@@ -315,7 +330,9 @@ pub fn genesis_block_preview<D: Domain<Genesis = CardanoGenesis>>(domain: &Facad
     })
 }
 
-pub fn genesis_block_preprod<D: Domain<Genesis = CardanoGenesis>>(domain: &Facade<D>) -> Result<BlockContent, StatusCode> {
+pub fn genesis_block_preprod<D: Domain<Genesis = CardanoGenesis>>(
+    domain: &Facade<D>,
+) -> Result<BlockContent, StatusCode> {
     let confirmations = MultiEraBlock::decode(
         &domain
             .archive()
@@ -358,7 +375,9 @@ pub fn genesis_block_preprod<D: Domain<Genesis = CardanoGenesis>>(domain: &Facad
     })
 }
 
-pub fn genesis_block_mainnet<D: Domain<Genesis = CardanoGenesis>>(domain: &Facade<D>) -> Result<BlockContent, StatusCode> {
+pub fn genesis_block_mainnet<D: Domain<Genesis = CardanoGenesis>>(
+    domain: &Facade<D>,
+) -> Result<BlockContent, StatusCode> {
     let confirmations = MultiEraBlock::decode(
         &domain
             .archive()
@@ -401,7 +420,10 @@ pub fn genesis_block_mainnet<D: Domain<Genesis = CardanoGenesis>>(domain: &Facad
     })
 }
 
-pub fn maybe_set_genesis_previous_block<D: Domain<Genesis = CardanoGenesis>>(domain: &Facade<D>, block: &mut BlockContent) {
+pub fn maybe_set_genesis_previous_block<D: Domain<Genesis = CardanoGenesis>>(
+    domain: &Facade<D>,
+    block: &mut BlockContent,
+) {
     if block.height.is_some_and(|x| x > 1) {
         return;
     }

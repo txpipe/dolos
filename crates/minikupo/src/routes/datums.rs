@@ -10,7 +10,9 @@ use pallas::crypto::hash::Hash;
 
 use crate::{bad_request, Facade};
 
-pub async fn by_hash<D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static>(
+pub async fn by_hash<
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
+>(
     State(facade): State<Facade<D>>,
     Path(datum_hash): Path<String>,
 ) -> Response {

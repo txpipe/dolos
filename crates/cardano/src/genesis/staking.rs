@@ -111,7 +111,12 @@ fn parse_delegation(account: &str, pool: &str, genesis: &crate::CardanoGenesis) 
     }
 }
 
-pub fn bootstrap<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(state: &D::State, genesis: &crate::CardanoGenesis) -> Result<(), ChainError<crate::CardanoError>> {
+pub fn bootstrap<
+    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+>(
+    state: &D::State,
+    genesis: &crate::CardanoGenesis,
+) -> Result<(), ChainError<crate::CardanoError>> {
     let writer = state.start_writer()?;
 
     let Some(staking) = &genesis.shelley.staking else {

@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, ChainError,  NsKey, TxOrder};
+use dolos_core::{BlockSlot, ChainError, NsKey, TxOrder};
 
 use super::WorkDeltas;
 use pallas::codec::minicbor;
@@ -533,7 +533,8 @@ impl BlockVisitor for AccountVisitor {
         account: &[u8],
         amount: u64,
     ) -> Result<(), ChainError<crate::CardanoError>> {
-        let address = Address::from_bytes(account).map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Address(e)))?;
+        let address = Address::from_bytes(account)
+            .map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Address(e)))?;
 
         let Some((cred, _)) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());

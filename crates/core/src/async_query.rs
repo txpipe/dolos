@@ -130,9 +130,10 @@ where
             return Ok(None);
         };
 
-        D::Chain::find_tx_in_block(&raw, &tx_hash)
-            .map_err(|err| DomainError::ChainError(ChainError::ChainSpecific(err)))
-            .map(|maybe_ix| maybe_ix.map(|(era_cbor, ix)| (era_cbor.cbor().to_vec(), ix)))
+        let result = D::Chain::find_tx_in_block(&raw, &tx_hash)
+            .map_err(|err| DomainError::ChainError(ChainError::ChainSpecific(err)))?;
+
+        Ok(result.map(|(_, ix)| (raw, ix)))
     }
 
     pub async fn tx_cbor(

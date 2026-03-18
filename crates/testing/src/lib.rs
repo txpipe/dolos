@@ -217,7 +217,7 @@ pub fn genesis_tx_hash() -> Hash<32> {
 pub fn slot_to_hash(slot: u64) -> BlockHash {
     let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
     hasher.input(&(slot as i32).to_le_bytes());
-    hasher.finalize()
+    dolos_cardano::pallas_hash_to_core(hasher.finalize())
 }
 
 pub fn slot_to_chainpoint(slot: u64) -> ChainPoint {
@@ -227,7 +227,7 @@ pub fn slot_to_chainpoint(slot: u64) -> ChainPoint {
 pub fn tx_sequence_to_hash(sequence: u64) -> TxHash {
     let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
     hasher.input(&sequence.to_le_bytes());
-    hasher.finalize()
+    dolos_cardano::pallas_hash_to_core(hasher.finalize())
 }
 
 pub fn fake_genesis_utxo(
@@ -236,7 +236,7 @@ pub fn fake_genesis_utxo(
     amount: u64,
 ) -> (TxoRef, EraCbor) {
     let tx_hash = genesis_tx_hash();
-    let txoref = TxoRef(tx_hash, ordinal as u32);
+    let txoref = TxoRef(dolos_cardano::pallas_hash_to_core(tx_hash), ordinal as u32);
     (txoref, utxo_with_value(address, Value::Coin(amount)))
 }
 

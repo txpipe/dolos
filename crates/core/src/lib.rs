@@ -737,11 +737,12 @@ pub trait Driver<D: Domain, C: CancelToken>: Send + Sync + 'static {
 mod tests {
     use super::*;
 
-    //pub fn slot_to_hash(slot: u64) -> BlockHash {
-    //    let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-    //    hasher.input(&(slot as i32).to_le_bytes());
-    //    hasher.finalize()
-    //}
+    pub fn slot_to_hash(slot: u64) -> BlockHash {
+        let mut bytes = [0u8; 32];
+        let slot_bytes = (slot as i32).to_le_bytes();
+        bytes[..4].copy_from_slice(&slot_bytes);
+        BlockHash::new(bytes)
+    }
 
     #[test]
     fn chainpoint_partial_eq() {

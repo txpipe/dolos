@@ -138,7 +138,7 @@ mod tests {
     use dolos_testing::*;
     use pallas::ledger::{
         addresses::{Address, ShelleyDelegationPart},
-        traverse::MultiEraOutput,
+        traverse::{Era as PallasEra, MultiEraOutput},
     };
 
     use crate::state::StateStore;
@@ -179,33 +179,41 @@ mod tests {
 
         // Handle forward operations: produced_utxo -> add to index, consumed_utxo -> remove from index
         for (txo_ref, era_cbor) in utxo_delta.produced_utxo.iter() {
-            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
-                let tags = extract_utxo_tags(&output);
-                produced.push((txo_ref.clone(), tags));
+            if let Ok(pallas_era) = PallasEra::try_from(era_cbor.0) {
+                if let Ok(output) = MultiEraOutput::decode(pallas_era, &era_cbor.1) {
+                    let tags = extract_utxo_tags(&output);
+                    produced.push((txo_ref.clone(), tags));
+                }
             }
         }
 
         for (txo_ref, era_cbor) in utxo_delta.consumed_utxo.iter() {
-            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
-                let tags = extract_utxo_tags(&output);
-                consumed.push((txo_ref.clone(), tags));
+            if let Ok(pallas_era) = PallasEra::try_from(era_cbor.0) {
+                if let Ok(output) = MultiEraOutput::decode(pallas_era, &era_cbor.1) {
+                    let tags = extract_utxo_tags(&output);
+                    consumed.push((txo_ref.clone(), tags));
+                }
             }
         }
 
         // Handle rollback operations: recovered_stxi -> restore to index (add), undone_utxo -> remove from index
         // recovered_stxi: UTxOs that were previously consumed, now being restored
         for (txo_ref, era_cbor) in utxo_delta.recovered_stxi.iter() {
-            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
-                let tags = extract_utxo_tags(&output);
-                produced.push((txo_ref.clone(), tags));
+            if let Ok(pallas_era) = PallasEra::try_from(era_cbor.0) {
+                if let Ok(output) = MultiEraOutput::decode(pallas_era, &era_cbor.1) {
+                    let tags = extract_utxo_tags(&output);
+                    produced.push((txo_ref.clone(), tags));
+                }
             }
         }
 
         // undone_utxo: UTxOs that were previously produced, now being removed
         for (txo_ref, era_cbor) in utxo_delta.undone_utxo.iter() {
-            if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
-                let tags = extract_utxo_tags(&output);
-                consumed.push((txo_ref.clone(), tags));
+            if let Ok(pallas_era) = PallasEra::try_from(era_cbor.0) {
+                if let Ok(output) = MultiEraOutput::decode(pallas_era, &era_cbor.1) {
+                    let tags = extract_utxo_tags(&output);
+                    consumed.push((txo_ref.clone(), tags));
+                }
             }
         }
 

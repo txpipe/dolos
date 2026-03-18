@@ -249,7 +249,9 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     }
 }
 
-fn compute_network_sync<D: Domain<Genesis = CardanoGenesis>>(domain: Facade<D>) -> Result<Network, StatusCode>
+fn compute_network_sync<D: Domain<Genesis = CardanoGenesis>>(
+    domain: Facade<D>,
+) -> Result<Network, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
 {

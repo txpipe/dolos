@@ -26,7 +26,10 @@ fn get_utxo_amount(genesis: &crate::CardanoGenesis) -> Lovelace {
     byron_utxo + shelley_utxo
 }
 
-fn bootstrap_pots(pparams: &PParamsSet, genesis: &crate::CardanoGenesis) -> Result<Pots, ChainError<crate::CardanoError>> {
+fn bootstrap_pots(
+    pparams: &PParamsSet,
+    genesis: &crate::CardanoGenesis,
+) -> Result<Pots, ChainError<crate::CardanoError>> {
     let utxos = get_utxo_amount(genesis);
 
     let max_supply = genesis
@@ -47,7 +50,9 @@ fn bootstrap_pots(pparams: &PParamsSet, genesis: &crate::CardanoGenesis) -> Resu
     })
 }
 
-pub fn bootstrap_epoch<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+pub fn bootstrap_epoch<
+    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+>(
     state: &D::State,
     genesis: &crate::CardanoGenesis,
 ) -> Result<EpochState, ChainError<crate::CardanoError>> {
@@ -88,7 +93,12 @@ pub fn bootstrap_epoch<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError
     Ok(epoch)
 }
 
-pub fn bootstrap_eras<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(state: &D::State, epoch: &EpochState) -> Result<(), ChainError<crate::CardanoError>> {
+pub fn bootstrap_eras<
+    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+>(
+    state: &D::State,
+    epoch: &EpochState,
+) -> Result<(), ChainError<crate::CardanoError>> {
     let pparams = epoch.pparams.unwrap_live();
 
     let system_start = pparams.ensure_system_start()?;
@@ -117,7 +127,9 @@ pub fn bootstrap_eras<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError 
     Ok(())
 }
 
-pub fn bootstrap_utxos<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+pub fn bootstrap_utxos<
+    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+>(
     state: &D::State,
     indexes: &D::Indexes,
     genesis: &crate::CardanoGenesis,

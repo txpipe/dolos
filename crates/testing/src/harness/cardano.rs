@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use dolos_cardano::{CardanoDelta, CardanoLogic, CardanoWorkUnit};
+use dolos_cardano::{CardanoDelta, CardanoGenesis, CardanoLogic, CardanoWorkUnit};
 use dolos_core::{
     config::{CardanoConfig, FjallStateConfig, StorageConfig, SyncConfig},
-    BootstrapExt, ChainLogic, Domain, DomainError, Genesis, MempoolError, MempoolEvent,
-    MempoolStore, MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
+    BootstrapExt, ChainLogic, Domain, DomainError, MempoolError, MempoolEvent, MempoolStore,
+    MempoolTx, MempoolTxStage, StateStore as CoreStateStore, TipEvent,
     TipSubscription as CoreTipSubscription, *,
 };
 
@@ -19,7 +19,7 @@ pub struct Config {
     /// Path to Mithril immutable DB directory.
     pub immutable_dir: PathBuf,
     /// Pre-loaded genesis data.
-    pub genesis: Genesis,
+    pub genesis: CardanoGenesis,
     /// Cardano chain config (stop_epoch, custom_utxos, etc).
     pub chain: CardanoConfig,
     /// Fjall state store configuration.
@@ -130,25 +130,27 @@ pub struct HarnessDomain {
     wal: dolos_redb3::wal::RedbWalStore<CardanoDelta>,
     chain: Arc<RwLock<CardanoLogic>>,
     state: dolos_fjall::StateStore,
-    archive: dolos_core::builtin::NoOpArchiveStore,
+    archive: dolos_core::builtin::NoOpArchiveStore<dolos_cardano::CardanoError>,
     indexes: dolos_core::builtin::NoOpIndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     sync_config: SyncConfig,
-    genesis: Arc<Genesis>,
+    genesis: Arc<CardanoGenesis>,
 }
 
 impl Domain for HarnessDomain {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = CardanoDelta;
     type Wal = dolos_redb3::wal::RedbWalStore<CardanoDelta>;
-    type Archive = dolos_core::builtin::NoOpArchiveStore;
+    type Archive = dolos_core::builtin::NoOpArchiveStore<dolos_cardano::CardanoError>;
     type State = dolos_fjall::StateStore;
     type Chain = CardanoLogic;
     type WorkUnit = CardanoWorkUnit;
     type TipSubscription = StubTipSubscription;
     type Indexes = dolos_core::builtin::NoOpIndexStore;
     type Mempool = Mempool;
+    type Genesis = CardanoGenesis;
+    type ChainSpecificError = dolos_cardano::CardanoError;
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
@@ -158,7 +160,7 @@ impl Domain for HarnessDomain {
         &self.sync_config
     }
 
-    fn genesis(&self) -> Arc<Genesis> {
+    fn genesis(&self) -> Arc<Self::Genesis> {
         self.genesis.clone()
     }
 
@@ -190,7 +192,10 @@ impl Domain for HarnessDomain {
         &self.mempool
     }
 
-    fn watch_tip(&self, _from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
+    fn watch_tip(
+        &self,
+        _from: Option<ChainPoint>,
+    ) -> Result<Self::TipSubscription, DomainError<dolos_cardano::CardanoError>> {
         Ok(StubTipSubscription)
     }
 
@@ -215,14 +220,18 @@ impl LedgerHarness {
 
         // 3. Initialize chain logic
         let genesis = Arc::new(config.genesis);
-        let chain = CardanoLogic::initialize::<HarnessDomain>(config.chain, &state, &genesis)?;
+        let chain = CardanoLogic::initialize::<HarnessDomain>(
+            config.chain,
+            &state,
+            genesis.as_ref().clone(),
+        )?;
 
         // 4. Assemble domain
         let domain = HarnessDomain {
             wal: dolos_redb3::wal::RedbWalStore::memory()?,
             chain: Arc::new(RwLock::new(chain)),
             state,
-            archive: dolos_core::builtin::NoOpArchiveStore,
+            archive: dolos_core::builtin::NoOpArchiveStore::default(),
             indexes: dolos_core::builtin::NoOpIndexStore,
             mempool: Mempool {},
             storage_config: StorageConfig::default(),
@@ -255,7 +264,13 @@ impl LedgerHarness {
             .domain
             .state
             .read_cursor()?
-            .map(|c| c.try_into().unwrap())
+            .and_then(|c| match c {
+                dolos_core::ChainPoint::Origin => Some(Point::Origin),
+                dolos_core::ChainPoint::Specific(slot, hash) => {
+                    Some(Point::Specific(slot, hash.as_slice().to_vec()))
+                }
+                dolos_core::ChainPoint::Slot(_) => None,
+            })
             .unwrap_or(Point::Origin);
 
         let mut iter = pallas::storage::hardano::immutable::read_blocks_from_point(

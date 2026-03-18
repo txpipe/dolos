@@ -1,4 +1,3 @@
-
 use pallas::crypto::hash::Hasher;
 use std::path::Path;
 

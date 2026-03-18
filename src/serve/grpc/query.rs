@@ -15,7 +15,11 @@ use dolos_cardano::indexes::AsyncCardanoQueryExt;
 pub fn point_to_u5c<T: LedgerContext>(_ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     u5c::query::ChainPoint {
         slot: point.slot(),
-        hash: point.hash().map(|h| h.as_slice().to_vec()).unwrap_or_default().into(),
+        hash: point
+            .hash()
+            .map(|h| h.as_slice().to_vec())
+            .unwrap_or_default()
+            .into(),
         ..Default::default()
     }
 }

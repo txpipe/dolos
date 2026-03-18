@@ -30,7 +30,11 @@ fn map_cost_models(original: CostModels) -> HashMap<u8, tx3_cardano::CostModel> 
     HashMap::from_iter(present)
 }
 
-fn build_pparams<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>>(domain: &D) -> Result<tx3_cardano::PParams, Error> {
+fn build_pparams<
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>,
+>(
+    domain: &D,
+) -> Result<tx3_cardano::PParams, Error> {
     let network = network_id_from_genesis(domain.genesis().as_ref()).unwrap();
 
     let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
@@ -48,7 +52,11 @@ fn build_pparams<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_
     Ok(out)
 }
 
-pub fn find_cursor<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>>(domain: &D) -> Result<tx3_cardano::ChainPoint, Error> {
+pub fn find_cursor<
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>,
+>(
+    domain: &D,
+) -> Result<tx3_cardano::ChainPoint, Error> {
     let cursor = domain
         .state()
         .read_cursor()
@@ -59,12 +67,17 @@ pub fn find_cursor<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolo
 
     Ok(tx3_cardano::ChainPoint {
         slot: cursor.slot(),
-        hash: cursor.hash().map(|h| h.as_slice().to_vec()).unwrap_or_default(),
+        hash: cursor
+            .hash()
+            .map(|h| h.as_slice().to_vec())
+            .unwrap_or_default(),
         timestamp: era.slot_time(cursor.slot()) as u128,
     })
 }
 
-pub fn load_compiler<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>>(
+pub fn load_compiler<
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>,
+>(
     domain: &D,
     config: &TrpConfig,
 ) -> Result<tx3_cardano::Compiler, Error> {

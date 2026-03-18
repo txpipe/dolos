@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_core::{ArchiveWriter, BlockSlot, ChainPoint, StateSchema};
+use dolos_core::{hash::Hash as CoreHash, ArchiveWriter, BlockSlot, ChainPoint, StateSchema};
 
 use super::ArchiveStore;
 
@@ -11,7 +11,7 @@ fn test_store() -> ArchiveStore {
 
 /// Create a fake ChainPoint with the given slot.
 fn point(slot: u64) -> ChainPoint {
-    ChainPoint::Specific(slot, pallas::crypto::hash::Hash::new([0u8; 32]))
+    ChainPoint::Specific(slot, CoreHash::new([0u8; 32]))
 }
 
 /// Create fake block data for a given slot.
@@ -236,7 +236,8 @@ fn test_truncate_front() {
 
 #[test]
 fn test_in_memory_store() {
-    let store = ArchiveStore::in_memory(StateSchema::default()).unwrap();
+    let store =
+        ArchiveStore::<std::convert::Infallible>::in_memory(StateSchema::default()).unwrap();
 
     let writer = store.start_writer().unwrap();
     writer.apply(&point(42), &Arc::new(fake_block(42))).unwrap();

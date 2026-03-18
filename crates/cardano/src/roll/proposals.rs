@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, ChainError,  NsKey};
+use dolos_core::{BlockSlot, ChainError, NsKey};
 use pallas::{
     codec::utils::Bytes,
     crypto::hash::Hash,
@@ -391,8 +391,9 @@ impl BlockVisitor for ProposalVisitor {
             GovAction::NewConstitution(..) => ProposalAction::Other,
         };
 
-        let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
-            .ok_or(ChainError::ChainSpecific(crate::CardanoError::InvalidProposalParams))?;
+        let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account).ok_or(
+            ChainError::ChainSpecific(crate::CardanoError::InvalidProposalParams),
+        )?;
 
         deltas.add_for_entity(NewProposal {
             slot: block.slot(),

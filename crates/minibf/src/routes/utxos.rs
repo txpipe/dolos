@@ -43,7 +43,11 @@ where
     let block_deps: HashMap<TxHash, UtxoBlockData> = join_all(tx_deps.iter().map(|tx| {
         let tx = *tx;
         async move {
-            match domain.query().block_by_tx_hash(tx.as_slice().to_vec()).await {
+            match domain
+                .query()
+                .block_by_tx_hash(tx.as_slice().to_vec())
+                .await
+            {
                 Ok(Some((cbor, txorder))) => {
                     let Ok(block) = MultiEraBlock::decode(&cbor) else {
                         return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));

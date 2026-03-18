@@ -193,7 +193,10 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError<crate::CardanoError>> {
+    fn flush(
+        &mut self,
+        ctx: &mut super::BoundaryWork,
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let mark_protocol = ctx
             .ending_state()
             .pparams

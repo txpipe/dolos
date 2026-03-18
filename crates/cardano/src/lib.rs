@@ -120,7 +120,12 @@ pub enum CardanoWorkUnit {
 
 impl<D> WorkUnit<D> for CardanoWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta, ChainSpecificError = CardanoError>,
+    D: Domain<
+        Chain = CardanoLogic,
+        Entity = CardanoEntity,
+        EntityDelta = CardanoDelta,
+        ChainSpecificError = CardanoError,
+    >,
 {
     fn name(&self) -> &'static str {
         match self {
@@ -328,8 +333,14 @@ impl dolos_core::ChainLogic for CardanoLogic {
     type Utxo = OwnedMultiEraOutput;
     type Delta = CardanoDelta;
     type Entity = CardanoEntity;
-    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError>> =
-        CardanoWorkUnit;
+    type WorkUnit<
+        D: Domain<
+            Chain = Self,
+            Entity = Self::Entity,
+            EntityDelta = Self::Delta,
+            ChainSpecificError = Self::ChainSpecificError,
+        >,
+    > = CardanoWorkUnit;
     type ChainSpecificError = CardanoError;
     type Genesis = CardanoGenesis;
 
@@ -397,7 +408,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn pop_work<D>(&mut self, domain: &D) -> Option<CardanoWorkUnit>
     where
-        D: Domain<Chain = Self, Entity = CardanoEntity, EntityDelta = CardanoDelta, ChainSpecificError = Self::ChainSpecificError, Genesis = Self::Genesis>,
+        D: Domain<
+            Chain = Self,
+            Entity = CardanoEntity,
+            EntityDelta = CardanoDelta,
+            ChainSpecificError = Self::ChainSpecificError,
+            Genesis = Self::Genesis,
+        >,
     {
         // Refresh cache if needed (after previous genesis or estart execution)
         if self.needs_cache_refresh {
@@ -574,14 +591,14 @@ pub fn load_epoch<D: Domain>(
 }
 
 #[cfg(test)]
-pub fn load_test_genesis(env: &str) -> GenesisCardanoCardano {
+pub fn load_test_genesis(env: &str) -> CardanoGenesis {
     use std::path::PathBuf;
 
     let test_data = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("test_data")
         .join(env);
 
-    GenesisCardanoCardano::from_file_paths(
+    CardanoGenesis::from_file_paths(
         test_data.join("genesis/byron.json"),
         test_data.join("genesis/shelley.json"),
         test_data.join("genesis/alonzo.json"),

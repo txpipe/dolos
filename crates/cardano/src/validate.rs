@@ -63,8 +63,8 @@ pub fn validate_tx<D: Domain<ChainSpecificError = CardanoError>>(
 
         let eracbor = eracbor.as_ref();
 
-        let output = crate::multi_era_output_from_era_cbor(eracbor)
-            .map_err(ChainError::ChainSpecific)?;
+        let output =
+            crate::multi_era_output_from_era_cbor(eracbor).map_err(ChainError::ChainSpecific)?;
 
         pallas_utxos.insert(input, output);
     }
@@ -147,9 +147,10 @@ pub fn evaluate_tx<D: Domain<ChainSpecificError = CardanoError>>(
         })
         .collect();
 
-    let report =
-        pallas::ledger::validate::phase2::evaluate_tx(&tx, &pparams, &utxos, &slot_config)
-            .map_err(|e| ChainError::ChainSpecific(CardanoError::Phase2EvaluationError(e.to_string())))?;
+    let report = pallas::ledger::validate::phase2::evaluate_tx(&tx, &pparams, &utxos, &slot_config)
+        .map_err(|e| {
+            ChainError::ChainSpecific(CardanoError::Phase2EvaluationError(e.to_string()))
+        })?;
 
     Ok(report)
 }

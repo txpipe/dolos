@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use dolos_core::{BlockHash, BlockSlot, ChainPoint, RawBlock};
+use dolos_cardano::pallas_hash_to_core;
+use dolos_core::{BlockSlot, ChainPoint, RawBlock};
 use pallas::{
     codec::utils::{Bytes, KeepRaw},
     crypto::hash::Hash,
@@ -15,7 +16,7 @@ use pallas::{
 };
 use std::collections::BTreeMap;
 
-pub fn slot_to_hash(slot: u64) -> BlockHash {
+pub fn slot_to_hash(slot: u64) -> pallas::crypto::hash::Hash<32> {
     let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
     hasher.input(&(slot as i32).to_le_bytes());
     hasher.finalize()
@@ -58,7 +59,7 @@ pub fn make_conway_block(slot: BlockSlot) -> (ChainPoint, RawBlock) {
     let wrapper = (Era::Conway as u16, block);
 
     let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
-    let chain_point = ChainPoint::Specific(slot, hash);
+    let chain_point = ChainPoint::Specific(slot, dolos_cardano::pallas_hash_to_core(hash));
 
     (chain_point, Arc::new(raw_bytes))
 }
@@ -123,7 +124,7 @@ pub fn make_conway_block_with_tx(
     let wrapper = (Era::Conway as u16, block);
 
     let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
-    let chain_point = ChainPoint::Specific(slot, hash);
+    let chain_point = ChainPoint::Specific(slot, pallas_hash_to_core(hash));
 
     (chain_point, Arc::new(raw_bytes))
 }

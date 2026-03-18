@@ -4,7 +4,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_cardano::{indexes::CardanoIndexExt, network_from_genesis, pallas_extras, pallas_hash_to_core, CardanoError, CardanoGenesis};
+use dolos_cardano::{
+    indexes::CardanoIndexExt, network_from_genesis, pallas_extras, pallas_hash_to_core,
+    CardanoError, CardanoGenesis,
+};
 use dolos_core::{Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet};
 use pallas::codec::minicbor;
 use pallas::ledger::{

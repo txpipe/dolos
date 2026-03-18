@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use dolos_core::{BrokenInvariant, ChainError,  NsKey, TxOrder, TxoRef};
+use dolos_core::{BrokenInvariant, ChainError, NsKey, TxOrder, TxoRef};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -138,11 +138,12 @@ fn compute_collateral_value(
     let mut total = 0;
 
     for input in tx.consumes() {
-        let utxo = utxos
-            .get(&crate::txo_ref_from_input(&input))
-            .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
-                crate::txo_ref_from_input(&input),
-            )))?;
+        let utxo =
+            utxos
+                .get(&crate::txo_ref_from_input(&input))
+                .ok_or(ChainError::BrokenInvariant(BrokenInvariant::MissingUtxo(
+                    crate::txo_ref_from_input(&input),
+                )))?;
         utxo.with_dependent(|_, utxo| {
             total += utxo.value().coin();
         });
@@ -224,7 +225,10 @@ impl BlockVisitor for EpochStateVisitor {
             self.nonces_delta = Some(NoncesUpdate {
                 slot: block.header().slot(),
                 tail: block.header().previous_hash(),
-                nonce_vrf_output: block.header().nonce_vrf_output().map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Traverse(e)))?,
+                nonce_vrf_output: block
+                    .header()
+                    .nonce_vrf_output()
+                    .map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Traverse(e)))?,
                 previous: None,
             });
         }

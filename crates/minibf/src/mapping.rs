@@ -54,8 +54,8 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    pallas_extras, pallas_hash_to_core, AccountState, ChainSummary, DRepState,
-    PParamsSet, PoolHash, PoolState,
+    pallas_extras, pallas_hash_to_core, AccountState, ChainSummary, DRepState, PParamsSet,
+    PoolHash, PoolState,
 };
 use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
@@ -945,7 +945,9 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .outputs()
             .into_iter()
             .enumerate()
-            .map(|(i, o)| UtxoOutputModelBuilder::from_output(pallas_hash_to_core(tx.hash()), i as u32, o))
+            .map(|(i, o)| {
+                UtxoOutputModelBuilder::from_output(pallas_hash_to_core(tx.hash()), i as u32, o)
+            })
             .map(|b| {
                 let builder = if let Some(consumed_by) = self.consumed_deps.get(&b.txo_ref()) {
                     b.with_consumed_by(*consumed_by)
@@ -961,7 +963,12 @@ impl<'a> IntoModel<TxContentUtxo> for TxModelBuilder<'a> {
             .into_iter()
             .enumerate()
             .map(|(i, o)| {
-                UtxoOutputModelBuilder::from_collateral(pallas_hash_to_core(tx.hash()), outputs.len(), i as u32, o)
+                UtxoOutputModelBuilder::from_collateral(
+                    pallas_hash_to_core(tx.hash()),
+                    outputs.len(),
+                    i as u32,
+                    o,
+                )
             })
             .map(|b| {
                 let builder = if let Some(consumed_by) = self.consumed_deps.get(&b.txo_ref()) {

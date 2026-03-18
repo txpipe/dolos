@@ -1017,11 +1017,11 @@ mod tests {
     }
 
     fn test_point() -> ChainPoint {
-        ChainPoint::Specific(12345, pallas::crypto::hash::Hash::new([0xAB; 32]))
+        ChainPoint::Specific(12345, dolos_core::hash::Hash::new([0xAB; 32]))
     }
 
     fn test_point_2() -> ChainPoint {
-        ChainPoint::Specific(12346, pallas::crypto::hash::Hash::new([0xCD; 32]))
+        ChainPoint::Specific(12346, dolos_core::hash::Hash::new([0xCD; 32]))
     }
 
     #[test]

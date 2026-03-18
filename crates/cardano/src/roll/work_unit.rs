@@ -45,7 +45,12 @@ impl RollWorkUnit {
 
 impl<D> WorkUnit<D> for RollWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, Entity = CardanoEntity, EntityDelta = CardanoDelta, ChainSpecificError = CardanoError>,
+    D: Domain<
+        Chain = CardanoLogic,
+        Entity = CardanoEntity,
+        EntityDelta = CardanoDelta,
+        ChainSpecificError = CardanoError,
+    >,
 {
     fn name(&self) -> &'static str {
         "roll"

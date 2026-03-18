@@ -22,7 +22,7 @@ pub enum TestFault {
 #[derive(Clone)]
 pub struct FaultyToyDomain {
     inner: ToyDomain,
-    genesis_override: Option<Arc<dolos_core::Genesis>>,
+    genesis_override: Option<Arc<dolos_cardano::CardanoGenesis>>,
     state: FaultyStateStore,
     archive: FaultyArchiveStore,
     indexes: FaultyIndexStore,
@@ -140,12 +140,15 @@ impl StateStore for FaultyStateStore {
 
 #[derive(Clone)]
 pub struct FaultyArchiveStore {
-    inner: dolos_redb3::archive::ArchiveStore,
+    inner: dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError>,
     fault: TestFault,
 }
 
 impl FaultyArchiveStore {
-    pub fn new(inner: dolos_redb3::archive::ArchiveStore, fault: TestFault) -> Self {
+    pub fn new(
+        inner: dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError>,
+        fault: TestFault,
+    ) -> Self {
         Self { inner, fault }
     }
 
@@ -153,29 +156,34 @@ impl FaultyArchiveStore {
         matches!(self.fault, TestFault::ArchiveStoreError)
     }
 
-    fn fault_err(&self) -> ArchiveError {
+    fn fault_err(&self) -> ArchiveError<dolos_cardano::CardanoError> {
         ArchiveError::InternalError("fault injection: archive store".into())
     }
 }
 
 impl ArchiveStore for FaultyArchiveStore {
-    type BlockIter<'a> = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::BlockIter<'a>;
-    type Writer = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::Writer;
-    type LogIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::LogIter;
-    type EntityValueIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::EntityValueIter;
+    type BlockIter<'a> =
+        <dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError> as ArchiveStore>::BlockIter<'a>;
+    type Writer =
+        <dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError> as ArchiveStore>::Writer;
+    type LogIter =
+        <dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError> as ArchiveStore>::LogIter;
+    type EntityValueIter =
+        <dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError> as ArchiveStore>::EntityValueIter;
+    type ChainSpecificError = dolos_cardano::CardanoError;
 
-    fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer().map_err(ArchiveError::from)
+        ArchiveStore::start_writer(&self.inner)
     }
 
     fn read_logs(
         &self,
         ns: Namespace,
         keys: &[&LogKey],
-    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError> {
+    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -186,59 +194,68 @@ impl ArchiveStore for FaultyArchiveStore {
         &self,
         ns: Namespace,
         range: std::ops::Range<LogKey>,
-    ) -> Result<Self::LogIter, ArchiveError> {
+    ) -> Result<Self::LogIter, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner.iter_logs(ns, range)
     }
 
-    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+    fn get_block_by_slot(
+        &self,
+        slot: &BlockSlot,
+    ) -> Result<Option<BlockBody>, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_block_by_slot(slot)
-            .map_err(ArchiveError::from)
+        ArchiveStore::get_block_by_slot(&self.inner, slot)
     }
 
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
-    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+    ) -> Result<Self::BlockIter<'a>, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_range(from, to).map_err(ArchiveError::from)
+        ArchiveStore::get_range(&self.inner, from, to)
     }
 
-    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
+    fn find_intersect(
+        &self,
+        intersect: &[ChainPoint],
+    ) -> Result<Option<ChainPoint>, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .find_intersect(intersect)
-            .map_err(ArchiveError::from)
+        ArchiveStore::find_intersect(&self.inner, intersect)
     }
 
-    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+    fn get_tip(
+        &self,
+    ) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_tip().map_err(ArchiveError::from)
+        ArchiveStore::get_tip(&self.inner)
     }
 
-    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+    fn prune_history(
+        &self,
+        max_slots: u64,
+        max_prune: Option<u64>,
+    ) -> Result<bool, ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .prune_history(max_slots, max_prune)
-            .map_err(ArchiveError::from)
+        ArchiveStore::prune_history(&self.inner, max_slots, max_prune)
     }
 
-    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
+    fn truncate_front(
+        &self,
+        after: &ChainPoint,
+    ) -> Result<(), ArchiveError<Self::ChainSpecificError>> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -461,6 +478,8 @@ impl Domain for FaultyToyDomain {
     type TipSubscription = TipSubscription;
     type Indexes = FaultyIndexStore;
     type Mempool = Mempool;
+    type ChainSpecificError = dolos_cardano::CardanoError;
+    type Genesis = dolos_cardano::CardanoGenesis;
 
     fn storage_config(&self) -> &dolos_core::config::StorageConfig {
         self.inner.storage_config()
@@ -470,7 +489,7 @@ impl Domain for FaultyToyDomain {
         self.inner.sync_config()
     }
 
-    fn genesis(&self) -> Arc<dolos_core::Genesis> {
+    fn genesis(&self) -> Arc<Self::Genesis> {
         self.genesis_override
             .as_ref()
             .cloned()
@@ -505,7 +524,10 @@ impl Domain for FaultyToyDomain {
         self.inner.mempool()
     }
 
-    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
+    fn watch_tip(
+        &self,
+        from: Option<ChainPoint>,
+    ) -> Result<Self::TipSubscription, DomainError<Self::ChainSpecificError>> {
         self.inner.watch_tip(from)
     }
 

@@ -51,7 +51,10 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, dolos_core::EntityKey::from(self.datum_hash.as_slice())))
+        NsKey::from((
+            DATUM_NS,
+            dolos_core::EntityKey::from(self.datum_hash.as_slice()),
+        ))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {
@@ -105,7 +108,10 @@ impl dolos_core::EntityDelta for DatumRefDecrement {
     type Entity = DatumState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((DATUM_NS, dolos_core::EntityKey::from(self.datum_hash.as_slice())))
+        NsKey::from((
+            DATUM_NS,
+            dolos_core::EntityKey::from(self.datum_hash.as_slice()),
+        ))
     }
 
     fn apply(&mut self, entity: &mut Option<DatumState>) {

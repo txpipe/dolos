@@ -243,7 +243,10 @@ impl RupdWork {
         self.snapshot.performance_epoch_pool_blocks
     }
 
-    pub fn load<D: Domain<ChainSpecificError = crate::CardanoError>>(state: &D::State, genesis: &crate::CardanoGenesis) -> Result<RupdWork, ChainError<crate::CardanoError>> {
+    pub fn load<D: Domain<ChainSpecificError = crate::CardanoError>>(
+        state: &D::State,
+        genesis: &crate::CardanoGenesis,
+    ) -> Result<RupdWork, ChainError<crate::CardanoError>> {
         let epoch = crate::load_epoch::<D>(state)?;
 
         let current_epoch = epoch.number;

@@ -1,6 +1,6 @@
+use dolos_cardano::pallas_hash_to_core;
 use dolos_core::config::RootConfig;
 use miette::{Context, IntoDiagnostic};
-use dolos_cardano::pallas_hash_to_core;
 use pallas::crypto::hash::Hash;
 use std::str::FromStr;
 

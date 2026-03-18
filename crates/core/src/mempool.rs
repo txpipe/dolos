@@ -416,12 +416,13 @@ mod tests {
     use std::task::{Context, Poll};
 
     use dolos_testing::streams::{noop_waker, ScriptedStream};
-    use dolos_testing::tx_sequence_to_hash;
 
     type MockStream = ScriptedStream<Result<MempoolEvent, MempoolError>>;
 
     fn test_hash(n: u8) -> TxHash {
-        tx_sequence_to_hash(n as u64)
+        let mut bytes = [0u8; 32];
+        bytes[0] = n;
+        TxHash::new(bytes)
     }
 
     fn test_event(hash: TxHash) -> MempoolEvent {

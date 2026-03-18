@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use dolos_core::{BlockSlot, ChainError,  NsKey, TxOrder};
+use dolos_core::{BlockSlot, ChainError, NsKey, TxOrder};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};

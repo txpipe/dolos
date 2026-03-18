@@ -506,7 +506,9 @@ fn compute_delegator_chunk<C: RewardsContext>(
         .collect()
 }
 
-pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainError<crate::CardanoError>> {
+pub fn define_rewards<C: RewardsContext>(
+    ctx: &C,
+) -> Result<RewardMap<C>, ChainError<crate::CardanoError>> {
     let mut map = RewardMap::<C>::new(ctx.incentives().clone());
 
     // Sequential pool iteration with parallel delegator processing

@@ -26,7 +26,11 @@ pub struct Context<D: Domain> {
 
 pub struct Driver;
 
-impl<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver {
+impl<
+        D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + SubmitExt,
+        C: CancelToken,
+    > dolos_core::Driver<D, C> for Driver
+{
     type Config = TrpConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {

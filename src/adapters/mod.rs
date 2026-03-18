@@ -2,7 +2,7 @@ pub mod storage;
 
 use std::sync::Arc;
 
-use dolos_cardano::{CardanoGenesis, CardanoLogic, core_hash_to_pallas, pallas_hash_to_core};
+use dolos_cardano::{core_hash_to_pallas, pallas_hash_to_core, CardanoGenesis, CardanoLogic};
 use dolos_core::{
     config::{StorageConfig, SyncConfig},
     *,
@@ -84,7 +84,10 @@ impl DomainAdapter {
             for (txo_ref, era_cbor) in &log.inputs {
                 if refs_set.contains(txo_ref) {
                     let era = era_cbor.0.try_into().expect("era out of range");
-                    result.insert((core_hash_to_pallas(txo_ref.0), txo_ref.1), (era, era_cbor.1.clone()));
+                    result.insert(
+                        (core_hash_to_pallas(txo_ref.0), txo_ref.1),
+                        (era, era_cbor.1.clone()),
+                    );
                 }
             }
 
@@ -155,7 +158,10 @@ impl Domain for DomainAdapter {
         &self.sync_config
     }
 
-    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError<dolos_cardano::CardanoError>> {
+    fn watch_tip(
+        &self,
+        from: Option<ChainPoint>,
+    ) -> Result<Self::TipSubscription, DomainError<dolos_cardano::CardanoError>> {
         // TODO: do a more thorough analysis to understand if this approach is
         // susceptible to race conditions. Things to explore:
         // - a mutex to block the sending of events while gathering the replay.

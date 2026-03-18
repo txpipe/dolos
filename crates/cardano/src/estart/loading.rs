@@ -8,7 +8,12 @@ use crate::{
 };
 
 impl super::WorkContext {
-    pub fn compute_deltas<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(&mut self, state: &D::State) -> Result<(), ChainError<crate::CardanoError>> {
+    pub fn compute_deltas<
+        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+    >(
+        &mut self,
+        state: &D::State,
+    ) -> Result<(), ChainError<crate::CardanoError>> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor::default();
 
@@ -57,14 +62,19 @@ impl super::WorkContext {
     /// Compute the value of unredeemed AVVM UTxOs at the Shelley→Allegra
     /// boundary. These UTxOs are removed from the UTxO set and their value
     /// returned to reserves, matching the Haskell ledger's `translateEra`.
-    fn compute_avvm_reclamation<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+    fn compute_avvm_reclamation<
+        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+    >(
         state: &D::State,
         genesis: &crate::CardanoGenesis,
     ) -> Result<u64, ChainError<crate::CardanoError>> {
         let avvm_utxos = pallas::ledger::configs::byron::genesis_avvm_utxos(&genesis.byron);
 
         // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
-        let refs: Vec<TxoRef> = avvm_utxos.iter().map(|(tx, _, _)| TxoRef(crate::pallas_hash_to_core(*tx), 0)).collect();
+        let refs: Vec<TxoRef> = avvm_utxos
+            .iter()
+            .map(|(tx, _, _)| TxoRef(crate::pallas_hash_to_core(*tx), 0))
+            .collect();
 
         // Query the UTxO set to find which are still unspent
         let remaining = state.get_utxos(refs)?;
@@ -88,7 +98,12 @@ impl super::WorkContext {
         Ok(total)
     }
 
-    pub fn load<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(state: &D::State, genesis: Arc<crate::CardanoGenesis>) -> Result<Self, ChainError<crate::CardanoError>> {
+    pub fn load<
+        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+    >(
+        state: &D::State,
+        genesis: Arc<crate::CardanoGenesis>,
+    ) -> Result<Self, ChainError<crate::CardanoError>> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);

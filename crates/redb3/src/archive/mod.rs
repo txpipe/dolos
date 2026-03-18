@@ -831,7 +831,9 @@ pub struct ArchiveStoreWriter<E: std::error::Error + Send + Sync + 'static = Inf
     _phantom: PhantomData<E>,
 }
 
-impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveWriter for ArchiveStoreWriter<E> {
+impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveWriter
+    for ArchiveStoreWriter<E>
+{
     type ChainSpecificError = E;
 
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError<E>> {
@@ -844,7 +846,6 @@ impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveWriter for
 
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError<E>> {
         tables::BlocksTable::undo(&self.wx, &self.flatfiles, point)
-            .map_err(RedbArchiveError::from)
             .map_err(|e| e.into_archive_error())
     }
 
@@ -855,11 +856,11 @@ impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveWriter for
         let pending = self.pending_blocks.into_inner().unwrap();
         if !pending.is_empty() {
             tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)
-                .map_err(RedbArchiveError::from)
                 .map_err(|e| e.into_archive_error())?;
         }
 
-        self.wx.commit()
+        self.wx
+            .commit()
             .map_err(RedbArchiveError::from)
             .map_err(|e| e.into_archive_error())?;
         Ok(())
@@ -934,37 +935,29 @@ impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveStore for 
     type ChainSpecificError = E;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError<E>> {
-        Self::start_writer(self)
-            .map_err(|e| e.into_archive_error())
+        Self::start_writer(self).map_err(|e| e.into_archive_error())
     }
 
-    fn get_block_by_slot(
-        &self,
-        slot: &BlockSlot,
-    ) -> Result<Option<BlockBody>, ArchiveError<E>> {
-        Self::get_block_by_slot(self, slot)
-            .map_err(|e| e.into_archive_error())
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError<E>> {
+        Self::get_block_by_slot(self, slot).map_err(|e| e.into_archive_error())
     }
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
         to: Option<BlockSlot>,
     ) -> Result<Self::BlockIter<'a>, ArchiveError<E>> {
-        Self::get_range(self, from, to)
-            .map_err(|e| e.into_archive_error())
+        Self::get_range(self, from, to).map_err(|e| e.into_archive_error())
     }
 
     fn find_intersect(
         &self,
         intersect: &[ChainPoint],
     ) -> Result<Option<ChainPoint>, ArchiveError<E>> {
-        Self::find_intersect(self, intersect)
-            .map_err(|e| e.into_archive_error())
+        Self::find_intersect(self, intersect).map_err(|e| e.into_archive_error())
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError<E>> {
-        Self::get_tip(self)
-            .map_err(|e| e.into_archive_error())
+        Self::get_tip(self).map_err(|e| e.into_archive_error())
     }
 
     fn prune_history(
@@ -972,13 +965,11 @@ impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveStore for 
         max_slots: u64,
         max_prune: Option<u64>,
     ) -> Result<bool, ArchiveError<E>> {
-        Self::prune_history(self, max_slots, max_prune)
-            .map_err(|e| e.into_archive_error())
+        Self::prune_history(self, max_slots, max_prune).map_err(|e| e.into_archive_error())
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError<E>> {
-        Self::truncate_front(self, after)
-            .map_err(|e| e.into_archive_error())
+        Self::truncate_front(self, after).map_err(|e| e.into_archive_error())
     }
 
     fn read_logs(
@@ -999,12 +990,10 @@ impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveStore for 
         let mut out = vec![];
 
         for key in keys {
-            let value = table
-                .read_value(&mut rx, key.as_ref())
-                .map_err(|e| {
-                    let redb_err: RedbArchiveError = e.into();
-                    redb_err.into_archive_error()
-                })?;
+            let value = table.read_value(&mut rx, key.as_ref()).map_err(|e| {
+                let redb_err: RedbArchiveError = e.into();
+                redb_err.into_archive_error()
+            })?;
             out.push(value);
         }
 
@@ -1031,12 +1020,10 @@ impl<E: std::error::Error + Send + Sync + 'static> dolos_core::ArchiveStore for 
             .get(&ns)
             .ok_or(ArchiveError::NamespaceNotFound(ns))?;
 
-        let values = table
-            .range(&mut rx, range)
-            .map_err(|e| {
-                let redb_err: RedbArchiveError = e.into();
-                redb_err.into_archive_error()
-            })?;
+        let values = table.range(&mut rx, range).map_err(|e| {
+            let redb_err: RedbArchiveError = e.into();
+            redb_err.into_archive_error()
+        })?;
 
         Ok(LogIter(values, PhantomData))
     }

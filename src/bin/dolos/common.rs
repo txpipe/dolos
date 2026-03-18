@@ -10,9 +10,9 @@ use tracing::{debug, info};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
-use dolos_cardano::CardanoGenesis;
 use dolos::prelude::*;
 use dolos::storage;
+use dolos_cardano::CardanoGenesis;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
 

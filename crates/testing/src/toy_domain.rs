@@ -124,12 +124,12 @@ pub struct ToyDomain {
     wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     state: dolos_redb3::state::StateStore,
-    archive: dolos_redb3::archive::ArchiveStore,
+    archive: dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError>,
     indexes: dolos_redb3::indexes::IndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     sync_config: SyncConfig,
-    genesis: Arc<dolos_core::Genesis>,
+    genesis: Arc<dolos_cardano::CardanoGenesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
@@ -141,7 +141,7 @@ impl ToyDomain {
     }
 
     pub fn new_with_genesis(
-        genesis: Arc<dolos_core::Genesis>,
+        genesis: Arc<dolos_cardano::CardanoGenesis>,
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
     ) -> Self {
@@ -154,7 +154,7 @@ impl ToyDomain {
     }
 
     pub fn new_with_genesis_and_config(
-        genesis: Arc<dolos_core::Genesis>,
+        genesis: Arc<dolos_cardano::CardanoGenesis>,
         config: CardanoConfig,
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
@@ -170,9 +170,12 @@ impl ToyDomain {
 
         let indexes = dolos_redb3::indexes::IndexStore::in_memory().unwrap();
 
-        let chain =
-            dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
-                .unwrap();
+        let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
+            config.clone(),
+            &state,
+            genesis.as_ref().clone(),
+        )
+        .unwrap();
 
         // Create the domain first (genesis work unit needs it for execution)
         let domain = Self {
@@ -260,13 +263,15 @@ impl dolos_core::Domain for ToyDomain {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
-    type Archive = dolos_redb3::archive::ArchiveStore;
+    type Archive = dolos_redb3::archive::ArchiveStore<dolos_cardano::CardanoError>;
     type State = dolos_redb3::state::StateStore;
     type Chain = dolos_cardano::CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
     type Indexes = dolos_redb3::indexes::IndexStore;
     type Mempool = Mempool;
+    type Genesis = dolos_cardano::CardanoGenesis;
+    type ChainSpecificError = dolos_cardano::CardanoError;
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
@@ -276,7 +281,7 @@ impl dolos_core::Domain for ToyDomain {
         &self.sync_config
     }
 
-    fn genesis(&self) -> Arc<dolos_core::Genesis> {
+    fn genesis(&self) -> Arc<dolos_cardano::CardanoGenesis> {
         self.genesis.clone()
     }
 
@@ -308,7 +313,10 @@ impl dolos_core::Domain for ToyDomain {
         &self.mempool
     }
 
-    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
+    fn watch_tip(
+        &self,
+        from: Option<ChainPoint>,
+    ) -> Result<Self::TipSubscription, DomainError<dolos_cardano::CardanoError>> {
         let receiver = self.tip_broadcast.subscribe();
 
         let replay = self

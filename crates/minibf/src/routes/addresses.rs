@@ -46,7 +46,14 @@ type VKeyOrAddress = Either<Vec<u8>, Vec<u8>>;
 
 /// Stream of blocks returned by address queries
 type BlockStream = std::pin::Pin<
-    Box<dyn Stream<Item = Result<(BlockSlot, Option<BlockBody>), dolos_core::DomainError<dolos_cardano::CardanoError>>> + Send>,
+    Box<
+        dyn Stream<
+                Item = Result<
+                    (BlockSlot, Option<BlockBody>),
+                    dolos_core::DomainError<dolos_cardano::CardanoError>,
+                >,
+            > + Send,
+    >,
 >;
 
 enum ParsedAddress {
