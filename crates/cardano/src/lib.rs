@@ -387,7 +387,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         builder.add_consumed_utxos_from_delta(&utxo_delta);
 
         // Archive indexes (shared logic)
-        builder.index_block(&blockv, &decoded_inputs);
+        builder.index_block(blockv, &decoded_inputs);
 
         let tx_hashes = blockv.txs().iter().map(|tx| tx.hash()).collect();
 

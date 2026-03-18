@@ -24,12 +24,12 @@ fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock]) {
 
     for block in blocks {
         if !chain.can_receive_block() {
-            drain_partial(&mut *chain, domain);
+            drain_partial(&mut chain, domain);
         }
         chain.receive_block(block.clone()).unwrap();
     }
 
-    drain_partial(&mut *chain, domain);
+    drain_partial(&mut chain, domain);
 }
 
 fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain) {
