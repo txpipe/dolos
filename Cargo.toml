@@ -135,6 +135,10 @@ path = "tests/memory.rs"
 name = "mempool"
 path = "tests/mempool.rs"
 
+[[test]]
+name = "bootstrap"
+path = "tests/bootstrap.rs"
+
 [features]
 strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]
