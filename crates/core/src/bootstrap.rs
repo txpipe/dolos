@@ -219,5 +219,8 @@ fn catch_up_indexes<D: Domain>(
 
 #[cfg(test)]
 mod tests {
-    // Tests will be added once we have the full integration in place
+    // Tests for bootstrap catch-up live in `tests/bootstrap.rs` (workspace-level
+    // integration test) because they need `ToyDomain` from `dolos-testing`,
+    // which re-exports `dolos-core` and would create a duplicate-crate conflict
+    // inside lib-level `#[cfg(test)]`.
 }
