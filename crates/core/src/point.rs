@@ -35,7 +35,7 @@ impl ChainPoint {
     /// (from Slot round-trip through into_bytes/from_bytes) return false.
     pub fn is_fully_defined(&self) -> bool {
         match self.hash() {
-            Some(hash) => hash.as_slice() != &[0u8; 32],
+            Some(hash) => hash.as_slice() != [0u8; 32],
             None => false,
         }
     }
