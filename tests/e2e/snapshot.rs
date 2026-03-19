@@ -1,11 +1,7 @@
 #![cfg(not(windows))]
 
-use std::fs::File;
 use std::process::Stdio;
 use std::time::Duration;
-
-use flate2::read::GzDecoder;
-use tar::Archive;
 
 #[path = "common.rs"]
 mod common;
@@ -91,24 +87,24 @@ fn snapshot_roundtrip(scenario: &Scenario) {
     // Phase 3: Wipe data and restore from snapshot
     reset_and_bootstrap(scenario);
 
-    let data_dir = dir.join("data");
-    let tar_file = File::open(&snapshot_path).expect("failed to open snapshot");
-    let decoder = GzDecoder::new(tar_file);
-    let mut archive = Archive::new(decoder);
-    archive.unpack(&data_dir).expect("failed to extract snapshot");
-
     let mut cmd = prepare_scenario_process(scenario);
-    let reset_wal = cmd
-        .args(["doctor", "reset-wal"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let restore = cmd
+        .args([
+            "bootstrap",
+            "snapshot",
+            "--force",
+            "--file",
+            snapshot_path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .output()
-        .expect("failed to run reset-wal");
+        .expect("failed to run bootstrap snapshot --file");
 
     assert!(
-        reset_wal.status.success(),
-        "reset-wal failed: {}",
-        String::from_utf8_lossy(&reset_wal.stderr)
+        restore.status.success(),
+        "bootstrap snapshot --file failed: {}",
+        String::from_utf8_lossy(&restore.stderr)
     );
 
     // Phase 4: Verify cursors match
