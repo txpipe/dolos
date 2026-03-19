@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2026-03-19
+
+### 🐛 Bug Fixes
+
+- *(cli)* Reset wal after any kind of bootstrap (#950)
+- *(cli)* Generate deterministic snapshots by removing file metadata (#951)
+
 ## [1.0.1] - 2026-03-18
 
 ### 🐛 Bug Fixes
@@ -13,6 +20,10 @@ All notable changes to this project will be documented in this file.
 ### 📚 Documentation
 
 - Fix broken doc links (#945)
+
+### Release
+
+- V1.0.1
 
 ## [1.0.0] - 2026-03-13
 
