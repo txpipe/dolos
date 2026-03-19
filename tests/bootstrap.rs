@@ -7,7 +7,8 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    BootstrapExt, ChainLogic, Domain, IndexStore, StateStore, WorkUnit,
+    BootstrapExt, ChainLogic, ChainPoint, Domain, IndexStore, StateStore, StateWriter, WalStore,
+    WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -104,4 +105,25 @@ fn test_catchup_recovers_archive_and_indexes() {
         "tx hash {} should be found in index after catch-up",
         tx_hash_hex
     );
+}
+
+#[test]
+fn test_bootstrap_origin_cursor_is_noop() {
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis(genesis, None, None);
+
+    // Simulate relay bootstrap: state at Origin, WAL seeded at Origin
+    let writer = domain.state().start_writer().unwrap();
+    writer.set_cursor(ChainPoint::Origin).unwrap();
+    writer.commit().unwrap();
+
+    domain.wal().reset_to(&ChainPoint::Origin).unwrap();
+
+    // bootstrap() should succeed without crashing on the empty Origin WAL entry.
+    // Previously this would fail with UnknownCbor("") when catch_up_stores tried
+    // to CBOR-decode the synthetic Origin entry's empty block bytes.
+    domain.bootstrap().unwrap();
+
+    // Archive should still be empty — no real blocks were processed.
+    assert!(domain.archive().get_tip().unwrap().is_none());
 }

@@ -136,8 +136,12 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
 /// to bring them back in sync.
 fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let state_cursor = match domain.state().read_cursor()? {
+        // nothing to catch up
+        None => return Ok(()),
+        // Origin means no blocks have been processed yet — archive and indexes
+        // are correctly empty, so there is nothing to replay.
+        Some(ChainPoint::Origin) => return Ok(()),
         Some(cursor) => cursor,
-        None => return Ok(()), // nothing to catch up
     };
 
     catch_up_archive(domain, &state_cursor)?;
@@ -147,10 +151,7 @@ fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
 }
 
 /// Catch up archive store by replaying WAL blocks.
-fn catch_up_archive<D: Domain>(
-    domain: &D,
-    state_cursor: &ChainPoint,
-) -> Result<(), DomainError> {
+fn catch_up_archive<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<(), DomainError> {
     let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
     let state_slot = state_cursor.slot();
 
@@ -191,10 +192,7 @@ fn catch_up_archive<D: Domain>(
 }
 
 /// Catch up index store by replaying WAL log entries.
-fn catch_up_indexes<D: Domain>(
-    domain: &D,
-    state_cursor: &ChainPoint,
-) -> Result<(), DomainError> {
+fn catch_up_indexes<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<(), DomainError> {
     let index_cursor = domain.indexes().cursor()?;
 
     if index_cursor.as_ref() == Some(state_cursor) {
@@ -209,9 +207,7 @@ fn catch_up_indexes<D: Domain>(
         None => None,
     };
 
-    let logs = domain
-        .wal()
-        .iter_logs(start, Some(state_cursor.clone()))?;
+    let logs = domain.wal().iter_logs(start, Some(state_cursor.clone()))?;
 
     let writer = domain.indexes().start_writer()?;
     let mut count = 0u64;
