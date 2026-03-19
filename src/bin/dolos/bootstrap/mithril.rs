@@ -234,36 +234,6 @@ fn do_import(
     Ok(())
 }
 
-/// Seed the WAL from the state cursor so that `find_intersect` works after bootstrap.
-fn seed_wal_from_state(domain: &dolos::adapters::DomainAdapter) -> Result<(), miette::Error> {
-    let cursor = domain
-        .state
-        .read_cursor()
-        .into_diagnostic()
-        .context("reading state cursor")?;
-
-    let Some(cursor) = cursor else {
-        return Err(miette::miette!("state has no cursor after import"));
-    };
-
-    if !cursor.is_fully_defined() {
-        return Err(miette::miette!(
-            "state cursor at slot {} has no block hash, cannot seed WAL",
-            cursor.slot(),
-        ));
-    }
-
-    domain
-        .wal()
-        .reset_to(&cursor)
-        .map_err(|e| miette::miette!(e.to_string()))
-        .context("seeding WAL from state cursor")?;
-
-    info!(%cursor, "seeded WAL from state cursor");
-
-    Ok(())
-}
-
 fn import_hardano_into_domain(
     args: &Args,
     config: &RootConfig,
@@ -274,15 +244,6 @@ fn import_hardano_into_domain(
     let domain = crate::common::setup_domain(config)?;
 
     let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
-
-    // Seed WAL from state cursor so the node can find intersection after bootstrap.
-    // Import skips WAL commits for performance, so the WAL is empty. Without this,
-    // the node would fail to intersect with the upstream peer.
-    if result.is_ok() {
-        if let Err(e) = seed_wal_from_state(&domain) {
-            tracing::error!("failed to seed WAL from state: {}", e);
-        }
-    }
 
     // Always shutdown the domain before it goes out of scope, regardless of
     // whether import succeeded or failed.

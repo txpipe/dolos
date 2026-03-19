@@ -30,13 +30,14 @@ impl ChainPoint {
         }
     }
 
-    /// Returns true if this point has a non-zero block hash.
-    /// Points without a hash (Origin, Slot) or with a zero hash
-    /// (from Slot round-trip through into_bytes/from_bytes) return false.
+    /// Returns true if this point can be used as an intersection point.
+    /// Origin and Specific points with non-zero hashes are fully defined;
+    /// Slot-only points and zero-hash Specifics are not.
     pub fn is_fully_defined(&self) -> bool {
-        match self.hash() {
-            Some(hash) => hash.as_slice() != [0u8; 32],
-            None => false,
+        match self {
+            Self::Origin => true,
+            Self::Specific(_, hash) => hash.as_slice() != [0u8; 32],
+            Self::Slot(_) => false,
         }
     }
 }
