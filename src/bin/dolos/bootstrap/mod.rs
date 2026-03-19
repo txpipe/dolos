@@ -136,7 +136,8 @@ fn seed_wal_from_state(config: &RootConfig) -> miette::Result<()> {
         .context("reading state cursor")?;
 
     let Some(cursor) = cursor else {
-        return Err(miette::miette!("state has no cursor after bootstrap"));
+        info!("no state cursor after bootstrap, skipping WAL seed");
+        return Ok(());
     };
 
     if !cursor.is_fully_defined() {
