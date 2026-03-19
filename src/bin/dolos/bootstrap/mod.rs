@@ -4,7 +4,7 @@ use miette::{bail, Context, IntoDiagnostic};
 use tracing::info;
 
 use crate::feedback::Feedback;
-use dolos_core::StateStore;
+use dolos_core::{StateStore, WalStore};
 
 mod mithril;
 mod relay;
@@ -121,6 +121,41 @@ fn dispatch(config: &RootConfig, command: &Command, feedback: &Feedback) -> miet
     }
 }
 
+/// Seed the WAL from the state cursor so that `find_intersect` works after bootstrap.
+///
+/// Some bootstrap mechanisms skip WAL commits for performance, leaving it empty.
+/// This ensures the WAL tip matches the state cursor regardless of which bootstrap
+/// method was used.
+fn seed_wal_from_state(config: &RootConfig) -> miette::Result<()> {
+    let state = crate::common::open_state_store(config)?;
+    let wal = crate::common::open_wal_store(config)?;
+
+    let cursor = state
+        .read_cursor()
+        .into_diagnostic()
+        .context("reading state cursor")?;
+
+    let Some(cursor) = cursor else {
+        info!("no state cursor after bootstrap, skipping WAL seed");
+        return Ok(());
+    };
+
+    if !cursor.is_fully_defined() {
+        return Err(miette::miette!(
+            "state cursor at slot {} has no block hash, cannot seed WAL",
+            cursor.slot(),
+        ));
+    }
+
+    wal.reset_to(&cursor)
+        .into_diagnostic()
+        .context("seeding WAL from state cursor")?;
+
+    info!(%cursor, "seeded WAL from state cursor");
+
+    Ok(())
+}
+
 fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
     if verbose {
         crate::common::setup_tracing(&config.logging, &config.telemetry)?;
@@ -143,5 +178,15 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         None => Command::inquire()?,
     };
 
-    dispatch(config, &command, feedback)
+    dispatch(config, &command, feedback)?;
+
+    // Reset WAL after any successful bootstrap so that `find_intersect` works.
+    // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty
+    // or stale. This ensures the WAL tip matches the state cursor regardless of
+    // which bootstrap method was used.
+    if let Err(e) = seed_wal_from_state(config) {
+        tracing::error!("failed to seed WAL from state: {}", e);
+    }
+
+    Ok(())
 }

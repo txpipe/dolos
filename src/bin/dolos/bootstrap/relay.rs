@@ -7,7 +7,8 @@ use crate::feedback::Feedback;
 pub struct Args {}
 
 pub fn run(_config: &RootConfig, _args: &Args, _feedback: &Feedback) -> miette::Result<()> {
-    info!("data initialized to sync from origin");
-
+    // Relay bootstrap is intentionally a no-op on storage.
+    // The daemon starts as a fresh node and syncs from genesis via chain-sync.
+    info!("relay bootstrap selected — daemon will sync from genesis");
     Ok(())
 }
