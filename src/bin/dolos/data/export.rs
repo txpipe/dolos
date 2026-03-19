@@ -43,6 +43,30 @@ fn is_macos_metadata(path: &Path) -> bool {
     file_name == ".DS_Store" || file_name.starts_with("._")
 }
 
+/// Create a tar header with deterministic metadata for the given path.
+fn deterministic_header(source: &Path) -> miette::Result<tar::Header> {
+    let metadata = std::fs::metadata(source).into_diagnostic()?;
+    let mut header = tar::Header::new_gnu();
+
+    if metadata.is_dir() {
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+    } else {
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(metadata.len());
+    }
+
+    header.set_mtime(0);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_username("").into_diagnostic()?;
+    header.set_groupname("").into_diagnostic()?;
+    header.set_mode(if metadata.is_dir() { 0o755 } else { 0o644 });
+    header.set_cksum();
+
+    Ok(header)
+}
+
 fn append_path_filtered(
     archive: &mut Builder<GzEncoder<File>>,
     source: &Path,
@@ -53,9 +77,9 @@ fn append_path_filtered(
         return Ok(());
     }
 
-    archive
-        .append_path_with_name(source, name)
-        .into_diagnostic()?;
+    let header = deterministic_header(source)?;
+    let file = File::open(source).into_diagnostic()?;
+    archive.append_data(&mut header.clone(), name, file).into_diagnostic()?;
 
     Ok(())
 }
@@ -65,10 +89,17 @@ fn append_dir_filtered(
     source: &Path,
     name: &Path,
 ) -> miette::Result<()> {
-    archive.append_dir(name, source).into_diagnostic()?;
+    let header = deterministic_header(source)?;
+    archive.append_data(&mut header.clone(), name, &[] as &[u8]).into_diagnostic()?;
 
-    for entry in std::fs::read_dir(source).into_diagnostic()? {
-        let entry = entry.into_diagnostic()?;
+    let mut entries: Vec<_> = std::fs::read_dir(source)
+        .into_diagnostic()?
+        .collect::<Result<Vec<_>, _>>()
+        .into_diagnostic()?;
+
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
         let path = entry.path();
 
         if is_macos_metadata(&path) {
@@ -80,9 +111,9 @@ fn append_dir_filtered(
         if path.is_dir() {
             append_dir_filtered(archive, &path, &entry_name)?;
         } else {
-            archive
-                .append_path_with_name(&path, &entry_name)
-                .into_diagnostic()?;
+            let header = deterministic_header(&path)?;
+            let file = File::open(&path).into_diagnostic()?;
+            archive.append_data(&mut header.clone(), &entry_name, file).into_diagnostic()?;
         }
     }
 
