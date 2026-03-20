@@ -26,6 +26,10 @@ pub struct Args {
     // Whether to include indexes
     #[arg(long, action)]
     include_indexes: bool,
+
+    /// Skip the compact and integrity check of the archive database
+    #[arg(long, action)]
+    skip_sanitization: bool,
 }
 
 fn is_macos_metadata(path: &Path) -> bool {
@@ -150,7 +154,10 @@ pub fn run(
 
     // prepare_archive requires direct redb access
     match &mut stores.archive {
-        ArchiveStoreBackend::Redb(s) => prepare_archive(s, &pb)?,
+        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => {
+            prepare_archive(s, &pb)?
+        }
+        ArchiveStoreBackend::Redb(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
             bail!("export command is not available for noop archive backend")
         }
