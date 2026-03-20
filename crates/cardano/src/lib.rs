@@ -292,11 +292,7 @@ pub struct CardanoGenesis {
     pub force_protocol: Option<usize>,
 }
 
-impl dolos_core::Genesis for CardanoGenesis {
-    fn chain_id(&self) -> u32 {
-        self.shelley.network_magic.unwrap_or_default()
-    }
-}
+impl dolos_core::Genesis for CardanoGenesis {}
 
 impl CardanoGenesis {
     pub fn from_file_paths(

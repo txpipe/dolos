@@ -484,9 +484,7 @@ pub enum ChainError<E: std::error::Error + Send + Sync + 'static> {
     // Phase2ValidationRejected(Phase2Log),
 }
 
-pub trait Genesis: Clone + Send + Sync + 'static {
-    fn chain_id(&self) -> u32;
-}
+pub trait Genesis: Clone + Send + Sync + 'static {}
 
 // Note: The WorkUnit trait is now defined in work_unit.rs
 // Chain-specific work unit implementations live in their respective crates
