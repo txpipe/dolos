@@ -155,13 +155,8 @@ pub enum ArchiveError<E: std::error::Error + Send + Sync + 'static> {
     #[error("invalid store version")]
     InvalidStoreVersion,
 
-    #[error("decoding error")]
-    DecodingError(#[from] minicbor::decode::Error),
-
-    //#[error("address decoding error")]
-    //AddressDecoding(#[from] pallas::ledger::addresses::Error),
-    //#[error("decoding error")]
-    //DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+    #[error("decoding error: {0}")]
+    DecodingError(String),
 
     //#[error("block decoding error")]
     //BlockDecodingError(#[from] pallas::ledger::traverse::Error),

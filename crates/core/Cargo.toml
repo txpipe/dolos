@@ -22,7 +22,6 @@ tokio-stream.workspace = true
 hex.workspace = true
 regex.workspace = true
 serde_with = "3.16.0"
-minicbor = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.7.0"

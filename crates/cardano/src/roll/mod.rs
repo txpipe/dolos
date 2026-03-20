@@ -328,9 +328,12 @@ impl<'a> DeltaBuilder<'a> {
             for input in tx.consumes() {
                 let txoref = crate::txo_ref_from_input(&input);
 
-                let resolved = self.utxos.get(&txoref).ok_or_else(|| {
-                    StateError::InvariantViolation(InvariantViolation::InputNotFound(txoref))
-                })?;
+                let resolved = self
+                    .utxos
+                    .get(&txoref)
+                    .ok_or(StateError::InvariantViolation(
+                        InvariantViolation::InputNotFound(txoref),
+                    ))?;
 
                 resolved.with_dependent(|_, resolved| {
                     self.account_state

@@ -116,7 +116,7 @@ pub enum MempoolError {
     // #[error("traverse error: {0}")]
     // TraverseError(#[from] pallas::ledger::traverse::Error),
     #[error("decode error: {0}")]
-    DecodeError(#[from] minicbor::decode::Error),
+    DecodeError(String),
 
     #[error(transparent)]
     StateError(#[from] StateError),

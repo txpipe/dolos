@@ -2,6 +2,63 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use pallas::codec::minicbor::{self, Decode, Encode};
+
+// Provides minicbor Encode/Decode for EraCbor (which no longer derives them)
+// using the same on-disk CBOR format: array(2) [ uint(era), bytes(cbor) ]
+mod era_cbor_codec {
+    use dolos_core::EraCbor;
+    use pallas::codec::minicbor;
+
+    pub fn encode<W: minicbor::encode::Write, C>(
+        v: &EraCbor,
+        e: &mut minicbor::Encoder<W>,
+        _: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(2)?.u16(v.0)?.bytes(&v.1)?;
+        Ok(())
+    }
+
+    pub fn decode<'b, C>(
+        d: &mut minicbor::Decoder<'b>,
+        _: &mut C,
+    ) -> Result<EraCbor, minicbor::decode::Error> {
+        d.array()?;
+        let era = d.u16()?;
+        let cbor = d.bytes()?.to_vec();
+        Ok(EraCbor(era, cbor))
+    }
+}
+
+mod opt_era_cbor_codec {
+    use dolos_core::EraCbor;
+    use pallas::codec::minicbor;
+
+    pub fn encode<W: minicbor::encode::Write, C>(
+        v: &Option<EraCbor>,
+        e: &mut minicbor::Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        match v {
+            None => {
+                e.null()?;
+                Ok(())
+            }
+            Some(inner) => super::era_cbor_codec::encode(inner, e, ctx),
+        }
+    }
+
+    pub fn decode<'b, C>(
+        d: &mut minicbor::Decoder<'b>,
+        ctx: &mut C,
+    ) -> Result<Option<EraCbor>, minicbor::decode::Error> {
+        if d.datatype()? == minicbor::data::Type::Null {
+            d.null()?;
+            Ok(None)
+        } else {
+            Ok(Some(super::era_cbor_codec::decode(d, ctx)?))
+        }
+    }
+}
 use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition};
 use thiserror::Error;
 use tokio::sync::broadcast;
@@ -206,14 +263,19 @@ impl redb::Value for DbEraCbor {
     where
         Self: 'a,
     {
-        Self(minicbor::decode(data).unwrap())
+        let mut d = minicbor::Decoder::new(data);
+        let era_cbor = era_cbor_codec::decode(&mut d, &mut ()).unwrap();
+        Self(era_cbor)
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
     where
         Self: 'b,
     {
-        minicbor::to_vec(&value.0).unwrap()
+        let mut buf = Vec::new();
+        let mut e = minicbor::Encoder::new(&mut buf);
+        era_cbor_codec::encode(&value.0, &mut e, &mut ()).unwrap();
+        buf
     }
 
     fn type_name() -> redb::TypeName {
@@ -239,7 +301,7 @@ struct InflightRecord {
     stage: InflightStage,
     #[n(1)]
     confirmations: u32,
-    #[n(2)]
+    #[cbor(n(2), with = "era_cbor_codec")]
     payload: EraCbor,
     #[cbor(n(3), with = "minicbor::bytes")]
     confirmed_at: Option<Vec<u8>>,
@@ -289,7 +351,7 @@ struct FinalizedEntry {
     confirmations: u32,
     #[cbor(n(2), with = "minicbor::bytes")]
     confirmed_at: Option<Vec<u8>>,
-    #[n(3)]
+    #[cbor(n(3), with = "opt_era_cbor_codec")]
     payload: Option<EraCbor>,
     #[n(4)]
     dropped: Option<bool>,

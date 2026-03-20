@@ -16,7 +16,6 @@
 //        traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
 //    },
 //};
-use minicbor::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -102,29 +101,8 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
-// TODO: ask santiago. Doubtful
-mod cbor_bytes {
-    use minicbor::{Decoder, Encoder};
-
-    pub fn encode<W: minicbor::encode::Write, C>(
-        v: &[u8],
-        e: &mut Encoder<W>,
-        _: &mut C,
-    ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        e.bytes(v)?;
-        Ok(())
-    }
-
-    pub fn decode<'b, C>(
-        d: &mut Decoder<'b>,
-        _: &mut C,
-    ) -> Result<Vec<u8>, minicbor::decode::Error> {
-        d.bytes().map(|b| b.to_vec())
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize, Encode, Decode)]
-pub struct EraCbor(#[n(0)] pub Era, #[cbor(n(1), with = "cbor_bytes")] pub Cbor);
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct EraCbor(pub Era, pub Cbor);
 
 impl EraCbor {
     pub fn era(&self) -> Era {

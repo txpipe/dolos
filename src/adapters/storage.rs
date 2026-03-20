@@ -700,8 +700,8 @@ impl Iterator for ArchiveLogIterBackend {
     type Item = Result<(LogKey, EntityValue), ArchiveError<CardanoError>>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Redb(iter) => iter.next().map(|r| r),
-            Self::NoOp(iter) => iter.next().map(|r| r),
+            Self::Redb(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
         }
     }
 }
@@ -719,8 +719,8 @@ impl Iterator for ArchiveEntityValueIterBackend {
     type Item = Result<EntityValue, ArchiveError<CardanoError>>;
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::Redb(iter) => iter.next().map(|r| r),
-            Self::NoOp(iter) => iter.next().map(|r| r),
+            Self::Redb(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
         }
     }
 }

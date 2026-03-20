@@ -193,9 +193,8 @@ pub enum StateError {
     #[error("invalid namespace: {0}")]
     InvalidNamespace(Namespace),
 
-    #[error(transparent)]
-    DecodingError(#[from] minicbor::decode::Error),
-    //DecodingError(#[from] pallas::codec::minicbor::decode::Error),
+    #[error("decoding error: {0}")]
+    DecodingError(String),
     // #[error(transparent)]
     // TraverseError(#[from] pallas::ledger::traverse::Error),
     #[error(transparent)]
