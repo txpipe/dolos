@@ -83,6 +83,18 @@ pub struct UndoBlockData {
     pub index_delta: IndexDelta,
     pub tx_hashes: Vec<TxHash>,
 }
+
+/// Data needed to catch up stores from a WAL entry during recovery.
+///
+/// Chain-specific implementations compute this from the raw block CBOR
+/// and the resolved inputs stored in the WAL. Used during bootstrap to
+/// replay blocks that are in the WAL but not yet applied to indexes.
+pub struct CatchUpBlockData {
+    pub utxo_delta: UtxoSetDelta,
+    pub index_delta: IndexDelta,
+    pub tx_hashes: Vec<TxHash>,
+}
+
 pub type OutputIdx = u64;
 pub type UtxoBody = (u16, Cbor);
 
@@ -536,6 +548,18 @@ pub trait ChainLogic: Sized + Send + Sync {
         inputs: &HashMap<TxoRef, Arc<EraCbor>>,
         point: ChainPoint,
     ) -> Result<UndoBlockData, ChainError<Self::ChainSpecificError>>;
+
+    /// Compute catch-up data from a WAL entry for recovery.
+    ///
+    /// Given the raw block CBOR and the resolved inputs stored in the WAL,
+    /// computes the UTxO delta, index delta, and transaction hashes needed
+    /// to replay the block's effects. Used during bootstrap to catch up
+    /// stores that are behind the state store.
+    fn compute_catchup(
+        block: &Cbor,
+        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        point: ChainPoint,
+    ) -> Result<CatchUpBlockData, ChainError<Self::ChainSpecificError>>;
 
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(

@@ -14,11 +14,6 @@ use dolos_core::{
     NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
     UtxoSetDelta, WalStore as _,
 };
-use pallas::ledger::{
-    primitives::conway::ScriptRef,
-    traverse::{ComputeHash as _, OriginalHash as _},
-};
-
 use crate::indexes::CardanoIndexDeltaBuilder;
 use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
 
@@ -325,16 +320,12 @@ impl WorkBatch {
         let mut builder = CardanoIndexDeltaBuilder::new(self.last_point());
 
         for work_block in self.blocks.iter() {
-            let point = work_block.point();
             let raw = work_block.raw();
 
             // Decode block for tag extraction
             let Ok(block) = MultiEraBlock::decode(&raw) else {
                 continue;
             };
-
-            // Start archive delta for this block
-            builder.start_block(point.slot(), block.hash().to_vec(), Some(block.number()));
 
             // Process UTxO delta for filter indexes
             if let Some(utxo_delta) = &work_block.utxo_delta {
@@ -367,93 +358,8 @@ impl WorkBatch {
                 }
             }
 
-            // Process transactions for archive indexes
-            for tx in block.txs() {
-                builder.add_tx_hash(tx.hash().to_vec());
-
-                // Metadata labels
-                for (label, _) in tx.metadata().collect::<Vec<_>>() {
-                    builder.add_metadata_label(label);
-                }
-
-                // Inputs (spent UTxOs)
-                for input in tx.inputs() {
-                    builder.add_spent_input(&input);
-
-                    // Try to get resolved input for address/asset tags
-                    let txo_ref = crate::txo_ref_from_input(&input);
-                    if let Some(resolved) = self.utxos_decoded.get(&txo_ref) {
-                        resolved.with_dependent(|_, output| {
-                            if let Ok(addr) = output.address() {
-                                builder.add_address(&addr);
-                            }
-                            builder.add_assets(&output.value());
-                            if let Some(datum) = output.datum() {
-                                builder.add_datum(&datum);
-                            }
-                        });
-                    }
-                }
-
-                // Outputs
-                for (_, output) in tx.produces() {
-                    if let Ok(addr) = output.address() {
-                        builder.add_address(&addr);
-                    }
-                    builder.add_assets(&output.value());
-                    if let Some(datum) = output.datum() {
-                        builder.add_datum(&datum);
-                    }
-
-                    if let Some(script_ref) = output.script_ref() {
-                        match script_ref {
-                            ScriptRef::NativeScript(script) => {
-                                builder.add_script_hash(script.original_hash().to_vec());
-                            }
-                            ScriptRef::PlutusV1Script(script) => {
-                                builder.add_script_hash(script.compute_hash().to_vec());
-                            }
-                            ScriptRef::PlutusV2Script(script) => {
-                                builder.add_script_hash(script.compute_hash().to_vec());
-                            }
-                            ScriptRef::PlutusV3Script(script) => {
-                                builder.add_script_hash(script.compute_hash().to_vec());
-                            }
-                        }
-                    }
-                }
-
-                // Witness scripts
-                {
-                    for script in tx.native_scripts() {
-                        builder.add_script_hash(script.original_hash().to_vec());
-                    }
-                    for script in tx.plutus_v1_scripts() {
-                        builder.add_script_hash(script.compute_hash().to_vec());
-                    }
-                    for script in tx.plutus_v2_scripts() {
-                        builder.add_script_hash(script.compute_hash().to_vec());
-                    }
-                    for script in tx.plutus_v3_scripts() {
-                        builder.add_script_hash(script.compute_hash().to_vec());
-                    }
-                }
-
-                // Witness datums
-                for datum in tx.plutus_data() {
-                    builder.add_datum_hash(datum.original_hash().to_vec());
-                }
-
-                // Certificates
-                for cert in tx.certs() {
-                    builder.add_cert(&cert);
-                }
-
-                // Redeemers
-                for redeemer in tx.redeemers() {
-                    builder.add_datum_hash(redeemer.data().compute_hash().to_vec());
-                }
-            }
+            // Archive indexes (shared logic)
+            builder.index_block(&block, &self.utxos_decoded);
         }
 
         builder.build()

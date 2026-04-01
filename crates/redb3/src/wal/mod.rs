@@ -454,7 +454,7 @@ where
         let deltas: Vec<_> = range
             .map_ok(|(k, _)| k.value())
             .map_ok(ChainPoint::from)
-            .map_ok(|point| (target - point.slot(), point))
+            .map_ok(|point| (target.abs_diff(point.slot()), point))
             .try_collect()?;
 
         let point = deltas.into_iter().min_by_key(|(x, _)| *x).map(|(_, v)| v);
@@ -590,7 +590,7 @@ where
         let range = match (start, end) {
             (Some(start), Some(end)) => table.range(start..=end)?,
             (Some(start), None) => table.range(start..)?,
-            (None, Some(end)) => table.range(..end)?,
+            (None, Some(end)) => table.range(..=end)?,
             (None, None) => table.range::<DbChainPoint>(..)?,
         };
 
@@ -701,8 +701,8 @@ where
     fn locate_point(&self, around: BlockSlot) -> Result<Option<ChainPoint>, WalError> {
         let search = |retry| {
             let delta = 20 * retry as u64;
-            let start = around - delta;
-            let end = around + delta;
+            let start = around.saturating_sub(delta);
+            let end = around.saturating_add(delta);
             start..=end
         };
 
