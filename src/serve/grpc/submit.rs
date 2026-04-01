@@ -64,13 +64,20 @@ fn tx_eval_to_u5c<E: std::error::Error + Send + Sync + 'static>(
     eval: Result<MempoolTx, DomainError<E>>,
 ) -> u5c::spec::cardano::TxEval {
     match eval {
-        Ok(_tx) => u5c::spec::cardano::TxEval {
-            ex_units: None,
-            redeemers: vec![],
-            fee: None,
-            traces: vec![],
-            ..Default::default()
-        },
+        Ok(tx) => {
+            let traces = tx
+                .report
+                .and_then(|b| String::from_utf8(b).ok())
+                .map(|msg| vec![u5c::spec::cardano::EvalTrace { msg }])
+                .unwrap_or_default();
+            u5c::spec::cardano::TxEval {
+                ex_units: None,
+                redeemers: vec![],
+                fee: None,
+                traces,
+                ..Default::default()
+            }
+        }
         Err(e) => u5c::spec::cardano::TxEval {
             errors: vec![u5c::spec::cardano::EvalError {
                 msg: format!("{e:#?}"),
@@ -128,10 +135,16 @@ where
             .r#ref
             .into_iter()
             .map(|x| {
-                let arr: [u8; 32] = x.as_ref().try_into().unwrap_or_default();
-                dolos_core::hash::Hash::new(arr)
+                let bytes: &[u8] = x.as_ref();
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| {
+                    Status::invalid_argument(format!(
+                        "invalid tx hash length: expected 32 bytes, got {}",
+                        bytes.len()
+                    ))
+                })?;
+                Ok(dolos_core::hash::Hash::new(arr))
             })
-            .collect();
+            .collect::<Result<HashSet<TxHash>, Status>>()?;
 
         let initial_stages: Vec<_> = subjects
             .iter()

@@ -33,8 +33,8 @@ async fn process_request<W: WalStore>(
 
     debug!(?p1, ?p2, "processing equest");
 
-    let p1 = pallas_point_to_chain(p1);
-    let p2 = pallas_point_to_chain(p2);
+    let p1 = pallas_point_to_chain(p1).map_err(Error::parse)?;
+    let p2 = pallas_point_to_chain(p2).map_err(Error::parse)?;
 
     let ok1 = wal.contains_point(&p1).map_err(Error::server)?;
     let ok2 = wal.contains_point(&p2).map_err(Error::server)?;

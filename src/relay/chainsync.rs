@@ -1,5 +1,4 @@
 use dolos_core::crawl::ChainCrawler;
-use itertools::*;
 use pallas::network::miniprotocols::{
     chainsync::{ClientRequest, N2NServer, Tip},
     Point,
@@ -147,7 +146,10 @@ impl<D: Domain> Session<D> {
             points.push(Point::Origin);
         }
 
-        let points = points.into_iter().map(pallas_point_to_chain).collect_vec();
+        let points: Vec<_> = points
+            .into_iter()
+            .filter_map(|p| pallas_point_to_chain(p).ok())
+            .collect();
 
         let intersect = ChainCrawler::<D>::start(&self.domain, &points).unwrap();
 

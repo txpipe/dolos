@@ -79,7 +79,7 @@ impl<D: Domain<Genesis = CardanoGenesis>> Session<D> {
         debug!(?point, "handling acquire request");
 
         let chain_point = match point {
-            Some(p) => pallas_point_to_chain(p),
+            Some(p) => pallas_point_to_chain(p)?,
             None => {
                 // None means acquire the latest point
                 self.tip_cursor()?

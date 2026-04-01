@@ -5,22 +5,28 @@ use pallas::network::miniprotocols::Point;
 use std::fmt::Display;
 use thiserror::Error;
 
-pub fn pallas_point_to_chain(p: Point) -> ChainPoint {
+pub fn pallas_point_to_chain(p: Point) -> Result<ChainPoint, Error> {
     match p {
-        Point::Origin => ChainPoint::Origin,
+        Point::Origin => Ok(ChainPoint::Origin),
         Point::Specific(slot, hash) => {
-            let arr: [u8; 32] = hash.as_slice().try_into().unwrap_or_default();
-            ChainPoint::Specific(slot, dolos_core::hash::Hash::new(arr))
+            let len = hash.len();
+            let arr: [u8; 32] = hash.as_slice().try_into().map_err(|_| {
+                Error::parse(format!(
+                    "invalid block hash length: expected 32 bytes, got {len}"
+                ))
+            })?;
+            Ok(ChainPoint::Specific(slot, dolos_core::hash::Hash::new(arr)))
         }
     }
 }
 
-#[allow(clippy::result_unit_err)]
-pub fn chain_point_to_pallas(p: ChainPoint) -> Result<Point, ()> {
+pub fn chain_point_to_pallas(p: ChainPoint) -> Result<Point, Error> {
     match p {
         ChainPoint::Origin => Ok(Point::Origin),
         ChainPoint::Specific(slot, hash) => Ok(Point::Specific(slot, hash.as_slice().to_vec())),
-        ChainPoint::Slot(_) => Err(()),
+        ChainPoint::Slot(slot) => Err(Error::parse(format!(
+            "ChainPoint::Slot({slot}) cannot be converted to a pallas Point: no hash available"
+        ))),
     }
 }
 

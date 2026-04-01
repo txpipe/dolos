@@ -307,8 +307,9 @@ impl Stage {
             Point::Specific(slot, _) => debug!(slot, "rollback"),
         };
 
+        let chain_point = pallas_point_to_chain(point).or_panic()?;
         self.downstream
-            .send(PullEvent::Rollback(pallas_point_to_chain(point)).into())
+            .send(PullEvent::Rollback(chain_point).into())
             .await
             .or_panic()?;
 
