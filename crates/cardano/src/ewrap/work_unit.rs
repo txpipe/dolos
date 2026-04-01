@@ -77,7 +77,7 @@ where
         debug!(slot = self.slot, "committing ewrap state changes");
 
         let boundary = self.boundary.as_mut().ok_or_else(|| {
-            DomainError::InconsistentState("ewrap boundary not loaded".to_string())
+            DomainError::Internal("ewrap boundary not loaded".into())
         })?;
 
         boundary.commit::<D>(domain.state(), domain.archive())?;

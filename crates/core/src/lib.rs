@@ -616,14 +616,17 @@ pub enum DomainError<E: std::error::Error + Send + Sync + 'static> {
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 
-    #[error("inconsistent state: {0}")]
-    InconsistentState(String),
+    #[error("inconsistent state")]
+    InconsistentState {
+        wal: Option<ChainPoint>,
+        state: Option<ChainPoint>,
+    },
+
+    #[error("{0}")]
+    Internal(String),
 
     #[error("wal is empty")]
     WalIsEmpty,
-
-    #[error("wal is behind state: {0}")]
-    WalIsBehindState(BlockSlot, BlockSlot),
 
     #[error("forced stop epoch reached")]
     StopEpochReached,

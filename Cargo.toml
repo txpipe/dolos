@@ -124,6 +124,10 @@ name = "sync"
 path = "tests/e2e/sync.rs"
 
 [[test]]
+name = "snapshot"
+path = "tests/e2e/snapshot.rs"
+
+[[test]]
 name = "epoch_pots"
 path = "tests/epoch_pots/main.rs"
 
@@ -185,7 +189,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.2"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
