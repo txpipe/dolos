@@ -22,6 +22,7 @@ pub mod pallas_extras;
 
 // machinery
 pub mod cip25;
+pub mod consensus;
 pub mod cip68;
 pub mod eras;
 pub mod forks;

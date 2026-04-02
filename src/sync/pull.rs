@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
+use dolos_cardano::consensus::{ChainFragment, ConsensusError, RollbackResult};
 use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
+use dolos_core::ChainPoint;
 use gasket::framework::*;
 use itertools::Itertools;
-use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
-use pallas::network::miniprotocols::chainsync::{
-    HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
-};
+use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip};
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
@@ -24,70 +23,6 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
-/// Extract the hash from a pallas Point, if present.
-fn point_hash(point: &Point) -> Option<Hash<32>> {
-    match point {
-        Point::Specific(_, hash) => <[u8; 32]>::try_from(hash.as_slice()).ok().map(Hash::new),
-        Point::Origin => None,
-    }
-}
-
-// ============================================================================
-// ChainFragment — RollbackBuffer wrapper with continuity checks
-// ============================================================================
-
-/// A wrapper around pallas' `RollbackBuffer` that validates chain continuity
-/// on each roll forward.
-///
-/// Before accepting a new header, it checks that the header's `previous_hash`
-/// matches the hash of the current tip. A mismatch indicates the upstream peer
-/// switched forks without sending a rollback first.
-struct ChainFragment {
-    inner: RollbackBuffer,
-}
-
-impl ChainFragment {
-    fn new() -> Self {
-        Self {
-            inner: RollbackBuffer::new(),
-        }
-    }
-
-    /// Roll forward with chain continuity validation.
-    ///
-    /// Checks that `header.previous_hash()` matches the tip of the buffer.
-    /// Returns `Err(WorkerError::Restart)` on mismatch, signaling that the
-    /// pull worker should reconnect and find a new intersection.
-    fn roll_forward(&mut self, header: &MultiEraHeader) -> Result<Point, WorkerError> {
-        let prev_hash = header.previous_hash();
-        let tip_hash = self.inner.latest().and_then(point_hash);
-
-        if let (Some(prev), Some(tip)) = (prev_hash, tip_hash) {
-            if prev != tip {
-                warn!(
-                    slot = header.slot(),
-                    expected = %tip,
-                    got = %prev,
-                    "block parent hash mismatch, upstream peer may have switched forks — reconnecting"
-                );
-                return Err(WorkerError::Restart);
-            }
-        }
-
-        let point = Point::Specific(header.slot(), header.hash().to_vec());
-        self.inner.roll_forward(point.clone());
-        Ok(point)
-    }
-
-    fn roll_back(&mut self, point: &Point) -> RollbackEffect {
-        self.inner.roll_back(point)
-    }
-
-    fn pop_with_depth(&mut self, min_depth: usize) -> Vec<Point> {
-        self.inner.pop_with_depth(min_depth)
-    }
-}
-
 // ============================================================================
 // Pull stage
 // ============================================================================
@@ -95,8 +30,8 @@ impl ChainFragment {
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
 enum PullResult {
-    Blocks(Vec<Point>),
-    Rollback(Point),
+    Blocks(Vec<ChainPoint>),
+    Rollback(ChainPoint),
     Empty,
 }
 
@@ -167,8 +102,8 @@ impl Worker {
     /// Gather up to `max_headers` headers from the upstream peer.
     ///
     /// For each chainsync response:
-    /// - RollForward: validate chain continuity, track in buffer
-    /// - RollBackward: update buffer; if out of scope, return as rollback
+    /// - RollForward: validate chain continuity, track in fragment
+    /// - RollBackward: update fragment; if out of scope, return as rollback
     /// - Await: stop gathering (peer has no more blocks)
     ///
     /// Returns the gathered points to fetch, a rollback to propagate, or empty.
@@ -185,7 +120,12 @@ impl Worker {
             match next {
                 NextResponse::RollForward(header, tip) => {
                     let header = to_traverse(&header).or_panic()?;
-                    let point = self.chain.roll_forward(&header)?;
+
+                    let point = self.chain.roll_forward(&header).map_err(|err| {
+                        warn!(%err, "chain continuity error, reconnecting");
+                        WorkerError::Restart
+                    })?;
+
                     debug!(?point, "header received from upstream peer");
                     gathered += 1;
 
@@ -194,9 +134,13 @@ impl Worker {
                 NextResponse::RollBackward(point, tip) => {
                     debug!(?point, "rollback sent by upstream peer");
 
-                    match self.chain.roll_back(&point) {
-                        RollbackEffect::OutOfScope => return Ok(PullResult::Rollback(point)),
-                        RollbackEffect::Handled => (),
+                    let chain_point = ChainPoint::from(point);
+
+                    match self.chain.roll_back(&chain_point) {
+                        RollbackResult::OutOfScope(point) => {
+                            return Ok(PullResult::Rollback(point))
+                        }
+                        RollbackResult::Handled => (),
                     }
 
                     stage.track_tip(&tip);
@@ -205,7 +149,7 @@ impl Worker {
             }
         }
 
-        let points = self.chain.pop_with_depth(0);
+        let points = self.chain.take_pending();
 
         if points.is_empty() {
             Ok(PullResult::Empty)
@@ -217,15 +161,19 @@ impl Worker {
     /// Fetch block bodies for the given points and flush them downstream.
     async fn fetch_and_flush(
         &mut self,
-        points: &[Point],
+        points: &[ChainPoint],
         stage: &mut Stage,
     ) -> Result<(), WorkerError> {
+        let to_pallas = |cp: &ChainPoint| -> Point {
+            Point::try_from(cp.clone()).expect("pending points are always Specific")
+        };
+
         let blocks = match points {
             [single] => {
                 let block = self
                     .peer_session
                     .blockfetch()
-                    .fetch_single(single.clone())
+                    .fetch_single(to_pallas(single))
                     .await
                     .or_restart()?;
 
@@ -234,7 +182,7 @@ impl Worker {
             [first, .., last] => self
                 .peer_session
                 .blockfetch()
-                .fetch_range((first.clone(), last.clone()))
+                .fetch_range((to_pallas(first), to_pallas(last)))
                 .await
                 .or_restart()?,
             [] => return Ok(()),
@@ -293,12 +241,11 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let mut chain = ChainFragment::new();
-        chain.inner.roll_forward(intersection);
+        let chain_point = ChainPoint::from(intersection);
 
         let worker = Self {
             peer_session,
-            chain,
+            chain: ChainFragment::from_intersection(&chain_point),
         };
 
         Ok(worker)
@@ -389,14 +336,11 @@ impl Stage {
         Ok(())
     }
 
-    async fn flush_rollback(&mut self, point: Point) -> Result<(), WorkerError> {
-        match &point {
-            Point::Origin => debug!("rollback to origin"),
-            Point::Specific(slot, _) => debug!(slot, "rollback"),
-        };
+    async fn flush_rollback(&mut self, point: ChainPoint) -> Result<(), WorkerError> {
+        debug!(slot = point.slot(), "rollback");
 
         self.downstream
-            .send(PullEvent::Rollback(point.into()).into())
+            .send(PullEvent::Rollback(point).into())
             .await
             .or_panic()?;
 

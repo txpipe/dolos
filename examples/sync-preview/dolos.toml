@@ -1,5 +1,5 @@
 [upstream]
-peer_address = "preview-node.world.dev.cardano.org:30002"
+peer_address = "relay.cnode-m1.demeter.run:3002"
 
 [storage]
 version = "v3"
