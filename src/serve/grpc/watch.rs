@@ -275,10 +275,14 @@ where
             .intersect
             .iter()
             .map(|x| {
-                let arr: [u8; 32] = x.hash.as_ref().try_into().unwrap_or([0u8; 32]);
-                ChainPoint::Specific(x.slot, dolos_core::hash::Hash::new(arr))
+                let arr: [u8; 32] = x
+                    .hash
+                    .as_ref()
+                    .try_into()
+                    .map_err(|_| Status::invalid_argument("malformed intersect hash"))?;
+                Ok(ChainPoint::Specific(x.slot, dolos_core::hash::Hash::new(arr)))
             })
-            .collect::<Vec<ChainPoint>>();
+            .collect::<Result<Vec<ChainPoint>, Status>>()?;
 
         let stream =
             ChainStream::start::<D, _>(self.domain.clone(), intersect, self.cancel.clone());
