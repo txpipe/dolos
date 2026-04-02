@@ -24,11 +24,40 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
+/// Check that a new header's previous hash matches the tip of the chain buffer.
+/// Returns Err(Restart) if the chain is discontinuous, signaling that
+/// we should reconnect and find a new intersection.
+fn check_chain_continuity(
+    header: &MultiEraHeader,
+    chain_buffer: &RollbackBuffer,
+) -> Result<(), WorkerError> {
+    let prev_hash = header.previous_hash();
+
+    let known = chain_buffer.latest().and_then(|p| match p {
+        Point::Specific(_, hash) => <[u8; 32]>::try_from(hash.as_slice()).ok().map(Hash::new),
+        Point::Origin => None,
+    });
+
+    if let (Some(prev), Some(known)) = (prev_hash, known) {
+        if prev != known {
+            warn!(
+                slot = header.slot(),
+                expected = %known,
+                got = %prev,
+                "block parent hash mismatch, upstream peer may have switched forks — reconnecting"
+            );
+            return Err(WorkerError::Restart);
+        }
+    }
+
+    Ok(())
+}
+
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
-enum PullBatch {
-    BlockRange(Point, Point),
-    OutOfScopeRollback(Point),
+enum PullResult {
+    Blocks(Vec<Point>),
+    Rollback(Point),
     Empty,
 }
 
@@ -83,46 +112,36 @@ pub struct Worker {
     chain_buffer: RollbackBuffer,
 }
 
-/// Extract the hash from a pallas Point, if present.
-fn point_hash(point: &Point) -> Option<Hash<32>> {
-    match point {
-        Point::Specific(_, hash) => <[u8; 32]>::try_from(hash.as_slice()).ok().map(Hash::new),
-        Point::Origin => None,
-    }
-}
+impl Worker {
+    /// Receive the next chainsync response, using the appropriate method
+    /// depending on whether we have agency (catching up) or not (at the tip).
+    async fn recv_next_header(&mut self) -> Result<NextResponse<HeaderContent>, WorkerError> {
+        let client = self.peer_session.chainsync();
 
-/// Check that a new header's previous hash matches the tip of the chain buffer.
-/// Returns Err(Restart) if the chain is discontinuous, signaling that
-/// we should reconnect and find a new intersection.
-fn check_chain_continuity(
-    header: &MultiEraHeader,
-    chain_buffer: &RollbackBuffer,
-) -> Result<(), WorkerError> {
-    let prev_hash = header.previous_hash();
-    let known = chain_buffer.latest().and_then(|p| point_hash(p));
-
-    if let (Some(prev), Some(known)) = (prev_hash, known) {
-        if prev != known {
-            warn!(
-                slot = header.slot(),
-                expected = %known,
-                got = %prev,
-                "block parent hash mismatch, upstream peer may have switched forks — reconnecting"
-            );
-            return Err(WorkerError::Restart);
+        if client.has_agency() {
+            client.request_next().await.or_restart()
+        } else {
+            client.recv_while_must_reply().await.or_restart()
         }
     }
 
-    Ok(())
-}
+    /// Gather up to `max_headers` headers from the upstream peer.
+    ///
+    /// For each chainsync response:
+    /// - RollForward: validate chain continuity, track in buffer
+    /// - RollBackward: update buffer; if out of scope, return as rollback
+    /// - Await: stop gathering (peer has no more blocks)
+    ///
+    /// Returns the gathered points to fetch, a rollback to propagate, or empty.
+    async fn pull_headers(
+        &mut self,
+        max_headers: usize,
+        stage: &mut Stage,
+    ) -> Result<PullResult, WorkerError> {
+        let mut gathered = 0;
 
-impl Worker {
-    async fn gather_pull_batch(&mut self, stage: &mut Stage) -> Result<PullBatch, WorkerError> {
-        let client = self.peer_session.chainsync();
-        let start_size = self.chain_buffer.size();
-
-        while self.chain_buffer.size() - start_size < stage.block_fetch_batch_size {
-            let next = client.request_next().await.or_restart()?;
+        while gathered < max_headers {
+            let next = self.recv_next_header().await?;
 
             match next {
                 NextResponse::RollForward(header, tip) => {
@@ -131,31 +150,68 @@ impl Worker {
                     check_chain_continuity(&header, &self.chain_buffer)?;
 
                     let point = Point::Specific(header.slot(), header.hash().to_vec());
+                    debug!(?point, "header received from upstream peer");
                     self.chain_buffer.roll_forward(point);
+                    gathered += 1;
 
                     stage.track_tip(&tip);
                 }
-                NextResponse::RollBackward(point, _) => {
+                NextResponse::RollBackward(point, tip) => {
+                    debug!(?point, "rollback sent by upstream peer");
+
                     match self.chain_buffer.roll_back(&point) {
-                        RollbackEffect::OutOfScope => {
-                            return Ok(PullBatch::OutOfScopeRollback(point))
-                        }
+                        RollbackEffect::OutOfScope => return Ok(PullResult::Rollback(point)),
                         RollbackEffect::Handled => (),
                     }
+
+                    stage.track_tip(&tip);
                 }
                 NextResponse::Await => break,
             }
         }
 
-        // Drain the new points gathered in this batch
-        let new_points = self.chain_buffer.pop_with_depth(0);
+        let points = self.chain_buffer.pop_with_depth(0);
 
-        let range = match (new_points.first(), new_points.last()) {
-            (Some(a), Some(b)) => PullBatch::BlockRange(a.clone(), b.clone()),
-            _ => PullBatch::Empty,
+        if points.is_empty() {
+            Ok(PullResult::Empty)
+        } else {
+            Ok(PullResult::Blocks(points))
+        }
+    }
+
+    /// Fetch block bodies for the given points and flush them downstream.
+    async fn fetch_and_flush(
+        &mut self,
+        points: &[Point],
+        stage: &mut Stage,
+    ) -> Result<(), WorkerError> {
+        let blocks = match points {
+            [single] => {
+                let block = self
+                    .peer_session
+                    .blockfetch()
+                    .fetch_single(single.clone())
+                    .await
+                    .or_restart()?;
+
+                vec![block]
+            }
+            [first, .., last] => {
+                self.peer_session
+                    .blockfetch()
+                    .fetch_range((first.clone(), last.clone()))
+                    .await
+                    .or_restart()?
+            }
+            [] => return Ok(()),
         };
 
-        Ok(range)
+        debug!(len = blocks.len(), "block batch pulled from peer");
+
+        stage.quota.consume_blocks(blocks.len() as u64);
+        stage.flush_blocks(blocks).await?;
+
+        Ok(())
     }
 }
 
@@ -232,81 +288,19 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
-        match unit {
-            WorkUnit::Pull => {
-                debug!("pulling block batch from upstream peer");
-                let batch = self.gather_pull_batch(stage).await?;
+        let max_headers = match unit {
+            WorkUnit::Pull => stage.block_fetch_batch_size,
+            WorkUnit::Await => 1,
+        };
 
-                match batch {
-                    PullBatch::BlockRange(start, end) => {
-                        let blocks = self
-                            .peer_session
-                            .blockfetch()
-                            .fetch_range((start, end))
-                            .await
-                            .or_restart()?;
+        match self.pull_headers(max_headers, stage).await? {
+            PullResult::Blocks(points) => self.fetch_and_flush(&points, stage).await?,
+            PullResult::Rollback(point) => stage.flush_rollback(point).await?,
+            PullResult::Empty => (),
+        }
 
-                        debug!(len = blocks.len(), "block batch pulled from peer");
-
-                        stage.quota.consume_blocks(blocks.len() as u64);
-                        stage.flush_blocks(blocks).await?;
-                    }
-                    PullBatch::OutOfScopeRollback(point) => {
-                        stage.flush_rollback(point).await?;
-                    }
-                    PullBatch::Empty => (),
-                };
-                if !self.peer_session.chainsync().has_agency() {
-                    stage.quota.on_tip();
-                }
-            }
-            WorkUnit::Await => {
-                debug!("waiting for new block");
-
-                let next = self
-                    .peer_session
-                    .chainsync()
-                    .recv_while_must_reply()
-                    .await
-                    .or_restart()?;
-
-                match next {
-                    NextResponse::RollForward(header, tip) => {
-                        let header = to_traverse(&header).or_panic()?;
-
-                        check_chain_continuity(&header, &self.chain_buffer)?;
-
-                        let point = Point::Specific(header.slot(), header.hash().to_vec());
-
-                        debug!(?point, "new block sent by upstream peer");
-
-                        let block = self
-                            .peer_session
-                            .blockfetch()
-                            .fetch_single(point.clone())
-                            .await
-                            .or_restart()?;
-
-                        stage.flush_blocks(vec![block]).await?;
-                        // Track this point, then pop so the buffer stays lean
-                        self.chain_buffer.roll_forward(point);
-                        self.chain_buffer.pop_with_depth(1);
-                        stage.quota.consume_blocks(1);
-                        stage.track_tip(&tip);
-                    }
-                    NextResponse::RollBackward(point, tip) => {
-                        debug!(?point, "rollback sent by upstream peer");
-
-                        self.chain_buffer.roll_back(&point);
-
-                        stage.flush_rollback(point).await?;
-                        stage.track_tip(&tip);
-                    }
-                    NextResponse::Await => {
-                        warn!("unexpected response, skipping");
-                    }
-                }
-            }
+        if !self.peer_session.chainsync().has_agency() {
+            stage.quota.on_tip();
         }
 
         Ok(())
