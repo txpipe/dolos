@@ -3,6 +3,7 @@ use std::sync::Arc;
 use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
 use gasket::framework::*;
 use itertools::Itertools;
+use pallas::crypto::hash::Hash;
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
 use pallas::network::miniprotocols::chainsync::{
@@ -79,33 +80,77 @@ impl From<SyncLimit> for PullQuota {
 
 pub struct Worker {
     peer_session: PeerClient,
+    chain_buffer: RollbackBuffer,
+}
+
+/// Extract the hash from a pallas Point, if present.
+fn point_hash(point: &Point) -> Option<Hash<32>> {
+    match point {
+        Point::Specific(_, hash) => <[u8; 32]>::try_from(hash.as_slice()).ok().map(Hash::new),
+        Point::Origin => None,
+    }
+}
+
+/// Check that a new header's previous hash matches the tip of the chain buffer.
+/// Returns Err(Restart) if the chain is discontinuous, signaling that
+/// we should reconnect and find a new intersection.
+fn check_chain_continuity(
+    header: &MultiEraHeader,
+    chain_buffer: &RollbackBuffer,
+) -> Result<(), WorkerError> {
+    let prev_hash = header.previous_hash();
+    let known = chain_buffer.latest().and_then(|p| point_hash(p));
+
+    if let (Some(prev), Some(known)) = (prev_hash, known) {
+        if prev != known {
+            warn!(
+                slot = header.slot(),
+                expected = %known,
+                got = %prev,
+                "block parent hash mismatch, upstream peer may have switched forks — reconnecting"
+            );
+            return Err(WorkerError::Restart);
+        }
+    }
+
+    Ok(())
 }
 
 impl Worker {
     async fn gather_pull_batch(&mut self, stage: &mut Stage) -> Result<PullBatch, WorkerError> {
         let client = self.peer_session.chainsync();
-        let mut buffer = RollbackBuffer::new();
+        let start_size = self.chain_buffer.size();
 
-        while buffer.size() < stage.block_fetch_batch_size {
+        while self.chain_buffer.size() - start_size < stage.block_fetch_batch_size {
             let next = client.request_next().await.or_restart()?;
 
             match next {
                 NextResponse::RollForward(header, tip) => {
                     let header = to_traverse(&header).or_panic()?;
+
+                    check_chain_continuity(&header, &self.chain_buffer)?;
+
                     let point = Point::Specific(header.slot(), header.hash().to_vec());
-                    buffer.roll_forward(point);
+                    self.chain_buffer.roll_forward(point);
 
                     stage.track_tip(&tip);
                 }
-                NextResponse::RollBackward(point, _) => match buffer.roll_back(&point) {
-                    RollbackEffect::OutOfScope => return Ok(PullBatch::OutOfScopeRollback(point)),
-                    RollbackEffect::Handled => (),
-                },
+                NextResponse::RollBackward(point, _) => {
+                    match self.chain_buffer.roll_back(&point) {
+                        RollbackEffect::OutOfScope => {
+                            return Ok(PullBatch::OutOfScopeRollback(point))
+                        }
+                        RollbackEffect::Handled => (),
+                    }
+                }
                 NextResponse::Await => break,
             }
         }
 
-        let range = match (buffer.oldest(), buffer.latest()) {
+        // Drain the new points gathered in this batch
+        let new_points = self.chain_buffer.pop_with_depth(0);
+
+        let range = match (new_points.first(), new_points.last()) {
             (Some(a), Some(b)) => PullBatch::BlockRange(a.clone(), b.clone()),
             _ => PullBatch::Empty,
         };
@@ -158,7 +203,13 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let worker = Self { peer_session };
+        let mut chain_buffer = RollbackBuffer::new();
+        chain_buffer.roll_forward(intersection);
+
+        let worker = Self {
+            peer_session,
+            chain_buffer,
+        };
 
         Ok(worker)
     }
@@ -222,6 +273,9 @@ impl gasket::framework::Worker<Stage> for Worker {
                 match next {
                     NextResponse::RollForward(header, tip) => {
                         let header = to_traverse(&header).or_panic()?;
+
+                        check_chain_continuity(&header, &self.chain_buffer)?;
+
                         let point = Point::Specific(header.slot(), header.hash().to_vec());
 
                         debug!(?point, "new block sent by upstream peer");
@@ -229,16 +283,21 @@ impl gasket::framework::Worker<Stage> for Worker {
                         let block = self
                             .peer_session
                             .blockfetch()
-                            .fetch_single(point)
+                            .fetch_single(point.clone())
                             .await
                             .or_restart()?;
 
                         stage.flush_blocks(vec![block]).await?;
+                        // Track this point, then pop so the buffer stays lean
+                        self.chain_buffer.roll_forward(point);
+                        self.chain_buffer.pop_with_depth(1);
                         stage.quota.consume_blocks(1);
                         stage.track_tip(&tip);
                     }
                     NextResponse::RollBackward(point, tip) => {
                         debug!(?point, "rollback sent by upstream peer");
+
+                        self.chain_buffer.roll_back(&point);
 
                         stage.flush_rollback(point).await?;
                         stage.track_tip(&tip);
