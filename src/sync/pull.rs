@@ -24,34 +24,73 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
-/// Check that a new header's previous hash matches the tip of the chain buffer.
-/// Returns Err(Restart) if the chain is discontinuous, signaling that
-/// we should reconnect and find a new intersection.
-fn check_chain_continuity(
-    header: &MultiEraHeader,
-    chain_buffer: &RollbackBuffer,
-) -> Result<(), WorkerError> {
-    let prev_hash = header.previous_hash();
-
-    let known = chain_buffer.latest().and_then(|p| match p {
+/// Extract the hash from a pallas Point, if present.
+fn point_hash(point: &Point) -> Option<Hash<32>> {
+    match point {
         Point::Specific(_, hash) => <[u8; 32]>::try_from(hash.as_slice()).ok().map(Hash::new),
         Point::Origin => None,
-    });
+    }
+}
 
-    if let (Some(prev), Some(known)) = (prev_hash, known) {
-        if prev != known {
-            warn!(
-                slot = header.slot(),
-                expected = %known,
-                got = %prev,
-                "block parent hash mismatch, upstream peer may have switched forks — reconnecting"
-            );
-            return Err(WorkerError::Restart);
+// ============================================================================
+// ChainFragment — RollbackBuffer wrapper with continuity checks
+// ============================================================================
+
+/// A wrapper around pallas' `RollbackBuffer` that validates chain continuity
+/// on each roll forward.
+///
+/// Before accepting a new header, it checks that the header's `previous_hash`
+/// matches the hash of the current tip. A mismatch indicates the upstream peer
+/// switched forks without sending a rollback first.
+struct ChainFragment {
+    inner: RollbackBuffer,
+}
+
+impl ChainFragment {
+    fn new() -> Self {
+        Self {
+            inner: RollbackBuffer::new(),
         }
     }
 
-    Ok(())
+    /// Roll forward with chain continuity validation.
+    ///
+    /// Checks that `header.previous_hash()` matches the tip of the buffer.
+    /// Returns `Err(WorkerError::Restart)` on mismatch, signaling that the
+    /// pull worker should reconnect and find a new intersection.
+    fn roll_forward(&mut self, header: &MultiEraHeader) -> Result<Point, WorkerError> {
+        let prev_hash = header.previous_hash();
+        let tip_hash = self.inner.latest().and_then(point_hash);
+
+        if let (Some(prev), Some(tip)) = (prev_hash, tip_hash) {
+            if prev != tip {
+                warn!(
+                    slot = header.slot(),
+                    expected = %tip,
+                    got = %prev,
+                    "block parent hash mismatch, upstream peer may have switched forks — reconnecting"
+                );
+                return Err(WorkerError::Restart);
+            }
+        }
+
+        let point = Point::Specific(header.slot(), header.hash().to_vec());
+        self.inner.roll_forward(point.clone());
+        Ok(point)
+    }
+
+    fn roll_back(&mut self, point: &Point) -> RollbackEffect {
+        self.inner.roll_back(point)
+    }
+
+    fn pop_with_depth(&mut self, min_depth: usize) -> Vec<Point> {
+        self.inner.pop_with_depth(min_depth)
+    }
 }
+
+// ============================================================================
+// Pull stage
+// ============================================================================
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
@@ -109,7 +148,7 @@ impl From<SyncLimit> for PullQuota {
 
 pub struct Worker {
     peer_session: PeerClient,
-    chain_buffer: RollbackBuffer,
+    chain: ChainFragment,
 }
 
 impl Worker {
@@ -146,12 +185,8 @@ impl Worker {
             match next {
                 NextResponse::RollForward(header, tip) => {
                     let header = to_traverse(&header).or_panic()?;
-
-                    check_chain_continuity(&header, &self.chain_buffer)?;
-
-                    let point = Point::Specific(header.slot(), header.hash().to_vec());
+                    let point = self.chain.roll_forward(&header)?;
                     debug!(?point, "header received from upstream peer");
-                    self.chain_buffer.roll_forward(point);
                     gathered += 1;
 
                     stage.track_tip(&tip);
@@ -159,7 +194,7 @@ impl Worker {
                 NextResponse::RollBackward(point, tip) => {
                     debug!(?point, "rollback sent by upstream peer");
 
-                    match self.chain_buffer.roll_back(&point) {
+                    match self.chain.roll_back(&point) {
                         RollbackEffect::OutOfScope => return Ok(PullResult::Rollback(point)),
                         RollbackEffect::Handled => (),
                     }
@@ -170,7 +205,7 @@ impl Worker {
             }
         }
 
-        let points = self.chain_buffer.pop_with_depth(0);
+        let points = self.chain.pop_with_depth(0);
 
         if points.is_empty() {
             Ok(PullResult::Empty)
@@ -196,13 +231,12 @@ impl Worker {
 
                 vec![block]
             }
-            [first, .., last] => {
-                self.peer_session
-                    .blockfetch()
-                    .fetch_range((first.clone(), last.clone()))
-                    .await
-                    .or_restart()?
-            }
+            [first, .., last] => self
+                .peer_session
+                .blockfetch()
+                .fetch_range((first.clone(), last.clone()))
+                .await
+                .or_restart()?,
             [] => return Ok(()),
         };
 
@@ -259,12 +293,12 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let mut chain_buffer = RollbackBuffer::new();
-        chain_buffer.roll_forward(intersection);
+        let mut chain = ChainFragment::new();
+        chain.inner.roll_forward(intersection);
 
         let worker = Self {
             peer_session,
-            chain_buffer,
+            chain,
         };
 
         Ok(worker)
