@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_cardano::consensus::{ChainFragment, ConsensusError, RollbackResult};
+use dolos_cardano::consensus::{ChainFragment, RollbackResult};
 use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
 use dolos_core::ChainPoint;
 use gasket::framework::*;
