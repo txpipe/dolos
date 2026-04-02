@@ -65,7 +65,7 @@ impl RedbArchiveError {
             ArchiveError::DecodingError(e) => ArchiveError::DecodingError(e),
             ArchiveError::EntityDecodingError(e) => ArchiveError::EntityDecodingError(e),
             ArchiveError::NamespaceNotFound(ns) => ArchiveError::NamespaceNotFound(ns),
-            ArchiveError::ChainSpecifc(infallible) => match infallible {},
+            ArchiveError::ChainSpecific(infallible) => match infallible {},
         }
     }
 }

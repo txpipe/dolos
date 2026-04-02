@@ -167,7 +167,7 @@ pub enum ArchiveError<E: std::error::Error + Send + Sync + 'static> {
     NamespaceNotFound(Namespace),
 
     #[error("chain-specific error: {0}")]
-    ChainSpecifc(E),
+    ChainSpecific(E),
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
