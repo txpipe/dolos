@@ -498,7 +498,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     type ChainSpecificError: std::error::Error + Send + Sync;
 
     /// The concrete work unit type produced by this chain logic.
-    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError>>: WorkUnit<D>;
+    type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError, Genesis = Self::Genesis>>: WorkUnit<D>;
 
     /// Initialize the chain logic with configuration and state.
     fn initialize<D: Domain>(

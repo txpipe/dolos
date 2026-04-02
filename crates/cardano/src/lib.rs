@@ -125,6 +125,7 @@ where
         Entity = CardanoEntity,
         EntityDelta = CardanoDelta,
         ChainSpecificError = CardanoError,
+        Genesis = CardanoGenesis,
     >,
 {
     fn name(&self) -> &'static str {
@@ -335,6 +336,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             Entity = Self::Entity,
             EntityDelta = Self::Delta,
             ChainSpecificError = Self::ChainSpecificError,
+            Genesis = Self::Genesis,
         >,
     > = CardanoWorkUnit;
     type ChainSpecificError = CardanoError;

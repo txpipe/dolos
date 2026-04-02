@@ -46,7 +46,7 @@ impl EwrapWorkUnit {
 
 impl<D> WorkUnit<D> for EwrapWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError>,
+    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>,
 {
     fn name(&self) -> &'static str {
         "ewrap"
@@ -76,9 +76,10 @@ where
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!(slot = self.slot, "committing ewrap state changes");
 
-        let boundary = self.boundary.as_mut().ok_or_else(|| {
-            DomainError::Internal("ewrap boundary not loaded".into())
-        })?;
+        let boundary = self
+            .boundary
+            .as_mut()
+            .ok_or_else(|| DomainError::Internal("ewrap boundary not loaded".into()))?;
 
         boundary.commit::<D>(domain.state(), domain.archive())?;
 

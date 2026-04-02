@@ -51,7 +51,11 @@ fn bootstrap_pots(
 }
 
 pub fn bootstrap_epoch<
-    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+    D: Domain<
+        Chain = crate::CardanoLogic,
+        ChainSpecificError = crate::CardanoError,
+        Genesis = crate::CardanoGenesis,
+    >,
 >(
     state: &D::State,
     genesis: &crate::CardanoGenesis,
@@ -158,7 +162,13 @@ pub fn bootstrap_utxos<
     Ok(())
 }
 
-pub fn execute<D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>>(
+pub fn execute<
+    D: Domain<
+        Chain = crate::CardanoLogic,
+        ChainSpecificError = crate::CardanoError,
+        Genesis = crate::CardanoGenesis,
+    >,
+>(
     state: &D::State,
     indexes: &D::Indexes,
     genesis: &crate::CardanoGenesis,

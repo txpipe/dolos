@@ -46,7 +46,7 @@ impl EstartWorkUnit {
 
 impl<D> WorkUnit<D> for EstartWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError>,
+    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>,
 {
     fn name(&self) -> &'static str {
         "estart"
@@ -75,9 +75,10 @@ where
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError<D::ChainSpecificError>> {
         debug!(slot = self.slot, "committing estart state changes");
 
-        let context = self.context.as_mut().ok_or_else(|| {
-            DomainError::Internal("estart context not loaded".into())
-        })?;
+        let context = self
+            .context
+            .as_mut()
+            .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
         context.commit::<D>(domain.state(), domain.archive(), self.slot)?;
 

@@ -24,7 +24,7 @@ impl GenesisWorkUnit {
 
 impl<D> WorkUnit<D> for GenesisWorkUnit
 where
-    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError>,
+    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>,
 {
     fn name(&self) -> &'static str {
         "genesis"
