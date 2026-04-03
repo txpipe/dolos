@@ -120,13 +120,17 @@ impl Worker {
             match next {
                 NextResponse::RollForward(header, tip) => {
                     let header = to_traverse(&header).or_panic()?;
+                    let point = ChainPoint::Specific(header.slot(), header.hash());
+                    let prev_hash = header.previous_hash();
 
-                    let point = self.chain.roll_forward(&header).map_err(|err| {
-                        warn!(%err, "chain continuity error, reconnecting");
-                        WorkerError::Restart
-                    })?;
+                    self.chain.roll_forward(point.clone(), prev_hash).map_err(
+                        |err| {
+                            warn!(%err, "consensus error, reconnecting");
+                            WorkerError::Restart
+                        },
+                    )?;
 
-                    debug!(?point, "header received from upstream peer");
+                    debug!(%point, "header received from upstream peer");
                     gathered += 1;
 
                     stage.track_tip(&tip);
@@ -241,11 +245,9 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let chain_point = ChainPoint::from(intersection);
-
         let worker = Self {
             peer_session,
-            chain: ChainFragment::from_intersection(&chain_point),
+            chain: ChainFragment::start(ChainPoint::from(intersection)),
         };
 
         Ok(worker)

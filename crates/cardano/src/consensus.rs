@@ -1,11 +1,11 @@
 //! Chain consensus utilities for the pull stage.
 //!
 //! This module provides [`ChainFragment`], a lightweight tracker for the
-//! upstream chain position that validates parent-hash continuity on each
-//! new header and accumulates pending points for block fetching.
+//! upstream chain position that validates parent-hash continuity and slot
+//! ordering on each new header, and accumulates pending points for block
+//! fetching.
 
-use dolos_core::{BlockHash, ChainPoint};
-use pallas::ledger::traverse::MultiEraHeader;
+use dolos_core::{BlockHash, BlockSlot, ChainPoint};
 
 /// Errors that can occur during consensus validation.
 #[derive(Debug, thiserror::Error)]
@@ -13,9 +13,16 @@ pub enum ConsensusError {
     /// A header's `previous_hash` doesn't match the expected chain tip.
     #[error("block at slot {slot} has parent hash {got} but expected {expected}")]
     BrokenContinuity {
-        slot: u64,
+        slot: BlockSlot,
         expected: BlockHash,
         got: BlockHash,
+    },
+
+    /// A header's slot is not strictly greater than the current tip slot.
+    #[error("block slot {slot} does not advance from tip slot {tip_slot}")]
+    SlotNotIncreasing {
+        slot: BlockSlot,
+        tip_slot: BlockSlot,
     },
 }
 
@@ -29,16 +36,58 @@ pub enum RollbackResult {
     OutOfScope(ChainPoint),
 }
 
+// ============================================================================
+// Consensus checks — each is a standalone function for readability
+// ============================================================================
+
+/// Verify that `prev_hash` matches the tip's hash.
+/// Skipped when either side is unknown (Origin / genesis).
+fn check_continuity(
+    slot: BlockSlot,
+    prev_hash: Option<BlockHash>,
+    tip: &ChainPoint,
+) -> Result<(), ConsensusError> {
+    if let (Some(prev), Some(tip_hash)) = (prev_hash, tip.hash()) {
+        if prev != tip_hash {
+            return Err(ConsensusError::BrokenContinuity {
+                slot,
+                expected: tip_hash,
+                got: prev,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify that the new slot is strictly greater than the tip's slot.
+/// Skipped when the tip is Origin (no slot to compare against).
+fn check_slot_increase(slot: BlockSlot, tip: &ChainPoint) -> Result<(), ConsensusError> {
+    if matches!(tip, ChainPoint::Origin) {
+        return Ok(());
+    }
+
+    if slot <= tip.slot() {
+        return Err(ConsensusError::SlotNotIncreasing {
+            slot,
+            tip_slot: tip.slot(),
+        });
+    }
+
+    Ok(())
+}
+
+// ============================================================================
+// ChainFragment
+// ============================================================================
+
 /// Tracks the upstream chain position for the pull stage.
 ///
-/// Maintains the tip hash (for continuity validation) separately from
-/// the pending batch of points (which will be fetched via blockfetch).
-/// On each [`roll_forward`](Self::roll_forward), validates that the new
-/// header's `previous_hash` matches the current tip.
+/// Maintains the current tip (for continuity and slot validation) separately
+/// from the pending batch of points (which will be fetched via blockfetch).
 pub struct ChainFragment {
-    /// Hash of the latest known block. Used to validate that the next header
-    /// is a valid continuation. `None` when starting from Origin.
-    tip: Option<BlockHash>,
+    /// The latest known chain position.
+    tip: ChainPoint,
 
     /// Points accumulated during the current header-gathering pass.
     /// Drained by [`take_pending`](Self::take_pending) after the pass
@@ -48,31 +97,27 @@ pub struct ChainFragment {
 
 impl ChainFragment {
     /// Create a new fragment seeded from the chainsync intersection point.
-    pub fn from_intersection(point: &ChainPoint) -> Self {
+    pub fn start(point: ChainPoint) -> Self {
         Self {
-            tip: point.hash(),
+            tip: point,
             pending: Vec::new(),
         }
     }
 
-    /// Validate chain continuity and accept a new header.
+    /// Validate consensus rules and accept a new point.
     ///
-    /// Returns the header's [`ChainPoint`] on success.
-    /// Returns [`Err(ConsensusError)`] if the header's `previous_hash`
-    /// doesn't match our tip.
-    pub fn roll_forward(&mut self, header: &MultiEraHeader) -> Result<ChainPoint, ConsensusError> {
-        if let (Some(prev), Some(tip)) = (header.previous_hash(), self.tip) {
-            if prev != tip {
-                return Err(ConsensusError::BrokenContinuity {
-                    slot: header.slot(),
-                    expected: tip,
-                    got: prev,
-                });
-            }
-        }
+    /// `prev_hash` is the parent hash declared by the block header.
+    /// Returns the accepted [`ChainPoint`] on success.
+    /// Returns [`Err(ConsensusError)`] if any check fails.
+    pub fn roll_forward(
+        &mut self,
+        point: ChainPoint,
+        prev_hash: Option<BlockHash>,
+    ) -> Result<ChainPoint, ConsensusError> {
+        check_continuity(point.slot(), prev_hash, &self.tip)?;
+        check_slot_increase(point.slot(), &self.tip)?;
 
-        let point = ChainPoint::Specific(header.slot(), header.hash());
-        self.tip = Some(header.hash());
+        self.tip = point.clone();
         self.pending.push(point.clone());
         Ok(point)
     }
@@ -85,11 +130,11 @@ impl ChainFragment {
     pub fn roll_back(&mut self, point: &ChainPoint) -> RollbackResult {
         if let Some(pos) = self.pending.iter().position(|p| p == point) {
             self.pending.truncate(pos + 1);
-            self.tip = point.hash();
+            self.tip = point.clone();
             RollbackResult::Handled
         } else {
             self.pending.clear();
-            self.tip = point.hash();
+            self.tip = point.clone();
             RollbackResult::OutOfScope(point.clone())
         }
     }
@@ -113,141 +158,187 @@ mod tests {
         ChainPoint::Specific(slot, hash_of(n))
     }
 
-    /// Simulate roll_forward by providing prev_hash and own hash directly,
-    /// bypassing header parsing.
-    fn simulate_roll_forward(
-        chain: &mut ChainFragment,
-        slot: u64,
-        prev_hash: Option<BlockHash>,
-        own_hash: BlockHash,
-    ) -> Result<ChainPoint, ConsensusError> {
-        if let (Some(prev), Some(tip)) = (prev_hash, chain.tip) {
-            if prev != tip {
-                return Err(ConsensusError::BrokenContinuity {
-                    slot,
-                    expected: tip,
-                    got: prev,
-                });
-            }
-        }
+    // -- construction --
 
-        let point = ChainPoint::Specific(slot, own_hash);
-        chain.tip = Some(own_hash);
-        chain.pending.push(point.clone());
-        Ok(point)
+    #[test]
+    fn start_from_origin() {
+        let chain = ChainFragment::start(ChainPoint::Origin);
+        assert_eq!(chain.tip, ChainPoint::Origin);
+        assert!(chain.pending.is_empty());
     }
 
     #[test]
-    fn from_origin_accepts_any_first_block() {
-        let mut chain = ChainFragment::from_intersection(&ChainPoint::Origin);
+    fn start_from_specific() {
+        let chain = ChainFragment::start(point_of(10, 10));
+        assert_eq!(chain.tip, point_of(10, 10));
+        assert!(chain.pending.is_empty());
+    }
 
-        let result = simulate_roll_forward(&mut chain, 1, Some(hash_of(0)), hash_of(1));
+    // -- continuity --
+
+    #[test]
+    fn from_origin_accepts_any_first_block() {
+        let mut chain = ChainFragment::start(ChainPoint::Origin);
+
+        let result = chain.roll_forward(point_of(1, 1), Some(hash_of(0)));
         assert!(result.is_ok());
-        assert_eq!(chain.tip, Some(hash_of(1)));
+        assert_eq!(chain.tip, point_of(1, 1));
         assert_eq!(chain.pending.len(), 1);
     }
 
     #[test]
-    fn from_specific_intersection_validates_first_block() {
-        let mut chain = ChainFragment::from_intersection(&point_of(10, 10));
+    fn from_specific_validates_first_block() {
+        let mut chain = ChainFragment::start(point_of(10, 10));
 
-        let result = simulate_roll_forward(&mut chain, 11, Some(hash_of(10)), hash_of(11));
+        let result = chain.roll_forward(point_of(11, 11), Some(hash_of(10)));
         assert!(result.is_ok());
-        assert_eq!(chain.tip, Some(hash_of(11)));
+        assert_eq!(chain.tip, point_of(11, 11));
     }
 
     #[test]
     fn rejects_mismatched_parent_hash() {
-        let mut chain = ChainFragment::from_intersection(&point_of(10, 10));
+        let mut chain = ChainFragment::start(point_of(10, 10));
 
-        let result = simulate_roll_forward(&mut chain, 11, Some(hash_of(99)), hash_of(11));
-        assert!(result.is_err());
-
-        let ConsensusError::BrokenContinuity {
-            slot,
-            expected,
-            got,
-        } = result.unwrap_err();
-        assert_eq!(slot, 11);
-        assert_eq!(expected, hash_of(10));
-        assert_eq!(got, hash_of(99));
+        let result = chain.roll_forward(point_of(11, 11), Some(hash_of(99)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConsensusError::BrokenContinuity { .. }
+        ));
 
         // State unchanged after rejection
-        assert_eq!(chain.tip, Some(hash_of(10)));
+        assert_eq!(chain.tip, point_of(10, 10));
         assert!(chain.pending.is_empty());
     }
 
     #[test]
     fn sequential_forwards_maintain_chain() {
-        let mut chain = ChainFragment::from_intersection(&point_of(0, 0));
+        let mut chain = ChainFragment::start(point_of(0, 0));
 
         for i in 1..=5u8 {
-            let result =
-                simulate_roll_forward(&mut chain, i as u64, Some(hash_of(i - 1)), hash_of(i));
-            assert!(result.is_ok());
+            chain
+                .roll_forward(point_of(i as u64, i), Some(hash_of(i - 1)))
+                .unwrap();
         }
 
-        assert_eq!(chain.tip, Some(hash_of(5)));
+        assert_eq!(chain.tip, point_of(5, 5));
         assert_eq!(chain.pending.len(), 5);
     }
 
+    // -- slot ordering --
+
+    #[test]
+    fn rejects_same_slot() {
+        let mut chain = ChainFragment::start(point_of(10, 10));
+
+        let result = chain.roll_forward(point_of(10, 11), Some(hash_of(10)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConsensusError::SlotNotIncreasing {
+                slot: 10,
+                tip_slot: 10,
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_decreasing_slot() {
+        let mut chain = ChainFragment::start(point_of(10, 10));
+
+        let result = chain.roll_forward(point_of(5, 11), Some(hash_of(10)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConsensusError::SlotNotIncreasing {
+                slot: 5,
+                tip_slot: 10,
+            }
+        ));
+    }
+
+    #[test]
+    fn slot_check_skipped_from_origin() {
+        let mut chain = ChainFragment::start(ChainPoint::Origin);
+
+        let result = chain.roll_forward(point_of(0, 1), None);
+        assert!(result.is_ok());
+    }
+
+    // -- take_pending --
+
     #[test]
     fn take_pending_drains_and_preserves_tip() {
-        let mut chain = ChainFragment::from_intersection(&point_of(0, 0));
+        let mut chain = ChainFragment::start(point_of(0, 0));
 
-        simulate_roll_forward(&mut chain, 1, Some(hash_of(0)), hash_of(1)).unwrap();
-        simulate_roll_forward(&mut chain, 2, Some(hash_of(1)), hash_of(2)).unwrap();
+        chain
+            .roll_forward(point_of(1, 1), Some(hash_of(0)))
+            .unwrap();
+        chain
+            .roll_forward(point_of(2, 2), Some(hash_of(1)))
+            .unwrap();
 
         let points = chain.take_pending();
         assert_eq!(points.len(), 2);
         assert!(chain.pending.is_empty());
-        assert_eq!(chain.tip, Some(hash_of(2)));
+        assert_eq!(chain.tip, point_of(2, 2));
 
         // Can continue building from the same tip
-        let result = simulate_roll_forward(&mut chain, 3, Some(hash_of(2)), hash_of(3));
+        let result = chain.roll_forward(point_of(3, 3), Some(hash_of(2)));
         assert!(result.is_ok());
     }
 
+    // -- rollback --
+
     #[test]
     fn rollback_within_pending_truncates() {
-        let mut chain = ChainFragment::from_intersection(&point_of(0, 0));
+        let mut chain = ChainFragment::start(point_of(0, 0));
 
-        simulate_roll_forward(&mut chain, 1, Some(hash_of(0)), hash_of(1)).unwrap();
-        simulate_roll_forward(&mut chain, 2, Some(hash_of(1)), hash_of(2)).unwrap();
-        simulate_roll_forward(&mut chain, 3, Some(hash_of(2)), hash_of(3)).unwrap();
+        chain
+            .roll_forward(point_of(1, 1), Some(hash_of(0)))
+            .unwrap();
+        chain
+            .roll_forward(point_of(2, 2), Some(hash_of(1)))
+            .unwrap();
+        chain
+            .roll_forward(point_of(3, 3), Some(hash_of(2)))
+            .unwrap();
 
         let result = chain.roll_back(&point_of(1, 1));
         assert!(matches!(result, RollbackResult::Handled));
         assert_eq!(chain.pending.len(), 1);
-        assert_eq!(chain.tip, Some(hash_of(1)));
+        assert_eq!(chain.tip, point_of(1, 1));
 
         // Can continue from the rollback point
-        let result = simulate_roll_forward(&mut chain, 4, Some(hash_of(1)), hash_of(4));
+        let result = chain.roll_forward(point_of(4, 4), Some(hash_of(1)));
         assert!(result.is_ok());
     }
 
     #[test]
     fn rollback_out_of_scope_clears_pending_and_updates_tip() {
-        let mut chain = ChainFragment::from_intersection(&point_of(0, 0));
+        let mut chain = ChainFragment::start(point_of(0, 0));
 
-        simulate_roll_forward(&mut chain, 1, Some(hash_of(0)), hash_of(1)).unwrap();
-        simulate_roll_forward(&mut chain, 2, Some(hash_of(1)), hash_of(2)).unwrap();
+        chain
+            .roll_forward(point_of(1, 1), Some(hash_of(0)))
+            .unwrap();
+        chain
+            .roll_forward(point_of(2, 2), Some(hash_of(1)))
+            .unwrap();
 
         let result = chain.roll_back(&point_of(100, 100));
         assert!(matches!(result, RollbackResult::OutOfScope(_)));
         assert!(chain.pending.is_empty());
-        assert_eq!(chain.tip, Some(hash_of(100)));
+        assert_eq!(chain.tip, point_of(100, 100));
     }
 
     #[test]
     fn rollback_to_origin_clears_tip() {
-        let mut chain = ChainFragment::from_intersection(&point_of(0, 0));
+        let mut chain = ChainFragment::start(point_of(0, 0));
 
-        simulate_roll_forward(&mut chain, 1, Some(hash_of(0)), hash_of(1)).unwrap();
+        chain
+            .roll_forward(point_of(1, 1), Some(hash_of(0)))
+            .unwrap();
 
         let result = chain.roll_back(&ChainPoint::Origin);
         assert!(matches!(result, RollbackResult::OutOfScope(_)));
         assert!(chain.pending.is_empty());
-        assert_eq!(chain.tip, None);
+        assert_eq!(chain.tip, ChainPoint::Origin);
     }
 }
