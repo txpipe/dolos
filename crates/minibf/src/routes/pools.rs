@@ -11,9 +11,9 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     model::{AccountState, PoolState},
-    FixedNamespace, PoolDelegation, StakeLog,
+    PoolDelegation, StakeLog,
 };
-use dolos_core::{ArchiveStore, BlockSlot, Domain, EntityKey, TemporalKey};
+use dolos_core::{BlockSlot, Domain, EntityKey};
 use futures::future::join_all;
 use itertools::Itertools;
 use pallas::{
@@ -48,9 +48,9 @@ where
     Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let chain_summary = domain.get_chain_summary()?;
 
     let mut live_stake_map = HashMap::new();
+    let mut active_stake_map = HashMap::new();
     for x in domain
         .iter_cardano_entities::<AccountState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -59,6 +59,13 @@ where
         if let Some(PoolDelegation::Pool(hash)) = state.pool.live() {
             let stake = state.stake.live().map(|x| x.total()).unwrap_or(0);
             live_stake_map
+                .entry(*hash)
+                .and_modify(|entry| *entry += stake)
+                .or_insert(stake);
+        };
+        if let Some(PoolDelegation::Pool(hash)) = state.pool.set() {
+            let stake = state.stake.set().map(|x| x.total()).unwrap_or(0);
+            active_stake_map
                 .entry(*hash)
                 .and_modify(|entry| *entry += stake)
                 .or_insert(stake);
@@ -114,7 +121,7 @@ where
 
     let mut out = vec![];
 
-    for ((key, pool), fetched_metadata) in pools.into_iter().zip(metadata_results) {
+    for ((_, pool), fetched_metadata) in pools.into_iter().zip(metadata_results) {
         let poolhex = hex::encode(pool.operator);
         let pool_id = bech32_pool(pool.operator)?;
         let params = pool.snapshot.live().map(|x| x.params.clone());
@@ -145,32 +152,15 @@ where
             None => None,
         };
 
-        // Fetch live and active stake logs
         let live = live_stake_map.get(&pool.operator).copied();
-
-        let Some(epoch) = pool.snapshot.epoch() else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
-        };
-
-        if epoch == 0 {
-            return Err(StatusCode::BAD_REQUEST.into());
-        }
-
-        let active_slot = chain_summary.epoch_start(epoch - 1);
-
-        let Ok(active) = domain.archive().read_log_typed::<StakeLog>(
-            StakeLog::NS,
-            &(TemporalKey::from(active_slot), key.clone()).into(),
-        ) else {
-            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
-        };
+        let active = active_stake_map.get(&pool.operator).copied();
 
         out.push(PoolListExtendedInner {
             pool_id,
             hex: poolhex,
             live_stake: live.map(|x| x.to_string()).unwrap_or("0".to_string()),
             active_stake: active
-                .map(|x| x.total_stake.to_string())
+                .map(|x| x.to_string())
                 .unwrap_or("0".to_string()),
             live_saturation: live
                 .map(|x| x as f64 * optimal as f64 / circulating_supply as f64)
