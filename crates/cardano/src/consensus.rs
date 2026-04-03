@@ -61,20 +61,16 @@ fn check_continuity(
 }
 
 /// Verify that the new slot is strictly greater than the tip's slot.
-/// Skipped when the tip is Origin (no slot to compare against).
+/// Origin is treated as before any slot, so any slot value is accepted.
 fn check_slot_increase(slot: BlockSlot, tip: &ChainPoint) -> Result<(), ConsensusError> {
-    if matches!(tip, ChainPoint::Origin) {
-        return Ok(());
-    }
-
-    if slot <= tip.slot() {
-        return Err(ConsensusError::SlotNotIncreasing {
+    match tip {
+        ChainPoint::Origin => Ok(()),
+        _ if slot > tip.slot() => Ok(()),
+        _ => Err(ConsensusError::SlotNotIncreasing {
             slot,
             tip_slot: tip.slot(),
-        });
+        }),
     }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -260,6 +256,32 @@ mod tests {
 
         let result = chain.roll_forward(point_of(0, 1), None);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn slot_zero_accepted_from_origin() {
+        // Mainnet: intersection is Origin, first Byron block is at slot 0.
+        // Origin is before any slot, so slot 0 is accepted.
+        let mut chain = ChainFragment::start(ChainPoint::Origin);
+
+        let result = chain.roll_forward(point_of(0, 1), None);
+        assert!(result.is_ok());
+        assert_eq!(chain.tip, point_of(0, 1));
+    }
+
+    #[test]
+    fn rejects_same_slot_even_at_zero() {
+        // Once we're at a concrete slot 0, another slot 0 is not allowed.
+        let mut chain = ChainFragment::start(point_of(0, 0));
+
+        let result = chain.roll_forward(point_of(0, 1), Some(hash_of(0)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ConsensusError::SlotNotIncreasing {
+                slot: 0,
+                tip_slot: 0,
+            }
+        ));
     }
 
     // -- take_pending --
