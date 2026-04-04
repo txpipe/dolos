@@ -24,3 +24,8 @@ axum = { version = "0.8.4" }
 
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
+
+[dev-dependencies]
+dolos-testing = { path = "../testing" }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "0.1.2"

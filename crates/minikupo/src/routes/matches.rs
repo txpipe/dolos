@@ -763,3 +763,308 @@ fn slot_range_hint() -> String {
 fn spent_hint() -> String {
     "Invalid or unsupported filter query parameters! 'spent', 'spent_after' and 'spent_before' are not supported. Only unspent results are available. In case of doubts, check the documentation at: <https://cardanosolutions.github.io/kupo>!".to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use axum::http::StatusCode;
+    use serde::Deserialize;
+    use serde_json::{json, Value};
+
+    use crate::test_support::{TestApp, TestFault};
+
+    #[derive(Debug, Deserialize)]
+    struct MatchResponseTest {
+        transaction_index: u32,
+        transaction_id: String,
+        output_index: u32,
+        address: String,
+        value: ValueResponseTest,
+        datum_hash: Option<String>,
+        datum_type: Option<String>,
+        script_hash: Option<String>,
+        created_at: PointResponseTest,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ValueResponseTest {
+        coins: u64,
+        assets: HashMap<String, u64>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct PointResponseTest {
+        slot_no: u64,
+        header_hash: String,
+    }
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn matches_address_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/matches/{}", app.vectors().address);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse matches response");
+        assert_eq!(items.len(), app.vectors().blocks.len());
+        assert!(items
+            .iter()
+            .all(|item| item.address == app.vectors().address));
+        assert!(items.iter().all(|item| item.transaction_index == 0));
+        assert!(items.iter().all(|item| item.value.coins > 0));
+        assert!(items
+            .iter()
+            .all(|item| item.datum_hash.as_deref() == Some(app.vectors().datum_hash.as_str())));
+        assert!(items
+            .iter()
+            .all(|item| item.datum_type.as_deref() == Some("hash")));
+        assert!(items
+            .iter()
+            .all(|item| item.script_hash.as_deref() == Some(app.vectors().script_hash.as_str())));
+
+        let actual_slots: Vec<_> = items.iter().map(|item| item.created_at.slot_no).collect();
+        let expected_slots: Vec<_> = app
+            .vectors()
+            .blocks
+            .iter()
+            .rev()
+            .map(|block| block.slot)
+            .collect();
+        assert_eq!(actual_slots, expected_slots);
+    }
+
+    #[tokio::test]
+    async fn matches_asset_pattern_happy_path() {
+        let app = TestApp::new();
+        let asset_pattern = format!(
+            "{}.{}",
+            app.vectors().policy_id,
+            app.vectors().asset_name_hex
+        );
+        let asset_key = asset_pattern.clone();
+        let path = format!("/matches/{asset_pattern}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset matches");
+        assert!(!items.is_empty());
+        assert!(items
+            .iter()
+            .all(|item| item.value.assets.contains_key(&asset_key)));
+    }
+
+    #[tokio::test]
+    async fn matches_output_ref_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/matches/0@{}", app.vectors().tx_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse output ref matches");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].transaction_id, app.vectors().tx_hash);
+        assert_eq!(items[0].output_index, 0);
+    }
+
+    #[tokio::test]
+    async fn matches_resolve_hashes_happy_path() {
+        let app = TestApp::new();
+        let path = format!("/matches/{}?resolve_hashes", app.vectors().address);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<Value> =
+            serde_json::from_slice(&bytes).expect("failed to parse resolved matches");
+        assert_eq!(items.len(), app.vectors().blocks.len());
+
+        for item in items {
+            assert_eq!(
+                item.get("datum_hash"),
+                Some(&json!(app.vectors().datum_hash))
+            );
+            assert_eq!(item.get("datum_type"), Some(&json!("hash")));
+            assert_eq!(
+                item.get("datum"),
+                Some(&json!(app.vectors().datum_cbor_hex))
+            );
+            assert_eq!(
+                item.get("script_hash"),
+                Some(&json!(app.vectors().script_hash))
+            );
+            assert_eq!(
+                item.get("script"),
+                Some(&json!({
+                    "language": "native",
+                    "script": app.vectors().script_cbor_hex,
+                }))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn matches_order_oldest_first() {
+        let app = TestApp::new();
+        let path = format!("/matches/{}?order=oldest_first", app.vectors().address);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse ordered matches");
+        let slots: Vec<_> = items.iter().map(|item| item.created_at.slot_no).collect();
+        assert!(slots.windows(2).all(|window| window[0] <= window[1]));
+    }
+
+    #[tokio::test]
+    async fn matches_created_bounds_with_point() {
+        let app = TestApp::new();
+        let block = app
+            .vectors()
+            .blocks
+            .get(2)
+            .expect("missing bounded block vector");
+        let point = format!("{}.{}", block.slot, block.block_hash);
+        let path = format!(
+            "/matches/{}?created_after={point}&created_before={point}",
+            app.vectors().address
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse bounded matches");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].created_at.slot_no, block.slot);
+        assert_eq!(items[0].created_at.header_hash, block.block_hash);
+    }
+
+    #[tokio::test]
+    async fn matches_policy_and_asset_filters() {
+        let app = TestApp::new();
+        let asset_key = format!(
+            "{}.{}",
+            app.vectors().policy_id,
+            app.vectors().asset_name_hex
+        );
+        let path = format!(
+            "/matches/{}?policy_id={}&asset_name={}",
+            app.vectors().address,
+            app.vectors().policy_id,
+            app.vectors().asset_name_hex,
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse filtered matches");
+        assert_eq!(items.len(), app.vectors().blocks.len());
+        assert!(items
+            .iter()
+            .all(|item| item.value.assets.contains_key(&asset_key)));
+    }
+
+    #[tokio::test]
+    async fn matches_transaction_id_and_output_index_filters() {
+        let app = TestApp::new();
+        let path = format!(
+            "/matches/{}?transaction_id={}&output_index=0",
+            app.vectors().address,
+            app.vectors().tx_hash,
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<MatchResponseTest> =
+            serde_json::from_slice(&bytes).expect("failed to parse tx/output filtered matches");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].transaction_id, app.vectors().tx_hash);
+        assert_eq!(items[0].output_index, 0);
+    }
+
+    #[tokio::test]
+    async fn matches_wildcard_pattern_is_rejected() {
+        let app = TestApp::new();
+        assert_status(&app, "/matches/*", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_metadata_tag_pattern_is_rejected() {
+        let app = TestApp::new();
+        assert_status(&app, "/matches/%7B42%7D", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_spent_filters_are_rejected() {
+        let app = TestApp::new();
+        let path = format!("/matches/{}?spent_after=1", app.vectors().address);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_bad_order_is_rejected() {
+        let app = TestApp::new();
+        let path = format!("/matches/{}?order=sideways", app.vectors().address);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_asset_name_without_policy_id_is_rejected() {
+        let app = TestApp::new();
+        let path = format!(
+            "/matches/{}?asset_name={}",
+            app.vectors().address,
+            app.vectors().asset_name_hex,
+        );
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_output_index_without_transaction_id_is_rejected() {
+        let app = TestApp::new();
+        let path = format!("/matches/{}?output_index=0", app.vectors().address);
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_bad_created_point_is_rejected() {
+        let app = TestApp::new();
+        let path = format!(
+            "/matches/{}?created_after=1.not-a-hash",
+            app.vectors().address
+        );
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn matches_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let path = format!("/matches/{}", app.vectors().address);
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}

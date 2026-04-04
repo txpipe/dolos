@@ -16,6 +16,8 @@ use crate::types::BadRequest;
 
 pub mod patterns;
 mod routes;
+#[cfg(test)]
+mod test_support;
 mod types;
 
 #[derive(Clone)]

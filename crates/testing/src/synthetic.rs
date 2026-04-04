@@ -10,7 +10,7 @@ use crate::{tx_sequence_to_hash, utxo_with_value};
 use bech32::{FromBase32, ToBase32, Variant};
 use dolos_cardano::model::MemberRewardLog;
 use dolos_cardano::rupd::credential_to_key;
-use pallas::codec::utils::Nullable;
+use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
 use pallas::crypto::{hash::Hasher, key::ed25519::SecretKeyExtended};
 use pallas::{
@@ -23,7 +23,8 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Certificate, PostAlonzoTransactionOutput, TransactionBody, TransactionOutput, Value,
+                Certificate, DatumOption, PlutusData, PostAlonzoTransactionOutput, ScriptRef,
+                TransactionBody, TransactionOutput, Value, WitnessSet,
             },
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
@@ -111,9 +112,15 @@ pub struct SyntheticVectors {
     pub address: String,
     pub stake_address: String,
     pub asset_unit: String,
+    pub policy_id: String,
+    pub asset_name_hex: String,
     pub metadata_label: String,
     pub block_hash: String,
     pub tx_hash: String,
+    pub datum_hash: String,
+    pub datum_cbor_hex: String,
+    pub script_hash: String,
+    pub script_cbor_hex: String,
     pub blocks: Vec<BlockVectors>,
     pub account_addresses: Vec<String>,
     pub account_address_blocks: Vec<(String, u64)>,
@@ -144,6 +151,21 @@ impl SyntheticVectors {
             })
             .expect("missing tx hash in vectors")
     }
+}
+
+#[derive(Clone)]
+struct SyntheticFixtureExtras {
+    datum: PlutusData,
+    datum_hash: Hash<32>,
+    datum_cbor: Vec<u8>,
+    script: pallas::ledger::primitives::alonzo::NativeScript,
+    script_hash: Hash<28>,
+    script_cbor: Vec<u8>,
+}
+
+struct SyntheticTxSpec {
+    body: TransactionBody<'static>,
+    witness_set: WitnessSet<'static>,
 }
 
 pub fn build_synthetic_blocks(
@@ -178,6 +200,9 @@ pub fn build_synthetic_blocks(
 
     let policy_id = Hash::from(cfg.policy_id);
     let asset_name = Bytes::from(cfg.asset_name.as_bytes().to_vec());
+    let policy_id_hex = hex::encode(cfg.policy_id);
+    let asset_name_hex = hex::encode(cfg.asset_name.as_bytes());
+    let fixture_extras = Some(build_datum_and_script_fixture());
 
     let stake_cred = Address::from_bech32(&cfg.address)
         .ok()
@@ -217,7 +242,7 @@ pub fn build_synthetic_blocks(
     for offset in 0..block_count {
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
-        let mut tx_bodies = Vec::with_capacity(txs_per_block);
+        let mut tx_specs = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
 
         let metadata: alonzo::Metadata = vec![(
@@ -270,7 +295,13 @@ pub fn build_synthetic_blocks(
                 }
             }
 
-            tx_bodies.push(sample_transaction_body(
+            let extras = if tx_offset == 0 {
+                fixture_extras.as_ref()
+            } else {
+                None
+            };
+
+            tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
                 seed_tx_hash,
@@ -283,10 +314,11 @@ pub fn build_synthetic_blocks(
                 cfg.drep_keyhash,
                 cfg.drep_deposit,
                 if tx_offset == 0 { Some(aux_hash) } else { None },
+                extras,
             ));
         }
 
-        let (block, hashes) = sample_block(block_number, slot, tx_bodies, Some(aux_data));
+        let (block, hashes) = sample_block(block_number, slot, tx_specs, Some(aux_data));
 
         for hash in &hashes {
             tx_hashes.push(hex::encode(hash.as_ref()));
@@ -348,9 +380,27 @@ pub fn build_synthetic_blocks(
         address: cfg.address,
         stake_address,
         asset_unit,
+        policy_id: policy_id_hex,
+        asset_name_hex,
         metadata_label: metadata_label.to_string(),
         block_hash: hex::encode(first_block_hash.expect("missing block hash").as_ref()),
         tx_hash: hex::encode(first_tx_hash.expect("missing tx hash").as_ref()),
+        datum_hash: fixture_extras
+            .as_ref()
+            .map(|x| x.datum_hash.to_string())
+            .unwrap_or_default(),
+        datum_cbor_hex: fixture_extras
+            .as_ref()
+            .map(|x| hex::encode(&x.datum_cbor))
+            .unwrap_or_default(),
+        script_hash: fixture_extras
+            .as_ref()
+            .map(|x| x.script_hash.to_string())
+            .unwrap_or_default(),
+        script_cbor_hex: fixture_extras
+            .as_ref()
+            .map(|x| hex::encode(&x.script_cbor))
+            .unwrap_or_default(),
         blocks: block_vectors,
         account_addresses,
         account_address_blocks,
@@ -361,6 +411,25 @@ pub fn build_synthetic_blocks(
     };
 
     (raw_blocks, vectors, chain_config)
+}
+
+fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
+    let datum = PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(Int::from(42)));
+    let datum_hash = datum.compute_hash();
+    let datum_cbor = minicbor::to_vec(&datum).expect("failed to encode synthetic datum");
+
+    let script = pallas::ledger::primitives::alonzo::NativeScript::InvalidHereafter(500_000);
+    let script_hash = script.compute_hash();
+    let script_cbor = minicbor::to_vec(&script).expect("failed to encode synthetic script");
+
+    SyntheticFixtureExtras {
+        datum,
+        datum_hash,
+        datum_cbor,
+        script,
+        script_hash,
+        script_cbor,
+    }
 }
 
 pub fn seed_reward_logs<D: Domain>(
@@ -429,7 +498,7 @@ fn address_with_stake_cred(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sample_transaction_body(
+fn sample_transaction(
     address: Bytes,
     lovelace: u64,
     tx_hash: Hash<32>,
@@ -442,7 +511,8 @@ fn sample_transaction_body(
     drep_keyhash: [u8; 28],
     drep_deposit: u64,
     auxiliary_data_hash: Option<Hash<32>>,
-) -> TransactionBody<'static> {
+    extras: Option<&SyntheticFixtureExtras>,
+) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
         index: 0,
@@ -460,11 +530,18 @@ fn sample_transaction_body(
     let mut output_multiasset = BTreeMap::new();
     output_multiasset.insert(policy_id, output_assets);
 
+    let datum_option = extras.map(|extras| KeepRaw::from(DatumOption::Hash(extras.datum_hash)));
+    let script_ref = extras.map(|extras| {
+        CborWrap(ScriptRef::NativeScript(KeepRaw::from(
+            extras.script.clone(),
+        )))
+    });
+
     let output = PostAlonzoTransactionOutput {
         address,
         value: Value::Multiasset(lovelace, output_multiasset),
-        datum_option: None,
-        script_ref: None,
+        datum_option,
+        script_ref,
     };
 
     let vrf_keyhash = VrfKeyhash::from([1u8; 32]);
@@ -499,7 +576,7 @@ fn sample_transaction_body(
     let certificates = NonEmptySet::try_from(vec![registration, delegation, pool_cert, drep_cert])
         .expect("non-empty certificates");
 
-    TransactionBody {
+    let body = TransactionBody {
         inputs: Set::from(vec![input]),
         outputs: vec![TransactionOutput::PostAlonzo(KeepRaw::from(output))],
         fee: 7,
@@ -520,14 +597,32 @@ fn sample_transaction_body(
         proposal_procedures: None,
         treasury_value: None,
         donation: None,
-    }
+    };
+
+    let witness_set = WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: extras.map(|extras| {
+            KeepRaw::from(
+                NonEmptySet::try_from(vec![KeepRaw::from(extras.datum.clone())])
+                    .expect("non-empty datum set"),
+            )
+        }),
+        redeemer: None,
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    };
+
+    SyntheticTxSpec { body, witness_set }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn sample_block(
     block_number: u64,
     slot: u64,
-    tx_bodies: Vec<TransactionBody<'static>>,
+    tx_specs: Vec<SyntheticTxSpec>,
     aux_data: Option<alonzo::AuxiliaryData>,
 ) -> (
     pallas::ledger::primitives::conway::Block<'static>,
@@ -559,24 +654,20 @@ fn sample_block(
         body_signature: Bytes::from(vec![0x18]),
     };
 
-    let body_hashes: Vec<_> = tx_bodies.iter().map(|body| body.compute_hash()).collect();
+    let body_hashes: Vec<_> = tx_specs
+        .iter()
+        .map(|spec| spec.body.compute_hash())
+        .collect();
     let block = pallas::ledger::primitives::conway::Block {
         header: KeepRaw::from(header),
-        transaction_bodies: tx_bodies.into_iter().map(KeepRaw::from).collect(),
-        transaction_witness_sets: std::iter::repeat_with(|| {
-            KeepRaw::from(pallas::ledger::primitives::conway::WitnessSet {
-                vkeywitness: None,
-                native_script: None,
-                bootstrap_witness: None,
-                plutus_v1_script: None,
-                plutus_data: None,
-                redeemer: None,
-                plutus_v2_script: None,
-                plutus_v3_script: None,
-            })
-        })
-        .take(body_hashes.len())
-        .collect(),
+        transaction_bodies: tx_specs
+            .iter()
+            .map(|spec| KeepRaw::from(spec.body.clone()))
+            .collect(),
+        transaction_witness_sets: tx_specs
+            .into_iter()
+            .map(|spec| KeepRaw::from(spec.witness_set))
+            .collect(),
         auxiliary_data_set: match aux_data {
             Some(aux) => {
                 let mut map = BTreeMap::new();
