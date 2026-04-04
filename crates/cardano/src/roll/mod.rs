@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{ChainError, Domain, InvariantViolation, StateError, TxOrder, TxoRef};
+use dolos_core::{ChainError, InvariantViolation, StateError, TxOrder, TxoRef};
+
+use crate::CardanoDomain;
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
@@ -537,9 +539,7 @@ impl<'a> DeltaBuilder<'a> {
 }
 
 #[instrument(name = "roll", skip_all)]
-pub fn compute_delta<
-    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
->(
+pub fn compute_delta<D: CardanoDomain>(
     genesis: Arc<crate::CardanoGenesis>,
     cache: &Cache,
     state: &D::State,

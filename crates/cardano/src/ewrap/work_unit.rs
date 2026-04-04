@@ -8,10 +8,12 @@
 
 use std::sync::Arc;
 
-use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, WorkUnit};
+use dolos_core::{config::CardanoConfig, BlockSlot, DomainError, WorkUnit};
+
+use crate::CardanoDomain;
 use tracing::{debug, info};
 
-use crate::{CardanoError, CardanoGenesis, CardanoLogic};
+use crate::CardanoGenesis;
 
 use super::BoundaryWork;
 
@@ -44,10 +46,7 @@ impl EwrapWorkUnit {
     }
 }
 
-impl<D> WorkUnit<D> for EwrapWorkUnit
-where
-    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>,
-{
+impl<D: CardanoDomain> WorkUnit<D> for EwrapWorkUnit {
     fn name(&self) -> &'static str {
         "ewrap"
     }

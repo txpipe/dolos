@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use dolos_core::{ChainError, Domain, StateStore, TxoRef};
+use dolos_core::{ChainError, StateStore, TxoRef};
+
+use crate::CardanoDomain;
 
 use crate::{
     estart::BoundaryVisitor, load_era_summary, roll::WorkDeltas, AccountState, DRepState,
@@ -8,9 +10,7 @@ use crate::{
 };
 
 impl super::WorkContext {
-    pub fn compute_deltas<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
-    >(
+    pub fn compute_deltas<D: CardanoDomain>(
         &mut self,
         state: &D::State,
     ) -> Result<(), ChainError<crate::CardanoError>> {
@@ -62,9 +62,7 @@ impl super::WorkContext {
     /// Compute the value of unredeemed AVVM UTxOs at the Shelley→Allegra
     /// boundary. These UTxOs are removed from the UTxO set and their value
     /// returned to reserves, matching the Haskell ledger's `translateEra`.
-    fn compute_avvm_reclamation<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
-    >(
+    fn compute_avvm_reclamation<D: CardanoDomain>(
         state: &D::State,
         genesis: &crate::CardanoGenesis,
     ) -> Result<u64, ChainError<crate::CardanoError>> {
@@ -98,9 +96,7 @@ impl super::WorkContext {
         Ok(total)
     }
 
-    pub fn load<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
-    >(
+    pub fn load<D: CardanoDomain>(
         state: &D::State,
         genesis: Arc<crate::CardanoGenesis>,
     ) -> Result<Self, ChainError<crate::CardanoError>> {

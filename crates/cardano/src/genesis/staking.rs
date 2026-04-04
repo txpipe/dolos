@@ -1,4 +1,6 @@
-use dolos_core::{ChainError, Domain, EntityKey, StateStore as _, StateWriter as _};
+use dolos_core::{ChainError, EntityKey, StateStore as _, StateWriter as _};
+
+use crate::CardanoDomain;
 use pallas::codec::minicbor;
 use pallas::ledger::addresses::{Address, Network, StakeAddress, StakePayload};
 use pallas::ledger::primitives::StakeCredential;
@@ -111,9 +113,7 @@ fn parse_delegation(account: &str, pool: &str, genesis: &crate::CardanoGenesis) 
     }
 }
 
-pub fn bootstrap<
-    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
->(
+pub fn bootstrap<D: CardanoDomain>(
     state: &D::State,
     genesis: &crate::CardanoGenesis,
 ) -> Result<(), ChainError<crate::CardanoError>> {

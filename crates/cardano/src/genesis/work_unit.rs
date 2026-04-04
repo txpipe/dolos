@@ -4,10 +4,12 @@
 
 use std::sync::Arc;
 
-use dolos_core::{config::CardanoConfig, ChainPoint, Domain, DomainError, WalStore as _, WorkUnit};
+use dolos_core::{config::CardanoConfig, ChainPoint, DomainError, WalStore as _, WorkUnit};
+
+use crate::CardanoDomain;
 use tracing::{debug, info};
 
-use crate::{CardanoError, CardanoGenesis, CardanoLogic};
+use crate::CardanoGenesis;
 
 /// Work unit for bootstrapping the chain from genesis.
 pub struct GenesisWorkUnit {
@@ -22,10 +24,7 @@ impl GenesisWorkUnit {
     }
 }
 
-impl<D> WorkUnit<D> for GenesisWorkUnit
-where
-    D: Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>,
-{
+impl<D: CardanoDomain> WorkUnit<D> for GenesisWorkUnit {
     fn name(&self) -> &'static str {
         "genesis"
     }

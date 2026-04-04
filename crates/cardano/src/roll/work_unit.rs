@@ -50,6 +50,7 @@ where
         Entity = CardanoEntity,
         EntityDelta = CardanoDelta,
         ChainSpecificError = CardanoError,
+        Genesis = CardanoGenesis,
     >,
 {
     fn name(&self) -> &'static str {

@@ -15,7 +15,10 @@ use dolos_core::{
     UtxoSetDelta, WalStore as _,
 };
 use crate::indexes::CardanoIndexDeltaBuilder;
-use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
+use crate::{
+    CardanoDelta, CardanoDomain, CardanoEntity, CardanoLogic, OwnedMultiEraBlock,
+    OwnedMultiEraOutput,
+};
 
 /// Container for entity deltas computed during block processing.
 #[derive(Debug, Default)]
@@ -145,7 +148,7 @@ impl WorkBatch {
 
     pub fn load_utxos<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     {
         // TODO: paralelize in chunks
 
@@ -268,7 +271,7 @@ impl WorkBatch {
 
     pub fn commit_state<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     {
         let writer = domain.state().start_writer()?;
 
@@ -294,7 +297,7 @@ impl WorkBatch {
 
     pub fn commit_archive<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     {
         let writer = domain.archive().start_writer()?;
 
@@ -367,7 +370,7 @@ impl WorkBatch {
 
     pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError<crate::CardanoError>>
     where
-        D: Domain<Chain = CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     {
         let delta = self.build_index_delta();
 

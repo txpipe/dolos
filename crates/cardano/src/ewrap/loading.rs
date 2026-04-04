@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{BlockSlot, ChainError, Domain, StateStore, TxOrder};
+use dolos_core::{BlockSlot, ChainError, StateStore, TxOrder};
+
+use crate::CardanoDomain;
 use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
 
 use crate::{
@@ -25,7 +27,7 @@ impl BoundaryWork {
     }
 
     fn load_pool_reward_account<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &self,
         state: &D::State,
@@ -54,7 +56,7 @@ impl BoundaryWork {
     }
 
     fn load_pool_data<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &mut self,
         state: &D::State,
@@ -123,7 +125,7 @@ impl BoundaryWork {
     }
 
     fn load_drep_data<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &mut self,
         state: &D::State,
@@ -147,7 +149,7 @@ impl BoundaryWork {
     }
 
     fn load_proposal_reward_account<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &self,
         state: &D::State,
@@ -165,7 +167,7 @@ impl BoundaryWork {
     }
 
     fn load_proposal_data<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &mut self,
         state: &D::State,
@@ -196,7 +198,7 @@ impl BoundaryWork {
     /// Process pending MIRs: check registration status and apply to registered accounts.
     /// MIRs to unregistered accounts stay in their source pot (no transfer).
     fn process_pending_mirs<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &mut self,
         state: &D::State,
@@ -278,7 +280,7 @@ impl BoundaryWork {
     }
 
     pub fn compute_deltas<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         &mut self,
         state: &D::State,
@@ -387,7 +389,7 @@ impl BoundaryWork {
 
     /// Load pending rewards from state store (persisted by RUPD).
     fn load_pending_rewards<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         state: &D::State,
         incentives: EpochIncentives,
@@ -432,7 +434,7 @@ impl BoundaryWork {
     }
 
     pub fn load<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
     >(
         state: &D::State,
         genesis: Arc<crate::CardanoGenesis>,

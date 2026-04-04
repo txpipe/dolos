@@ -5,9 +5,11 @@
 //! in memory.
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
-    NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Entity, EntityDelta as _, LogKey, NsKey,
+    StateStore, StateWriter, TemporalKey,
 };
+
+use crate::CardanoDomain;
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
@@ -26,7 +28,7 @@ impl BoundaryWork {
         writer: &<D::State as StateStore>::Writer,
     ) -> Result<(), ChainError<crate::CardanoError>>
     where
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
+        D: CardanoDomain,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
         let records = state.iter_entities_typed::<E>(E::NS, None)?;
@@ -58,9 +60,7 @@ impl BoundaryWork {
     }
 
     #[instrument(skip_all)]
-    pub fn commit<
-        D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
-    >(
+    pub fn commit<D: CardanoDomain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,

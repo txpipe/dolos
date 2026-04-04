@@ -54,6 +54,25 @@ pub use eras::*;
 pub use model::*;
 pub use utils::{mutable_slots, network_from_genesis};
 
+/// Trait alias for [`dolos_core::Domain`] implementations backed by Cardano chain logic.
+///
+/// Equivalent to `Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>`,
+/// but avoids repeating all three associated-type constraints at every call site.
+/// Use this in place of the verbose bound anywhere inside the `cardano` crate.
+pub trait CardanoDomain: dolos_core::Domain<
+    Chain = CardanoLogic,
+    ChainSpecificError = CardanoError,
+    Genesis = CardanoGenesis,
+> {}
+
+impl<T> CardanoDomain for T where
+    T: dolos_core::Domain<
+        Chain = CardanoLogic,
+        ChainSpecificError = CardanoError,
+        Genesis = CardanoGenesis,
+    >
+{}
+
 pub type Block<'a> = MultiEraBlock<'a>;
 
 pub type UtxoBody<'a> = MultiEraOutput<'a>;

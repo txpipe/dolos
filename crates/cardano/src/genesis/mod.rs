@@ -1,7 +1,9 @@
 use dolos_core::{
-    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, IndexStore as _,
-    IndexWriter as _, StateStore as _, StateWriter as _,
+    config::CardanoConfig, ChainError, ChainPoint, EntityKey, IndexStore as _, IndexWriter as _,
+    StateStore as _, StateWriter as _,
 };
+
+use crate::CardanoDomain;
 
 use crate::{
     indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EpochState,
@@ -50,13 +52,7 @@ fn bootstrap_pots(
     })
 }
 
-pub fn bootstrap_epoch<
-    D: Domain<
-        Chain = crate::CardanoLogic,
-        ChainSpecificError = crate::CardanoError,
-        Genesis = crate::CardanoGenesis,
-    >,
->(
+pub fn bootstrap_epoch<D: CardanoDomain>(
     state: &D::State,
     genesis: &crate::CardanoGenesis,
 ) -> Result<EpochState, ChainError<crate::CardanoError>> {
@@ -97,9 +93,7 @@ pub fn bootstrap_epoch<
     Ok(epoch)
 }
 
-pub fn bootstrap_eras<
-    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
->(
+pub fn bootstrap_eras<D: CardanoDomain>(
     state: &D::State,
     epoch: &EpochState,
 ) -> Result<(), ChainError<crate::CardanoError>> {
@@ -131,9 +125,7 @@ pub fn bootstrap_eras<
     Ok(())
 }
 
-pub fn bootstrap_utxos<
-    D: Domain<Chain = crate::CardanoLogic, ChainSpecificError = crate::CardanoError>,
->(
+pub fn bootstrap_utxos<D: CardanoDomain>(
     state: &D::State,
     indexes: &D::Indexes,
     genesis: &crate::CardanoGenesis,
@@ -162,13 +154,7 @@ pub fn bootstrap_utxos<
     Ok(())
 }
 
-pub fn execute<
-    D: Domain<
-        Chain = crate::CardanoLogic,
-        ChainSpecificError = crate::CardanoError,
-        Genesis = crate::CardanoGenesis,
-    >,
->(
+pub fn execute<D: CardanoDomain>(
     state: &D::State,
     indexes: &D::Indexes,
     genesis: &crate::CardanoGenesis,
