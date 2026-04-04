@@ -202,8 +202,9 @@ impl CardanoIndexDeltaBuilder {
     /// Add a spent TxO reference to the current block.
     pub fn add_spent_input(&mut self, input: &MultiEraInput) {
         let txo_ref = crate::txo_ref_from_input(input);
-        let mut bytes = txo_ref.0.as_slice().to_vec();
-        bytes.extend_from_slice(txo_ref.1.to_be_bytes().as_slice());
+        let mut bytes = [0u8; 36];
+        bytes[0..32].copy_from_slice(txo_ref.0.as_slice());
+        bytes[32..36].copy_from_slice(&txo_ref.1.to_be_bytes());
         self.current_block()
             .tags
             .push(Tag::new(archive::SPENT_TXO, bytes));
