@@ -2,12 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.3] - 2026-04-04
+
+### 🚀 Features
+
+- *(cli)* Allow skipping sanitization during export (#952)
+
+### 🐛 Bug Fixes
+
+- *(sync)* Restart intersect on header violation (#954)
+- *(minibf)* Avoid using timing-dependant logs for active stake data (#956)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update cargo dist version and scripts (#955)
+- Remove sneaky mac files
+- Update tx3 to v0.16.4 (#957)
+
 ## [1.0.2] - 2026-03-19
 
 ### 🐛 Bug Fixes
 
 - *(cli)* Reset wal after any kind of bootstrap (#950)
 - *(cli)* Generate deterministic snapshots by removing file metadata (#951)
+
+### Release
+
+- V1.0.2
 
 ## [1.0.1] - 2026-03-18
 
