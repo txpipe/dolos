@@ -173,7 +173,7 @@ pub fn build_custom_utxos_delta(
             .era
             .unwrap_or(pallas::ledger::traverse::Era::Conway.into());
 
-        let eracbor = EraCbor(era, utxo.cbor.clone());
+        let eracbor = TaggedPayload(era, utxo.cbor.clone());
 
         delta
             .produced_utxo
@@ -212,7 +212,7 @@ mod tests {
             .map(|key| {
                 (
                     key,
-                    OwnedMultiEraOutput::decode(Arc::new(EraCbor(
+                    OwnedMultiEraOutput::decode(Arc::new(TaggedPayload(
                         block.era().into(),
                         valid_utxo.clone(),
                     )))

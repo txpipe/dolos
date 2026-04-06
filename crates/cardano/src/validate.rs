@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use dolos_core::{ChainError, ChainPoint, Domain, EraCbor, MempoolAwareUtxoStore, MempoolTx};
+use dolos_core::{
+    ChainError, ChainPoint, Domain, MempoolAwareUtxoStore, MempoolTx, TaggedPayload,
+};
 
 use crate::{CardanoError, CardanoGenesis};
 use pallas::ledger::{
@@ -97,7 +99,7 @@ pub fn validate_tx<D: Domain<ChainSpecificError = CardanoError>>(
     );
 
     let era = u16::from(tx.era());
-    let payload = EraCbor(era, cbor.into());
+    let payload = TaggedPayload(era, cbor.into());
 
     let tx_hash = crate::pallas_hash_to_core(hash);
     let tx = MempoolTx::new(tx_hash, payload);
@@ -137,11 +139,11 @@ pub fn evaluate_tx<D: Domain<ChainSpecificError = CardanoError>>(
         .get_utxos(input_refs)?
         .into_iter()
         .map(|(TxoRef(a, b), eracbor)| {
-            let era = eracbor.era().try_into().expect("era out of range");
+            let era = eracbor.tag().try_into().expect("era out of range");
 
             (
                 pallas::ledger::validate::utils::TxoRef::from((crate::core_hash_to_pallas(a), b)),
-                pallas::ledger::validate::utils::EraCbor::from((era, eracbor.cbor().into())),
+                pallas::ledger::validate::utils::EraCbor::from((era, eracbor.bytes().into())),
             )
         })
         .collect();

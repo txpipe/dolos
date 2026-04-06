@@ -1464,6 +1464,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.14.0",
+ "minicbor 0.26.4",
  "pallas",
  "redb",
  "redb-extras",

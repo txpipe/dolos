@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 #[derive(Debug)]
 pub struct MempoolTx {
     pub hash: TxHash,
-    pub payload: EraCbor,
+    pub payload: TaggedPayload,
     pub stage: MempoolTxStage,
     pub confirmations: u32,
     pub non_confirmations: u32,
@@ -37,7 +37,7 @@ impl Clone for MempoolTx {
 }
 
 impl MempoolTx {
-    pub fn new(hash: TxHash, payload: EraCbor) -> Self {
+    pub fn new(hash: TxHash, payload: TaggedPayload) -> Self {
         Self {
             hash,
             payload,
@@ -283,7 +283,7 @@ pub struct MempoolAwareUtxoStore<'a, D: Domain> {
 
 fn scan_mempool_utxos<D: Domain, F>(predicate: F, mempool: &D::Mempool) -> HashSet<TxoRef>
 where
-    F: Fn(&EraCbor) -> bool,
+    F: Fn(&TaggedPayload) -> bool,
 {
     let mut refs = HashSet::new();
 
@@ -393,7 +393,7 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         predicate: F,
     ) -> Result<UtxoSet, IndexError>
     where
-        F: Fn(&EraCbor) -> bool,
+        F: Fn(&TaggedPayload) -> bool,
     {
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
@@ -438,7 +438,7 @@ mod tests {
 
     fn test_event(hash: TxHash) -> MempoolEvent {
         MempoolEvent {
-            tx: MempoolTx::new(hash, EraCbor(7, vec![0x80])),
+            tx: MempoolTx::new(hash, TaggedPayload(7, vec![0x80])),
         }
     }
 

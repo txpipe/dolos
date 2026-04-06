@@ -1,16 +1,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use pallas::codec::minicbor::{self, Decode, Encode};
+use minicbor::{Decode, Encode};
 
-// Provides minicbor Encode/Decode for EraCbor (which no longer derives them)
-// using the same on-disk CBOR format: array(2) [ uint(era), bytes(cbor) ]
-mod era_cbor_codec {
-    use dolos_core::EraCbor;
-    use pallas::codec::minicbor;
+// Provides minicbor Encode/Decode for TaggedPayload (which no longer derives them)
+// using the on-disk CBOR format: array(2) [ uint(tag), bytes(payload) ]
+mod tagged_payload_codec {
+    use dolos_core::TaggedPayload;
 
     pub fn encode<W: minicbor::encode::Write, C>(
-        v: &EraCbor,
+        v: &TaggedPayload,
         e: &mut minicbor::Encoder<W>,
         _: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
@@ -21,20 +20,19 @@ mod era_cbor_codec {
     pub fn decode<'b, C>(
         d: &mut minicbor::Decoder<'b>,
         _: &mut C,
-    ) -> Result<EraCbor, minicbor::decode::Error> {
+    ) -> Result<TaggedPayload, minicbor::decode::Error> {
         d.array()?;
-        let era = d.u16()?;
-        let cbor = d.bytes()?.to_vec();
-        Ok(EraCbor(era, cbor))
+        let tag = d.u16()?;
+        let payload = d.bytes()?.to_vec();
+        Ok(TaggedPayload(tag, payload))
     }
 }
 
-mod opt_era_cbor_codec {
-    use dolos_core::EraCbor;
-    use pallas::codec::minicbor;
+mod opt_tagged_payload_codec {
+    use dolos_core::TaggedPayload;
 
     pub fn encode<W: minicbor::encode::Write, C>(
-        v: &Option<EraCbor>,
+        v: &Option<TaggedPayload>,
         e: &mut minicbor::Encoder<W>,
         ctx: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
@@ -43,19 +41,19 @@ mod opt_era_cbor_codec {
                 e.null()?;
                 Ok(())
             }
-            Some(inner) => super::era_cbor_codec::encode(inner, e, ctx),
+            Some(inner) => super::tagged_payload_codec::encode(inner, e, ctx),
         }
     }
 
     pub fn decode<'b, C>(
         d: &mut minicbor::Decoder<'b>,
         ctx: &mut C,
-    ) -> Result<Option<EraCbor>, minicbor::decode::Error> {
+    ) -> Result<Option<TaggedPayload>, minicbor::decode::Error> {
         if d.datatype()? == minicbor::data::Type::Null {
             d.null()?;
             Ok(None)
         } else {
-            Ok(Some(super::era_cbor_codec::decode(d, ctx)?))
+            Ok(Some(super::tagged_payload_codec::decode(d, ctx)?))
         }
     }
 }
@@ -66,8 +64,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
 use dolos_core::{
-    config::RedbMempoolConfig, ChainPoint, EraCbor, MempoolError, MempoolEvent, MempoolPage,
-    MempoolStore, MempoolTx, MempoolTxStage, TxHash, TxStatus,
+    config::RedbMempoolConfig, ChainPoint, MempoolError, MempoolEvent, MempoolPage,
+    MempoolStore, MempoolTx, MempoolTxStage, TaggedPayload, TxHash, TxStatus,
 };
 
 // ── Error newtype (mirrors wal/mod.rs pattern) ──────────────────────────
@@ -241,9 +239,9 @@ impl redb::Key for DbTxHash {
     }
 }
 
-/// Newtype wrapping `EraCbor` for the pending table value (foreign type).
+/// Newtype wrapping `TaggedPayload` for the pending table value (foreign type).
 #[derive(Debug)]
-struct DbEraCbor(EraCbor);
+struct DbEraCbor(TaggedPayload);
 
 impl redb::Value for DbEraCbor {
     type SelfType<'a>
@@ -264,8 +262,8 @@ impl redb::Value for DbEraCbor {
         Self: 'a,
     {
         let mut d = minicbor::Decoder::new(data);
-        let era_cbor = era_cbor_codec::decode(&mut d, &mut ()).unwrap();
-        Self(era_cbor)
+        let payload = tagged_payload_codec::decode(&mut d, &mut ()).unwrap();
+        Self(payload)
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -274,7 +272,7 @@ impl redb::Value for DbEraCbor {
     {
         let mut buf = Vec::new();
         let mut e = minicbor::Encoder::new(&mut buf);
-        era_cbor_codec::encode(&value.0, &mut e, &mut ()).unwrap();
+        tagged_payload_codec::encode(&value.0, &mut e, &mut ()).unwrap();
         buf
     }
 
@@ -301,8 +299,8 @@ struct InflightRecord {
     stage: InflightStage,
     #[n(1)]
     confirmations: u32,
-    #[cbor(n(2), with = "era_cbor_codec")]
-    payload: EraCbor,
+    #[cbor(n(2), with = "tagged_payload_codec")]
+    payload: TaggedPayload,
     #[cbor(n(3), with = "minicbor::bytes")]
     confirmed_at: Option<Vec<u8>>,
     #[n(4)]
@@ -351,8 +349,8 @@ struct FinalizedEntry {
     confirmations: u32,
     #[cbor(n(2), with = "minicbor::bytes")]
     confirmed_at: Option<Vec<u8>>,
-    #[cbor(n(3), with = "opt_era_cbor_codec")]
-    payload: Option<EraCbor>,
+    #[cbor(n(3), with = "opt_tagged_payload_codec")]
+    payload: Option<TaggedPayload>,
     #[n(4)]
     dropped: Option<bool>,
 }
@@ -401,7 +399,7 @@ impl FinalizedEntry {
         };
         MempoolTx {
             hash: TxHash::from(hash_bytes),
-            payload: self.payload.unwrap_or(EraCbor(0, vec![])),
+            payload: self.payload.unwrap_or(TaggedPayload(0, vec![])),
             stage,
             confirmations: self.confirmations,
             non_confirmations: 0,
@@ -413,7 +411,7 @@ impl FinalizedEntry {
 }
 
 impl InflightRecord {
-    fn new(payload: EraCbor) -> Self {
+    fn new(payload: TaggedPayload) -> Self {
         Self {
             stage: InflightStage::Propagated,
             confirmations: 0,
@@ -579,7 +577,7 @@ impl PendingTable {
     fn insert(
         wx: &redb::WriteTransaction,
         hash: &TxHash,
-        payload: &EraCbor,
+        payload: &TaggedPayload,
     ) -> Result<(), RedbMempoolError> {
         let mut table = wx.open_table(Self::DEF)?;
         let seq = match table.last()? {
@@ -594,7 +592,7 @@ impl PendingTable {
     fn drain_by_hashes(
         wx: &redb::WriteTransaction,
         hashes: &HashSet<TxHash>,
-    ) -> Result<Vec<(TxHash, EraCbor)>, RedbMempoolError> {
+    ) -> Result<Vec<(TxHash, TaggedPayload)>, RedbMempoolError> {
         let mut table = wx.open_table(Self::DEF)?;
         let extracted = table.extract_if(|key, _value| hashes.contains(&key.hash()))?;
         extracted

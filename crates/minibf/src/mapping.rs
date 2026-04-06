@@ -57,7 +57,7 @@ use dolos_cardano::{
     pallas_extras, pallas_hash_to_core, AccountState, ChainSummary, DRepState, PParamsSet,
     PoolHash, PoolState,
 };
-use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+use dolos_core::{BlockSlot, Domain, TaggedPayload, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
 
@@ -870,7 +870,7 @@ impl<'a> TxModelBuilder<'a> {
         Ok(deps)
     }
 
-    pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
+    pub fn load_dep(&mut self, key: TxHash, cbor: &'a TaggedPayload) -> Result<(), StatusCode> {
         let era = try_into_or_500!(cbor.0);
 
         let tx = MultiEraTx::decode_for_era(era, &cbor.1)

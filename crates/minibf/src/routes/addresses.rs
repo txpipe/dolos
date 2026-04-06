@@ -22,7 +22,7 @@ use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     pallas_extras, CardanoError, ChainSummary,
 };
-use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, StateStore as _, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, TaggedPayload, StateStore as _, TxoRef};
 use pallas::ledger::traverse::Era;
 
 use crate::{
@@ -408,7 +408,7 @@ where
     }
 
     for input in tx.consumes() {
-        if let Some(EraCbor(era, cbor)) = domain
+        if let Some(TaggedPayload(era, cbor)) = domain
             .query()
             .tx_cbor(input.hash().as_slice().to_vec())
             .await

@@ -1,11 +1,11 @@
 use dolos_core::mempool::{MempoolEvent, MempoolTx, MempoolTxStage};
-use dolos_core::{ChainPoint, EraCbor, MempoolError, MempoolStore, TxHash, TxStatus};
+use dolos_core::{ChainPoint, MempoolError, MempoolStore, TaggedPayload, TxHash, TxStatus};
 
 use crate::streams::ScriptedStream;
 
 /// Build a minimal `MempoolTx` for testing.
 pub fn make_test_mempool_tx(hash: TxHash) -> MempoolTx {
-    MempoolTx::new(hash, EraCbor(7, vec![0x80]))
+    MempoolTx::new(hash, TaggedPayload(7, vec![0x80]))
 }
 
 /// Build a minimal `MempoolEvent` at the `Pending` stage for testing.

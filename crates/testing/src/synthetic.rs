@@ -208,7 +208,7 @@ pub fn build_synthetic_blocks(
     let submit_tx_hash = tx_sequence_to_hash(block_count as u64 * txs_per_block as u64 + 1);
     let submit_ref = TxoRef(submit_tx_hash, 0);
     let submit_utxo = utxo_with_value(submit_address.clone(), Value::Coin(submit_amount));
-    let crate::EraCbor(_, submit_cbor) = submit_utxo;
+    let crate::TaggedPayload(_, submit_cbor) = submit_utxo;
     chain_config.custom_utxos.push(CustomUtxo {
         ref_: submit_ref.clone(),
         era: Some(pallas::ledger::traverse::Era::Conway.into()),
@@ -237,7 +237,7 @@ pub fn build_synthetic_blocks(
             let seed_tx_hash = tx_sequence_to_hash(1 + (offset * txs_per_block + tx_offset) as u64);
             let seed_ref = TxoRef(seed_tx_hash, 0);
             let seed_utxo = utxo_with_value(cfg.seed_address.clone(), Value::Coin(cfg.seed_amount));
-            let crate::EraCbor(_, seed_cbor) = seed_utxo;
+            let crate::TaggedPayload(_, seed_cbor) = seed_utxo;
 
             chain_config.custom_utxos.push(CustomUtxo {
                 ref_: seed_ref,

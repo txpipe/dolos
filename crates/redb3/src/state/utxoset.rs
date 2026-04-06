@@ -1,4 +1,4 @@
-use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
+use dolos_core::{TaggedPayload, TxoRef, UtxoMap, UtxoSetDelta};
 use redb::{
     Range, ReadTransaction, ReadableDatabase, ReadableTable as _, ReadableTableMetadata as _,
     TableDefinition, TableStats, WriteTransaction,
@@ -15,7 +15,7 @@ type UtxosValue = (u16, &'static [u8]);
 pub struct UtxosIterator(Range<'static, UtxosKey, UtxosValue>);
 
 impl Iterator for UtxosIterator {
-    type Item = Result<(TxoRef, EraCbor), ::redb::StorageError>;
+    type Item = Result<(TxoRef, TaggedPayload), ::redb::StorageError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let x = self.0.next()?;
@@ -26,7 +26,7 @@ impl Iterator for UtxosIterator {
 
             let (era, cbor) = v.value();
             let cbor = cbor.to_owned();
-            let v = EraCbor(era, cbor);
+            let v = TaggedPayload(era, cbor);
 
             (k, v)
         });
@@ -61,7 +61,7 @@ impl UtxosTable {
             if let Some(body) = table.get(&(key.0.as_array(), key.1))? {
                 let (era, cbor) = body.value();
                 let cbor = cbor.to_owned();
-                let value = Arc::new(EraCbor(era, cbor));
+                let value = Arc::new(TaggedPayload(era, cbor));
 
                 out.insert(key, value);
             }

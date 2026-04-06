@@ -12,7 +12,7 @@ use std::convert::Infallible;
 
 use dolos_core::{
     config::RedbArchiveConfig, ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue,
-    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder, TxoIdx, TxoRef,
+    LogKey, Namespace, RawBlock, StateSchema, TaggedPayload, TxHash, TxOrder, TxoIdx, TxoRef,
 };
 
 use ::redb::Durability;
@@ -675,7 +675,7 @@ impl<E: std::error::Error + Send + Sync + 'static> ArchiveStore<E> {
         Ok(None)
     }
 
-    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<EraCbor>, RedbArchiveError> {
+    pub fn get_tx(&self, tx_hash: &[u8]) -> Result<Option<TaggedPayload>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         let Some(slot) = indexes::Indexes::get_by_tx_hash(&rx, tx_hash)? else {
             return Ok(None);
@@ -688,7 +688,7 @@ impl<E: std::error::Error + Send + Sync + 'static> ArchiveStore<E> {
         let block = MultiEraBlock::decode(raw.as_slice())
             .map_err(|e| RedbArchiveError(ArchiveError::InternalError(e.to_string())))?;
         if let Some(tx) = block.txs().iter().find(|x| x.hash().to_vec() == tx_hash) {
-            return Ok(Some(EraCbor(block.era().into(), tx.encode())));
+            return Ok(Some(TaggedPayload(block.era().into(), tx.encode())));
         }
 
         Ok(None)

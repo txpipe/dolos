@@ -14,7 +14,7 @@ fn search_state_utxos<D: Domain<ChainSpecificError = CardanoError>>(
     store: &MempoolAwareUtxoStore<D>,
 ) -> Result<HashSet<TxoRef>, IndexError> {
     // Dummy filter that always returns true (we want all UTxOs matching the index)
-    let no_filter = |_: &dolos_core::EraCbor| true;
+    let no_filter = |_: &dolos_core::TaggedPayload| true;
 
     let refs = match pattern {
         UtxoPattern::ByAddress(address) => {

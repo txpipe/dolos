@@ -16,7 +16,7 @@ fn to_n2n_era(era: u16) -> u16 {
 }
 
 fn to_n2n_reply(mempool_tx: &MempoolTx) -> TxIdAndSize<EraTxId> {
-    let EraCbor(era, bytes) = &mempool_tx.payload;
+    let TaggedPayload(era, bytes) = &mempool_tx.payload;
 
     let era = to_n2n_era(*era);
 
@@ -26,7 +26,7 @@ fn to_n2n_reply(mempool_tx: &MempoolTx) -> TxIdAndSize<EraTxId> {
 }
 
 fn to_n2n_body(mempool_tx: MempoolTx) -> EraTxBody {
-    let EraCbor(era, bytes) = mempool_tx.payload;
+    let TaggedPayload(era, bytes) = mempool_tx.payload;
 
     let era = to_n2n_era(era);
 

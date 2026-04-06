@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dolos_core::{EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
+use dolos_core::{TaggedPayload, TxoRef, UtxoMap, UtxoSetDelta};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{
@@ -70,7 +70,7 @@ pub fn get_utxos<R: Readable>(
 
         if let Some(value) = readable.get(keyspace, key).map_err(Error::Fjall)? {
             if let Some((era, cbor)) = decode_utxo_value(&value) {
-                result.insert(txo_ref.clone(), Arc::new(EraCbor(era, cbor)));
+                result.insert(txo_ref.clone(), Arc::new(TaggedPayload(era, cbor)));
             }
         }
     }
@@ -85,7 +85,7 @@ pub fn get_utxos<R: Readable>(
 /// MVCC (Multi-Version Concurrency Control).
 pub struct UtxosIterator {
     /// Collected UTxOs from scan
-    utxos: Vec<(TxoRef, Arc<EraCbor>)>,
+    utxos: Vec<(TxoRef, Arc<TaggedPayload>)>,
     /// Current position
     pos: usize,
 }
@@ -106,7 +106,7 @@ impl UtxosIterator {
             if key_bytes.len() == TXO_REF_SIZE {
                 let txo_ref = decode_txo_ref(&key_bytes);
                 if let Some((era, cbor)) = decode_utxo_value(&value_bytes) {
-                    utxos.push((txo_ref, Arc::new(EraCbor(era, cbor))));
+                    utxos.push((txo_ref, Arc::new(TaggedPayload(era, cbor))));
                 }
             }
         }
@@ -116,7 +116,7 @@ impl UtxosIterator {
 }
 
 impl Iterator for UtxosIterator {
-    type Item = Result<(TxoRef, Arc<EraCbor>), Error>;
+    type Item = Result<(TxoRef, Arc<TaggedPayload>), Error>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.pos < self.utxos.len() {

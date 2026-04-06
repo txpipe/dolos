@@ -31,14 +31,14 @@ pub mod mempool;
 pub mod streams;
 
 pub trait UtxoGenerator {
-    fn generate(&self, address: &TestAddress) -> EraCbor;
+    fn generate(&self, address: &TestAddress) -> TaggedPayload;
 }
 
 impl<F> UtxoGenerator for F
 where
-    F: Fn(&TestAddress) -> EraCbor,
+    F: Fn(&TestAddress) -> TaggedPayload,
 {
-    fn generate(&self, address: &TestAddress) -> EraCbor {
+    fn generate(&self, address: &TestAddress) -> TaggedPayload {
         self(address)
     }
 }
@@ -234,14 +234,14 @@ pub fn fake_genesis_utxo(
     address: impl Into<TestAddress>,
     ordinal: usize,
     amount: u64,
-) -> (TxoRef, EraCbor) {
+) -> (TxoRef, TaggedPayload) {
     let tx_hash = genesis_tx_hash();
     let txoref = TxoRef(dolos_cardano::pallas_hash_to_core(tx_hash), ordinal as u32);
     (txoref, utxo_with_value(address, Value::Coin(amount)))
 }
 
-pub fn replace_utxo_address(utxo: Arc<EraCbor>, new_address: TestAddress) -> Arc<EraCbor> {
-    let EraCbor(_, cbor) = utxo.as_ref();
+pub fn replace_utxo_address(utxo: Arc<TaggedPayload>, new_address: TestAddress) -> Arc<TaggedPayload> {
+    let TaggedPayload(_, cbor) = utxo.as_ref();
 
     let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
 
@@ -251,7 +251,7 @@ pub fn replace_utxo_address(utxo: Arc<EraCbor>, new_address: TestAddress) -> Arc
 
     output.address = new_address.to_bytes().into();
 
-    Arc::new(EraCbor(
+    Arc::new(TaggedPayload(
         Era::Conway.into(),
         minicbor::to_vec(&output).unwrap(),
     ))
@@ -273,8 +273,8 @@ pub fn replace_utxo_map_txhash(utxos: UtxoMap, tx_sequence: u64) -> UtxoMap {
         .collect()
 }
 
-pub fn get_utxo_address_and_value(utxo: &EraCbor) -> (Vec<u8>, u64) {
-    let EraCbor(_, cbor) = utxo;
+pub fn get_utxo_address_and_value(utxo: &TaggedPayload) -> (Vec<u8>, u64) {
+    let TaggedPayload(_, cbor) = utxo;
 
     let output = MultiEraOutput::decode(Era::Conway, cbor).unwrap();
 
@@ -291,7 +291,7 @@ pub fn get_utxo_address_and_value(utxo: &EraCbor) -> (Vec<u8>, u64) {
     )
 }
 
-pub fn assert_utxo_address_and_value(utxo: &EraCbor, address: impl Into<Vec<u8>>, value: u64) {
+pub fn assert_utxo_address_and_value(utxo: &TaggedPayload, address: impl Into<Vec<u8>>, value: u64) {
     let (output_address, output_value) = get_utxo_address_and_value(utxo);
 
     assert_eq!(output_address, address.into());
@@ -307,7 +307,7 @@ where
     }
 }
 
-pub fn print_utxo(txoref: &TxoRef, utxo: &EraCbor) {
+pub fn print_utxo(txoref: &TxoRef, utxo: &TaggedPayload) {
     let (output_address, output_value) = get_utxo_address_and_value(utxo);
 
     let bech32 = Address::from_bytes(&output_address).unwrap().to_string();
@@ -385,7 +385,7 @@ where
     }
 }
 
-pub fn utxo_with_value(address: impl Into<TestAddress>, value: Value) -> EraCbor {
+pub fn utxo_with_value(address: impl Into<TestAddress>, value: Value) -> TaggedPayload {
     let output = pallas::ledger::primitives::conway::TransactionOutput::PostAlonzo(
         PostAlonzoTransactionOutput {
             address: address.into().to_bytes().into(),
@@ -396,13 +396,13 @@ pub fn utxo_with_value(address: impl Into<TestAddress>, value: Value) -> EraCbor
         .into(),
     );
 
-    EraCbor(
+    TaggedPayload(
         pallas::ledger::traverse::Era::Conway.into(),
         pallas::codec::minicbor::to_vec(&output).unwrap(),
     )
 }
 
-pub fn utxo_with_random_amount(address: impl Into<TestAddress>, amount: Range<u64>) -> EraCbor {
+pub fn utxo_with_random_amount(address: impl Into<TestAddress>, amount: Range<u64>) -> TaggedPayload {
     let amount = rand::rng().random_range(amount);
 
     utxo_with_value(address, Value::Coin(amount))
@@ -414,7 +414,7 @@ pub fn utxo_with_random_asset(
     address: impl Into<TestAddress>,
     asset: impl Into<TestAsset>,
     asset_amount: Range<u64>,
-) -> EraCbor {
+) -> TaggedPayload {
     let rnd_amount = rand::rng().random_range(asset_amount);
 
     let asset: TestAsset = asset.into();

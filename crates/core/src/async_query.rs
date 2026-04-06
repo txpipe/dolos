@@ -4,7 +4,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockSlot, ChainError,
-    ChainLogic, ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension, TxOrder,
+    ChainLogic, ChainPoint, Domain, DomainError, IndexError, TagDimension, TaggedPayload, TxOrder,
 };
 
 #[derive(Debug, Clone)]
@@ -139,7 +139,7 @@ where
     pub async fn tx_cbor(
         &self,
         tx_hash: Vec<u8>,
-    ) -> Result<Option<EraCbor>, DomainError<D::ChainSpecificError>> {
+    ) -> Result<Option<TaggedPayload>, DomainError<D::ChainSpecificError>> {
         let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {

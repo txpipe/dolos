@@ -45,7 +45,7 @@ fn event_to_watch_mempool_response(event: MempoolEvent) -> WatchMempoolResponse 
     WatchMempoolResponse {
         tx: TxInMempool {
             r#ref: event.tx.hash.as_slice().to_vec().into(),
-            native_bytes: event.tx.payload.cbor().to_vec().into(),
+            native_bytes: event.tx.payload.bytes().to_vec().into(),
             stage: tx_stage_to_u5c(event.tx.stage.clone()),
             parsed_state: None, // TODO
         }

@@ -10,7 +10,8 @@ pub use pallas;
 
 use dolos_core::{
     config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EntityKey,
-    EraCbor, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent,
+    MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TaggedPayload,
+    TipEvent,
     TxoRef, WorkUnit,
 };
 
@@ -93,17 +94,17 @@ pub fn pallas_hash_to_core<const N: usize>(
 
 // Can the era integer be removed? Not sure. Santi said something about it.
 pub(crate) fn multi_era_tx_from_era_cbor(
-    era_body: &EraCbor,
+    era_body: &TaggedPayload,
 ) -> Result<MultiEraTx<'_>, CardanoError> {
-    Ok(MultiEraTx::decode(era_body.cbor())?)
+    Ok(MultiEraTx::decode(era_body.bytes())?)
 }
 
 pub(crate) fn txo_ref_from_pallas(hash: pallas::crypto::hash::Hash<32>, idx: u32) -> TxoRef {
     TxoRef(pallas_hash_to_core(hash), idx)
 }
 
-pub(crate) fn era_cbor_from_output(output: &MultiEraOutput<'_>) -> EraCbor {
-    EraCbor(output.era().into(), output.encode())
+pub(crate) fn era_cbor_from_output(output: &MultiEraOutput<'_>) -> TaggedPayload {
+    TaggedPayload(output.era().into(), output.encode())
 }
 
 pub(crate) fn txo_ref_from_input(input: &MultiEraInput<'_>) -> TxoRef {
@@ -116,9 +117,9 @@ pub fn core_hash_to_pallas<const N: usize>(
     (*h.as_ref()).into()
 }
 
-fn multi_era_output_from_era_cbor(era_body: &EraCbor) -> Result<MultiEraOutput<'_>, CardanoError> {
-    let era = pallas::ledger::traverse::Era::try_from(era_body.era())?;
-    Ok(MultiEraOutput::decode(era, era_body.cbor())?)
+fn multi_era_output_from_era_cbor(era_body: &TaggedPayload) -> Result<MultiEraOutput<'_>, CardanoError> {
+    let era = pallas::ledger::traverse::Era::try_from(era_body.tag())?;
+    Ok(MultiEraOutput::decode(era, era_body.bytes())?)
 }
 
 /// Cardano-specific work unit variants.
@@ -494,7 +495,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn compute_undo(
         block: &dolos_core::Cbor,
-        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<TaggedPayload>>,
         point: ChainPoint,
     ) -> Result<dolos_core::UndoBlockData, ChainError<Self::ChainSpecificError>> {
         let block_arc = Arc::new(block.clone());
@@ -534,7 +535,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn compute_catchup(
         block: &dolos_core::Cbor,
-        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
+        inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<TaggedPayload>>,
         point: ChainPoint,
     ) -> Result<dolos_core::CatchUpBlockData, ChainError<Self::ChainSpecificError>> {
         let block_arc = Arc::new(block.clone());
@@ -581,7 +582,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
     fn decode_utxo(
         &self,
-        utxo: Arc<EraCbor>,
+        utxo: Arc<TaggedPayload>,
     ) -> Result<Self::Utxo, ChainError<Self::ChainSpecificError>> {
         let out = OwnedMultiEraOutput::decode(utxo)
             .map_err(CardanoError::from)
@@ -614,8 +615,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 
     fn tx_produced_utxos(
-        era_body: &EraCbor,
-    ) -> Result<Vec<(dolos_core::TxoRef, EraCbor)>, CardanoError> {
+        era_body: &TaggedPayload,
+    ) -> Result<Vec<(dolos_core::TxoRef, TaggedPayload)>, CardanoError> {
         let tx = multi_era_tx_from_era_cbor(era_body)?;
         Ok(tx
             .produces()
@@ -628,21 +629,21 @@ impl dolos_core::ChainLogic for CardanoLogic {
             .collect())
     }
 
-    fn tx_consumed_ref(era_body: &EraCbor) -> Result<Vec<dolos_core::TxoRef>, CardanoError> {
+    fn tx_consumed_ref(era_body: &TaggedPayload) -> Result<Vec<dolos_core::TxoRef>, CardanoError> {
         let tx = multi_era_tx_from_era_cbor(era_body)?;
         Ok(tx.consumes().iter().map(txo_ref_from_input).collect())
     }
     fn find_tx_in_block(
         block: &[u8],
         tx_hash: &[u8],
-    ) -> Result<Option<(EraCbor, dolos_core::TxOrder)>, Self::ChainSpecificError> {
+    ) -> Result<Option<(TaggedPayload, dolos_core::TxOrder)>, Self::ChainSpecificError> {
         let block = MultiEraBlock::decode(block)?;
         let result = block
             .txs()
             .iter()
             .enumerate()
             .find(|(_, tx)| tx.hash().as_slice() == tx_hash)
-            .map(|(idx, tx)| (EraCbor(block.era().into(), tx.encode()), idx));
+            .map(|(idx, tx)| (TaggedPayload(block.era().into(), tx.encode()), idx));
         Ok(result)
     }
 }

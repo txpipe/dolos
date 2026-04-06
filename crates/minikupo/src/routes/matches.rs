@@ -8,7 +8,7 @@ use dolos_cardano::{
     indexes::CardanoIndexExt, network_from_genesis, pallas_extras, pallas_hash_to_core,
     CardanoError, CardanoGenesis,
 };
-use dolos_core::{Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet};
+use dolos_core::{Domain, TaggedPayload, IndexStore as _, StateStore as _, TxoRef, UtxoSet};
 use pallas::codec::minicbor;
 use pallas::ledger::{
     addresses::{Address, StakeAddress},
@@ -359,7 +359,7 @@ async fn refs_for_output_ref_pattern<D: Domain>(
             refs
         }
         patterns::OutputIndexPattern::Any => {
-            let Some(EraCbor(era, cbor)) = facade
+            let Some(TaggedPayload(era, cbor)) = facade
                 .query()
                 .tx_cbor(tx_id.to_vec())
                 .await
@@ -439,7 +439,7 @@ async fn build_matches<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = 
     let mut out = Vec::new();
 
     for (txo_ref, cbor) in utxos {
-        let cbor: &dolos_core::EraCbor = cbor.as_ref();
+        let cbor: &dolos_core::TaggedPayload = cbor.as_ref();
         let era = Era::try_from(cbor.0).map_err(|_| MatchError::Internal)?;
         let output = MultiEraOutput::decode(era, &cbor.1).map_err(|_| MatchError::Internal)?;
         let address = output.address().map_err(|_| MatchError::Internal)?;

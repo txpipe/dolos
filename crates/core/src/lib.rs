@@ -69,7 +69,7 @@ pub type Cbor = Vec<u8>;
 pub type BlockBody = Cbor;
 pub type RawBlock = Arc<BlockBody>;
 pub type RawBlockBatch = Vec<RawBlock>;
-pub type RawUtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
+pub type RawUtxoMap = HashMap<TxoRef, Arc<TaggedPayload>>;
 pub type BlockHash = crate::hash::Hash<32>;
 pub type BlockHeader = Cbor;
 pub type TxHash = crate::hash::Hash<32>;
@@ -113,65 +113,69 @@ pub use point::*;
 pub use state::*;
 pub use wal::*;
 
+/// A chain-agnostic tagged payload: a `u16` discriminant (whose meaning is
+/// chain-specific, e.g. era for Cardano) paired with raw bytes.
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub struct EraCbor(pub Era, pub Cbor);
+pub struct TaggedPayload(pub u16, pub Vec<u8>);
 
-impl EraCbor {
-    pub fn era(&self) -> Era {
+impl TaggedPayload {
+    pub fn tag(&self) -> u16 {
         self.0
     }
 
-    pub fn cbor(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.1
     }
+
 }
 
-impl AsRef<[u8]> for EraCbor {
+impl AsRef<[u8]> for TaggedPayload {
     fn as_ref(&self) -> &[u8] {
         &self.1
     }
 }
 
-impl From<(Era, Cbor)> for EraCbor {
-    fn from(value: (Era, Cbor)) -> Self {
+impl From<(u16, Vec<u8>)> for TaggedPayload {
+    fn from(value: (u16, Vec<u8>)) -> Self {
         Self(value.0, value.1)
     }
 }
 
-impl From<EraCbor> for (Era, Cbor) {
-    fn from(value: EraCbor) -> Self {
+impl From<TaggedPayload> for (u16, Vec<u8>) {
+    fn from(value: TaggedPayload) -> Self {
         (value.0, value.1)
     }
 }
 
-//impl From<MultiEraOutput<'_>> for EraCbor {
+
+//impl From<MultiEraOutput<'_>> for TaggedPayload {
 //    fn from(value: MultiEraOutput<'_>) -> Self {
-//        EraCbor(value.era().into(), value.encode())
+//        TaggedPayload(value.era().into(), value.encode())
 //    }
 //}
 //
-//impl<'a> TryFrom<&'a EraCbor> for MultiEraOutput<'a> {
+//impl<'a> TryFrom<&'a TaggedPayload> for MultiEraOutput<'a> {
 //    type Error = pallas::codec::minicbor::decode::Error;
 //
-//    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+//    fn try_from(value: &'a TaggedPayload) -> Result<Self, Self::Error> {
 //        let era = value.0.try_into().expect("era out of range");
 //        MultiEraOutput::decode(era, &value.1)
 //    }
 //}
 //
-//impl<'a> TryFrom<&'a EraCbor> for MultiEraTx<'a> {
+//impl<'a> TryFrom<&'a TaggedPayload> for MultiEraTx<'a> {
 //    type Error = pallas::codec::minicbor::decode::Error;
 //
-//    fn try_from(value: &'a EraCbor) -> Result<Self, Self::Error> {
+//    fn try_from(value: &'a TaggedPayload) -> Result<Self, Self::Error> {
 //        let era = value.0.try_into().expect("era out of range");
 //        MultiEraTx::decode_for_era(era, &value.1)
 //    }
 //}
 //
-//impl TryFrom<EraCbor> for MultiEraUpdate<'_> {
+//impl TryFrom<TaggedPayload> for MultiEraUpdate<'_> {
 //    type Error = pallas::codec::minicbor::decode::Error;
 //
-//    fn try_from(value: EraCbor) -> Result<Self, Self::Error> {
+//    fn try_from(value: TaggedPayload) -> Result<Self, Self::Error> {
 //        let era = value.0.try_into().expect("era out of range");
 //        MultiEraUpdate::decode_for_era(era, &value.1)
 //    }
@@ -267,16 +271,16 @@ pub enum BrokenInvariant {
     EpochBoundaryIncomplete,
 }
 
-pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
+pub type UtxoMap = HashMap<TxoRef, Arc<TaggedPayload>>;
 
 pub type UtxoSet = HashSet<TxoRef>;
 
 #[derive(Default, Debug, Clone)]
 pub struct UtxoSetDelta {
-    pub produced_utxo: HashMap<TxoRef, Arc<EraCbor>>,
-    pub consumed_utxo: HashMap<TxoRef, Arc<EraCbor>>,
-    pub recovered_stxi: HashMap<TxoRef, Arc<EraCbor>>,
-    pub undone_utxo: HashMap<TxoRef, Arc<EraCbor>>,
+    pub produced_utxo: HashMap<TxoRef, Arc<TaggedPayload>>,
+    pub consumed_utxo: HashMap<TxoRef, Arc<TaggedPayload>>,
+    pub recovered_stxi: HashMap<TxoRef, Arc<TaggedPayload>>,
+    pub undone_utxo: HashMap<TxoRef, Arc<TaggedPayload>>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +296,7 @@ where
 {
     pub block: Cbor,
     pub delta: Vec<D>,
-    pub inputs: HashMap<TxoRef, Arc<EraCbor>>,
+    pub inputs: HashMap<TxoRef, Arc<TaggedPayload>>,
 }
 
 impl<D> LogValue<D>
@@ -555,7 +559,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// to reverse the block's effects.
     fn compute_undo(
         block: &Cbor,
-        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        inputs: &HashMap<TxoRef, Arc<TaggedPayload>>,
         point: ChainPoint,
     ) -> Result<UndoBlockData, ChainError<Self::ChainSpecificError>>;
 
@@ -567,14 +571,14 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// stores that are behind the state store.
     fn compute_catchup(
         block: &Cbor,
-        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        inputs: &HashMap<TxoRef, Arc<TaggedPayload>>,
         point: ChainPoint,
     ) -> Result<CatchUpBlockData, ChainError<Self::ChainSpecificError>>;
 
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(
         &self,
-        utxo: Arc<EraCbor>,
+        utxo: Arc<TaggedPayload>,
     ) -> Result<Self::Utxo, ChainError<Self::ChainSpecificError>>;
 
     // TODO: remove from the interface - this is Cardano-specific
@@ -588,13 +592,13 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn tx_produced_utxos(era_body: &EraCbor) -> Result<Vec<(TxoRef, EraCbor)>, Self::ChainSpecificError>;
-    fn tx_consumed_ref(era_body: &EraCbor) -> Result<Vec<TxoRef>, Self::ChainSpecificError>;
+    fn tx_produced_utxos(era_body: &TaggedPayload) -> Result<Vec<(TxoRef, TaggedPayload)>, Self::ChainSpecificError>;
+    fn tx_consumed_ref(era_body: &TaggedPayload) -> Result<Vec<TxoRef>, Self::ChainSpecificError>;
 
     fn find_tx_in_block(
         block: &[u8],
         tx_hash: &[u8],
-    ) -> Result<Option<(EraCbor, TxOrder)>, Self::ChainSpecificError>;
+    ) -> Result<Option<(TaggedPayload, TxOrder)>, Self::ChainSpecificError>;
 
     // Validate a transaction against the current ledger state.
     fn validate_tx<D: Domain<ChainSpecificError = Self::ChainSpecificError>>(

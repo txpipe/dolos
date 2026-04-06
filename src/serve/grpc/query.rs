@@ -210,7 +210,7 @@ fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
 
 async fn into_u5c_utxo<S: Domain<ChainSpecificError = CardanoError> + LedgerContext>(
     txo: &TxoRef,
-    body: &EraCbor,
+    body: &TaggedPayload,
     mapper: &interop::Mapper<S>,
     domain: &S,
 ) -> Result<u5c::query::AnyUtxoData, Box<dyn std::error::Error>> {

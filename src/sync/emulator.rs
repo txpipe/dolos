@@ -54,7 +54,7 @@ impl Worker {
         for (i, tx) in txs.iter().enumerate() {
             debug!(tx = hex::encode(tx.hash), "adding tx to emulated block");
 
-            let EraCbor(era, cbor) = &tx.payload;
+            let dolos_core::TaggedPayload(era, cbor) = &tx.payload;
 
             let era = pallas::ledger::traverse::Era::try_from(*era).or_panic()?;
 

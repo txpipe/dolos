@@ -9,7 +9,7 @@ use std::{borrow::Cow, path::PathBuf};
 
 use dolos::{
     adapters::DomainAdapter,
-    core::{Domain, EraCbor, StateStore as _, TxoRef},
+    core::{Domain, StateStore as _, TxoRef},
 };
 use dolos_cardano::{core_hash_to_pallas, pallas_hash_to_core};
 
@@ -66,7 +66,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let mut utxos2 = UTxOs::new();
 
     for (ref_, body) in resolved.iter() {
-        let EraCbor(era, cbor) = body.as_ref();
+        let dolos_core::TaggedPayload(era, cbor) = body.as_ref();
 
         let era = (*era)
             .try_into()
