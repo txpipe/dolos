@@ -408,7 +408,6 @@ impl FinalizedEntry {
             confirmed_at: self
                 .confirmed_at
                 .map(|b| ChainPoint::from_bytes(b[..].try_into().unwrap())),
-            report: None,
         }
     }
 }
@@ -511,7 +510,6 @@ impl InflightRecord {
                 .confirmed_at
                 .as_ref()
                 .map(|b| ChainPoint::from_bytes(b[..].try_into().unwrap())),
-            report: None,
         }
     }
 }
@@ -548,7 +546,6 @@ impl PendingTable {
                 confirmations: 0,
                 non_confirmations: 0,
                 confirmed_at: None,
-                report: None,
             });
         }
         Ok(result)
