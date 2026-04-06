@@ -91,7 +91,7 @@ impl DomainAdapter {
                 }
             }
 
-            if result.len() == refs.len() {
+            if result.len() == refs_set.len() {
                 break;
             }
         }
