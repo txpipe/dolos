@@ -1,4 +1,4 @@
-use dolos_core::config::GrpcConfig;
+use dolos_core::{config::GrpcConfig, ChainLogic};
 use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
@@ -22,6 +22,7 @@ pub struct Driver;
 impl<D, C> dolos_core::Driver<D, C> for Driver
 where
     D: Domain<ChainSpecificError = dolos_cardano::CardanoError> + LedgerContext,
+    D::Chain: ChainLogic<EvalReport = pallas::ledger::validate::phase2::EvalReport>,
     C: CancelToken,
 {
     type Config = GrpcConfig;

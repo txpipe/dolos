@@ -1,5 +1,5 @@
 use any_chain_eval::Chain;
-use dolos_core::SubmitExt;
+use dolos_core::{ChainLogic, SubmitExt};
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::interop::utxorpc as u5c;
@@ -61,23 +61,35 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
 }
 
 fn tx_eval_to_u5c<E: std::error::Error + Send + Sync + 'static>(
-    eval: Result<MempoolTx, DomainError<E>>,
+    eval: Result<pallas::ledger::validate::phase2::EvalReport, DomainError<E>>,
 ) -> u5c::spec::cardano::TxEval {
     match eval {
-        Ok(tx) => {
-            let traces = tx
-                .report
-                .and_then(|b| String::from_utf8(b).ok())
-                .map(|msg| vec![u5c::spec::cardano::EvalTrace { msg }])
-                .unwrap_or_default();
-            u5c::spec::cardano::TxEval {
-                ex_units: None,
-                redeemers: vec![],
-                fee: None,
-                traces,
-                ..Default::default()
-            }
-        }
+        Ok(report) => u5c::spec::cardano::TxEval {
+            ex_units: report.iter().try_fold(
+                u5c::spec::cardano::ExUnits::default(),
+                |acc, eval| {
+                    Some(u5c::spec::cardano::ExUnits {
+                        steps: acc.steps + eval.units.steps,
+                        memory: acc.memory + eval.units.mem,
+                    })
+                },
+            ),
+            redeemers: report
+                .iter()
+                .map(|x| u5c::spec::cardano::Redeemer {
+                    purpose: x.tag as i32,
+                    index: x.index,
+                    ex_units: Some(u5c::spec::cardano::ExUnits {
+                        steps: x.units.steps,
+                        memory: x.units.mem,
+                    }),
+                    ..Default::default()
+                })
+                .collect(),
+            fee: None,
+            traces: vec![],
+            ..Default::default()
+        },
         Err(e) => u5c::spec::cardano::TxEval {
             errors: vec![u5c::spec::cardano::EvalError {
                 msg: format!("{e:#?}"),
@@ -91,6 +103,7 @@ fn tx_eval_to_u5c<E: std::error::Error + Send + Sync + 'static>(
 impl<D> submit_service_server::SubmitService for SubmitServiceImpl<D>
 where
     D: Domain + LedgerContext,
+    D::Chain: ChainLogic<EvalReport = pallas::ledger::validate::phase2::EvalReport>,
 {
     type WaitForTxStream =
         Pin<Box<dyn Stream<Item = Result<WaitForTxResponse, tonic::Status>> + Send + 'static>>;
@@ -202,9 +215,7 @@ where
             _ => return Err(Status::invalid_argument("missing or unsupported tx type")),
         };
 
-        let chain = self.domain.read_chain();
-
-        let result = self.domain.validate_tx(&chain, &tx_raw);
+        let result = self.domain.eval_tx(&tx_raw);
         let result = tx_eval_to_u5c(result);
 
         let report = AnyChainEval {
