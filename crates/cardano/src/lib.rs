@@ -59,11 +59,14 @@ pub use utils::{mutable_slots, network_from_genesis};
 /// Equivalent to `Domain<Chain = CardanoLogic, ChainSpecificError = CardanoError, Genesis = CardanoGenesis>`,
 /// but avoids repeating all three associated-type constraints at every call site.
 /// Use this in place of the verbose bound anywhere inside the `cardano` crate.
-pub trait CardanoDomain: dolos_core::Domain<
+pub trait CardanoDomain:
+    dolos_core::Domain<
     Chain = CardanoLogic,
     ChainSpecificError = CardanoError,
     Genesis = CardanoGenesis,
-> {}
+>
+{
+}
 
 impl<T> CardanoDomain for T where
     T: dolos_core::Domain<
@@ -71,7 +74,8 @@ impl<T> CardanoDomain for T where
         ChainSpecificError = CardanoError,
         Genesis = CardanoGenesis,
     >
-{}
+{
+}
 
 pub type Block<'a> = MultiEraBlock<'a>;
 
@@ -518,7 +522,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let tx_hashes = blockv
             .txs()
             .iter()
-            // TODO: fix this pallas_hash_to_core most likely
             .map(|tx| pallas_hash_to_core(tx.hash()))
             .collect();
 
