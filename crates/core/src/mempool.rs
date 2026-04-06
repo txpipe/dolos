@@ -5,7 +5,7 @@ use crate::TagDimension;
 
 use futures_core::Stream;
 use std::pin::Pin;
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub type Report = Vec<u8>;
 
@@ -302,7 +302,14 @@ where
 
     for mtx in all_txs.into_iter() {
         debug!(mtx = %mtx.hash, "scanning mempool tx");
-        for (txoref, utxo) in D::Chain::tx_produced_utxos(&mtx.payload) {
+        let utxos = match D::Chain::tx_produced_utxos(&mtx.payload) {
+            Ok(utxos) => utxos,
+            Err(e) => {
+                warn!(tx = %mtx.hash, error = %e, "failed to decode mempool tx outputs");
+                continue;
+            }
+        };
+        for (txoref, utxo) in utxos {
             if predicate(&utxo) {
                 debug!(txoref = %txoref, "mempool utxo matches predicate");
                 refs.insert(txoref);
@@ -321,7 +328,14 @@ fn exclude_inflight_stxis<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Me
 
     for mtx in all_txs {
         debug!(tx = %mtx.hash, "checking inflight tx");
-        for txoref in D::Chain::tx_consumed_ref(&mtx.payload) {
+        let consumed = match D::Chain::tx_consumed_ref(&mtx.payload) {
+            Ok(consumed) => consumed,
+            Err(e) => {
+                warn!(tx = %mtx.hash, error = %e, "failed to decode mempool tx inputs");
+                continue;
+            }
+        };
+        for txoref in consumed {
             if refs.remove(&txoref) {
                 debug!(txoref = %txoref, "excluded stxi");
             }
@@ -337,7 +351,14 @@ fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Memp
 
     for mtx in all_txs {
         debug!(tx = %mtx.hash, "checking mempool tx");
-        for (txoref, era_cbor) in D::Chain::tx_produced_utxos(&mtx.payload) {
+        let utxos = match D::Chain::tx_produced_utxos(&mtx.payload) {
+            Ok(utxos) => utxos,
+            Err(e) => {
+                warn!(tx = %mtx.hash, error = %e, "failed to decode mempool tx outputs");
+                continue;
+            }
+        };
+        for (txoref, era_cbor) in utxos {
             debug!(txoref = %txoref, "checking mempool utxo");
             if refs.contains(&txoref) {
                 debug!(txoref = %txoref, "selected utxo available in mempool tx");

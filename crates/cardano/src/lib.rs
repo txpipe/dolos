@@ -604,24 +604,24 @@ impl dolos_core::ChainLogic for CardanoLogic {
         validate::validate_tx(cbor, utxos, tip, genesis)
     }
 
-    fn tx_produced_utxos(era_body: &EraCbor) -> Vec<(dolos_core::TxoRef, EraCbor)> {
-        let Ok(tx) = multi_era_tx_from_era_cbor(era_body) else {
-            return vec![];
-        };
-        tx.produces()
+    fn tx_produced_utxos(
+        era_body: &EraCbor,
+    ) -> Result<Vec<(dolos_core::TxoRef, EraCbor)>, CardanoError> {
+        let tx = multi_era_tx_from_era_cbor(era_body)?;
+        Ok(tx
+            .produces()
             .iter()
             .map(|(idx, output)| {
                 let txoref = txo_ref_from_pallas(tx.hash(), *idx as u32);
                 let body = era_cbor_from_output(output);
                 (txoref, body)
             })
-            .collect()
+            .collect())
     }
-    fn tx_consumed_ref(era_body: &EraCbor) -> Vec<dolos_core::TxoRef> {
-        let Ok(tx) = multi_era_tx_from_era_cbor(era_body) else {
-            return vec![];
-        };
-        tx.consumes().iter().map(txo_ref_from_input).collect()
+
+    fn tx_consumed_ref(era_body: &EraCbor) -> Result<Vec<dolos_core::TxoRef>, CardanoError> {
+        let tx = multi_era_tx_from_era_cbor(era_body)?;
+        Ok(tx.consumes().iter().map(txo_ref_from_input).collect())
     }
     fn find_tx_in_block(
         block: &[u8],

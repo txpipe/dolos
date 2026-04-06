@@ -588,8 +588,8 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip.saturating_sub(Self::mutable_slots(domain))
     }
 
-    fn tx_produced_utxos(era_body: &EraCbor) -> Vec<(TxoRef, EraCbor)>;
-    fn tx_consumed_ref(era_body: &EraCbor) -> Vec<TxoRef>;
+    fn tx_produced_utxos(era_body: &EraCbor) -> Result<Vec<(TxoRef, EraCbor)>, Self::ChainSpecificError>;
+    fn tx_consumed_ref(era_body: &EraCbor) -> Result<Vec<TxoRef>, Self::ChainSpecificError>;
 
     fn find_tx_in_block(
         block: &[u8],
