@@ -100,8 +100,7 @@ pub fn validate_tx<D: Domain<ChainSpecificError = CardanoError>>(
     let payload = EraCbor(era, cbor.into());
 
     let tx_hash = crate::pallas_hash_to_core(hash);
-    let encoded_report = format!("{report:?}").into_bytes();
-    let tx = MempoolTx::new(tx_hash, payload, encoded_report);
+    let tx = MempoolTx::new(tx_hash, payload);
 
     Ok(tx)
 }

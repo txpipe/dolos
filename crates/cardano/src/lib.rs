@@ -604,6 +604,15 @@ impl dolos_core::ChainLogic for CardanoLogic {
         validate::validate_tx(cbor, utxos, tip, genesis)
     }
 
+    type EvalReport = pallas::ledger::validate::phase2::EvalReport;
+
+    fn eval_tx<D: Domain<ChainSpecificError = CardanoError>>(
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+    ) -> Result<Self::EvalReport, ChainError<Self::ChainSpecificError>> {
+        validate::evaluate_tx(cbor, utxos)
+    }
+
     fn tx_produced_utxos(
         era_body: &EraCbor,
     ) -> Result<Vec<(dolos_core::TxoRef, EraCbor)>, CardanoError> {
