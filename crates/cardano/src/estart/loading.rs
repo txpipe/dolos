@@ -86,14 +86,14 @@ impl super::WorkContext {
                     .unwrap_or(0)
             })
             .sum();
+        let total = remaining.values().try_fold(0u64, |acc, utxo| {
+            let coin = crate::multi_era_output_from_era_cbor(utxo.as_ref())
+                .map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Traverse(e)))?
+                .value()
+                .coin();
 
-        tracing::debug!(
-            remaining_count = remaining.len(),
-            total_avvm = total,
-            "AVVM reclamation at Shelley→Allegra boundary"
-        );
-
-        Ok(total)
+            Ok(acc + coin)
+        })?;
     }
 
     pub fn load<D: CardanoDomain>(
