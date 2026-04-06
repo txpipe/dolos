@@ -206,6 +206,16 @@ impl From<TxoRef> for (TxHash, TxoIdx) {
     }
 }
 
+impl TxoRef {
+    /// Serialize to the 36-byte index key format: `[tx_hash (32 bytes) || output_index (4 bytes, big-endian)]`.
+    pub fn to_index_bytes(&self) -> [u8; 36] {
+        let mut bytes = [0u8; 36];
+        bytes[0..32].copy_from_slice(self.0.as_slice());
+        bytes[32..36].copy_from_slice(&self.1.to_be_bytes());
+        bytes
+    }
+}
+
 impl Display for TxoRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}#{}", self.0, self.1)

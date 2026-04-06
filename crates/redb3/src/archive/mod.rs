@@ -12,7 +12,7 @@ use std::convert::Infallible;
 
 use dolos_core::{
     config::RedbArchiveConfig, ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue,
-    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder,
+    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder, TxoIdx, TxoRef,
 };
 
 use ::redb::Durability;
@@ -662,10 +662,9 @@ impl<E: std::error::Error + Send + Sync + 'static> ArchiveStore<E> {
 
             for tx in block.txs().iter() {
                 for input in tx.inputs() {
-                    // TODO: dudoso, ask Santiago
-                    let mut bytes = input.hash().to_vec();
-                    bytes.extend_from_slice(u32::to_be_bytes(input.index() as u32).as_slice());
-                    if bytes.as_slice() == spent_txo {
+                    let hash_bytes: [u8; 32] = **input.hash();
+                    let key = TxoRef(TxHash::from(hash_bytes), input.index() as TxoIdx).to_index_bytes();
+                    if key.as_slice() == spent_txo {
                         let hash_bytes: [u8; 32] = *tx.hash();
                         return Ok(Some(dolos_core::hash::Hash::from(hash_bytes)));
                     }

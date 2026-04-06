@@ -538,10 +538,7 @@ where
             |block| {
                 for tx in block.txs().iter() {
                     for input in tx.inputs() {
-                        let txo_ref = crate::txo_ref_from_input(&input);
-                        let mut bytes = [0u8; 36];
-                        bytes[0..32].copy_from_slice(txo_ref.0.as_slice());
-                        bytes[32..36].copy_from_slice(&txo_ref.1.to_be_bytes());
+                        let bytes = crate::txo_ref_from_input(&input).to_index_bytes();
                         if bytes == spent.as_slice() {
                             return Some(crate::pallas_hash_to_core(tx.hash()));
                         }
