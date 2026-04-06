@@ -78,22 +78,16 @@ impl super::WorkContext {
         let remaining = state.get_utxos(refs)?;
 
         // Sum the remaining values
-        let total: u64 = remaining
-            .values()
-            .map(|utxo| {
-                crate::multi_era_output_from_era_cbor(utxo.as_ref())
-                    .map(|o| o.value().coin())
-                    .unwrap_or(0)
-            })
-            .sum();
-        let total = remaining.values().try_fold(0u64, |acc, utxo| {
-            let coin = crate::multi_era_output_from_era_cbor(utxo.as_ref())
-                .map_err(|e| ChainError::ChainSpecific(crate::CardanoError::Traverse(e)))?
+        let mut total = 0u64;
+
+        for utxo in remaining.values() {
+            total += crate::multi_era_output_from_era_cbor(utxo.as_ref())
+                .map_err(ChainError::ChainSpecific)?
                 .value()
                 .coin();
+        }
 
-            Ok(acc + coin)
-        })?;
+        Ok(total)
     }
 
     pub fn load<D: CardanoDomain>(
