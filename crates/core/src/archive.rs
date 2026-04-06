@@ -213,7 +213,7 @@ pub trait Skippable {
 }
 
 pub trait ArchiveStore: Clone + Send + Sync + 'static {
-    type ChainSpecificError: std::error::Error + Send + Sync;
+    type ChainSpecificError: std::error::Error + Send + Sync + 'static;
     type BlockIter<'a>: Iterator<Item = (BlockSlot, BlockBody)>
         + DoubleEndedIterator
         + Skippable
