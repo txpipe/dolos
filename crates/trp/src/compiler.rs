@@ -35,7 +35,8 @@ fn build_pparams<
 >(
     domain: &D,
 ) -> Result<tx3_cardano::PParams, Error> {
-    let network = network_id_from_genesis(domain.genesis().as_ref()).unwrap();
+    let network = network_id_from_genesis(domain.genesis().as_ref())
+        .ok_or_else(|| Error::InternalError("unrecognized network ID in genesis".to_string()))?;
 
     let pparams = dolos_cardano::load_effective_pparams::<D>(domain.state())?;
 
