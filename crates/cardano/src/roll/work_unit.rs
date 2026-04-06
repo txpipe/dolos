@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use dolos_core::{Domain, DomainError, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
+use dolos_core::{DomainError, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
 use tracing::{debug, info};
 
 use crate::roll::batch::WorkBatch;
-use crate::{roll, Cache, CardanoDelta, CardanoEntity, CardanoError, CardanoGenesis, CardanoLogic};
+use crate::{roll, Cache, CardanoDelta, CardanoDomain, CardanoEntity, CardanoGenesis};
 
 /// Work unit for processing a batch of blocks ("rolling" the chain forward).
 pub struct RollWorkUnit {
@@ -45,13 +45,7 @@ impl RollWorkUnit {
 
 impl<D> WorkUnit<D> for RollWorkUnit
 where
-    D: Domain<
-        Chain = CardanoLogic,
-        Entity = CardanoEntity,
-        EntityDelta = CardanoDelta,
-        ChainSpecificError = CardanoError,
-        Genesis = CardanoGenesis,
-    >,
+    D: CardanoDomain<Entity = CardanoEntity, EntityDelta = CardanoDelta>,
 {
     fn name(&self) -> &'static str {
         "roll"
