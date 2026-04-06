@@ -5,7 +5,7 @@ use crate::streams::ScriptedStream;
 
 /// Build a minimal `MempoolTx` for testing.
 pub fn make_test_mempool_tx(hash: TxHash) -> MempoolTx {
-    MempoolTx::new(hash, EraCbor(7, vec![0x80]), vec![])
+    MempoolTx::new(hash, EraCbor(7, vec![0x80]))
 }
 
 /// Build a minimal `MempoolEvent` at the `Pending` stage for testing.
