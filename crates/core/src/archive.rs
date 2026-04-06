@@ -171,7 +171,7 @@ pub enum ArchiveError<E: std::error::Error + Send + Sync + 'static> {
 }
 
 pub trait ArchiveWriter: Send + Sync + 'static {
-    type ChainSpecificError: std::error::Error + Send + Sync;
+    type ChainSpecificError: std::error::Error + Send + Sync + 'static;
     fn apply(
         &self,
         point: &ChainPoint,

@@ -1,13 +1,9 @@
 use super::*;
 use crate::TagDimension;
 
-//pub use pallas::ledger::validate::phase2::EvalReport;
-
 use futures_core::Stream;
 use std::pin::Pin;
 use tracing::{debug, warn};
-
-pub type Report = Vec<u8>;
 
 #[derive(Debug)]
 pub struct MempoolTx {
@@ -17,10 +13,6 @@ pub struct MempoolTx {
     pub confirmations: u32,
     pub non_confirmations: u32,
     pub confirmed_at: Option<ChainPoint>,
-
-    // this might be empty if the tx is cloned
-    // TODO: notify santiago there is an extra serialize/deserialize on mempool ops
-    pub report: Option<Report>,
 }
 
 impl PartialEq for MempoolTx {
@@ -40,13 +32,12 @@ impl Clone for MempoolTx {
             confirmations: self.confirmations,
             non_confirmations: self.non_confirmations,
             confirmed_at: self.confirmed_at.clone(),
-            report: None,
         }
     }
 }
 
 impl MempoolTx {
-    pub fn new(hash: TxHash, payload: EraCbor, report: Report) -> Self {
+    pub fn new(hash: TxHash, payload: EraCbor) -> Self {
         Self {
             hash,
             payload,
@@ -54,7 +45,6 @@ impl MempoolTx {
             confirmations: 0,
             non_confirmations: 0,
             confirmed_at: None,
-            report: Some(report),
         }
     }
 
@@ -448,7 +438,7 @@ mod tests {
 
     fn test_event(hash: TxHash) -> MempoolEvent {
         MempoolEvent {
-            tx: MempoolTx::new(hash, EraCbor(7, vec![0x80]), vec![]),
+            tx: MempoolTx::new(hash, EraCbor(7, vec![0x80])),
         }
     }
 

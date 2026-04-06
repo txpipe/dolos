@@ -60,6 +60,21 @@ pub trait SubmitExt: Domain {
     /// # Returns
     ///
     /// The transaction hash if successfully submitted.
+    /// Evaluate a transaction's scripts against the current ledger state.
+    ///
+    /// Returns execution unit reports without submitting to the mempool.
+    #[instrument(skip_all)]
+    fn eval_tx(
+        &self,
+        cbor: &[u8],
+    ) -> Result<<Self::Chain as ChainLogic>::EvalReport, DomainError<Self::ChainSpecificError>>
+    {
+        let utxos =
+            MempoolAwareUtxoStore::<'_, Self>::new(self.state(), self.indexes(), self.mempool());
+
+        Ok(Self::Chain::eval_tx(cbor, &utxos)?)
+    }
+
     #[instrument(skip_all)]
     fn receive_tx(
         &self,

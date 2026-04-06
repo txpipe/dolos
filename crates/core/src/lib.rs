@@ -604,6 +604,14 @@ pub trait ChainLogic: Sized + Send + Sync {
         tip: Option<ChainPoint>,
         genesis: &Self::Genesis,
     ) -> Result<mempool::MempoolTx, ChainError<Self::ChainSpecificError>>;
+
+    /// Evaluate a transaction's scripts and return execution unit reports.
+    type EvalReport: Send + Sync;
+
+    fn eval_tx<D: Domain<ChainSpecificError = Self::ChainSpecificError>>(
+        cbor: &[u8],
+        utxos: &MempoolAwareUtxoStore<D>,
+    ) -> Result<Self::EvalReport, ChainError<Self::ChainSpecificError>>;
 }
 
 #[derive(Debug, Error)]
