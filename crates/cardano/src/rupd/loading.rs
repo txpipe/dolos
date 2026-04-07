@@ -126,7 +126,7 @@ impl StakeSnapshot {
         state: &D::State,
         stake_epoch: u64,
         protocol: EraProtocol,
-        _rupd_slot: u64,
+        rupd_slot: u64,
     ) -> Result<Self, ChainError<crate::CardanoError>> {
         let mut snapshot = Self::default();
 
@@ -153,9 +153,7 @@ impl StakeSnapshot {
         for record in accounts {
             let (_, account) = record?;
 
-            let is_reg = account.is_registered();
-
-            if is_reg {
+            if account.is_registered_at(rupd_slot) {
                 snapshot
                     .registered_accounts
                     .insert(account.credential.clone());
