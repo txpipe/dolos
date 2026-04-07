@@ -158,8 +158,6 @@ pub enum ArchiveError<E: std::error::Error + Send + Sync + 'static> {
     #[error("decoding error: {0}")]
     DecodingError(String),
 
-    //#[error("block decoding error")]
-    //BlockDecodingError(#[from] pallas::ledger::traverse::Error),
     #[error("entity decoding error")]
     EntityDecodingError(String),
 
