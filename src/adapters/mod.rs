@@ -67,9 +67,10 @@ impl DomainAdapter {
     pub fn get_historical_utxos(
         &self,
         refs: &[pallas::interop::utxorpc::TxoRef],
-    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
+    ) -> Result<Option<pallas::interop::utxorpc::UtxoMap>, DomainError<dolos_cardano::CardanoError>>
+    {
         if refs.is_empty() {
-            return Some(Default::default());
+            return Ok(Some(Default::default()));
         }
 
         let mut result = std::collections::HashMap::new();
@@ -79,11 +80,16 @@ impl DomainAdapter {
             .map(|(h, i)| TxoRef(pallas_hash_to_core(h), i))
             .collect();
 
-        let iter = self.wal().iter_logs(None, None).ok()?;
+        let iter = self.wal().iter_logs(None, None).map_err(DomainError::WalError)?;
         for (_, log) in iter.rev() {
             for (txo_ref, era_cbor) in &log.inputs {
                 if refs_set.contains(txo_ref) {
-                    let era = era_cbor.0.try_into().expect("era out of range");
+                    let era = era_cbor.0.try_into().map_err(|_| {
+                        DomainError::Internal(format!(
+                            "era out of range: txo_ref={txo_ref:?}, era={}",
+                            era_cbor.0
+                        ))
+                    })?;
                     result.insert(
                         (core_hash_to_pallas(txo_ref.0), txo_ref.1),
                         (era, era_cbor.1.clone()),
@@ -97,9 +103,9 @@ impl DomainAdapter {
         }
 
         if result.is_empty() {
-            None
+            Ok(None)
         } else {
-            Some(result)
+            Ok(Some(result))
         }
     }
 }
@@ -196,12 +202,22 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
             .map(|(h, i)| TxoRef(pallas_hash_to_core(*h), *i))
             .collect();
 
-        let some = dolos_core::StateStore::get_utxos(self.state(), refs)
+        let some: pallas::interop::utxorpc::UtxoMap = dolos_core::StateStore::get_utxos(self.state(), refs)
             .ok()?
             .into_iter()
-            .map(|(k, v)| {
-                let era = v.0.try_into().expect("era out of range");
-                ((core_hash_to_pallas(k.0), k.1), (era, v.1.clone()))
+            .filter_map(|(k, v)| {
+                let era = v
+                    .0
+                    .try_into()
+                    .map_err(|_| {
+                        tracing::error!(
+                            txo_ref = ?(k.0, k.1),
+                            era = v.0,
+                            "era out of range during UTxO lookup, skipping entry"
+                        )
+                    })
+                    .ok()?;
+                Some(((core_hash_to_pallas(k.0), k.1), (era, v.1.clone())))
             })
             .collect();
 
