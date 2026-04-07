@@ -361,7 +361,7 @@ async fn refs_for_output_ref_pattern<D: Domain>(
         patterns::OutputIndexPattern::Any => {
             let Some(TaggedPayload(era, cbor)) = facade
                 .query()
-                .tx_cbor(tx_id.to_vec())
+                .tx_cbor(pallas_hash_to_core(tx_hash))
                 .await
                 .map_err(|_| MatchError::Internal)?
             else {
@@ -454,7 +454,7 @@ async fn build_matches<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = 
             None => {
                 let Some((raw_block, tx_index)) = facade
                     .query()
-                    .block_by_tx_hash(tx_hash.as_slice().to_vec())
+                    .block_by_tx_hash(tx_hash)
                     .await
                     .map_err(|_| MatchError::Internal)?
                 else {

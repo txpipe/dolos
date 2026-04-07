@@ -189,10 +189,6 @@ impl FromStr for TxoRef {
     }
 }
 
-// TODO: remove legacy
-// #[derive(Debug, Eq, PartialEq, Hash)]
-// pub struct ChainPoint(pub BlockSlot, pub BlockHash);
-
 #[derive(Debug, Error)]
 pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
@@ -491,7 +487,7 @@ pub trait ChainLogic: Sized + Send + Sync {
 
     fn find_tx_in_block(
         block: &[u8],
-        tx_hash: &[u8],
+        tx_hash: &TxHash,
     ) -> Result<Option<(TaggedPayload, TxOrder)>, Self::ChainSpecificError>;
 
     // Validate a transaction against the current ledger state.

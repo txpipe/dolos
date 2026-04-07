@@ -652,14 +652,14 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
     fn find_tx_in_block(
         block: &[u8],
-        tx_hash: &[u8],
+        tx_hash: &dolos_core::TxHash,
     ) -> Result<Option<(TaggedPayload, dolos_core::TxOrder)>, Self::ChainSpecificError> {
         let block = MultiEraBlock::decode(block)?;
         let result = block
             .txs()
             .iter()
             .enumerate()
-            .find(|(_, tx)| tx.hash().as_slice() == tx_hash)
+            .find(|(_, tx)| tx.hash().as_slice() == tx_hash.as_slice())
             .map(|(idx, tx)| (TaggedPayload(block.era().into(), tx.encode()), idx));
         Ok(result)
     }

@@ -19,7 +19,7 @@ use dolos_cardano::{
     core_hash_to_pallas, indexes::AsyncCardanoQueryExt, pallas_hash_to_core, AccountState,
     CardanoError, CardanoGenesis, DRepState, PoolState,
 };
-use dolos_core::Domain;
+use dolos_core::{Domain, TxHash};
 
 use crate::{
     hacks, log_and_500,
@@ -41,12 +41,12 @@ where
     Option<PoolState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
+    let (raw, order) = match domain.get_block_by_tx_hash(hash).await {
         Ok(block) => block,
         Err(StatusCode::NOT_FOUND) => {
-            return Ok(Json(hacks::genesis_tx_content_for_hash(&domain, &hash)?));
+            return Ok(Json(hacks::genesis_tx_content_for_hash(&domain, hash.as_ref())?));
         }
         Err(err) => return Err(err),
     };
@@ -69,9 +69,9 @@ pub async fn by_hash_cbor<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let tx = TxModelBuilder::new(&raw, order)?;
 
@@ -89,13 +89,13 @@ where
         + Sync
         + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = match domain.get_block_by_tx_hash(&hash).await {
+    let (raw, order) = match domain.get_block_by_tx_hash(hash).await {
         Ok(block) => block,
         Err(StatusCode::NOT_FOUND) => {
             return Ok(Json(
-                hacks::genesis_tx_utxos_for_hash(&domain, &hash).await?,
+                hacks::genesis_tx_utxos_for_hash(&domain, hash.as_ref()).await?,
             ));
         }
         Err(err) => return Err(err),
@@ -142,9 +142,9 @@ pub async fn by_hash_metadata<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let tx = TxModelBuilder::new(&raw, order)?;
 
@@ -158,9 +158,9 @@ pub async fn by_hash_metadata_cbor<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let builder = TxModelBuilder::new(&raw, order)?;
 
@@ -174,9 +174,9 @@ pub async fn by_hash_redeemers<D>(
 where
     D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let chain = domain.get_chain_summary()?;
 
@@ -205,9 +205,9 @@ pub async fn by_hash_withdrawals<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let tx = TxModelBuilder::new(&raw, order)?;
 
@@ -221,9 +221,9 @@ pub async fn by_hash_delegations<D>(
 where
     D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let network = domain.get_network_id()?;
     let chain = domain.get_chain_summary()?;
@@ -242,9 +242,9 @@ pub async fn by_hash_mirs<D>(
 where
     D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let network = domain.get_network_id()?;
 
@@ -260,9 +260,9 @@ pub async fn by_hash_pool_retires<D>(
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let tx = TxModelBuilder::new(&raw, order)?;
 
@@ -277,11 +277,11 @@ where
     D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
     Option<PoolState>: From<D::Entity>,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let network = domain.get_network_id()?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let chain = domain.get_chain_summary()?;
 
@@ -301,11 +301,11 @@ pub async fn by_hash_stakes<D>(
 where
     D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
 {
-    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let hash = tx_hash.parse::<TxHash>().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let network = domain.get_network_id()?;
 
-    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+    let (raw, order) = domain.get_block_by_tx_hash(hash).await?;
 
     let tx = TxModelBuilder::new(&raw, order)?.with_network(network);
 

@@ -6,7 +6,7 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    CardanoError, CardanoGenesis, ChainSummary, PParamsSet,
+    pallas_hash_to_core, CardanoError, CardanoGenesis, ChainSummary, PParamsSet,
 };
 use pallas::{
     crypto::hash::Hash,
@@ -22,7 +22,7 @@ use tracing::Level;
 use dolos_core::{
     config::MinibfConfig, ArchiveStore as _, AsyncQueryFacade, BlockSlot, CancelToken, Domain,
     Entity, EntityKey, TaggedPayload, LogKey, ServeError, StateError, StateStore as _, SubmitExt,
-    TemporalKey, TxOrder,
+    TemporalKey, TxHash, TxOrder,
 };
 
 mod cache;
@@ -70,13 +70,13 @@ impl<D: Domain> Facade<D> {
 
     pub async fn get_block_by_tx_hash(
         &self,
-        tx_hash: &[u8],
+        tx_hash: TxHash,
     ) -> Result<(Vec<u8>, TxOrder), StatusCode>
     where
         D: Clone + Send + Sync + 'static,
     {
         self.query()
-            .block_by_tx_hash(tx_hash.to_vec())
+            .block_by_tx_hash(tx_hash)
             .await
             .map_err(log_and_500("failed to query block by tx hash"))?
             .ok_or(StatusCode::NOT_FOUND)
@@ -160,7 +160,7 @@ impl<D: Domain> Facade<D> {
     {
         let tx = self
             .query()
-            .tx_cbor(hash.as_slice().to_vec())
+            .tx_cbor(pallas_hash_to_core(hash))
             .await
             .map_err(log_and_500("failed to fetch tx cbor"))?;
 
@@ -194,7 +194,7 @@ impl<D: Domain> Facade<D> {
         for hash in hashes.into_iter() {
             let block = self
                 .query()
-                .block_by_tx_hash(hash.as_slice().to_vec())
+                .block_by_tx_hash(pallas_hash_to_core(hash))
                 .await
                 .map_err(log_and_500("failed to fetch block_with_tx batch"))?;
             if let Some(block) = block {

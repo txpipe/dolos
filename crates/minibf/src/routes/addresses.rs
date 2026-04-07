@@ -20,7 +20,7 @@ use pallas::ledger::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    pallas_extras, CardanoError, ChainSummary,
+    pallas_extras, pallas_hash_to_core, CardanoError, ChainSummary,
 };
 use dolos_core::{BlockBody, BlockSlot, Domain, TaggedPayload, StateStore as _, TxoRef};
 use pallas::ledger::traverse::Era;
@@ -410,7 +410,7 @@ where
     for input in tx.consumes() {
         if let Some(TaggedPayload(era, cbor)) = domain
             .query()
-            .tx_cbor(input.hash().as_slice().to_vec())
+            .tx_cbor(pallas_hash_to_core(*input.hash()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         {

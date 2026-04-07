@@ -45,7 +45,7 @@ where
         async move {
             match domain
                 .query()
-                .block_by_tx_hash(tx.as_slice().to_vec())
+                .block_by_tx_hash(tx)
                 .await
             {
                 Ok(Some((cbor, txorder))) => {

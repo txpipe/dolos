@@ -429,11 +429,16 @@ where
 
         info!("received new grpc query - read_tx");
 
-        let tx_hash = message.hash;
+        let tx_hash_bytes = message.hash;
+        let tx_hash_arr: [u8; 32] = tx_hash_bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("invalid tx hash length"))?;
+        let tx_hash = dolos_core::TxHash::from(tx_hash_arr);
 
         let query = dolos_core::AsyncQueryFacade::new(self.domain.clone());
         let (block_bytes, tx_index) = query
-            .block_by_tx_hash(tx_hash.to_vec())
+            .block_by_tx_hash(tx_hash)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("tx hash not found"))?;

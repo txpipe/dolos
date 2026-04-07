@@ -16,7 +16,7 @@ use dolos_cardano::{
     cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::AssetState,
-    CardanoError, ChainSummary,
+    pallas_hash_to_core, CardanoError, ChainSummary,
 };
 use dolos_core::{BlockSlot, Domain, TaggedPayload, IndexStore as _, StateStore as _};
 use futures_util::StreamExt;
@@ -339,7 +339,7 @@ impl AssetModelBuilder {
             if let Some(metadata_tx) = ref_state.and_then(|state| state.metadata_tx) {
                 if let Some(TaggedPayload(era, cbor)) = domain
                     .query()
-                    .tx_cbor(metadata_tx.as_slice().to_vec())
+                    .tx_cbor(pallas_hash_to_core(metadata_tx))
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 {
@@ -358,7 +358,7 @@ impl AssetModelBuilder {
             if Some(metadata_tx) != self.asset_state.initial_tx {
                 let metadata_cbor = domain
                     .query()
-                    .tx_cbor(metadata_tx.as_slice().to_vec())
+                    .tx_cbor(pallas_hash_to_core(metadata_tx))
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 if metadata_cbor.is_some() {
@@ -488,7 +488,7 @@ where
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
         domain
             .query()
-            .tx_cbor(initial_tx.as_slice().to_vec())
+            .tx_cbor(pallas_hash_to_core(initial_tx))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
@@ -622,7 +622,7 @@ where
     for input in tx.consumes() {
         if let Some(TaggedPayload(era, cbor)) = domain
             .query()
-            .tx_cbor(input.hash().as_slice().to_vec())
+            .tx_cbor(pallas_hash_to_core(*input.hash()))
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         {

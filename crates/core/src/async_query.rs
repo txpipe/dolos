@@ -4,7 +4,8 @@ use tokio::sync::Semaphore;
 
 use crate::{
     archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockSlot, ChainError,
-    ChainLogic, ChainPoint, Domain, DomainError, IndexError, TagDimension, TaggedPayload, TxOrder,
+    ChainLogic, ChainPoint, Domain, DomainError, IndexError, TagDimension, TaggedPayload, TxHash,
+    TxOrder,
 };
 
 #[derive(Debug, Clone)]
@@ -113,12 +114,11 @@ where
 
     pub async fn block_by_tx_hash(
         &self,
-        tx_hash: Vec<u8>,
+        tx_hash: TxHash,
     ) -> Result<Option<(BlockBody, TxOrder)>, DomainError<D::ChainSpecificError>> {
-        let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {
-                let slot = domain.indexes().slot_by_tx_hash(&tx_hash_lookup)?;
+                let slot = domain.indexes().slot_by_tx_hash(tx_hash.as_ref())?;
                 let Some(slot) = slot else {
                     return Ok(None);
                 };
@@ -138,12 +138,11 @@ where
 
     pub async fn tx_cbor(
         &self,
-        tx_hash: Vec<u8>,
+        tx_hash: TxHash,
     ) -> Result<Option<TaggedPayload>, DomainError<D::ChainSpecificError>> {
-        let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {
-                let slot = domain.indexes().slot_by_tx_hash(&tx_hash_lookup)?;
+                let slot = domain.indexes().slot_by_tx_hash(tx_hash.as_ref())?;
                 let Some(slot) = slot else {
                     return Ok(None);
                 };
