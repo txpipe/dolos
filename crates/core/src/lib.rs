@@ -653,8 +653,7 @@ mod tests {
 
     pub fn slot_to_hash(slot: u64) -> BlockHash {
         let mut bytes = [0u8; 32];
-        let slot_bytes = (slot as i32).to_le_bytes();
-        bytes[..4].copy_from_slice(&slot_bytes);
+        bytes[..8].copy_from_slice(&slot.to_le_bytes());
         BlockHash::new(bytes)
     }
 
