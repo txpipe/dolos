@@ -59,7 +59,7 @@ pub fn make_conway_block(slot: BlockSlot) -> (ChainPoint, RawBlock) {
     let wrapper = (Era::Conway as u16, block);
 
     let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
-    let chain_point = ChainPoint::Specific(slot, dolos_cardano::pallas_hash_to_core(hash));
+    let chain_point = ChainPoint::Specific(slot, pallas_hash_to_core(hash));
 
     (chain_point, Arc::new(raw_bytes))
 }
