@@ -387,7 +387,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         // into the epoch, capturing addrsRew (registered accounts) for the pre-Babbage
         // prefilter. Using 4k/f instead of 3k/f ensures the state at RUPD time includes
         // all deregistrations up to the correct threshold.
-        let stability_window = utils::randomness_stability_window(&genesis);
+        let stability_window = utils::randomness_stability_window(&genesis)?;
 
         Ok(Self {
             config,
@@ -591,7 +591,9 @@ impl dolos_core::ChainLogic for CardanoLogic {
         Ok(out)
     }
 
-    fn mutable_slots(domain: &impl Domain<Genesis = CardanoGenesis>) -> BlockSlot {
+    fn mutable_slots(
+        domain: &impl Domain<Genesis = CardanoGenesis>,
+    ) -> Result<BlockSlot, ChainError<CardanoError>> {
         utils::mutable_slots(&domain.genesis())
     }
 

@@ -125,7 +125,9 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                     parameters: Box::new(NetworkErasInnerParameters {
                         epoch_length: self.genesis.shelley.epoch_length.unwrap() as i32,
                         slot_length: self.genesis.shelley.slot_length.unwrap() as i32,
-                        safe_zone: mutable_slots(self.genesis) as i32,
+                        safe_zone: mutable_slots(self.genesis)
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                            as i32,
                     }),
                 };
                 out.push(other.clone());
@@ -170,7 +172,9 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
                 parameters: Box::new(NetworkErasInnerParameters {
                     epoch_length: era.epoch_length as i32,
                     slot_length: era.slot_length as i32,
-                    safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
+                    safe_zone: dolos_cardano::mutable_slots(self.genesis)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                        as i32,
                 }),
             };
 

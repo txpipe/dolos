@@ -52,8 +52,10 @@ pub fn compute_nonce<D: Domain<Genesis = CardanoGenesis>>(
     }
 
     let (protocol, era) = summary.protocol_and_era_for_epoch(epoch);
-    let largest_stable_slot =
-        era.epoch_start(epoch) - nonce_stability_window(*protocol, domain.genesis().as_ref());
+    let largest_stable_slot = era.epoch_start(epoch)
+        - nonce_stability_window(*protocol, domain.genesis().as_ref())
+            .into_diagnostic()
+            .context("missing active_slots_coeff in genesis")?;
 
     let mut nonces = Nonces::bootstrap(domain.genesis().shelley_hash);
 

@@ -308,7 +308,7 @@ impl RupdWork {
             // Pre-Babbage pre-filtering uses this to exclude unregistered accounts from
             // reward computation.
             let rupd_slot = work.chain.epoch_start(current_epoch)
-                + crate::utils::randomness_stability_window(genesis);
+                + crate::utils::randomness_stability_window(genesis)?;
 
             work.snapshot = StakeSnapshot::load::<D>(state, snapshot_epoch, protocol, rupd_slot)?;
 

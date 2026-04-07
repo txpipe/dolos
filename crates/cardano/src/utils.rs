@@ -17,10 +17,16 @@ pub fn network_from_genesis(genesis: &CardanoGenesis) -> Network {
 /// Reads the relevant genesis config values and uses the security window
 /// guarantee formula from consensus to calculate the latest slot that can be
 /// considered immutable.
-pub fn mutable_slots(genesis: &CardanoGenesis) -> u64 {
+pub fn mutable_slots(
+    genesis: &CardanoGenesis,
+) -> Result<u64, ChainError<crate::CardanoError>> {
     let k = genesis.byron.protocol_consts.k as f64;
-    let f = genesis.shelley.active_slots_coeff.unwrap() as f64;
-    ((3.0 * k) / f).ceil() as u64
+    let f = genesis
+        .shelley
+        .active_slots_coeff
+        .ok_or_else(|| ChainError::GenesisFieldMissing("active_slots_coeff".to_string()))?
+        as f64;
+    Ok(((3.0 * k) / f).ceil() as u64)
 }
 
 /// Computes the amount of mutable slots in chain.
@@ -29,7 +35,9 @@ pub fn mutable_slots(genesis: &CardanoGenesis) -> u64 {
 /// guarantee formula from consensus to calculate the latest slot that can be
 /// considered immutable. Same as `mutable_slots`, added for the code to be similar in naming
 /// convention to other implementations.
-pub fn stability_window(genesis: &CardanoGenesis) -> u64 {
+pub fn stability_window(
+    genesis: &CardanoGenesis,
+) -> Result<u64, ChainError<crate::CardanoError>> {
     mutable_slots(genesis)
 }
 
@@ -37,17 +45,26 @@ pub fn stability_window(genesis: &CardanoGenesis) -> u64 {
 ///
 /// Similar to `mutable_slots` but with 4 instead of 3 as the constant. See the following issue for
 /// refference: https://github.com/IntersectMBO/cardano-ledger/issues/1914
-pub fn randomness_stability_window(genesis: &CardanoGenesis) -> u64 {
+pub fn randomness_stability_window(
+    genesis: &CardanoGenesis,
+) -> Result<u64, ChainError<crate::CardanoError>> {
     let k = genesis.byron.protocol_consts.k as f64;
-    let f = genesis.shelley.active_slots_coeff.unwrap() as f64;
-    ((4.0 * k) / f).ceil() as u64
+    let f = genesis
+        .shelley
+        .active_slots_coeff
+        .ok_or_else(|| ChainError::GenesisFieldMissing("active_slots_coeff".to_string()))?
+        as f64;
+    Ok(((4.0 * k) / f).ceil() as u64)
 }
 
 /// Get the window of slots used to calculate eta_h for epoch nonce calculation.
 ///
 /// This is supposed be `randomness_stability_window` but due to a bug in the code it is dependant
 /// on the protocol. See https://github.com/IntersectMBO/cardano-ledger/issues/1914.
-pub fn nonce_stability_window(protocol: u16, genesis: &CardanoGenesis) -> u64 {
+pub fn nonce_stability_window(
+    protocol: u16,
+    genesis: &CardanoGenesis,
+) -> Result<u64, ChainError<crate::CardanoError>> {
     if protocol >= 9 {
         randomness_stability_window(genesis)
     } else {
@@ -61,8 +78,11 @@ pub fn nonce_stability_window(protocol: u16, genesis: &CardanoGenesis) -> u64 {
 /// uses the security window guarantee formula from consensus to calculate the
 /// latest slot that can be considered immutable. This is used mainly to define
 /// which slots can be finalized in the ledger store (aka: compaction).
-pub fn lastest_immutable_slot(tip: BlockSlot, genesis: &CardanoGenesis) -> BlockSlot {
-    tip.saturating_sub(mutable_slots(genesis))
+pub fn lastest_immutable_slot(
+    tip: BlockSlot,
+    genesis: &CardanoGenesis,
+) -> Result<BlockSlot, ChainError<crate::CardanoError>> {
+    Ok(tip.saturating_sub(mutable_slots(genesis)?))
 }
 
 pub fn float_to_rational(x: f32) -> pallas::ledger::primitives::conway::RationalNumber {
@@ -151,7 +171,7 @@ mod tests {
 
         let tip: BlockSlot = 1_000_000;
 
-        let result = lastest_immutable_slot(tip, &genesis);
+        let result = lastest_immutable_slot(tip, &genesis).unwrap();
 
         // slot delta in hours
         let delta_in_hours = tip.saturating_sub(result) / (60 * 60);

@@ -392,7 +392,10 @@ impl ConfigEditor {
             // Add max rollback window for network from Genesis.
             if self.0.sync.max_rollback.is_none() {
                 let genesis = network.load_included_genesis();
-                self.0.sync.max_rollback = Some(mutable_slots(&genesis));
+                self.0.sync.max_rollback = Some(
+                    mutable_slots(&genesis)
+                        .expect("built-in Cardano genesis must include active_slots_coeff"),
+                );
             }
         }
 

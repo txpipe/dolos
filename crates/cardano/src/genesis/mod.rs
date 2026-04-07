@@ -77,7 +77,7 @@ pub fn bootstrap_epoch<D: CardanoDomain>(
         pparams,
         initial_pots: pots,
         largest_stable_slot: genesis.shelley.epoch_length.unwrap() as u64
-            - nonce_stability_window(protocol as u16, genesis),
+            - nonce_stability_window(protocol as u16, genesis)?,
         nonces,
         previous_nonce_tail: None,
         number: 0,

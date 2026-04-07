@@ -582,14 +582,16 @@ pub trait ChainLogic: Sized + Send + Sync {
     ) -> Result<Self::Utxo, ChainError<Self::ChainSpecificError>>;
 
     // TODO: remove from the interface - this is Cardano-specific
-    fn mutable_slots(domain: &impl Domain<Genesis = Self::Genesis>) -> BlockSlot;
+    fn mutable_slots(
+        domain: &impl Domain<Genesis = Self::Genesis>,
+    ) -> Result<BlockSlot, ChainError<Self::ChainSpecificError>>;
 
     // TODO: remove from the interface - this is Cardano-specific
     fn last_immutable_slot(
         domain: &impl Domain<Genesis = Self::Genesis>,
         tip: BlockSlot,
-    ) -> BlockSlot {
-        tip.saturating_sub(Self::mutable_slots(domain))
+    ) -> Result<BlockSlot, ChainError<Self::ChainSpecificError>> {
+        Ok(tip.saturating_sub(Self::mutable_slots(domain)?))
     }
 
     fn tx_produced_utxos(era_body: &TaggedPayload) -> Result<Vec<(TxoRef, TaggedPayload)>, Self::ChainSpecificError>;
@@ -714,11 +716,10 @@ pub trait Domain: Send + Sync + Clone + 'static {
     const MAX_PRUNE_SLOTS_PER_HOUSEKEEPING: u64 = 10_000;
 
     fn housekeeping(&self) -> Result<bool, DomainError<Self::ChainSpecificError>> {
-        let max_ledger_slots = self
-            .storage_config()
-            .state
-            .max_history()
-            .unwrap_or(Self::Chain::mutable_slots(self));
+        let max_ledger_slots = match self.storage_config().state.max_history() {
+            Some(x) => x,
+            None => Self::Chain::mutable_slots(self)?,
+        };
 
         info!(max_ledger_slots, "pruning ledger for excess history");
 
