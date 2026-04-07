@@ -5,7 +5,9 @@ use pallas::network::miniprotocols::localstate::queries_v16 as q16;
 use tracing::debug;
 
 /// Build response for GetAccountState query (treasury and reserves)
-pub fn build_account_state_response<D: Domain>(domain: &D) -> Result<AnyCbor, Error> {
+pub fn build_account_state_response<D: Domain<ChainSpecificError = dolos_cardano::CardanoError>>(
+    domain: &D,
+) -> Result<AnyCbor, Error> {
     let epoch_state = load_epoch::<D>(domain.state())
         .map_err(|e| Error::server(format!("failed to load epoch state: {}", e)))?;
 

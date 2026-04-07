@@ -241,9 +241,9 @@ pub fn log_epoch_range_to_key_range(
     (start_slot, end_slot, range)
 }
 
-pub fn load_active_era<D: Domain>(
+pub fn load_active_era<D: Domain<ChainSpecificError = crate::CardanoError>>(
     state: &D::State,
-) -> Result<(EraProtocol, EraSummary), ChainError<D::ChainSpecificError>> {
+) -> Result<(EraProtocol, EraSummary), ChainError<crate::CardanoError>> {
     let eras = state.iter_entities_typed::<EraSummary>(EraSummary::NS, None)?;
 
     match eras.last() {
@@ -252,8 +252,8 @@ pub fn load_active_era<D: Domain>(
                 let protocol = EraProtocol::from(key);
                 Ok((protocol, summary))
             }
-            Err(_) => Err(ChainError::EraNotFound),
+            Err(_) => Err(ChainError::ChainSpecific(crate::CardanoError::EraNotFound)),
         },
-        None => Err(ChainError::EraNotFound),
+        None => Err(ChainError::ChainSpecific(crate::CardanoError::EraNotFound)),
     }
 }

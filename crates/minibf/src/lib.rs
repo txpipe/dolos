@@ -110,7 +110,10 @@ impl<D: Domain> Facade<D> {
         Ok(summary)
     }
 
-    pub fn get_current_effective_pparams(&self) -> Result<PParamsSet, StatusCode> {
+    pub fn get_current_effective_pparams(&self) -> Result<PParamsSet, StatusCode>
+    where
+        D: Domain<ChainSpecificError = CardanoError>,
+    {
         let pparams = dolos_cardano::load_effective_pparams::<D>(self.state())
             .map_err(log_and_500("failed to load effective pparams"))?;
 

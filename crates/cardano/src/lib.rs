@@ -308,6 +308,18 @@ pub enum CardanoError {
 
     #[error("chain tip is not available")]
     MissingChainPoint,
+
+    #[error("protocol params not found: {0}")]
+    PParamsNotFound(String),
+
+    #[error("no active epoch")]
+    NoActiveEpoch,
+
+    #[error("era not found")]
+    EraNotFound,
+
+    #[error("epoch value version not found for epoch {0}")]
+    EpochValueVersionNotFound(u64),
 }
 
 #[derive(Clone)]
@@ -653,21 +665,21 @@ impl dolos_core::ChainLogic for CardanoLogic {
     }
 }
 
-pub fn load_effective_pparams<D: Domain>(
+pub fn load_effective_pparams<D: Domain<ChainSpecificError = CardanoError>>(
     state: &D::State,
-) -> Result<PParamsSet, ChainError<D::ChainSpecificError>> {
+) -> Result<PParamsSet, ChainError<CardanoError>> {
     let epoch = load_epoch::<D>(state)?;
     let active = epoch.pparams.unwrap_live();
 
     Ok(active.clone())
 }
 
-pub fn load_epoch<D: Domain>(
+pub fn load_epoch<D: Domain<ChainSpecificError = CardanoError>>(
     state: &D::State,
-) -> Result<EpochState, ChainError<D::ChainSpecificError>> {
+) -> Result<EpochState, ChainError<CardanoError>> {
     let epoch = state
         .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(CURRENT_EPOCH_KEY))?
-        .ok_or(ChainError::NoActiveEpoch)?;
+        .ok_or(ChainError::ChainSpecific(CardanoError::NoActiveEpoch))?;
 
     Ok(epoch)
 }

@@ -8,14 +8,6 @@
 //!    be processed together). A batch is usually split into chunks for parallel
 //!    processing.
 
-//use pallas::{
-//    codec::minicbor::{self, Decode, Encode},
-//    crypto::hash::{Hash, Hasher},
-//    ledger::{
-//        primitives::Epoch,
-//        traverse::{MultiEraInput, MultiEraOutput, MultiEraTx, MultiEraUpdate},
-//    },
-//};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -126,7 +118,6 @@ impl TaggedPayload {
     pub fn bytes(&self) -> &[u8] {
         &self.1
     }
-
 }
 
 impl AsRef<[u8]> for TaggedPayload {
@@ -146,54 +137,6 @@ impl From<TaggedPayload> for (u16, Vec<u8>) {
         (value.0, value.1)
     }
 }
-
-
-//impl From<MultiEraOutput<'_>> for TaggedPayload {
-//    fn from(value: MultiEraOutput<'_>) -> Self {
-//        TaggedPayload(value.era().into(), value.encode())
-//    }
-//}
-//
-//impl<'a> TryFrom<&'a TaggedPayload> for MultiEraOutput<'a> {
-//    type Error = pallas::codec::minicbor::decode::Error;
-//
-//    fn try_from(value: &'a TaggedPayload) -> Result<Self, Self::Error> {
-//        let era = value.0.try_into().expect("era out of range");
-//        MultiEraOutput::decode(era, &value.1)
-//    }
-//}
-//
-//impl<'a> TryFrom<&'a TaggedPayload> for MultiEraTx<'a> {
-//    type Error = pallas::codec::minicbor::decode::Error;
-//
-//    fn try_from(value: &'a TaggedPayload) -> Result<Self, Self::Error> {
-//        let era = value.0.try_into().expect("era out of range");
-//        MultiEraTx::decode_for_era(era, &value.1)
-//    }
-//}
-//
-//impl TryFrom<TaggedPayload> for MultiEraUpdate<'_> {
-//    type Error = pallas::codec::minicbor::decode::Error;
-//
-//    fn try_from(value: TaggedPayload) -> Result<Self, Self::Error> {
-//        let era = value.0.try_into().expect("era out of range");
-//        MultiEraUpdate::decode_for_era(era, &value.1)
-//    }
-//}
-//
-//impl From<&MultiEraInput<'_>> for TxoRef {
-//    fn from(value: &MultiEraInput<'_>) -> Self {
-//        TxoRef(*value.hash(), value.index() as u32)
-//    }
-//}
-//
-//impl From<TxoRef> for Vec<u8> {
-//    fn from(value: TxoRef) -> Self {
-//        let mut bytes = value.0.to_vec();
-//        bytes.extend_from_slice(value.1.to_be_bytes().as_slice());
-//        bytes
-//    }
-//}
 
 #[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
@@ -410,82 +353,29 @@ pub type Phase2Log = Vec<String>;
 
 #[derive(Debug, Error)]
 pub enum ChainError<E: std::error::Error + Send + Sync + 'static> {
-    // keep
     #[error("can't receive block until previous work is completed")]
     CantReceiveBlock(RawBlock),
 
-    // keep
     #[error(transparent)]
     BrokenInvariant(#[from] BrokenInvariant),
 
-    // ChainSpecific
-    //#[error("decoding error")]
-    //DecodingError(#[from] pallas::ledger::traverse::Error),
-
-    //// ChainSpecifci
-    //#[error("cbor error")]
-    //CborDecodingError(#[from] pallas::codec::minicbor::decode::Error),
     #[error("invalid namespace: {0}")]
     InvalidNamespace(Namespace),
 
-    // Chain specific
-    //#[error("address decoding error")]
-    //AddressDecoding(#[from] pallas::ledger::addresses::Error),
-
-    // chain specific
-    // TODO: check StateError
     #[error(transparent)]
     StateError(#[from] StateError),
 
-    // keep
     #[error(transparent)]
     IndexError(#[from] IndexError),
 
-    // keep
     #[error(transparent)]
     ArchiveError(#[from] ArchiveError<E>),
 
-    // keep ?
     #[error("genesis field missing: {0}")]
     GenesisFieldMissing(String),
 
-    // keep ?
-    #[error("protocol params not found: {0}")]
-    PParamsNotFound(String),
-
-    // keep
-    #[error("no active epoch")]
-    NoActiveEpoch,
-
-    // keep -> maybe rename?
-    #[error("era not found")]
-    EraNotFound,
-
-    // keep -> maybe rename?
-    #[error("epoch value version not found for epoch {0}")]
-    EpochValueVersionNotFound(Epoch),
-
-    // keep? idk. too cardano
-    //#[error("missing rewards")]
-    //MissingRewards,
-
-    // keep? too cardano
-    //#[error("invalid pool params")]
-    //InvalidPoolParams,
-
-    // keep? too cardano
-    //#[error("invalid proposal params")]
-    //InvalidProposalParams,
     #[error(transparent)]
     ChainSpecific(E),
-    // #[error("phase-1 script rejected the transaction: {0}")]
-    // Phase1ValidationRejected(#[from] pallas::ledger::validate::utils::ValidationError),
-
-    // #[error("couldn't evaluate phase-2 script: {0}")]
-    // Phase2EvaluationError(String),
-
-    // #[error("phase-2 script rejected the transaction")]
-    // Phase2ValidationRejected(Phase2Log),
 }
 
 pub trait Genesis: Clone + Send + Sync + 'static {}
@@ -594,7 +484,9 @@ pub trait ChainLogic: Sized + Send + Sync {
         Ok(tip.saturating_sub(Self::mutable_slots(domain)?))
     }
 
-    fn tx_produced_utxos(era_body: &TaggedPayload) -> Result<Vec<(TxoRef, TaggedPayload)>, Self::ChainSpecificError>;
+    fn tx_produced_utxos(
+        era_body: &TaggedPayload,
+    ) -> Result<Vec<(TxoRef, TaggedPayload)>, Self::ChainSpecificError>;
     fn tx_consumed_ref(era_body: &TaggedPayload) -> Result<Vec<TxoRef>, Self::ChainSpecificError>;
 
     fn find_tx_in_block(

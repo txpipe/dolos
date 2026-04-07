@@ -32,7 +32,11 @@ pub async fn by_hash<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<TxContent>, StatusCode>
 where
-    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
     Option<AccountState>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
@@ -168,7 +172,7 @@ pub async fn by_hash_redeemers<D>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<TxContentRedeemersInner>>, StatusCode>
 where
-    D: Domain + Clone + Send + Sync + 'static,
+    D: Domain<ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
 

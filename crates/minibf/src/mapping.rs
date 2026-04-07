@@ -54,8 +54,8 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    pallas_extras, pallas_hash_to_core, AccountState, ChainSummary, DRepState, PParamsSet,
-    PoolHash, PoolState,
+    pallas_extras, pallas_hash_to_core, AccountState, CardanoError, ChainSummary, DRepState,
+    PParamsSet, PoolHash, PoolState,
 };
 use dolos_core::{BlockSlot, Domain, TaggedPayload, TxHash, TxOrder, TxoIdx, TxoRef};
 
@@ -615,7 +615,7 @@ impl<'a> TxModelBuilder<'a> {
         }
     }
 
-    pub fn with_historical_pparams<D: Domain>(
+    pub fn with_historical_pparams<D: Domain<ChainSpecificError = CardanoError>>(
         self,
         facade: &Facade<D>,
     ) -> Result<Self, StatusCode> {

@@ -7,7 +7,8 @@ use blockfrost_openapi::models::{
     network_supply::NetworkSupply,
 };
 use dolos_cardano::{
-    model::EpochState, mutable_slots, AccountState, CardanoGenesis, EraProtocol, EraSummary,
+    model::EpochState, mutable_slots, AccountState, CardanoError, CardanoGenesis, EraProtocol,
+    EraSummary,
     FixedNamespace,
 };
 use dolos_core::{BlockSlot, Domain, StateStore};
@@ -253,7 +254,7 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
     }
 }
 
-fn compute_network_sync<D: Domain<Genesis = CardanoGenesis>>(
+fn compute_network_sync<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>>(
     domain: Facade<D>,
 ) -> Result<Network, StatusCode>
 where
@@ -292,7 +293,7 @@ where
 pub async fn naked<D>(State(domain): State<Facade<D>>) -> Result<Json<Network>, StatusCode>
 where
     Option<EpochState>: From<D::Entity>,
-    D: Domain<Genesis = CardanoGenesis> + Clone + Send + Sync + 'static,
+    D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError> + Clone + Send + Sync + 'static,
 {
     const TTL: std::time::Duration = std::time::Duration::from_secs(30);
 

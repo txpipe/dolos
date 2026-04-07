@@ -11,7 +11,7 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     model::{AccountState, PoolState},
-    CardanoGenesis, FixedNamespace, PoolDelegation, StakeLog,
+    CardanoError, CardanoGenesis, FixedNamespace, PoolDelegation, StakeLog,
 };
 use dolos_core::{ArchiveStore, BlockSlot, Domain, EntityKey, TemporalKey};
 use futures::future::join_all;
@@ -39,7 +39,7 @@ fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     Err(Error::Code(StatusCode::BAD_REQUEST))
 }
 
-pub async fn all_extended<D: Domain>(
+pub async fn all_extended<D: Domain<ChainSpecificError = CardanoError>>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<PoolListExtendedInner>>, Error>

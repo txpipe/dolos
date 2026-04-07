@@ -3,7 +3,9 @@ use dolos_cardano::load_effective_pparams;
 use pallas::codec::utils::{AnyUInt, KeyValuePairs};
 use pallas::network::miniprotocols::localstate::queries_v16 as q16;
 
-pub fn build_protocol_params<D: Domain>(domain: &D) -> Result<q16::ProtocolParam, Error> {
+pub fn build_protocol_params<D: Domain<ChainSpecificError = dolos_cardano::CardanoError>>(
+    domain: &D,
+) -> Result<q16::ProtocolParam, Error> {
     let pparams = load_effective_pparams::<D>(domain.state())
         .map_err(|e| Error::server(format!("failed to load protocol params: {}", e)))?;
 

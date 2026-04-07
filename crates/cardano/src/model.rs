@@ -307,7 +307,9 @@ where
     pub fn try_snapshot_at(&self, epoch: Epoch) -> Result<&T, ChainError<crate::CardanoError>> {
         match self.snapshot_at(epoch) {
             Some(value) => Ok(value),
-            None => Err(ChainError::EpochValueVersionNotFound(epoch)),
+            None => Err(ChainError::ChainSpecific(
+                crate::CardanoError::EpochValueVersionNotFound(epoch),
+            )),
         }
     }
 }
@@ -1234,7 +1236,7 @@ macro_rules! ensure_pparam {
     ($kind:ident, $ty:ty) => {
         paste::paste! {
             pub fn [<ensure_ $kind:snake>](&self) -> Result<$ty, ChainError<crate::CardanoError>> {
-                self.$kind().ok_or(ChainError::PParamsNotFound(stringify!($kind).to_string()))
+                self.$kind().ok_or(ChainError::ChainSpecific(crate::CardanoError::PParamsNotFound(stringify!($kind).to_string())))
             }
         }
     };

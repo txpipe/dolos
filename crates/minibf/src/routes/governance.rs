@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use dolos_cardano::{model::DRepState, pallas_extras, ChainSummary, PParamsSet};
+use dolos_cardano::{model::DRepState, pallas_extras, CardanoError, ChainSummary, PParamsSet};
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use pallas::ledger::primitives::Epoch;
 
@@ -177,7 +177,7 @@ impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<
     }
 }
 
-pub async fn drep_by_id<D: Domain>(
+pub async fn drep_by_id<D: Domain<ChainSpecificError = CardanoError>>(
     Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode>

@@ -6,7 +6,7 @@ use axum::{
 use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
 use pallas::ledger::{primitives::Epoch, traverse::MultiEraBlock};
 
-use dolos_cardano::CardanoGenesis;
+use dolos_cardano::{CardanoError, CardanoGenesis};
 use dolos_core::{archive::Skippable as _, ArchiveStore, Domain};
 
 use crate::{
@@ -19,7 +19,7 @@ use crate::{
 pub mod cost_models;
 pub mod mapping;
 
-pub async fn latest_parameters<D: Domain<Genesis = CardanoGenesis>>(
+pub async fn latest_parameters<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>>(
     State(domain): State<Facade<D>>,
 ) -> Result<Json<EpochParamContent>, Error> {
     let tip = domain.get_tip_slot()?;
@@ -42,7 +42,7 @@ pub async fn latest_parameters<D: Domain<Genesis = CardanoGenesis>>(
     Ok(model.into_response()?)
 }
 
-pub async fn by_number_parameters<D: Domain<Genesis = CardanoGenesis>>(
+pub async fn by_number_parameters<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = CardanoError>>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<Epoch>,
 ) -> Result<Json<EpochParamContent>, Error> {

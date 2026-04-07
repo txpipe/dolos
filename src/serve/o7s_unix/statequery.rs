@@ -18,13 +18,13 @@ use utils::{
     build_stake_snapshots_response, build_utxo_by_address_response,
 };
 
-pub struct Session<D: Domain<Genesis = CardanoGenesis>> {
+pub struct Session<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>> {
     domain: D,
     connection: localstate::Server,
     acquired_point: Option<ChainPoint>,
 }
 
-impl<D: Domain<Genesis = CardanoGenesis>> Session<D> {
+impl<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>> Session<D> {
     fn tip_cursor(&self) -> Result<ChainPoint, Error> {
         let point = self
             .domain
@@ -407,7 +407,7 @@ impl<D: Domain<Genesis = CardanoGenesis>> Session<D> {
     }
 }
 
-pub async fn handle_session<D: Domain<Genesis = CardanoGenesis>, C: CancelToken>(
+pub async fn handle_session<D: Domain<Genesis = CardanoGenesis, ChainSpecificError = dolos_cardano::CardanoError>, C: CancelToken>(
     domain: D,
     connection: localstate::Server,
     cancel: C,

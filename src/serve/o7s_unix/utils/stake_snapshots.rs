@@ -9,7 +9,7 @@ use pallas::network::miniprotocols::localtxsubmission::SMaybe;
 use std::collections::{BTreeSet, HashMap};
 use tracing::debug;
 
-pub fn build_stake_snapshots_response<D: Domain>(
+pub fn build_stake_snapshots_response<D: Domain<ChainSpecificError = dolos_cardano::CardanoError>>(
     domain: &D,
     pools_filter: &SMaybe<q16::Pools>,
 ) -> Result<AnyCbor, Error> {
