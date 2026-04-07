@@ -21,7 +21,10 @@ mod tagged_payload_codec {
         d: &mut minicbor::Decoder<'b>,
         _: &mut C,
     ) -> Result<TaggedPayload, minicbor::decode::Error> {
-        d.array()?;
+        let len = d.array()?;
+        if len != Some(2) {
+            return Err(minicbor::decode::Error::message("expected 2-element array for TaggedPayload"));
+        }
         let tag = d.u16()?;
         let payload = d.bytes()?.to_vec();
         Ok(TaggedPayload(tag, payload))
