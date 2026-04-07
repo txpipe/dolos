@@ -624,9 +624,9 @@ fn setup_tracing_for_format(config: &RootConfig, format: OutputFormat) -> miette
     crate::common::setup_tracing(&config.logging, &config.telemetry)
 }
 
-fn decode_stake_credential(key: &EntityKey) -> Result<StakeCredential, Box<dyn std::error::Error>> {
+fn decode_stake_credential(key: &EntityKey) -> Result<StakeCredential, minicbor::decode::Error> {
     let mut decoder = minicbor::Decoder::new(key.as_ref());
-    decoder.decode().map_err(|e| Box::new(e) as _)
+    decoder.decode()
 }
 
 fn log_slot_from_key(key: &LogKey) -> u64 {
