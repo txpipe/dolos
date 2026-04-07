@@ -132,15 +132,13 @@ pub fn bootstrap<D: CardanoDomain>(
         writer.write_entity_typed(&EntityKey::from(state.operator.as_slice()), &state)?;
     }
 
-    let Some(delegations) = &staking.stake else {
-        return Ok(());
-    };
-
-    for (account, pool) in delegations {
-        let state = parse_delegation(account, pool, genesis);
-        let key = minicbor::to_vec(&state.credential).unwrap();
-        let key = EntityKey::from(key);
-        writer.write_entity_typed(&key, &state)?;
+    if let Some(delegations) = &staking.stake {
+        for (account, pool) in delegations {
+            let state = parse_delegation(account, pool, genesis);
+            let key = minicbor::to_vec(&state.credential).unwrap();
+            let key = EntityKey::from(key);
+            writer.write_entity_typed(&key, &state)?;
+        }
     }
 
     writer.commit()?;
