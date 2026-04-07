@@ -305,6 +305,9 @@ pub enum CardanoError {
 
     #[error("invalid governance proposal params")]
     InvalidProposalParams,
+
+    #[error("chain tip is not available")]
+    MissingChainPoint,
 }
 
 #[derive(Clone)]

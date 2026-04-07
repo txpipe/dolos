@@ -27,18 +27,26 @@ pub fn validate_tx<D: Domain<ChainSpecificError = CardanoError>>(
 
     let network_id = match genesis.shelley.network_id.as_ref() {
         Some(network) => match network.as_str() {
-            "Mainnet" => Some(NetworkId::Mainnet.into()),
-            "Testnet" => Some(NetworkId::Testnet.into()),
-            _ => None,
+            "Mainnet" => Ok(NetworkId::Mainnet.into()),
+            "Testnet" => Ok(NetworkId::Testnet.into()),
+            _ => Err(ChainError::GenesisFieldMissing("network_id".to_string())),
         },
-        None => None,
-    }
-    .unwrap();
+        None => Err(ChainError::GenesisFieldMissing("network_id".to_string())),
+    }?;
+
+    let prot_magic = genesis
+        .shelley
+        .network_magic
+        .ok_or_else(|| ChainError::GenesisFieldMissing("network_magic".to_string()))?;
+
+    let block_slot = tip
+        .ok_or(ChainError::ChainSpecific(CardanoError::MissingChainPoint))?
+        .slot();
 
     let env = pallas::ledger::validate::utils::Environment {
         prot_params: pparams,
-        prot_magic: genesis.shelley.network_magic.unwrap(),
-        block_slot: tip.clone().unwrap().slot(),
+        prot_magic,
+        block_slot,
         network_id,
         acnt: Some(pallas::ledger::validate::utils::AccountState::default()),
     };
