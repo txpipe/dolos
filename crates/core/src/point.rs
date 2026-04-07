@@ -92,27 +92,6 @@ impl PartialOrd for ChainPoint {
     }
 }
 
-//impl From<PallasPoint> for ChainPoint {
-//    fn from(value: PallasPoint) -> Self {
-//        match value {
-//            PallasPoint::Origin => ChainPoint::Origin,
-//            PallasPoint::Specific(s, h) => ChainPoint::Specific(s, h.as_slice().into()),
-//        }
-//    }
-//}
-
-//impl TryFrom<ChainPoint> for PallasPoint {
-//    type Error = ();
-//
-//    fn try_from(value: ChainPoint) -> Result<Self, Self::Error> {
-//        match value {
-//            ChainPoint::Origin => Ok(PallasPoint::Origin),
-//            ChainPoint::Specific(s, h) => Ok(PallasPoint::Specific(s, h.to_vec())),
-//            ChainPoint::Slot(_) => Err(()),
-//        }
-//    }
-//}
-
 impl<T> From<&T> for ChainPoint
 where
     T: Block,
