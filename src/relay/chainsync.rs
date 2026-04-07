@@ -148,8 +148,8 @@ impl<D: Domain> Session<D> {
 
         let points: Vec<_> = points
             .into_iter()
-            .filter_map(|p| pallas_point_to_chain(p).ok())
-            .collect();
+            .map(pallas_point_to_chain)
+            .collect::<Result<_, _>>()?;
 
         let intersect = ChainCrawler::<D>::start(&self.domain, &points).unwrap();
 
