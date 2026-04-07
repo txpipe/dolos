@@ -71,7 +71,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         &mut self,
         ctx: &mut super::WorkContext,
     ) -> Result<(), ChainError<crate::CardanoError>> {
-        let next_slot = next_largest_stable_slot(ctx);
+        let next_slot = next_largest_stable_slot(ctx)?;
         let next_nonce = next_nonce(ctx);
 
         ctx.deltas.add_for_entity(NonceTransition {
