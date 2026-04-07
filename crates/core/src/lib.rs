@@ -399,7 +399,7 @@ pub trait ChainLogic: Sized + Send + Sync {
     type Utxo: Sized + Send + Sync;
     type Delta: EntityDelta<Entity = Self::Entity>;
     type Genesis: Genesis;
-    type ChainSpecificError: std::error::Error + Send + Sync;
+    type ChainSpecificError: std::error::Error + Send + Sync + 'static;
 
     /// The concrete work unit type produced by this chain logic.
     type WorkUnit<D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta, ChainSpecificError = Self::ChainSpecificError, Genesis = Self::Genesis>>: WorkUnit<D>;
@@ -565,7 +565,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Entity: Entity;
     type EntityDelta: EntityDelta<Entity = Self::Entity> + std::fmt::Debug;
     type Genesis: Genesis;
-    type ChainSpecificError: std::error::Error + Send + Sync;
+    type ChainSpecificError: std::error::Error + Send + Sync + 'static;
 
     type Chain: ChainLogic<
         Delta = Self::EntityDelta,
