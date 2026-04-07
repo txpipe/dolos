@@ -36,18 +36,13 @@ where
                 MultiEraOutput::decode(era, &v.1).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             Ok::<_, StatusCode>((k, output))
         })
-        .try_collect()
-        .map_err(|e: StatusCode| e)?;
+        .try_collect()?;
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
     let block_deps: HashMap<TxHash, UtxoBlockData> = join_all(tx_deps.iter().map(|tx| {
         let tx = *tx;
         async move {
-            match domain
-                .query()
-                .block_by_tx_hash(tx)
-                .await
-            {
+            match domain.query().block_by_tx_hash(tx).await {
                 Ok(Some((cbor, txorder))) => {
                     let Ok(block) = MultiEraBlock::decode(&cbor) else {
                         return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
