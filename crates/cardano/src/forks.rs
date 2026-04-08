@@ -74,14 +74,14 @@ fn from_conway_drep_voting_thresholds(
     }
 }
 
-// AFAIK, Byron epoch length is a constant and not available via Genesis files.
-const FIVE_DAYS_IN_SECONDS: u64 = 5 * 24 * 60 * 60;
+// Byron epochs last 10k slots (10 * k) per cardano-node, where k is protocol_consts.k from Byron genesis.
+const BYRON_EPOCH_SLOTS_PER_K: u64 = 10;
 
 pub fn from_byron_genesis(byron: &byron::GenesisFile) -> PParamsSet {
     let version = &byron.block_version_data;
 
     let slot_length_in_secs = version.slot_duration / 1000;
-    let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
+    let epoch_length = BYRON_EPOCH_SLOTS_PER_K * byron.protocol_consts.k as u64;
 
     PParamsSet::default()
         .with(Val::ProtocolVersion((0, 0)))
@@ -273,7 +273,7 @@ pub fn protocol_constants(version: u16, genesis: &Genesis) -> ProtocolConstants 
     match version {
         x if x < 2 => {
             let slot_length_in_secs = genesis.byron.block_version_data.slot_duration / 1000;
-            let epoch_length = FIVE_DAYS_IN_SECONDS / slot_length_in_secs;
+            let epoch_length = BYRON_EPOCH_SLOTS_PER_K * genesis.byron.protocol_consts.k as u64;
 
             ProtocolConstants {
                 epoch_length,
