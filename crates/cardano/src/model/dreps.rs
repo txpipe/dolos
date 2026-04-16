@@ -239,7 +239,7 @@ impl dolos_core::EntityDelta for DRepExpiration {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
+        let entity = entity.as_mut().expect("existing drep");
 
         debug!(drep=%self.drep_id, "expiring drep");
 
