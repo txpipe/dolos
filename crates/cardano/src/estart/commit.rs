@@ -54,8 +54,8 @@ impl super::WorkContext {
         let new = EraSummary {
             start: previous.end.clone().unwrap(),
             end: None,
-            epoch_length: consts.epoch_length as u64,
-            slot_length: consts.slot_length as u64,
+            epoch_length: consts.epoch_length,
+            slot_length: consts.slot_length,
             protocol: transition.new_version.into(),
         };
 
