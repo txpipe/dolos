@@ -1,38 +1,6 @@
-use dolos_core::{BlockSlot, ChainError, EntityDelta, NsKey};
-use serde::{Deserialize, Serialize};
+use dolos_core::{BlockSlot, ChainError};
 
-use crate::{
-    sub, utils::nonce_stability_window, EpochState, FixedNamespace as _, Nonces, CURRENT_EPOCH_KEY,
-};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NonceTransition {
-    next_nonce: Option<Nonces>,
-    next_slot: BlockSlot,
-}
-
-impl NonceTransition {}
-
-impl EntityDelta for NonceTransition {
-    type Entity = EpochState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing epoch");
-
-        entity.previous_nonce_tail = entity.nonces.as_ref().and_then(|n| n.tail);
-        entity.nonces = self.next_nonce.clone();
-        entity.largest_stable_slot = self.next_slot;
-    }
-
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // todo!()
-        // Placeholder undo logic. Ensure this does not panic.
-    }
-}
+use crate::{sub, utils::nonce_stability_window, NonceTransition, Nonces};
 
 fn next_largest_stable_slot(ctx: &super::WorkContext) -> BlockSlot {
     let stability_window = nonce_stability_window(ctx.active_protocol.into(), &ctx.genesis);

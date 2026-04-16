@@ -1,109 +1,12 @@
-use dolos_core::{ChainError, NsKey};
-use pallas::crypto::hash::Hash;
+use dolos_core::ChainError;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput, MultiEraPolicyAssets, MultiEraTx};
-use serde::{Deserialize, Serialize};
 use tracing::trace;
 
 use super::WorkDeltas;
 use crate::cip25::{cip25_metadata_for_tx, cip25_metadata_has_asset};
 use crate::cip68::{has_cip25_metadata, parse_cip67_label_from_asset_name};
-use crate::model::FixedNamespace as _;
-use crate::{model::AssetState, roll::BlockVisitor};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MintStatsUpdate {
-    policy: Hash<28>,
-    asset: Vec<u8>,
-    quantity: i128,
-    seen_in_tx: Hash<32>,
-    seen_in_slot: u64,
-
-    // undo
-    is_first_mint: Option<bool>,
-}
-
-impl dolos_core::EntityDelta for MintStatsUpdate {
-    type Entity = AssetState;
-
-    fn key(&self) -> NsKey {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(self.policy.as_slice());
-        hasher.input(self.asset.as_slice());
-        let key = hasher.finalize();
-        let key = key.as_slice();
-        NsKey::from((AssetState::NS, key))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AssetState>) {
-        let entity = entity.get_or_insert_default();
-
-        entity.add_quantity(self.quantity);
-        entity.mint_tx_count += 1;
-
-        if entity.initial_slot.unwrap_or(u64::MAX) > self.seen_in_slot {
-            entity.initial_slot = Some(self.seen_in_slot);
-            entity.initial_tx = Some(self.seen_in_tx);
-            self.is_first_mint = Some(true);
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<AssetState>) {
-        let entity = entity.get_or_insert_default();
-
-        entity.add_quantity(-self.quantity);
-        entity.mint_tx_count -= 1;
-
-        if self.is_first_mint.unwrap_or(false) {
-            entity.initial_slot = None;
-            entity.initial_tx = None;
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetadataTxUpdate {
-    policy: Hash<28>,
-    asset: Vec<u8>,
-    metadata_tx: Hash<32>,
-
-    // undo
-    prev_metadata_tx: Option<Hash<32>>,
-}
-
-impl MetadataTxUpdate {
-    pub fn new(policy: Hash<28>, asset: Vec<u8>, metadata_tx: Hash<32>) -> Self {
-        Self {
-            policy,
-            asset,
-            metadata_tx,
-            prev_metadata_tx: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for MetadataTxUpdate {
-    type Entity = AssetState;
-
-    fn key(&self) -> NsKey {
-        let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
-        hasher.input(self.policy.as_slice());
-        hasher.input(self.asset.as_slice());
-        let key = hasher.finalize();
-        let key = key.as_slice();
-        NsKey::from((AssetState::NS, key))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AssetState>) {
-        let entity = entity.get_or_insert_default();
-        self.prev_metadata_tx = entity.metadata_tx;
-        entity.metadata_tx = Some(self.metadata_tx);
-    }
-
-    fn undo(&self, entity: &mut Option<AssetState>) {
-        let entity = entity.get_or_insert_default();
-        entity.metadata_tx = self.prev_metadata_tx;
-    }
-}
+use crate::roll::BlockVisitor;
+use crate::{MetadataTxUpdate, MintStatsUpdate};
 
 #[derive(Default, Clone)]
 pub struct AssetStateVisitor;

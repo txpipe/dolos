@@ -1,89 +1,21 @@
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, ChainError, Genesis, NsKey};
+use dolos_core::{ChainError, Genesis};
 use pallas::{
     codec::utils::Bytes,
-    crypto::hash::Hash,
     ledger::{
         primitives::{
             conway::{GovAction, ProtocolParamUpdate},
-            Epoch, ExUnitPrices, RationalNumber, StakeCredential,
+            Epoch, ExUnitPrices, RationalNumber,
         },
         traverse::{MultiEraBlock, MultiEraTx, MultiEraUpdate},
     },
 };
-use serde::{Deserialize, Serialize};
 
 use super::WorkDeltas;
 use crate::{
-    hacks::{self, proposals::ProposalOutcome},
-    model::FixedNamespace as _,
-    pallas_extras,
-    roll::BlockVisitor,
-    Lovelace, PParamValue, PParamsSet, ProposalAction, ProposalState,
+    pallas_extras, roll::BlockVisitor, NewProposal, PParamValue, PParamsSet, ProposalAction,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewProposal {
-    slot: BlockSlot,
-    tx: Hash<32>,
-    idx: u32,
-    action: ProposalAction,
-    deposit: Option<Lovelace>,
-    reward_account: Option<StakeCredential>,
-    validity_period: Option<u64>,
-    current_epoch: Epoch,
-    network_magic: u32,
-    protocol: u16,
-}
-
-impl dolos_core::EntityDelta for NewProposal {
-    type Entity = ProposalState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((
-            ProposalState::NS,
-            ProposalState::build_entity_key(self.tx, self.idx),
-        ))
-    }
-
-    fn apply(&mut self, entity: &mut Option<ProposalState>) {
-        let id = ProposalState::id(self.tx, self.idx);
-
-        let outcome = hacks::proposals::outcome(self.network_magic, self.protocol, &id);
-
-        let max_epoch = self.validity_period.map(|x| self.current_epoch + x);
-
-        let ratified_epoch = match &outcome {
-            ProposalOutcome::Ratified(epoch) => Some(*epoch),
-            ProposalOutcome::RatifiedCurrentEpoch => Some(self.current_epoch),
-            _ => None,
-        };
-
-        let canceled_epoch = match &outcome {
-            ProposalOutcome::Canceled(epoch) => Some(*epoch),
-            _ => None,
-        };
-
-        let state = ProposalState {
-            slot: self.slot,
-            tx: self.tx,
-            idx: self.idx,
-            action: self.action.clone(),
-            reward_account: self.reward_account.clone(),
-            deposit: self.deposit,
-            max_epoch,
-            ratified_epoch,
-            canceled_epoch,
-        };
-
-        let _ = entity.insert(state);
-    }
-
-    fn undo(&self, entity: &mut Option<ProposalState>) {
-        entity.take();
-    }
-}
 
 macro_rules! map_conway_pparam {
     ($update:expr, $getter:ident, $set:expr, $variant:ident) => {
