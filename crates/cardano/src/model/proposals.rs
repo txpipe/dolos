@@ -6,11 +6,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{
-    epochs::Lovelace,
-    pparams::PParamsSet,
-    FixedNamespace as _,
-};
+use super::{epochs::Lovelace, pparams::PParamsSet, FixedNamespace as _};
 use crate::hacks::{self, proposals::ProposalOutcome};
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]

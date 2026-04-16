@@ -2,10 +2,7 @@ use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
-    ledger::primitives::{
-        conway::DRep,
-        Epoch, StakeCredential,
-    },
+    ledger::primitives::{conway::DRep, Epoch, StakeCredential},
 };
 use serde::{Deserialize, Serialize};
 use tracing::debug;

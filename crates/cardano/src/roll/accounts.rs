@@ -12,10 +12,9 @@ use pallas::ledger::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pallas_extras,
-    roll::BlockVisitor,
-    ControlledAmountDec, ControlledAmountInc, EnqueueMir, PParamsSet, StakeDelegation,
-    StakeDeregistration, StakeRegistration, VoteDelegation, WithdrawalInc,
+    pallas_extras, roll::BlockVisitor, ControlledAmountDec, ControlledAmountInc, EnqueueMir,
+    PParamsSet, StakeDelegation, StakeDeregistration, StakeRegistration, VoteDelegation,
+    WithdrawalInc,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,10 +25,7 @@ pub struct TrackSeenAddresses {
 }
 
 impl TrackSeenAddresses {
-    pub fn new(
-        cred: pallas::ledger::primitives::StakeCredential,
-        full_address: Address,
-    ) -> Self {
+    pub fn new(cred: pallas::ledger::primitives::StakeCredential, full_address: Address) -> Self {
         Self {
             cred,
             full_address: full_address.to_vec(),

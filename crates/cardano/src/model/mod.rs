@@ -1,4 +1,4 @@
-use dolos_core::{EntityValue, NamespaceType, Namespace, NsKey, StateSchema, ChainError};
+use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
 
 pub trait FixedNamespace {
     const NS: &'static str;
@@ -11,7 +11,10 @@ macro_rules! entity_boilerplate {
         }
 
         impl dolos_core::Entity for $type {
-            fn decode_entity(ns: dolos_core::Namespace, value: &dolos_core::EntityValue) -> Result<Self, dolos_core::ChainError> {
+            fn decode_entity(
+                ns: dolos_core::Namespace,
+                value: &dolos_core::EntityValue,
+            ) -> Result<Self, dolos_core::ChainError> {
                 assert_eq!(ns, <$type as super::FixedNamespace>::NS);
                 let value = pallas::codec::minicbor::decode(value)?;
                 Ok(value)
@@ -25,11 +28,11 @@ macro_rules! entity_boilerplate {
     };
 }
 
-pub mod epoch_value;
 pub mod accounts;
 pub mod assets;
 pub mod datums;
 pub mod dreps;
+pub mod epoch_value;
 pub mod epochs;
 pub mod eras;
 pub mod logs;
@@ -38,11 +41,11 @@ pub mod pools;
 pub mod pparams;
 pub mod proposals;
 
-pub use epoch_value::*;
 pub use accounts::*;
 pub use assets::*;
 pub use datums::*;
 pub use dreps::*;
+pub use epoch_value::*;
 pub use epochs::*;
 pub use eras::*;
 pub use logs::*;

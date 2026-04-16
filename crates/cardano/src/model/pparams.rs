@@ -5,8 +5,7 @@ use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
         conway::{CostModels, DRepVotingThresholds, PoolVotingThresholds},
-        Coin, Epoch, ExUnitPrices, ExUnits, Nonce, ProtocolVersion, RationalNumber,
-        UnitInterval,
+        Coin, Epoch, ExUnitPrices, ExUnits, Nonce, ProtocolVersion, RationalNumber, UnitInterval,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -16,8 +15,8 @@ use super::{
     eras::{EraProtocol, EraTransition},
 };
 use crate::pallas_extras::{
-    default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices,
-    default_ex_units, default_nonce, default_pool_voting_thresholds, default_rational_number,
+    default_cost_models, default_drep_voting_thresholds, default_ex_unit_prices, default_ex_units,
+    default_nonce, default_pool_voting_thresholds, default_rational_number,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]

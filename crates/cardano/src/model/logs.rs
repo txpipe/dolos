@@ -3,7 +3,6 @@ use pallas::{
     ledger::primitives::conway::RationalNumber,
 };
 
-
 #[derive(Debug, Clone, PartialEq, Eq, Decode, Encode, Default)]
 pub struct LeaderRewardLog {
     #[n(0)]

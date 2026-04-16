@@ -75,9 +75,10 @@ where
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
         debug!(slot = self.slot, "committing estart state changes");
 
-        let context = self.context.as_mut().ok_or_else(|| {
-            DomainError::Internal("estart context not loaded".into())
-        })?;
+        let context = self
+            .context
+            .as_mut()
+            .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
         context.commit::<D>(domain.state(), domain.archive(), self.slot)?;
 

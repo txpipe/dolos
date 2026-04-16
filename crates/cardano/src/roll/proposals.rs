@@ -14,9 +14,7 @@ use pallas::{
 
 use super::WorkDeltas;
 use crate::{
-    pallas_extras,
-    roll::BlockVisitor,
-    NewProposal, PParamValue, PParamsSet, ProposalAction,
+    pallas_extras, roll::BlockVisitor, NewProposal, PParamValue, PParamsSet, ProposalAction,
 };
 
 macro_rules! map_conway_pparam {

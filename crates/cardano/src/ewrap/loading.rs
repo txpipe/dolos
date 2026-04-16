@@ -199,10 +199,7 @@ impl BoundaryWork {
                     if total > 0 {
                         // Create delta to add MIR to account rewards
                         self.deltas
-                            .add_for_entity(crate::AssignRewards::new(
-                                account_key.clone(),
-                                total,
-                            ));
+                            .add_for_entity(crate::AssignRewards::new(account_key.clone(), total));
 
                         tracing::debug!(
                             credential = ?credential,

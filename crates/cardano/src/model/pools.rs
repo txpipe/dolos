@@ -7,7 +7,10 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use super::{epoch_value::{EpochValue, TransitionDefault}, FixedNamespace as _};
+use super::{
+    epoch_value::{EpochValue, TransitionDefault},
+    FixedNamespace as _,
+};
 use crate::pallas_extras::MultiEraPoolRegistration;
 
 pub type PoolHash = Hash<28>;

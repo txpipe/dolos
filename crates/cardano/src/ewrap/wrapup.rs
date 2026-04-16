@@ -1,6 +1,4 @@
-use crate::{
-    AccountState, CardanoDelta, EndStats, EpochWrapUp, PoolHash, PoolState, PoolWrapUp,
-};
+use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUp, PoolHash, PoolState, PoolWrapUp};
 use dolos_core::ChainError;
 
 #[derive(Default)]

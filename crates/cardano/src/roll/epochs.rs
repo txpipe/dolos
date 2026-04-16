@@ -1,25 +1,19 @@
 use std::collections::HashMap;
 
 use dolos_core::{BrokenInvariant, ChainError, Genesis, TxOrder, TxoRef};
-use pallas::{
-    ledger::{
-        primitives::{
-            alonzo::{
-                InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
-            },
-            conway::RationalNumber,
-            Epoch,
-        },
-        traverse::{fees::compute_byron_fee, MultiEraBlock, MultiEraCert, MultiEraTx},
+use pallas::ledger::{
+    primitives::{
+        alonzo::{InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward},
+        conway::RationalNumber,
+        Epoch,
     },
+    traverse::{fees::compute_byron_fee, MultiEraBlock, MultiEraCert, MultiEraTx},
 };
 
 use super::WorkDeltas;
 use crate::{
-    owned::OwnedMultiEraOutput,
-    pallas_extras,
-    roll::BlockVisitor,
-    EpochStatsUpdate, Lovelace, NoncesUpdate, PParamsSet,
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, EpochStatsUpdate, Lovelace,
+    NoncesUpdate, PParamsSet,
 };
 
 // HACK: There are txs that don't have an explicit value for total collateral
