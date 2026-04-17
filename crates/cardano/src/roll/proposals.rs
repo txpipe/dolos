@@ -283,18 +283,18 @@ impl BlockVisitor for ProposalVisitor {
     ) -> Result<(), ChainError> {
         let action = pre_conway_to_pparamset(update);
 
-        deltas.add_for_entity(NewProposal {
-            slot: block.slot(),
-            tx: tx.map(|tx| tx.hash()).unwrap_or_else(|| block.hash()),
-            idx: 0,
-            action: ProposalAction::ParamChange(action),
-            deposit: None,
-            reward_account: None,
-            validity_period: self.validity_period,
-            current_epoch: self.current_epoch.expect("value set in root"),
-            network_magic: self.network_magic.expect("value set in root"),
-            protocol: self.protocol.expect("value set in root"),
-        });
+        deltas.add_for_entity(NewProposal::new(
+            block.slot(),
+            tx.map(|tx| tx.hash()).unwrap_or_else(|| block.hash()),
+            0,
+            ProposalAction::ParamChange(action),
+            None,
+            None,
+            self.validity_period,
+            self.current_epoch.expect("value set in root"),
+            self.network_magic.expect("value set in root"),
+            self.protocol.expect("value set in root"),
+        ));
 
         Ok(())
     }
@@ -326,18 +326,18 @@ impl BlockVisitor for ProposalVisitor {
         let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
             .ok_or(ChainError::InvalidProposalParams)?;
 
-        deltas.add_for_entity(NewProposal {
-            slot: block.slot(),
-            tx: tx.hash(),
-            idx: idx as u32,
-            reward_account: Some(reward_account),
-            deposit: Some(proposal.deposit),
+        deltas.add_for_entity(NewProposal::new(
+            block.slot(),
+            tx.hash(),
+            idx as u32,
             action,
-            validity_period: self.validity_period,
-            current_epoch: self.current_epoch.expect("value set in root"),
-            network_magic: self.network_magic.expect("value set in root"),
-            protocol: self.protocol.expect("value set in root"),
-        });
+            Some(proposal.deposit),
+            Some(reward_account),
+            self.validity_period,
+            self.current_epoch.expect("value set in root"),
+            self.network_magic.expect("value set in root"),
+            self.protocol.expect("value set in root"),
+        ));
 
         Ok(())
     }

@@ -134,6 +134,28 @@ where
         }
     }
 
+    /// Test-only raw constructor used by proptest strategies to populate every slot
+    /// independently. Must stay behind `cfg(test)` so production code keeps going through
+    /// the regular `new`/`with_live`/`schedule`/`transition` API.
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        epoch: Epoch,
+        live: Option<T>,
+        next: Option<T>,
+        mark: Option<T>,
+        set: Option<T>,
+        go: Option<T>,
+    ) -> Self {
+        Self {
+            epoch: EpochPosition::Epoch(epoch),
+            live,
+            next,
+            mark,
+            set,
+            go,
+        }
+    }
+
     pub fn with_genesis(live: T) -> Self {
         Self {
             epoch: EpochPosition::Epoch(0),
@@ -284,5 +306,76 @@ where
         }
 
         self.transition(next_epoch);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    #![allow(dead_code)]
+
+    use super::*;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    /// Generate an `EpochValue<T>` where `live` is always populated (most deltas require
+    /// it) and the other slots are independently randomized.
+    ///
+    /// Takes a `BoxedStrategy` because many proptest combinator types are not `Clone`,
+    /// which is required by the tuple-combinator composition used here.
+    pub fn any_epoch_value<T>(inner: BoxedStrategy<T>) -> impl Strategy<Value = EpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        (
+            root::any_epoch(),
+            inner.clone(),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner),
+        )
+            .prop_map(|(epoch, live, next, mark, set, go)| {
+                EpochValue::from_parts(epoch, Some(live), next, mark, set, go)
+            })
+    }
+
+    /// Variant of `any_epoch_value` that lets `live` be `None` too.
+    pub fn any_epoch_value_opt_live<T>(
+        inner: BoxedStrategy<T>,
+    ) -> impl Strategy<Value = EpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        (
+            root::any_epoch(),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner),
+        )
+            .prop_map(|(epoch, live, next, mark, set, go)| {
+                EpochValue::from_parts(epoch, live, next, mark, set, go)
+            })
+    }
+
+    /// Variant of `any_epoch_value` that forces `next` to `None`. Required by deltas
+    /// whose `apply` calls `live_mut`, which asserts there is no scheduled next.
+    pub fn any_epoch_value_no_next<T>(
+        inner: BoxedStrategy<T>,
+    ) -> impl Strategy<Value = EpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        (
+            root::any_epoch(),
+            inner.clone(),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner),
+        )
+            .prop_map(|(epoch, live, mark, set, go)| {
+                EpochValue::from_parts(epoch, Some(live), None, mark, set, go)
+            })
     }
 }

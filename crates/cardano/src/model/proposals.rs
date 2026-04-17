@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::{epochs::Lovelace, pparams::PParamsSet, FixedNamespace as _};
 use crate::hacks::{self, proposals::ProposalOutcome};
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProposalAction {
     #[n(0)]
     ParamChange(#[n(0)] PParamsSet),
@@ -25,7 +25,7 @@ pub enum ProposalAction {
     Other,
 }
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProposalState {
     #[n(0)]
     pub slot: BlockSlot,
@@ -57,6 +57,38 @@ pub struct ProposalState {
 }
 
 entity_boilerplate!(ProposalState, "proposals");
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_proposal_state()(
+            slot in root::any_slot(),
+            tx in root::any_hash_32(),
+            idx in 0u32..16u32,
+            deposit in prop::option::of(root::any_lovelace()),
+            reward_account in prop::option::of(root::any_stake_credential()),
+            max_epoch in prop::option::of(root::any_epoch()),
+            ratified_epoch in prop::option::of(root::any_epoch()),
+            canceled_epoch in prop::option::of(root::any_epoch()),
+        ) -> ProposalState {
+            ProposalState {
+                slot,
+                tx,
+                idx,
+                action: ProposalAction::Other,
+                max_epoch,
+                ratified_epoch,
+                canceled_epoch,
+                deposit,
+                reward_account,
+            }
+        }
+    }
+}
 
 impl ProposalState {
     pub fn key(&self) -> EntityKey {
@@ -160,6 +192,38 @@ pub struct NewProposal {
     pub(crate) current_epoch: Epoch,
     pub(crate) network_magic: u32,
     pub(crate) protocol: u16,
+
+    pub(crate) prev: Option<ProposalState>,
+}
+
+impl NewProposal {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slot: BlockSlot,
+        tx: Hash<32>,
+        idx: u32,
+        action: ProposalAction,
+        deposit: Option<Lovelace>,
+        reward_account: Option<StakeCredential>,
+        validity_period: Option<u64>,
+        current_epoch: Epoch,
+        network_magic: u32,
+        protocol: u16,
+    ) -> Self {
+        Self {
+            slot,
+            tx,
+            idx,
+            action,
+            deposit,
+            reward_account,
+            validity_period,
+            current_epoch,
+            network_magic,
+            protocol,
+            prev: None,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for NewProposal {
@@ -173,6 +237,8 @@ impl dolos_core::EntityDelta for NewProposal {
     }
 
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
+        self.prev = entity.clone();
+
         let id = ProposalState::id(self.tx, self.idx);
 
         let outcome = hacks::proposals::outcome(self.network_magic, self.protocol, &id);
@@ -205,7 +271,46 @@ impl dolos_core::EntityDelta for NewProposal {
         let _ = entity.insert(state);
     }
 
-    fn undo(&self, _entity: &mut Option<ProposalState>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<ProposalState>) {
+        *entity = self.prev.clone();
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use super::testing::any_proposal_state;
+    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn any_new_proposal()(
+            slot in root::any_slot(),
+            tx in root::any_hash_32(),
+            idx in 0u32..16u32,
+            deposit in prop::option::of(root::any_lovelace()),
+            reward_account in prop::option::of(root::any_stake_credential()),
+            validity_period in prop::option::of(1u64..10u64),
+            current_epoch in root::any_epoch(),
+            network_magic in any::<u32>(),
+            protocol in 0u16..10u16,
+        ) -> NewProposal {
+            NewProposal::new(
+                slot, tx, idx,
+                ProposalAction::Other,
+                deposit, reward_account, validity_period,
+                current_epoch, network_magic, protocol,
+            )
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn new_proposal_roundtrip(
+            entity in prop::option::of(any_proposal_state()),
+            delta in any_new_proposal(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
     }
 }

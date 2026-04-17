@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1057bb42c86c85cd2110d23f2f7873e8dcc29789f7ca02e9854cae4f362f0c91 # shrinks to entity = Some(PendingMirState { credential: AddrKeyhash(Hash<28>("00000000000000000000000000000000000000000000000000000000")), from_reserves: 0, from_treasury: 0 }), delta = DequeueMir { credential: AddrKeyhash(Hash<28>("00000000000000000000000000000000000000000000000000000000")), prev: None }
+cc 804a15cef674dee3ebb1e0d9a9408a90ac6fc1521c8700368b6646d0b1df5830 # shrinks to entity = Some(PendingRewardState { credential: AddrKeyhash(Hash<28>("00000000000000000000000000000000000000000000000000000000")), is_spendable: false, as_leader: [], as_delegator: [] }), delta = DequeueReward { credential: AddrKeyhash(Hash<28>("00000000000000000000000000000000000000000000000000000000")), prev: None }
+cc 9557d410b239711f5d5c114c753d23a984290050af372fe5d2536ff73bd4f37c # shrinks to entity = None, delta = EnqueueMir { credential: AddrKeyhash(Hash<28>("00000000000000000000000000000000000000000000000000000000")), from_reserves: 0, from_treasury: 0, overwrite: false }
+cc 95ace387586e2c13eb16a02b266f4a005049ffa2b7ebe2ab42d52924032d49fe # shrinks to entity = None, delta = EnqueueReward { credential: AddrKeyhash(Hash<28>("00000000000000000000000000000000000000000000000000000000")), is_spendable: false, as_leader: [], as_delegator: [] }

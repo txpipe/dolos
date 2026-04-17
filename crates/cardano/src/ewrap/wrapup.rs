@@ -150,7 +150,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         let stats = define_end_stats(ctx);
 
-        ctx.deltas.add_for_entity(EpochWrapUp { stats });
+        ctx.deltas.add_for_entity(EpochWrapUp::new(stats));
 
         Ok(())
     }

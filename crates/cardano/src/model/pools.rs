@@ -15,7 +15,7 @@ use crate::pallas_extras::MultiEraPoolRegistration;
 
 pub type PoolHash = Hash<28>;
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolParams {
     #[n(0)]
     pub vrf_keyhash: Hash<32>,
@@ -42,7 +42,7 @@ pub struct PoolParams {
     pub pool_metadata: Option<PoolMetadata>,
 }
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolState {
     #[n(1)]
     pub operator: PoolHash,
@@ -64,7 +64,7 @@ pub struct PoolState {
 }
 
 /// Pool state that is epoch-specific
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PoolSnapshot {
     #[n(1)]
     pub is_retired: bool,
@@ -119,6 +119,74 @@ impl From<MultiEraPoolRegistration> for PoolParams {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_pool_params()(
+            vrf in root::any_hash_32(),
+            pledge in root::any_lovelace(),
+            cost in root::any_lovelace(),
+            margin in root::any_rational(),
+            reward_account in prop::collection::vec(any::<u8>(), 29..30),
+            n_owners in 0usize..3usize,
+        )(
+            vrf in Just(vrf),
+            pledge in Just(pledge),
+            cost in Just(cost),
+            margin in Just(margin),
+            reward_account in Just(reward_account),
+            pool_owners in prop::collection::vec(root::any_hash_28(), n_owners..=n_owners),
+        ) -> PoolParams {
+            PoolParams {
+                vrf_keyhash: vrf,
+                pledge,
+                cost,
+                margin,
+                reward_account,
+                pool_owners,
+                relays: vec![],
+                pool_metadata: None,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_pool_snapshot()(
+            is_retired in any::<bool>(),
+            blocks_minted in 0u32..1000u32,
+            params in any_pool_params(),
+            is_new in any::<bool>(),
+        ) -> PoolSnapshot {
+            PoolSnapshot { is_retired, blocks_minted, params, is_new }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_pool_state()(
+            operator in root::any_pool_hash(),
+            snapshot in any_epoch_value(any_pool_snapshot().boxed()),
+            blocks_minted_total in 0u32..10_000u32,
+            register_slot in root::any_slot(),
+            retiring_epoch in prop::option::of(root::any_epoch()),
+            deposit in root::any_lovelace(),
+        ) -> PoolState {
+            PoolState {
+                operator,
+                snapshot,
+                blocks_minted_total,
+                register_slot,
+                retiring_epoch,
+                deposit,
+            }
+        }
+    }
+}
+
 // --- Deltas ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,8 +198,11 @@ pub struct PoolRegistration {
     // params
     pub(crate) pool_deposit: u64,
 
-    // undo
-    pub(crate) is_new: Option<bool>,
+    // undo: `was_new` flags the creation branch (undo removes the entity); otherwise we
+    // restore the touched EpochValue snapshot and `retiring_epoch`.
+    pub(crate) was_new: bool,
+    pub(crate) prev_snapshot: Option<EpochValue<PoolSnapshot>>,
+    pub(crate) prev_retiring_epoch: Option<u64>,
 }
 
 impl PoolRegistration {
@@ -146,7 +217,9 @@ impl PoolRegistration {
             slot,
             epoch,
             pool_deposit,
-            is_new: None,
+            was_new: false,
+            prev_snapshot: None,
+            prev_retiring_epoch: None,
         }
     }
 }
@@ -166,6 +239,10 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 operator = hex::encode(self.cert.operator),
                 "updating pool registration",
             );
+
+            // save undo info
+            self.prev_snapshot = Some(entity.snapshot.clone());
+            self.prev_retiring_epoch = entity.retiring_epoch;
 
             let is_currently_retired = entity.snapshot.unwrap_live().is_retired;
 
@@ -202,8 +279,7 @@ impl dolos_core::EntityDelta for PoolRegistration {
                 "applying pool registration",
             );
 
-            // save undo info
-            self.is_new = Some(true);
+            self.was_new = true;
 
             let snapshot = PoolSnapshot {
                 is_retired: false,
@@ -228,8 +304,14 @@ impl dolos_core::EntityDelta for PoolRegistration {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<PoolState>) {
-        // Placeholder undo logic. Ensure this does not panic.
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if self.was_new {
+            *entity = None;
+            return;
+        }
+        let entity = entity.as_mut().expect("existing pool");
+        entity.snapshot = self.prev_snapshot.clone().expect("apply captured snapshot");
+        entity.retiring_epoch = self.prev_retiring_epoch;
     }
 }
 
@@ -254,8 +336,12 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<PoolState>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.blocks_minted_total -= self.count;
+            let live = entity.snapshot.unwrap_live_mut();
+            live.blocks_minted -= self.count;
+        }
     }
 }
 
@@ -305,19 +391,28 @@ impl dolos_core::EntityDelta for PoolDeRegistration {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<PoolState>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        if let Some(entity) = entity {
+            entity.retiring_epoch = self.prev_retiring_epoch;
+            entity.deposit = self.prev_deposit.unwrap_or(0);
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolWrapUp {
     pub(crate) pool_hash: PoolHash,
+
+    // undo: whole EpochValue snapshot captured pre-apply.
+    pub(crate) prev_snapshot: Option<EpochValue<PoolSnapshot>>,
 }
 
 impl PoolWrapUp {
     pub fn new(pool_hash: PoolHash) -> Self {
-        Self { pool_hash }
+        Self {
+            pool_hash,
+            prev_snapshot: None,
+        }
     }
 }
 
@@ -331,13 +426,16 @@ impl dolos_core::EntityDelta for PoolWrapUp {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         let entity = entity.as_mut().expect("existing pool");
 
+        self.prev_snapshot = Some(entity.snapshot.clone());
+
         let snapshot = entity.snapshot.scheduled_or_default();
 
         snapshot.is_retired = true;
     }
 
-    fn undo(&self, _entity: &mut Option<PoolState>) {
-        // Placeholder undo logic. Ensure this does not panic.
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        let entity = entity.as_mut().expect("existing pool");
+        entity.snapshot = self.prev_snapshot.clone().expect("apply captured snapshot");
     }
 }
 
@@ -345,11 +443,18 @@ impl dolos_core::EntityDelta for PoolWrapUp {
 pub struct PoolTransition {
     pub(crate) pool: EntityKey,
     pub(crate) next_epoch: Epoch,
+
+    // undo: save the whole EpochValue so rotation can be reversed in one shot.
+    pub(crate) prev_snapshot: Option<EpochValue<PoolSnapshot>>,
 }
 
 impl PoolTransition {
     pub fn new(pool: EntityKey, next_epoch: Epoch) -> Self {
-        Self { pool, next_epoch }
+        Self {
+            pool,
+            next_epoch,
+            prev_snapshot: None,
+        }
     }
 }
 
@@ -363,11 +468,113 @@ impl dolos_core::EntityDelta for PoolTransition {
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         let entity = entity.as_mut().expect("existing pool");
 
-        // apply changes
+        self.prev_snapshot = Some(entity.snapshot.clone());
+
         entity.snapshot.default_transition(self.next_epoch);
     }
 
-    fn undo(&self, _entity: &mut Option<PoolState>) {
-        // Placeholder undo logic. Ensure this does not panic.
+    fn undo(&self, entity: &mut Option<PoolState>) {
+        let entity = entity.as_mut().expect("existing pool");
+        entity.snapshot = self.prev_snapshot.clone().expect("apply captured snapshot");
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use super::testing::any_pool_state;
+    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::pallas_extras::testing::any_multi_era_pool_registration;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn any_pool_registration()(
+            cert in any_multi_era_pool_registration(),
+            slot in root::any_slot(),
+            epoch in root::any_epoch(),
+            pool_deposit in root::any_lovelace(),
+        ) -> PoolRegistration {
+            PoolRegistration::new(cert, slot, epoch, pool_deposit)
+        }
+    }
+
+    prop_compose! {
+        fn any_minted_blocks_inc()(
+            operator in root::any_hash_28(),
+            count in 1u32..100u32,
+        ) -> MintedBlocksInc {
+            MintedBlocksInc { operator, count }
+        }
+    }
+
+    prop_compose! {
+        fn any_pool_deregistration()(
+            operator in root::any_hash_28(),
+            epoch in root::any_epoch(),
+        ) -> PoolDeRegistration {
+            PoolDeRegistration::new(operator, epoch)
+        }
+    }
+
+    prop_compose! {
+        fn any_pool_wrap_up()(
+            pool_hash in root::any_pool_hash(),
+        ) -> PoolWrapUp {
+            PoolWrapUp::new(pool_hash)
+        }
+    }
+
+    // `PoolTransition::apply` expects `entity.snapshot.live` populated so the
+    // `TransitionDefault` impl on `PoolSnapshot` can clone it forward.
+    // Our `any_pool_state` always fills `live`, so this holds.
+    prop_compose! {
+        fn any_pool_transition()(
+            pool in root::any_hash_28(),
+            next_epoch in root::any_epoch(),
+        ) -> PoolTransition {
+            PoolTransition::new(dolos_core::EntityKey::from(pool.as_slice()), next_epoch)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn pool_registration_roundtrip(
+            entity in prop::option::of(any_pool_state()),
+            delta in any_pool_registration(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn minted_blocks_inc_roundtrip(
+            entity in prop::option::of(any_pool_state()),
+            delta in any_minted_blocks_inc(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn pool_deregistration_roundtrip(
+            entity in prop::option::of(any_pool_state()),
+            delta in any_pool_deregistration(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn pool_wrap_up_roundtrip(
+            entity in any_pool_state(),
+            delta in any_pool_wrap_up(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn pool_transition_roundtrip(
+            entity in any_pool_state(),
+            delta in any_pool_transition(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
     }
 }

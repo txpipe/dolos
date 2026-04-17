@@ -41,6 +41,9 @@ pub mod pools;
 pub mod pparams;
 pub mod proposals;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 pub use accounts::*;
 pub use assets::*;
 pub use datums::*;

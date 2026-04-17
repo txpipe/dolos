@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d035f3dd23201981e4412987cfd67b38d44d78570d2fcebf01ac94c853703d7c # shrinks to entity = None, delta = MetadataTxUpdate { policy: Hash<28>("00000000000000000000000000000000000000000000000000000000"), asset: [], metadata_tx: Hash<32>("0000000000000000000000000000000000000000000000000000000000000000"), prev_metadata_tx: None }
+cc 4c91c5ef7dbeab7e92238dceed3017f9959c7e4c04d12dc70f81a31c27dc0be4 # shrinks to entity = None, delta = MintStatsUpdate { policy: Hash<28>("00000000000000000000000000000000000000000000000000000000"), asset: [], quantity: 0, seen_in_tx: Hash<32>("0000000000000000000000000000000000000000000000000000000000000000"), seen_in_slot: 0, is_first_mint: None }

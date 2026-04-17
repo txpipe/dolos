@@ -76,10 +76,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             return Ok(());
         }
 
-        self.change(AssignRewards {
-            account: id.clone(),
-            reward: reward.total_value(),
-        });
+        self.change(AssignRewards::new(id.clone(), reward.total_value()));
 
         for (pool, value, as_leader) in reward.into_vec() {
             ctx.applied_rewards.push(AppliedReward {

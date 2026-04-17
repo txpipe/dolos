@@ -15,7 +15,7 @@ pub fn credential_to_key(cred: &StakeCredential) -> EntityKey {
 
 /// Pending reward for a single account, waiting to be applied at epoch boundary.
 /// Created by RUPD, consumed by EWRAP.
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingRewardState {
     #[n(0)]
     pub credential: StakeCredential,
@@ -55,7 +55,7 @@ entity_boilerplate!(PendingRewardState, "pending_rewards");
 /// Unlike regular rewards, MIRs come from either reserves or treasury.
 /// At EWRAP, MIRs are only applied to registered accounts - MIRs to unregistered
 /// accounts stay in their source pot (no transfer occurs).
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingMirState {
     #[n(0)]
     pub credential: StakeCredential,
@@ -77,6 +77,34 @@ impl PendingMirState {
 
 entity_boilerplate!(PendingMirState, "pending_mirs");
 
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_pending_reward_state()(
+            credential in root::any_stake_credential(),
+            is_spendable in any::<bool>(),
+            as_leader in prop::collection::vec((root::any_pool_hash(), root::any_lovelace()), 0..3),
+            as_delegator in prop::collection::vec((root::any_pool_hash(), root::any_lovelace()), 0..3),
+        ) -> PendingRewardState {
+            PendingRewardState { credential, is_spendable, as_leader, as_delegator }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_pending_mir_state()(
+            credential in root::any_stake_credential(),
+            from_reserves in root::any_lovelace(),
+            from_treasury in root::any_lovelace(),
+        ) -> PendingMirState {
+            PendingMirState { credential, from_reserves, from_treasury }
+        }
+    }
+}
+
 // --- Deltas ---
 
 /// Delta to enqueue a pending reward for an account.
@@ -87,6 +115,8 @@ pub struct EnqueueReward {
     pub is_spendable: bool,
     pub as_leader: Vec<(PoolHash, u64)>,
     pub as_delegator: Vec<(PoolHash, u64)>,
+
+    pub(crate) prev: Option<PendingRewardState>,
 }
 
 impl EnqueueReward {
@@ -101,6 +131,7 @@ impl EnqueueReward {
             is_spendable,
             as_leader,
             as_delegator,
+            prev: None,
         }
     }
 }
@@ -113,6 +144,7 @@ impl dolos_core::EntityDelta for EnqueueReward {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        self.prev = entity.clone();
         *entity = Some(PendingRewardState {
             credential: self.credential.clone(),
             is_spendable: self.is_spendable,
@@ -121,8 +153,8 @@ impl dolos_core::EntityDelta for EnqueueReward {
         });
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        *entity = self.prev.clone();
     }
 }
 
@@ -156,8 +188,8 @@ impl dolos_core::EntityDelta for DequeueReward {
         self.prev = entity.take();
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        *entity = self.prev.clone();
     }
 }
 
@@ -175,6 +207,8 @@ pub struct EnqueueMir {
     /// If true, overwrite previous MIR values (pre-Alonzo behavior).
     /// If false, accumulate MIR values (Alonzo+ behavior).
     pub overwrite: bool,
+
+    pub(crate) prev: Option<PendingMirState>,
 }
 
 impl EnqueueMir {
@@ -189,6 +223,7 @@ impl EnqueueMir {
             from_reserves,
             from_treasury,
             overwrite,
+            prev: None,
         }
     }
 
@@ -209,6 +244,8 @@ impl dolos_core::EntityDelta for EnqueueMir {
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        self.prev = entity.clone();
+
         // Behavior depends on overwrite flag (determined by protocol version):
         // - Pre-Alonzo (overwrite=true): Later MIRs overwrite earlier ones (Map.union semantics)
         // - Alonzo+ (overwrite=false): MIRs accumulate (Map.unionWith (<>) semantics)
@@ -232,8 +269,8 @@ impl dolos_core::EntityDelta for EnqueueMir {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        *entity = self.prev.clone();
     }
 }
 
@@ -267,7 +304,87 @@ impl dolos_core::EntityDelta for DequeueMir {
         self.prev = entity.take();
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        *entity = self.prev.clone();
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use super::testing::{any_pending_mir_state, any_pending_reward_state};
+    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn any_enqueue_reward()(
+            credential in root::any_stake_credential(),
+            is_spendable in any::<bool>(),
+            as_leader in prop::collection::vec((root::any_pool_hash(), root::any_lovelace()), 0..3),
+            as_delegator in prop::collection::vec((root::any_pool_hash(), root::any_lovelace()), 0..3),
+        ) -> EnqueueReward {
+            EnqueueReward::new(credential, is_spendable, as_leader, as_delegator)
+        }
+    }
+
+    prop_compose! {
+        fn any_dequeue_reward()(
+            credential in root::any_stake_credential(),
+        ) -> DequeueReward {
+            DequeueReward::new(credential)
+        }
+    }
+
+    prop_compose! {
+        fn any_enqueue_mir()(
+            credential in root::any_stake_credential(),
+            from_reserves in root::any_lovelace(),
+            from_treasury in root::any_lovelace(),
+            overwrite in any::<bool>(),
+        ) -> EnqueueMir {
+            EnqueueMir::new(credential, from_reserves, from_treasury, overwrite)
+        }
+    }
+
+    prop_compose! {
+        fn any_dequeue_mir()(
+            credential in root::any_stake_credential(),
+        ) -> DequeueMir {
+            DequeueMir::new(credential)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn enqueue_reward_roundtrip(
+            entity in prop::option::of(any_pending_reward_state()),
+            delta in any_enqueue_reward(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn dequeue_reward_roundtrip(
+            entity in prop::option::of(any_pending_reward_state()),
+            delta in any_dequeue_reward(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn enqueue_mir_roundtrip(
+            entity in prop::option::of(any_pending_mir_state()),
+            delta in any_enqueue_mir(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn dequeue_mir_roundtrip(
+            entity in prop::option::of(any_pending_mir_state()),
+            delta in any_dequeue_mir(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
     }
 }
