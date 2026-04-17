@@ -10,7 +10,7 @@ pub type PallasRatio = pallas::ledger::primitives::RationalNumber;
 
 pub type Eta = Ratio;
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Pots {
     #[n(0)]
     pub reserves: Lovelace,
@@ -74,7 +74,7 @@ impl Pots {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct EpochIncentives {
     #[n(0)]
     pub total: u64,
@@ -443,6 +443,46 @@ pub fn apply_delta(pots: Pots, incentives: &EpochIncentives, delta: &PotDelta) -
     match delta.protocol_version {
         0 | 1 => apply_byron_delta(pots, incentives, delta),
         2.. => apply_shelley_delta(pots, incentives, delta),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_pots()(
+            reserves in root::any_lovelace(),
+            treasury in root::any_lovelace(),
+            utxos in root::any_lovelace(),
+            rewards in root::any_lovelace(),
+            fees in root::any_lovelace(),
+            pool_count in 0u64..1000u64,
+            account_count in 0u64..100_000u64,
+        ) -> Pots {
+            Pots {
+                reserves, treasury, utxos, rewards, fees,
+                pool_count, account_count,
+                deposit_per_pool: 500_000_000,
+                deposit_per_account: 2_000_000,
+                nominal_deposits: 0,
+                drep_deposits: 0,
+                proposal_deposits: 0,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_epoch_incentives()(
+            total in root::any_lovelace(),
+            treasury_tax in root::any_lovelace(),
+            available_rewards in root::any_lovelace(),
+            used_fees in root::any_lovelace(),
+        ) -> EpochIncentives {
+            EpochIncentives { total, treasury_tax, available_rewards, used_fees }
+        }
     }
 }
 

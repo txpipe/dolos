@@ -13,7 +13,7 @@ pub const DATUM_NS: &str = "datums";
 /// Datums are keyed by their hash (32 bytes) and store:
 /// - `refcount`: Number of UTxOs currently referencing this datum
 /// - `bytes`: The raw CBOR-encoded datum bytes
-#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DatumState {
     #[n(0)]
     pub refcount: u64,
@@ -29,6 +29,21 @@ impl DatumState {
 }
 
 entity_boilerplate!(DatumState, "datums");
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_datum_state()(
+            refcount in 0u64..1000u64,
+            bytes in prop::collection::vec(any::<u8>(), 0..64),
+        ) -> DatumState {
+            DatumState { refcount, bytes }
+        }
+    }
+}
 
 // --- Deltas ---
 
@@ -77,8 +92,12 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<DatumState>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<DatumState>) {
+        if self.was_new {
+            *entity = None;
+        } else if let Some(state) = entity {
+            state.refcount = state.refcount.saturating_sub(1);
+        }
     }
 }
 
@@ -125,8 +144,8 @@ impl dolos_core::EntityDelta for DatumRefDecrement {
         // If entity is None, this is a no-op (datum doesn't exist)
     }
 
-    fn undo(&self, _entity: &mut Option<DatumState>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<DatumState>) {
+        *entity = self.prev_state.clone();
     }
 }
 
@@ -202,5 +221,44 @@ mod tests {
 
         let state = entity.as_ref().unwrap();
         assert_eq!(state.refcount, 2);
+    }
+
+    use super::testing::any_datum_state;
+    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use proptest::prelude::*;
+
+    prop_compose! {
+        fn any_datum_ref_increment()(
+            hash in root::any_hash_32(),
+            bytes in prop::collection::vec(any::<u8>(), 0..64),
+        ) -> DatumRefIncrement {
+            DatumRefIncrement::new(hash, bytes)
+        }
+    }
+
+    prop_compose! {
+        fn any_datum_ref_decrement()(
+            hash in root::any_hash_32(),
+        ) -> DatumRefDecrement {
+            DatumRefDecrement::new(hash)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn datum_ref_increment_roundtrip(
+            entity in prop::option::of(any_datum_state()),
+            delta in any_datum_ref_increment(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn datum_ref_decrement_roundtrip(
+            entity in prop::option::of(any_datum_state()),
+            delta in any_datum_ref_decrement(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
     }
 }

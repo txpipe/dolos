@@ -4,7 +4,7 @@ use dolos_core::EntityKey;
 use pallas::codec::minicbor::{self, Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EraProtocol(#[n(0)] u16);
 
 impl EraProtocol {
@@ -56,7 +56,7 @@ impl From<EntityKey> for EraProtocol {
     }
 }
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EraTransition {
     #[n(0)]
     pub prev_version: EraProtocol,
@@ -110,3 +110,21 @@ pub struct EraSummary {
 }
 
 entity_boilerplate!(EraSummary, "eras");
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_era_transition()(
+            prev in 0u16..10u16,
+            new in 0u16..10u16,
+        ) -> EraTransition {
+            EraTransition {
+                prev_version: EraProtocol::from(prev),
+                new_version: EraProtocol::from(new),
+            }
+        }
+    }
+}

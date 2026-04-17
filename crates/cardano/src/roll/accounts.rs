@@ -75,11 +75,11 @@ impl BlockVisitor for AccountVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(ControlledAmountDec {
+        deltas.add_for_entity(ControlledAmountDec::new(
             cred,
             is_pointer,
-            amount: resolved.value().coin(),
-        });
+            resolved.value().coin(),
+        ));
 
         Ok(())
     }
@@ -99,12 +99,12 @@ impl BlockVisitor for AccountVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(ControlledAmountInc {
-            cred: cred.clone(),
+        deltas.add_for_entity(ControlledAmountInc::new(
+            cred.clone(),
             is_pointer,
-            amount: output.value().coin(),
+            output.value().coin(),
             epoch,
-        });
+        ));
 
         Ok(())
     }
@@ -188,7 +188,7 @@ impl BlockVisitor for AccountVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(WithdrawalInc { cred, amount });
+        deltas.add_for_entity(WithdrawalInc::new(cred, amount));
 
         Ok(())
     }

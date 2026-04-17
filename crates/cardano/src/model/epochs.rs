@@ -24,7 +24,7 @@ pub type Lovelace = u64;
 
 pub const CURRENT_EPOCH_KEY: &[u8] = b"0";
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Nonces {
     #[n(0)]
     pub active: Hash<32>,
@@ -84,7 +84,7 @@ impl Nonces {
 }
 
 /// Epoch data that is gathered as part of the block rolling process
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RollingStats {
     #[n(2)]
     pub produced_utxos: Lovelace,
@@ -149,7 +149,7 @@ impl TransitionDefault for RollingStats {
 }
 
 /// Stats that are gathered at the end of the epoch
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndStats {
     #[n(0)]
     pub pool_deposit_count: u64,
@@ -210,7 +210,7 @@ pub struct EndStats {
     pub __drep_refunds: Lovelace,
 }
 
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
+#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EpochState {
     #[n(0)]
@@ -261,6 +261,97 @@ impl Default for EpochState {
 
 entity_boilerplate!(EpochState, "epochs");
 
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::pparams::testing::any_pparams_set;
+    use crate::model::testing as root;
+    use crate::pots::testing::{any_epoch_incentives, any_pots};
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_nonces()(
+            active in root::any_hash_32(),
+            evolving in root::any_hash_32(),
+            candidate in root::any_hash_32(),
+            tail in prop::option::of(root::any_hash_32()),
+        ) -> Nonces {
+            Nonces { active, evolving, candidate, tail }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_rolling_stats()(
+            produced_utxos in root::any_lovelace(),
+            consumed_utxos in root::any_lovelace(),
+            gathered_fees in root::any_lovelace(),
+            blocks_minted in 0u32..1000u32,
+        ) -> RollingStats {
+            let mut stats = RollingStats::default();
+            stats.produced_utxos = produced_utxos;
+            stats.consumed_utxos = consumed_utxos;
+            stats.gathered_fees = gathered_fees;
+            stats.blocks_minted = blocks_minted;
+            stats
+        }
+    }
+
+    prop_compose! {
+        pub fn any_end_stats()(
+            pool_deposit_count in 0u64..100u64,
+            pool_refund_count in 0u64..100u64,
+            pool_invalid_refund_count in 0u64..100u64,
+            epoch_incentives in any_epoch_incentives(),
+            effective_rewards in root::any_lovelace(),
+        ) -> EndStats {
+            EndStats {
+                pool_deposit_count,
+                pool_refund_count,
+                pool_invalid_refund_count,
+                epoch_incentives,
+                effective_rewards,
+                unspendable_to_treasury: 0,
+                unspendable_to_reserves: 0,
+                treasury_mirs: 0,
+                reserve_mirs: 0,
+                invalid_treasury_mirs: 0,
+                invalid_reserve_mirs: 0,
+                proposal_invalid_refunds: 0,
+                proposal_refunds: 0,
+                __drep_deposits: 0,
+                __drep_refunds: 0,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_epoch_state()(
+            number in root::any_epoch(),
+            initial_pots in any_pots(),
+            rolling in any_epoch_value(any_rolling_stats().boxed()),
+            pparams in any_epoch_value(any_pparams_set().boxed()),
+            largest_stable_slot in root::any_slot(),
+            previous_nonce_tail in prop::option::of(root::any_hash_32()),
+            nonces in prop::option::of(any_nonces()),
+            end in prop::option::of(any_end_stats()),
+            incentives in prop::option::of(any_epoch_incentives()),
+        ) -> EpochState {
+            EpochState {
+                number,
+                initial_pots,
+                rolling,
+                pparams,
+                largest_stable_slot,
+                previous_nonce_tail,
+                nonces,
+                end,
+                incentives,
+            }
+        }
+    }
+}
+
 // --- Deltas ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -279,6 +370,11 @@ pub struct EpochStatsUpdate {
     pub(crate) reserve_mirs: Lovelace,
     pub(crate) treasury_mirs: Lovelace,
     pub(crate) non_overlay_blocks_minted: u32,
+
+    // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
+    // can't be recovered by set subtraction (a pool in both prev and self would be removed).
+    pub(crate) was_new: bool,
+    pub(crate) prev_registered_pools: HashSet<PoolHash>,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -291,7 +387,11 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     fn apply(&mut self, entity: &mut Option<EpochState>) {
         let entity = entity.as_mut().expect("existing epoch");
 
-        let stats = entity.rolling.live_mut(self.epoch).get_or_insert_default();
+        let live_slot = entity.rolling.live_mut(self.epoch);
+        self.was_new = live_slot.is_none();
+        let stats = live_slot.get_or_insert_default();
+
+        self.prev_registered_pools = stats.registered_pools.clone();
 
         stats.blocks_minted += 1;
 
@@ -320,8 +420,38 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
             .collect();
     }
 
-    fn undo(&self, _entity: &mut Option<EpochState>) {
-        // TODO: implement undo
+    fn undo(&self, entity: &mut Option<EpochState>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        if self.was_new {
+            *entity.rolling.live_mut(self.epoch) = None;
+            return;
+        }
+
+        let live_slot = entity.rolling.live_mut(self.epoch);
+        let stats = live_slot.as_mut().expect("rolling.live populated");
+
+        stats.blocks_minted -= 1;
+
+        if self.utxo_delta > 0 {
+            stats.produced_utxos -= self.utxo_delta.unsigned_abs();
+        } else {
+            stats.consumed_utxos -= self.utxo_delta.unsigned_abs();
+        }
+
+        stats.gathered_fees -= self.block_fees;
+        stats.new_accounts -= self.new_accounts;
+        stats.removed_accounts -= self.removed_accounts;
+        stats.withdrawals -= self.withdrawals;
+        stats.proposal_deposits -= self.proposal_deposits;
+        stats.drep_deposits -= self.drep_deposits;
+        stats.drep_refunds -= self.drep_refunds;
+        stats.treasury_donations -= self.treasury_donations;
+        stats.reserve_mirs -= self.reserve_mirs;
+        stats.treasury_mirs -= self.treasury_mirs;
+        stats.non_overlay_blocks_minted -= self.non_overlay_blocks_minted;
+
+        stats.registered_pools = self.prev_registered_pools.clone();
     }
 }
 
@@ -332,6 +462,17 @@ pub struct NoncesUpdate {
     pub(crate) nonce_vrf_output: Vec<u8>,
 
     pub(crate) previous: Option<Nonces>,
+}
+
+impl NoncesUpdate {
+    pub fn new(slot: u64, tail: Option<Hash<32>>, nonce_vrf_output: Vec<u8>) -> Self {
+        Self {
+            slot,
+            tail,
+            nonce_vrf_output,
+            previous: None,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for NoncesUpdate {
@@ -353,19 +494,30 @@ impl dolos_core::EntityDelta for NoncesUpdate {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<EpochState>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<EpochState>) {
+        // apply is a no-op when entity was None or when nonces were None, so in those
+        // cases undo is also a no-op.
+        let Some(entity) = entity else { return };
+        if self.previous.is_some() {
+            entity.nonces = self.previous.clone();
+        }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PParamsUpdate {
     pub(crate) to_update: PParamsSet,
+
+    // undo
+    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
 }
 
 impl PParamsUpdate {
     pub fn new(to_update: PParamsSet) -> Self {
-        Self { to_update }
+        Self {
+            to_update,
+            prev_pparams: None,
+        }
     }
 }
 
@@ -381,19 +533,38 @@ impl dolos_core::EntityDelta for PParamsUpdate {
 
         tracing::debug!(value = ?self.to_update, "applying pparam update");
 
+        self.prev_pparams = Some(entity.pparams.clone());
+
         let next = entity.pparams.scheduled_or_default();
 
         next.merge(self.to_update.clone());
     }
 
-    fn undo(&self, _entity: &mut Option<EpochState>) {
-        // Placeholder undo logic. Ensure this does not panic.
+    fn undo(&self, entity: &mut Option<EpochState>) {
+        let entity = entity.as_mut().expect("epoch state missing");
+        entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUp {
     pub(crate) stats: EndStats,
+
+    // undo
+    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_end: Option<EndStats>,
+}
+
+impl EpochWrapUp {
+    pub fn new(stats: EndStats) -> Self {
+        Self {
+            stats,
+            prev_rolling: None,
+            prev_pparams: None,
+            prev_end: None,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for EpochWrapUp {
@@ -406,13 +577,20 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
 
+        self.prev_rolling = Some(entity.rolling.clone());
+        self.prev_pparams = Some(entity.pparams.clone());
+        self.prev_end = entity.end.clone();
+
         entity.rolling.scheduled_or_default();
         entity.pparams.scheduled_or_default();
         entity.end = Some(self.stats.clone());
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
+        entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
+        entity.end = self.prev_end.clone();
     }
 }
 
@@ -420,6 +598,23 @@ impl dolos_core::EntityDelta for EpochWrapUp {
 pub struct NonceTransition {
     pub(crate) next_nonce: Option<Nonces>,
     pub(crate) next_slot: BlockSlot,
+
+    // undo
+    pub(crate) prev_previous_nonce_tail: Option<Hash<32>>,
+    pub(crate) prev_nonces: Option<Nonces>,
+    pub(crate) prev_largest_stable_slot: BlockSlot,
+}
+
+impl NonceTransition {
+    pub fn new(next_nonce: Option<Nonces>, next_slot: BlockSlot) -> Self {
+        Self {
+            next_nonce,
+            next_slot,
+            prev_previous_nonce_tail: None,
+            prev_nonces: None,
+            prev_largest_stable_slot: 0,
+        }
+    }
 }
 
 impl dolos_core::EntityDelta for NonceTransition {
@@ -432,13 +627,20 @@ impl dolos_core::EntityDelta for NonceTransition {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
 
+        self.prev_previous_nonce_tail = entity.previous_nonce_tail;
+        self.prev_nonces = entity.nonces.clone();
+        self.prev_largest_stable_slot = entity.largest_stable_slot;
+
         entity.previous_nonce_tail = entity.nonces.as_ref().and_then(|n| n.tail);
         entity.nonces = self.next_nonce.clone();
         entity.largest_stable_slot = self.next_slot;
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // Placeholder undo logic. Ensure this does not panic.
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.previous_nonce_tail = self.prev_previous_nonce_tail;
+        entity.nonces = self.prev_nonces.clone();
+        entity.largest_stable_slot = self.prev_largest_stable_slot;
     }
 }
 
@@ -450,6 +652,32 @@ pub struct EpochTransition {
 
     #[serde(skip)]
     pub(crate) genesis: Option<Arc<Genesis>>,
+
+    // undo
+    pub(crate) prev_number: Epoch,
+    pub(crate) prev_initial_pots: Option<Pots>,
+    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+}
+
+impl EpochTransition {
+    pub fn new(
+        new_epoch: Epoch,
+        new_pots: Pots,
+        era_transition: Option<EraTransition>,
+        genesis: Option<Arc<Genesis>>,
+    ) -> Self {
+        Self {
+            new_epoch,
+            new_pots,
+            era_transition,
+            genesis,
+            prev_number: 0,
+            prev_initial_pots: None,
+            prev_rolling: None,
+            prev_pparams: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for EpochTransition {
@@ -473,6 +701,13 @@ impl dolos_core::EntityDelta for EpochTransition {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
+        // save undo info (snapshot whole EpochValues so rotation + any era migration are
+        // both covered)
+        self.prev_number = entity.number;
+        self.prev_initial_pots = Some(entity.initial_pots.clone());
+        self.prev_rolling = Some(entity.rolling.clone());
+        self.prev_pparams = Some(entity.pparams.clone());
+
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
         entity.rolling.default_transition(self.new_epoch);
@@ -491,8 +726,16 @@ impl dolos_core::EntityDelta for EpochTransition {
         }
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // Placeholder undo logic. Ensure this does not panic.
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
+        entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
+        entity.number = self.prev_number;
+        entity.initial_pots = self
+            .prev_initial_pots
+            .clone()
+            .expect("apply captured initial_pots");
     }
 }
 
@@ -526,7 +769,175 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
         entity.incentives = Some(self.incentives.clone());
     }
 
-    fn undo(&self, _entity: &mut Option<Self::Entity>) {
-        // no-op: undo not yet comprehensively implemented
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("EpochState must exist");
+        entity.incentives = self.prev_incentives.clone();
+    }
+}
+
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use super::testing::{any_end_stats, any_epoch_state, any_nonces};
+    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_no_next};
+    use crate::model::pparams::testing::any_pparams_set;
+    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::pots::testing::{any_epoch_incentives, any_pots};
+    use proptest::prelude::*;
+
+    /// `EpochStatsUpdate::apply` calls `rolling.live_mut` which asserts `next` is None,
+    /// so we need a specialized generator that keeps `rolling.next` empty.
+    prop_compose! {
+        fn any_epoch_state_no_rolling_next()(
+            number in root::any_epoch(),
+            initial_pots in any_pots(),
+            rolling in any_epoch_value_no_next(super::testing::any_rolling_stats().boxed()),
+            pparams in any_epoch_value(any_pparams_set().boxed()),
+            largest_stable_slot in root::any_slot(),
+            previous_nonce_tail in prop::option::of(root::any_hash_32()),
+            nonces in prop::option::of(any_nonces()),
+            end in prop::option::of(any_end_stats()),
+            incentives in prop::option::of(any_epoch_incentives()),
+        ) -> EpochState {
+            EpochState {
+                number,
+                initial_pots,
+                rolling,
+                pparams,
+                largest_stable_slot,
+                previous_nonce_tail,
+                nonces,
+                end,
+                incentives,
+            }
+        }
+    }
+
+    prop_compose! {
+        fn any_epoch_stats_update()(
+            epoch in root::any_epoch(),
+            block_fees in root::any_lovelace(),
+            utxo_delta in -1_000_000i64..1_000_000i64,
+            new_accounts in 0u64..100u64,
+            removed_accounts in 0u64..100u64,
+            withdrawals in root::any_lovelace(),
+        ) -> EpochStatsUpdate {
+            EpochStatsUpdate {
+                epoch, block_fees, utxo_delta,
+                new_accounts, removed_accounts, withdrawals,
+                ..EpochStatsUpdate::default()
+            }
+        }
+    }
+
+    prop_compose! {
+        fn any_nonces_update()(
+            slot in root::any_slot(),
+            tail in prop::option::of(root::any_hash_32()),
+            nonce_vrf_output in prop::collection::vec(any::<u8>(), 32..=32),
+        ) -> NoncesUpdate {
+            NoncesUpdate::new(slot, tail, nonce_vrf_output)
+        }
+    }
+
+    fn any_pparams_update() -> impl Strategy<Value = PParamsUpdate> {
+        Just(PParamsUpdate::new(crate::model::pparams::PParamsSet::default()))
+    }
+
+    prop_compose! {
+        fn any_epoch_wrap_up()(
+            stats in any_end_stats(),
+        ) -> EpochWrapUp {
+            EpochWrapUp::new(stats)
+        }
+    }
+
+    prop_compose! {
+        fn any_nonce_transition()(
+            next_nonce in prop::option::of(any_nonces()),
+            next_slot in root::any_slot(),
+        ) -> NonceTransition {
+            NonceTransition::new(next_nonce, next_slot)
+        }
+    }
+
+    prop_compose! {
+        fn any_epoch_transition()(
+            new_epoch in root::any_epoch(),
+        ) -> EpochTransition {
+            // new_pots is filled in by the test harness from the entity's initial_pots
+            // so that `new_pots.max_supply() == entity.initial_pots.max_supply()` holds
+            // (which `apply`'s debug_assert requires).
+            EpochTransition::new(new_epoch, crate::pots::Pots::default(), None, None)
+        }
+    }
+
+    prop_compose! {
+        fn any_set_epoch_incentives()(
+            incentives in any_epoch_incentives(),
+        ) -> SetEpochIncentives {
+            SetEpochIncentives::new(incentives)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn epoch_stats_update_roundtrip(
+            entity in any_epoch_state_no_rolling_next(),
+            delta in any_epoch_stats_update(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn nonces_update_roundtrip(
+            entity in prop::option::of(any_epoch_state()),
+            delta in any_nonces_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn pparams_update_roundtrip(
+            entity in any_epoch_state(),
+            delta in any_pparams_update(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn epoch_wrap_up_roundtrip(
+            entity in any_epoch_state(),
+            delta in any_epoch_wrap_up(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn nonce_transition_roundtrip(
+            entity in any_epoch_state(),
+            delta in any_nonce_transition(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn epoch_transition_roundtrip(
+            entity in any_epoch_state(),
+            mut delta in any_epoch_transition(),
+        ) {
+            // align new_pots with the entity's initial_pots so apply's max_supply
+            // consistency debug_assert holds.
+            delta.new_pots = entity.initial_pots.clone();
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn set_epoch_incentives_roundtrip(
+            entity in any_epoch_state(),
+            delta in any_set_epoch_incentives(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
     }
 }

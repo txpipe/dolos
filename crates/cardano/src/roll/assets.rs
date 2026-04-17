@@ -32,14 +32,13 @@ impl BlockVisitor for AssetStateVisitor {
 
             let quantity: i128 = asset.mint_coin().unwrap_or_default().into();
 
-            deltas.add_for_entity(MintStatsUpdate {
-                policy: *policy,
-                asset: asset.name().to_vec(),
+            deltas.add_for_entity(MintStatsUpdate::new(
+                *policy,
+                asset.name().to_vec(),
                 quantity,
-                seen_in_tx: tx.hash(),
-                seen_in_slot: block.slot(),
-                is_first_mint: None,
-            });
+                tx.hash(),
+                block.slot(),
+            ));
 
             if quantity > 0 {
                 if let Some(metadata) = cip25_metadata.as_ref() {

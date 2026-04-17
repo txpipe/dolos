@@ -1356,6 +1356,7 @@ dependencies = [
  "num-rational",
  "pallas",
  "paste",
+ "proptest",
  "rayon",
  "self_cell",
  "serde",

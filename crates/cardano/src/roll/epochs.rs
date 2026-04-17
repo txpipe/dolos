@@ -112,12 +112,11 @@ impl BlockVisitor for EpochStateVisitor {
         }
         // we only track nonces for Shelley and later
         if block.era() >= pallas::ledger::traverse::Era::Shelley {
-            self.nonces_delta = Some(NoncesUpdate {
-                slot: block.header().slot(),
-                tail: block.header().previous_hash(),
-                nonce_vrf_output: block.header().nonce_vrf_output()?,
-                previous: None,
-            });
+            self.nonces_delta = Some(NoncesUpdate::new(
+                block.header().slot(),
+                block.header().previous_hash(),
+                block.header().nonce_vrf_output()?,
+            ));
         }
 
         Ok(())
