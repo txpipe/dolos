@@ -1,12 +1,16 @@
 pub mod storage;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
 use dolos_core::{
+    archive::ArchiveStore as _,
     config::{StorageConfig, SyncConfig},
+    indexes::IndexStore as _,
     *,
 };
+use pallas::ledger::traverse::MultiEraBlock;
 
 pub use storage::{
     ArchiveStoreBackend, IndexStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
@@ -62,39 +66,6 @@ impl DomainAdapter {
 
         tracing::info!("domain adapter: graceful shutdown complete");
         Ok(())
-    }
-
-    pub fn get_historical_utxos(
-        &self,
-        refs: &[pallas::interop::utxorpc::TxoRef],
-    ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        if refs.is_empty() {
-            return Some(Default::default());
-        }
-
-        let mut result = std::collections::HashMap::new();
-        let refs_set: std::collections::HashSet<_> =
-            refs.iter().copied().map(TxoRef::from).collect();
-
-        let iter = self.wal().iter_logs(None, None).ok()?;
-        for (_, log) in iter.rev() {
-            for (txo_ref, era_cbor) in &log.inputs {
-                if refs_set.contains(txo_ref) {
-                    let era = era_cbor.0.try_into().expect("era out of range");
-                    result.insert(txo_ref.clone().into(), (era, era_cbor.1.clone()));
-                }
-            }
-
-            if result.len() == refs.len() {
-                break;
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
     }
 }
 
@@ -180,18 +151,58 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
         &self,
         refs: &[pallas::interop::utxorpc::TxoRef],
     ) -> Option<pallas::interop::utxorpc::UtxoMap> {
-        let refs: Vec<_> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+        let dolos_refs: Vec<TxoRef> = refs.iter().map(|x| TxoRef::from(*x)).collect();
+        let mut result: pallas::interop::utxorpc::UtxoMap =
+            dolos_core::StateStore::get_utxos(self.state(), dolos_refs)
+                .ok()?
+                .into_iter()
+                .map(|(k, v)| {
+                    let era = v.0.try_into().expect("era out of range");
+                    (k.into(), (era, v.1.clone()))
+                })
+                .collect();
 
-        let some = dolos_core::StateStore::get_utxos(self.state(), refs)
-            .ok()?
-            .into_iter()
-            .map(|(k, v)| {
-                let era = v.0.try_into().expect("era out of range");
-                (k.into(), (era, v.1.clone()))
-            })
-            .collect();
+        let missing: Vec<_> = refs.iter().filter(|r| !result.contains_key(r)).collect();
+        if missing.is_empty() {
+            return Some(result);
+        }
 
-        Some(some)
+        let mut by_tx: HashMap<Vec<u8>, Vec<&pallas::interop::utxorpc::TxoRef>> = HashMap::new();
+        for txo_ref in &missing {
+            by_tx.entry(txo_ref.0.to_vec()).or_default().push(txo_ref);
+        }
+
+        for (tx_hash_bytes, txo_refs) in by_tx {
+            let Ok(Some(slot)) = self.indexes().slot_by_tx_hash(&tx_hash_bytes) else {
+                continue;
+            };
+            let Ok(Some(block_bytes)) = self.archive().get_block_by_slot(&slot) else {
+                continue;
+            };
+            let Ok(block) = MultiEraBlock::decode(&block_bytes) else {
+                continue;
+            };
+
+            let block_txs = block.txs();
+            let Some(tx) = block_txs
+                .iter()
+                .find(|tx| tx.hash().as_ref() == tx_hash_bytes.as_slice())
+            else {
+                continue;
+            };
+
+            let outputs = tx.outputs();
+            let era = block.era();
+
+            for txo_ref in txo_refs {
+                let Some(output) = outputs.get(txo_ref.1 as usize) else {
+                    continue;
+                };
+                result.insert(*txo_ref, (era, output.encode()));
+            }
+        }
+
+        Some(result)
     }
 
     fn get_slot_timestamp(&self, slot: u64) -> Option<u64> {
