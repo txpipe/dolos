@@ -6587,8 +6587,11 @@ dependencies = [
  "postgres-native-tls",
  "serde",
  "serde_json",
+ "tar",
+ "tempfile",
  "toml 0.8.20",
  "xshell",
+ "zstd",
 ]
 
 [[package]]
