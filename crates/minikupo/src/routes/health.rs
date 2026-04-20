@@ -74,3 +74,91 @@ pub async fn health<D: Domain>(State(facade): State<Facade<D>>, headers: HeaderM
 
     (StatusCode::OK, response_headers, Json(health)).into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{header, StatusCode};
+
+    use crate::{
+        test_support::{TestApp, TestFault},
+        types::{ConnectionStatus, Health},
+    };
+
+    async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
+        let (status, _, bytes) = app.get_response(path).await;
+        assert_eq!(
+            status,
+            expected,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+
+    #[tokio::test]
+    async fn health_json_happy_path() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, headers, bytes) = app.get_response("/health").await;
+        let expected_checkpoint = block.slot.to_string();
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let health: Health = serde_json::from_slice(&bytes).expect("failed to parse health");
+        assert_eq!(health.connection_status, ConnectionStatus::Connected);
+        assert_eq!(health.most_recent_checkpoint, Some(block.slot));
+        assert_eq!(
+            headers
+                .get("x-most-recent-checkpoint")
+                .and_then(|x| x.to_str().ok()),
+            Some(expected_checkpoint.as_str())
+        );
+        assert_eq!(
+            headers.get(header::ETAG).and_then(|x| x.to_str().ok()),
+            Some(block.block_hash.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn health_prometheus_happy_path() {
+        let app = TestApp::new();
+        let (status, headers, bytes) = app
+            .get_response_with_accept("/health", Some("text/plain"))
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|x| x.to_str().ok()),
+            Some("text/plain;charset=utf-8")
+        );
+
+        let body = String::from_utf8(bytes).expect("health body should be utf8");
+        assert!(body.contains("kupo_most_recent_checkpoint"));
+        assert!(body.contains("kupo_connection_status"));
+    }
+
+    #[tokio::test]
+    async fn health_no_tip_happy_path() {
+        let app = TestApp::new_empty();
+        let (status, headers, bytes) = app.get_response("/health").await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let health: Health = serde_json::from_slice(&bytes).expect("failed to parse health");
+        assert_eq!(health.most_recent_checkpoint, None);
+        assert!(headers.get("x-most-recent-checkpoint").is_none());
+        assert!(headers.get(header::ETAG).is_none());
+    }
+
+    #[tokio::test]
+    async fn health_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(&app, "/health", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+}
