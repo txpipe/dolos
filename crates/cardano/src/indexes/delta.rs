@@ -239,6 +239,13 @@ impl CardanoIndexDeltaBuilder {
         }
     }
 
+    /// Add withdrawal tags to the current block.
+    pub fn add_withdrawal(&mut self, account: &[u8]) {
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::ACCOUNT_WITHDRAWALS, account.to_vec()));
+    }
+
     /// Add a metadata label to the current block.
     pub fn add_metadata_label(&mut self, label: u64) {
         self.current_block()
@@ -333,6 +340,10 @@ impl CardanoIndexDeltaBuilder {
 
             for cert in tx.certs() {
                 self.add_cert(&cert);
+            }
+
+            for (account, _) in tx.withdrawals().collect::<Vec<_>>() {
+                self.add_withdrawal(account);
             }
 
             for redeemer in tx.redeemers() {
