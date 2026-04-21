@@ -461,6 +461,10 @@ where
             "/pools/{id}/history",
             get(routes::pools::by_id_history::<D>),
         )
+        .route(
+            "/pools/{id}/metadata",
+            get(routes::pools::by_id_metadata::<D>),
+        )
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route(
             "/governance/dreps/{drep_id}",
