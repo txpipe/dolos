@@ -159,9 +159,7 @@ where
             pool_id,
             hex: poolhex,
             live_stake: live.map(|x| x.to_string()).unwrap_or("0".to_string()),
-            active_stake: active
-                .map(|x| x.to_string())
-                .unwrap_or("0".to_string()),
+            active_stake: active.map(|x| x.to_string()).unwrap_or("0".to_string()),
             live_saturation: live
                 .map(|x| x as f64 * optimal as f64 / circulating_supply as f64)
                 .unwrap_or_default(),

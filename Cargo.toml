@@ -228,6 +228,7 @@ base64 = "0.22.1"
 bech32 = "0.11.1"
 reqwest = { version = "0.12.7", default-features = false, features = [
     "blocking",
+    "json",
     "rustls-tls",
 ] }
 rayon = "1.11.0"

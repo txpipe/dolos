@@ -290,6 +290,8 @@ fn build_delegation(
     cert: &MultiEraCert,
     epoch: Epoch,
     network: Network,
+    block: &MultiEraBlock,
+    chain: &ChainSummary,
 ) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
     let (cred, pool) = match cert {
         MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
@@ -321,6 +323,9 @@ fn build_delegation(
             .sum::<u64>()
             .to_string(),
         pool_id: pool,
+        tx_slot: block.slot() as i32,
+        block_time: chain.slot_time(block.slot()) as i32,
+        block_height: block.number() as i32,
     }))
 }
 
@@ -330,6 +335,8 @@ fn build_registration(
     cert: &MultiEraCert,
     _epoch: Epoch,
     network: Network,
+    block: &MultiEraBlock,
+    chain: &ChainSummary,
 ) -> Result<Option<AccountRegistrationContentInner>, StatusCode> {
     let (cred, is_registration) = match cert {
         MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
@@ -362,6 +369,9 @@ fn build_registration(
         } else {
             Action::Deregistered
         },
+        tx_slot: block.slot() as i32,
+        block_time: chain.slot_time(block.slot()) as i32,
+        block_height: block.number() as i32,
     }))
 }
 
@@ -411,6 +421,7 @@ impl<T> AccountActivityModelBuilder<T> {
         &mut self,
         epoch: Epoch,
         block: &MultiEraBlock,
+        chain: &ChainSummary,
         mapper: F,
         order: crate::pagination::Order,
     ) -> Result<(), StatusCode>
@@ -421,6 +432,8 @@ impl<T> AccountActivityModelBuilder<T> {
             &MultiEraCert,
             Epoch,
             Network,
+            &MultiEraBlock,
+            &ChainSummary,
         ) -> Result<Option<T>, StatusCode>,
     {
         let txs = block.txs();
@@ -428,7 +441,15 @@ impl<T> AccountActivityModelBuilder<T> {
 
         for tx in txs {
             for cert in tx.certs() {
-                if let Some(model) = mapper(&self.stake_address, &tx, &cert, epoch, self.network)? {
+                if let Some(model) = mapper(
+                    &self.stake_address,
+                    &tx,
+                    &cert,
+                    epoch,
+                    self.network,
+                    block,
+                    chain,
+                )? {
                     block_items.push(model);
                 }
             }
@@ -483,6 +504,8 @@ where
         &MultiEraCert,
         Epoch,
         Network,
+        &MultiEraBlock,
+        &ChainSummary,
     ) -> Result<Option<T>, StatusCode>,
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -532,7 +555,7 @@ where
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        builder.scan_block_certs(epoch, &block, &mapper, pagination.order)?;
+        builder.scan_block_certs(epoch, &block, &chain, &mapper, pagination.order)?;
     }
 
     Ok(builder.items)
