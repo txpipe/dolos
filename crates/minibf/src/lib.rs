@@ -328,6 +328,10 @@ where
             get(routes::accounts::by_stake_rewards::<D>),
         )
         .route(
+            "/accounts/{stake_address}/withdrawals",
+            get(routes::accounts::by_stake_withdrawals::<D>),
+        )
+        .route(
             "/addresses/{address}",
             get(routes::addresses::by_address::<D>),
         )
