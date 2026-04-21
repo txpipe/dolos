@@ -67,6 +67,7 @@ pub mod archive_dimensions {
     pub const DATUM: &str = "datum";
     pub const SPENT_TXO: &str = "spent_txo";
     pub const ACCOUNT_CERTS: &str = "account_certs";
+    pub const POOL_CERTS: &str = "pool_certs";
     pub const METADATA: &str = "metadata";
     pub const SCRIPT: &str = "script";
 }
@@ -489,6 +490,10 @@ fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
             let mut table = wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
             table.insert(bucketed_key, slot)?;
         }
+        archive_dimensions::POOL_CERTS => {
+            let mut table = wx.open_multimap_table(PoolCertsApproxIndexTable::DEF)?;
+            table.insert(bucketed_key, slot)?;
+        }
         archive_dimensions::METADATA => {
             let mut table = wx.open_multimap_table(MetadataApproxIndexTable::DEF)?;
             table.insert(bucketed_key, slot)?;
@@ -552,6 +557,10 @@ fn remove_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
         }
         archive_dimensions::ACCOUNT_CERTS => {
             let mut table = wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
+            table.remove(bucketed_key, slot)?;
+        }
+        archive_dimensions::POOL_CERTS => {
+            let mut table = wx.open_multimap_table(PoolCertsApproxIndexTable::DEF)?;
             table.remove(bucketed_key, slot)?;
         }
         archive_dimensions::METADATA => {
@@ -847,6 +856,9 @@ impl CoreIndexStore for IndexStore {
             }
             archive_dimensions::ACCOUNT_CERTS => {
                 archive::indexes::Indexes::iter_by_account_certs(&rx, key, start, end)?
+            }
+            archive_dimensions::POOL_CERTS => {
+                archive::indexes::Indexes::iter_by_pool_certs(&rx, key, start, end)?
             }
             archive_dimensions::METADATA => {
                 // Metadata is keyed by u64, need to parse the bytes

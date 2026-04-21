@@ -84,6 +84,14 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
 
+    fn blocks_by_pool_certs_stream(
+        &self,
+        pool: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
     fn blocks_by_metadata_stream(
         &self,
         label: u64,
@@ -123,6 +131,13 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
     async fn blocks_by_account_certs(
         &self,
         account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
+
+    async fn blocks_by_pool_certs(
+        &self,
+        pool: &[u8],
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError>;
@@ -241,6 +256,24 @@ where
         )
     }
 
+    fn blocks_by_pool_certs_stream(
+        &self,
+        pool: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::POOL_CERTS,
+            pool.to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
     fn blocks_by_metadata_stream(
         &self,
         label: u64,
@@ -302,6 +335,15 @@ where
         end_slot: BlockSlot,
     ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
         blocks_by_tag(self, archive::ACCOUNT_CERTS, account, start_slot, end_slot).await
+    }
+
+    async fn blocks_by_pool_certs(
+        &self,
+        pool: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<Vec<(BlockSlot, Option<BlockBody>)>, DomainError> {
+        blocks_by_tag(self, archive::POOL_CERTS, pool, start_slot, end_slot).await
     }
 
     async fn blocks_by_metadata(

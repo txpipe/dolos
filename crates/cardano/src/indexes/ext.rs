@@ -121,6 +121,16 @@ pub trait CardanoIndexExt: IndexStore {
         self.slots_by_tag(archive::ACCOUNT_CERTS, account, start, end)
     }
 
+    /// Iterate over slots of blocks containing certificates for a pool.
+    fn slots_by_pool_certs(
+        &self,
+        pool: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, IndexError> {
+        self.slots_by_tag(archive::POOL_CERTS, pool, start, end)
+    }
+
     /// Iterate over slots of blocks containing transactions with a specific metadata label.
     fn slots_by_metadata(
         &self,

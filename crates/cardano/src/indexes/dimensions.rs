@@ -58,6 +58,9 @@ pub mod archive {
     /// Account certificates (stake registration, deregistration, delegation)
     pub const ACCOUNT_CERTS: TagDimension = "account_certs";
 
+    /// Pool certificates (registration/update and retirement)
+    pub const POOL_CERTS: TagDimension = "pool_certs";
+
     /// Transaction metadata labels
     pub const METADATA: TagDimension = "metadata";
 }
