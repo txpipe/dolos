@@ -87,6 +87,32 @@ pub fn cert_as_pool_registration(cert: &MultiEraCert) -> Option<MultiEraPoolRegi
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiEraPoolRetirement {
+    pub operator: Hash<28>,
+    pub epoch: Epoch,
+}
+
+pub fn cert_as_pool_retirement(cert: &MultiEraCert) -> Option<MultiEraPoolRetirement> {
+    match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::PoolRetirement(operator, epoch) => Some(MultiEraPoolRetirement {
+                operator: *operator,
+                epoch: *epoch,
+            }),
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::PoolRetirement(operator, epoch) => Some(MultiEraPoolRetirement {
+                operator: *operator,
+                epoch: *epoch,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 pub struct MultiEraVoteDelegation {
     pub delegator: StakeCredential,
     pub drep: DRep,
