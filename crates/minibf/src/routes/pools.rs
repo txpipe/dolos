@@ -126,6 +126,13 @@ fn http_response_error(url: &str, status: StatusCode) -> DrepMetadataError {
     )
 }
 
+fn connection_error(url: &str) -> DrepMetadataError {
+    DrepMetadataError::new(
+        MetadataErrorCode::ConnectionError,
+        format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
+    )
+}
+
 async fn fetch_pool_offchain_metadata(
     pool: &PoolState,
 ) -> Option<crate::mapping::PoolOffchainMetadata> {
@@ -168,7 +175,7 @@ async fn fetch_pool_metadata_with_error(
 
     let response = match client.get(&metadata.url).send().await {
         Ok(response) => response,
-        Err(_) => return (None, None),
+        Err(_) => return (None, Some(connection_error(&metadata.url))),
     };
 
     if response.status() != StatusCode::OK {
@@ -659,6 +666,18 @@ mod tests {
         assert_eq!(
             error.message,
             "Error Offchain Pool: HTTP Response error from https://blockfrost.io/fakemetadata resulted in HTTP status code : 404 \"Not Found\""
+        );
+    }
+
+    #[test]
+    fn pool_metadata_connection_error_matches_expected_format() {
+        let error =
+            connection_error("http://localhost:23009/p/pool_clai_registration_metadata.json");
+
+        assert_eq!(error.code, MetadataErrorCode::ConnectionError);
+        assert_eq!(
+            error.message,
+            "Error Offchain Pool: Connection failure error when fetching metadata from http://localhost:23009/p/pool_clai_registration_metadata.json."
         );
     }
 
