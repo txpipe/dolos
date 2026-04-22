@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::pagination::PaginationError;
 
+#[derive(Debug)]
 pub enum Error {
     Pagination(PaginationError),
     Code(StatusCode),

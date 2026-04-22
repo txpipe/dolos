@@ -82,6 +82,7 @@ pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 
 const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
+const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
 
 #[inline]
 pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -113,6 +114,10 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
     bech32(POOL_HRP, key)
+}
+
+pub fn bech32_calidus(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
+    bech32(CALIDUS_HRP, key)
 }
 
 pub fn asset_fingerprint(subject: &[u8]) -> Result<String, StatusCode> {

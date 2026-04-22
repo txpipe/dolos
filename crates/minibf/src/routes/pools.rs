@@ -6,10 +6,12 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    pool::Pool, pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
-    pool_list_extended_inner::PoolListExtendedInner, PoolListExtendedInnerMetadata,
+    pool::Pool, pool_calidus_key::PoolCalidusKey, pool_delegators_inner::PoolDelegatorsInner,
+    pool_history_inner::PoolHistoryInner, pool_list_extended_inner::PoolListExtendedInner,
+    PoolListExtendedInnerMetadata,
 };
 use dolos_cardano::{
+    cip151,
     indexes::{AsyncCardanoQueryExt, SlotOrder},
     model::{AccountState, PoolState},
     pallas_extras, PoolDelegation, PoolHash, StakeLog,
@@ -26,8 +28,8 @@ use rayon::prelude::*;
 use crate::{
     error::Error,
     mapping::{
-        bech32_pool, pool_offchain_metadata, rational_to_f64, stake_cred_to_address,
-        vkey_to_stake_address, IntoModel,
+        bech32_calidus, bech32_pool, pool_offchain_metadata, rational_to_f64,
+        stake_cred_to_address, vkey_to_stake_address, IntoModel,
     },
     pagination::{Pagination, PaginationParameters},
     Facade,
@@ -247,6 +249,78 @@ where
     Ok((registrations, retirements))
 }
 
+async fn load_pool_calidus_key<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+) -> Result<Option<PoolCalidusKey>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let stream = domain.query().blocks_by_metadata_stream(
+        cip151::CIP151_METADATA_LABEL,
+        0,
+        tip,
+        SlotOrder::Desc,
+    );
+
+    let mut stream = Box::pin(stream);
+
+    while let Some(item) = stream.next().await {
+        let (_, block) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(block) = block else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(block.as_slice())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let block_height = block.number();
+        let block_slot = block.slot();
+        let block_time = chain.slot_time(block_slot);
+        let epoch = chain.slot_epoch(block_slot).0;
+
+        for tx in block.txs().into_iter().rev() {
+            let Some(metadata) = cip151::cip151_metadata_for_tx(&tx) else {
+                continue;
+            };
+
+            let Ok(registration) = cip151::parse_cip151_pool_registration(&metadata) else {
+                continue;
+            };
+
+            if registration.pool_id != pool {
+                continue;
+            }
+
+            if cip151::calidus_key_is_revoked(&registration.calidus_pub_key) {
+                return Ok(None);
+            }
+
+            return Ok(Some(PoolCalidusKey {
+                id: bech32_calidus(cip151::calidus_key_id_bytes(&registration.calidus_pub_key))?,
+                pub_key: hex::encode(registration.calidus_pub_key),
+                nonce: registration
+                    .nonce
+                    .try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                tx_hash: tx.hash().to_string(),
+                block_height: block_height
+                    .try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                block_time: block_time
+                    .try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                epoch: epoch
+                    .try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
 pub async fn by_id<D>(
     Path(id): Path<String>,
     State(domain): State<Facade<D>>,
@@ -290,6 +364,7 @@ where
     })??;
 
     let (registration, retirement) = load_pool_cert_hashes(&domain, pool.operator).await?;
+    let calidus_key = load_pool_calidus_key(&domain, pool.operator).await?;
 
     let reward_account = pallas_extras::parse_reward_account(&params.reward_account)
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
@@ -333,7 +408,7 @@ where
         owners,
         registration,
         retirement,
-        calidus_key: None,
+        calidus_key: calidus_key.map(Box::new),
     };
 
     Ok(Json(response))
@@ -647,10 +722,23 @@ mod tests {
         pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
     };
+    use dolos_cardano::cip151;
     use dolos_cardano::model::{DRepDelegation, EpochValue, Stake};
     use dolos_testing::synthetic::SyntheticBlockConfig;
-    use pallas::{crypto::hash::Hash, ledger::primitives::StakeCredential};
+    use pallas::{
+        codec::utils::Bytes,
+        crypto::hash::Hash,
+        ledger::primitives::{alonzo, Int, StakeCredential},
+    };
     use serde_json::Value;
+
+    fn md_int(value: i64) -> alonzo::Metadatum {
+        alonzo::Metadatum::Int(Int::from(value))
+    }
+
+    fn md_map(items: Vec<(alonzo::Metadatum, alonzo::Metadatum)>) -> alonzo::Metadatum {
+        alonzo::Metadatum::Map(items.into())
+    }
 
     fn invalid_pool_id() -> &'static str {
         "not-a-pool"
@@ -701,6 +789,102 @@ mod tests {
         assert_eq!(pool.pool_id, pool_id);
         assert!(!pool.registration.is_empty());
         assert!(pool.retirement.is_empty());
+        assert!(pool.calidus_key.is_none());
+    }
+
+    fn cip151_pool_metadata(
+        pool_id: &str,
+        nonce: i128,
+        calidus_key: [u8; 32],
+    ) -> alonzo::Metadatum {
+        let operator = decode_pool_id(pool_id).expect("valid pool id");
+
+        md_map(vec![
+            (md_int(0), md_int(2)),
+            (
+                md_int(1),
+                md_map(vec![
+                    (
+                        md_int(1),
+                        alonzo::Metadatum::Array(vec![
+                            md_int(1),
+                            alonzo::Metadatum::Bytes(Bytes::from(operator)),
+                        ]),
+                    ),
+                    (md_int(2), alonzo::Metadatum::Array(vec![])),
+                    (md_int(3), alonzo::Metadatum::Array(vec![md_int(2)])),
+                    (
+                        md_int(4),
+                        alonzo::Metadatum::Int(Int::try_from(nonce).expect("nonce fits")),
+                    ),
+                    (
+                        md_int(7),
+                        alonzo::Metadatum::Bytes(Bytes::from(calidus_key.to_vec())),
+                    ),
+                ]),
+            ),
+        ])
+    }
+
+    #[tokio::test]
+    async fn pool_by_id_returns_calidus_key() {
+        let default_cfg = SyntheticBlockConfig {
+            pool_id: bech32_pool([9u8; 28]).expect("valid pool id"),
+            ..Default::default()
+        };
+        let pool_id = default_cfg.pool_id.clone();
+        let calidus_pub_key = [0x57; 32];
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            metadata_entries: vec![(
+                cip151::CIP151_METADATA_LABEL,
+                cip151_pool_metadata(&pool_id, 12345, calidus_pub_key),
+            )],
+            ..default_cfg
+        });
+
+        let path = format!("/pools/{pool_id}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
+        let calidus = pool.calidus_key.expect("missing calidus key");
+        assert_eq!(calidus.pub_key, hex::encode(calidus_pub_key));
+        assert_eq!(calidus.nonce, 12345);
+        assert!(calidus.id.starts_with("calidus1"));
+    }
+
+    #[tokio::test]
+    async fn pool_by_id_treats_zero_calidus_key_as_revocation() {
+        let default_cfg = SyntheticBlockConfig {
+            pool_id: bech32_pool([9u8; 28]).expect("valid pool id"),
+            ..Default::default()
+        };
+        let pool_id = default_cfg.pool_id.clone();
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            metadata_entries: vec![(
+                cip151::CIP151_METADATA_LABEL,
+                cip151_pool_metadata(&pool_id, 12345, [0u8; 32]),
+            )],
+            ..default_cfg
+        });
+
+        let path = format!("/pools/{pool_id}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pool: Pool = serde_json::from_slice(&bytes).expect("failed to parse pool response");
         assert!(pool.calidus_key.is_none());
     }
 
