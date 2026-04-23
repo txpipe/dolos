@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     extract::{Path, Query, State},
@@ -37,6 +37,8 @@ use crate::{
 
 const ACCOUNT_SCAN_CHUNK_SIZE: usize = 4096;
 
+type ActivePools = HashSet<PoolHash>;
+
 #[derive(Default, Clone, Copy)]
 struct PoolMetrics {
     live_stake: u64,
@@ -67,28 +69,64 @@ fn safe_ratio(part: u64, total: u64) -> f64 {
     }
 }
 
-fn reduce_account_chunk(accounts: &[AccountState], target_pool: PoolHash) -> PoolMetrics {
+fn live_stake_pool(account: &AccountState) -> Option<PoolHash> {
+    if !account.is_registered() {
+        return None;
+    }
+
+    account
+        .delegated_pool_live()
+        .or(account.retired_pool.as_ref())
+        .copied()
+}
+
+fn live_stake_denominator_pool(
+    account: &AccountState,
+    active_pools: &ActivePools,
+) -> Option<PoolHash> {
+    if !account.is_registered() {
+        return None;
+    }
+
+    let pool = account.delegated_pool_live()?;
+
+    active_pools.contains(pool).then_some(*pool)
+}
+
+fn active_stake_pool(account: &AccountState) -> Option<PoolHash> {
+    match account.pool.set() {
+        Some(PoolDelegation::Pool(hash)) => Some(*hash),
+        _ => None,
+    }
+}
+
+fn reduce_account_chunk(
+    accounts: &[AccountState],
+    target_pool: PoolHash,
+    active_pools: &ActivePools,
+) -> PoolMetrics {
     accounts
         .par_iter()
         .fold(PoolMetrics::default, |mut metrics, account| {
             let live_stake = account.live_stake();
-            metrics.total_live_stake += live_stake;
 
-            if let Some(hash) = account
-                .delegated_pool_live()
-                .or(account.retired_pool.as_ref())
-            {
-                if hash == &target_pool {
-                    metrics.live_stake += live_stake;
-                    metrics.live_delegators += 1;
-                }
+            if live_stake_denominator_pool(account, active_pools).is_some() {
+                metrics.total_live_stake += live_stake;
             }
 
-            let active_stake = account.active_stake();
-            metrics.total_active_stake += active_stake;
+            if live_stake_pool(account).is_some_and(|hash| hash == target_pool) {
+                metrics.live_stake += live_stake;
+            }
 
-            if let Some(PoolDelegation::Pool(hash)) = account.pool.set() {
-                if hash == &target_pool {
+            if live_stake_pool(account).is_some_and(|hash| hash == target_pool) {
+                metrics.live_delegators += 1;
+            }
+
+            if let Some(hash) = active_stake_pool(account) {
+                let active_stake = account.active_stake();
+                metrics.total_active_stake += active_stake;
+
+                if hash == target_pool {
                     metrics.active_stake += active_stake;
                 }
             }
@@ -96,6 +134,31 @@ fn reduce_account_chunk(accounts: &[AccountState], target_pool: PoolHash) -> Poo
             metrics
         })
         .reduce(PoolMetrics::default, |a, b| a.merge(b))
+}
+
+fn load_active_pools<D>(domain: &Facade<D>) -> Result<ActivePools, StatusCode>
+where
+    D: Domain,
+    Option<PoolState>: From<D::Entity>,
+{
+    let mut active_pools = ActivePools::default();
+
+    for item in domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if pool
+            .snapshot
+            .live()
+            .is_some_and(|snapshot| !snapshot.is_retired)
+        {
+            active_pools.insert(pool.operator);
+        }
+    }
+
+    Ok(active_pools)
 }
 
 fn compute_live_pledge<D: Domain>(
@@ -114,6 +177,10 @@ where
             return Ok(acc);
         };
 
+        if !account.is_registered() {
+            return Ok(acc);
+        }
+
         if account
             .delegated_pool_live()
             .or(account.retired_pool.as_ref())
@@ -129,6 +196,7 @@ where
 fn compute_pool_metrics_sync<D: Domain>(
     domain: Facade<D>,
     target_pool: PoolHash,
+    active_pools: ActivePools,
     owners: Vec<pallas::crypto::hash::Hash<28>>,
 ) -> Result<PoolMetrics, StatusCode>
 where
@@ -154,7 +222,7 @@ where
             break;
         }
 
-        metrics = metrics.merge(reduce_account_chunk(&chunk, target_pool));
+        metrics = metrics.merge(reduce_account_chunk(&chunk, target_pool, &active_pools));
     }
 
     metrics.live_pledge = compute_live_pledge(&domain, target_pool, &owners)?;
@@ -351,11 +419,12 @@ where
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let active_pools = load_active_pools(&domain)?;
     let owners = params.pool_owners.clone();
     let operator = pool.operator;
     let domain_clone = domain.clone();
     let metrics = tokio::task::spawn_blocking(move || {
-        compute_pool_metrics_sync(domain_clone, operator, owners)
+        compute_pool_metrics_sync(domain_clone, operator, active_pools, owners)
     })
     .await
     .map_err(|err| {
@@ -431,17 +500,17 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     {
         let (_, state) = x.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        if let Some(PoolDelegation::Pool(hash)) = state.pool.live() {
-            let stake = state.stake.live().map(|x| x.total()).unwrap_or(0);
+        if let Some(hash) = live_stake_pool(&state) {
+            let stake = state.live_stake();
             live_stake_map
-                .entry(*hash)
+                .entry(hash)
                 .and_modify(|entry| *entry += stake)
                 .or_insert(stake);
         };
-        if let Some(PoolDelegation::Pool(hash)) = state.pool.set() {
+        if let Some(hash) = active_stake_pool(&state) {
             let stake = state.stake.set().map(|x| x.total()).unwrap_or(0);
             active_stake_map
-                .entry(*hash)
+                .entry(hash)
                 .and_modify(|entry| *entry += stake)
                 .or_insert(stake);
         };
@@ -911,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn pool_metrics_include_retired_pool_stake() {
+    fn pool_metrics_exclude_unregistered_retired_pool_stake() {
         let target_pool = Hash::from([1u8; 28]);
         let account = AccountState {
             registered_at: None,
@@ -930,13 +999,166 @@ mod tests {
             retired_pool: Some(target_pool),
         };
 
-        let metrics = reduce_account_chunk(&[account], target_pool);
+        let metrics = reduce_account_chunk(&[account], target_pool, &ActivePools::default());
 
-        assert_eq!(metrics.live_stake, 42);
+        assert_eq!(metrics.live_stake, 0);
+        assert_eq!(metrics.live_pledge, 0);
+        assert_eq!(metrics.live_delegators, 0);
+        assert_eq!(metrics.total_live_stake, 0);
+        assert_eq!(metrics.active_stake, 0);
+    }
+
+    #[test]
+    fn pool_metrics_only_count_registered_accounts_with_pool_relation() {
+        let target_pool = Hash::from([1u8; 28]);
+        let other_active_pool = Hash::from([2u8; 28]);
+        let retired_pool = Hash::from([3u8; 28]);
+
+        let accounts = [
+            AccountState {
+                registered_at: Some(1),
+                stake: EpochValue::with_live(
+                    3,
+                    Stake {
+                        utxo_sum: 10,
+                        ..Default::default()
+                    },
+                ),
+                pool: EpochValue::with_live(3, PoolDelegation::Pool(target_pool)),
+                drep: EpochValue::with_live(3, DRepDelegation::NotDelegated),
+                vote_delegated_at: None,
+                deregistered_at: None,
+                credential: StakeCredential::AddrKeyhash(Hash::from([2u8; 28])),
+                retired_pool: None,
+            },
+            AccountState {
+                registered_at: Some(1),
+                stake: EpochValue::with_live(
+                    3,
+                    Stake {
+                        utxo_sum: 20,
+                        ..Default::default()
+                    },
+                ),
+                pool: EpochValue::with_live(3, PoolDelegation::Pool(other_active_pool)),
+                drep: EpochValue::with_live(3, DRepDelegation::NotDelegated),
+                vote_delegated_at: None,
+                deregistered_at: None,
+                credential: StakeCredential::AddrKeyhash(Hash::from([3u8; 28])),
+                retired_pool: None,
+            },
+            AccountState {
+                registered_at: Some(1),
+                stake: EpochValue::with_live(
+                    3,
+                    Stake {
+                        utxo_sum: 30,
+                        ..Default::default()
+                    },
+                ),
+                pool: EpochValue::with_live(3, PoolDelegation::Pool(retired_pool)),
+                drep: EpochValue::with_live(3, DRepDelegation::NotDelegated),
+                vote_delegated_at: None,
+                deregistered_at: None,
+                credential: StakeCredential::AddrKeyhash(Hash::from([4u8; 28])),
+                retired_pool: Some(retired_pool),
+            },
+            AccountState {
+                registered_at: Some(1),
+                stake: EpochValue::with_live(
+                    3,
+                    Stake {
+                        utxo_sum: 40,
+                        ..Default::default()
+                    },
+                ),
+                pool: EpochValue::with_live(3, PoolDelegation::NotDelegated),
+                drep: EpochValue::with_live(3, DRepDelegation::NotDelegated),
+                vote_delegated_at: None,
+                deregistered_at: None,
+                credential: StakeCredential::AddrKeyhash(Hash::from([5u8; 28])),
+                retired_pool: None,
+            },
+            AccountState {
+                registered_at: Some(1),
+                stake: EpochValue::with_live(
+                    3,
+                    Stake {
+                        utxo_sum: 50,
+                        ..Default::default()
+                    },
+                ),
+                pool: EpochValue::with_live(3, PoolDelegation::Pool(target_pool)),
+                drep: EpochValue::with_live(3, DRepDelegation::NotDelegated),
+                vote_delegated_at: None,
+                deregistered_at: Some(2),
+                credential: StakeCredential::AddrKeyhash(Hash::from([6u8; 28])),
+                retired_pool: None,
+            },
+        ];
+
+        let active_pools = ActivePools::from([target_pool, other_active_pool]);
+        let metrics = reduce_account_chunk(&accounts, target_pool, &active_pools);
+
+        assert_eq!(metrics.live_stake, 10);
         assert_eq!(metrics.live_pledge, 0);
         assert_eq!(metrics.live_delegators, 1);
-        assert_eq!(metrics.total_live_stake, 42);
+        assert_eq!(metrics.total_live_stake, 30);
         assert_eq!(metrics.active_stake, 0);
+        assert_eq!(metrics.total_active_stake, 0);
+    }
+
+    #[test]
+    fn pool_metrics_include_retired_pool_stake_for_registered_accounts() {
+        let target_pool = Hash::from([1u8; 28]);
+        let account = AccountState {
+            registered_at: Some(1),
+            stake: EpochValue::with_live(
+                3,
+                Stake {
+                    utxo_sum: 42,
+                    ..Default::default()
+                },
+            ),
+            pool: EpochValue::with_live(3, PoolDelegation::NotDelegated),
+            drep: EpochValue::with_live(3, DRepDelegation::NotDelegated),
+            vote_delegated_at: None,
+            deregistered_at: None,
+            credential: StakeCredential::AddrKeyhash(Hash::from([2u8; 28])),
+            retired_pool: Some(target_pool),
+        };
+
+        let metrics = reduce_account_chunk(&[account], target_pool, &ActivePools::default());
+
+        assert_eq!(metrics.live_stake, 42);
+        assert_eq!(metrics.total_live_stake, 0);
+        assert_eq!(metrics.live_delegators, 1);
+    }
+
+    #[tokio::test]
+    async fn pool_by_id_matches_extended_live_metrics() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let pool_path = format!("/pools/{pool_id}");
+        let (pool_status, pool_bytes) = app.get_bytes(&pool_path).await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?page=1&count=100").await;
+
+        assert_eq!(pool_status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pool: Pool =
+            serde_json::from_slice(&pool_bytes).expect("failed to parse pool response");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_pool = extended
+            .into_iter()
+            .find(|candidate| candidate.pool_id == pool_id)
+            .expect("pool missing from extended response");
+
+        assert_eq!(extended_pool.live_stake, pool.live_stake);
+        assert_eq!(extended_pool.live_saturation, pool.live_saturation);
     }
 
     #[tokio::test]
