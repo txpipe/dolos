@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use axum::{
     extract::{Path, Query, State},
@@ -6,8 +6,11 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
-    pool_list_extended_inner::PoolListExtendedInner, PoolListExtendedInnerMetadata,
+    drep_metadata_error::{Code as MetadataErrorCode, DrepMetadataError},
+    pool_delegators_inner::PoolDelegatorsInner,
+    pool_history_inner::PoolHistoryInner,
+    pool_list_extended_inner::PoolListExtendedInner,
+    PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{
     model::{AccountState, PoolState},
@@ -18,8 +21,10 @@ use futures::future::join_all;
 use itertools::Itertools;
 use pallas::{
     codec::minicbor,
+    crypto::hash::Hasher,
     ledger::{addresses::Network, primitives::StakeCredential},
 };
+use serde::Serialize;
 
 use crate::{
     error::Error,
@@ -37,6 +42,171 @@ fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     }
 
     Err(Error::Code(StatusCode::BAD_REQUEST))
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum PoolMetadataResponse {
+    Metadata(PoolMetadataModel),
+    Empty(EmptyObject),
+}
+
+#[derive(Default, Serialize)]
+pub struct EmptyObject {}
+
+fn build_pool_extended_metadata(
+    onchain: Option<&pallas::ledger::primitives::PoolMetadata>,
+    offchain: Option<crate::mapping::PoolOffchainMetadata>,
+) -> Option<Box<PoolListExtendedInnerMetadata>> {
+    onchain.map(|onchain| {
+        Box::new(match offchain {
+            Some(offchain) => PoolListExtendedInnerMetadata {
+                url: Some(onchain.url.clone()),
+                hash: Some(hex::encode(&*onchain.hash)),
+                error: None,
+                ticker: Some(offchain.ticker),
+                name: Some(offchain.name),
+                description: Some(offchain.description),
+                homepage: Some(offchain.homepage),
+            },
+            None => PoolListExtendedInnerMetadata {
+                url: Some(onchain.url.clone()),
+                hash: Some(hex::encode(&*onchain.hash)),
+                ..Default::default()
+            },
+        })
+    })
+}
+
+fn build_pool_metadata_response(
+    operator: impl AsRef<[u8]>,
+    onchain: Option<&pallas::ledger::primitives::PoolMetadata>,
+    offchain: Option<crate::mapping::PoolOffchainMetadata>,
+    error: Option<DrepMetadataError>,
+) -> Result<PoolMetadataResponse, StatusCode> {
+    let operator = operator.as_ref();
+
+    let Some(onchain) = onchain else {
+        return Ok(PoolMetadataResponse::Empty(EmptyObject::default()));
+    };
+
+    Ok(PoolMetadataResponse::Metadata(PoolMetadataModel {
+        pool_id: bech32_pool(operator)?,
+        hex: hex::encode(operator),
+        url: Some(onchain.url.clone()),
+        hash: Some(hex::encode(&*onchain.hash)),
+        error: error.map(Box::new),
+        ticker: offchain.as_ref().map(|x| x.ticker.clone()),
+        name: offchain.as_ref().map(|x| x.name.clone()),
+        description: offchain.as_ref().map(|x| x.description.clone()),
+        homepage: offchain.as_ref().map(|x| x.homepage.clone()),
+    }))
+}
+
+fn hash_mismatch_error(url: &str, expected_hash: &[u8], actual_hash: &[u8]) -> DrepMetadataError {
+    DrepMetadataError::new(
+        MetadataErrorCode::HashMismatch,
+        format!(
+            "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
+            hex::encode(expected_hash),
+            hex::encode(actual_hash),
+        ),
+    )
+}
+
+fn http_response_error(url: &str, status: StatusCode) -> DrepMetadataError {
+    let reason = status.canonical_reason().unwrap_or("Unknown");
+
+    DrepMetadataError::new(
+        MetadataErrorCode::HttpResponseError,
+        format!(
+            "Error Offchain Pool: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
+            status.as_u16(),
+        ),
+    )
+}
+
+fn connection_error(url: &str) -> DrepMetadataError {
+    DrepMetadataError::new(
+        MetadataErrorCode::ConnectionError,
+        format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
+    )
+}
+
+async fn fetch_pool_offchain_metadata(
+    pool: &PoolState,
+) -> Option<crate::mapping::PoolOffchainMetadata> {
+    let metadata = pool
+        .snapshot
+        .live()
+        .and_then(|x| x.params.pool_metadata.as_ref());
+
+    match metadata {
+        Some(metadata) => {
+            pool_offchain_metadata(&metadata.url, Some(metadata.hash.as_slice())).await
+        }
+        None => None,
+    }
+}
+
+async fn fetch_pool_metadata_with_error(
+    pool: &PoolState,
+) -> (
+    Option<crate::mapping::PoolOffchainMetadata>,
+    Option<DrepMetadataError>,
+) {
+    let Some(metadata) = pool
+        .snapshot
+        .live()
+        .and_then(|x| x.params.pool_metadata.as_ref())
+    else {
+        return (None, None);
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .user_agent("Dolos MiniBF")
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return (None, None),
+    };
+
+    let response = match client.get(&metadata.url).send().await {
+        Ok(response) => response,
+        Err(_) => return (None, Some(connection_error(&metadata.url))),
+    };
+
+    if response.status() != StatusCode::OK {
+        return (
+            None,
+            Some(http_response_error(&metadata.url, response.status())),
+        );
+    }
+
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(_) => return (None, None),
+    };
+
+    let actual_hash = Hasher::<256>::hash(body.as_ref());
+
+    if actual_hash.as_ref() != metadata.hash.as_slice() {
+        return (
+            None,
+            Some(hash_mismatch_error(
+                &metadata.url,
+                metadata.hash.as_slice(),
+                actual_hash.as_ref(),
+            )),
+        );
+    }
+
+    match serde_json::from_slice(body.as_ref()) {
+        Ok(offchain) => (Some(offchain), None),
+        Err(_) => (None, None),
+    }
 }
 
 pub async fn all_extended<D: Domain>(
@@ -102,19 +272,7 @@ where
 
     let metadata_futures: Vec<_> = pools
         .iter()
-        .map(|(_, pool)| {
-            let url = pool
-                .snapshot
-                .live()
-                .and_then(|x| x.params.pool_metadata.as_ref())
-                .map(|x| x.url.clone());
-            async move {
-                match url {
-                    Some(u) => pool_offchain_metadata(&u).await,
-                    None => None,
-                }
-            }
-        })
+        .map(|(_, pool)| fetch_pool_offchain_metadata(pool))
         .collect();
 
     let metadata_results = join_all(metadata_futures).await;
@@ -125,32 +283,9 @@ where
         let poolhex = hex::encode(pool.operator);
         let pool_id = bech32_pool(pool.operator)?;
         let params = pool.snapshot.live().map(|x| x.params.clone());
-        let metadata = match params.as_ref() {
-            Some(x) => match x.pool_metadata.as_ref() {
-                Some(onchain) => {
-                    let out = match fetched_metadata {
-                        Some(offchain) => PoolListExtendedInnerMetadata {
-                            url: Some(onchain.url.clone()),
-                            hash: Some(hex::encode(&*onchain.hash)),
-                            error: None,
-                            ticker: Some(offchain.ticker),
-                            name: Some(offchain.name),
-                            description: Some(offchain.description),
-                            homepage: Some(offchain.homepage),
-                        },
-                        None => PoolListExtendedInnerMetadata {
-                            url: Some(onchain.url.clone()),
-                            hash: Some(hex::encode(&*onchain.hash)),
-                            ..Default::default()
-                        },
-                    };
-
-                    Some(Box::new(out))
-                }
-                None => None,
-            },
-            None => None,
-        };
+        let metadata = params
+            .as_ref()
+            .and_then(|x| build_pool_extended_metadata(x.pool_metadata.as_ref(), fetched_metadata));
 
         let live = live_stake_map.get(&pool.operator).copied();
         let active = active_stake_map.get(&pool.operator).copied();
@@ -181,6 +316,29 @@ where
     }
 
     Ok(Json(out))
+}
+
+pub async fn by_id_metadata<D: Domain>(
+    Path(id): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<PoolMetadataResponse>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let operator = decode_pool_id(&id)?;
+    let pool = domain
+        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let onchain = pool
+        .snapshot
+        .live()
+        .and_then(|x| x.params.pool_metadata.as_ref());
+    let (offchain, error) = fetch_pool_metadata_with_error(&pool).await;
+
+    Ok(Json(build_pool_metadata_response(
+        operator, onchain, offchain, error,
+    )?))
 }
 
 struct PoolDelegatorModelBuilder {
@@ -347,6 +505,7 @@ mod tests {
         pool_delegators_inner::PoolDelegatorsInner, pool_list_extended_inner::PoolListExtendedInner,
     };
     use dolos_testing::synthetic::SyntheticBlockConfig;
+    use pallas::ledger::primitives::PoolMetadata;
 
     fn invalid_pool_id() -> &'static str {
         "not-a-pool"
@@ -413,6 +572,154 @@ mod tests {
     async fn pools_extended_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[test]
+    fn pool_metadata_response_empty_without_onchain_metadata() {
+        let response =
+            build_pool_metadata_response([1u8; 28], None, None, None).expect("pool metadata");
+
+        assert!(matches!(response, PoolMetadataResponse::Empty(_)));
+    }
+
+    #[test]
+    fn pool_metadata_response_includes_onchain_and_offchain_fields() {
+        let operator = [1u8; 28];
+        let onchain = PoolMetadata {
+            url: "https://example.com/pool.json".to_string(),
+            hash: vec![2u8; 32].into(),
+        };
+        let offchain = crate::mapping::PoolOffchainMetadata {
+            ticker: "TICK".to_string(),
+            name: "Pool Name".to_string(),
+            description: "Pool Description".to_string(),
+            homepage: "https://example.com".to_string(),
+        };
+
+        let response = build_pool_metadata_response(operator, Some(&onchain), Some(offchain), None)
+            .expect("pool metadata");
+
+        let PoolMetadataResponse::Metadata(response) = response else {
+            panic!("expected metadata response");
+        };
+
+        assert_eq!(
+            response.pool_id,
+            bech32_pool(operator).expect("bech32 pool id")
+        );
+        let expected_hash = hex::encode([2u8; 32]);
+        assert_eq!(response.hex, hex::encode(operator));
+        assert_eq!(
+            response.url.as_deref(),
+            Some("https://example.com/pool.json")
+        );
+        assert_eq!(response.hash.as_deref(), Some(expected_hash.as_str()));
+        assert_eq!(response.ticker.as_deref(), Some("TICK"));
+        assert_eq!(response.name.as_deref(), Some("Pool Name"));
+        assert_eq!(response.description.as_deref(), Some("Pool Description"));
+        assert_eq!(response.homepage.as_deref(), Some("https://example.com"));
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn pool_metadata_response_includes_error_details() {
+        let operator = [1u8; 28];
+        let onchain = PoolMetadata {
+            url: "https://tinyurl.com/39a7pnv5".to_string(),
+            hash: vec![
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+                0x89, 0xab, 0xcd, 0xef,
+            ]
+            .into(),
+        };
+        let error = hash_mismatch_error(
+            &onchain.url,
+            onchain.hash.as_slice(),
+            &[
+                0xb1, 0x23, 0xea, 0x83, 0xd1, 0xf8, 0x7a, 0xfc, 0xb9, 0x5a, 0x76, 0x66, 0x1b, 0xe5,
+                0x08, 0xb3, 0x7a, 0x09, 0x57, 0xc7, 0xfa, 0x95, 0xba, 0xa8, 0x83, 0xa8, 0x0d, 0x12,
+                0x03, 0xff, 0xcd, 0x94,
+            ],
+        );
+
+        let response = build_pool_metadata_response(operator, Some(&onchain), None, Some(error))
+            .expect("pool metadata");
+
+        let PoolMetadataResponse::Metadata(response) = response else {
+            panic!("expected metadata response");
+        };
+
+        let error = response.error.expect("expected error");
+        assert_eq!(error.code, MetadataErrorCode::HashMismatch);
+        assert!(error
+            .message
+            .contains("Hash mismatch when fetching metadata"));
+    }
+
+    #[test]
+    fn pool_metadata_http_response_error_matches_expected_format() {
+        let error =
+            http_response_error("https://blockfrost.io/fakemetadata", StatusCode::NOT_FOUND);
+
+        assert_eq!(error.code, MetadataErrorCode::HttpResponseError);
+        assert_eq!(
+            error.message,
+            "Error Offchain Pool: HTTP Response error from https://blockfrost.io/fakemetadata resulted in HTTP status code : 404 \"Not Found\""
+        );
+    }
+
+    #[test]
+    fn pool_metadata_connection_error_matches_expected_format() {
+        let error =
+            connection_error("http://localhost:23009/p/pool_clai_registration_metadata.json");
+
+        assert_eq!(error.code, MetadataErrorCode::ConnectionError);
+        assert_eq!(
+            error.message,
+            "Error Offchain Pool: Connection failure error when fetching metadata from http://localhost:23009/p/pool_clai_registration_metadata.json."
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_metadata_happy_path_returns_empty_object_when_unset() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/metadata");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let response: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("failed to parse pool metadata");
+        assert_eq!(response, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn pools_metadata_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/metadata", invalid_pool_id());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_metadata_not_found() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/metadata", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_metadata_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/metadata");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]

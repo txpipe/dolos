@@ -141,7 +141,25 @@ pub struct PoolOffchainMetadata {
     pub homepage: String,
 }
 
-pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
+fn parse_pool_offchain_metadata(
+    body: &[u8],
+    expected_hash: Option<&[u8]>,
+) -> Option<PoolOffchainMetadata> {
+    if let Some(expected_hash) = expected_hash {
+        let actual_hash = Hasher::<256>::hash(body);
+
+        if actual_hash.as_ref() != expected_hash {
+            return None;
+        }
+    }
+
+    serde_json::from_slice(body).ok()
+}
+
+pub async fn pool_offchain_metadata(
+    url: &str,
+    expected_hash: Option<&[u8]>,
+) -> Option<PoolOffchainMetadata> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::limited(3))
@@ -155,7 +173,9 @@ pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
         return None;
     }
 
-    res.json().await.ok()
+    let body = res.bytes().await.ok()?;
+
+    parse_pool_offchain_metadata(body.as_ref(), expected_hash)
 }
 
 pub trait IntoModel<T>
@@ -699,7 +719,7 @@ impl<'a> TxModelBuilder<'a> {
                     {
                         pool_metadata
                             .as_ref()
-                            .map(|meta| (operator, meta.url.clone()))
+                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
                     } else {
                         None
                     }
@@ -713,7 +733,7 @@ impl<'a> TxModelBuilder<'a> {
                     {
                         pool_metadata
                             .as_ref()
-                            .map(|meta| (operator, meta.url.clone()))
+                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
                     } else {
                         None
                     }
@@ -723,8 +743,8 @@ impl<'a> TxModelBuilder<'a> {
             .collect_vec();
 
         self.pool_metadata = join_all(pool_registrations.iter().map(
-            |(pool_hash, url)| async move {
-                pool_offchain_metadata(url)
+            |(pool_hash, url, hash)| async move {
+                pool_offchain_metadata(url, Some(hash.as_slice()))
                     .await
                     .map(|meta| (*pool_hash, meta))
             },
