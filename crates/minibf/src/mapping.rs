@@ -1031,6 +1031,12 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let chain = self.chain_or_500()?;
 
         let block_time = chain.slot_time(block.slot());
+        let treasury_donation = tx
+            .as_conway()
+            .and_then(|x| x.transaction_body.donation.as_ref())
+            .map(u64::from)
+            .unwrap_or_default()
+            .to_string();
 
         let tx = TxContent {
             hash: tx.hash().to_string(),
@@ -1063,6 +1069,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
             deposit: self.deposit.unwrap_or_default().to_string(),
+            treasury_donation,
         };
 
         Ok(tx)
