@@ -460,6 +460,12 @@ fn run_epoch_pots_test(
     // When estart fires for epoch N+1, ended_state() holds the completed epoch N.
     let mut captured_epoch: Option<EpochState> = None;
 
+    // Accumulate applied rewards across all EwrapShard work units for the
+    // subject boundary. Each shard holds only its own slice in memory, but
+    // the test harness needs the full set at the end for the CSV dump.
+    let mut accumulated_applied: Vec<AppliedReward> = Vec::new();
+    let mut accumulated_ending_epoch: Option<u64> = None;
+
     harness
         .run(100, |_domain, work| {
             match work {
@@ -490,16 +496,25 @@ fn run_epoch_pots_test(
                         }
                     }
                 }
-                CardanoWorkUnit::Ewrap(ewrap) => {
-                    // Dump rewards from EWRAP (only actually applied/spendable rewards)
-                    if let Some(boundary) = ewrap.boundary() {
-                        // performance_epoch = ending_epoch - 1
-                        // For epoch 214 ending, rewards are for performance_epoch 213
-                        let ending_epoch = boundary.ending_state().number;
+                CardanoWorkUnit::EwrapPrepare(prep) => {
+                    // Reset accumulator at the start of each boundary.
+                    if let Some(boundary) = prep.boundary() {
+                        accumulated_applied.clear();
+                        accumulated_ending_epoch = Some(boundary.ending_state().number);
+                    }
+                }
+                CardanoWorkUnit::EwrapShard(shard) => {
+                    // Each shard contributes its slice of applied rewards.
+                    if let Some(boundary) = shard.boundary() {
+                        accumulated_applied.extend(boundary.applied_rewards.iter().cloned());
+                    }
+                }
+                CardanoWorkUnit::EwrapFinalize(_) => {
+                    if let Some(ending_epoch) = accumulated_ending_epoch.take() {
                         if ending_epoch >= 1 {
                             let performance_epoch = ending_epoch - 1;
                             if let Err(e) = dump_applied_rewards_csv(
-                                &boundary.applied_rewards,
+                                &accumulated_applied,
                                 cardano_network,
                                 &dumps_dir,
                                 performance_epoch,
@@ -507,6 +522,7 @@ fn run_epoch_pots_test(
                                 eprintln!("failed to dump rewards csv: {e}");
                             }
                         }
+                        accumulated_applied.clear();
                     }
                 }
                 _ => {}

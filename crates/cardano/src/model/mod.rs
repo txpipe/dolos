@@ -204,6 +204,8 @@ pub enum CardanoDelta {
     PoolDepositRefund(Box<PoolDepositRefund>),
     EpochTransition(Box<EpochTransition>),
     EpochWrapUp(Box<EpochWrapUp>),
+    EpochEndInit(Box<EpochEndInit>),
+    EpochEndAccumulate(Box<EpochEndAccumulate>),
     DRepDelegatorDrop(Box<DRepDelegatorDrop>),
     PoolDelegatorRetire(Box<PoolDelegatorRetire>),
     PoolWrapUp(Box<PoolWrapUp>),
@@ -279,6 +281,8 @@ delta_from!(AccountTransition);
 delta_from!(PoolDepositRefund);
 delta_from!(EpochTransition);
 delta_from!(EpochWrapUp);
+delta_from!(EpochEndInit);
+delta_from!(EpochEndAccumulate);
 delta_from!(DRepDelegatorDrop);
 delta_from!(PoolDelegatorRetire);
 delta_from!(PoolWrapUp);
@@ -324,6 +328,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDepositRefund(x) => x.key(),
             Self::EpochTransition(x) => x.key(),
             Self::EpochWrapUp(x) => x.key(),
+            Self::EpochEndInit(x) => x.key(),
+            Self::EpochEndAccumulate(x) => x.key(),
             Self::PoolDelegatorRetire(x) => x.key(),
             Self::DRepDelegatorDrop(x) => x.key(),
             Self::PoolWrapUp(x) => x.key(),
@@ -368,6 +374,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDepositRefund(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EpochTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EpochWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EpochEndInit(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::EpochEndAccumulate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolDelegatorRetire(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -412,6 +420,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PoolDepositRefund(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EpochTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EpochWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EpochEndInit(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::EpochEndAccumulate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolDelegatorRetire(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),

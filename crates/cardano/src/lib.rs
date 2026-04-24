@@ -69,8 +69,20 @@ pub enum CardanoWorkUnit {
     Roll(Box<roll::RollWorkUnit>),
     /// Compute rewards at stability window boundary.
     Rupd(Box<rupd::RupdWorkUnit>),
-    /// Handle epoch boundary wrap-up processing.
-    Ewrap(Box<ewrap::EwrapWorkUnit>),
+    /// Handle the global portion of the epoch boundary (pool/drep/proposal
+    /// classification, MIRs, enactment, deposit refunds). Emits
+    /// `EpochEndInit` to seed `EpochState.end` with the prepare-time globals
+    /// and zeroed reward accumulators.
+    EwrapPrepare(Box<ewrap::EwrapPrepareWorkUnit>),
+    /// Handle one shard of per-account reward application. Emitted
+    /// `config.ewrap_total_shards` times in sequence. Each shard covers a
+    /// first-byte prefix range of the account key space and accumulates its
+    /// contribution into `EpochState.end` via `EpochEndAccumulate`.
+    EwrapShard(Box<ewrap::EwrapShardWorkUnit>),
+    /// Handle the finalise portion of the epoch boundary: read the
+    /// accumulated `EpochState.end` and emit `EpochWrapUp` (which transitions
+    /// rolling/pparams and clears `ewrap_progress`).
+    EwrapFinalize(Box<ewrap::EwrapFinalizeWorkUnit>),
     /// Handle epoch start processing.
     Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
@@ -86,7 +98,9 @@ where
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::name(w),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::name(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
+            Self::EwrapPrepare(w) => <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::name(w),
+            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::name(w),
+            Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::name(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
         }
@@ -97,7 +111,11 @@ where
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::EwrapPrepare(w) => <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::EwrapFinalize(w) => {
+                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::load(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -108,7 +126,9 @@ where
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
+            Self::EwrapPrepare(w) => <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::compute(w),
+            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::compute(w),
+            Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::compute(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
             Self::ForcedStop => Ok(()),
         }
@@ -119,7 +139,15 @@ where
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::EwrapPrepare(w) => {
+                <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+            }
+            Self::EwrapShard(w) => {
+                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+            }
+            Self::EwrapFinalize(w) => {
+                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -130,7 +158,15 @@ where
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_state(w, domain),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::EwrapPrepare(w) => {
+                <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            }
+            Self::EwrapShard(w) => {
+                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            }
+            Self::EwrapFinalize(w) => {
+                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::ForcedStop => Err(DomainError::StopEpochReached),
         }
@@ -143,7 +179,15 @@ where
             }
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
+            Self::EwrapPrepare(w) => {
+                <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            }
+            Self::EwrapShard(w) => {
+                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            }
+            Self::EwrapFinalize(w) => {
+                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -156,7 +200,15 @@ where
             }
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
+            Self::EwrapPrepare(w) => {
+                <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            }
+            Self::EwrapShard(w) => {
+                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            }
+            Self::EwrapFinalize(w) => {
+                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -167,7 +219,9 @@ where
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::EwrapPrepare(w) => <ewrap::EwrapPrepareWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
@@ -229,6 +283,41 @@ impl dolos_core::ChainLogic for CardanoLogic {
             None => WorkBuffer::Empty,
         };
 
+        // Crash-recovery check: if the previous process crashed mid-EWRAP,
+        // `EpochState.ewrap_progress` will be `Some(i)` with `i` equal to the
+        // next shard that should have run. Detect and warn — full resume
+        // requires re-fetching the boundary block from upstream, which is
+        // tracked separately.
+        if let Ok(epoch) = load_epoch::<D>(state) {
+            if let Some(progress) = epoch.ewrap_progress {
+                let total = config.ewrap_total_shards();
+                if progress < total {
+                    tracing::warn!(
+                        epoch = epoch.number,
+                        next_shard = progress,
+                        total_shards = total,
+                        "crash detected mid-EWRAP: ewrap_progress is set. \
+                         On the next block that triggers the boundary, dolos will \
+                         begin the EWRAP pipeline from scratch; correctness depends \
+                         on shard idempotency (state deletes are no-ops if already \
+                         applied; EpochEndAccumulate guards on shard_index). \
+                         Operators should monitor the subsequent boundary for \
+                         inconsistency. TODO: implement true shard resume."
+                    );
+                } else {
+                    tracing::warn!(
+                        epoch = epoch.number,
+                        progress,
+                        total_shards = total,
+                        "found EpochState.ewrap_progress == total_shards at \
+                         startup — EwrapFinalize was not reached before crash. \
+                         The next boundary attempt will re-run prepare and shards; \
+                         idempotency should keep the result correct."
+                    );
+                }
+            }
+        }
+
         let eras = eras::load_era_summary::<D>(state)?;
 
         // Use randomness_stability_window (4k/f) for the RUPD trigger boundary.
@@ -286,7 +375,8 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let work = self.work.take().expect("work buffer is initialized");
 
-        let (work_unit, new_buffer) = work.pop_work(self.config.stop_epoch);
+        let (work_unit, new_buffer) =
+            work.pop_work(self.config.stop_epoch, self.config.ewrap_total_shards());
 
         self.work = Some(new_buffer);
 
@@ -312,14 +402,28 @@ impl dolos_core::ChainLogic for CardanoLogic {
             InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(Box::new(
                 rupd::RupdWorkUnit::new(slot, domain.genesis()),
             ))),
-            InternalWorkUnit::EWrap(slot) => {
-                // Rewards are loaded from state store during EWRAP load phase
-                Some(CardanoWorkUnit::Ewrap(Box::new(ewrap::EwrapWorkUnit::new(
+            InternalWorkUnit::EwrapPrepare(slot) => Some(CardanoWorkUnit::EwrapPrepare(
+                Box::new(ewrap::EwrapPrepareWorkUnit::new(
                     slot,
                     self.config.clone(),
                     domain.genesis(),
-                ))))
-            }
+                )),
+            )),
+            InternalWorkUnit::EwrapShard(slot, shard_index) => Some(CardanoWorkUnit::EwrapShard(
+                Box::new(ewrap::EwrapShardWorkUnit::new(
+                    slot,
+                    self.config.clone(),
+                    domain.genesis(),
+                    shard_index,
+                )),
+            )),
+            InternalWorkUnit::EwrapFinalize(slot) => Some(CardanoWorkUnit::EwrapFinalize(
+                Box::new(ewrap::EwrapFinalizeWorkUnit::new(
+                    slot,
+                    self.config.clone(),
+                    domain.genesis(),
+                )),
+            )),
             InternalWorkUnit::EStart(slot) => {
                 // EStart may trigger era transitions, schedule cache refresh
                 self.needs_cache_refresh = true;

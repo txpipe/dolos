@@ -1,4 +1,4 @@
-use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUp, PoolHash, PoolState, PoolWrapUp};
+use crate::{AccountState, CardanoDelta, EndStats, EpochEndInit, PoolHash, PoolState, PoolWrapUp};
 use dolos_core::ChainError;
 
 #[derive(Default)]
@@ -80,34 +80,12 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         );
     }
 
-    let effective = ctx.rewards.applied_effective();
-    let to_treasury = ctx.rewards.applied_unspendable_to_treasury();
-    let to_reserves = ctx.rewards.applied_unspendable_to_reserves();
-
-    // Sum of applied_rewards should match effective
-    let applied_rewards_sum: u64 = ctx.applied_rewards.iter().map(|r| r.amount).sum();
-
-    #[cfg(feature = "strict")]
-    assert!(
-        effective == applied_rewards_sum,
-        "EWRAP epoch {}: effective_rewards ({}) != applied_rewards_sum ({}), diff = {}",
-        ctx.ending_state().number,
-        effective,
-        applied_rewards_sum,
-        effective as i64 - applied_rewards_sum as i64
-    );
-
+    // Reward accumulators start at zero — shards add to them via
+    // `EpochEndAccumulate` before `EwrapFinalize` emits `EpochWrapUp`.
     tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
-        %effective,
-        %to_treasury,
-        %to_reserves,
-        consumed = %(effective + to_treasury),
-        returned = %(incentives.available_rewards.saturating_sub(effective + to_treasury)),
-        %applied_rewards_sum,
-        applied_rewards_count = ctx.applied_rewards.len(),
-        "EWRAP reward classification"
+        "EWRAP prepare: seeding EndStats with zero reward accumulators"
     );
 
     EndStats {
@@ -115,9 +93,9 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
         epoch_incentives: incentives.clone(),
-        effective_rewards: effective,
-        unspendable_to_treasury: to_treasury,
-        unspendable_to_reserves: to_reserves,
+        effective_rewards: 0,
+        unspendable_to_treasury: 0,
+        unspendable_to_reserves: 0,
         treasury_mirs,
         reserve_mirs,
         invalid_treasury_mirs,
@@ -148,9 +126,13 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
+        // Emit the prepare-time EndStats seed. The reward accumulators are
+        // zero here; shards will add their contributions via
+        // `EpochEndAccumulate`, and `EwrapFinalize` will emit `EpochWrapUp`
+        // against the accumulated `end`.
         let stats = define_end_stats(ctx);
 
-        ctx.deltas.add_for_entity(EpochWrapUp::new(stats));
+        ctx.deltas.add_for_entity(EpochEndInit::new(stats));
 
         Ok(())
     }

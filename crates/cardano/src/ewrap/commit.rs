@@ -1,8 +1,14 @@
-//! Commit logic for epoch wrap (ewrap) work unit.
+//! Commit logic for the three EWRAP phases.
 //!
-//! This module uses a streaming pattern that processes entities one-by-one,
-//! applying deltas and writing immediately without accumulating all entities
-//! in memory.
+//! Each phase commits its own deltas and archive logs atomically. The handoff
+//! between phases happens via `EpochState.end` + `EpochState.ewrap_progress`
+//! (see `EpochEndInit` / `EpochEndAccumulate` / `EpochWrapUp` deltas).
+//!
+//! All phases share the same streaming helper: each entity namespace is read
+//! one record at a time, deltas for that record are applied, and the result
+//! is written immediately. Peak residency is bounded by whatever the current
+//! phase keeps in `BoundaryWork` — prepare keeps the small globals, shards
+//! keep a single key-range slice, finalize keeps nothing per-account.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
@@ -18,23 +24,22 @@ use crate::{
 impl BoundaryWork {
     /// Stream entities from a namespace, apply deltas, and write immediately.
     ///
-    /// Processes entities one at a time without accumulating them in memory,
-    /// reducing peak memory usage during epoch boundary commits.
+    /// `range` optionally narrows iteration (shard phase uses it).
     fn stream_and_apply_namespace<D, E>(
         &mut self,
         state: &D::State,
         writer: &<D::State as StateStore>::Writer,
+        range: Option<std::ops::Range<dolos_core::EntityKey>>,
     ) -> Result<(), ChainError>
     where
         D: Domain,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
-        let records = state.iter_entities_typed::<E>(E::NS, None)?;
+        let records = state.iter_entities_typed::<E>(E::NS, range)?;
 
         for record in records {
             let (entity_id, entity) = record?;
 
-            // Check if this entity has deltas to apply
             let to_apply = self
                 .deltas
                 .entities
@@ -47,7 +52,6 @@ impl BoundaryWork {
                     delta.apply(&mut entity);
                 }
 
-                // Write immediately - don't collect!
                 writer.save_entity_typed(E::NS, &entity_id, entity.as_ref())?;
             } else {
                 trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
@@ -57,44 +61,37 @@ impl BoundaryWork {
         Ok(())
     }
 
+    /// Commit the prepare phase: enactment/MIR/refund/wrapup-global deltas for
+    /// pools, dreps, proposals, the epoch state (`EpochEndInit`), plus archive
+    /// logs produced by the prepare visitors (e.g. `PoolDepositRefundLog`).
     #[instrument(skip_all)]
-    pub fn commit<D: Domain>(
+    pub fn commit_prepare<D: Domain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
     ) -> Result<(), ChainError> {
-        debug!("committing ewrap changes (streaming mode)");
+        debug!("committing ewrap prepare changes");
 
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
-        // Stream each namespace - entities are read, processed, and written one at a time
-        debug!("streaming account entities");
-        self.stream_and_apply_namespace::<D, AccountState>(state, &writer)?;
+        // Apply deltas to pools / dreps / proposals. Accounts are skipped —
+        // the only prepare-phase `AssignRewards` deltas are from MIRs, which
+        // are applied in the account namespace below (range-scoped).
+        self.stream_and_apply_namespace::<D, PoolState>(state, &writer, None)?;
+        self.stream_and_apply_namespace::<D, DRepState>(state, &writer, None)?;
+        self.stream_and_apply_namespace::<D, ProposalState>(state, &writer, None)?;
 
-        debug!("streaming pool entities");
-        self.stream_and_apply_namespace::<D, PoolState>(state, &writer)?;
+        // MIR AssignRewards land on accounts; stream the account namespace so
+        // MIR recipients get their rewards applied here (only recipients have
+        // queued deltas, so this is effectively a targeted write via the
+        // streaming path).
+        self.stream_and_apply_namespace::<D, AccountState>(state, &writer, None)?;
 
-        debug!("streaming drep entities");
-        self.stream_and_apply_namespace::<D, DRepState>(state, &writer)?;
+        // EpochState gets the EpochEndInit delta.
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
 
-        debug!("streaming proposal entities");
-        self.stream_and_apply_namespace::<D, ProposalState>(state, &writer)?;
-
-        debug!("streaming epoch entities");
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer)?;
-
-        // Delete applied pending rewards
-        debug!(
-            count = self.applied_reward_credentials.len(),
-            "deleting applied pending rewards"
-        );
-        for credential in self.applied_reward_credentials.drain(..) {
-            let key = credential_to_key(&credential);
-            writer.delete_entity(PendingRewardState::NS, &key)?;
-        }
-
-        // Delete processed pending MIRs
+        // Delete processed pending MIRs.
         debug!(
             count = self.applied_mir_credentials.len(),
             "deleting processed pending MIRs"
@@ -104,11 +101,64 @@ impl BoundaryWork {
             writer.delete_entity(PendingMirState::NS, &key)?;
         }
 
-        // Drain remaining unspendable rewards
+        // Write archive logs under the epoch-start temporal key.
+        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+
+        debug!(log_count = self.logs.len(), "writing prepare archive logs");
+        for (entity_key, log) in self.logs.drain(..) {
+            let log_key = LogKey::from((temporal_key.clone(), entity_key));
+            archive_writer.write_log_typed(&log_key, &log)?;
+        }
+
+        if !self.deltas.entities.is_empty() {
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted prepare deltas");
+        }
+
+        writer.commit()?;
+        archive_writer.commit()?;
+
+        debug!("ewrap prepare commit complete");
+        Ok(())
+    }
+
+    /// Commit a single shard: apply per-account deltas (rewards + drops) and
+    /// the `EpochEndAccumulate` delta against `EpochState`, flush archive logs
+    /// (`{Leader,Member}RewardLog`), delete applied pending rewards.
+    #[instrument(skip(self, state, archive))]
+    pub fn commit_shard<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        range: std::ops::Range<dolos_core::EntityKey>,
+    ) -> Result<(), ChainError> {
+        debug!("committing ewrap shard changes");
+
+        let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
+
+        // Stream accounts in this shard's range only.
+        self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+
+        // EpochState gets the EpochEndAccumulate delta (single entity).
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+
+        // Delete applied pending rewards.
+        debug!(
+            count = self.applied_reward_credentials.len(),
+            "deleting applied pending rewards"
+        );
+        for credential in self.applied_reward_credentials.drain(..) {
+            let key = credential_to_key(&credential);
+            writer.delete_entity(PendingRewardState::NS, &key)?;
+        }
+
+        // Any unspendable rewards left in the map after flush (i.e. those not
+        // in drain_unspendable — shouldn't happen today but kept for safety).
         if !self.rewards.is_empty() {
             warn!(
                 remaining = self.rewards.len(),
-                "draining remaining unspendable rewards"
+                "draining remaining pending rewards (shard)"
             );
             for (credential, _) in self.rewards.iter_pending() {
                 let key = credential_to_key(credential);
@@ -116,30 +166,59 @@ impl BoundaryWork {
             }
         }
 
-        // Write archive logs (still accumulated during compute_deltas, but much smaller than entities)
-        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state.number);
+        // Archive logs — share the epoch-start temporal key across shards.
+        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
         let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
 
-        debug!(log_count = self.logs.len(), "writing archive logs");
+        debug!(log_count = self.logs.len(), "writing shard archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
         }
 
-        // Write epoch state to archive
-        archive_writer.write_log_typed(&temporal_key.clone().into(), &self.ending_state)?;
-
-        // Verify all deltas were processed
         if !self.deltas.entities.is_empty() {
-            warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
         }
 
-        // Commit both writers atomically
         writer.commit()?;
         archive_writer.commit()?;
 
-        debug!("ewrap commit complete");
+        debug!("ewrap shard commit complete");
+        Ok(())
+    }
 
+    /// Commit the finalize phase: apply the `EpochWrapUp` delta to
+    /// `EpochState` (transitions rolling/pparams, clears `ewrap_progress`),
+    /// write the completed `EpochState` to the archive.
+    #[instrument(skip_all)]
+    pub fn commit_finalize<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+    ) -> Result<(), ChainError> {
+        debug!("committing ewrap finalize changes");
+
+        let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
+
+        // Only EpochState has queued deltas here (EpochWrapUp).
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+
+        // Write the completed epoch state to archive, preserving the
+        // pre-transition snapshot for historical queries.
+        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+
+        archive_writer.write_log_typed(&temporal_key.clone().into(), self.ending_state())?;
+
+        if !self.deltas.entities.is_empty() {
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted finalize deltas");
+        }
+
+        writer.commit()?;
+        archive_writer.commit()?;
+
+        debug!("ewrap finalize commit complete");
         Ok(())
     }
 }

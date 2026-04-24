@@ -24,6 +24,7 @@ pub struct AppliedReward {
 
 pub mod commit;
 pub mod loading;
+pub mod shard;
 pub mod work_unit;
 
 // visitors
@@ -33,7 +34,7 @@ pub mod refunds;
 pub mod rewards;
 pub mod wrapup;
 
-pub use work_unit::EwrapWorkUnit;
+pub use work_unit::{EwrapFinalizeWorkUnit, EwrapPrepareWorkUnit, EwrapShardWorkUnit};
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -165,6 +166,21 @@ pub struct BoundaryWork {
 
     /// Credentials whose pending MIRs were processed (need to be dequeued from state).
     pub applied_mir_credentials: Vec<StakeCredential>,
+
+    /// Shard-local reward accumulator — total effective rewards applied by the
+    /// current shard. Snapshot into `EpochEndAccumulate` at the end of the
+    /// shard's compute phase. Zero in prepare / finalize phases.
+    pub shard_applied_effective: u64,
+
+    /// Shard-local unspendable reward routed to treasury (accounts that
+    /// deregistered between RUPD and EWRAP). Snapshot into
+    /// `EpochEndAccumulate` at the end of the shard's compute phase.
+    pub shard_applied_unspendable_to_treasury: u64,
+
+    /// Shard-local unspendable reward that returns to reserves (pre-Babbage
+    /// filtered entries). Snapshot into `EpochEndAccumulate` at the end of
+    /// the shard's compute phase.
+    pub shard_applied_unspendable_to_reserves: u64,
 }
 
 impl BoundaryWork {

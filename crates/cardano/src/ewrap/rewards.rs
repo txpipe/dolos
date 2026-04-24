@@ -79,6 +79,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         self.change(AssignRewards::new(id.clone(), reward.total_value()));
 
         for (pool, value, as_leader) in reward.into_vec() {
+            // Per-shard bookkeeping: each shard's applied_rewards is bounded
+            // by the shard's account count, so holding it for the duration of
+            // the shard is fine (the memory bound is per-shard, not epoch).
             ctx.applied_rewards.push(AppliedReward {
                 credential: account.credential.clone(),
                 pool,

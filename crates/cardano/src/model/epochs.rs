@@ -241,6 +241,14 @@ pub struct EpochState {
     #[n(14)]
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
+
+    /// When set, EWRAP sharding is in progress and this holds the next shard
+    /// index to run. Initialised by `EpochEndInit` (EwrapPrepare), advanced by
+    /// each `EpochEndAccumulate` (EwrapShard), cleared by `EpochWrapUp`
+    /// (EwrapFinalize). Doubles as cursor + "EWRAP in flight" flag.
+    #[n(15)]
+    #[cbor(default)]
+    pub ewrap_progress: Option<u32>,
 }
 
 impl Default for EpochState {
@@ -255,6 +263,7 @@ impl Default for EpochState {
             nonces: None,
             end: None,
             incentives: None,
+            ewrap_progress: None,
         }
     }
 }
@@ -347,6 +356,7 @@ pub(crate) mod testing {
                 nonces,
                 end,
                 incentives,
+                ewrap_progress: None,
             }
         }
     }
@@ -554,6 +564,7 @@ pub struct EpochWrapUp {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
+    pub(crate) prev_ewrap_progress: Option<u32>,
 }
 
 impl EpochWrapUp {
@@ -563,6 +574,7 @@ impl EpochWrapUp {
             prev_rolling: None,
             prev_pparams: None,
             prev_end: None,
+            prev_ewrap_progress: None,
         }
     }
 }
@@ -580,10 +592,12 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
+        self.prev_ewrap_progress = entity.ewrap_progress;
 
         entity.rolling.scheduled_or_default();
         entity.pparams.scheduled_or_default();
         entity.end = Some(self.stats.clone());
+        entity.ewrap_progress = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -591,6 +605,151 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
         entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
         entity.end = self.prev_end.clone();
+        entity.ewrap_progress = self.prev_ewrap_progress;
+    }
+}
+
+/// Delta emitted once by `EwrapPrepare` to initialise `EpochState.end` with
+/// the globals known at prepare time (pool counts, MIR totals, proposal
+/// refunds, epoch incentives) and zeroed reward accumulators, plus set
+/// `ewrap_progress = Some(0)` to mark the start of the sharding pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochEndInit {
+    pub(crate) stats: EndStats,
+
+    // undo
+    pub(crate) prev_end: Option<EndStats>,
+    pub(crate) prev_ewrap_progress: Option<u32>,
+}
+
+impl EpochEndInit {
+    pub fn new(stats: EndStats) -> Self {
+        Self {
+            stats,
+            prev_end: None,
+            prev_ewrap_progress: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for EpochEndInit {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        self.prev_end = entity.end.clone();
+        self.prev_ewrap_progress = entity.ewrap_progress;
+
+        entity.end = Some(self.stats.clone());
+        entity.ewrap_progress = Some(0);
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.end = self.prev_end.clone();
+        entity.ewrap_progress = self.prev_ewrap_progress;
+    }
+}
+
+/// Delta emitted once per `EwrapShard` to accumulate the shard's reward-
+/// distribution contribution into `EpochState.end` and advance
+/// `ewrap_progress` to the next shard index. Idempotent on repeat-apply by
+/// guarding on the shard index — a shard that was already committed will have
+/// `ewrap_progress > completed_shard_index` and should skip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochEndAccumulate {
+    pub(crate) effective_delta: u64,
+    pub(crate) unspendable_to_treasury_delta: u64,
+    pub(crate) unspendable_to_reserves_delta: u64,
+    pub(crate) completed_shard_index: u32,
+}
+
+impl EpochEndAccumulate {
+    pub fn new(
+        effective_delta: u64,
+        unspendable_to_treasury_delta: u64,
+        unspendable_to_reserves_delta: u64,
+        completed_shard_index: u32,
+    ) -> Self {
+        Self {
+            effective_delta,
+            unspendable_to_treasury_delta,
+            unspendable_to_reserves_delta,
+            completed_shard_index,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for EpochEndAccumulate {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        // Idempotency guard: if this shard was already applied (recovery
+        // scenario — the shard committed to state but the process crashed
+        // before advancing the work buffer past it), skip. The check uses the
+        // `ewrap_progress` cursor as the authoritative record of which shards
+        // have landed.
+        match entity.ewrap_progress {
+            Some(expected) if expected == self.completed_shard_index => {
+                // Normal path — apply.
+            }
+            Some(n) if n > self.completed_shard_index => {
+                // Already applied. Skip to preserve idempotency.
+                tracing::debug!(
+                    completed_shard = self.completed_shard_index,
+                    ewrap_progress = n,
+                    "EpochEndAccumulate already applied — skipping (idempotent)"
+                );
+                return;
+            }
+            other => {
+                // Out-of-order apply (shard N emitted before shard N-1 ran).
+                // Treated as a broken invariant because it would leave the
+                // `ewrap_progress` cursor misaligned.
+                tracing::error!(
+                    completed_shard = self.completed_shard_index,
+                    ewrap_progress = ?other,
+                    "EpochEndAccumulate applied out of order — skipping to avoid corruption"
+                );
+                return;
+            }
+        }
+
+        let end = entity
+            .end
+            .as_mut()
+            .expect("EwrapPrepare initialised end before shards run");
+
+        end.effective_rewards += self.effective_delta;
+        end.unspendable_to_treasury += self.unspendable_to_treasury_delta;
+        end.unspendable_to_reserves += self.unspendable_to_reserves_delta;
+
+        entity.ewrap_progress = Some(self.completed_shard_index + 1);
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+        let end = entity
+            .end
+            .as_mut()
+            .expect("end present if accumulate was applied");
+
+        end.effective_rewards -= self.effective_delta;
+        end.unspendable_to_treasury -= self.unspendable_to_treasury_delta;
+        end.unspendable_to_reserves -= self.unspendable_to_reserves_delta;
+
+        entity.ewrap_progress = Some(self.completed_shard_index);
     }
 }
 
@@ -809,6 +968,7 @@ mod prop_tests {
                 nonces,
                 end,
                 incentives,
+                ewrap_progress: None,
             }
         }
     }
