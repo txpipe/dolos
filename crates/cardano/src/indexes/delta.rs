@@ -237,6 +237,18 @@ impl CardanoIndexDeltaBuilder {
                 .tags
                 .push(Tag::new(archive::ACCOUNT_CERTS, bytes));
         }
+
+        if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
+            self.current_block()
+                .tags
+                .push(Tag::new(archive::POOL_CERTS, cert.operator.to_vec()));
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_pool_retirement(cert) {
+            self.current_block()
+                .tags
+                .push(Tag::new(archive::POOL_CERTS, cert.operator.to_vec()));
+        }
     }
 
     /// Add withdrawal tags to the current block.

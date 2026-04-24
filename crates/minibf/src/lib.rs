@@ -470,6 +470,7 @@ where
             get(routes::pools::by_id_metadata::<D>),
         )
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
+        .route("/pools/{id}", get(routes::pools::by_id::<D>))
         .route(
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),

@@ -42,6 +42,7 @@ pub struct SyntheticBlockConfig {
     pub slot: u64,
     pub metadata_label: u64,
     pub metadata_value: String,
+    pub metadata_entries: Vec<(u64, alonzo::Metadatum)>,
     pub policy_id: [u8; 28],
     pub asset_name: String,
     pub lovelace: u64,
@@ -92,6 +93,7 @@ impl Default for SyntheticBlockConfig {
             slot: 1,
             metadata_label: 1990,
             metadata_value: "synthetic".to_string(),
+            metadata_entries: vec![],
             policy_id: [1u8; 28],
             asset_name: "SYNTH".to_string(),
             lovelace: crate::MIN_UTXO_AMOUNT,
@@ -181,7 +183,18 @@ pub fn build_synthetic_blocks(
             Address::Stake(_) | Address::Byron(_) => None,
         })
         .unwrap_or(Network::Testnet);
-    let metadata_label = cfg.metadata_label;
+    let metadata_entries = if cfg.metadata_entries.is_empty() {
+        vec![(
+            cfg.metadata_label,
+            alonzo::Metadatum::Text(cfg.metadata_value.clone()),
+        )]
+    } else {
+        cfg.metadata_entries.clone()
+    };
+    let metadata_label = metadata_entries
+        .first()
+        .map(|(label, _)| *label)
+        .unwrap_or(cfg.metadata_label);
 
     let policy_id = Hash::from(cfg.policy_id);
     let asset_name = Bytes::from(cfg.asset_name.as_bytes().to_vec());
@@ -229,12 +242,7 @@ pub fn build_synthetic_blocks(
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
 
-        let metadata: alonzo::Metadata = vec![(
-            metadata_label,
-            alonzo::Metadatum::Text(cfg.metadata_value.clone()),
-        )]
-        .into_iter()
-        .collect();
+        let metadata: alonzo::Metadata = metadata_entries.clone().into_iter().collect();
 
         let aux_data = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
             transaction_metadata: metadata,

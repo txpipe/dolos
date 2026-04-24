@@ -1427,6 +1427,7 @@ dependencies = [
  "num-rational",
  "num-traits",
  "pallas",
+ "rayon",
  "reqwest 0.12.22",
  "serde",
  "serde_json",
