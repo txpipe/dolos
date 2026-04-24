@@ -440,6 +440,27 @@ impl PoolCertsApproxIndexTable {
     }
 }
 
+pub struct AccountWithdrawalsApproxIndexTable;
+
+impl AccountWithdrawalsApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
+        MultimapTableDefinition::new("archive-byaccountwithdrawals");
+
+    pub fn compute_key(account: &Vec<u8>) -> u64 {
+        xxh3_64(account.as_slice())
+    }
+
+    pub fn iter_by_account_withdrawals(
+        rx: &ReadTransaction,
+        account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        let key = Self::compute_key(&account.to_vec());
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
+    }
+}
+
 pub struct TxHashIndexTable;
 
 impl TxHashIndexTable {
@@ -471,6 +492,7 @@ impl Indexes {
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
         wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
         wx.open_multimap_table(PoolCertsApproxIndexTable::DEF)?;
+        wx.open_multimap_table(AccountWithdrawalsApproxIndexTable::DEF)?;
         wx.open_table(TxHashIndexTable::DEF)?;
         wx.open_multimap_table(MetadataApproxIndexTable::DEF)?;
 
@@ -538,6 +560,17 @@ impl Indexes {
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
         PoolCertsApproxIndexTable::iter_by_pool_certs(rx, pool, start_slot, end_slot)
+    }
+
+    pub fn iter_by_account_withdrawals(
+        rx: &ReadTransaction,
+        account: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        AccountWithdrawalsApproxIndexTable::iter_by_account_withdrawals(
+            rx, account, start_slot, end_slot,
+        )
     }
 
     pub fn iter_by_policy(
@@ -692,6 +725,7 @@ impl Indexes {
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PoolCertsApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_table(AccountWithdrawalsApproxIndexTable::DEF, rx, wx)?;
         Self::copy_value_table(TxHashIndexTable::DEF, rx, wx)?;
 
         Ok(())

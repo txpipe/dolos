@@ -328,6 +328,10 @@ where
             get(routes::accounts::by_stake_rewards::<D>),
         )
         .route(
+            "/accounts/{stake_address}/withdrawals",
+            get(routes::accounts::by_stake_withdrawals::<D>),
+        )
+        .route(
             "/addresses/{address}",
             get(routes::addresses::by_address::<D>),
         )
@@ -460,6 +464,10 @@ where
         .route(
             "/pools/{id}/history",
             get(routes::pools::by_id_history::<D>),
+        )
+        .route(
+            "/pools/{id}/metadata",
+            get(routes::pools::by_id_metadata::<D>),
         )
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
