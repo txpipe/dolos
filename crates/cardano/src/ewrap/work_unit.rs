@@ -1,7 +1,7 @@
-//! Ewrap (Epoch Wrap) work units — three-phase pipeline.
+//! Ewrap (Epoch Wrap) work units — two-phase boundary pipeline.
 //!
-//! The epoch boundary is partitioned into three distinct work units
-//! scheduled sequentially by the chain logic:
+//! The epoch boundary is partitioned into two distinct work units scheduled
+//! sequentially by the chain logic:
 //!
 //! 1. `AccountShardWorkUnit { shard_index }` — emitted `total_shards` times.
 //!    Each shard covers a first-byte prefix range of the account key space,
@@ -9,13 +9,14 @@
 //!    rewards + drops visitors, and emits `EpochEndAccumulate` to populate
 //!    the reward accumulators on `EpochState.end` (the slot is opened by
 //!    `EpochTransition` during ESTART).
-//! 2. `EwrapWorkUnit` — global (non-account) work: pool/drep/proposal
-//!    classification, enactment, MIR processing, deposit refunds, and
-//!    emitting the `EpochEndInit` delta that patches the prepare-time fields
-//!    into `EpochState.end` (leaving the shard accumulators untouched).
-//! 3. `EwrapFinalizeWorkUnit` — reads the accumulated `EpochState.end`,
-//!    emits `EpochWrapUp` (transitions rolling/pparams, clears
-//!    `ewrap_progress`), writes the completed epoch state to archive.
+//! 2. `EwrapWorkUnit` — global (non-account) work and the boundary close:
+//!    pool/drep/proposal classification, enactment, MIR processing, deposit
+//!    refunds, then assembles the final `EndStats` (combining prepare-time
+//!    fields with the shard-populated accumulators) and emits a single
+//!    `EpochWrapUp` delta. `EpochWrapUp::apply` overwrites `entity.end` with
+//!    the final stats, rotates rolling/pparams snapshots forward, and
+//!    clears `ewrap_progress`. The completed `EpochState` is also written
+//!    to archive at commit time.
 
 use std::sync::Arc;
 
@@ -194,71 +195,3 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// EwrapFinalizeWorkUnit
-// ---------------------------------------------------------------------------
-
-pub struct EwrapFinalizeWorkUnit {
-    slot: BlockSlot,
-    #[allow(dead_code)]
-    config: CardanoConfig,
-    genesis: Arc<Genesis>,
-
-    boundary: Option<BoundaryWork>,
-}
-
-impl EwrapFinalizeWorkUnit {
-    pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
-        Self {
-            slot,
-            config,
-            genesis,
-            boundary: None,
-        }
-    }
-
-    pub fn boundary(&self) -> Option<&BoundaryWork> {
-        self.boundary.as_ref()
-    }
-}
-
-impl<D> WorkUnit<D> for EwrapFinalizeWorkUnit
-where
-    D: Domain<Chain = CardanoLogic>,
-{
-    fn name(&self) -> &'static str {
-        "ewrap_finalize"
-    }
-
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "loading ewrap finalize context");
-
-        let boundary = BoundaryWork::load_finalize::<D>(domain.state(), self.genesis.clone())?;
-
-        info!(epoch = boundary.ending_state().number, "ewrap finalize");
-
-        self.boundary = Some(boundary);
-
-        debug!("ewrap finalize context loaded");
-        Ok(())
-    }
-
-    fn compute(&mut self) -> Result<(), DomainError> {
-        debug!("ewrap finalize compute (deltas computed during load)");
-        Ok(())
-    }
-
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        let boundary = self
-            .boundary
-            .as_mut()
-            .ok_or_else(|| DomainError::Internal("ewrap finalize boundary not loaded".into()))?;
-
-        boundary.commit_finalize::<D>(domain.state(), domain.archive())?;
-        Ok(())
-    }
-
-    fn commit_archive(&mut self, _domain: &D) -> Result<(), DomainError> {
-        Ok(())
-    }
-}

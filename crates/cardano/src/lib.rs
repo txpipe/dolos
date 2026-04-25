@@ -70,21 +70,17 @@ pub enum CardanoWorkUnit {
     /// Compute rewards at stability window boundary.
     Rupd(Box<rupd::RupdWorkUnit>),
     /// Handle the global portion of the epoch boundary (pool/drep/proposal
-    /// classification, MIRs, enactment, deposit refunds). Emits
-    /// `EpochEndInit` to populate `EpochState.end` with the prepare-time
-    /// globals and zeroed reward accumulators. The `EpochState.end` slot
-    /// itself is opened by ESTART's `EpochTransition` at the start of each
-    /// epoch.
+    /// classification, MIRs, enactment, deposit refunds) and close the
+    /// boundary by emitting `EpochWrapUp` with the assembled final
+    /// `EndStats` (prepare-time fields + accumulator fields populated by
+    /// the preceding `AccountShard` runs). The `EpochState.end` slot itself
+    /// is opened by ESTART's `EpochTransition` at the start of each epoch.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Handle one shard of per-account reward application. Emitted
     /// `config.ewrap_total_shards` times in sequence. Each shard covers a
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
     AccountShard(Box<ewrap::AccountShardWorkUnit>),
-    /// Handle the finalise portion of the epoch boundary: read the
-    /// accumulated `EpochState.end` and emit `EpochWrapUp` (which transitions
-    /// rolling/pparams and clears `ewrap_progress`).
-    EwrapFinalize(Box<ewrap::EwrapFinalizeWorkUnit>),
     /// Handle epoch start processing.
     Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
@@ -102,7 +98,6 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
             Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::name(w),
-            Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::name(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
         }
@@ -115,9 +110,6 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::EwrapFinalize(w) => {
-                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::load(w, domain)
-            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -130,7 +122,6 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
             Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::compute(w),
-            Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::compute(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
             Self::ForcedStop => Ok(()),
         }
@@ -147,9 +138,6 @@ where
             Self::AccountShard(w) => {
                 <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
-            Self::EwrapFinalize(w) => {
-                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
-            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -165,9 +153,6 @@ where
             }
             Self::AccountShard(w) => {
                 <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
-            }
-            Self::EwrapFinalize(w) => {
-                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::ForcedStop => Err(DomainError::StopEpochReached),
@@ -187,9 +172,6 @@ where
             Self::AccountShard(w) => {
                 <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
-            Self::EwrapFinalize(w) => {
-                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
-            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -208,9 +190,6 @@ where
             Self::AccountShard(w) => {
                 <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
-            Self::EwrapFinalize(w) => {
-                <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
-            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -223,7 +202,6 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
@@ -312,9 +290,10 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         progress,
                         total_shards = total,
                         "found EpochState.ewrap_progress == total_shards at \
-                         startup — EwrapFinalize was not reached before crash. \
-                         The next boundary attempt will re-run prepare and shards; \
-                         idempotency should keep the result correct."
+                         startup — Ewrap (closing phase) was not committed \
+                         before crash. The next boundary attempt will re-run \
+                         shards and Ewrap; idempotency should keep the result \
+                         correct."
                     );
                 }
             }
@@ -422,13 +401,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
                     ),
                 )))
             }
-            InternalWorkUnit::EwrapFinalize(slot) => Some(CardanoWorkUnit::EwrapFinalize(
-                Box::new(ewrap::EwrapFinalizeWorkUnit::new(
-                    slot,
-                    self.config.clone(),
-                    domain.genesis(),
-                )),
-            )),
             InternalWorkUnit::EStart(slot) => {
                 // EStart may trigger era transitions, schedule cache refresh
                 self.needs_cache_refresh = true;

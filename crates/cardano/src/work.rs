@@ -15,7 +15,6 @@ pub(crate) enum InternalWorkUnit {
     Blocks(WorkBatch),
     Ewrap(BlockSlot),
     AccountShard(BlockSlot, u32),
-    EwrapFinalize(BlockSlot),
     EStart(BlockSlot),
     Rupd(BlockSlot),
     ForcedStop,
@@ -42,14 +41,12 @@ pub(crate) enum WorkBuffer {
         shard_index: u32,
         total_shards: u32,
     },
-    /// Global Ewrap phase. `pop_work` yields `InternalWorkUnit::Ewrap` and
-    /// advances to `EwrapFinaliseBoundary`. Reached after all shards have
+    /// Closing phase of the epoch-boundary pipeline. `pop_work` yields
+    /// `InternalWorkUnit::Ewrap` (which runs the global visitors AND emits
+    /// `EpochWrapUp` to close the boundary) and advances to
+    /// `EstartBoundary(block, epoch + 1)`. Reached after all shards have
     /// committed (or directly from `PreEwrapBoundary` when `total_shards == 0`).
     EwrapBoundary(OwnedMultiEraBlock, Epoch),
-    /// Final stage of the EWRAP pipeline. `pop_work` yields
-    /// `InternalWorkUnit::EwrapFinalize` and advances to
-    /// `EstartBoundary(block, epoch + 1)`.
-    EwrapFinaliseBoundary(OwnedMultiEraBlock, Epoch),
     EstartBoundary(OwnedMultiEraBlock, Epoch),
     PreForcedStop(OwnedMultiEraBlock),
     ForcedStop,
@@ -71,7 +68,6 @@ impl WorkBuffer {
             WorkBuffer::PreEwrapBoundary(_, block, _) => block.point(),
             WorkBuffer::EwrapBoundary(block, _) => block.point(),
             WorkBuffer::AccountShardingBoundary { block, .. } => block.point(),
-            WorkBuffer::EwrapFinaliseBoundary(block, _) => block.point(),
             WorkBuffer::EstartBoundary(block, _) => block.point(),
             WorkBuffer::PreForcedStop(block) => block.point(),
             WorkBuffer::ForcedStop => unreachable!(),
@@ -249,10 +245,6 @@ impl WorkBuffer {
             }
             WorkBuffer::EwrapBoundary(block, epoch) => (
                 Some(InternalWorkUnit::Ewrap(block.slot())),
-                Self::EwrapFinaliseBoundary(block, epoch),
-            ),
-            WorkBuffer::EwrapFinaliseBoundary(block, epoch) => (
-                Some(InternalWorkUnit::EwrapFinalize(block.slot())),
                 Self::EstartBoundary(block, epoch + 1),
             ),
             WorkBuffer::EstartBoundary(block, epoch) => (
@@ -330,12 +322,11 @@ mod tests {
                 last: batch.last_slot(),
             },
             InternalWorkUnit::Rupd(s) => WorkTag::Rupd(*s),
-            // For test purposes, collapse all three EWRAP phases into a
+            // For test purposes, collapse the EWRAP boundary phases into a
             // single `EWrap` tag keyed by the boundary slot. Tests care that
             // EWRAP work was produced at all, not about phase count.
             InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
             InternalWorkUnit::AccountShard(s, _) => WorkTag::EWrap(*s),
-            InternalWorkUnit::EwrapFinalize(s) => WorkTag::EWrap(*s),
             InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),
             InternalWorkUnit::ForcedStop => WorkTag::ForcedStop,
         }

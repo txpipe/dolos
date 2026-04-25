@@ -3,11 +3,11 @@
 ## Natural sequence within an epoch
 
 ```
-Estart  →  Roll …  →  Rupd  →  Roll …  →  AccountShard ×N  →  Ewrap  →  EwrapFinalize
-(open)     (blocks)   (RUPD)   (blocks)    (per-account)         (global)    (close)
-                                                                                │
-                                                                                ▼
-                                                                        next epoch's Estart
+Estart  →  Roll …  →  Rupd  →  Roll …  →  AccountShard ×N  →  Ewrap
+(open)     (blocks)   (RUPD)   (blocks)    (per-account)         (global + close)
+                                                                          │
+                                                                          ▼
+                                                                  next epoch's Estart
 ```
 
 `Genesis` runs once at chain bootstrap, before the first `Estart`. `ForcedStop` is a sentinel that ends the loop at a configured epoch.
@@ -77,7 +77,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 
 - Variants: `CardanoWorkUnit::AccountShard` / `InternalWorkUnit::AccountShard(BlockSlot, u32)`.
 - Struct: `ewrap::AccountShardWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
-- Purpose: apply rewards + drops for the accounts in this shard's range; accumulate the shard's reward contribution into `EpochState.end`. This is the first phase of the epoch-boundary pipeline — `Ewrap` (globals) and `EwrapFinalize` (close) follow.
+- Purpose: apply rewards + drops for the accounts in this shard's range; accumulate the shard's reward contribution into `EpochState.end`. This is the first phase of the epoch-boundary pipeline — `Ewrap` (globals + close) follows.
 - Deltas emitted (4 variants per shard run):
   - **Rewards** (`ewrap/rewards.rs`):
     - `AssignRewards:79` (one per rewarded account in range)
@@ -89,11 +89,11 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 - Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
 - Namespaces touched: `accounts` (shard range), `epochs`. Deletes from `pending_rewards` (shard range).
 
-## 5. `EwrapWorkUnit` — global epoch-boundary work
+## 5. `EwrapWorkUnit` — global epoch-boundary work + close
 
 - Variants: `CardanoWorkUnit::Ewrap` / `InternalWorkUnit::Ewrap(BlockSlot)`.
 - Struct: `ewrap::EwrapWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`).
-- Purpose: classify retiring pools / expiring dreps / enacting+dropping proposals, process pending MIRs, run enactment + refund + wrapup-global visitors, patch the prepare-time fields of `EpochState.end` (the reward accumulator fields were already populated by the preceding AccountShards).
+- Purpose: classify retiring pools / expiring dreps / enacting+dropping proposals, process pending MIRs, run enactment + refund + wrapup-global visitors, then close the boundary by emitting `EpochWrapUp` with the assembled final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding AccountShards). Also writes the completed `EpochState` to archive.
 - Deltas emitted (10 distinct variants, 11 sites):
   - **Enactment** (`ewrap/enactment.rs`):
     - `PParamsUpdate:36,39`
@@ -107,23 +107,14 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
     - `PoolDelegatorRetire:32` *(also fires in AccountShard for accounts)*
   - **Wrap-up globals** (`ewrap/wrapup.rs`):
     - `PoolWrapUp:119`
-    - `EpochEndInit:135` (PATCH: writes only the prepare-time fields of `EpochState.end` — pool counts, MIRs, proposal refunds, epoch incentives — leaving the AccountShard-populated accumulator fields untouched; does not modify `ewrap_progress`)
+    - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ewrap_progress`)
   - **MIR processing** (`ewrap/loading.rs`):
     - `AssignRewards:207` (one per registered MIR recipient)
 - Direct deletes: `PendingMirState` entries for processed MIRs.
+- Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
 - Namespaces touched: `pools`, `dreps`, `proposals`, `accounts` (MIR recipients), `epochs`. Deletes from `pending_mirs`.
 
-## 6. `EwrapFinalizeWorkUnit` — closes the epoch boundary
-
-- Variants: `CardanoWorkUnit::EwrapFinalize` / `InternalWorkUnit::EwrapFinalize(BlockSlot)`.
-- Struct: `ewrap::EwrapFinalizeWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`).
-- Purpose: read the accumulated `EpochState.end`, emit the canonical wrap-up, write the completed epoch state to archive.
-- Deltas emitted (1):
-  - `EpochWrapUp` — `ewrap/loading.rs:527`. Transitions `rolling` and `pparams` snapshots forward, clears `ewrap_progress`. Targets `epochs`.
-- Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
-- Namespaces touched: `epochs`.
-
-## 7. `GenesisWorkUnit` — one-time chain bootstrap
+## 6. `GenesisWorkUnit` — one-time chain bootstrap
 
 - Variants: `CardanoWorkUnit::Genesis` / `InternalWorkUnit::Genesis`.
 - Struct: `genesis::GenesisWorkUnit` (`crates/cardano/src/genesis/mod.rs`).
@@ -131,7 +122,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 - Deltas: **none**. Writes `EpochState` and `EraSummary` entities directly via `bootstrap_epoch` / `bootstrap_eras`.
 - Namespaces touched: `epochs`, `eras`.
 
-## 8. `ForcedStop` — sentinel
+## 7. `ForcedStop` — sentinel
 
 - Variant: `CardanoWorkUnit::ForcedStop` / `InternalWorkUnit::ForcedStop`.
 - No struct, no load/compute/commit. Causes the sync loop to stop at the configured `stop_epoch`.

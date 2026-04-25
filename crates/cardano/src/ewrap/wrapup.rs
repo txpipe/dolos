@@ -1,4 +1,4 @@
-use crate::{AccountState, CardanoDelta, EndStats, EpochEndInit, PoolHash, PoolState, PoolWrapUp};
+use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUp, PoolHash, PoolState, PoolWrapUp};
 use dolos_core::ChainError;
 
 #[derive(Default)]
@@ -81,12 +81,20 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     }
 
     // Reward accumulators are populated by AccountShards (which ran before
-    // this Ewrap phase). EpochEndInit patches only the prepare-time fields
-    // and leaves the accumulators untouched.
+    // this Ewrap phase). Read them back from `EpochState.end` and combine
+    // with the prepare-time fields to produce the final stats carried by
+    // `EpochWrapUp`.
+    let acc = ctx
+        .ending_state()
+        .end
+        .as_ref()
+        .expect("ESTART seeded EpochState.end before AccountShards");
+
     tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
-        "EWRAP: patching prepare-time globals into EndStats"
+        effective_rewards = acc.effective_rewards,
+        "EWRAP: assembling final EndStats (prepare-time + accumulators)"
     );
 
     EndStats {
@@ -94,9 +102,9 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
         epoch_incentives: incentives.clone(),
-        effective_rewards: 0,
-        unspendable_to_treasury: 0,
-        unspendable_to_reserves: 0,
+        effective_rewards: acc.effective_rewards,
+        unspendable_to_treasury: acc.unspendable_to_treasury,
+        unspendable_to_reserves: acc.unspendable_to_reserves,
         treasury_mirs,
         reserve_mirs,
         invalid_treasury_mirs,
@@ -127,15 +135,18 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
-        // Patch the prepare-time globals into `EpochState.end`. ESTART
-        // opened the slot via `EpochTransition`, AccountShards already wrote
-        // the reward accumulators in earlier work units; this delta only
-        // touches the prepare-time fields and leaves accumulators alone.
-        // `EwrapFinalize` then emits `EpochWrapUp` against the now-complete
-        // `end`.
-        let stats = define_end_stats(ctx);
+        // Assemble the final `EndStats` from the prepare-time fields plus the
+        // shard-populated accumulators (already in `ending_state.end`), and
+        // emit `EpochWrapUp` to close the epoch boundary. Apply will
+        // overwrite `entity.end` with these stats, rotate the rolling/pparams
+        // snapshots forward, and clear `ewrap_progress`.
+        let final_stats = define_end_stats(ctx);
 
-        ctx.deltas.add_for_entity(EpochEndInit::new(stats));
+        // Stash the final stats on `ending_state.end` so the post-commit
+        // archive write in `commit_ewrap` reflects the finalised state.
+        ctx.ending_state.end = Some(final_stats.clone());
+
+        ctx.deltas.add_for_entity(EpochWrapUp::new(final_stats));
 
         Ok(())
     }

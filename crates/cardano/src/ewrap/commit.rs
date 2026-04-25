@@ -1,14 +1,14 @@
-//! Commit logic for the three EWRAP phases.
+//! Commit logic for the two-phase boundary pipeline (AccountShard + Ewrap).
 //!
 //! Each phase commits its own deltas and archive logs atomically. The handoff
 //! between phases happens via `EpochState.end` + `EpochState.ewrap_progress`
-//! (see `EpochEndInit` / `EpochEndAccumulate` / `EpochWrapUp` deltas).
+//! (see `EpochEndAccumulate` / `EpochWrapUp` deltas).
 //!
-//! All phases share the same streaming helper: each entity namespace is read
+//! Both phases share the same streaming helper: each entity namespace is read
 //! one record at a time, deltas for that record are applied, and the result
 //! is written immediately. Peak residency is bounded by whatever the current
-//! phase keeps in `BoundaryWork` — prepare keeps the small globals, shards
-//! keep a single key-range slice, finalize keeps nothing per-account.
+//! phase keeps in `BoundaryWork` — shards keep a single key-range slice,
+//! Ewrap keeps the small globals.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
@@ -61,10 +61,13 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Commit the global Ewrap phase: enactment/MIR/refund/wrapup-global
-    /// deltas for pools, dreps, proposals, the epoch state (`EpochEndInit`),
-    /// plus archive logs produced by the global visitors (e.g.
-    /// `PoolDepositRefundLog`).
+    /// Commit the Ewrap phase: enactment/MIR/refund/wrapup-global deltas
+    /// for pools, dreps, proposals, plus the `EpochWrapUp` delta on
+    /// `EpochState` that closes the boundary (overwrites `entity.end` with
+    /// the final stats, rotates rolling/pparams snapshots, clears
+    /// `ewrap_progress`). Also writes archive logs produced by the global
+    /// visitors (e.g. `PoolDepositRefundLog`) and the completed `EpochState`
+    /// snapshot under the epoch-start temporal key.
     #[instrument(skip_all)]
     pub fn commit_ewrap<D: Domain>(
         &mut self,
@@ -89,7 +92,9 @@ impl BoundaryWork {
         // streaming path).
         self.stream_and_apply_namespace::<D, AccountState>(state, &writer, None)?;
 
-        // EpochState gets the EpochEndInit delta.
+        // EpochState receives the boundary-closing deltas (PParamsUpdate,
+        // TreasuryWithdrawal from enactment; EpochWrapUp from the wrapup
+        // visitor that finalises `entity.end` and rotates snapshots).
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
 
         // Delete processed pending MIRs.
@@ -111,6 +116,12 @@ impl BoundaryWork {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
         }
+
+        // Write the completed `EpochState` to archive under the epoch-start
+        // temporal key (preserves the pre-snapshot-rotation state for
+        // historical queries). `ending_state.end` was assembled with the
+        // final stats by `wrapup.flush` before this commit ran.
+        archive_writer.write_log_typed(&temporal_key.clone().into(), self.ending_state())?;
 
         if !self.deltas.entities.is_empty() {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted ewrap deltas");
@@ -189,38 +200,4 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Commit the finalize phase: apply the `EpochWrapUp` delta to
-    /// `EpochState` (transitions rolling/pparams, clears `ewrap_progress`),
-    /// write the completed `EpochState` to the archive.
-    #[instrument(skip_all)]
-    pub fn commit_finalize<D: Domain>(
-        &mut self,
-        state: &D::State,
-        archive: &D::Archive,
-    ) -> Result<(), ChainError> {
-        debug!("committing ewrap finalize changes");
-
-        let writer = state.start_writer()?;
-        let archive_writer = archive.start_writer()?;
-
-        // Only EpochState has queued deltas here (EpochWrapUp).
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
-
-        // Write the completed epoch state to archive, preserving the
-        // pre-transition snapshot for historical queries.
-        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
-
-        archive_writer.write_log_typed(&temporal_key.clone().into(), self.ending_state())?;
-
-        if !self.deltas.entities.is_empty() {
-            warn!(quantity = %self.deltas.entities.len(), "uncommitted finalize deltas");
-        }
-
-        writer.commit()?;
-        archive_writer.commit()?;
-
-        debug!("ewrap finalize commit complete");
-        Ok(())
-    }
 }

@@ -335,10 +335,12 @@ impl BoundaryWork {
     ///   * classify pools/dreps/proposals (retiring/enacting/dropping),
     ///   * process pending MIRs,
     ///   * run the enactment / refunds / wrapup visitors (global only —
-    ///     account-level work happens in the shards), and
-    ///   * emit an `EpochEndInit` delta that populates `EpochState.end` with
-    ///     the prepare-time globals and zeroed reward accumulators (the slot
-    ///     itself is opened by ESTART's `EpochTransition`).
+    ///     account-level work happened in the preceding AccountShards), and
+    ///   * emit a single `EpochWrapUp` delta carrying the final `EndStats`
+    ///     (prepare-time fields + shard-populated reward accumulators). Apply
+    ///     overwrites `entity.end`, rotates rolling/pparams snapshots, and
+    ///     clears `ewrap_progress`. The boundary close is now part of this
+    ///     load; there is no separate finalize phase.
     pub fn load_ewrap<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
@@ -378,21 +380,6 @@ impl BoundaryWork {
         boundary.load_pending_rewards_range::<D>(state, Some(range.clone()))?;
 
         boundary.compute_shard_deltas::<D>(state, range, shard_index)?;
-
-        Ok(boundary)
-    }
-
-    /// Load + compute for `EwrapFinalize`:
-    ///   * read the final `EpochState.end` that prepare+shards have populated,
-    ///   * emit an `EpochWrapUp` delta carrying those stats (also transitions
-    ///     rolling/pparams and clears ewrap_progress).
-    pub fn load_finalize<D: Domain>(
-        state: &D::State,
-        genesis: Arc<Genesis>,
-    ) -> Result<BoundaryWork, ChainError> {
-        let mut boundary = Self::new_empty::<D>(state, genesis)?;
-
-        boundary.compute_finalize_deltas()?;
 
         Ok(boundary)
     }
@@ -470,7 +457,8 @@ impl BoundaryWork {
         visitor_drops.flush(self)?;
         visitor_refunds.flush(self)?;
 
-        // wrapup.flush now emits `EpochEndInit` instead of `EpochWrapUp`.
+        // wrapup.flush emits the final `EpochWrapUp` delta carrying the
+        // assembled `EndStats` (prepare-time fields + shard accumulators).
         visitor_wrapup.flush(self)?;
 
         Ok(())
@@ -514,18 +502,6 @@ impl BoundaryWork {
             self.shard_applied_unspendable_to_reserves,
             shard_index,
         ));
-
-        Ok(())
-    }
-
-    fn compute_finalize_deltas(&mut self) -> Result<(), ChainError> {
-        let stats = self
-            .ending_state
-            .end
-            .clone()
-            .ok_or(dolos_core::BrokenInvariant::EpochBoundaryIncomplete)?;
-
-        self.add_delta(crate::EpochWrapUp::new(stats));
 
         Ok(())
     }

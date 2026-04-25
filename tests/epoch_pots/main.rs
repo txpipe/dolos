@@ -496,20 +496,22 @@ fn run_epoch_pots_test(
                         }
                     }
                 }
-                CardanoWorkUnit::Ewrap(ewrap) => {
-                    // Reset accumulator at the start of each boundary.
-                    if let Some(boundary) = ewrap.boundary() {
-                        accumulated_applied.clear();
-                        accumulated_ending_epoch = Some(boundary.ending_state().number);
-                    }
-                }
                 CardanoWorkUnit::AccountShard(shard) => {
-                    // Each shard contributes its slice of applied rewards.
+                    if shard.shard_index() == 0 {
+                        // First shard of this boundary — reset accumulator
+                        // and capture the ending epoch.
+                        accumulated_applied.clear();
+                        if let Some(boundary) = shard.boundary() {
+                            accumulated_ending_epoch =
+                                Some(boundary.ending_state().number);
+                        }
+                    }
                     if let Some(boundary) = shard.boundary() {
                         accumulated_applied.extend(boundary.applied_rewards.iter().cloned());
                     }
                 }
-                CardanoWorkUnit::EwrapFinalize(_) => {
+                CardanoWorkUnit::Ewrap(_) => {
+                    // Boundary close — dump accumulated rewards.
                     if let Some(ending_epoch) = accumulated_ending_epoch.take() {
                         if ending_epoch >= 1 {
                             let performance_epoch = ending_epoch - 1;
