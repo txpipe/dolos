@@ -297,7 +297,7 @@ impl BoundaryWork {
     ///   * emit a single `EpochWrapUp` delta carrying the final `EndStats`
     ///     (prepare-time fields + shard-populated reward accumulators). Apply
     ///     overwrites `entity.end`, rotates rolling/pparams snapshots, and
-    ///     clears `ewrap_progress`. The boundary close is now part of this
+    ///     clears `ashard_progress`. The boundary close is now part of this
     ///     load; there is no separate finalize phase.
     pub fn load_ewrap<D: Domain>(
         state: &D::State,

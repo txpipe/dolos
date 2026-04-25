@@ -1,7 +1,7 @@
 //! Commit logic for the two-phase boundary pipeline (AccountShard + Ewrap).
 //!
 //! Each phase commits its own deltas and archive logs atomically. The handoff
-//! between phases happens via `EpochState.end` + `EpochState.ewrap_progress`
+//! between phases happens via `EpochState.end` + `EpochState.ashard_progress`
 //! (see `EpochEndAccumulate` / `EpochWrapUp` deltas).
 //!
 //! Both phases share the same streaming helper: each entity namespace is read
@@ -66,7 +66,7 @@ impl BoundaryWork {
     /// for pools, dreps, proposals, plus the `EpochWrapUp` delta on
     /// `EpochState` that closes the boundary (overwrites `entity.end` with
     /// the final stats, rotates rolling/pparams snapshots, clears
-    /// `ewrap_progress`). Also writes archive logs produced by the global
+    /// `ashard_progress`). Also writes archive logs produced by the global
     /// visitors (e.g. `PoolDepositRefundLog`) and the completed `EpochState`
     /// snapshot under the epoch-start temporal key.
     #[instrument(skip_all)]

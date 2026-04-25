@@ -250,7 +250,7 @@ pub struct EpochState {
     /// back to `None`. Doubles as crash-recovery flag for "boundary in flight".
     #[n(15)]
     #[cbor(default)]
-    pub ewrap_progress: Option<u32>,
+    pub ashard_progress: Option<u32>,
 }
 
 impl Default for EpochState {
@@ -265,7 +265,7 @@ impl Default for EpochState {
             nonces: None,
             end: None,
             incentives: None,
-            ewrap_progress: None,
+            ashard_progress: None,
         }
     }
 }
@@ -358,7 +358,7 @@ pub(crate) mod testing {
                 nonces,
                 end,
                 incentives,
-                ewrap_progress: None,
+                ashard_progress: None,
             }
         }
     }
@@ -562,7 +562,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
 /// fully populated `EndStats` (prepare-time fields from the wrap-up visitor +
 /// reward accumulators from the preceding `AccountShard` runs). Apply
 /// overwrites `entity.end` with these final stats, rotates the rolling and
-/// pparams snapshots forward, and clears `ewrap_progress`.
+/// pparams snapshots forward, and clears `ashard_progress`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUp {
     pub(crate) stats: EndStats,
@@ -571,7 +571,7 @@ pub struct EpochWrapUp {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ewrap_progress: Option<u32>,
+    pub(crate) prev_ashard_progress: Option<u32>,
 }
 
 impl EpochWrapUp {
@@ -581,7 +581,7 @@ impl EpochWrapUp {
             prev_rolling: None,
             prev_pparams: None,
             prev_end: None,
-            prev_ewrap_progress: None,
+            prev_ashard_progress: None,
         }
     }
 }
@@ -599,12 +599,12 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
-        self.prev_ewrap_progress = entity.ewrap_progress;
+        self.prev_ashard_progress = entity.ashard_progress;
 
         entity.rolling.scheduled_or_default();
         entity.pparams.scheduled_or_default();
         entity.end = Some(self.stats.clone());
-        entity.ewrap_progress = None;
+        entity.ashard_progress = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -612,15 +612,15 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
         entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
         entity.end = self.prev_end.clone();
-        entity.ewrap_progress = self.prev_ewrap_progress;
+        entity.ashard_progress = self.prev_ashard_progress;
     }
 }
 
 /// Delta emitted once per `AccountShard` to accumulate the shard's reward-
 /// distribution contribution into `EpochState.end` and advance
-/// `ewrap_progress` to the next shard index. Idempotent on repeat-apply by
+/// `ashard_progress` to the next shard index. Idempotent on repeat-apply by
 /// guarding on the shard index — a shard that was already committed will have
-/// `ewrap_progress > completed_shard_index` and should skip.
+/// `ashard_progress > completed_shard_index` and should skip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochEndAccumulate {
     pub(crate) effective_delta: u64,
@@ -655,20 +655,20 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
 
-        // Idempotency + ordering guard. `ewrap_progress` is the authoritative
+        // Idempotency + ordering guard. `ashard_progress` is the authoritative
         // cursor for which shards have landed: `None` means no shards have
         // run yet (shard 0 is the next expected); `Some(n)` means shards
         // `0..n` have committed and `n` is next. AccountShard is the first
         // phase of the epoch boundary, so `None` is the natural starting
         // state (set by ESTART's `EpochTransition`).
-        let expected = entity.ewrap_progress.unwrap_or(0);
+        let expected = entity.ashard_progress.unwrap_or(0);
         if expected > self.completed_shard_index {
             // Already applied (crash-recovery scenario where the shard's
             // state commit landed but the work buffer hadn't advanced past
             // it). Skip to preserve idempotency.
             tracing::debug!(
                 completed_shard = self.completed_shard_index,
-                ewrap_progress = expected,
+                ashard_progress = expected,
                 "EpochEndAccumulate already applied — skipping (idempotent)"
             );
             return;
@@ -676,10 +676,10 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         if expected < self.completed_shard_index {
             // Out-of-order apply (shard N emitted before shard N-1 ran).
             // Treated as a broken invariant because it would leave the
-            // `ewrap_progress` cursor misaligned.
+            // `ashard_progress` cursor misaligned.
             tracing::error!(
                 completed_shard = self.completed_shard_index,
-                ewrap_progress = expected,
+                ashard_progress = expected,
                 "EpochEndAccumulate applied out of order — skipping to avoid corruption"
             );
             return;
@@ -694,7 +694,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         end.unspendable_to_treasury += self.unspendable_to_treasury_delta;
         end.unspendable_to_reserves += self.unspendable_to_reserves_delta;
 
-        entity.ewrap_progress = Some(self.completed_shard_index + 1);
+        entity.ashard_progress = Some(self.completed_shard_index + 1);
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -708,7 +708,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         end.unspendable_to_treasury -= self.unspendable_to_treasury_delta;
         end.unspendable_to_reserves -= self.unspendable_to_reserves_delta;
 
-        entity.ewrap_progress = Some(self.completed_shard_index);
+        entity.ashard_progress = Some(self.completed_shard_index);
     }
 }
 
@@ -777,7 +777,7 @@ pub struct EpochTransition {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ewrap_progress: Option<u32>,
+    pub(crate) prev_ashard_progress: Option<u32>,
 }
 
 impl EpochTransition {
@@ -797,7 +797,7 @@ impl EpochTransition {
             prev_rolling: None,
             prev_pparams: None,
             prev_end: None,
-            prev_ewrap_progress: None,
+            prev_ashard_progress: None,
         }
     }
 }
@@ -830,7 +830,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
-        self.prev_ewrap_progress = entity.ewrap_progress;
+        self.prev_ashard_progress = entity.ashard_progress;
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -854,7 +854,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         // end of this epoch; until then, downstream readers see a consistent
         // empty container instead of the previous epoch's stale data.
         entity.end = Some(EndStats::default());
-        entity.ewrap_progress = None;
+        entity.ashard_progress = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -868,7 +868,7 @@ impl dolos_core::EntityDelta for EpochTransition {
             .clone()
             .expect("apply captured initial_pots");
         entity.end = self.prev_end.clone();
-        entity.ewrap_progress = self.prev_ewrap_progress;
+        entity.ashard_progress = self.prev_ashard_progress;
     }
 }
 
@@ -942,7 +942,7 @@ mod prop_tests {
                 nonces,
                 end,
                 incentives,
-                ewrap_progress: None,
+                ashard_progress: None,
             }
         }
     }

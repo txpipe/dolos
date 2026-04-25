@@ -78,7 +78,7 @@ pub enum CardanoWorkUnit {
     /// is opened by ESTART's `EpochTransition` at the start of each epoch.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Handle one shard of per-account reward application. Emitted
-    /// `config.ewrap_total_shards` times in sequence. Each shard covers a
+    /// `config.ashard_total` times in sequence. Each shard covers a
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
     AccountShard(Box<ashard::AccountShardWorkUnit>),
@@ -264,24 +264,24 @@ impl dolos_core::ChainLogic for CardanoLogic {
             None => WorkBuffer::Empty,
         };
 
-        // Crash-recovery check: if the previous process crashed mid-EWRAP,
-        // `EpochState.ewrap_progress` will be `Some(i)` with `i` equal to the
-        // next shard that should have run. Detect and warn — full resume
-        // requires re-fetching the boundary block from upstream, which is
-        // tracked separately.
+        // Crash-recovery check: if the previous process crashed mid-boundary,
+        // `EpochState.ashard_progress` will be `Some(i)` with `i` equal to the
+        // next AccountShard that should have run. Detect and warn — full
+        // resume requires re-fetching the boundary block from upstream, which
+        // is tracked separately.
         if let Ok(epoch) = load_epoch::<D>(state) {
-            if let Some(progress) = epoch.ewrap_progress {
-                let total = config.ewrap_total_shards();
+            if let Some(progress) = epoch.ashard_progress {
+                let total = config.ashard_total();
                 if progress < total {
                     tracing::warn!(
                         epoch = epoch.number,
                         next_shard = progress,
                         total_shards = total,
-                        "crash detected mid-EWRAP: ewrap_progress is set. \
+                        "crash detected mid-boundary: ashard_progress is set. \
                          On the next block that triggers the boundary, dolos will \
-                         begin the EWRAP pipeline from scratch; correctness depends \
-                         on shard idempotency (state deletes are no-ops if already \
-                         applied; EpochEndAccumulate guards on shard_index). \
+                         begin the AccountShard pipeline from scratch; correctness \
+                         depends on shard idempotency (state deletes are no-ops if \
+                         already applied; EpochEndAccumulate guards on shard_index). \
                          Operators should monitor the subsequent boundary for \
                          inconsistency. TODO: implement true shard resume."
                     );
@@ -290,11 +290,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         epoch = epoch.number,
                         progress,
                         total_shards = total,
-                        "found EpochState.ewrap_progress == total_shards at \
+                        "found EpochState.ashard_progress == total_shards at \
                          startup — Ewrap (closing phase) was not committed \
                          before crash. The next boundary attempt will re-run \
-                         shards and Ewrap; idempotency should keep the result \
-                         correct."
+                         AccountShards and Ewrap; idempotency should keep the \
+                         result correct."
                     );
                 }
             }
@@ -338,7 +338,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             block,
             &self.cache.eras,
             self.cache.stability_window,
-            self.config.ewrap_total_shards(),
+            self.config.ashard_total(),
         );
 
         let last = new_work.last_point_seen().slot();
@@ -363,7 +363,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let work = self.work.take().expect("work buffer is initialized");
 
         let (work_unit, new_buffer) =
-            work.pop_work(self.config.stop_epoch, self.config.ewrap_total_shards());
+            work.pop_work(self.config.stop_epoch, self.config.ashard_total());
 
         self.work = Some(new_buffer);
 

@@ -90,12 +90,12 @@ fn test_redb3_lazy_iter() {
 // ---------------------------------------------------------------------------
 // Per-shard range iteration.
 //
-// EWRAP shards use key-range iteration to bound per-shard memory. This test
-// verifies the property end-to-end: given a store with N entities distributed
-// across the full first-byte prefix space, iterating a single first-byte
-// prefix range must allocate O(1) on the iterator side. If it regresses
-// (e.g. a backend materialising the whole range), EWRAP shards would stop
-// being memory-bounded.
+// AccountShard work units use key-range iteration to bound per-shard memory.
+// This test verifies the property end-to-end: given a store with N entities
+// distributed across the full first-byte prefix space, iterating a single
+// first-byte prefix range must allocate O(1) on the iterator side. If it
+// regresses (e.g. a backend materialising the whole range), AccountShards
+// would stop being memory-bounded.
 // ---------------------------------------------------------------------------
 
 const SHARD_ENTITY_COUNT: u64 = 50_000;

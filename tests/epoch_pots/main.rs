@@ -201,8 +201,9 @@ fn dump_stake_csv(
     Ok(())
 }
 
-/// Dump rewards that were actually applied (spendable) at EWRAP time.
-/// This filters out rewards for accounts that deregistered between RUPD and EWRAP.
+/// Dump rewards that were actually applied (spendable) during the
+/// `AccountShard` phase. Filters out rewards for accounts that deregistered
+/// between RUPD and the boundary.
 fn dump_applied_rewards_csv(
     applied_rewards: &[AppliedReward],
     network: Network,

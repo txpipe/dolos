@@ -60,7 +60,7 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        let total_shards = self.config.ewrap_total_shards();
+        let total_shards = self.config.ashard_total();
         let range = shard_key_range(self.shard_index, total_shards);
 
         debug!(
@@ -95,7 +95,7 @@ where
     }
 
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        let total_shards = self.config.ewrap_total_shards();
+        let total_shards = self.config.ashard_total();
         let range = shard_key_range(self.shard_index, total_shards);
 
         let boundary = self

@@ -25,7 +25,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
   - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
   - `AccountTransition` — `estart/reset.rs:127`. One per account. Targets `accounts`.
   - `PoolTransition` — `estart/reset.rs:138`. One per pool. Targets `pools`.
-  - `EpochTransition` — `estart/reset.rs:148`. Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, also seeds `EpochState.end = Some(EndStats::default())` and resets `ewrap_progress = None` for the new epoch — at the next boundary, AccountShards populate the reward accumulator fields directly via `EpochEndAccumulate`, then Ewrap reads them back, assembles the final `EndStats` (combining accumulators with the prepare-time fields), and emits `EpochWrapUp` to close.
+  - `EpochTransition` — `estart/reset.rs:148`. Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, also seeds `EpochState.end = Some(EndStats::default())` and resets `ashard_progress = None` for the new epoch — at the next boundary, AccountShards populate the reward accumulator fields directly via `EpochEndAccumulate`, then Ewrap reads them back, assembles the final `EndStats` (combining accumulators with the prepare-time fields), and emits `EpochWrapUp` to close.
 - Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.).
 - Namespaces touched: `accounts`, `pools`, `epochs`, `eras`.
 
@@ -85,7 +85,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
     - `PoolDelegatorRetire:32` *(also fires in Ewrap for non-account targets)*
     - `DRepDelegatorDrop:53` *(also fires in Ewrap for non-account targets)*
   - **Accumulator** (`ashard/loading.rs`):
-    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, advances `ewrap_progress` from `unwrap_or(0)` → `Some(shard_index + 1)`)
+    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, advances `ashard_progress` from `unwrap_or(0)` → `Some(shard_index + 1)`)
 - Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
 - Namespaces touched: `accounts` (shard range), `epochs`. Deletes from `pending_rewards` (shard range).
 
@@ -107,7 +107,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
     - `PoolDelegatorRetire:32` *(also fires in AccountShard for accounts)*
   - **Wrap-up globals** (`ewrap/wrapup.rs`):
     - `PoolWrapUp:119`
-    - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ewrap_progress`)
+    - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ashard_progress`)
   - **MIR processing** (`ewrap/loading.rs`):
     - `AssignRewards:207` (one per registered MIR recipient)
 - Direct deletes: `PendingMirState` entries for processed MIRs.

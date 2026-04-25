@@ -121,11 +121,11 @@ impl WorkBuffer {
         self,
         next_block: OwnedMultiEraBlock,
         epoch: Epoch,
-        ewrap_total_shards: u32,
+        ashard_total: u32,
     ) -> Self {
         match self {
             WorkBuffer::Restart(..) => {
-                if ewrap_total_shards == 0 {
+                if ashard_total == 0 {
                     // No shards — entry goes straight to the global Ewrap phase.
                     WorkBuffer::EwrapBoundary(next_block, epoch)
                 } else {
@@ -133,7 +133,7 @@ impl WorkBuffer {
                         block: next_block,
                         epoch,
                         shard_index: 0,
-                        total_shards: ewrap_total_shards,
+                        total_shards: ashard_total,
                     }
                 }
             }
@@ -147,7 +147,7 @@ impl WorkBuffer {
         block: OwnedMultiEraBlock,
         eras: &ChainSummary,
         stability_window: u64,
-        ewrap_total_shards: u32,
+        ashard_total: u32,
     ) -> Self {
         assert!(
             self.can_receive_block(),
@@ -165,7 +165,7 @@ impl WorkBuffer {
         let boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
 
         if let Some((epoch, _, _)) = boundary {
-            return self.on_ewrap_boundary(block, epoch, ewrap_total_shards);
+            return self.on_ewrap_boundary(block, epoch, ashard_total);
         }
 
         let rupd_boundary =
@@ -181,7 +181,7 @@ impl WorkBuffer {
     pub fn pop_work(
         self,
         stop_epoch: Option<Epoch>,
-        ewrap_total_shards: u32,
+        ashard_total: u32,
     ) -> (Option<InternalWorkUnit>, Self) {
         if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
             return (None, self);
@@ -208,7 +208,7 @@ impl WorkBuffer {
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             WorkBuffer::PreEwrapBoundary(batch, block, epoch) => {
-                let next = if ewrap_total_shards == 0 {
+                let next = if ashard_total == 0 {
                     // No shards requested — skip straight to the global Ewrap
                     // phase. Shouldn't happen with a valid config but keeps
                     // the state machine safe.
@@ -218,7 +218,7 @@ impl WorkBuffer {
                         block,
                         epoch,
                         shard_index: 0,
-                        total_shards: ewrap_total_shards,
+                        total_shards: ashard_total,
                     }
                 };
                 (Some(InternalWorkUnit::Blocks(batch)), next)
@@ -274,8 +274,8 @@ mod tests {
     use dolos_testing::blocks::make_conway_block;
 
     /// Tests that exercise the WorkBuffer state machine use a small shard
-    /// count to keep per-epoch EWRAP sequences manageable (1 prepare + N
-    /// shards + 1 finalize).
+    /// count to keep per-epoch boundary sequences manageable
+    /// (`AccountShard ×N` + `Ewrap`).
     const TEST_TOTAL_SHARDS: u32 = 1;
 
     /// Single Conway era, epoch_length=100, slot_length=1.
@@ -322,9 +322,10 @@ mod tests {
                 last: batch.last_slot(),
             },
             InternalWorkUnit::Rupd(s) => WorkTag::Rupd(*s),
-            // For test purposes, collapse the EWRAP boundary phases into a
-            // single `EWrap` tag keyed by the boundary slot. Tests care that
-            // EWRAP work was produced at all, not about phase count.
+            // For test purposes, collapse the epoch-boundary phases
+            // (AccountShard ×N + Ewrap) into a single `EWrap` tag keyed by
+            // the boundary slot. Tests care that boundary work was produced
+            // at all, not about phase count.
             InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
             InternalWorkUnit::AccountShard(s, _) => WorkTag::EWrap(*s),
             InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),

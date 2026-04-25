@@ -12,8 +12,9 @@ use crate::{
     ProposalState,
 };
 
-/// A reward that was applied at EWRAP time.
-/// This represents a spendable reward that was successfully credited to an account.
+/// A reward that was applied during the per-account boundary phase
+/// (`AccountShard`). Represents a spendable reward that was successfully
+/// credited to an account.
 #[derive(Debug, Clone)]
 pub struct AppliedReward {
     pub credential: StakeCredential,
@@ -146,8 +147,9 @@ pub struct BoundaryWork {
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,
 
-    /// Rewards that were actually applied (spendable) at EWRAP time.
-    /// This is populated during the reward visitor phase and survives commit.
+    /// Rewards that were actually applied (spendable) during the
+    /// `AccountShard` reward visitor. Populated per-shard and survives the
+    /// commit so callers can observe what was credited.
     pub applied_rewards: Vec<AppliedReward>,
 
     /// Effective MIRs from treasury (applied to registered accounts).

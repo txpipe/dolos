@@ -23,11 +23,11 @@ pub const PREFIX_SPACE: u32 = 256;
 /// divides 256).
 pub fn validate_total_shards(total_shards: u32) -> Result<(), String> {
     if total_shards == 0 {
-        return Err("ewrap_total_shards must be >= 1".into());
+        return Err("ashard_total must be >= 1".into());
     }
     if !PREFIX_SPACE.is_multiple_of(total_shards) {
         return Err(format!(
-            "ewrap_total_shards ({total_shards}) must divide {PREFIX_SPACE}"
+            "ashard_total ({total_shards}) must divide {PREFIX_SPACE}"
         ));
     }
     Ok(())

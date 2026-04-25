@@ -6,7 +6,7 @@
 //! fields with the shard-populated accumulators) and emits a single
 //! `EpochWrapUp` delta. `EpochWrapUp::apply` overwrites `entity.end` with
 //! the final stats, rotates rolling/pparams snapshots forward, and clears
-//! `ewrap_progress`. The completed `EpochState` is also written to archive
+//! `ashard_progress`. The completed `EpochState` is also written to archive
 //! at commit time.
 
 use std::sync::Arc;

@@ -139,7 +139,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         // shard-populated accumulators (already in `ending_state.end`), and
         // emit `EpochWrapUp` to close the epoch boundary. Apply will
         // overwrite `entity.end` with these stats, rotate the rolling/pparams
-        // snapshots forward, and clear `ewrap_progress`.
+        // snapshots forward, and clear `ashard_progress`.
         let final_stats = define_end_stats(ctx);
 
         // Stash the final stats on `ending_state.end` so the post-commit
