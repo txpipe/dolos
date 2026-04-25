@@ -61,16 +61,17 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Commit the prepare phase: enactment/MIR/refund/wrapup-global deltas for
-    /// pools, dreps, proposals, the epoch state (`EpochEndInit`), plus archive
-    /// logs produced by the prepare visitors (e.g. `PoolDepositRefundLog`).
+    /// Commit the global Ewrap phase: enactment/MIR/refund/wrapup-global
+    /// deltas for pools, dreps, proposals, the epoch state (`EpochEndInit`),
+    /// plus archive logs produced by the global visitors (e.g.
+    /// `PoolDepositRefundLog`).
     #[instrument(skip_all)]
-    pub fn commit_prepare<D: Domain>(
+    pub fn commit_ewrap<D: Domain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
     ) -> Result<(), ChainError> {
-        debug!("committing ewrap prepare changes");
+        debug!("committing ewrap changes");
 
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
@@ -105,20 +106,20 @@ impl BoundaryWork {
         let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
         let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
 
-        debug!(log_count = self.logs.len(), "writing prepare archive logs");
+        debug!(log_count = self.logs.len(), "writing ewrap archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
         }
 
         if !self.deltas.entities.is_empty() {
-            warn!(quantity = %self.deltas.entities.len(), "uncommitted prepare deltas");
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted ewrap deltas");
         }
 
         writer.commit()?;
         archive_writer.commit()?;
 
-        debug!("ewrap prepare commit complete");
+        debug!("ewrap commit complete");
         Ok(())
     }
 

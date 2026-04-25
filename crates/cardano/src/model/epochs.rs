@@ -149,7 +149,7 @@ impl TransitionDefault for RollingStats {
 }
 
 /// Stats that are gathered at the end of the epoch
-#[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndStats {
     #[n(0)]
     pub pool_deposit_count: u64,
@@ -243,9 +243,11 @@ pub struct EpochState {
     pub incentives: Option<EpochIncentives>,
 
     /// When set, EWRAP sharding is in progress and this holds the next shard
-    /// index to run. Initialised by `EpochEndInit` (EwrapPrepare), advanced by
-    /// each `EpochEndAccumulate` (EwrapShard), cleared by `EpochWrapUp`
-    /// (EwrapFinalize). Doubles as cursor + "EWRAP in flight" flag.
+    /// index to run. Reset to `None` by `EpochTransition` (ESTART) at epoch
+    /// open, set to `Some(0)` by `EpochEndInit` (Ewrap) when prepare-time
+    /// globals are populated, advanced by each `EpochEndAccumulate`
+    /// (EwrapShard), cleared by `EpochWrapUp` (EwrapFinalize). Doubles as
+    /// cursor + "EWRAP in flight" flag.
     #[n(15)]
     #[cbor(default)]
     pub ewrap_progress: Option<u32>,
@@ -609,10 +611,14 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     }
 }
 
-/// Delta emitted once by `EwrapPrepare` to initialise `EpochState.end` with
-/// the globals known at prepare time (pool counts, MIR totals, proposal
-/// refunds, epoch incentives) and zeroed reward accumulators, plus set
+/// Delta emitted once by `Ewrap` to populate `EpochState.end` with the
+/// globals known at prepare time (pool counts, MIR totals, proposal refunds,
+/// epoch incentives) and zeroed reward accumulators, plus set
 /// `ewrap_progress = Some(0)` to mark the start of the sharding pipeline.
+///
+/// `entity.end` is already `Some(EndStats::default())` at this point — ESTART's
+/// `EpochTransition` opens the slot at epoch start. This delta overwrites
+/// that default-seeded slot with the populated stats.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochEndInit {
     pub(crate) stats: EndStats,
@@ -729,7 +735,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         let end = entity
             .end
             .as_mut()
-            .expect("EwrapPrepare initialised end before shards run");
+            .expect("Ewrap populated end before shards run (slot opened by ESTART)");
 
         end.effective_rewards += self.effective_delta;
         end.unspendable_to_treasury += self.unspendable_to_treasury_delta;
@@ -817,6 +823,8 @@ pub struct EpochTransition {
     pub(crate) prev_initial_pots: Option<Pots>,
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_end: Option<EndStats>,
+    pub(crate) prev_ewrap_progress: Option<u32>,
 }
 
 impl EpochTransition {
@@ -835,6 +843,8 @@ impl EpochTransition {
             prev_initial_pots: None,
             prev_rolling: None,
             prev_pparams: None,
+            prev_end: None,
+            prev_ewrap_progress: None,
         }
     }
 }
@@ -866,6 +876,8 @@ impl dolos_core::EntityDelta for EpochTransition {
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
+        self.prev_end = entity.end.clone();
+        self.prev_ewrap_progress = entity.ewrap_progress;
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -883,6 +895,13 @@ impl dolos_core::EntityDelta for EpochTransition {
                 self.genesis.as_ref().expect("genesis not set"),
             );
         }
+
+        // Open the EndStats slot for the new epoch with zeroed defaults.
+        // Ewrap will overwrite this with the fully-populated EndStats at the
+        // end of this epoch; until then, downstream readers see a consistent
+        // empty container instead of the previous epoch's stale data.
+        entity.end = Some(EndStats::default());
+        entity.ewrap_progress = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -895,6 +914,8 @@ impl dolos_core::EntityDelta for EpochTransition {
             .prev_initial_pots
             .clone()
             .expect("apply captured initial_pots");
+        entity.end = self.prev_end.clone();
+        entity.ewrap_progress = self.prev_ewrap_progress;
     }
 }
 

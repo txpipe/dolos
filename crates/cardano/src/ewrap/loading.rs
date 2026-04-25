@@ -331,14 +331,15 @@ impl BoundaryWork {
     // Phase-specific load + compute orchestration.
     // ---------------------------------------------------------------------
 
-    /// Load + compute for the `EwrapPrepare` phase:
+    /// Load + compute for the `Ewrap` phase:
     ///   * classify pools/dreps/proposals (retiring/enacting/dropping),
     ///   * process pending MIRs,
     ///   * run the enactment / refunds / wrapup visitors (global only —
     ///     account-level work happens in the shards), and
-    ///   * emit an `EpochEndInit` delta that seeds `EpochState.end` with the
-    ///     prepare-time globals and zeroed reward accumulators.
-    pub fn load_prepare<D: Domain>(
+    ///   * emit an `EpochEndInit` delta that populates `EpochState.end` with
+    ///     the prepare-time globals and zeroed reward accumulators (the slot
+    ///     itself is opened by ESTART's `EpochTransition`).
+    pub fn load_ewrap<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<BoundaryWork, ChainError> {

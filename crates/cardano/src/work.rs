@@ -13,7 +13,7 @@ use crate::roll::{WorkBatch, WorkBlock};
 pub(crate) enum InternalWorkUnit {
     Genesis,
     Blocks(WorkBatch),
-    EwrapPrepare(BlockSlot),
+    Ewrap(BlockSlot),
     EwrapShard(BlockSlot, u32),
     EwrapFinalize(BlockSlot),
     EStart(BlockSlot),
@@ -30,7 +30,7 @@ pub(crate) enum WorkBuffer {
     RupdBoundary(OwnedMultiEraBlock),
     PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
     /// Entry state for the EWRAP pipeline. `pop_work` yields
-    /// `InternalWorkUnit::EwrapPrepare` and advances to
+    /// `InternalWorkUnit::Ewrap` and advances to
     /// `EwrapShardingBoundary { shard_index: 0, total_shards }`.
     EwrapBoundary(OwnedMultiEraBlock, Epoch),
     /// Intermediate state that emits `EwrapShard(shard_index)` until
@@ -208,7 +208,7 @@ impl WorkBuffer {
                         total_shards: ewrap_total_shards,
                     }
                 };
-                (Some(InternalWorkUnit::EwrapPrepare(slot)), next)
+                (Some(InternalWorkUnit::Ewrap(slot)), next)
             }
             WorkBuffer::EwrapShardingBoundary {
                 block,
@@ -312,7 +312,7 @@ mod tests {
             // For test purposes, collapse all three EWRAP phases into a
             // single `EWrap` tag keyed by the boundary slot. Tests care that
             // EWRAP work was produced at all, not about phase count.
-            InternalWorkUnit::EwrapPrepare(s) => WorkTag::EWrap(*s),
+            InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
             InternalWorkUnit::EwrapShard(s, _) => WorkTag::EWrap(*s),
             InternalWorkUnit::EwrapFinalize(s) => WorkTag::EWrap(*s),
             InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),

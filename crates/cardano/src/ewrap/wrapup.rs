@@ -85,7 +85,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
-        "EWRAP prepare: seeding EndStats with zero reward accumulators"
+        "EWRAP: populating EndStats with prepare-time globals"
     );
 
     EndStats {
@@ -126,10 +126,11 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
-        // Emit the prepare-time EndStats seed. The reward accumulators are
-        // zero here; shards will add their contributions via
-        // `EpochEndAccumulate`, and `EwrapFinalize` will emit `EpochWrapUp`
-        // against the accumulated `end`.
+        // Populate `EpochState.end` with the prepare-time globals. ESTART
+        // already opened the slot via `EpochTransition` (with default zeros),
+        // so this delta overwrites the empty default. Reward accumulators
+        // remain zero; shards add their contributions via `EpochEndAccumulate`
+        // and `EwrapFinalize` emits `EpochWrapUp` against the accumulated `end`.
         let stats = define_end_stats(ctx);
 
         ctx.deltas.add_for_entity(EpochEndInit::new(stats));

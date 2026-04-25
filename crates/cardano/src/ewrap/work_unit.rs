@@ -3,10 +3,12 @@
 //! EWRAP at an epoch boundary is partitioned into three distinct work units
 //! scheduled sequentially by the chain logic:
 //!
-//! 1. `EwrapPrepareWorkUnit` — global (non-account) work: pool/drep/proposal
+//! 1. `EwrapWorkUnit` — global (non-account) work: pool/drep/proposal
 //!    classification, enactment, MIR processing, deposit refunds, and
-//!    emitting the `EpochEndInit` delta that seeds `EpochState.end` with the
-//!    prepare-time globals + zeroed reward accumulators.
+//!    emitting the `EpochEndInit` delta that populates `EpochState.end` with
+//!    the prepare-time globals + zeroed reward accumulators. The structural
+//!    `EpochState.end` slot is opened (as `Some(EndStats::default())`) by
+//!    `EpochTransition` during ESTART, so this phase only writes content.
 //! 2. `EwrapShardWorkUnit { shard_index }` — emitted `total_shards` times.
 //!    Each shard covers a first-byte prefix range of the account key space,
 //!    range-loads pending rewards, iterates accounts in range, applies
@@ -26,10 +28,10 @@ use crate::CardanoLogic;
 use super::{shard::shard_key_range, BoundaryWork};
 
 // ---------------------------------------------------------------------------
-// EwrapPrepareWorkUnit
+// EwrapWorkUnit
 // ---------------------------------------------------------------------------
 
-pub struct EwrapPrepareWorkUnit {
+pub struct EwrapWorkUnit {
     slot: BlockSlot,
     #[allow(dead_code)]
     config: CardanoConfig,
@@ -38,7 +40,7 @@ pub struct EwrapPrepareWorkUnit {
     boundary: Option<BoundaryWork>,
 }
 
-impl EwrapPrepareWorkUnit {
+impl EwrapWorkUnit {
     pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
         Self {
             slot,
@@ -53,29 +55,29 @@ impl EwrapPrepareWorkUnit {
     }
 }
 
-impl<D> WorkUnit<D> for EwrapPrepareWorkUnit
+impl<D> WorkUnit<D> for EwrapWorkUnit
 where
     D: Domain<Chain = CardanoLogic>,
 {
     fn name(&self) -> &'static str {
-        "ewrap_prepare"
+        "ewrap"
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "loading ewrap prepare context");
+        debug!(slot = self.slot, "loading ewrap context");
 
-        let boundary = BoundaryWork::load_prepare::<D>(domain.state(), self.genesis.clone())?;
+        let boundary = BoundaryWork::load_ewrap::<D>(domain.state(), self.genesis.clone())?;
 
-        info!(epoch = boundary.ending_state().number, "ewrap prepare");
+        info!(epoch = boundary.ending_state().number, "ewrap");
 
         self.boundary = Some(boundary);
 
-        debug!("ewrap prepare context loaded");
+        debug!("ewrap context loaded");
         Ok(())
     }
 
     fn compute(&mut self) -> Result<(), DomainError> {
-        debug!("ewrap prepare compute (deltas computed during load)");
+        debug!("ewrap compute (deltas computed during load)");
         Ok(())
     }
 
@@ -83,9 +85,9 @@ where
         let boundary = self
             .boundary
             .as_mut()
-            .ok_or_else(|| DomainError::Internal("ewrap prepare boundary not loaded".into()))?;
+            .ok_or_else(|| DomainError::Internal("ewrap boundary not loaded".into()))?;
 
-        boundary.commit_prepare::<D>(domain.state(), domain.archive())?;
+        boundary.commit_ewrap::<D>(domain.state(), domain.archive())?;
         Ok(())
     }
 

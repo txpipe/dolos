@@ -496,9 +496,9 @@ fn run_epoch_pots_test(
                         }
                     }
                 }
-                CardanoWorkUnit::EwrapPrepare(prep) => {
+                CardanoWorkUnit::Ewrap(ewrap) => {
                     // Reset accumulator at the start of each boundary.
-                    if let Some(boundary) = prep.boundary() {
+                    if let Some(boundary) = ewrap.boundary() {
                         accumulated_applied.clear();
                         accumulated_ending_epoch = Some(boundary.ending_state().number);
                     }
