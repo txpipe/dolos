@@ -3,7 +3,7 @@
 ## Natural sequence within an epoch
 
 ```
-Estart  →  Roll …  →  Rupd  →  Roll …  →  AccountShard ×N  →  Ewrap
+Estart  →  Roll …  →  Rupd  →  Roll …  →  AShard ×N  →  Ewrap
 (open)     (blocks)   (RUPD)   (blocks)    (per-account)         (global + close)
                                                                           │
                                                                           ▼
@@ -25,7 +25,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
   - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
   - `AccountTransition` — `estart/reset.rs:127`. One per account. Targets `accounts`.
   - `PoolTransition` — `estart/reset.rs:138`. One per pool. Targets `pools`.
-  - `EpochTransition` — `estart/reset.rs:148`. Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, also seeds `EpochState.end = Some(EndStats::default())` and resets `ashard_progress = None` for the new epoch — at the next boundary, AccountShards populate the reward accumulator fields directly via `EpochEndAccumulate`, then Ewrap reads them back, assembles the final `EndStats` (combining accumulators with the prepare-time fields), and emits `EpochWrapUp` to close.
+  - `EpochTransition` — `estart/reset.rs:148`. Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, also seeds `EpochState.end = Some(EndStats::default())` and resets `ashard_progress = None` for the new epoch — at the next boundary, AShards populate the reward accumulator fields directly via `EpochEndAccumulate`, then Ewrap reads them back, assembles the final `EndStats` (combining accumulators with the prepare-time fields), and emits `EpochWrapUp` to close.
 - Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.).
 - Namespaces touched: `accounts`, `pools`, `epochs`, `eras`.
 
@@ -73,15 +73,15 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 - Deltas: **none**. Writes `PendingRewardState` entities directly and updates `EpochState.incentives`.
 - Namespaces touched: `pending_rewards`, `epochs`.
 
-## 4. `AccountShardWorkUnit` — per-account reward application (×N shards)
+## 4. `AShardWorkUnit` — per-account reward application (×N shards)
 
-- Variants: `CardanoWorkUnit::AccountShard` / `InternalWorkUnit::AccountShard(BlockSlot, u32)`.
-- Struct: `ashard::AccountShardWorkUnit` (`crates/cardano/src/ashard/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
+- Variants: `CardanoWorkUnit::AShard` / `InternalWorkUnit::AShard(BlockSlot, u32)`.
+- Struct: `ashard::AShardWorkUnit` (`crates/cardano/src/ashard/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
 - Purpose: apply rewards + drops for the accounts in this shard's range; accumulate the shard's reward contribution into `EpochState.end`. This is the first phase of the epoch-boundary pipeline — `Ewrap` (globals + close) follows.
 - Deltas emitted (4 variants per shard run):
   - **Rewards** (`ashard/rewards.rs`):
     - `AssignRewards:79` (one per rewarded account in range)
-  - **Drops** (account-level, `ewrap/drops.rs`, used by both Ewrap and AccountShard):
+  - **Drops** (account-level, `ewrap/drops.rs`, used by both Ewrap and AShard):
     - `PoolDelegatorRetire:32` *(also fires in Ewrap for non-account targets)*
     - `DRepDelegatorDrop:53` *(also fires in Ewrap for non-account targets)*
   - **Accumulator** (`ashard/loading.rs`):
@@ -93,7 +93,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 
 - Variants: `CardanoWorkUnit::Ewrap` / `InternalWorkUnit::Ewrap(BlockSlot)`.
 - Struct: `ewrap::EwrapWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`).
-- Purpose: classify retiring pools / expiring dreps / enacting+dropping proposals, process pending MIRs, run enactment + refund + wrapup-global visitors, then close the boundary by emitting `EpochWrapUp` with the assembled final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding AccountShards). Also writes the completed `EpochState` to archive.
+- Purpose: classify retiring pools / expiring dreps / enacting+dropping proposals, process pending MIRs, run enactment + refund + wrapup-global visitors, then close the boundary by emitting `EpochWrapUp` with the assembled final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding AShards). Also writes the completed `EpochState` to archive.
 - Deltas emitted (10 distinct variants, 11 sites):
   - **Enactment** (`ewrap/enactment.rs`):
     - `PParamsUpdate:36,39`
@@ -103,8 +103,8 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
     - `ProposalDepositRefund:39,62`
   - **Drops** (drep-level, `ewrap/drops.rs`):
     - `DRepExpiration:67`
-    - `DRepDelegatorDrop:53` *(also fires in AccountShard for accounts)*
-    - `PoolDelegatorRetire:32` *(also fires in AccountShard for accounts)*
+    - `DRepDelegatorDrop:53` *(also fires in AShard for accounts)*
+    - `PoolDelegatorRetire:32` *(also fires in AShard for accounts)*
   - **Wrap-up globals** (`ewrap/wrapup.rs`):
     - `PoolWrapUp:119`
     - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ashard_progress`)

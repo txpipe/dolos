@@ -986,7 +986,7 @@ pub struct CardanoConfig {
     pub custom_utxos: Vec<CustomUtxo>,
 
     /// Number of shards used to partition the per-account leg of the
-    /// epoch-boundary pipeline (see `AccountShardWorkUnit`). Must divide 256
+    /// epoch-boundary pipeline (see `AShardWorkUnit`). Must divide 256
     /// (so shards are whole first-byte prefix buckets) and be >= 1. When
     /// `None`, defaults to `CardanoConfig::DEFAULT_ASHARD_TOTAL`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

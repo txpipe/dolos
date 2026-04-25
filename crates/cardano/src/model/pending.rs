@@ -14,7 +14,7 @@ pub fn credential_to_key(cred: &StakeCredential) -> EntityKey {
 }
 
 /// Pending reward for a single account, waiting to be applied at the epoch
-/// boundary. Created by RUPD, consumed by `AccountShard` (the per-account
+/// boundary. Created by RUPD, consumed by `AShard` (the per-account
 /// leg of the boundary pipeline).
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingRewardState {
@@ -52,7 +52,7 @@ entity_boilerplate!(PendingRewardState, "pending_rewards");
 /// Pending MIR (Move Instantaneous Reward) for a single account, waiting to
 /// be applied at the epoch boundary. Created during block roll when MIR
 /// certificates are processed, consumed by `Ewrap` (MIR processing is part
-/// of the global Ewrap phase, not the per-account `AccountShard` phase).
+/// of the global Ewrap phase, not the per-account `AShard` phase).
 ///
 /// Unlike regular rewards, MIRs come from either reserves or treasury.
 /// During Ewrap, MIRs are only applied to registered accounts — MIRs to
@@ -161,7 +161,7 @@ impl dolos_core::EntityDelta for EnqueueReward {
 }
 
 /// Delta to dequeue (consume) a pending reward after applying it.
-/// Applied by `AccountShard` after rewards are assigned to accounts.
+/// Applied by `AShard` after rewards are assigned to accounts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DequeueReward {
     pub credential: StakeCredential,

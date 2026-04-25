@@ -2,7 +2,7 @@
 //!
 //! The rupd work unit computes rewards at the stability window boundary
 //! (4k slots before epoch end). Computed rewards are persisted to state store
-//! as `PendingRewardState` entities, to be consumed by `AccountShard` at the
+//! as `PendingRewardState` entities, to be consumed by `AShard` at the
 //! epoch boundary.
 
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 //! Ewrap work unit — global (non-account) work and the boundary close.
 //!
-//! Runs after the per-account `AccountShardWorkUnit` series. Performs
+//! Runs after the per-account `AShardWorkUnit` series. Performs
 //! pool/drep/proposal classification, enactment, MIR processing, deposit
 //! refunds, then assembles the final `EndStats` (combining prepare-time
 //! fields with the shard-populated accumulators) and emits a single

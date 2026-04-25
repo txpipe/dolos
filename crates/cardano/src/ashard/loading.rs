@@ -1,6 +1,6 @@
-//! Load + compute helpers for `AccountShardWorkUnit`.
+//! Load + compute helpers for `AShardWorkUnit`.
 //!
-//! Adds AccountShard-specific methods to `BoundaryWork` (defined in `ewrap`).
+//! Adds AShard-specific methods to `BoundaryWork` (defined in `ewrap`).
 //! The shared boundary helpers (`new_empty`, `load_pool_data`,
 //! `load_drep_data`) live in `ewrap/loading.rs`; this file builds on top.
 
@@ -56,7 +56,7 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Load + compute for an `AccountShard` phase:
+    /// Load + compute for an `AShard` phase:
     ///   * reload the small classifications that drops.visit_account needs
     ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
     ///   * range-load pending rewards for this shard's key range,

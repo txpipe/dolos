@@ -285,7 +285,7 @@ impl BoundaryWork {
     }
 
     // ---------------------------------------------------------------------
-    // Ewrap-phase orchestration. AccountShard's load/commit live in
+    // Ewrap-phase orchestration. AShard's load/commit live in
     // `crate::ashard` (separate module); the shared helpers above are reused.
     // ---------------------------------------------------------------------
 
@@ -293,7 +293,7 @@ impl BoundaryWork {
     ///   * classify pools/dreps/proposals (retiring/enacting/dropping),
     ///   * process pending MIRs,
     ///   * run the enactment / refunds / wrapup visitors (global only —
-    ///     account-level work happened in the preceding AccountShards), and
+    ///     account-level work happened in the preceding AShards), and
     ///   * emit a single `EpochWrapUp` delta carrying the final `EndStats`
     ///     (prepare-time fields + shard-populated reward accumulators). Apply
     ///     overwrites `entity.end`, rotates rolling/pparams snapshots, and

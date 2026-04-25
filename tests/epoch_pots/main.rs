@@ -202,7 +202,7 @@ fn dump_stake_csv(
 }
 
 /// Dump rewards that were actually applied (spendable) during the
-/// `AccountShard` phase. Filters out rewards for accounts that deregistered
+/// `AShard` phase. Filters out rewards for accounts that deregistered
 /// between RUPD and the boundary.
 fn dump_applied_rewards_csv(
     applied_rewards: &[AppliedReward],
@@ -461,7 +461,7 @@ fn run_epoch_pots_test(
     // When estart fires for epoch N+1, ended_state() holds the completed epoch N.
     let mut captured_epoch: Option<EpochState> = None;
 
-    // Accumulate applied rewards across all AccountShard work units for the
+    // Accumulate applied rewards across all AShard work units for the
     // subject boundary. Each shard holds only its own slice in memory, but
     // the test harness needs the full set at the end for the CSV dump.
     let mut accumulated_applied: Vec<AppliedReward> = Vec::new();
@@ -497,7 +497,7 @@ fn run_epoch_pots_test(
                         }
                     }
                 }
-                CardanoWorkUnit::AccountShard(shard) => {
+                CardanoWorkUnit::AShard(shard) => {
                     if shard.shard_index() == 0 {
                         // First shard of this boundary — reset accumulator
                         // and capture the ending epoch.

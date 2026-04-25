@@ -1,6 +1,6 @@
-//! Commit logic for `AccountShardWorkUnit`.
+//! Commit logic for `AShardWorkUnit`.
 //!
-//! Adds the AccountShard-specific commit method to `BoundaryWork`. Reuses the
+//! Adds the AShard-specific commit method to `BoundaryWork`. Reuses the
 //! shared `stream_and_apply_namespace` helper that lives in `ewrap/commit.rs`.
 
 use dolos_core::{

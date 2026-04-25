@@ -80,7 +80,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         );
     }
 
-    // Reward accumulators are populated by AccountShards (which ran before
+    // Reward accumulators are populated by AShards (which ran before
     // this Ewrap phase). Read them back from `EpochState.end` and combine
     // with the prepare-time fields to produce the final stats carried by
     // `EpochWrapUp`.
@@ -88,7 +88,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         .ending_state()
         .end
         .as_ref()
-        .expect("ESTART seeded EpochState.end before AccountShards");
+        .expect("ESTART seeded EpochState.end before AShards");
 
     tracing::debug!(
         epoch = ctx.ending_state().number,

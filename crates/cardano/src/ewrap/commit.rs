@@ -1,4 +1,4 @@
-//! Commit logic for the two-phase boundary pipeline (AccountShard + Ewrap).
+//! Commit logic for the two-phase boundary pipeline (AShard + Ewrap).
 //!
 //! Each phase commits its own deltas and archive logs atomically. The handoff
 //! between phases happens via `EpochState.end` + `EpochState.ashard_progress`
@@ -24,7 +24,7 @@ use crate::{
 impl BoundaryWork {
     /// Stream entities from a namespace, apply deltas, and write immediately.
     ///
-    /// `range` optionally narrows iteration — `AccountShard` passes the
+    /// `range` optionally narrows iteration — `AShard` passes the
     /// shard's key range so only accounts in that slice are streamed.
     pub(crate) fn stream_and_apply_namespace<D, E>(
         &mut self,
@@ -82,7 +82,7 @@ impl BoundaryWork {
 
         // Apply deltas to pools / dreps / proposals. The only `AssignRewards`
         // deltas Ewrap queues against accounts come from MIR processing
-        // (per-account stake rewards are owned by the preceding AccountShard
+        // (per-account stake rewards are owned by the preceding AShard
         // phase); they're applied in the account namespace below.
         self.stream_and_apply_namespace::<D, PoolState>(state, &writer, None)?;
         self.stream_and_apply_namespace::<D, DRepState>(state, &writer, None)?;

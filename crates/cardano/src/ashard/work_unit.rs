@@ -1,4 +1,4 @@
-//! AccountShard work unit — per-account leg of the epoch-boundary pipeline.
+//! AShard work unit — per-account leg of the epoch-boundary pipeline.
 //!
 //! Emitted `total_shards` times in sequence. Each shard covers a first-byte
 //! prefix range of the account key space, range-loads pending rewards,
@@ -17,7 +17,7 @@ use crate::{ewrap::BoundaryWork, CardanoLogic};
 
 use super::shard::shard_key_range;
 
-pub struct AccountShardWorkUnit {
+pub struct AShardWorkUnit {
     slot: BlockSlot,
     config: CardanoConfig,
     genesis: Arc<Genesis>,
@@ -26,7 +26,7 @@ pub struct AccountShardWorkUnit {
     boundary: Option<BoundaryWork>,
 }
 
-impl AccountShardWorkUnit {
+impl AShardWorkUnit {
     pub fn new(
         slot: BlockSlot,
         config: CardanoConfig,
@@ -51,7 +51,7 @@ impl AccountShardWorkUnit {
     }
 }
 
-impl<D> WorkUnit<D> for AccountShardWorkUnit
+impl<D> WorkUnit<D> for AShardWorkUnit
 where
     D: Domain<Chain = CardanoLogic>,
 {

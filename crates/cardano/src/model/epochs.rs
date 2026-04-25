@@ -243,10 +243,10 @@ pub struct EpochState {
     pub incentives: Option<EpochIncentives>,
 
     /// Cursor tracking shard progress through the epoch boundary. `None`
-    /// means no AccountShard has run yet (the natural starting state, set by
+    /// means no AShard has run yet (the natural starting state, set by
     /// `EpochTransition` during ESTART). `Some(n)` means shards `0..n` have
     /// committed and `n` is the next to run. Each `EpochEndAccumulate`
-    /// (AccountShard) advances the cursor; `EpochWrapUp` (Ewrap) clears it
+    /// (AShard) advances the cursor; `EpochWrapUp` (Ewrap) clears it
     /// back to `None`. Doubles as crash-recovery flag for "boundary in flight".
     #[n(15)]
     #[cbor(default)]
@@ -560,7 +560,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
 
 /// Delta emitted once by `Ewrap` to close the epoch boundary. Carries the
 /// fully populated `EndStats` (prepare-time fields from the wrap-up visitor +
-/// reward accumulators from the preceding `AccountShard` runs). Apply
+/// reward accumulators from the preceding `AShard` runs). Apply
 /// overwrites `entity.end` with these final stats, rotates the rolling and
 /// pparams snapshots forward, and clears `ashard_progress`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -616,7 +616,7 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     }
 }
 
-/// Delta emitted once per `AccountShard` to accumulate the shard's reward-
+/// Delta emitted once per `AShard` to accumulate the shard's reward-
 /// distribution contribution into `EpochState.end` and advance
 /// `ashard_progress` to the next shard index. Idempotent on repeat-apply by
 /// guarding on the shard index — a shard that was already committed will have
@@ -658,7 +658,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         // Idempotency + ordering guard. `ashard_progress` is the authoritative
         // cursor for which shards have landed: `None` means no shards have
         // run yet (shard 0 is the next expected); `Some(n)` means shards
-        // `0..n` have committed and `n` is next. AccountShard is the first
+        // `0..n` have committed and `n` is next. AShard is the first
         // phase of the epoch boundary, so `None` is the natural starting
         // state (set by ESTART's `EpochTransition`).
         let expected = entity.ashard_progress.unwrap_or(0);

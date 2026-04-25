@@ -90,11 +90,11 @@ fn test_redb3_lazy_iter() {
 // ---------------------------------------------------------------------------
 // Per-shard range iteration.
 //
-// AccountShard work units use key-range iteration to bound per-shard memory.
+// AShard work units use key-range iteration to bound per-shard memory.
 // This test verifies the property end-to-end: given a store with N entities
 // distributed across the full first-byte prefix space, iterating a single
 // first-byte prefix range must allocate O(1) on the iterator side. If it
-// regresses (e.g. a backend materialising the whole range), AccountShards
+// regresses (e.g. a backend materialising the whole range), AShards
 // would stop being memory-bounded.
 // ---------------------------------------------------------------------------
 
@@ -128,7 +128,7 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
     seed_account_namespace(store);
 
     // Build a half-open Range<EntityKey> spanning one first-byte prefix
-    // bucket — this is the same shape AccountShardWorkUnit uses.
+    // bucket — this is the same shape AShardWorkUnit uses.
     let mut start_bytes = [0u8; 32];
     start_bytes[0] = SHARD_KEY_PREFIX_RANGE.start;
     let mut end_bytes = [0u8; 32];

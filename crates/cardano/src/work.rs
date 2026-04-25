@@ -14,7 +14,7 @@ pub(crate) enum InternalWorkUnit {
     Genesis,
     Blocks(WorkBatch),
     Ewrap(BlockSlot),
-    AccountShard(BlockSlot, u32),
+    AShard(BlockSlot, u32),
     EStart(BlockSlot),
     Rupd(BlockSlot),
     ForcedStop,
@@ -29,13 +29,13 @@ pub(crate) enum WorkBuffer {
     RupdBoundary(OwnedMultiEraBlock),
     /// Pre-flushed state when crossing the epoch boundary with a buffered
     /// `WorkBatch`. `pop_work` yields the batch as `InternalWorkUnit::Blocks`
-    /// and advances to `AccountShardingBoundary { shard_index: 0, total_shards }`
+    /// and advances to `AShardingBoundary { shard_index: 0, total_shards }`
     /// (or `EwrapBoundary` if `total_shards == 0`).
     PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
-    /// Entry state that emits `AccountShard(shard_index)` until
+    /// Entry state that emits `AShard(shard_index)` until
     /// `shard_index == total_shards`, then advances to `EwrapBoundary`.
     /// This is the first phase of the epoch-boundary pipeline.
-    AccountShardingBoundary {
+    AShardingBoundary {
         block: OwnedMultiEraBlock,
         epoch: Epoch,
         shard_index: u32,
@@ -67,7 +67,7 @@ impl WorkBuffer {
             WorkBuffer::RupdBoundary(block) => block.point(),
             WorkBuffer::PreEwrapBoundary(_, block, _) => block.point(),
             WorkBuffer::EwrapBoundary(block, _) => block.point(),
-            WorkBuffer::AccountShardingBoundary { block, .. } => block.point(),
+            WorkBuffer::AShardingBoundary { block, .. } => block.point(),
             WorkBuffer::EstartBoundary(block, _) => block.point(),
             WorkBuffer::PreForcedStop(block) => block.point(),
             WorkBuffer::ForcedStop => unreachable!(),
@@ -129,7 +129,7 @@ impl WorkBuffer {
                     // No shards — entry goes straight to the global Ewrap phase.
                     WorkBuffer::EwrapBoundary(next_block, epoch)
                 } else {
-                    WorkBuffer::AccountShardingBoundary {
+                    WorkBuffer::AShardingBoundary {
                         block: next_block,
                         epoch,
                         shard_index: 0,
@@ -214,7 +214,7 @@ impl WorkBuffer {
                     // the state machine safe.
                     Self::EwrapBoundary(block, epoch)
                 } else {
-                    Self::AccountShardingBoundary {
+                    Self::AShardingBoundary {
                         block,
                         epoch,
                         shard_index: 0,
@@ -223,7 +223,7 @@ impl WorkBuffer {
                 };
                 (Some(InternalWorkUnit::Blocks(batch)), next)
             }
-            WorkBuffer::AccountShardingBoundary {
+            WorkBuffer::AShardingBoundary {
                 block,
                 epoch,
                 shard_index,
@@ -234,14 +234,14 @@ impl WorkBuffer {
                 let next = if next_index >= total_shards {
                     Self::EwrapBoundary(block, epoch)
                 } else {
-                    Self::AccountShardingBoundary {
+                    Self::AShardingBoundary {
                         block,
                         epoch,
                         shard_index: next_index,
                         total_shards,
                     }
                 };
-                (Some(InternalWorkUnit::AccountShard(slot, shard_index)), next)
+                (Some(InternalWorkUnit::AShard(slot, shard_index)), next)
             }
             WorkBuffer::EwrapBoundary(block, epoch) => (
                 Some(InternalWorkUnit::Ewrap(block.slot())),
@@ -275,7 +275,7 @@ mod tests {
 
     /// Tests that exercise the WorkBuffer state machine use a small shard
     /// count to keep per-epoch boundary sequences manageable
-    /// (`AccountShard ×N` + `Ewrap`).
+    /// (`AShard ×N` + `Ewrap`).
     const TEST_TOTAL_SHARDS: u32 = 1;
 
     /// Single Conway era, epoch_length=100, slot_length=1.
@@ -323,11 +323,11 @@ mod tests {
             },
             InternalWorkUnit::Rupd(s) => WorkTag::Rupd(*s),
             // For test purposes, collapse the epoch-boundary phases
-            // (AccountShard ×N + Ewrap) into a single `EWrap` tag keyed by
+            // (AShard ×N + Ewrap) into a single `EWrap` tag keyed by
             // the boundary slot. Tests care that boundary work was produced
             // at all, not about phase count.
             InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
-            InternalWorkUnit::AccountShard(s, _) => WorkTag::EWrap(*s),
+            InternalWorkUnit::AShard(s, _) => WorkTag::EWrap(*s),
             InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),
             InternalWorkUnit::ForcedStop => WorkTag::ForcedStop,
         }

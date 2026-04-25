@@ -74,14 +74,14 @@ pub enum CardanoWorkUnit {
     /// classification, MIRs, enactment, deposit refunds) and close the
     /// boundary by emitting `EpochWrapUp` with the assembled final
     /// `EndStats` (prepare-time fields + accumulator fields populated by
-    /// the preceding `AccountShard` runs). The `EpochState.end` slot itself
+    /// the preceding `AShard` runs). The `EpochState.end` slot itself
     /// is opened by ESTART's `EpochTransition` at the start of each epoch.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Handle one shard of per-account reward application. Emitted
     /// `config.ashard_total` times in sequence. Each shard covers a
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
-    AccountShard(Box<ashard::AccountShardWorkUnit>),
+    AShard(Box<ashard::AShardWorkUnit>),
     /// Handle epoch start processing.
     Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
@@ -98,7 +98,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::name(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
-            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::name(w),
+            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::name(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
         }
@@ -110,7 +110,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -122,7 +122,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
-            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::compute(w),
+            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::compute(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
             Self::ForcedStop => Ok(()),
         }
@@ -136,8 +136,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
-            Self::AccountShard(w) => {
-                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+            Self::AShard(w) => {
+                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::ForcedStop => Ok(()),
@@ -152,8 +152,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
-            Self::AccountShard(w) => {
-                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            Self::AShard(w) => {
+                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::ForcedStop => Err(DomainError::StopEpochReached),
@@ -170,8 +170,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
-            Self::AccountShard(w) => {
-                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            Self::AShard(w) => {
+                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::ForcedStop => Ok(()),
@@ -188,8 +188,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
-            Self::AccountShard(w) => {
-                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            Self::AShard(w) => {
+                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::ForcedStop => Ok(()),
@@ -202,7 +202,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
@@ -266,7 +266,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         // Crash-recovery check: if the previous process crashed mid-boundary,
         // `EpochState.ashard_progress` will be `Some(i)` with `i` equal to the
-        // next AccountShard that should have run. Detect and warn — full
+        // next AShard that should have run. Detect and warn — full
         // resume requires re-fetching the boundary block from upstream, which
         // is tracked separately.
         if let Ok(epoch) = load_epoch::<D>(state) {
@@ -279,7 +279,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         total_shards = total,
                         "crash detected mid-boundary: ashard_progress is set. \
                          On the next block that triggers the boundary, dolos will \
-                         begin the AccountShard pipeline from scratch; correctness \
+                         begin the AShard pipeline from scratch; correctness \
                          depends on shard idempotency (state deletes are no-ops if \
                          already applied; EpochEndAccumulate guards on shard_index). \
                          Operators should monitor the subsequent boundary for \
@@ -293,7 +293,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         "found EpochState.ashard_progress == total_shards at \
                          startup — Ewrap (closing phase) was not committed \
                          before crash. The next boundary attempt will re-run \
-                         AccountShards and Ewrap; idempotency should keep the \
+                         AShards and Ewrap; idempotency should keep the \
                          result correct."
                     );
                 }
@@ -392,9 +392,9 @@ impl dolos_core::ChainLogic for CardanoLogic {
             InternalWorkUnit::Ewrap(slot) => Some(CardanoWorkUnit::Ewrap(Box::new(
                 ewrap::EwrapWorkUnit::new(slot, self.config.clone(), domain.genesis()),
             ))),
-            InternalWorkUnit::AccountShard(slot, shard_index) => {
-                Some(CardanoWorkUnit::AccountShard(Box::new(
-                    ashard::AccountShardWorkUnit::new(
+            InternalWorkUnit::AShard(slot, shard_index) => {
+                Some(CardanoWorkUnit::AShard(Box::new(
+                    ashard::AShardWorkUnit::new(
                         slot,
                         self.config.clone(),
                         domain.genesis(),
