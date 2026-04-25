@@ -37,6 +37,7 @@ pub mod utils;
 pub mod utxoset;
 
 // work units
+pub mod ashard;
 pub mod estart;
 pub mod ewrap;
 pub mod genesis;
@@ -80,7 +81,7 @@ pub enum CardanoWorkUnit {
     /// `config.ewrap_total_shards` times in sequence. Each shard covers a
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
-    AccountShard(Box<ewrap::AccountShardWorkUnit>),
+    AccountShard(Box<ashard::AccountShardWorkUnit>),
     /// Handle epoch start processing.
     Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
@@ -97,7 +98,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::name(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
-            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::name(w),
+            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::name(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
         }
@@ -109,7 +110,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -121,7 +122,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
-            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::compute(w),
+            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::compute(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
             Self::ForcedStop => Ok(()),
         }
@@ -136,7 +137,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
             Self::AccountShard(w) => {
-                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::ForcedStop => Ok(()),
@@ -152,7 +153,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
             Self::AccountShard(w) => {
-                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::ForcedStop => Err(DomainError::StopEpochReached),
@@ -170,7 +171,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
             Self::AccountShard(w) => {
-                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::ForcedStop => Ok(()),
@@ -188,7 +189,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
             Self::AccountShard(w) => {
-                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+                <ashard::AccountShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::ForcedStop => Ok(()),
@@ -201,7 +202,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::AccountShard(w) => <ashard::AccountShardWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
@@ -393,7 +394,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             ))),
             InternalWorkUnit::AccountShard(slot, shard_index) => {
                 Some(CardanoWorkUnit::AccountShard(Box::new(
-                    ewrap::AccountShardWorkUnit::new(
+                    ashard::AccountShardWorkUnit::new(
                         slot,
                         self.config.clone(),
                         domain.genesis(),

@@ -1,6 +1,6 @@
-//! Shard range helper for EWRAP key-range partitioning.
+//! Shard range helper for account-shard key-range partitioning.
 //!
-//! Shards partition per-account EWRAP work by first-byte prefix of the
+//! Shards partition per-account boundary work by first-byte prefix of the
 //! `EntityKey`. `total_shards` must divide 256 so that each shard covers an
 //! equal whole number of prefix buckets (e.g. at `total_shards = 16` each
 //! shard owns 16 consecutive prefix values).

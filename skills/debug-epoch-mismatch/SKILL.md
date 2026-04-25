@@ -135,7 +135,7 @@ ORDER BY b.slot_no;
 | Pots & incentives | `crates/cardano/src/pots.rs` |
 | Model types (EpochValue, etc.) | `crates/cardano/src/model.rs` |
 | ESTART / epoch transition | `crates/cardano/src/estart/reset.rs` |
-| EWRAP / reward application | `crates/cardano/src/ewrap/rewards.rs` |
+| EWRAP / reward application | `crates/cardano/src/ashard/rewards.rs` |
 | RUPD / reward calculation | `crates/cardano/src/rupd/loading.rs` |
 | ROLL / certificate processing | `crates/cardano/src/roll/accounts.rs` |
 | ROLL / batch delta application | `crates/cardano/src/roll/batch.rs` |

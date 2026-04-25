@@ -24,17 +24,15 @@ pub struct AppliedReward {
 
 pub mod commit;
 pub mod loading;
-pub mod shard;
 pub mod work_unit;
 
 // visitors
 pub mod drops;
 pub mod enactment;
 pub mod refunds;
-pub mod rewards;
 pub mod wrapup;
 
-pub use work_unit::{AccountShardWorkUnit, EwrapWorkUnit};
+pub use work_unit::EwrapWorkUnit;
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]
@@ -123,7 +121,7 @@ pub type ProposalId = EntityKey;
 
 pub struct BoundaryWork {
     // loaded
-    ending_state: EpochState,
+    pub(crate) ending_state: EpochState,
     pub active_protocol: EraProtocol,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,

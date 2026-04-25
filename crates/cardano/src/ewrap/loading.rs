@@ -1,22 +1,16 @@
-use std::{
-    collections::HashMap,
-    ops::Range,
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{
-    BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder,
-};
-use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+use dolos_core::{BlockSlot, ChainError, Domain, Genesis, StateStore, TxOrder};
+use pallas::codec::minicbor;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
     load_era_summary, pallas_extras,
-    rewards::{Reward, RewardMap},
+    rewards::RewardMap,
     roll::WorkDeltas,
     rupd::credential_to_key,
-    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
-    PoolState, ProposalState,
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PoolState,
+    ProposalState,
 };
 
 impl BoundaryWork {
@@ -55,7 +49,7 @@ impl BoundaryWork {
         Ok(account)
     }
 
-    fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    pub(crate) fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
         for record in pools {
@@ -116,7 +110,7 @@ impl BoundaryWork {
         None
     }
 
-    fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for record in dreps {
@@ -253,7 +247,7 @@ impl BoundaryWork {
 
     /// Construct an empty `BoundaryWork` with the small globals every phase needs
     /// (ending_state, chain summary, active protocol, genesis, incentives).
-    fn new_empty<D: Domain>(
+    pub(crate) fn new_empty<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<Self, ChainError> {
@@ -290,43 +284,6 @@ impl BoundaryWork {
         })
     }
 
-    /// Range-load pending rewards from state store (persisted by RUPD).
-    /// Passing `None` loads the full range (matches the pre-sharding behaviour).
-    fn load_pending_rewards_range<D: Domain>(
-        &mut self,
-        state: &D::State,
-        range: Option<Range<EntityKey>>,
-    ) -> Result<(), ChainError> {
-        let pending_iter = state
-            .iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, range)?;
-
-        let mut pending: HashMap<StakeCredential, Reward> = HashMap::new();
-
-        for record in pending_iter {
-            let (_, pending_state) = record?;
-            let credential = pending_state.credential.clone();
-            let reward = Reward::from_pending_state(&pending_state);
-            pending.insert(credential, reward);
-        }
-
-        let pending_total: u64 = pending.values().map(|r| r.total_value()).sum();
-        let spendable_count = pending.values().filter(|r| r.is_spendable()).count();
-        let unspendable_count = pending.len() - spendable_count;
-
-        tracing::debug!(
-            pending_count = pending.len(),
-            %pending_total,
-            %spendable_count,
-            %unspendable_count,
-            "loaded pending rewards from state"
-        );
-
-        let incentives = self.rewards.incentives().clone();
-        self.rewards = RewardMap::from_pending(pending, incentives);
-
-        Ok(())
-    }
-
     // ---------------------------------------------------------------------
     // Phase-specific load + compute orchestration.
     // ---------------------------------------------------------------------
@@ -352,34 +309,6 @@ impl BoundaryWork {
         boundary.load_proposal_data::<D>(state)?;
 
         boundary.compute_prepare_deltas::<D>(state)?;
-
-        Ok(boundary)
-    }
-
-    /// Load + compute for an `AccountShard` phase:
-    ///   * reload the small classifications that drops.visit_account needs
-    ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
-    ///   * range-load pending rewards for this shard's key range,
-    ///   * iterate accounts in range, applying rewards+drops visitors, and
-    ///   * emit an `EpochEndAccumulate` delta carrying the shard's reward
-    ///     contribution.
-    pub fn load_account_shard<D: Domain>(
-        state: &D::State,
-        genesis: Arc<Genesis>,
-        shard_index: u32,
-        range: Range<EntityKey>,
-    ) -> Result<BoundaryWork, ChainError> {
-        let mut boundary = Self::new_empty::<D>(state, genesis)?;
-
-        // drops.visit_account needs retiring_pools + retiring_dreps +
-        // reregistrating_dreps. These sets are small (handful per epoch) so
-        // re-classifying them per shard is cheap.
-        boundary.load_pool_data::<D>(state)?;
-        boundary.load_drep_data::<D>(state)?;
-
-        boundary.load_pending_rewards_range::<D>(state, Some(range.clone()))?;
-
-        boundary.compute_shard_deltas::<D>(state, range, shard_index)?;
 
         Ok(boundary)
     }
@@ -464,45 +393,4 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn compute_shard_deltas<D: Domain>(
-        &mut self,
-        state: &D::State,
-        range: Range<EntityKey>,
-        shard_index: u32,
-    ) -> Result<(), ChainError> {
-        let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
-        let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
-
-        let accounts =
-            state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
-
-        for record in accounts {
-            let (account_id, account) = record?;
-            // HACK: rewards before drops — see comment on the pre-shard path.
-            visitor_rewards.visit_account(self, &account_id, &account)?;
-            visitor_drops.visit_account(self, &account_id, &account)?;
-        }
-
-        visitor_rewards.flush(self)?;
-        visitor_drops.flush(self)?;
-
-        // Snapshot the reward-map counters for this shard and emit the
-        // accumulator delta. The RewardMap's applied_* counters reflect only
-        // this shard's contribution (the map was created fresh for this shard
-        // with just this shard's pending rewards).
-        self.shard_applied_effective = self.rewards.applied_effective();
-        self.shard_applied_unspendable_to_treasury =
-            self.rewards.applied_unspendable_to_treasury();
-        self.shard_applied_unspendable_to_reserves =
-            self.rewards.applied_unspendable_to_reserves();
-
-        self.add_delta(crate::EpochEndAccumulate::new(
-            self.shard_applied_effective,
-            self.shard_applied_unspendable_to_treasury,
-            self.shard_applied_unspendable_to_reserves,
-            shard_index,
-        ));
-
-        Ok(())
-    }
 }

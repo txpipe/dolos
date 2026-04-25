@@ -76,16 +76,16 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 ## 4. `AccountShardWorkUnit` — per-account reward application (×N shards)
 
 - Variants: `CardanoWorkUnit::AccountShard` / `InternalWorkUnit::AccountShard(BlockSlot, u32)`.
-- Struct: `ewrap::AccountShardWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
+- Struct: `ashard::AccountShardWorkUnit` (`crates/cardano/src/ashard/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
 - Purpose: apply rewards + drops for the accounts in this shard's range; accumulate the shard's reward contribution into `EpochState.end`. This is the first phase of the epoch-boundary pipeline — `Ewrap` (globals + close) follows.
 - Deltas emitted (4 variants per shard run):
-  - **Rewards** (`ewrap/rewards.rs`):
+  - **Rewards** (`ashard/rewards.rs`):
     - `AssignRewards:79` (one per rewarded account in range)
-  - **Drops** (account-level, `ewrap/drops.rs`):
+  - **Drops** (account-level, `ewrap/drops.rs`, used by both Ewrap and AccountShard):
     - `PoolDelegatorRetire:32` *(also fires in Ewrap for non-account targets)*
     - `DRepDelegatorDrop:53` *(also fires in Ewrap for non-account targets)*
-  - **Accumulator** (`ewrap/loading.rs`):
-    - `EpochEndAccumulate:510` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, advances `ewrap_progress` from `unwrap_or(0)` → `Some(shard_index + 1)`)
+  - **Accumulator** (`ashard/loading.rs`):
+    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, advances `ewrap_progress` from `unwrap_or(0)` → `Some(shard_index + 1)`)
 - Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
 - Namespaces touched: `accounts` (shard range), `epochs`. Deletes from `pending_rewards` (shard range).
 
