@@ -4,8 +4,8 @@ use dolos_core::{
 };
 
 use crate::{
-    indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EpochState,
-    EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
+    indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EndStats,
+    EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
     CURRENT_EPOCH_KEY,
 };
 
@@ -77,7 +77,10 @@ pub fn bootstrap_epoch<D: Domain>(
         previous_nonce_tail: None,
         number: 0,
         rolling: EpochValue::with_live(0, RollingStats::default()),
-        end: None,
+        // Seed `end` with defaults so the first boundary's AccountShard
+        // (which now runs before Ewrap) finds a populated slot. ESTART's
+        // `EpochTransition` re-seeds it on every subsequent epoch.
+        end: Some(EndStats::default()),
         incentives: None,
         ewrap_progress: None,
     };
