@@ -16,8 +16,11 @@ use crate::{
 };
 
 impl BoundaryWork {
-    /// Range-load pending rewards from state store (persisted by RUPD).
-    /// Passing `None` loads the full range (matches the pre-sharding behaviour).
+    /// Range-load pending rewards from state store (persisted by RUPD) into
+    /// `self.rewards`. `range = Some(r)` restricts iteration to a shard's
+    /// key range; `None` loads everything (kept for completeness — currently
+    /// unused since the only caller is `load_ashard`, which always passes a
+    /// shard range).
     fn load_pending_rewards_range<D: Domain>(
         &mut self,
         state: &D::State,
@@ -95,7 +98,13 @@ impl BoundaryWork {
 
         for record in accounts {
             let (account_id, account) = record?;
-            // HACK: rewards before drops — see comment on the pre-shard path.
+            // HACK: rewards must apply before drops. Rewards update the live
+            // value before the snapshot; drops schedule refunds for after the
+            // snapshot. If reordered, the rewards would be overwritten by the
+            // refund schedule. With this order, the refund clones the live
+            // values with rewards already applied.
+            // TODO: move retires to ESTART (after the snapshot has been taken)
+            // and drop this ordering hack.
             visitor_rewards.visit_account(self, &account_id, &account)?;
             visitor_drops.visit_account(self, &account_id, &account)?;
         }

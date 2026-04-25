@@ -25,7 +25,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
   - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
   - `AccountTransition` — `estart/reset.rs:127`. One per account. Targets `accounts`.
   - `PoolTransition` — `estart/reset.rs:138`. One per pool. Targets `pools`.
-  - `EpochTransition` — `estart/reset.rs:148`. Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, also seeds `EpochState.end = Some(EndStats::default())` and resets `ewrap_progress = None` for the new epoch — AccountShards then populate the reward accumulator fields and Ewrap patches the prepare-time fields.
+  - `EpochTransition` — `estart/reset.rs:148`. Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, also seeds `EpochState.end = Some(EndStats::default())` and resets `ewrap_progress = None` for the new epoch — at the next boundary, AccountShards populate the reward accumulator fields directly via `EpochEndAccumulate`, then Ewrap reads them back, assembles the final `EndStats` (combining accumulators with the prepare-time fields), and emits `EpochWrapUp` to close.
 - Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.).
 - Namespaces touched: `accounts`, `pools`, `epochs`, `eras`.
 

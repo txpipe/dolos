@@ -285,7 +285,8 @@ impl BoundaryWork {
     }
 
     // ---------------------------------------------------------------------
-    // Phase-specific load + compute orchestration.
+    // Ewrap-phase orchestration. AccountShard's load/commit live in
+    // `crate::ashard` (separate module); the shared helpers above are reused.
     // ---------------------------------------------------------------------
 
     /// Load + compute for the `Ewrap` phase:
@@ -308,17 +309,19 @@ impl BoundaryWork {
         boundary.load_drep_data::<D>(state)?;
         boundary.load_proposal_data::<D>(state)?;
 
-        boundary.compute_prepare_deltas::<D>(state)?;
+        boundary.compute_ewrap_deltas::<D>(state)?;
 
         Ok(boundary)
     }
 
     // ---------------------------------------------------------------------
-    // compute_* helpers. These are phase-specific replacements for the old
-    // monolithic `compute_deltas`.
+    // Ewrap-phase compute helper. Drives the global visitors (enactment /
+    // refunds / drops / wrapup) over pools, dreps, and proposals, then the
+    // wrapup visitor's flush emits `EpochWrapUp` carrying the final
+    // `EndStats`.
     // ---------------------------------------------------------------------
 
-    fn compute_prepare_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    fn compute_ewrap_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         self.process_pending_mirs::<D>(state)?;
 
         let mut visitor_enactment = crate::ewrap::enactment::BoundaryVisitor::default();

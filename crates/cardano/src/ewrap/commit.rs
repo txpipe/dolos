@@ -24,7 +24,8 @@ use crate::{
 impl BoundaryWork {
     /// Stream entities from a namespace, apply deltas, and write immediately.
     ///
-    /// `range` optionally narrows iteration (shard phase uses it).
+    /// `range` optionally narrows iteration — `AccountShard` passes the
+    /// shard's key range so only accounts in that slice are streamed.
     pub(crate) fn stream_and_apply_namespace<D, E>(
         &mut self,
         state: &D::State,
@@ -79,9 +80,10 @@ impl BoundaryWork {
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
-        // Apply deltas to pools / dreps / proposals. Accounts are skipped —
-        // the only prepare-phase `AssignRewards` deltas are from MIRs, which
-        // are applied in the account namespace below (range-scoped).
+        // Apply deltas to pools / dreps / proposals. The only `AssignRewards`
+        // deltas Ewrap queues against accounts come from MIR processing
+        // (per-account stake rewards are owned by the preceding AccountShard
+        // phase); they're applied in the account namespace below.
         self.stream_and_apply_namespace::<D, PoolState>(state, &writer, None)?;
         self.stream_and_apply_namespace::<D, DRepState>(state, &writer, None)?;
         self.stream_and_apply_namespace::<D, ProposalState>(state, &writer, None)?;
