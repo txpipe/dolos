@@ -229,6 +229,13 @@ pub struct CardanoLogic {
     /// Flag indicating the cache needs refresh after a work unit that modifies eras.
     /// Set after Genesis or EStart work units are popped, cleared at next pop_work call.
     needs_cache_refresh: bool,
+    /// Cached effective `account_shards` value: equal to
+    /// `EpochState.ashard_progress.total` when a boundary is in flight, or
+    /// `config.account_shards()` otherwise. Refreshed at every `pop_work`
+    /// call (which has state access) so `receive_block` (which does not)
+    /// can use the up-to-date value when constructing
+    /// `WorkBuffer::AShardingBoundary`.
+    effective_account_shards: u32,
 }
 
 impl CardanoLogic {
@@ -238,6 +245,16 @@ impl CardanoLogic {
         self.cache.eras = eras::load_era_summary::<D>(state)?;
 
         Ok(())
+    }
+
+    /// Compute the effective `account_shards` value: stored
+    /// `ashard_progress.total` if a boundary is in flight, otherwise the
+    /// configured value.
+    fn read_effective_account_shards<D: Domain>(&self, state: &D::State) -> u32 {
+        load_epoch::<D>(state)
+            .ok()
+            .and_then(|e| e.ashard_progress.as_ref().map(|p| p.total))
+            .unwrap_or_else(|| self.config.account_shards())
     }
 }
 
@@ -265,32 +282,48 @@ impl dolos_core::ChainLogic for CardanoLogic {
         };
 
         // Crash-recovery check: if the previous process crashed mid-boundary,
-        // `EpochState.ashard_progress` will be `Some(i)` with `i` equal to the
-        // next AShard that should have run. Detect and warn — full
-        // resume requires re-fetching the boundary block from upstream, which
-        // is tracked separately.
+        // `EpochState.ashard_progress` will be `Some(p)` with `p.committed`
+        // equal to the next AShard that should have run, and `p.total` the
+        // boundary's shard count captured at the first commit. Detect and
+        // warn — full resume requires re-fetching the boundary block from
+        // upstream, which is tracked separately. The persisted `total` is
+        // used for the in-flight boundary even if `config.account_shards()`
+        // changed, to avoid breaking the in-progress pipeline.
         if let Ok(epoch) = load_epoch::<D>(state) {
-            if let Some(progress) = epoch.ashard_progress {
-                let total = config.account_shards();
-                if progress < total {
+            if let Some(progress) = epoch.ashard_progress.as_ref() {
+                let configured = config.account_shards();
+                if progress.total != configured {
                     tracing::warn!(
                         epoch = epoch.number,
-                        next_shard = progress,
-                        total_shards = total,
+                        stored_total = progress.total,
+                        configured_total = configured,
+                        "in-flight boundary uses {} shards but config.account_shards = {}; \
+                         the in-flight boundary will continue with {} (the persisted total) \
+                         and the new config takes effect on the next boundary",
+                        progress.total,
+                        configured,
+                        progress.total,
+                    );
+                }
+                if progress.committed < progress.total {
+                    tracing::warn!(
+                        epoch = epoch.number,
+                        next_shard = progress.committed,
+                        total_shards = progress.total,
                         "crash detected mid-boundary: ashard_progress is set. \
                          On the next block that triggers the boundary, dolos will \
-                         begin the AShard pipeline from scratch; correctness \
-                         depends on shard idempotency (state deletes are no-ops if \
-                         already applied; EpochEndAccumulate guards on shard_index). \
-                         Operators should monitor the subsequent boundary for \
-                         inconsistency. TODO: implement true shard resume."
+                         resume the AShard pipeline; correctness depends on shard \
+                         idempotency (state deletes are no-ops if already applied; \
+                         EpochEndAccumulate guards on shard_index). Operators should \
+                         monitor the subsequent boundary for inconsistency. \
+                         TODO: implement true shard resume."
                     );
                 } else {
                     tracing::warn!(
                         epoch = epoch.number,
-                        progress,
-                        total_shards = total,
-                        "found EpochState.ashard_progress == total_shards at \
+                        committed = progress.committed,
+                        total_shards = progress.total,
+                        "found EpochState.ashard_progress.committed == total at \
                          startup — Ewrap (closing phase) was not committed \
                          before crash. The next boundary attempt will re-run \
                          AShards and Ewrap; idempotency should keep the \
@@ -299,6 +332,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
                 }
             }
         }
+
+        // Capture the effective account_shards value: stored total if a
+        // boundary is in flight, otherwise the configured value.
+        let effective_account_shards = load_epoch::<D>(state)
+            .ok()
+            .and_then(|e| e.ashard_progress.as_ref().map(|p| p.total))
+            .unwrap_or_else(|| config.account_shards());
 
         let eras = eras::load_era_summary::<D>(state)?;
 
@@ -317,6 +357,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             },
             work: Some(work),
             needs_cache_refresh: false,
+            effective_account_shards,
         })
     }
 
@@ -338,7 +379,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             block,
             &self.cache.eras,
             self.cache.stability_window,
-            self.config.account_shards(),
+            self.effective_account_shards,
         );
 
         let last = new_work.last_point_seen().slot();
@@ -360,10 +401,16 @@ impl dolos_core::ChainLogic for CardanoLogic {
             self.needs_cache_refresh = false;
         }
 
+        // Refresh effective `account_shards` from state. While a boundary is
+        // in flight, `EpochState.ashard_progress.total` overrides config so
+        // the in-progress pipeline isn't disrupted by a config change.
+        self.effective_account_shards =
+            self.read_effective_account_shards::<D>(domain.state());
+
         let work = self.work.take().expect("work buffer is initialized");
 
         let (work_unit, new_buffer) =
-            work.pop_work(self.config.stop_epoch, self.config.account_shards());
+            work.pop_work(self.config.stop_epoch, self.effective_account_shards);
 
         self.work = Some(new_buffer);
 

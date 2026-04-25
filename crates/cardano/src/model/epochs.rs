@@ -210,6 +210,24 @@ pub struct EndStats {
     pub __drep_refunds: Lovelace,
 }
 
+/// Snapshot of the AShard pipeline's progress + total within a single epoch
+/// boundary. Persisted alongside `EpochState.ashard_progress` so a config
+/// change mid-boundary (or across a crash and restart) can't break the
+/// in-flight work — the stored `total` is authoritative until the boundary
+/// completes.
+#[derive(Debug, Clone, Encode, Decode, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AShardProgress {
+    /// Number of shards that have committed; shards `0..committed` are done
+    /// and `committed` is the next to run.
+    #[n(0)]
+    pub committed: u32,
+    /// Total shard count for this boundary, captured at the first shard's
+    /// commit (snapshots the value of `CardanoConfig::account_shards()`
+    /// effective at that moment).
+    #[n(1)]
+    pub total: u32,
+}
+
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct EpochState {
@@ -242,15 +260,18 @@ pub struct EpochState {
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
 
-    /// Cursor tracking shard progress through the epoch boundary. `None`
-    /// means no AShard has run yet (the natural starting state, set by
-    /// `EpochTransition` during ESTART). `Some(n)` means shards `0..n` have
-    /// committed and `n` is the next to run. Each `EpochEndAccumulate`
-    /// (AShard) advances the cursor; `EpochWrapUp` (Ewrap) clears it
-    /// back to `None`. Doubles as crash-recovery flag for "boundary in flight".
+    /// Cursor + total snapshot for the AShard pipeline within this epoch
+    /// boundary. `None` means no AShard has run yet (the natural starting
+    /// state, set by `EpochTransition` during ESTART). `Some(p)` means
+    /// shards `0..p.committed` have committed; `p.total` is the boundary's
+    /// shard count, captured at the first shard's commit. Each
+    /// `EpochEndAccumulate` (AShard) advances `committed`; `EpochWrapUp`
+    /// (Ewrap) clears the field back to `None`. The persisted `total`
+    /// guards against a config change mid-boundary breaking the in-flight
+    /// pipeline.
     #[n(15)]
     #[cbor(default)]
-    pub ashard_progress: Option<u32>,
+    pub ashard_progress: Option<AShardProgress>,
 }
 
 impl Default for EpochState {
@@ -571,7 +592,7 @@ pub struct EpochWrapUp {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ashard_progress: Option<u32>,
+    pub(crate) prev_ashard_progress: Option<AShardProgress>,
 }
 
 impl EpochWrapUp {
@@ -599,7 +620,7 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
-        self.prev_ashard_progress = entity.ashard_progress;
+        self.prev_ashard_progress = entity.ashard_progress.clone();
 
         entity.rolling.scheduled_or_default();
         entity.pparams.scheduled_or_default();
@@ -612,21 +633,27 @@ impl dolos_core::EntityDelta for EpochWrapUp {
         entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
         entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
         entity.end = self.prev_end.clone();
-        entity.ashard_progress = self.prev_ashard_progress;
+        entity.ashard_progress = self.prev_ashard_progress.clone();
     }
 }
 
 /// Delta emitted once per `AShard` to accumulate the shard's reward-
 /// distribution contribution into `EpochState.end` and advance
-/// `ashard_progress` to the next shard index. Idempotent on repeat-apply by
-/// guarding on the shard index — a shard that was already committed will have
-/// `ashard_progress > completed_shard_index` and should skip.
+/// `ashard_progress` to the next shard index. Carries `total_shards` so the
+/// boundary's shard count is captured in state at the first commit, which
+/// makes the in-flight pipeline robust against a config change between
+/// shards (e.g. across a crash and restart).
+///
+/// Idempotent on repeat-apply by guarding on the committed shard count —
+/// a shard that was already committed will have
+/// `ashard_progress.committed > completed_shard_index` and should skip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochEndAccumulate {
     pub(crate) effective_delta: u64,
     pub(crate) unspendable_to_treasury_delta: u64,
     pub(crate) unspendable_to_reserves_delta: u64,
     pub(crate) completed_shard_index: u32,
+    pub(crate) total_shards: u32,
 }
 
 impl EpochEndAccumulate {
@@ -635,12 +662,14 @@ impl EpochEndAccumulate {
         unspendable_to_treasury_delta: u64,
         unspendable_to_reserves_delta: u64,
         completed_shard_index: u32,
+        total_shards: u32,
     ) -> Self {
         Self {
             effective_delta,
             unspendable_to_treasury_delta,
             unspendable_to_reserves_delta,
             completed_shard_index,
+            total_shards,
         }
     }
 }
@@ -657,18 +686,19 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
 
         // Idempotency + ordering guard. `ashard_progress` is the authoritative
         // cursor for which shards have landed: `None` means no shards have
-        // run yet (shard 0 is the next expected); `Some(n)` means shards
-        // `0..n` have committed and `n` is next. AShard is the first
-        // phase of the epoch boundary, so `None` is the natural starting
-        // state (set by ESTART's `EpochTransition`).
-        let expected = entity.ashard_progress.unwrap_or(0);
+        // run yet (shard 0 is the next expected); `Some(p)` means shards
+        // `0..p.committed` have committed and `p.committed` is next. AShard
+        // is the first phase of the epoch boundary, so `None` is the
+        // natural starting state (set by ESTART's `EpochTransition`).
+        let stored = entity.ashard_progress.as_ref();
+        let expected = stored.map(|p| p.committed).unwrap_or(0);
         if expected > self.completed_shard_index {
             // Already applied (crash-recovery scenario where the shard's
             // state commit landed but the work buffer hadn't advanced past
             // it). Skip to preserve idempotency.
             tracing::debug!(
                 completed_shard = self.completed_shard_index,
-                ashard_progress = expected,
+                committed = expected,
                 "EpochEndAccumulate already applied — skipping (idempotent)"
             );
             return;
@@ -679,10 +709,29 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
             // `ashard_progress` cursor misaligned.
             tracing::error!(
                 completed_shard = self.completed_shard_index,
-                ashard_progress = expected,
+                committed = expected,
                 "EpochEndAccumulate applied out of order — skipping to avoid corruption"
             );
             return;
+        }
+
+        // Consistency: if a previous shard already wrote `total`, this
+        // delta's `total_shards` must match. A mismatch means the work unit
+        // was constructed with a different shard count than the in-flight
+        // boundary — surfaces as an error so it can't silently corrupt
+        // state.
+        if let Some(p) = stored {
+            if p.total != self.total_shards {
+                tracing::error!(
+                    completed_shard = self.completed_shard_index,
+                    stored_total = p.total,
+                    delta_total = self.total_shards,
+                    "EpochEndAccumulate total_shards disagrees with in-flight \
+                     boundary — skipping to avoid corruption (config changed \
+                     mid-boundary?)"
+                );
+                return;
+            }
         }
 
         let end = entity
@@ -694,7 +743,10 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         end.unspendable_to_treasury += self.unspendable_to_treasury_delta;
         end.unspendable_to_reserves += self.unspendable_to_reserves_delta;
 
-        entity.ashard_progress = Some(self.completed_shard_index + 1);
+        entity.ashard_progress = Some(AShardProgress {
+            committed: self.completed_shard_index + 1,
+            total: self.total_shards,
+        });
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -708,7 +760,14 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         end.unspendable_to_treasury -= self.unspendable_to_treasury_delta;
         end.unspendable_to_reserves -= self.unspendable_to_reserves_delta;
 
-        entity.ashard_progress = Some(self.completed_shard_index);
+        entity.ashard_progress = if self.completed_shard_index == 0 {
+            None
+        } else {
+            Some(AShardProgress {
+                committed: self.completed_shard_index,
+                total: self.total_shards,
+            })
+        };
     }
 }
 
@@ -777,7 +836,7 @@ pub struct EpochTransition {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ashard_progress: Option<u32>,
+    pub(crate) prev_ashard_progress: Option<AShardProgress>,
 }
 
 impl EpochTransition {
@@ -830,7 +889,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         self.prev_rolling = Some(entity.rolling.clone());
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
-        self.prev_ashard_progress = entity.ashard_progress;
+        self.prev_ashard_progress = entity.ashard_progress.clone();
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -868,7 +927,7 @@ impl dolos_core::EntityDelta for EpochTransition {
             .clone()
             .expect("apply captured initial_pots");
         entity.end = self.prev_end.clone();
-        entity.ashard_progress = self.prev_ashard_progress;
+        entity.ashard_progress = self.prev_ashard_progress.clone();
     }
 }
 

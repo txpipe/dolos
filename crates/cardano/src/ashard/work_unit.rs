@@ -13,7 +13,7 @@ use std::sync::Arc;
 use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
-use crate::{ewrap::BoundaryWork, CardanoLogic};
+use crate::{ewrap::BoundaryWork, load_epoch, CardanoLogic};
 
 use super::shard::shard_key_range;
 
@@ -60,7 +60,18 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        let total_shards = self.config.account_shards();
+        // If a boundary is in flight, the persisted `ashard_progress.total`
+        // is authoritative — guards against a config change between shards
+        // (e.g. across a crash and restart) breaking the in-flight pipeline.
+        // Falls back to current config for a fresh boundary.
+        let total_shards = match load_epoch::<D>(domain.state()) {
+            Ok(epoch) => epoch
+                .ashard_progress
+                .as_ref()
+                .map(|p| p.total)
+                .unwrap_or_else(|| self.config.account_shards()),
+            Err(_) => self.config.account_shards(),
+        };
         let range = shard_key_range(self.shard_index, total_shards);
 
         debug!(
@@ -74,6 +85,7 @@ where
             domain.state(),
             self.genesis.clone(),
             self.shard_index,
+            total_shards,
             range,
         )?;
 
@@ -95,7 +107,16 @@ where
     }
 
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        let total_shards = self.config.account_shards();
+        // Mirror the same effective-total logic as `load` so the commit's
+        // key range matches what `load` used.
+        let total_shards = match load_epoch::<D>(domain.state()) {
+            Ok(epoch) => epoch
+                .ashard_progress
+                .as_ref()
+                .map(|p| p.total)
+                .unwrap_or_else(|| self.config.account_shards()),
+            Err(_) => self.config.account_shards(),
+        };
         let range = shard_key_range(self.shard_index, total_shards);
 
         let boundary = self

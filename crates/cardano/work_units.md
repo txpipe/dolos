@@ -85,7 +85,7 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
     - `PoolDelegatorRetire:32` *(also fires in Ewrap for non-account targets)*
     - `DRepDelegatorDrop:53` *(also fires in Ewrap for non-account targets)*
   - **Accumulator** (`ashard/loading.rs`):
-    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, advances `ashard_progress` from `unwrap_or(0)` → `Some(shard_index + 1)`)
+    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, and writes `ashard_progress = Some(AShardProgress { committed: shard_index + 1, total })`. The persisted `total` snapshots the boundary's shard count at the first commit so a config change between shards — e.g. across a crash and restart — can't break the in-flight pipeline)
 - Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
 - Namespaces touched: `accounts` (shard range), `epochs`. Deletes from `pending_rewards` (shard range).
 

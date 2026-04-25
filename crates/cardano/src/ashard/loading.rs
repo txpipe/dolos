@@ -67,6 +67,7 @@ impl BoundaryWork {
         state: &D::State,
         genesis: Arc<Genesis>,
         shard_index: u32,
+        total_shards: u32,
         range: Range<EntityKey>,
     ) -> Result<BoundaryWork, ChainError> {
         let mut boundary = Self::new_empty::<D>(state, genesis)?;
@@ -79,7 +80,7 @@ impl BoundaryWork {
 
         boundary.load_pending_rewards_range::<D>(state, Some(range.clone()))?;
 
-        boundary.compute_shard_deltas::<D>(state, range, shard_index)?;
+        boundary.compute_shard_deltas::<D>(state, range, shard_index, total_shards)?;
 
         Ok(boundary)
     }
@@ -89,6 +90,7 @@ impl BoundaryWork {
         state: &D::State,
         range: Range<EntityKey>,
         shard_index: u32,
+        total_shards: u32,
     ) -> Result<(), ChainError> {
         let mut visitor_rewards = super::rewards::BoundaryVisitor::default();
         let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
@@ -127,6 +129,7 @@ impl BoundaryWork {
             self.shard_applied_unspendable_to_treasury,
             self.shard_applied_unspendable_to_reserves,
             shard_index,
+            total_shards,
         ));
 
         Ok(())
