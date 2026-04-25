@@ -78,7 +78,7 @@ pub enum CardanoWorkUnit {
     /// is opened by ESTART's `EpochTransition` at the start of each epoch.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Handle one shard of per-account reward application. Emitted
-    /// `config.ashard_total` times in sequence. Each shard covers a
+    /// `config.account_shards` times in sequence. Each shard covers a
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
     AShard(Box<ashard::AShardWorkUnit>),
@@ -271,7 +271,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         // is tracked separately.
         if let Ok(epoch) = load_epoch::<D>(state) {
             if let Some(progress) = epoch.ashard_progress {
-                let total = config.ashard_total();
+                let total = config.account_shards();
                 if progress < total {
                     tracing::warn!(
                         epoch = epoch.number,
@@ -338,7 +338,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             block,
             &self.cache.eras,
             self.cache.stability_window,
-            self.config.ashard_total(),
+            self.config.account_shards(),
         );
 
         let last = new_work.last_point_seen().slot();
@@ -363,7 +363,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let work = self.work.take().expect("work buffer is initialized");
 
         let (work_unit, new_buffer) =
-            work.pop_work(self.config.stop_epoch, self.config.ashard_total());
+            work.pop_work(self.config.stop_epoch, self.config.account_shards());
 
         self.work = Some(new_buffer);
 
