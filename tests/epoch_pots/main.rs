@@ -460,7 +460,7 @@ fn run_epoch_pots_test(
     // When estart fires for epoch N+1, ended_state() holds the completed epoch N.
     let mut captured_epoch: Option<EpochState> = None;
 
-    // Accumulate applied rewards across all EwrapShard work units for the
+    // Accumulate applied rewards across all AccountShard work units for the
     // subject boundary. Each shard holds only its own slice in memory, but
     // the test harness needs the full set at the end for the CSV dump.
     let mut accumulated_applied: Vec<AppliedReward> = Vec::new();
@@ -503,7 +503,7 @@ fn run_epoch_pots_test(
                         accumulated_ending_epoch = Some(boundary.ending_state().number);
                     }
                 }
-                CardanoWorkUnit::EwrapShard(shard) => {
+                CardanoWorkUnit::AccountShard(shard) => {
                     // Each shard contributes its slice of applied rewards.
                     if let Some(boundary) = shard.boundary() {
                         accumulated_applied.extend(boundary.applied_rewards.iter().cloned());

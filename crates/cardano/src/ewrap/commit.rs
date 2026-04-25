@@ -123,17 +123,18 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Commit a single shard: apply per-account deltas (rewards + drops) and
-    /// the `EpochEndAccumulate` delta against `EpochState`, flush archive logs
-    /// (`{Leader,Member}RewardLog`), delete applied pending rewards.
+    /// Commit a single account shard: apply per-account deltas (rewards +
+    /// drops) and the `EpochEndAccumulate` delta against `EpochState`, flush
+    /// archive logs (`{Leader,Member}RewardLog`), delete applied pending
+    /// rewards.
     #[instrument(skip(self, state, archive))]
-    pub fn commit_shard<D: Domain>(
+    pub fn commit_account_shard<D: Domain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
         range: std::ops::Range<dolos_core::EntityKey>,
     ) -> Result<(), ChainError> {
-        debug!("committing ewrap shard changes");
+        debug!("committing account shard changes");
 
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
@@ -184,7 +185,7 @@ impl BoundaryWork {
         writer.commit()?;
         archive_writer.commit()?;
 
-        debug!("ewrap shard commit complete");
+        debug!("account shard commit complete");
         Ok(())
     }
 

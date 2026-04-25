@@ -9,7 +9,7 @@
 //!    the prepare-time globals + zeroed reward accumulators. The structural
 //!    `EpochState.end` slot is opened (as `Some(EndStats::default())`) by
 //!    `EpochTransition` during ESTART, so this phase only writes content.
-//! 2. `EwrapShardWorkUnit { shard_index }` — emitted `total_shards` times.
+//! 2. `AccountShardWorkUnit { shard_index }` — emitted `total_shards` times.
 //!    Each shard covers a first-byte prefix range of the account key space,
 //!    range-loads pending rewards, iterates accounts in range, applies
 //!    rewards + drops visitors, and emits `EpochEndAccumulate` with the
@@ -97,10 +97,10 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// EwrapShardWorkUnit
+// AccountShardWorkUnit
 // ---------------------------------------------------------------------------
 
-pub struct EwrapShardWorkUnit {
+pub struct AccountShardWorkUnit {
     slot: BlockSlot,
     config: CardanoConfig,
     genesis: Arc<Genesis>,
@@ -109,7 +109,7 @@ pub struct EwrapShardWorkUnit {
     boundary: Option<BoundaryWork>,
 }
 
-impl EwrapShardWorkUnit {
+impl AccountShardWorkUnit {
     pub fn new(
         slot: BlockSlot,
         config: CardanoConfig,
@@ -134,12 +134,12 @@ impl EwrapShardWorkUnit {
     }
 }
 
-impl<D> WorkUnit<D> for EwrapShardWorkUnit
+impl<D> WorkUnit<D> for AccountShardWorkUnit
 where
     D: Domain<Chain = CardanoLogic>,
 {
     fn name(&self) -> &'static str {
-        "ewrap_shard"
+        "account_shard"
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
@@ -150,10 +150,10 @@ where
             slot = self.slot,
             shard = self.shard_index,
             total = total_shards,
-            "loading ewrap shard context"
+            "loading account shard context"
         );
 
-        let boundary = BoundaryWork::load_shard::<D>(
+        let boundary = BoundaryWork::load_account_shard::<D>(
             domain.state(),
             self.genesis.clone(),
             self.shard_index,
@@ -163,17 +163,17 @@ where
         info!(
             epoch = boundary.ending_state().number,
             shard = self.shard_index,
-            "ewrap shard"
+            "account shard"
         );
 
         self.boundary = Some(boundary);
 
-        debug!("ewrap shard context loaded");
+        debug!("account shard context loaded");
         Ok(())
     }
 
     fn compute(&mut self) -> Result<(), DomainError> {
-        debug!("ewrap shard compute (deltas computed during load)");
+        debug!("account shard compute (deltas computed during load)");
         Ok(())
     }
 
@@ -184,9 +184,9 @@ where
         let boundary = self
             .boundary
             .as_mut()
-            .ok_or_else(|| DomainError::Internal("ewrap shard boundary not loaded".into()))?;
+            .ok_or_else(|| DomainError::Internal("account shard boundary not loaded".into()))?;
 
-        boundary.commit_shard::<D>(domain.state(), domain.archive(), range)?;
+        boundary.commit_account_shard::<D>(domain.state(), domain.archive(), range)?;
         Ok(())
     }
 

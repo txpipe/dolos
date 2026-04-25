@@ -34,7 +34,7 @@ pub mod refunds;
 pub mod rewards;
 pub mod wrapup;
 
-pub use work_unit::{EwrapFinalizeWorkUnit, EwrapShardWorkUnit, EwrapWorkUnit};
+pub use work_unit::{AccountShardWorkUnit, EwrapFinalizeWorkUnit, EwrapWorkUnit};
 
 pub trait BoundaryVisitor {
     #[allow(unused_variables)]

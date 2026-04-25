@@ -3,8 +3,8 @@
 ## Natural sequence within an epoch
 
 ```
-Estart  →  Roll …  →  Rupd  →  Roll …  →  Ewrap  →  EwrapShard ×N  →  EwrapFinalize
-(open)     (blocks)   (RUPD)   (blocks)   (global)    (per-account)       (close)
+Estart  →  Roll …  →  Rupd  →  Roll …  →  Ewrap  →  AccountShard ×N  →  EwrapFinalize
+(open)     (blocks)   (RUPD)   (blocks)   (global)    (per-account)         (close)
                                                                                 │
                                                                                 ▼
                                                                         next epoch's Estart
@@ -87,8 +87,8 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
     - `ProposalDepositRefund:39,62`
   - **Drops** (drep-level, `ewrap/drops.rs`):
     - `DRepExpiration:67`
-    - `DRepDelegatorDrop:53` *(also fires in EwrapShard for accounts)*
-    - `PoolDelegatorRetire:32` *(also fires in EwrapShard for accounts)*
+    - `DRepDelegatorDrop:53` *(also fires in AccountShard for accounts)*
+    - `PoolDelegatorRetire:32` *(also fires in AccountShard for accounts)*
   - **Wrap-up globals** (`ewrap/wrapup.rs`):
     - `PoolWrapUp:119`
     - `EpochEndInit:135` (overwrites the ESTART-seeded default with prepare-time globals + zeroed reward accumulators, sets `ewrap_progress = Some(0)`)
@@ -97,10 +97,10 @@ The sections below walk the cycle starting at `Estart` (the opener of every epoc
 - Direct deletes: `PendingMirState` entries for processed MIRs.
 - Namespaces touched: `pools`, `dreps`, `proposals`, `accounts` (MIR recipients), `epochs`. Deletes from `pending_mirs`.
 
-## 5. `EwrapShardWorkUnit` — per-account reward application (×N shards)
+## 5. `AccountShardWorkUnit` — per-account reward application (×N shards)
 
-- Variants: `CardanoWorkUnit::EwrapShard` / `InternalWorkUnit::EwrapShard(BlockSlot, u32)`.
-- Struct: `ewrap::EwrapShardWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
+- Variants: `CardanoWorkUnit::AccountShard` / `InternalWorkUnit::AccountShard(BlockSlot, u32)`.
+- Struct: `ewrap::AccountShardWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
 - Purpose: apply rewards + drops for the accounts in this shard's range; accumulate the shard's contribution into `EpochState.end`.
 - Deltas emitted (4 variants per shard run):
   - **Rewards** (`ewrap/rewards.rs`):

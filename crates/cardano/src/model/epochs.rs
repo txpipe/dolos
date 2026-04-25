@@ -246,7 +246,7 @@ pub struct EpochState {
     /// index to run. Reset to `None` by `EpochTransition` (ESTART) at epoch
     /// open, set to `Some(0)` by `EpochEndInit` (Ewrap) when prepare-time
     /// globals are populated, advanced by each `EpochEndAccumulate`
-    /// (EwrapShard), cleared by `EpochWrapUp` (EwrapFinalize). Doubles as
+    /// (AccountShard), cleared by `EpochWrapUp` (EwrapFinalize). Doubles as
     /// cursor + "EWRAP in flight" flag.
     #[n(15)]
     #[cbor(default)]
@@ -662,7 +662,7 @@ impl dolos_core::EntityDelta for EpochEndInit {
     }
 }
 
-/// Delta emitted once per `EwrapShard` to accumulate the shard's reward-
+/// Delta emitted once per `AccountShard` to accumulate the shard's reward-
 /// distribution contribution into `EpochState.end` and advance
 /// `ewrap_progress` to the next shard index. Idempotent on repeat-apply by
 /// guarding on the shard index — a shard that was already committed will have

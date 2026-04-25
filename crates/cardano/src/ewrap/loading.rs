@@ -354,14 +354,14 @@ impl BoundaryWork {
         Ok(boundary)
     }
 
-    /// Load + compute for an `EwrapShard` phase:
+    /// Load + compute for an `AccountShard` phase:
     ///   * reload the small classifications that drops.visit_account needs
     ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
     ///   * range-load pending rewards for this shard's key range,
     ///   * iterate accounts in range, applying rewards+drops visitors, and
     ///   * emit an `EpochEndAccumulate` delta carrying the shard's reward
     ///     contribution.
-    pub fn load_shard<D: Domain>(
+    pub fn load_account_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
         shard_index: u32,

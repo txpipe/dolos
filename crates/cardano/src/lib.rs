@@ -80,7 +80,7 @@ pub enum CardanoWorkUnit {
     /// `config.ewrap_total_shards` times in sequence. Each shard covers a
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
-    EwrapShard(Box<ewrap::EwrapShardWorkUnit>),
+    AccountShard(Box<ewrap::AccountShardWorkUnit>),
     /// Handle the finalise portion of the epoch boundary: read the
     /// accumulated `EpochState.end` and emit `EpochWrapUp` (which transitions
     /// rolling/pparams and clears `ewrap_progress`).
@@ -101,7 +101,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::name(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
-            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::name(w),
+            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::name(w),
             Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::name(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
@@ -114,7 +114,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::EwrapFinalize(w) => {
                 <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::load(w, domain)
             }
@@ -129,7 +129,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
-            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::compute(w),
+            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::compute(w),
             Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::compute(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
             Self::ForcedStop => Ok(()),
@@ -144,8 +144,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
-            Self::EwrapShard(w) => {
-                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+            Self::AccountShard(w) => {
+                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
             Self::EwrapFinalize(w) => {
                 <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
@@ -163,8 +163,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
-            Self::EwrapShard(w) => {
-                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            Self::AccountShard(w) => {
+                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
             Self::EwrapFinalize(w) => {
                 <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_state(w, domain)
@@ -184,8 +184,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
-            Self::EwrapShard(w) => {
-                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            Self::AccountShard(w) => {
+                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
             Self::EwrapFinalize(w) => {
                 <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
@@ -205,8 +205,8 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
-            Self::EwrapShard(w) => {
-                <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            Self::AccountShard(w) => {
+                <ewrap::AccountShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
             Self::EwrapFinalize(w) => {
                 <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
@@ -222,7 +222,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::EwrapShard(w) => <ewrap::EwrapShardWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::AccountShard(w) => <ewrap::AccountShardWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::EwrapFinalize(w) => <ewrap::EwrapFinalizeWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
@@ -407,14 +407,16 @@ impl dolos_core::ChainLogic for CardanoLogic {
             InternalWorkUnit::Ewrap(slot) => Some(CardanoWorkUnit::Ewrap(Box::new(
                 ewrap::EwrapWorkUnit::new(slot, self.config.clone(), domain.genesis()),
             ))),
-            InternalWorkUnit::EwrapShard(slot, shard_index) => Some(CardanoWorkUnit::EwrapShard(
-                Box::new(ewrap::EwrapShardWorkUnit::new(
-                    slot,
-                    self.config.clone(),
-                    domain.genesis(),
-                    shard_index,
-                )),
-            )),
+            InternalWorkUnit::AccountShard(slot, shard_index) => {
+                Some(CardanoWorkUnit::AccountShard(Box::new(
+                    ewrap::AccountShardWorkUnit::new(
+                        slot,
+                        self.config.clone(),
+                        domain.genesis(),
+                        shard_index,
+                    ),
+                )))
+            }
             InternalWorkUnit::EwrapFinalize(slot) => Some(CardanoWorkUnit::EwrapFinalize(
                 Box::new(ewrap::EwrapFinalizeWorkUnit::new(
                     slot,

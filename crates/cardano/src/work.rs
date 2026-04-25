@@ -14,7 +14,7 @@ pub(crate) enum InternalWorkUnit {
     Genesis,
     Blocks(WorkBatch),
     Ewrap(BlockSlot),
-    EwrapShard(BlockSlot, u32),
+    AccountShard(BlockSlot, u32),
     EwrapFinalize(BlockSlot),
     EStart(BlockSlot),
     Rupd(BlockSlot),
@@ -31,12 +31,12 @@ pub(crate) enum WorkBuffer {
     PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
     /// Entry state for the EWRAP pipeline. `pop_work` yields
     /// `InternalWorkUnit::Ewrap` and advances to
-    /// `EwrapShardingBoundary { shard_index: 0, total_shards }`.
+    /// `AccountShardingBoundary { shard_index: 0, total_shards }`.
     EwrapBoundary(OwnedMultiEraBlock, Epoch),
-    /// Intermediate state that emits `EwrapShard(shard_index)` until
+    /// Intermediate state that emits `AccountShard(shard_index)` until
     /// `shard_index == total_shards`, then advances to
     /// `EwrapFinaliseBoundary`.
-    EwrapShardingBoundary {
+    AccountShardingBoundary {
         block: OwnedMultiEraBlock,
         epoch: Epoch,
         shard_index: u32,
@@ -66,7 +66,7 @@ impl WorkBuffer {
             WorkBuffer::RupdBoundary(block) => block.point(),
             WorkBuffer::PreEwrapBoundary(_, block, _) => block.point(),
             WorkBuffer::EwrapBoundary(block, _) => block.point(),
-            WorkBuffer::EwrapShardingBoundary { block, .. } => block.point(),
+            WorkBuffer::AccountShardingBoundary { block, .. } => block.point(),
             WorkBuffer::EwrapFinaliseBoundary(block, _) => block.point(),
             WorkBuffer::EstartBoundary(block, _) => block.point(),
             WorkBuffer::PreForcedStop(block) => block.point(),
@@ -201,7 +201,7 @@ impl WorkBuffer {
                     // state machine safe.
                     Self::EwrapFinaliseBoundary(block, epoch)
                 } else {
-                    Self::EwrapShardingBoundary {
+                    Self::AccountShardingBoundary {
                         block,
                         epoch,
                         shard_index: 0,
@@ -210,7 +210,7 @@ impl WorkBuffer {
                 };
                 (Some(InternalWorkUnit::Ewrap(slot)), next)
             }
-            WorkBuffer::EwrapShardingBoundary {
+            WorkBuffer::AccountShardingBoundary {
                 block,
                 epoch,
                 shard_index,
@@ -221,14 +221,14 @@ impl WorkBuffer {
                 let next = if next_index >= total_shards {
                     Self::EwrapFinaliseBoundary(block, epoch)
                 } else {
-                    Self::EwrapShardingBoundary {
+                    Self::AccountShardingBoundary {
                         block,
                         epoch,
                         shard_index: next_index,
                         total_shards,
                     }
                 };
-                (Some(InternalWorkUnit::EwrapShard(slot, shard_index)), next)
+                (Some(InternalWorkUnit::AccountShard(slot, shard_index)), next)
             }
             WorkBuffer::EwrapFinaliseBoundary(block, epoch) => (
                 Some(InternalWorkUnit::EwrapFinalize(block.slot())),
@@ -313,7 +313,7 @@ mod tests {
             // single `EWrap` tag keyed by the boundary slot. Tests care that
             // EWRAP work was produced at all, not about phase count.
             InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
-            InternalWorkUnit::EwrapShard(s, _) => WorkTag::EWrap(*s),
+            InternalWorkUnit::AccountShard(s, _) => WorkTag::EWrap(*s),
             InternalWorkUnit::EwrapFinalize(s) => WorkTag::EWrap(*s),
             InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),
             InternalWorkUnit::ForcedStop => WorkTag::ForcedStop,

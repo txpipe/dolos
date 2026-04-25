@@ -128,7 +128,7 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
     seed_account_namespace(store);
 
     // Build a half-open Range<EntityKey> spanning one first-byte prefix
-    // bucket — this is the same shape EwrapShardWorkUnit uses.
+    // bucket — this is the same shape AccountShardWorkUnit uses.
     let mut start_bytes = [0u8; 32];
     start_bytes[0] = SHARD_KEY_PREFIX_RANGE.start;
     let mut end_bytes = [0u8; 32];
