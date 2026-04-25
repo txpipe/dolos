@@ -242,12 +242,13 @@ pub struct EpochState {
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
 
-    /// When set, EWRAP sharding is in progress and this holds the next shard
-    /// index to run. Reset to `None` by `EpochTransition` (ESTART) at epoch
-    /// open, set to `Some(0)` by `EpochEndInit` (Ewrap) when prepare-time
-    /// globals are populated, advanced by each `EpochEndAccumulate`
-    /// (AccountShard), cleared by `EpochWrapUp` (EwrapFinalize). Doubles as
-    /// cursor + "EWRAP in flight" flag.
+    /// Cursor tracking shard progress through the epoch boundary. `None`
+    /// means no AccountShard has run yet (the natural starting state, set by
+    /// `EpochTransition` during ESTART). `Some(n)` means shards `0..n` have
+    /// committed and `n` is the next to run. Each `EpochEndAccumulate`
+    /// (AccountShard) advances the cursor; `EpochWrapUp` (EwrapFinalize)
+    /// clears it back to `None`. `EpochEndInit` (Ewrap) does not touch this
+    /// field. Doubles as crash-recovery flag for "boundary in flight".
     #[n(15)]
     #[cbor(default)]
     pub ewrap_progress: Option<u32>,
@@ -611,21 +612,25 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     }
 }
 
-/// Delta emitted once by `Ewrap` to populate `EpochState.end` with the
-/// globals known at prepare time (pool counts, MIR totals, proposal refunds,
-/// epoch incentives) and zeroed reward accumulators, plus set
-/// `ewrap_progress = Some(0)` to mark the start of the sharding pipeline.
+/// Delta emitted once by `Ewrap` to patch `EpochState.end` with the globals
+/// known at prepare time (pool counts, MIR totals, proposal refunds, epoch
+/// incentives).
 ///
 /// `entity.end` is already `Some(EndStats::default())` at this point — ESTART's
-/// `EpochTransition` opens the slot at epoch start. This delta overwrites
-/// that default-seeded slot with the populated stats.
+/// `EpochTransition` opens the slot at epoch start, and the preceding
+/// `AccountShard` runs have already populated the reward accumulators
+/// (`effective_rewards`, `unspendable_to_treasury`, `unspendable_to_reserves`).
+/// This delta writes ONLY the prepare-time fields and leaves the accumulators
+/// untouched. `ewrap_progress` is also untouched — it's owned by
+/// `EpochEndAccumulate`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochEndInit {
     pub(crate) stats: EndStats,
 
-    // undo
+    // undo: snapshot the previous EndStats so we can restore the prepare-time
+    // fields. Accumulators were not touched, so their values are preserved
+    // naturally — no separate undo state needed for them.
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ewrap_progress: Option<u32>,
 }
 
 impl EpochEndInit {
@@ -633,7 +638,6 @@ impl EpochEndInit {
         Self {
             stats,
             prev_end: None,
-            prev_ewrap_progress: None,
         }
     }
 }
@@ -647,18 +651,47 @@ impl dolos_core::EntityDelta for EpochEndInit {
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
+        let end = entity
+            .end
+            .as_mut()
+            .expect("ESTART seeded EpochState.end before Ewrap runs");
 
-        self.prev_end = entity.end.clone();
-        self.prev_ewrap_progress = entity.ewrap_progress;
+        self.prev_end = Some(end.clone());
 
-        entity.end = Some(self.stats.clone());
-        entity.ewrap_progress = Some(0);
+        end.pool_deposit_count = self.stats.pool_deposit_count;
+        end.pool_refund_count = self.stats.pool_refund_count;
+        end.pool_invalid_refund_count = self.stats.pool_invalid_refund_count;
+        end.epoch_incentives = self.stats.epoch_incentives.clone();
+        end.treasury_mirs = self.stats.treasury_mirs;
+        end.reserve_mirs = self.stats.reserve_mirs;
+        end.invalid_treasury_mirs = self.stats.invalid_treasury_mirs;
+        end.invalid_reserve_mirs = self.stats.invalid_reserve_mirs;
+        end.proposal_refunds = self.stats.proposal_refunds;
+        end.proposal_invalid_refunds = self.stats.proposal_invalid_refunds;
+        // NOT touched: effective_rewards, unspendable_to_treasury,
+        // unspendable_to_reserves (owned by EpochEndAccumulate);
+        // __drep_deposits, __drep_refunds (deprecated).
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
-        entity.end = self.prev_end.clone();
-        entity.ewrap_progress = self.prev_ewrap_progress;
+        if let Some(prev) = &self.prev_end {
+            let end = entity
+                .end
+                .as_mut()
+                .expect("end present if apply ran");
+            // Restore only the fields apply touched.
+            end.pool_deposit_count = prev.pool_deposit_count;
+            end.pool_refund_count = prev.pool_refund_count;
+            end.pool_invalid_refund_count = prev.pool_invalid_refund_count;
+            end.epoch_incentives = prev.epoch_incentives.clone();
+            end.treasury_mirs = prev.treasury_mirs;
+            end.reserve_mirs = prev.reserve_mirs;
+            end.invalid_treasury_mirs = prev.invalid_treasury_mirs;
+            end.invalid_reserve_mirs = prev.invalid_reserve_mirs;
+            end.proposal_refunds = prev.proposal_refunds;
+            end.proposal_invalid_refunds = prev.proposal_invalid_refunds;
+        }
     }
 }
 
@@ -701,41 +734,40 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
         let entity = entity.as_mut().expect("existing epoch");
 
-        // Idempotency guard: if this shard was already applied (recovery
-        // scenario — the shard committed to state but the process crashed
-        // before advancing the work buffer past it), skip. The check uses the
-        // `ewrap_progress` cursor as the authoritative record of which shards
-        // have landed.
-        match entity.ewrap_progress {
-            Some(expected) if expected == self.completed_shard_index => {
-                // Normal path — apply.
-            }
-            Some(n) if n > self.completed_shard_index => {
-                // Already applied. Skip to preserve idempotency.
-                tracing::debug!(
-                    completed_shard = self.completed_shard_index,
-                    ewrap_progress = n,
-                    "EpochEndAccumulate already applied — skipping (idempotent)"
-                );
-                return;
-            }
-            other => {
-                // Out-of-order apply (shard N emitted before shard N-1 ran).
-                // Treated as a broken invariant because it would leave the
-                // `ewrap_progress` cursor misaligned.
-                tracing::error!(
-                    completed_shard = self.completed_shard_index,
-                    ewrap_progress = ?other,
-                    "EpochEndAccumulate applied out of order — skipping to avoid corruption"
-                );
-                return;
-            }
+        // Idempotency + ordering guard. `ewrap_progress` is the authoritative
+        // cursor for which shards have landed: `None` means no shards have
+        // run yet (shard 0 is the next expected); `Some(n)` means shards
+        // `0..n` have committed and `n` is next. AccountShard is the first
+        // phase of the epoch boundary, so `None` is the natural starting
+        // state (set by ESTART's `EpochTransition`).
+        let expected = entity.ewrap_progress.unwrap_or(0);
+        if expected > self.completed_shard_index {
+            // Already applied (crash-recovery scenario where the shard's
+            // state commit landed but the work buffer hadn't advanced past
+            // it). Skip to preserve idempotency.
+            tracing::debug!(
+                completed_shard = self.completed_shard_index,
+                ewrap_progress = expected,
+                "EpochEndAccumulate already applied — skipping (idempotent)"
+            );
+            return;
+        }
+        if expected < self.completed_shard_index {
+            // Out-of-order apply (shard N emitted before shard N-1 ran).
+            // Treated as a broken invariant because it would leave the
+            // `ewrap_progress` cursor misaligned.
+            tracing::error!(
+                completed_shard = self.completed_shard_index,
+                ewrap_progress = expected,
+                "EpochEndAccumulate applied out of order — skipping to avoid corruption"
+            );
+            return;
         }
 
         let end = entity
             .end
             .as_mut()
-            .expect("Ewrap populated end before shards run (slot opened by ESTART)");
+            .expect("ESTART seeded EpochState.end before shards run");
 
         end.effective_rewards += self.effective_delta;
         end.unspendable_to_treasury += self.unspendable_to_treasury_delta;

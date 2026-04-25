@@ -28,20 +28,24 @@ pub(crate) enum WorkBuffer {
     OpenBatch(WorkBatch),
     PreRupdBoundary(WorkBatch, OwnedMultiEraBlock),
     RupdBoundary(OwnedMultiEraBlock),
+    /// Pre-flushed state when crossing the epoch boundary with a buffered
+    /// `WorkBatch`. `pop_work` yields the batch as `InternalWorkUnit::Blocks`
+    /// and advances to `AccountShardingBoundary { shard_index: 0, total_shards }`
+    /// (or `EwrapBoundary` if `total_shards == 0`).
     PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
-    /// Entry state for the EWRAP pipeline. `pop_work` yields
-    /// `InternalWorkUnit::Ewrap` and advances to
-    /// `AccountShardingBoundary { shard_index: 0, total_shards }`.
-    EwrapBoundary(OwnedMultiEraBlock, Epoch),
-    /// Intermediate state that emits `AccountShard(shard_index)` until
-    /// `shard_index == total_shards`, then advances to
-    /// `EwrapFinaliseBoundary`.
+    /// Entry state that emits `AccountShard(shard_index)` until
+    /// `shard_index == total_shards`, then advances to `EwrapBoundary`.
+    /// This is the first phase of the epoch-boundary pipeline.
     AccountShardingBoundary {
         block: OwnedMultiEraBlock,
         epoch: Epoch,
         shard_index: u32,
         total_shards: u32,
     },
+    /// Global Ewrap phase. `pop_work` yields `InternalWorkUnit::Ewrap` and
+    /// advances to `EwrapFinaliseBoundary`. Reached after all shards have
+    /// committed (or directly from `PreEwrapBoundary` when `total_shards == 0`).
+    EwrapBoundary(OwnedMultiEraBlock, Epoch),
     /// Final stage of the EWRAP pipeline. `pop_work` yields
     /// `InternalWorkUnit::EwrapFinalize` and advances to
     /// `EstartBoundary(block, epoch + 1)`.
@@ -117,9 +121,26 @@ impl WorkBuffer {
         }
     }
 
-    fn on_ewrap_boundary(self, next_block: OwnedMultiEraBlock, epoch: Epoch) -> Self {
+    fn on_ewrap_boundary(
+        self,
+        next_block: OwnedMultiEraBlock,
+        epoch: Epoch,
+        ewrap_total_shards: u32,
+    ) -> Self {
         match self {
-            WorkBuffer::Restart(..) => WorkBuffer::EwrapBoundary(next_block, epoch),
+            WorkBuffer::Restart(..) => {
+                if ewrap_total_shards == 0 {
+                    // No shards — entry goes straight to the global Ewrap phase.
+                    WorkBuffer::EwrapBoundary(next_block, epoch)
+                } else {
+                    WorkBuffer::AccountShardingBoundary {
+                        block: next_block,
+                        epoch,
+                        shard_index: 0,
+                        total_shards: ewrap_total_shards,
+                    }
+                }
+            }
             WorkBuffer::OpenBatch(batch) => WorkBuffer::PreEwrapBoundary(batch, next_block, epoch),
             _ => unreachable!(),
         }
@@ -130,6 +151,7 @@ impl WorkBuffer {
         block: OwnedMultiEraBlock,
         eras: &ChainSummary,
         stability_window: u64,
+        ewrap_total_shards: u32,
     ) -> Self {
         assert!(
             self.can_receive_block(),
@@ -147,7 +169,7 @@ impl WorkBuffer {
         let boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
 
         if let Some((epoch, _, _)) = boundary {
-            return self.on_ewrap_boundary(block, epoch);
+            return self.on_ewrap_boundary(block, epoch, ewrap_total_shards);
         }
 
         let rupd_boundary =
@@ -189,17 +211,12 @@ impl WorkBuffer {
                 Some(InternalWorkUnit::Rupd(block.slot())),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
-            WorkBuffer::PreEwrapBoundary(batch, block, epoch) => (
-                Some(InternalWorkUnit::Blocks(batch)),
-                Self::EwrapBoundary(block, epoch),
-            ),
-            WorkBuffer::EwrapBoundary(block, epoch) => {
-                let slot = block.slot();
+            WorkBuffer::PreEwrapBoundary(batch, block, epoch) => {
                 let next = if ewrap_total_shards == 0 {
-                    // No shards requested — skip straight to finalize. This
-                    // shouldn't happen with a valid config but keeps the
-                    // state machine safe.
-                    Self::EwrapFinaliseBoundary(block, epoch)
+                    // No shards requested — skip straight to the global Ewrap
+                    // phase. Shouldn't happen with a valid config but keeps
+                    // the state machine safe.
+                    Self::EwrapBoundary(block, epoch)
                 } else {
                     Self::AccountShardingBoundary {
                         block,
@@ -208,7 +225,7 @@ impl WorkBuffer {
                         total_shards: ewrap_total_shards,
                     }
                 };
-                (Some(InternalWorkUnit::Ewrap(slot)), next)
+                (Some(InternalWorkUnit::Blocks(batch)), next)
             }
             WorkBuffer::AccountShardingBoundary {
                 block,
@@ -219,7 +236,7 @@ impl WorkBuffer {
                 let slot = block.slot();
                 let next_index = shard_index + 1;
                 let next = if next_index >= total_shards {
-                    Self::EwrapFinaliseBoundary(block, epoch)
+                    Self::EwrapBoundary(block, epoch)
                 } else {
                     Self::AccountShardingBoundary {
                         block,
@@ -230,6 +247,10 @@ impl WorkBuffer {
                 };
                 (Some(InternalWorkUnit::AccountShard(slot, shard_index)), next)
             }
+            WorkBuffer::EwrapBoundary(block, epoch) => (
+                Some(InternalWorkUnit::Ewrap(block.slot())),
+                Self::EwrapFinaliseBoundary(block, epoch),
+            ),
             WorkBuffer::EwrapFinaliseBoundary(block, epoch) => (
                 Some(InternalWorkUnit::EwrapFinalize(block.slot())),
                 Self::EstartBoundary(block, epoch + 1),
@@ -345,7 +366,7 @@ mod tests {
                 }
             }
             let block = make_block(slot);
-            buf = buf.receive_block(block, eras, stability_window);
+            buf = buf.receive_block(block, eras, stability_window, TEST_TOTAL_SHARDS);
         }
 
         // drain remaining
@@ -395,7 +416,7 @@ mod tests {
                 }
             }
             let block = make_block(slot);
-            buf = buf.receive_block(block, eras, stability_window);
+            buf = buf.receive_block(block, eras, stability_window, TEST_TOTAL_SHARDS);
         }
 
         // drain remaining

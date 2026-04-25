@@ -354,7 +354,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let work = self.work.take().expect("work buffer is initialized");
 
-        let new_work = work.receive_block(block, &self.cache.eras, self.cache.stability_window);
+        let new_work = work.receive_block(
+            block,
+            &self.cache.eras,
+            self.cache.stability_window,
+            self.config.ewrap_total_shards(),
+        );
 
         let last = new_work.last_point_seen().slot();
 

@@ -1,19 +1,18 @@
 //! Ewrap (Epoch Wrap) work units — three-phase pipeline.
 //!
-//! EWRAP at an epoch boundary is partitioned into three distinct work units
+//! The epoch boundary is partitioned into three distinct work units
 //! scheduled sequentially by the chain logic:
 //!
-//! 1. `EwrapWorkUnit` — global (non-account) work: pool/drep/proposal
-//!    classification, enactment, MIR processing, deposit refunds, and
-//!    emitting the `EpochEndInit` delta that populates `EpochState.end` with
-//!    the prepare-time globals + zeroed reward accumulators. The structural
-//!    `EpochState.end` slot is opened (as `Some(EndStats::default())`) by
-//!    `EpochTransition` during ESTART, so this phase only writes content.
-//! 2. `AccountShardWorkUnit { shard_index }` — emitted `total_shards` times.
+//! 1. `AccountShardWorkUnit { shard_index }` — emitted `total_shards` times.
 //!    Each shard covers a first-byte prefix range of the account key space,
 //!    range-loads pending rewards, iterates accounts in range, applies
-//!    rewards + drops visitors, and emits `EpochEndAccumulate` with the
-//!    shard's reward contribution.
+//!    rewards + drops visitors, and emits `EpochEndAccumulate` to populate
+//!    the reward accumulators on `EpochState.end` (the slot is opened by
+//!    `EpochTransition` during ESTART).
+//! 2. `EwrapWorkUnit` — global (non-account) work: pool/drep/proposal
+//!    classification, enactment, MIR processing, deposit refunds, and
+//!    emitting the `EpochEndInit` delta that patches the prepare-time fields
+//!    into `EpochState.end` (leaving the shard accumulators untouched).
 //! 3. `EwrapFinalizeWorkUnit` — reads the accumulated `EpochState.end`,
 //!    emits `EpochWrapUp` (transitions rolling/pparams, clears
 //!    `ewrap_progress`), writes the completed epoch state to archive.

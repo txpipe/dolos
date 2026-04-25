@@ -80,12 +80,13 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         );
     }
 
-    // Reward accumulators start at zero — shards add to them via
-    // `EpochEndAccumulate` before `EwrapFinalize` emits `EpochWrapUp`.
+    // Reward accumulators are populated by AccountShards (which ran before
+    // this Ewrap phase). EpochEndInit patches only the prepare-time fields
+    // and leaves the accumulators untouched.
     tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
-        "EWRAP: populating EndStats with prepare-time globals"
+        "EWRAP: patching prepare-time globals into EndStats"
     );
 
     EndStats {
@@ -126,11 +127,12 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
-        // Populate `EpochState.end` with the prepare-time globals. ESTART
-        // already opened the slot via `EpochTransition` (with default zeros),
-        // so this delta overwrites the empty default. Reward accumulators
-        // remain zero; shards add their contributions via `EpochEndAccumulate`
-        // and `EwrapFinalize` emits `EpochWrapUp` against the accumulated `end`.
+        // Patch the prepare-time globals into `EpochState.end`. ESTART
+        // opened the slot via `EpochTransition`, AccountShards already wrote
+        // the reward accumulators in earlier work units; this delta only
+        // touches the prepare-time fields and leaves accumulators alone.
+        // `EwrapFinalize` then emits `EpochWrapUp` against the now-complete
+        // `end`.
         let stats = define_end_stats(ctx);
 
         ctx.deltas.add_for_entity(EpochEndInit::new(stats));
