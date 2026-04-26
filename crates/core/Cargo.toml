@@ -24,6 +24,7 @@ pallas.workspace = true
 hex.workspace = true
 regex.workspace = true
 serde_with = "3.16.0"
+memory-stats = "1.2"
 
 [dev-dependencies]
 proptest = "1.7.0"

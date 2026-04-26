@@ -13,9 +13,9 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
-    IndexStore as _, IndexWriter as _, MempoolStore, RawBlock, StateStore, StateWriter as _,
-    TipEvent, WalStore, WorkUnit,
+    work_unit::run_phase, ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain,
+    DomainError, EntityDelta as _, IndexStore as _, IndexWriter as _, MempoolStore, RawBlock,
+    StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
 
 const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
@@ -166,23 +166,12 @@ pub(crate) fn drain_pending_work<D: Domain>(
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     debug!("executing work unit");
 
-    work.load(domain)?;
-    debug!("load phase complete");
-
-    work.compute()?;
-    debug!("compute phase complete");
-
-    work.commit_wal(domain)?;
-    debug!("wal commit complete");
-
-    work.commit_state(domain)?;
-    debug!("state commit complete");
-
-    work.commit_archive(domain)?;
-    debug!("archive commit complete");
-
-    work.commit_indexes(domain)?;
-    debug!("index commit complete");
+    run_phase("load", || work.load(domain))?;
+    run_phase("compute", || work.compute())?;
+    run_phase("commit_wal", || work.commit_wal(domain))?;
+    run_phase("commit_state", || work.commit_state(domain))?;
+    run_phase("commit_archive", || work.commit_archive(domain))?;
+    run_phase("commit_indexes", || work.commit_indexes(domain))?;
 
     update_mempool(domain, work);
 

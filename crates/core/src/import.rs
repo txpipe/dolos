@@ -11,7 +11,9 @@
 
 use tracing::{debug, instrument};
 
-use crate::{BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
+use crate::{
+    work_unit::run_phase, BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit,
+};
 
 /// Extension trait for bulk block import operations.
 ///
@@ -79,23 +81,15 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     debug!("executing work unit (import)");
 
-    work.load(domain)?;
-    debug!("load phase complete");
-
-    work.compute()?;
-    debug!("compute phase complete");
+    run_phase("load", || work.load(domain))?;
+    run_phase("compute", || work.compute())?;
 
     // Skip WAL commit for import - data comes from trusted immutable source
     debug!("skipping wal commit (import mode)");
 
-    work.commit_state(domain)?;
-    debug!("state commit complete");
-
-    work.commit_archive(domain)?;
-    debug!("archive commit complete");
-
-    work.commit_indexes(domain)?;
-    debug!("index commit complete");
+    run_phase("commit_state", || work.commit_state(domain))?;
+    run_phase("commit_archive", || work.commit_archive(domain))?;
+    run_phase("commit_indexes", || work.commit_indexes(domain))?;
 
     // Skip tip notifications for import - no live subscribers
     debug!("skipping tip notifications (import mode)");
