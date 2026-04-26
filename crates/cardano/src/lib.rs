@@ -274,6 +274,13 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<Self, ChainError> {
         info!("initializing");
 
+        // Reject misconfigured `account_shards` early. The shard-key-range
+        // helper only `debug_assert!`s the divides-256 invariant, so an
+        // invalid release-build config (0, 3, 7, 100, ...) would silently
+        // corrupt key-range coverage.
+        crate::ashard::shard::validate_total_shards(config.account_shards())
+            .map_err(ChainError::InvalidConfig)?;
+
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
