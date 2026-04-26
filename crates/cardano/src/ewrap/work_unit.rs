@@ -1,10 +1,13 @@
-//! Ewrap (Epoch Wrap) work unit implementation.
+//! Ewrap work unit — global (non-account) work and the boundary close.
 //!
-//! The ewrap work unit handles epoch boundary processing including:
-//! - Applying rewards to accounts (loaded from pending_rewards state)
-//! - Processing pool retirements
-//! - Handling governance proposal enactment
-//! - DRep expiration
+//! Runs after the per-account `AShardWorkUnit` series. Performs
+//! pool/drep/proposal classification, enactment, MIR processing, deposit
+//! refunds, then assembles the final `EndStats` (combining prepare-time
+//! fields with the shard-populated accumulators) and emits a single
+//! `EpochWrapUp` delta. `EpochWrapUp::apply` overwrites `entity.end` with
+//! the final stats, rotates rolling/pparams snapshots forward, and clears
+//! `ashard_progress`. The completed `EpochState` is also written to archive
+//! at commit time.
 
 use std::sync::Arc;
 
@@ -15,20 +18,16 @@ use crate::CardanoLogic;
 
 use super::BoundaryWork;
 
-/// Work unit for epoch boundary wrap-up processing.
 pub struct EwrapWorkUnit {
     slot: BlockSlot,
     #[allow(dead_code)]
     config: CardanoConfig,
     genesis: Arc<Genesis>,
 
-    // Loaded
     boundary: Option<BoundaryWork>,
 }
 
 impl EwrapWorkUnit {
-    /// Create a new ewrap work unit.
-    /// Rewards are loaded from state store during load phase.
     pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
         Self {
             slot,
@@ -38,7 +37,6 @@ impl EwrapWorkUnit {
         }
     }
 
-    /// Access the loaded boundary work context.
     pub fn boundary(&self) -> Option<&BoundaryWork> {
         self.boundary.as_ref()
     }
@@ -53,43 +51,35 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "loading ewrap boundary context");
+        debug!(slot = self.slot, "loading ewrap context");
 
-        // Load rewards from state store (persisted by RUPD)
-        let boundary = BoundaryWork::load::<D>(domain.state(), self.genesis.clone())?;
+        let boundary = BoundaryWork::load_ewrap::<D>(domain.state(), self.genesis.clone())?;
 
-        info!(epoch = boundary.ending_state().number, "ending epoch");
+        info!(epoch = boundary.ending_state().number, "ewrap");
 
         self.boundary = Some(boundary);
 
-        debug!("ewrap boundary context loaded");
+        debug!("ewrap context loaded");
         Ok(())
     }
 
     fn compute(&mut self) -> Result<(), DomainError> {
-        // Computation is done during load via compute_deltas
-        // This is because the visitor pattern needs access to state
-        debug!("ewrap compute phase (deltas already computed during load)");
+        debug!("ewrap compute (deltas computed during load)");
         Ok(())
     }
 
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "committing ewrap state changes");
-
         let boundary = self
             .boundary
             .as_mut()
             .ok_or_else(|| DomainError::Internal("ewrap boundary not loaded".into()))?;
 
-        boundary.commit::<D>(domain.state(), domain.archive())?;
-
-        debug!("ewrap state committed");
+        boundary.commit_ewrap::<D>(domain.state(), domain.archive())?;
         Ok(())
     }
 
     fn commit_archive(&mut self, _domain: &D) -> Result<(), DomainError> {
-        // Archive writes are done in commit_state via boundary.commit()
-        // because they're interleaved with state commits
         Ok(())
     }
 }
+

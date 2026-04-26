@@ -12,8 +12,9 @@ use crate::{
     ProposalState,
 };
 
-/// A reward that was applied at EWRAP time.
-/// This represents a spendable reward that was successfully credited to an account.
+/// A reward that was applied during the per-account boundary phase
+/// (`AShard`). Represents a spendable reward that was successfully
+/// credited to an account.
 #[derive(Debug, Clone)]
 pub struct AppliedReward {
     pub credential: StakeCredential,
@@ -30,7 +31,6 @@ pub mod work_unit;
 pub mod drops;
 pub mod enactment;
 pub mod refunds;
-pub mod rewards;
 pub mod wrapup;
 
 pub use work_unit::EwrapWorkUnit;
@@ -122,7 +122,7 @@ pub type ProposalId = EntityKey;
 
 pub struct BoundaryWork {
     // loaded
-    ending_state: EpochState,
+    pub(crate) ending_state: EpochState,
     pub active_protocol: EraProtocol,
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
@@ -147,8 +147,9 @@ pub struct BoundaryWork {
     /// Credentials whose rewards were applied (need to be dequeued from state).
     pub applied_reward_credentials: Vec<StakeCredential>,
 
-    /// Rewards that were actually applied (spendable) at EWRAP time.
-    /// This is populated during the reward visitor phase and survives commit.
+    /// Rewards that were actually applied (spendable) during the
+    /// `AShard` reward visitor. Populated per-shard and survives the
+    /// commit so callers can observe what was credited.
     pub applied_rewards: Vec<AppliedReward>,
 
     /// Effective MIRs from treasury (applied to registered accounts).
@@ -165,6 +166,23 @@ pub struct BoundaryWork {
 
     /// Credentials whose pending MIRs were processed (need to be dequeued from state).
     pub applied_mir_credentials: Vec<StakeCredential>,
+
+    /// Shard-local reward accumulator — total effective rewards applied by
+    /// the current `AShard` run. Snapshot into `EpochEndAccumulate`
+    /// before the shard commits. Populated only by AShard work units;
+    /// zero in `BoundaryWork`s loaded for the Ewrap phase.
+    pub shard_applied_effective: u64,
+
+    /// Shard-local unspendable reward routed to treasury (accounts that
+    /// deregistered between RUPD and EWRAP). Snapshot into
+    /// `EpochEndAccumulate` before the shard commits. Zero outside
+    /// AShard.
+    pub shard_applied_unspendable_to_treasury: u64,
+
+    /// Shard-local unspendable reward that returns to reserves (pre-Babbage
+    /// filtered entries). Snapshot into `EpochEndAccumulate` before the
+    /// shard commits. Zero outside AShard.
+    pub shard_applied_unspendable_to_reserves: u64,
 }
 
 impl BoundaryWork {

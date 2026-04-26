@@ -1,17 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{BlockSlot, ChainError, Domain, Genesis, StateStore, TxOrder};
-use pallas::{codec::minicbor, ledger::primitives::StakeCredential};
+use pallas::codec::minicbor;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
     load_era_summary, pallas_extras,
-    pots::EpochIncentives,
-    rewards::{Reward, RewardMap},
+    rewards::RewardMap,
     roll::WorkDeltas,
-    rupd::{credential_to_key, RupdWork},
-    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
-    PoolState, ProposalState,
+    rupd::credential_to_key,
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PoolState,
+    ProposalState,
 };
 
 impl BoundaryWork {
@@ -50,7 +49,7 @@ impl BoundaryWork {
         Ok(account)
     }
 
-    fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    pub(crate) fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
         for record in pools {
@@ -111,7 +110,7 @@ impl BoundaryWork {
         None
     }
 
-    fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for record in dreps {
@@ -246,175 +245,23 @@ impl BoundaryWork {
         Ok(())
     }
 
-    pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        // Process pending MIRs first (before regular rewards)
-        self.process_pending_mirs::<D>(state)?;
-
-        let mut visitor_enactment = crate::ewrap::enactment::BoundaryVisitor::default();
-        let mut visitor_rewards = crate::ewrap::rewards::BoundaryVisitor::default();
-        let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
-        let mut visitor_refunds = crate::ewrap::refunds::BoundaryVisitor::default();
-        let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
-
-        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
-
-        for pool in pools {
-            let (pool_id, pool) = pool?;
-
-            visitor_enactment.visit_pool(self, &pool_id, &pool)?;
-            visitor_rewards.visit_pool(self, &pool_id, &pool)?;
-            visitor_drops.visit_pool(self, &pool_id, &pool)?;
-            visitor_refunds.visit_pool(self, &pool_id, &pool)?;
-            visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
-        }
-
-        let retiring_pools = self.retiring_pools.clone();
-
-        for (pool_id, (pool, account)) in retiring_pools {
-            visitor_enactment.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
-            visitor_rewards.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
-            visitor_drops.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
-            visitor_refunds.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
-            visitor_wrapup.visit_retiring_pool(self, pool_id, &pool, account.as_ref())?;
-        }
-
-        let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
-
-        for drep in dreps {
-            let (drep_id, drep) = drep?;
-
-            visitor_enactment.visit_drep(self, &drep_id, &drep)?;
-            visitor_rewards.visit_drep(self, &drep_id, &drep)?;
-            visitor_drops.visit_drep(self, &drep_id, &drep)?;
-            visitor_refunds.visit_drep(self, &drep_id, &drep)?;
-            visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
-        }
-
-        let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
-
-        for account in accounts {
-            let (account_id, account) = account?;
-
-            visitor_enactment.visit_account(self, &account_id, &account)?;
-
-            // HACK: we need the rewards to apply before the retires. This is because the rewards will update the live value before the snapshot but the retires will schedule refunds for after the snapshot. If we switch the sequence, the rewards will be overriden by the refund schedule. If we keep this order, the refund will clone the existing live values with the rewards already applied.
-            // TODO: we should probably move the retires to ESTART after the snapshot has been taken.
-            visitor_rewards.visit_account(self, &account_id, &account)?;
-            visitor_drops.visit_account(self, &account_id, &account)?;
-            visitor_refunds.visit_account(self, &account_id, &account)?;
-
-            visitor_wrapup.visit_account(self, &account_id, &account)?;
-        }
-
-        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
-
-        for proposal in proposals {
-            let (proposal_id, proposal) = proposal?;
-
-            if proposal.is_active(self.ending_state.number) {
-                visitor_enactment.visit_active_proposal(self, &proposal_id, &proposal)?;
-                visitor_rewards.visit_active_proposal(self, &proposal_id, &proposal)?;
-                visitor_drops.visit_active_proposal(self, &proposal_id, &proposal)?;
-                visitor_refunds.visit_active_proposal(self, &proposal_id, &proposal)?;
-                visitor_wrapup.visit_active_proposal(self, &proposal_id, &proposal)?;
-            }
-        }
-
-        let enacting_proposals = self.enacting_proposals.clone();
-
-        for (id, (proposal, account)) in enacting_proposals.iter() {
-            visitor_enactment.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_rewards.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_drops.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_refunds.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_wrapup.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-        }
-
-        let dropping_proposals = self.dropping_proposals.clone();
-
-        for (id, (proposal, account)) in dropping_proposals.iter() {
-            visitor_enactment.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
-            visitor_rewards.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
-            visitor_drops.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
-            visitor_refunds.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
-            visitor_wrapup.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
-        }
-
-        visitor_enactment.flush(self)?;
-        visitor_rewards.flush(self)?;
-        visitor_drops.flush(self)?;
-        visitor_refunds.flush(self)?;
-        visitor_wrapup.flush(self)?;
-
-        Ok(())
-    }
-
-    /// Load pending rewards from state store (persisted by RUPD).
-    fn load_pending_rewards<D: Domain>(
-        state: &D::State,
-        incentives: EpochIncentives,
-    ) -> Result<RewardMap<RupdWork>, ChainError> {
-        let pending_iter =
-            state.iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, None)?;
-
-        let mut pending: HashMap<StakeCredential, Reward> = HashMap::new();
-
-        for record in pending_iter {
-            let (_, pending_state) = record?;
-            let credential = pending_state.credential.clone();
-            let reward = Reward::from_pending_state(&pending_state);
-            pending.insert(credential, reward);
-        }
-
-        let pending_total: u64 = pending.values().map(|r| r.total_value()).sum();
-        let spendable_total: u64 = pending
-            .values()
-            .filter(|r| r.is_spendable())
-            .map(|r| r.total_value())
-            .sum();
-        let unspendable_total: u64 = pending
-            .values()
-            .filter(|r| !r.is_spendable())
-            .map(|r| r.total_value())
-            .sum();
-        let spendable_count = pending.values().filter(|r| r.is_spendable()).count();
-        let unspendable_count = pending.len() - spendable_count;
-
-        tracing::debug!(
-            pending_count = pending.len(),
-            %pending_total,
-            %spendable_count,
-            %spendable_total,
-            %unspendable_count,
-            %unspendable_total,
-            "loaded pending rewards from state"
-        );
-
-        Ok(RewardMap::from_pending(pending, incentives))
-    }
-
-    pub fn load<D: Domain>(
+    /// Construct an empty `BoundaryWork` with the small globals every phase needs
+    /// (ending_state, chain summary, active protocol, genesis, incentives).
+    pub(crate) fn new_empty<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-    ) -> Result<BoundaryWork, ChainError> {
+    ) -> Result<Self, ChainError> {
         let ending_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
-
-        // Load incentives from epoch state (set by RUPD)
         let incentives = ending_state.incentives.clone().unwrap_or_default();
 
-        // Load pending rewards from state store
-        let rewards = Self::load_pending_rewards::<D>(state, incentives)?;
-
-        let mut boundary = BoundaryWork {
+        Ok(BoundaryWork {
             ending_state,
             chain_summary,
             active_protocol,
             genesis,
-            rewards,
-
-            // to be loaded right after
+            rewards: RewardMap::from_pending(HashMap::new(), incentives),
             new_pools: Default::default(),
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
@@ -422,8 +269,6 @@ impl BoundaryWork {
             reregistrating_dreps: Default::default(),
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
-
-            // empty until computed
             deltas: WorkDeltas::default(),
             logs: Default::default(),
             applied_reward_credentials: Default::default(),
@@ -433,16 +278,122 @@ impl BoundaryWork {
             invalid_treasury_mirs: 0,
             invalid_reserve_mirs: 0,
             applied_mir_credentials: Default::default(),
-        };
+            shard_applied_effective: 0,
+            shard_applied_unspendable_to_treasury: 0,
+            shard_applied_unspendable_to_reserves: 0,
+        })
+    }
+
+    // ---------------------------------------------------------------------
+    // Ewrap-phase orchestration. AShard's load/commit live in
+    // `crate::ashard` (separate module); the shared helpers above are reused.
+    // ---------------------------------------------------------------------
+
+    /// Load + compute for the `Ewrap` phase:
+    ///   * classify pools/dreps/proposals (retiring/enacting/dropping),
+    ///   * process pending MIRs,
+    ///   * run the enactment / refunds / wrapup visitors (global only —
+    ///     account-level work happened in the preceding AShards), and
+    ///   * emit a single `EpochWrapUp` delta carrying the final `EndStats`
+    ///     (prepare-time fields + shard-populated reward accumulators). Apply
+    ///     overwrites `entity.end`, rotates rolling/pparams snapshots, and
+    ///     clears `ashard_progress`. The boundary close is now part of this
+    ///     load; there is no separate finalize phase.
+    pub fn load_ewrap<D: Domain>(
+        state: &D::State,
+        genesis: Arc<Genesis>,
+    ) -> Result<BoundaryWork, ChainError> {
+        let mut boundary = Self::new_empty::<D>(state, genesis)?;
 
         boundary.load_pool_data::<D>(state)?;
-
         boundary.load_drep_data::<D>(state)?;
-
         boundary.load_proposal_data::<D>(state)?;
 
-        boundary.compute_deltas::<D>(state)?;
+        boundary.compute_ewrap_deltas::<D>(state)?;
 
         Ok(boundary)
     }
+
+    // ---------------------------------------------------------------------
+    // Ewrap-phase compute helper. Drives the global visitors (enactment /
+    // refunds / drops / wrapup) over pools, dreps, and proposals, then the
+    // wrapup visitor's flush emits `EpochWrapUp` carrying the final
+    // `EndStats`.
+    // ---------------------------------------------------------------------
+
+    fn compute_ewrap_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        self.process_pending_mirs::<D>(state)?;
+
+        let mut visitor_enactment = crate::ewrap::enactment::BoundaryVisitor::default();
+        let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
+        let mut visitor_refunds = crate::ewrap::refunds::BoundaryVisitor::default();
+        let mut visitor_wrapup = crate::ewrap::wrapup::BoundaryVisitor::default();
+
+        // Pools — all pools, then retiring pools via their stored clones.
+        let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
+        for record in pools {
+            let (pool_id, pool) = record?;
+            visitor_enactment.visit_pool(self, &pool_id, &pool)?;
+            visitor_drops.visit_pool(self, &pool_id, &pool)?;
+            visitor_refunds.visit_pool(self, &pool_id, &pool)?;
+            visitor_wrapup.visit_pool(self, &pool_id, &pool)?;
+        }
+
+        let retiring_pools = self.retiring_pools.clone();
+        for (pool_hash, (pool, account)) in retiring_pools {
+            visitor_enactment.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
+            visitor_drops.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
+            visitor_refunds.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
+            visitor_wrapup.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
+        }
+
+        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps.
+        let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
+        for record in dreps {
+            let (drep_id, drep) = record?;
+            visitor_enactment.visit_drep(self, &drep_id, &drep)?;
+            visitor_drops.visit_drep(self, &drep_id, &drep)?;
+            visitor_refunds.visit_drep(self, &drep_id, &drep)?;
+            visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
+        }
+
+        // Active proposals + enacting + dropping.
+        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        for record in proposals {
+            let (proposal_id, proposal) = record?;
+            if proposal.is_active(self.ending_state.number) {
+                visitor_enactment.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_drops.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_refunds.visit_active_proposal(self, &proposal_id, &proposal)?;
+                visitor_wrapup.visit_active_proposal(self, &proposal_id, &proposal)?;
+            }
+        }
+
+        let enacting_proposals = self.enacting_proposals.clone();
+        for (id, (proposal, account)) in enacting_proposals.iter() {
+            visitor_enactment.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_drops.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_refunds.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+            visitor_wrapup.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+        }
+
+        let dropping_proposals = self.dropping_proposals.clone();
+        for (id, (proposal, account)) in dropping_proposals.iter() {
+            visitor_enactment.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_drops.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_refunds.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+            visitor_wrapup.visit_dropping_proposal(self, id, proposal, account.as_ref())?;
+        }
+
+        visitor_enactment.flush(self)?;
+        visitor_drops.flush(self)?;
+        visitor_refunds.flush(self)?;
+
+        // wrapup.flush emits the final `EpochWrapUp` delta carrying the
+        // assembled `EndStats` (prepare-time fields + shard accumulators).
+        visitor_wrapup.flush(self)?;
+
+        Ok(())
+    }
+
 }

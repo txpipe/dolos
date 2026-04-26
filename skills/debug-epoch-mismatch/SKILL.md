@@ -55,15 +55,16 @@ The test compares 6 datasets. The failure pattern reveals the root cause:
 
 | Pattern | Likely Cause | Work Unit |
 |---------|-------------|-----------|
-| Only `epochs` differs (treasury/reserves off) | Pot calculation -- unspendable routing, incentive formula, or delta field | EWRAP/ESTART |
-| Equal and opposite delta between rewards and treasury | Unspendable reward routing issue | EWRAP |
-| Rewards match but pots don't | Pot aggregation or unspendable handling | EWRAP/ESTART |
+| Only `epochs` differs (treasury/reserves off) | Pot calculation -- unspendable routing, incentive formula, or delta field | ASHARD/EWRAP/ESTART |
+| Equal and opposite delta between rewards and treasury | Unspendable reward routing issue | ASHARD |
+| Rewards match but pots don't | Pot aggregation or unspendable handling | ASHARD/EWRAP/ESTART |
 | `delegation` + `stake` + `rewards` + `epochs` all differ | Single stake discrepancy cascading | ROLL/ESTART |
 | Thousands of small reward diffs (±1 lovelace) | One pool's total stake is wrong, rounding cascade | ROLL/ESTART |
-| `rewards` has extra/missing rows | RUPD pre-filtering or EWRAP registration check | RUPD/EWRAP |
+| `rewards` has extra/missing rows | RUPD pre-filtering or EWRAP-time registration check | RUPD/ASHARD |
 | `delegation` off by exactly 500,000,000 | Pool deposit refund timing | ROLL (POOLREAP) |
 | `delegation` off by exactly 2,000,000 | Key deposit timing | ROLL |
 | Only subset of pools/accounts affected | Registration/retirement window or pool param update | ROLL |
+| MIR / treasury-reserves transfer mismatch | MIR application or routing in boundary close | EWRAP |
 
 ## Step 4: Identify the Root Account/Pool
 
@@ -121,12 +122,15 @@ ORDER BY b.slot_no;
 
 ### Dolos Work Units → Haskell Concepts
 
+The boundary pipeline runs `ASHARD ×N → EWRAP` at the end of each epoch (then `ESTART` opens the next one). `ASHARD` and `EWRAP` are split: per-account effects settle first across N shards, then a single `EWRAP` does the global / boundary-close work.
+
 | Dolos | Haskell | What it does |
 |-------|---------|-------------|
 | `ROLL` | Block processing | Applies transactions, certificates, updates pool/account state |
 | `RUPD` | Reward calculation at stability window | Computes pending rewards using mark snapshot |
-| `EWRAP` | `applyRUpd` + reward filtering | Applies rewards, filters unspendable, updates pots |
-| `ESTART` | NEWEPOCH transition | Rotates snapshots, computes initial pots, creates new epoch |
+| `ASHARD` | `applyRUpd` (per-account) + reward filtering | Per-account: applies pending rewards to registered accounts, filters/routes unspendable rewards (treasury vs reserves), accumulates per-shard contributions into `EpochState.end` |
+| `EWRAP` | `applyMIR` + boundary close | Global / once-per-boundary: applies MIRs, processes pool/proposal refunds, finalizes `EndStats`, rotates `pparams` / `rolling` snapshots forward |
+| `ESTART` | NEWEPOCH transition | Rotates remaining snapshots, computes initial pots, creates new epoch |
 
 ### Key Source Files
 
@@ -135,7 +139,10 @@ ORDER BY b.slot_no;
 | Pots & incentives | `crates/cardano/src/pots.rs` |
 | Model types (EpochValue, etc.) | `crates/cardano/src/model.rs` |
 | ESTART / epoch transition | `crates/cardano/src/estart/reset.rs` |
-| EWRAP / reward application | `crates/cardano/src/ewrap/rewards.rs` |
+| ASHARD / reward application & unspendable routing | `crates/cardano/src/ashard/rewards.rs` |
+| ASHARD / shard partitioning & wiring | `crates/cardano/src/ashard/{loading,commit,shard}.rs` |
+| EWRAP / MIR + refunds + wrap-up | `crates/cardano/src/ewrap/{enactment,refunds,wrapup}.rs` |
+| EWRAP / boundary-close commit | `crates/cardano/src/ewrap/commit.rs` |
 | RUPD / reward calculation | `crates/cardano/src/rupd/loading.rs` |
 | ROLL / certificate processing | `crates/cardano/src/roll/accounts.rs` |
 | ROLL / batch delta application | `crates/cardano/src/roll/batch.rs` |
@@ -163,9 +170,12 @@ Use targeted, temporary logs that point to a single hypothesis:
 |------------|-------------------|
 | Missing/wrong block attribution | Pool header data in ROLL visitor |
 | Wrong pool block count | Pool block counts in RUPD loading |
-| Wrong reward amounts | Reward map entries before EWRAP flush |
+| Wrong reward amounts | Reward map entries in ASHARD rewards visitor (`ashard/rewards.rs`) before commit |
+| Wrong unspendable routing (treasury vs reserves) | ASHARD rewards visitor + `EpochEndAccumulate` deltas |
+| Wrong MIR amount or routing | EWRAP enactment / wrap-up (`ewrap/enactment.rs`, `ewrap/wrapup.rs`) |
+| Wrong pool / proposal refund | EWRAP refunds visitor (`ewrap/refunds.rs`) |
 | Wrong pot delta | `apply_delta()` inputs in ESTART |
-| Registration boundary issue | Account registration checks at RUPD/EWRAP boundary |
+| Registration boundary issue | Account registration checks at RUPD entry and ASHARD reward-application time |
 
 Guidelines:
 - Use `eprintln!` for focused logs

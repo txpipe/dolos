@@ -80,34 +80,21 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         );
     }
 
-    let effective = ctx.rewards.applied_effective();
-    let to_treasury = ctx.rewards.applied_unspendable_to_treasury();
-    let to_reserves = ctx.rewards.applied_unspendable_to_reserves();
-
-    // Sum of applied_rewards should match effective
-    let applied_rewards_sum: u64 = ctx.applied_rewards.iter().map(|r| r.amount).sum();
-
-    #[cfg(feature = "strict")]
-    assert!(
-        effective == applied_rewards_sum,
-        "EWRAP epoch {}: effective_rewards ({}) != applied_rewards_sum ({}), diff = {}",
-        ctx.ending_state().number,
-        effective,
-        applied_rewards_sum,
-        effective as i64 - applied_rewards_sum as i64
-    );
+    // Reward accumulators are populated by AShards (which ran before
+    // this Ewrap phase). Read them back from `EpochState.end` and combine
+    // with the prepare-time fields to produce the final stats carried by
+    // `EpochWrapUp`.
+    let acc = ctx
+        .ending_state()
+        .end
+        .as_ref()
+        .expect("ESTART seeded EpochState.end before AShards");
 
     tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
-        %effective,
-        %to_treasury,
-        %to_reserves,
-        consumed = %(effective + to_treasury),
-        returned = %(incentives.available_rewards.saturating_sub(effective + to_treasury)),
-        %applied_rewards_sum,
-        applied_rewards_count = ctx.applied_rewards.len(),
-        "EWRAP reward classification"
+        effective_rewards = acc.effective_rewards,
+        "EWRAP: assembling final EndStats (prepare-time + accumulators)"
     );
 
     EndStats {
@@ -115,9 +102,9 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         pool_refund_count: pool_refund_count as u64,
         pool_invalid_refund_count: pool_invalid_refund_count as u64,
         epoch_incentives: incentives.clone(),
-        effective_rewards: effective,
-        unspendable_to_treasury: to_treasury,
-        unspendable_to_reserves: to_reserves,
+        effective_rewards: acc.effective_rewards,
+        unspendable_to_treasury: acc.unspendable_to_treasury,
+        unspendable_to_reserves: acc.unspendable_to_reserves,
         treasury_mirs,
         reserve_mirs,
         invalid_treasury_mirs,
@@ -148,9 +135,18 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             ctx.add_delta(delta);
         }
 
-        let stats = define_end_stats(ctx);
+        // Assemble the final `EndStats` from the prepare-time fields plus the
+        // shard-populated accumulators (already in `ending_state.end`), and
+        // emit `EpochWrapUp` to close the epoch boundary. Apply will
+        // overwrite `entity.end` with these stats, rotate the rolling/pparams
+        // snapshots forward, and clear `ashard_progress`.
+        let final_stats = define_end_stats(ctx);
 
-        ctx.deltas.add_for_entity(EpochWrapUp::new(stats));
+        // Stash the final stats on `ending_state.end` so the post-commit
+        // archive write in `commit_ewrap` reflects the finalised state.
+        ctx.ending_state.end = Some(final_stats.clone());
+
+        ctx.deltas.add_for_entity(EpochWrapUp::new(final_stats));
 
         Ok(())
     }
