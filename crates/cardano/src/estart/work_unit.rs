@@ -1,11 +1,12 @@
-//! Estart (Epoch Start) work unit implementation.
+//! Estart (Epoch Start) finalize work unit.
 //!
-//! The estart work unit handles the start of a new epoch including:
+//! Closes the epoch-start pipeline after the per-account `EStartShard`
+//! units have run. Handles the global (non-account-keyed) work:
+//! - Pool / DRep / proposal snapshot transitions
 //! - Nonce transitions
-//! - Account/pool snapshot transitions
-//! - Epoch number increment
-//! - Pot recalculation
+//! - Epoch number increment + pot recalculation (`EpochTransition`)
 //! - Era transitions (if protocol version changes)
+//! - Cursor advance (only this unit moves the cursor; shards must not)
 
 use std::sync::Arc;
 
@@ -53,15 +54,15 @@ where
     }
 
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "loading estart work context");
+        debug!(slot = self.slot, "loading estart finalize work context");
 
-        let context = WorkContext::load::<D>(domain.state(), self.genesis.clone())?;
+        let context = WorkContext::load_finalize::<D>(domain.state(), self.genesis.clone())?;
 
         info!(epoch = context.starting_epoch_no(), "starting epoch");
 
         self.context = Some(context);
 
-        debug!("estart context loaded");
+        debug!("estart finalize context loaded");
 
         Ok(())
     }
@@ -73,16 +74,16 @@ where
     }
 
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "committing estart state changes");
+        debug!(slot = self.slot, "committing estart finalize state changes");
 
         let context = self
             .context
             .as_mut()
             .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
-        context.commit::<D>(domain.state(), domain.archive(), self.slot)?;
+        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
 
-        debug!("estart state committed");
+        debug!("estart finalize state committed");
         Ok(())
     }
 

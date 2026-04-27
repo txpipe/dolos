@@ -83,6 +83,7 @@ pub fn bootstrap_epoch<D: Domain>(
         end: Some(EndStats::default()),
         incentives: None,
         ashard_progress: None,
+        estart_shard_progress: None,
     };
 
     let writer = state.start_writer()?;

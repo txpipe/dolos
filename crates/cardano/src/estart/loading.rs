@@ -3,14 +3,26 @@ use std::sync::Arc;
 use dolos_core::{ChainError, Domain, Genesis, StateStore, TxoRef};
 
 use crate::{
-    estart::BoundaryVisitor, load_era_summary, roll::WorkDeltas, AccountState, DRepState,
-    EraProtocol, FixedNamespace as _, PoolState, ProposalState,
+    estart::BoundaryVisitor, load_era_summary, roll::WorkDeltas, DRepState, EraProtocol,
+    FixedNamespace as _, PoolState, ProposalState,
 };
 
 impl super::WorkContext {
-    pub fn compute_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    /// Iterate the global (non-account-keyed) entity classes of the ESTART
+    /// boundary — pools, dreps, proposals — and emit transition deltas for
+    /// each. Closes by emitting the single `EpochTransition` delta that
+    /// advances the epoch number, recomputes pots, and (optionally)
+    /// migrates pparams across an era boundary.
+    ///
+    /// Account-keyed transitions are handled by `compute_shard_deltas`
+    /// (in the `estart_shard` module), which the work-buffer pipeline
+    /// runs ahead of this finalize pass — once per shard.
+    pub fn compute_global_deltas<D: Domain>(
+        &mut self,
+        state: &D::State,
+    ) -> Result<(), ChainError> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
-        let mut visitor_reset = super::reset::BoundaryVisitor::default();
+        let mut visitor_reset = super::reset::BoundaryVisitor;
 
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
@@ -30,15 +42,6 @@ impl super::WorkContext {
             visitor_reset.visit_drep(self, &drep_id, &drep)?;
         }
 
-        let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
-
-        for account in accounts {
-            let (account_id, account) = account?;
-
-            visitor_nonces.visit_account(self, &account_id, &account)?;
-            visitor_reset.visit_account(self, &account_id, &account)?;
-        }
-
         let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for proposal in proposals {
@@ -50,6 +53,10 @@ impl super::WorkContext {
 
         visitor_nonces.flush(self)?;
         visitor_reset.flush(self)?;
+
+        // Closing global delta — emitted once per epoch boundary, after
+        // all per-entity transitions have been queued.
+        super::reset::emit_epoch_transition(self);
 
         Ok(())
     }
@@ -88,7 +95,13 @@ impl super::WorkContext {
         Ok(total)
     }
 
-    pub fn load<D: Domain>(state: &D::State, genesis: Arc<Genesis>) -> Result<Self, ChainError> {
+    /// Build a fresh `WorkContext` (ended_state + chain summary + AVVM
+    /// reclamation) without any computed deltas. Shared between the
+    /// finalize-phase loader and the per-shard loader (in `estart_shard`).
+    pub fn new_empty<D: Domain>(
+        state: &D::State,
+        genesis: Arc<Genesis>,
+    ) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
@@ -104,20 +117,27 @@ impl super::WorkContext {
             0
         };
 
-        let mut boundary = Self {
+        Ok(Self {
             ended_state,
             chain_summary,
             active_protocol,
             genesis,
             avvm_reclamation,
-
-            // empty until computed
             deltas: WorkDeltas::default(),
             logs: Default::default(),
-        };
+        })
+    }
 
-        boundary.compute_deltas::<D>(state)?;
-
-        Ok(boundary)
+    /// Load + compute for the ESTART finalize phase: skips per-account
+    /// transitions (those land via `estart_shard` units that ran earlier
+    /// in the boundary) and emits pool / drep / proposal transitions plus
+    /// the closing `EpochTransition`.
+    pub fn load_finalize<D: Domain>(
+        state: &D::State,
+        genesis: Arc<Genesis>,
+    ) -> Result<Self, ChainError> {
+        let mut ctx = Self::new_empty::<D>(state, genesis)?;
+        ctx.compute_global_deltas::<D>(state)?;
+        Ok(ctx)
     }
 }

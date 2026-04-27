@@ -3,7 +3,7 @@ use dolos_core::ChainError;
 use crate::{
     estart::{AccountId, PoolId, WorkContext},
     pots::{apply_delta, PotDelta, Pots},
-    AccountState, AccountTransition, CardanoDelta, EpochTransition, PoolState, PoolTransition,
+    AccountState, AccountTransition, EpochTransition, PoolState, PoolTransition,
 };
 
 pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
@@ -106,16 +106,19 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
     pots
 }
 
+/// Per-entity transition visitor for the snapshot rotation that ESTART
+/// performs. Emits deltas straight onto `WorkContext.deltas` (no internal
+/// `Vec` accumulator) so the per-account branch can be driven from a
+/// shard-scoped iteration without holding millions of deltas in RAM.
+///
+/// The single `EpochTransition` delta — which advances the epoch number,
+/// recomputes pots, and (optionally) migrates pparams across an era
+/// boundary — is emitted by `WorkContext::compute_global_deltas` (the
+/// finalize-phase entry point), not by `flush`. Sharded callers therefore
+/// run the per-account branch alone and let the finalize unit handle the
+/// closing global delta.
 #[derive(Default)]
-pub struct BoundaryVisitor {
-    deltas: Vec<CardanoDelta>,
-}
-
-impl BoundaryVisitor {
-    fn change(&mut self, delta: impl Into<CardanoDelta>) {
-        self.deltas.push(delta.into());
-    }
-}
+pub struct BoundaryVisitor;
 
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_account(
@@ -124,7 +127,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &AccountId,
         _: &AccountState,
     ) -> Result<(), ChainError> {
-        self.change(AccountTransition::new(id.clone(), ctx.starting_epoch_no()));
+        ctx.add_delta(AccountTransition::new(id.clone(), ctx.starting_epoch_no()));
 
         Ok(())
     }
@@ -135,23 +138,27 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         id: &PoolId,
         _: &PoolState,
     ) -> Result<(), ChainError> {
-        self.change(PoolTransition::new(id.clone(), ctx.starting_epoch_no()));
+        ctx.add_delta(PoolTransition::new(id.clone(), ctx.starting_epoch_no()));
 
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut WorkContext) -> Result<(), ChainError> {
-        for delta in self.deltas.drain(..) {
-            ctx.add_delta(delta);
-        }
+    // No `flush` override — the closing `EpochTransition` is emitted by
+    // `WorkContext::compute_global_deltas`, which sees both the ended
+    // state and the newly-defined pots.
+}
 
-        ctx.deltas.add_for_entity(EpochTransition::new(
-            ctx.starting_epoch_no(),
-            define_new_pots(ctx),
-            ctx.ended_state().pparams.era_transition(),
-            Some(ctx.genesis.clone()),
-        ));
-
-        Ok(())
-    }
+/// Emit the closing `EpochTransition` delta — invoked from
+/// `WorkContext::compute_global_deltas` after all per-entity transitions
+/// have been emitted.
+pub fn emit_epoch_transition(ctx: &mut WorkContext) {
+    let new_pots = define_new_pots(ctx);
+    let era_transition = ctx.ended_state().pparams.era_transition();
+    let genesis = ctx.genesis.clone();
+    ctx.deltas.add_for_entity(EpochTransition::new(
+        ctx.starting_epoch_no(),
+        new_pots,
+        era_transition,
+        Some(genesis),
+    ));
 }

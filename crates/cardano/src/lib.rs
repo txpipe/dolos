@@ -33,12 +33,14 @@ pub mod model;
 pub mod owned;
 pub mod pots;
 pub mod rewards;
+pub mod shard;
 pub mod utils;
 pub mod utxoset;
 
 // work units
 pub mod ashard;
 pub mod estart;
+pub mod estart_shard;
 pub mod ewrap;
 pub mod genesis;
 pub mod roll;
@@ -82,7 +84,15 @@ pub enum CardanoWorkUnit {
     /// first-byte prefix range of the account key space and accumulates its
     /// contribution into `EpochState.end` via `EpochEndAccumulate`.
     AShard(Box<ashard::AShardWorkUnit>),
-    /// Handle epoch start processing.
+    /// Handle one shard of per-account snapshot rotation at the start of
+    /// the new epoch. Emitted `config.account_shards` times after `Ewrap`
+    /// and before the `Estart` finalize unit. Each shard covers the same
+    /// first-byte prefix range as its `AShard` counterpart, advancing
+    /// `EpochState.estart_shard_progress` via `EStartShardAccumulate`.
+    EStartShard(Box<estart_shard::EStartShardWorkUnit>),
+    /// Handle epoch start processing — finalize half (pools, dreps,
+    /// proposals, `EpochTransition`, era transition, cursor advance).
+    /// Per-account work has already landed via `EStartShard` units.
     Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
     ForcedStop,
@@ -99,6 +109,9 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
             Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::name(w),
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::name(w)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
         }
@@ -111,6 +124,9 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::load(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -123,6 +139,9 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
             Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::compute(w),
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::compute(w)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
             Self::ForcedStop => Ok(()),
         }
@@ -139,6 +158,9 @@ where
             Self::AShard(w) => {
                 <ashard::AShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
             }
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -154,6 +176,9 @@ where
             }
             Self::AShard(w) => {
                 <ashard::AShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            }
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
             }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
             Self::ForcedStop => Err(DomainError::StopEpochReached),
@@ -173,6 +198,9 @@ where
             Self::AShard(w) => {
                 <ashard::AShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
             }
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -191,6 +219,9 @@ where
             Self::AShard(w) => {
                 <ashard::AShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
             }
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::ForcedStop => Ok(()),
         }
@@ -203,6 +234,9 @@ where
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::tip_events(w),
+            Self::EStartShard(w) => {
+                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::tip_events(w)
+            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
@@ -248,12 +282,20 @@ impl CardanoLogic {
     }
 
     /// Compute the effective `account_shards` value: stored
-    /// `ashard_progress.total` if a boundary is in flight, otherwise the
-    /// configured value.
+    /// `ashard_progress.total` or `estart_shard_progress.total` if a
+    /// boundary is in flight (only one of them can ever be populated at a
+    /// time — Ewrap clears `ashard_progress` before any EStart-shard runs,
+    /// and `EpochTransition` clears `estart_shard_progress` for the new
+    /// epoch). Falls back to the configured value otherwise.
     fn read_effective_account_shards<D: Domain>(&self, state: &D::State) -> u32 {
         load_epoch::<D>(state)
             .ok()
-            .and_then(|e| e.ashard_progress.as_ref().map(|p| p.total))
+            .and_then(|e| {
+                e.ashard_progress
+                    .as_ref()
+                    .map(|p| p.total)
+                    .or_else(|| e.estart_shard_progress.as_ref().map(|p| p.total))
+            })
             .unwrap_or_else(|| self.config.account_shards())
     }
 }
@@ -278,7 +320,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         // helper only `debug_assert!`s the divides-256 invariant, so an
         // invalid release-build config (0, 3, 7, 100, ...) would silently
         // corrupt key-range coverage.
-        crate::ashard::shard::validate_total_shards(config.account_shards())
+        crate::shard::validate_total_shards(config.account_shards())
             .map_err(ChainError::InvalidConfig)?;
 
         let cursor = state.read_cursor()?;
@@ -338,13 +380,68 @@ impl dolos_core::ChainLogic for CardanoLogic {
                     );
                 }
             }
+
+            // Same crash-recovery check for the EStart-shard half of the
+            // boundary. Only one of the two progress fields can be set at
+            // any time — Ewrap clears `ashard_progress` before any
+            // EStart-shard runs, and `EpochTransition` clears
+            // `estart_shard_progress` when the new epoch opens.
+            if let Some(progress) = epoch.estart_shard_progress.as_ref() {
+                let configured = config.account_shards();
+                if progress.total != configured {
+                    tracing::warn!(
+                        epoch = epoch.number,
+                        stored_total = progress.total,
+                        configured_total = configured,
+                        "in-flight estart-shard boundary uses {} shards but \
+                         config.account_shards = {}; the in-flight boundary will \
+                         continue with {} (the persisted total) and the new \
+                         config takes effect on the next boundary",
+                        progress.total,
+                        configured,
+                        progress.total,
+                    );
+                }
+                if progress.committed < progress.total {
+                    tracing::warn!(
+                        epoch = epoch.number,
+                        next_shard = progress.committed,
+                        total_shards = progress.total,
+                        "crash detected mid-boundary: estart_shard_progress is set. \
+                         On the next block that triggers the boundary, dolos will \
+                         resume the EStart-shard pipeline; correctness depends on \
+                         shard idempotency (EStartShardAccumulate guards on \
+                         shard_index, but AccountTransition is not natively \
+                         idempotent). Operators should monitor the subsequent \
+                         boundary for inconsistency. TODO: implement true shard \
+                         resume."
+                    );
+                } else {
+                    tracing::warn!(
+                        epoch = epoch.number,
+                        committed = progress.committed,
+                        total_shards = progress.total,
+                        "found EpochState.estart_shard_progress.committed == total \
+                         at startup — Estart finalize was not committed before \
+                         crash. The next boundary attempt will re-run \
+                         EStart-shards and finalize; idempotency should keep the \
+                         result correct."
+                    );
+                }
+            }
         }
 
         // Capture the effective account_shards value: stored total if a
-        // boundary is in flight, otherwise the configured value.
+        // boundary is in flight (either AShard or EStart-shard half),
+        // otherwise the configured value.
         let effective_account_shards = load_epoch::<D>(state)
             .ok()
-            .and_then(|e| e.ashard_progress.as_ref().map(|p| p.total))
+            .and_then(|e| {
+                e.ashard_progress
+                    .as_ref()
+                    .map(|p| p.total)
+                    .or_else(|| e.estart_shard_progress.as_ref().map(|p| p.total))
+            })
             .unwrap_or_else(|| config.account_shards());
 
         let eras = eras::load_era_summary::<D>(state)?;
@@ -449,6 +546,16 @@ impl dolos_core::ChainLogic for CardanoLogic {
             InternalWorkUnit::AShard(slot, shard_index) => {
                 Some(CardanoWorkUnit::AShard(Box::new(
                     ashard::AShardWorkUnit::new(
+                        slot,
+                        self.config.clone(),
+                        domain.genesis(),
+                        shard_index,
+                    ),
+                )))
+            }
+            InternalWorkUnit::EStartShard(slot, shard_index) => {
+                Some(CardanoWorkUnit::EStartShard(Box::new(
+                    estart_shard::EStartShardWorkUnit::new(
                         slot,
                         self.config.clone(),
                         domain.genesis(),

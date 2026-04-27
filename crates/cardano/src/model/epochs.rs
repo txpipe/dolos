@@ -210,13 +210,13 @@ pub struct EndStats {
     pub __drep_refunds: Lovelace,
 }
 
-/// Snapshot of the AShard pipeline's progress + total within a single epoch
-/// boundary. Persisted alongside `EpochState.ashard_progress` so a config
-/// change mid-boundary (or across a crash and restart) can't break the
-/// in-flight work — the stored `total` is authoritative until the boundary
-/// completes.
+/// Snapshot of a sharded phase's progress + total within a single epoch
+/// boundary. Persisted on `EpochState` (one field per phase, e.g.
+/// `ashard_progress` and `estart_shard_progress`) so a config change
+/// mid-boundary (or across a crash and restart) can't break the in-flight
+/// work — the stored `total` is authoritative until the boundary completes.
 #[derive(Debug, Clone, Encode, Decode, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AShardProgress {
+pub struct ShardProgress {
     /// Number of shards that have committed; shards `0..committed` are done
     /// and `committed` is the next to run.
     #[n(0)]
@@ -271,7 +271,17 @@ pub struct EpochState {
     /// pipeline.
     #[n(15)]
     #[cbor(default)]
-    pub ashard_progress: Option<AShardProgress>,
+    pub ashard_progress: Option<ShardProgress>,
+
+    /// Cursor + total snapshot for the EStart-shard pipeline within this
+    /// epoch boundary. Mirrors `ashard_progress` for the EStart side: each
+    /// `EStartShardAccumulate` advances `committed`; the finalize-phase
+    /// `EpochTransition` clears the field back to `None` for the new epoch.
+    /// The two fields are never both populated — Ewrap clears
+    /// `ashard_progress` before any EStart-shard runs.
+    #[n(16)]
+    #[cbor(default)]
+    pub estart_shard_progress: Option<ShardProgress>,
 }
 
 impl Default for EpochState {
@@ -287,6 +297,7 @@ impl Default for EpochState {
             end: None,
             incentives: None,
             ashard_progress: None,
+            estart_shard_progress: None,
         }
     }
 }
@@ -369,7 +380,10 @@ pub(crate) mod testing {
             end in prop::option::of(any_end_stats()),
             incentives in prop::option::of(any_epoch_incentives()),
             ashard_progress in prop::option::of(
-                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| AShardProgress { committed, total })
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+            estart_shard_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
         ) -> EpochState {
             EpochState {
@@ -383,6 +397,7 @@ pub(crate) mod testing {
                 end,
                 incentives,
                 ashard_progress,
+                estart_shard_progress,
             }
         }
     }
@@ -595,7 +610,7 @@ pub struct EpochWrapUp {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ashard_progress: Option<AShardProgress>,
+    pub(crate) prev_ashard_progress: Option<ShardProgress>,
 }
 
 impl EpochWrapUp {
@@ -663,7 +678,7 @@ pub struct EpochEndAccumulate {
     // When `applied = false`, `undo` is a no-op so a rolled-back skip
     // can't underflow `end.*` u64s or clobber `ashard_progress`.
     pub(crate) applied: bool,
-    pub(crate) prev_ashard_progress: Option<AShardProgress>,
+    pub(crate) prev_ashard_progress: Option<ShardProgress>,
 }
 
 impl EpochEndAccumulate {
@@ -758,7 +773,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         end.unspendable_to_treasury += self.unspendable_to_treasury_delta;
         end.unspendable_to_reserves += self.unspendable_to_reserves_delta;
 
-        entity.ashard_progress = Some(AShardProgress {
+        entity.ashard_progress = Some(ShardProgress {
             committed: self.completed_shard_index + 1,
             total: self.total_shards,
         });
@@ -785,6 +800,113 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         end.unspendable_to_reserves -= self.unspendable_to_reserves_delta;
 
         entity.ashard_progress = self.prev_ashard_progress.clone();
+    }
+}
+
+/// Delta emitted once per `EStartShard` to advance `estart_shard_progress`
+/// to the next shard index. Carries `total_shards` so the boundary's shard
+/// count is captured in state at the first commit, which makes the
+/// in-flight pipeline robust against a config change between shards (e.g.
+/// across a crash and restart).
+///
+/// Unlike `EpochEndAccumulate` this delta carries no per-shard accumulator
+/// payload: the EStart-shard's per-account work lands directly on each
+/// `AccountState` via `AccountTransition` deltas, not into a global pot.
+/// The accumulator delta exists purely to track shard progress.
+///
+/// Idempotent on repeat-apply by guarding on the committed shard count —
+/// a shard that was already committed will have
+/// `estart_shard_progress.committed > completed_shard_index` and should
+/// skip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EStartShardAccumulate {
+    pub(crate) completed_shard_index: u32,
+    pub(crate) total_shards: u32,
+
+    // undo — captured by `apply` only when state was actually mutated
+    // (i.e. the idempotency / ordering / consistency guards all passed).
+    pub(crate) applied: bool,
+    pub(crate) prev_estart_shard_progress: Option<ShardProgress>,
+}
+
+impl EStartShardAccumulate {
+    pub fn new(completed_shard_index: u32, total_shards: u32) -> Self {
+        Self {
+            completed_shard_index,
+            total_shards,
+            applied: false,
+            prev_estart_shard_progress: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for EStartShardAccumulate {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        // Idempotency + ordering guard. `estart_shard_progress` is the
+        // authoritative cursor for which EStart shards have landed: `None`
+        // means no shard has run yet (shard 0 is next), `Some(p)` means
+        // shards `0..p.committed` have committed. EStart-shards run after
+        // Ewrap, so the natural starting state for the EStart phase is
+        // `None` (Ewrap's `EpochWrapUp` doesn't touch this field; the
+        // previous epoch's `EpochTransition` cleared it).
+        let stored = entity.estart_shard_progress.as_ref();
+        let expected = stored.map(|p| p.committed).unwrap_or(0);
+        if expected > self.completed_shard_index {
+            tracing::debug!(
+                completed_shard = self.completed_shard_index,
+                committed = expected,
+                "EStartShardAccumulate already applied — skipping (idempotent)"
+            );
+            return;
+        }
+        if expected < self.completed_shard_index {
+            tracing::error!(
+                completed_shard = self.completed_shard_index,
+                committed = expected,
+                "EStartShardAccumulate applied out of order — skipping to avoid corruption"
+            );
+            return;
+        }
+
+        if let Some(p) = stored {
+            if p.total != self.total_shards {
+                tracing::error!(
+                    completed_shard = self.completed_shard_index,
+                    stored_total = p.total,
+                    delta_total = self.total_shards,
+                    "EStartShardAccumulate total_shards disagrees with in-flight \
+                     boundary — skipping to avoid corruption (config changed \
+                     mid-boundary?)"
+                );
+                return;
+            }
+        }
+
+        self.prev_estart_shard_progress = entity.estart_shard_progress.clone();
+
+        entity.estart_shard_progress = Some(ShardProgress {
+            committed: self.completed_shard_index + 1,
+            total: self.total_shards,
+        });
+
+        self.applied = true;
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        if !self.applied {
+            return;
+        }
+
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.estart_shard_progress = self.prev_estart_shard_progress.clone();
     }
 }
 
@@ -853,7 +975,8 @@ pub struct EpochTransition {
     pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
     pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
     pub(crate) prev_end: Option<EndStats>,
-    pub(crate) prev_ashard_progress: Option<AShardProgress>,
+    pub(crate) prev_ashard_progress: Option<ShardProgress>,
+    pub(crate) prev_estart_shard_progress: Option<ShardProgress>,
 }
 
 impl EpochTransition {
@@ -874,6 +997,7 @@ impl EpochTransition {
             prev_pparams: None,
             prev_end: None,
             prev_ashard_progress: None,
+            prev_estart_shard_progress: None,
         }
     }
 }
@@ -907,6 +1031,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         self.prev_pparams = Some(entity.pparams.clone());
         self.prev_end = entity.end.clone();
         self.prev_ashard_progress = entity.ashard_progress.clone();
+        self.prev_estart_shard_progress = entity.estart_shard_progress.clone();
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -931,6 +1056,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         // empty container instead of the previous epoch's stale data.
         entity.end = Some(EndStats::default());
         entity.ashard_progress = None;
+        entity.estart_shard_progress = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -945,6 +1071,7 @@ impl dolos_core::EntityDelta for EpochTransition {
             .expect("apply captured initial_pots");
         entity.end = self.prev_end.clone();
         entity.ashard_progress = self.prev_ashard_progress.clone();
+        entity.estart_shard_progress = self.prev_estart_shard_progress.clone();
     }
 }
 
@@ -1019,6 +1146,7 @@ mod prop_tests {
                 end,
                 incentives,
                 ashard_progress: None,
+                estart_shard_progress: None,
             }
         }
     }
@@ -1091,12 +1219,36 @@ mod prop_tests {
         fn any_epoch_state_for_accumulate()(
             mut entity in any_epoch_state(),
             progress in prop::option::of((0u32..32u32, 1u32..=32u32).prop_map(
-                |(committed, total)| AShardProgress { committed, total }
+                |(committed, total)| ShardProgress { committed, total }
             )),
             end in any_end_stats(),
         ) -> EpochState {
             entity.end = Some(end);
             entity.ashard_progress = progress;
+            entity
+        }
+    }
+
+    prop_compose! {
+        fn any_estart_shard_accumulate()(
+            completed_shard_index in 0u32..16u32,
+            total_shards in 1u32..=16u32,
+        ) -> EStartShardAccumulate {
+            EStartShardAccumulate::new(completed_shard_index, total_shards)
+        }
+    }
+
+    // Entity generator parallel to `any_epoch_state_for_accumulate` but for
+    // the EStart-shard accumulator. Lets `estart_shard_progress` vary across
+    // `None`, matching, ahead, behind, and `total` mismatch.
+    prop_compose! {
+        fn any_epoch_state_for_estart_shard_accumulate()(
+            mut entity in any_epoch_state(),
+            progress in prop::option::of((0u32..32u32, 1u32..=32u32).prop_map(
+                |(committed, total)| ShardProgress { committed, total }
+            )),
+        ) -> EpochState {
+            entity.estart_shard_progress = progress;
             entity
         }
     }
@@ -1200,6 +1352,18 @@ mod prop_tests {
         fn epoch_end_accumulate_roundtrip(
             entity in any_epoch_state_for_accumulate(),
             delta in any_epoch_end_accumulate(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        /// Roundtrip across all branches of `EStartShardAccumulate::apply` —
+        /// includes entity states whose `estart_shard_progress` is ahead of,
+        /// behind, equal to, or `None` relative to the delta's
+        /// `completed_shard_index`, plus `total_shards` mismatches.
+        #[test]
+        fn estart_shard_accumulate_roundtrip(
+            entity in any_epoch_state_for_estart_shard_accumulate(),
+            delta in any_estart_shard_accumulate(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
