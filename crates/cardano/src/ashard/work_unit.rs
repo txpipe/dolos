@@ -15,7 +15,7 @@ use tracing::{debug, info};
 
 use crate::{ewrap::BoundaryWork, load_epoch, CardanoLogic};
 
-use super::shard::shard_key_range;
+use super::shard::shard_key_ranges;
 
 pub struct AShardWorkUnit {
     slot: BlockSlot,
@@ -72,7 +72,7 @@ where
                 .unwrap_or_else(|| self.config.account_shards()),
             Err(_) => self.config.account_shards(),
         };
-        let range = shard_key_range(self.shard_index, total_shards);
+        let ranges = shard_key_ranges(self.shard_index, total_shards);
 
         debug!(
             slot = self.slot,
@@ -86,7 +86,7 @@ where
             self.genesis.clone(),
             self.shard_index,
             total_shards,
-            range,
+            ranges,
         )?;
 
         info!(
@@ -117,14 +117,14 @@ where
                 .unwrap_or_else(|| self.config.account_shards()),
             Err(_) => self.config.account_shards(),
         };
-        let range = shard_key_range(self.shard_index, total_shards);
+        let ranges = shard_key_ranges(self.shard_index, total_shards);
 
         let boundary = self
             .boundary
             .as_mut()
             .ok_or_else(|| DomainError::Internal("ashard boundary not loaded".into()))?;
 
-        boundary.commit_ashard::<D>(domain.state(), domain.archive(), range)?;
+        boundary.commit_ashard::<D>(domain.state(), domain.archive(), ranges)?;
         Ok(())
     }
 

@@ -24,15 +24,20 @@ impl BoundaryWork {
         &mut self,
         state: &D::State,
         archive: &D::Archive,
-        range: std::ops::Range<dolos_core::EntityKey>,
+        ranges: Vec<std::ops::Range<dolos_core::EntityKey>>,
     ) -> Result<(), ChainError> {
         debug!("committing ashard changes");
 
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
-        // Stream accounts in this shard's range only.
-        self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+        // Stream accounts in this shard's ranges only (one per StakeCredential
+        // variant). Each call drains the matching deltas from `self.deltas`,
+        // so a delta keyed inside range N stays in the map until range N is
+        // streamed.
+        for range in ranges {
+            self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+        }
 
         // EpochState gets the EpochEndAccumulate delta (single entity).
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;

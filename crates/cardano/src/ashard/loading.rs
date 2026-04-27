@@ -17,25 +17,26 @@ use crate::{
 
 impl BoundaryWork {
     /// Range-load pending rewards from state store (persisted by RUPD) into
-    /// `self.rewards`. `range = Some(r)` restricts iteration to a shard's
-    /// key range; `None` loads everything (kept for completeness — currently
-    /// unused since the only caller is `load_ashard`, which always passes a
-    /// shard range).
-    fn load_pending_rewards_range<D: Domain>(
+    /// `self.rewards`. The caller passes one or more disjoint key ranges (a
+    /// shard covers two — one per `StakeCredential` variant) and we union
+    /// the iteration into a single map.
+    fn load_pending_rewards_ranges<D: Domain>(
         &mut self,
         state: &D::State,
-        range: Option<Range<EntityKey>>,
+        ranges: Vec<Range<EntityKey>>,
     ) -> Result<(), ChainError> {
-        let pending_iter = state
-            .iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, range)?;
-
         let mut pending: HashMap<StakeCredential, Reward> = HashMap::new();
 
-        for record in pending_iter {
-            let (_, pending_state) = record?;
-            let credential = pending_state.credential.clone();
-            let reward = Reward::from_pending_state(&pending_state);
-            pending.insert(credential, reward);
+        for range in ranges {
+            let pending_iter = state
+                .iter_entities_typed::<PendingRewardState>(PendingRewardState::NS, Some(range))?;
+
+            for record in pending_iter {
+                let (_, pending_state) = record?;
+                let credential = pending_state.credential.clone();
+                let reward = Reward::from_pending_state(&pending_state);
+                pending.insert(credential, reward);
+            }
         }
 
         let pending_total: u64 = pending.values().map(|r| r.total_value()).sum();
@@ -68,7 +69,7 @@ impl BoundaryWork {
         genesis: Arc<Genesis>,
         shard_index: u32,
         total_shards: u32,
-        range: Range<EntityKey>,
+        ranges: Vec<Range<EntityKey>>,
     ) -> Result<BoundaryWork, ChainError> {
         let mut boundary = Self::new_empty::<D>(state, genesis)?;
 
@@ -78,9 +79,9 @@ impl BoundaryWork {
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
 
-        boundary.load_pending_rewards_range::<D>(state, Some(range.clone()))?;
+        boundary.load_pending_rewards_ranges::<D>(state, ranges.clone())?;
 
-        boundary.compute_shard_deltas::<D>(state, range, shard_index, total_shards)?;
+        boundary.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;
 
         Ok(boundary)
     }
@@ -88,27 +89,29 @@ impl BoundaryWork {
     fn compute_shard_deltas<D: Domain>(
         &mut self,
         state: &D::State,
-        range: Range<EntityKey>,
+        ranges: Vec<Range<EntityKey>>,
         shard_index: u32,
         total_shards: u32,
     ) -> Result<(), ChainError> {
         let mut visitor_rewards = super::rewards::BoundaryVisitor::default();
         let mut visitor_drops = crate::ewrap::drops::BoundaryVisitor::default();
 
-        let accounts =
-            state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
+        for range in ranges {
+            let accounts =
+                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
 
-        for record in accounts {
-            let (account_id, account) = record?;
-            // HACK: rewards must apply before drops. Rewards update the live
-            // value before the snapshot; drops schedule refunds for after the
-            // snapshot. If reordered, the rewards would be overwritten by the
-            // refund schedule. With this order, the refund clones the live
-            // values with rewards already applied.
-            // TODO: move retires to ESTART (after the snapshot has been taken)
-            // and drop this ordering hack.
-            visitor_rewards.visit_account(self, &account_id, &account)?;
-            visitor_drops.visit_account(self, &account_id, &account)?;
+            for record in accounts {
+                let (account_id, account) = record?;
+                // HACK: rewards must apply before drops. Rewards update the live
+                // value before the snapshot; drops schedule refunds for after the
+                // snapshot. If reordered, the rewards would be overwritten by the
+                // refund schedule. With this order, the refund clones the live
+                // values with rewards already applied.
+                // TODO: move retires to ESTART (after the snapshot has been taken)
+                // and drop this ordering hack.
+                visitor_rewards.visit_account(self, &account_id, &account)?;
+                visitor_drops.visit_account(self, &account_id, &account)?;
+            }
         }
 
         visitor_rewards.flush(self)?;
