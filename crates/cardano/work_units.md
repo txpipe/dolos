@@ -3,48 +3,73 @@
 ## Natural sequence within an epoch
 
 ```
-EStartShard ×N  →  Estart  →  Roll …  →  Rupd  →  Roll …  →  AShard ×N  →  Ewrap
-(per-account     (open       (blocks)    (RUPD)    (blocks)    (per-account     (global + close)
- snapshot         globals                                       reward apply)
- rotation)        + close
-                  epoch
-                  start)                                                                    │
-                                                                                            ▼
-                                                                          next epoch's EStartShard
+Estart  →  Roll …  →  Rupd  →  Roll …  →  Ewrap
+(open half:    (blocks)    (RUPD)    (blocks)    (close half:
+ per-account                                       per-account
+ snapshot                                          reward apply
+ rotation                                          + global
+ + global                                          Ewrap pass
+ Estart pass                                       in finalize())
+ in finalize())                                                     │
+                                                                    ▼
+                                                          next epoch's Estart
 ```
 
-`Genesis` runs once at chain bootstrap; the first `EStartShard`/`Estart` cascade fires at the first epoch boundary the chain crosses. `ForcedStop` is a sentinel that ends the loop at a configured epoch.
+`Genesis` runs once at chain bootstrap; the first `Estart` fires at the first epoch boundary the chain crosses. `ForcedStop` is a sentinel that ends the loop at a configured epoch.
 
-The boundary work splits cleanly into a *close* half (AShard ×N + Ewrap, ending epoch N) and an *open* half (EStartShard ×N + Estart, opening epoch N+1). Both halves shard the per-account work on the same credential-key partitioning (`crate::shard::shard_key_ranges`) and use the same `account_shards` config knob; progress for each half is tracked separately on `EpochState.ashard_progress` and `EpochState.estart_shard_progress`.
+Every work unit reports its shard count via `WorkUnit::total_shards()` and the core executor (in `crates/core/src/sync.rs::run_lifecycle`) loops over shards calling `load → compute → commit_*` once per shard. Work units that don't need sharding default to `total_shards() = 1` and ignore the `shard_index` parameter. Two shard-agnostic hooks bracket the loop:
 
-The sections below walk the cycle starting at `EStartShard` (the first phase of every epoch).
+- **`initialize()`** runs once before any shard. Used to compute `total_shards`, hoist boundary-wide reads, and so on.
+- **`finalize()`** runs once after the last shard's commits. Used for global teardown that depends on every shard having landed.
+
+The boundary work splits into a *close* half (`Ewrap`, ending epoch N) and an *open* half (`Estart`, opening epoch N+1). Each is a single sharded work unit whose `finalize()` runs the corresponding global pass:
+
+| Half | Sharded body | `finalize()` pass | Cursor advance? |
+|------|--------------|-------------------|-----------------|
+| Close (epoch N) | `Ewrap` — per-account reward apply | Ewrap globals + `EpochWrapUp` | no |
+| Open (epoch N+1) | `Estart` — per-account snapshot rotation | Estart globals + `EpochTransition` + era transitions | yes (only here) |
+
+Both sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `account_shards` config knob; progress for each half is tracked separately on `EpochState.ashard_progress` and `EpochState.estart_shard_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a config change between shards (e.g. across a crash and restart) can't break an in-flight pipeline.
+
+The sections below walk the cycle starting at `Estart` (the first phase of every epoch).
 
 ---
 
-## 1. `EStartShardWorkUnit` — per-account snapshot rotation (×N shards)
+## 1. `EstartWorkUnit` — open half (sharded body + Estart finalize)
 
-- Variants: `CardanoWorkUnit::EStartShard` / `InternalWorkUnit::EStartShard(BlockSlot, u32)`.
-- Struct: `estart_shard::EStartShardWorkUnit` (`crates/cardano/src/estart_shard/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the credential key space — same partitioning as `AShard`.
-- Purpose: stream per-account snapshot transitions (rotate `EpochValue.go ← set ← mark ← live ← next`) for the accounts in this shard's range. Splits ESTART's account pass into bounded-memory chunks so `AccountTransition` deltas don't accumulate by the millions.
-- Deltas emitted (2 per shard run):
+- Variants: `CardanoWorkUnit::Estart` / `InternalWorkUnit::Estart(BlockSlot)`.
+- Struct: `estart::EstartWorkUnit` (`crates/cardano/src/estart/work_unit.rs`). Reports `total_shards` (default 16) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
+
+### `initialize()`
+
+- Resolves the boundary's effective shard count (`EpochState.estart_shard_progress.total` if a boundary is in flight, else `config.account_shards()`).
+- Computes the AVVM reclamation total once (used by every shard's `load` and by `finalize`). Returns 0 except at the Shelley→Allegra hardfork.
+
+### Per-shard body — per-account snapshot rotation
+
+- Each shard is scoped to a first-byte prefix bucket of the credential key space.
+- Streams per-account snapshot transitions (rotate `EpochValue.go ← set ← mark ← live ← next`) for the accounts in this shard's range. Splits the account pass into bounded-memory chunks so `AccountTransition` deltas don't accumulate by the millions.
+- Deltas emitted per shard:
   - `AccountTransition` — `estart/reset.rs:130` (visitor reused by the shard pass). One per account in range. Targets `accounts`.
-  - `EStartShardAccumulate` — `estart_shard/loading.rs:42`. Single per shard. Targets `epochs` — advances `estart_shard_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotent + ordered + total-mismatch guarded, mirroring `EpochEndAccumulate`.
-- **Cursor not advanced.** Only `EstartWorkUnit` (finalize) moves the cursor; a crash mid-shard restarts from the boundary block. `AccountTransition` is not natively idempotent on re-apply (would double-roll), so true mid-shard resume remains a TODO — same posture as `AShardWorkUnit`.
-- Namespaces touched: `accounts` (shard range), `epochs`.
+  - `EStartShardAccumulate` — `estart/loading.rs:42`. Single per shard. Targets `epochs` — advances `estart_shard_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotent + ordered + total-mismatch guarded, mirroring `EpochEndAccumulate`.
 
-## 2. `EstartWorkUnit` — closes epoch start
+### `finalize()` — Estart global pass
 
-- Variants: `CardanoWorkUnit::Estart` / `InternalWorkUnit::EStart(BlockSlot)`.
-- Struct: `estart::EstartWorkUnit` (`crates/cardano/src/estart/work_unit.rs`). Runs once after all `EStartShard` units have committed.
-- Purpose: finalize half of epoch start — pool / drep / proposal snapshot rotations, nonce transition, pot recalc, era transitions, opening the new `EpochState.end` slot, advancing the cursor.
-- Deltas emitted (3):
+- Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
+- Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors.
+- Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ashard_progress = None` and `estart_shard_progress = None`).
+- Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.).
+- **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
+- Deltas emitted in finalize:
   - `NonceTransition` — `estart/nonces.rs:40`. Targets `epochs`.
   - `PoolTransition` — `estart/reset.rs:141`. One per pool. Targets `pools`.
-  - `EpochTransition` — `estart/reset.rs:158` (emitted from `compute_global_deltas` in `estart/loading.rs`). Single. Targets `epochs`. In addition to rotating `number`/`initial_pots`/`rolling`/`pparams`, seeds `EpochState.end = Some(EndStats::default())` and resets *both* `ashard_progress = None` and `estart_shard_progress = None` for the new epoch — at the next boundary, AShards populate the reward accumulator fields via `EpochEndAccumulate`, Ewrap assembles the final `EndStats` and emits `EpochWrapUp` to close, then EStartShards rotate per-account snapshots.
-- Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.). Sets cursor to `ChainPoint::Slot(boundary_slot)` — the only phase in the epoch-open half that moves the cursor.
-- Namespaces touched: `pools`, `epochs`, `eras`. (Per-account writes already landed via the preceding `EStartShard` units.)
+  - `EpochTransition` — `estart/reset.rs:158` (emitted from `compute_global_deltas` in `estart/loading.rs`). Single. Targets `epochs`.
 
-## 3. `RollWorkUnit` — applies a batch of blocks
+`AccountTransition` is not natively idempotent on re-apply (would double-roll), so true mid-shard resume remains a TODO — same posture as `EwrapWorkUnit`.
+
+- Namespaces touched: `accounts` (shard range, per shard), `pools`, `epochs`, `eras` (in finalize).
+
+## 2. `RollWorkUnit` — applies a batch of blocks
 
 - Variants: `CardanoWorkUnit::Roll` / `InternalWorkUnit::Blocks(WorkBatch)`.
 - Struct: `roll::RollWorkUnit` (`crates/cardano/src/roll/work_unit.rs`).
@@ -80,7 +105,7 @@ The sections below walk the cycle starting at `EStartShard` (the first phase of 
     - `NoncesUpdate:115`
 - Namespaces touched: `accounts`, `pools`, `dreps`, `proposals`, `assets`, `datums`, `epochs`, `pending_mirs`.
 
-## 4. `RupdWorkUnit` — computes rewards at the stability window
+## 3. `RupdWorkUnit` — computes rewards at the stability window
 
 - Variants: `CardanoWorkUnit::Rupd` / `InternalWorkUnit::Rupd(BlockSlot)`.
 - Struct: `rupd::RupdWorkUnit` (`crates/cardano/src/rupd/work_unit.rs`).
@@ -88,28 +113,37 @@ The sections below walk the cycle starting at `EStartShard` (the first phase of 
 - Deltas: **none**. Writes `PendingRewardState` entities directly and updates `EpochState.incentives`.
 - Namespaces touched: `pending_rewards`, `epochs`.
 
-## 5. `AShardWorkUnit` — per-account reward application (×N shards)
-
-- Variants: `CardanoWorkUnit::AShard` / `InternalWorkUnit::AShard(BlockSlot, u32)`.
-- Struct: `ashard::AShardWorkUnit` (`crates/cardano/src/ashard/work_unit.rs`). Runs `total_shards` times in sequence (default 16), each scoped to a first-byte prefix bucket of the account key space.
-- Purpose: apply rewards + drops for the accounts in this shard's range; accumulate the shard's reward contribution into `EpochState.end`. This is the first phase of the epoch-boundary pipeline — `Ewrap` (globals + close) follows.
-- Deltas emitted (4 variants per shard run):
-  - **Rewards** (`ashard/rewards.rs`):
-    - `AssignRewards:79` (one per rewarded account in range)
-  - **Drops** (account-level, `ewrap/drops.rs`, used by both Ewrap and AShard):
-    - `PoolDelegatorRetire:32` *(also fires in Ewrap for non-account targets)*
-    - `DRepDelegatorDrop:53` *(also fires in Ewrap for non-account targets)*
-  - **Accumulator** (`ashard/loading.rs`):
-    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, and writes `ashard_progress = Some(ShardProgress { committed: shard_index + 1, total })`. The persisted `total` snapshots the boundary's shard count at the first commit so a config change between shards — e.g. across a crash and restart — can't break the in-flight pipeline)
-- Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
-- Namespaces touched: `accounts` (shard range), `epochs`. Deletes from `pending_rewards` (shard range).
-
-## 6. `EwrapWorkUnit` — global epoch-boundary work + close
+## 4. `EwrapWorkUnit` — close half (sharded body + Ewrap finalize)
 
 - Variants: `CardanoWorkUnit::Ewrap` / `InternalWorkUnit::Ewrap(BlockSlot)`.
-- Struct: `ewrap::EwrapWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`).
-- Purpose: classify retiring pools / expiring dreps / enacting+dropping proposals, process pending MIRs, run enactment + refund + wrapup-global visitors, then close the boundary by emitting `EpochWrapUp` with the assembled final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding AShards). Also writes the completed `EpochState` to archive.
-- Deltas emitted (10 distinct variants, 11 sites):
+- Struct: `ewrap::EwrapWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Reports `total_shards` (default 16) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
+
+### `initialize()`
+
+- Resolves the boundary's effective shard count (`EpochState.ashard_progress.total` if a boundary is in flight, else `config.account_shards()`).
+
+### Per-shard body — per-account reward application
+
+- Each shard is scoped to a first-byte prefix bucket of the account key space.
+- Applies rewards + drops for the accounts in this shard's range; accumulates the shard's reward contribution into `EpochState.end`.
+- Deltas emitted per shard:
+  - **Rewards** (`ewrap/rewards.rs`):
+    - `AssignRewards:79` (one per rewarded account in range)
+  - **Drops** (account-level, `ewrap/drops.rs`, also used in finalize for non-account targets):
+    - `PoolDelegatorRetire:32`
+    - `DRepDelegatorDrop:53`
+  - **Accumulator** (`ewrap/loading.rs`):
+    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, and writes `ashard_progress = Some(ShardProgress { committed: shard_index + 1, total })`)
+- Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
+
+### `finalize()` — Ewrap global pass
+
+- Builds a fresh `BoundaryWork` via `BoundaryWork::load_ewrap`.
+- Classifies retiring pools / expiring dreps / enacting+dropping proposals; processes pending MIRs; runs enactment + refund + wrapup-global visitors.
+- Assembles the final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding shard runs) and emits a single `EpochWrapUp` to close the boundary.
+- Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
+- Direct deletes: `PendingMirState` entries for processed MIRs.
+- Deltas emitted in finalize (10 distinct variants, 11 sites):
   - **Enactment** (`ewrap/enactment.rs`):
     - `PParamsUpdate:36,39`
     - `TreasuryWithdrawal:43`
@@ -118,18 +152,17 @@ The sections below walk the cycle starting at `EStartShard` (the first phase of 
     - `ProposalDepositRefund:39,62`
   - **Drops** (drep-level, `ewrap/drops.rs`):
     - `DRepExpiration:67`
-    - `DRepDelegatorDrop:53` *(also fires in AShard for accounts)*
-    - `PoolDelegatorRetire:32` *(also fires in AShard for accounts)*
+    - `DRepDelegatorDrop:53` *(also fires in shard body for accounts)*
+    - `PoolDelegatorRetire:32` *(also fires in shard body for accounts)*
   - **Wrap-up globals** (`ewrap/wrapup.rs`):
     - `PoolWrapUp:119`
     - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ashard_progress`)
   - **MIR processing** (`ewrap/loading.rs`):
     - `AssignRewards:207` (one per registered MIR recipient)
-- Direct deletes: `PendingMirState` entries for processed MIRs.
-- Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.
-- Namespaces touched: `pools`, `dreps`, `proposals`, `accounts` (MIR recipients), `epochs`. Deletes from `pending_mirs`.
 
-## 7. `GenesisWorkUnit` — one-time chain bootstrap
+- Namespaces touched: `accounts` (shard range, per shard; MIR recipients in finalize), `pools`, `dreps`, `proposals`, `epochs`. Deletes from `pending_rewards` (per shard) and `pending_mirs` (in finalize).
+
+## 5. `GenesisWorkUnit` — one-time chain bootstrap
 
 - Variants: `CardanoWorkUnit::Genesis` / `InternalWorkUnit::Genesis`.
 - Struct: `genesis::GenesisWorkUnit` (`crates/cardano/src/genesis/mod.rs`).
@@ -137,7 +170,7 @@ The sections below walk the cycle starting at `EStartShard` (the first phase of 
 - Deltas: **none**. Writes `EpochState` and `EraSummary` entities directly via `bootstrap_epoch` / `bootstrap_eras`.
 - Namespaces touched: `epochs`, `eras`.
 
-## 8. `ForcedStop` — sentinel
+## 6. `ForcedStop` — sentinel
 
 - Variant: `CardanoWorkUnit::ForcedStop` / `InternalWorkUnit::ForcedStop`.
 - No struct, no load/compute/commit. Causes the sync loop to stop at the configured `stop_epoch`.

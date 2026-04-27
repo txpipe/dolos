@@ -152,13 +152,16 @@ pub(crate) fn drain_pending_work<D: Domain>(
 /// Execute a work unit through the full sync lifecycle.
 ///
 /// Sync lifecycle includes all phases:
-/// 1. `load()` - Load required data from storage
-/// 2. `compute()` - Execute computation over loaded data
-/// 3. `commit_wal()` - Persist to write-ahead log
-/// 4. `commit_state()` - Apply changes to state store
-/// 5. `commit_archive()` - Apply changes to archive store
-/// 6. `commit_indexes()` - Apply changes to index stores
-/// 7. `notify_tip()` - Notify tip subscribers
+/// 1. `initialize()` - Shard-agnostic setup
+/// 2. For each shard `0..total_shards()`:
+///    a. `load()` - Load required data from storage
+///    b. `compute()` - Execute computation over loaded data
+///    c. `commit_wal()` - Persist to write-ahead log
+///    d. `commit_state()` - Apply changes to state store
+///    e. `commit_archive()` - Apply changes to archive store
+///    f. `commit_indexes()` - Apply changes to index stores
+/// 3. `finalize()` - Shard-agnostic teardown
+/// 4. `notify_tip()` - Notify tip subscribers
 ///
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
@@ -166,12 +169,7 @@ pub(crate) fn drain_pending_work<D: Domain>(
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     debug!("executing work unit");
 
-    run_phase("load", || work.load(domain))?;
-    run_phase("compute", || work.compute())?;
-    run_phase("commit_wal", || work.commit_wal(domain))?;
-    run_phase("commit_state", || work.commit_state(domain))?;
-    run_phase("commit_archive", || work.commit_archive(domain))?;
-    run_phase("commit_indexes", || work.commit_indexes(domain))?;
+    run_lifecycle(domain, work, true)?;
 
     update_mempool(domain, work);
 
@@ -181,6 +179,34 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
     }
 
     debug!("work unit completed");
+    Ok(())
+}
+
+/// Run the work-unit phase lifecycle: initialize, the per-shard loop, then
+/// finalize. Shared between sync and import; `include_wal` toggles the WAL
+/// commit (disabled in import mode).
+pub(crate) fn run_lifecycle<D: Domain>(
+    domain: &D,
+    work: &mut D::WorkUnit,
+    include_wal: bool,
+) -> Result<(), DomainError> {
+    run_phase("initialize", || work.initialize(domain))?;
+
+    let total_shards = work.total_shards();
+    for shard in 0..total_shards {
+        let _span = tracing::info_span!("shard", index = shard, total = total_shards).entered();
+        run_phase("load", || work.load(domain, shard))?;
+        run_phase("compute", || work.compute(shard))?;
+        if include_wal {
+            run_phase("commit_wal", || work.commit_wal(domain, shard))?;
+        }
+        run_phase("commit_state", || work.commit_state(domain, shard))?;
+        run_phase("commit_archive", || work.commit_archive(domain, shard))?;
+        run_phase("commit_indexes", || work.commit_indexes(domain, shard))?;
+    }
+
+    run_phase("finalize", || work.finalize(domain))?;
+
     Ok(())
 }
 

@@ -239,15 +239,22 @@ impl LedgerHarness {
         })
     }
 
-    /// Process blocks from the immutable DB, calling `on_work` after each work
-    /// unit is executed. Uses the import lifecycle (skips WAL, no tip events).
+    /// Process blocks from the immutable DB, calling `on_work` after each
+    /// shard's commit phase, plus once more after `finalize()` completes.
+    /// Uses the import lifecycle (skips WAL, no tip events).
+    ///
+    /// The `u32` argument is a phase marker: values `0..work.total_shards()`
+    /// are per-shard callbacks; the value `work.total_shards()` is the
+    /// post-finalize callback. For non-sharded work units the callback
+    /// fires twice — at `0` (after the single shard) and at `1` (after
+    /// finalize).
     pub fn run<F>(
         &self,
         chunk_size: usize,
         mut on_work: F,
     ) -> Result<(), Box<dyn std::error::Error>>
     where
-        F: FnMut(&HarnessDomain, &CardanoWorkUnit),
+        F: FnMut(&HarnessDomain, &CardanoWorkUnit, u32),
     {
         use pallas::network::miniprotocols::Point;
 
@@ -292,7 +299,7 @@ impl LedgerHarness {
 
     fn drain_with_callback<F>(&self, on_work: &mut F) -> Result<bool, Box<dyn std::error::Error>>
     where
-        F: FnMut(&HarnessDomain, &CardanoWorkUnit),
+        F: FnMut(&HarnessDomain, &CardanoWorkUnit, u32),
     {
         loop {
             let work = {
@@ -302,21 +309,34 @@ impl LedgerHarness {
 
             let Some(mut work) = work else { break };
 
-            // Use import-style execution (no WAL, no tip notify)
+            // Use import-style execution (no WAL, no tip notify), per the
+            // shard-aware WorkUnit lifecycle.
             use dolos_core::WorkUnit;
-            WorkUnit::<HarnessDomain>::load(&mut work, &self.domain)?;
-            WorkUnit::<HarnessDomain>::compute(&mut work)?;
+            WorkUnit::<HarnessDomain>::initialize(&mut work, &self.domain)?;
 
-            match WorkUnit::<HarnessDomain>::commit_state(&mut work, &self.domain) {
-                Ok(()) => {}
-                Err(DomainError::StopEpochReached) => return Ok(true),
-                Err(e) => return Err(e.into()),
+            let total_shards = WorkUnit::<HarnessDomain>::total_shards(&work);
+            for shard in 0..total_shards {
+                WorkUnit::<HarnessDomain>::load(&mut work, &self.domain, shard)?;
+                WorkUnit::<HarnessDomain>::compute(&mut work, shard)?;
+
+                match WorkUnit::<HarnessDomain>::commit_state(&mut work, &self.domain, shard) {
+                    Ok(()) => {}
+                    Err(DomainError::StopEpochReached) => return Ok(true),
+                    Err(e) => return Err(e.into()),
+                }
+
+                WorkUnit::<HarnessDomain>::commit_archive(&mut work, &self.domain, shard)?;
+                WorkUnit::<HarnessDomain>::commit_indexes(&mut work, &self.domain, shard)?;
+
+                on_work(&self.domain, &work, shard);
             }
 
-            WorkUnit::<HarnessDomain>::commit_archive(&mut work, &self.domain)?;
-            WorkUnit::<HarnessDomain>::commit_indexes(&mut work, &self.domain)?;
+            WorkUnit::<HarnessDomain>::finalize(&mut work, &self.domain)?;
 
-            on_work(&self.domain, &work);
+            // Post-finalize callback: index `total_shards` is the sentinel
+            // that signals "all shards plus finalize have run" — used by
+            // tests that need to introspect global teardown state.
+            on_work(&self.domain, &work, total_shards);
         }
 
         Ok(false)

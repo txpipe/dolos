@@ -2,7 +2,7 @@
 //!
 //! The rupd work unit computes rewards at the stability window boundary
 //! (4k slots before epoch end). Computed rewards are persisted to state store
-//! as `PendingRewardState` entities, to be consumed by `AShard` at the
+//! as `PendingRewardState` entities, to be consumed by `Ewrap` at the
 //! epoch boundary.
 
 use std::sync::Arc;
@@ -59,7 +59,7 @@ where
         "rupd"
     }
 
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn load(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!(slot = self.slot, "loading rupd work context");
 
         self.work = Some(RupdWork::load::<D>(domain.state(), &self.genesis)?);
@@ -68,7 +68,7 @@ where
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
+    fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
         debug!(slot = self.slot, "computing rewards");
 
         let work = self
@@ -86,7 +86,7 @@ where
         Ok(())
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_state(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         let _work = self
             .work
             .as_ref()
@@ -156,7 +156,7 @@ where
         Ok(())
     }
 
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_archive(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         let work = self
             .work
             .as_ref()

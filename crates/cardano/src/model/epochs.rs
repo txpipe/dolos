@@ -260,12 +260,12 @@ pub struct EpochState {
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
 
-    /// Cursor + total snapshot for the AShard pipeline within this epoch
-    /// boundary. `None` means no AShard has run yet (the natural starting
+    /// Cursor + total snapshot for the Ewrap pipeline within this epoch
+    /// boundary. `None` means no Ewrap has run yet (the natural starting
     /// state, set by `EpochTransition` during ESTART). `Some(p)` means
     /// shards `0..p.committed` have committed; `p.total` is the boundary's
     /// shard count, captured at the first shard's commit. Each
-    /// `EpochEndAccumulate` (AShard) advances `committed`; `EpochWrapUp`
+    /// `EpochEndAccumulate` (Ewrap) advances `committed`; `EpochWrapUp`
     /// (Ewrap) clears the field back to `None`. The persisted `total`
     /// guards against a config change mid-boundary breaking the in-flight
     /// pipeline.
@@ -599,7 +599,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
 
 /// Delta emitted once by `Ewrap` to close the epoch boundary. Carries the
 /// fully populated `EndStats` (prepare-time fields from the wrap-up visitor +
-/// reward accumulators from the preceding `AShard` runs). Apply
+/// reward accumulators from the preceding `Ewrap` runs). Apply
 /// overwrites `entity.end` with these final stats, rotates the rolling and
 /// pparams snapshots forward, and clears `ashard_progress`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -655,7 +655,7 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     }
 }
 
-/// Delta emitted once per `AShard` to accumulate the shard's reward-
+/// Delta emitted once per `Ewrap` to accumulate the shard's reward-
 /// distribution contribution into `EpochState.end` and advance
 /// `ashard_progress` to the next shard index. Carries `total_shards` so the
 /// boundary's shard count is captured in state at the first commit, which
@@ -714,7 +714,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
         // Idempotency + ordering guard. `ashard_progress` is the authoritative
         // cursor for which shards have landed: `None` means no shards have
         // run yet (shard 0 is the next expected); `Some(p)` means shards
-        // `0..p.committed` have committed and `p.committed` is next. AShard
+        // `0..p.committed` have committed and `p.committed` is next. Ewrap
         // is the first phase of the epoch boundary, so `None` is the
         // natural starting state (set by ESTART's `EpochTransition`).
         let stored = entity.ashard_progress.as_ref();
@@ -803,7 +803,7 @@ impl dolos_core::EntityDelta for EpochEndAccumulate {
     }
 }
 
-/// Delta emitted once per `EStartShard` to advance `estart_shard_progress`
+/// Delta emitted once per `Estart` to advance `estart_shard_progress`
 /// to the next shard index. Carries `total_shards` so the boundary's shard
 /// count is captured in state at the first commit, which makes the
 /// in-flight pipeline robust against a config change between shards (e.g.
@@ -1211,7 +1211,7 @@ mod prop_tests {
         }
     }
 
-    // Entity generator that always seeds `end = Some(...)` (AShard's
+    // Entity generator that always seeds `end = Some(...)` (Ewrap's
     // invariant) and lets `ashard_progress` vary across `None`,
     // matching, ahead, behind, and `total` mismatch — so the proptest
     // exercises both the apply-mutates and apply-skips branches.
@@ -1230,7 +1230,7 @@ mod prop_tests {
     }
 
     prop_compose! {
-        fn any_estart_shard_accumulate()(
+        fn any_estart_accumulate()(
             completed_shard_index in 0u32..16u32,
             total_shards in 1u32..=16u32,
         ) -> EStartShardAccumulate {
@@ -1242,7 +1242,7 @@ mod prop_tests {
     // the EStart-shard accumulator. Lets `estart_shard_progress` vary across
     // `None`, matching, ahead, behind, and `total` mismatch.
     prop_compose! {
-        fn any_epoch_state_for_estart_shard_accumulate()(
+        fn any_epoch_state_for_estart_accumulate()(
             mut entity in any_epoch_state(),
             progress in prop::option::of((0u32..32u32, 1u32..=32u32).prop_map(
                 |(committed, total)| ShardProgress { committed, total }
@@ -1361,9 +1361,9 @@ mod prop_tests {
         /// behind, equal to, or `None` relative to the delta's
         /// `completed_shard_index`, plus `total_shards` mismatches.
         #[test]
-        fn estart_shard_accumulate_roundtrip(
-            entity in any_epoch_state_for_estart_shard_accumulate(),
-            delta in any_estart_shard_accumulate(),
+        fn estart_accumulate_roundtrip(
+            entity in any_epoch_state_for_estart_accumulate(),
+            delta in any_estart_accumulate(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }

@@ -1,8 +1,13 @@
-//! Commit logic for epoch start (estart) work unit.
+//! Commit logic for the open half of the epoch boundary (per-shard runs
+//! plus the finalize pass).
 //!
-//! This module uses a streaming pattern that processes entities one-by-one,
-//! applying deltas and writing immediately without accumulating all entities
-//! in memory.
+//! Both code paths use the same streaming pattern: each entity namespace
+//! is read one record at a time, deltas for that record are applied, and
+//! the result is written immediately. Per-shard commits flush
+//! `EpochState`'s `EStartShardAccumulate` and the shard's account-range
+//! slice; the finalize commit flushes pool / drep / proposal transitions,
+//! the closing `EpochTransition`, optional era-summary writes, archive
+//! logs, and advances the cursor.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
@@ -11,8 +16,8 @@ use dolos_core::{
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
-    forks, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace, PoolState,
-    ProposalState,
+    forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
+    PoolState, ProposalState,
 };
 
 /// Era transition data collected from state.
@@ -109,15 +114,67 @@ impl super::WorkContext {
         Ok(())
     }
 
-    /// Commit the ESTART finalize half: pool / drep / proposal transitions
-    /// + the closing `EpochTransition` + (optional) era-summary writes +
-    /// archive logs + cursor advance.
+    /// Commit a single per-shard run: stream-and-apply per-account snapshot
+    /// transitions for the shard's key ranges, then commit the
+    /// `EStartShardAccumulate` delta against `EpochState`. Archive logs
+    /// (if any) are flushed too — the start-of-epoch temporal key is
+    /// shared across shards.
+    ///
+    /// **Does not advance the cursor.** Cursor moves only in
+    /// `commit_finalize`.
+    #[instrument(skip(self, state, archive))]
+    pub fn commit_shard<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        ranges: Vec<std::ops::Range<EntityKey>>,
+    ) -> Result<(), ChainError> {
+        debug!("committing estart changes");
+
+        let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
+
+        // Stream accounts in this shard's ranges only (one per
+        // StakeCredential variant). Each call drains the matching deltas
+        // from `self.deltas`, so a delta keyed inside range N stays in
+        // the map until range N is streamed.
+        for range in ranges {
+            self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+        }
+
+        // EpochState gets the EStartShardAccumulate delta (single entity).
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+
+        // Archive logs — share the start-of-epoch temporal key across shards.
+        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+
+        debug!(log_count = self.logs.len(), "writing shard archive logs");
+        for (entity_key, log) in self.logs.drain(..) {
+            let log_key = LogKey::from((temporal_key.clone(), entity_key));
+            archive_writer.write_log_typed(&log_key, &log)?;
+        }
+
+        if !self.deltas.entities.is_empty() {
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
+        }
+
+        writer.commit()?;
+        archive_writer.commit()?;
+
+        debug!("estart commit complete");
+        Ok(())
+    }
+
+    /// Commit the finalize half: pool / drep / proposal transitions + the
+    /// closing `EpochTransition` + (optional) era-summary writes + archive
+    /// logs + cursor advance.
     ///
     /// `AccountState` is intentionally **not** streamed here — per-account
-    /// snapshot transitions are committed by the preceding `EStartShard`
-    /// units (one per shard). The cursor is set only here, so a crash
-    /// mid-shard restarts from the boundary block and the pre-finalize
-    /// state stays at the previous-epoch cursor.
+    /// snapshot transitions were committed by the preceding per-shard
+    /// runs. The cursor is set only here, so a crash mid-shard restarts
+    /// from the boundary block and the pre-finalize state stays at the
+    /// previous-epoch cursor.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
@@ -137,7 +194,7 @@ impl super::WorkContext {
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
-        // Skip AccountState — committed earlier by EStartShard units.
+        // Skip AccountState — committed earlier by per-shard runs.
 
         debug!("streaming pool entities");
         self.stream_and_apply_namespace::<D, PoolState>(state, &writer, None)?;

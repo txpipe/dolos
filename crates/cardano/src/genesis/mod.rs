@@ -77,7 +77,7 @@ pub fn bootstrap_epoch<D: Domain>(
         previous_nonce_tail: None,
         number: 0,
         rolling: EpochValue::with_live(0, RollingStats::default()),
-        // Seed `end` with defaults so the first boundary's AShard
+        // Seed `end` with defaults so the first boundary's Ewrap
         // (which now runs before Ewrap) finds a populated slot. ESTART's
         // `EpochTransition` re-seeds it on every subsequent epoch.
         end: Some(EndStats::default()),

@@ -1,46 +1,77 @@
-//! Estart (Epoch Start) finalize work unit.
+//! Estart work unit — the open half of the epoch boundary.
 //!
-//! Closes the epoch-start pipeline after the per-account `EStartShard`
-//! units have run. Handles the global (non-account-keyed) work:
-//! - Pool / DRep / proposal snapshot transitions
-//! - Nonce transitions
-//! - Epoch number increment + pot recalculation (`EpochTransition`)
-//! - Era transitions (if protocol version changes)
-//! - Cursor advance (only this unit moves the cursor; shards must not)
+//! Sharded: `total_shards()` reports the boundary's shard count and the
+//! executor invokes `load` / `commit_state` once per shard. Each shard
+//! covers a first-byte prefix range of the credential key space, iterates
+//! accounts in range, runs the snapshot-rotation visitor
+//! (`AccountTransition`), and emits `EStartShardAccumulate` to advance
+//! `EpochState.estart_shard_progress`.
+//!
+//! After the per-shard loop, `finalize()` runs the global "Estart" pass:
+//! pool / drep / proposal snapshot transitions, nonce transition, pot
+//! recalculation (`EpochTransition`), era transitions (if protocol version
+//! changes), and the cursor advance. The cursor moves only here, so a
+//! crash before finalize restarts from the boundary block.
+//!
+//! `AccountTransition` is not natively idempotent (re-applying double-rolls
+//! the EpochValue snapshot), so true mid-shard resume requires additional
+//! work — same TODO posture as `EwrapWorkUnit`.
 
 use std::sync::Arc;
 
 use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
-use crate::CardanoLogic;
+use crate::{
+    estart::WorkContext, load_epoch, shard::shard_key_ranges, CardanoLogic, EpochState,
+};
 
-use super::WorkContext;
-
-/// Work unit for epoch start processing.
 pub struct EstartWorkUnit {
     slot: BlockSlot,
-    #[allow(dead_code)]
     config: CardanoConfig,
     genesis: Arc<Genesis>,
 
-    // Loaded
+    /// Number of shards this boundary's pipeline runs.
+    ///
+    /// Populated in `initialize()` from
+    /// `EpochState.estart_shard_progress.total` when a boundary is in
+    /// flight (so a config change can't disrupt the in-progress pipeline)
+    /// or from `config.account_shards()` for a fresh boundary.
+    total_shards: u32,
+
+    /// AVVM reclamation total for this boundary, computed once in
+    /// `initialize()`. Reused across all shards so the per-shard `load`
+    /// doesn't re-query the UTxO set.
+    avvm_reclamation: u64,
+
+    /// During the per-shard loop, holds the in-flight shard's
+    /// `WorkContext` (build-and-discard between shards). After
+    /// `finalize()`, holds the global Estart pass's `WorkContext` so
+    /// post-finalize introspection (e.g. tests reading `ended_state()`)
+    /// sees the global pass's data, not the last shard's leftover slice.
     context: Option<WorkContext>,
 }
 
 impl EstartWorkUnit {
-    /// Create a new estart work unit.
     pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
         Self {
             slot,
             config,
             genesis,
+            total_shards: 0,
+            avvm_reclamation: 0,
             context: None,
         }
     }
 
-    /// Access the ended (completed) epoch state, available after load.
-    pub fn ended_state(&self) -> Option<&crate::EpochState> {
+    pub fn context(&self) -> Option<&WorkContext> {
+        self.context.as_ref()
+    }
+
+    /// The completed (ended) epoch state, available after `finalize()`
+    /// has run. Returns `None` during the per-shard loop or before
+    /// initialize.
+    pub fn ended_state(&self) -> Option<&EpochState> {
         self.context.as_ref().map(|ctx| ctx.ended_state())
     }
 }
@@ -53,42 +84,108 @@ where
         "estart"
     }
 
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "loading estart finalize work context");
+    fn total_shards(&self) -> u32 {
+        self.total_shards
+    }
 
-        let context = WorkContext::load_finalize::<D>(domain.state(), self.genesis.clone())?;
+    fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
+        // Resolve the effective shard count for this boundary. While a
+        // boundary is in flight, the persisted
+        // `estart_shard_progress.total` is authoritative — guards against
+        // a config change between shards (e.g. across a crash and
+        // restart). Falls back to current config for a fresh boundary.
+        self.total_shards = match load_epoch::<D>(domain.state()) {
+            Ok(epoch) => epoch
+                .estart_shard_progress
+                .as_ref()
+                .map(|p| p.total)
+                .unwrap_or_else(|| self.config.account_shards()),
+            Err(_) => self.config.account_shards(),
+        };
 
-        info!(epoch = context.starting_epoch_no(), "starting epoch");
+        // Compute AVVM reclamation once per boundary instead of once per
+        // shard. Returns 0 unless we're crossing the Shelley→Allegra
+        // hardfork — a one-time chain event, but the per-shard cost adds
+        // up at that boundary.
+        self.avvm_reclamation =
+            WorkContext::compute_boundary_avvm::<D>(domain.state(), &self.genesis)?;
+
+        debug!(
+            slot = self.slot,
+            total = self.total_shards,
+            avvm = self.avvm_reclamation,
+            "estart initialize"
+        );
+        Ok(())
+    }
+
+    fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
+        let ranges = shard_key_ranges(shard_index, self.total_shards);
+
+        debug!(
+            slot = self.slot,
+            shard = shard_index,
+            total = self.total_shards,
+            "loading estart context"
+        );
+
+        let context = WorkContext::load_shard::<D>(
+            domain.state(),
+            self.genesis.clone(),
+            self.avvm_reclamation,
+            shard_index,
+            self.total_shards,
+            ranges,
+        )?;
+
+        info!(
+            epoch = context.starting_epoch_no(),
+            shard = shard_index,
+            "estart"
+        );
 
         self.context = Some(context);
 
-        debug!("estart finalize context loaded");
-
+        debug!("estart context loaded");
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
-        // Computation is done during load via the visitor pattern
-        debug!("estart compute phase (deltas already computed during load)");
+    fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
+        debug!("estart compute (deltas computed during load)");
         Ok(())
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
-        debug!(slot = self.slot, "committing estart finalize state changes");
+    fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
+        let ranges = shard_key_ranges(shard_index, self.total_shards);
 
         let context = self
             .context
             .as_mut()
             .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
-        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
-
-        debug!("estart finalize state committed");
+        context.commit_shard::<D>(domain.state(), domain.archive(), ranges)?;
         Ok(())
     }
 
-    fn commit_archive(&mut self, _domain: &D) -> Result<(), DomainError> {
-        // Archive writes are done in commit_state via context.commit()
+    fn commit_archive(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    fn finalize(&mut self, domain: &D) -> Result<(), DomainError> {
+        debug!(slot = self.slot, "loading estart finalize work context");
+
+        let mut context = WorkContext::load_finalize::<D>(domain.state(), self.genesis.clone())?;
+
+        info!(epoch = context.starting_epoch_no(), "starting epoch");
+
+        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
+
+        // Replace the per-shard context with the finalize-phase
+        // WorkContext so post-finalize introspection (e.g. `ended_state`
+        // for tests) sees the global pass's data.
+        self.context = Some(context);
+
+        debug!("estart finalize state committed");
         Ok(())
     }
 }

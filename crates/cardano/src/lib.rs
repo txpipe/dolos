@@ -38,9 +38,7 @@ pub mod utils;
 pub mod utxoset;
 
 // work units
-pub mod ashard;
 pub mod estart;
-pub mod estart_shard;
 pub mod ewrap;
 pub mod genesis;
 pub mod roll;
@@ -72,27 +70,22 @@ pub enum CardanoWorkUnit {
     Roll(Box<roll::RollWorkUnit>),
     /// Compute rewards at stability window boundary.
     Rupd(Box<rupd::RupdWorkUnit>),
-    /// Handle the global portion of the epoch boundary (pool/drep/proposal
-    /// classification, MIRs, enactment, deposit refunds) and close the
-    /// boundary by emitting `EpochWrapUp` with the assembled final
-    /// `EndStats` (prepare-time fields + accumulator fields populated by
-    /// the preceding `AShard` runs). The `EpochState.end` slot itself
-    /// is opened by ESTART's `EpochTransition` at the start of each epoch.
+    /// Close the epoch boundary: per-account reward application across
+    /// `config.account_shards` shards (`WorkUnit::total_shards`), each
+    /// covering a first-byte prefix range of the account key space and
+    /// accumulating its contribution into `EpochState.end` via
+    /// `EpochEndAccumulate`. After the shard loop, `finalize()` runs the
+    /// global Ewrap pass (pool/drep/proposal classification, MIRs,
+    /// enactment, deposit refunds) and emits `EpochWrapUp` with the
+    /// assembled final `EndStats`.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
-    /// Handle one shard of per-account reward application. Emitted
-    /// `config.account_shards` times in sequence. Each shard covers a
-    /// first-byte prefix range of the account key space and accumulates its
-    /// contribution into `EpochState.end` via `EpochEndAccumulate`.
-    AShard(Box<ashard::AShardWorkUnit>),
-    /// Handle one shard of per-account snapshot rotation at the start of
-    /// the new epoch. Emitted `config.account_shards` times after `Ewrap`
-    /// and before the `Estart` finalize unit. Each shard covers the same
-    /// first-byte prefix range as its `AShard` counterpart, advancing
-    /// `EpochState.estart_shard_progress` via `EStartShardAccumulate`.
-    EStartShard(Box<estart_shard::EStartShardWorkUnit>),
-    /// Handle epoch start processing — finalize half (pools, dreps,
-    /// proposals, `EpochTransition`, era transition, cursor advance).
-    /// Per-account work has already landed via `EStartShard` units.
+    /// Open the next epoch: per-account snapshot rotation across
+    /// `config.account_shards` shards (`WorkUnit::total_shards`),
+    /// advancing `EpochState.estart_shard_progress` via
+    /// `EStartShardAccumulate`. After the shard loop, `finalize()` runs
+    /// the global Estart pass (pool / drep / proposal transitions,
+    /// `EpochTransition`, era transition, cursor advance). The cursor
+    /// only moves in `finalize()`.
     Estart(Box<estart::EstartWorkUnit>),
     /// Signal forced stop at configured epoch.
     ForcedStop,
@@ -108,121 +101,178 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::name(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::name(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::name(w),
-            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::name(w),
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::name(w)
-            }
             Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::name(w),
             Self::ForcedStop => "forced_stop",
         }
     }
 
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn total_shards(&self) -> u32 {
         match self {
-            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::load(w, domain),
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::load(w, domain)
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::total_shards(w),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::total_shards(w),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::total_shards(w),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::total_shards(w),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::total_shards(w)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain),
+            Self::ForcedStop => 1,
+        }
+    }
+
+    fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::initialize(w, domain),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::initialize(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::initialize(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::initialize(w, domain),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::initialize(w, domain)
+            }
             Self::ForcedStop => Ok(()),
         }
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
+    fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
         match self {
-            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w),
-            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w),
-            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w),
-            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w),
-            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::compute(w),
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::compute(w)
+            Self::Genesis(w) => {
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::load(w, domain, shard_index)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w),
-            Self::ForcedStop => Ok(()),
-        }
-    }
-
-    fn commit_wal(&mut self, domain: &D) -> Result<(), DomainError> {
-        match self {
-            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
-            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
-            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
             Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
+                <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain, shard_index)
             }
-            Self::AShard(w) => {
-                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
-            }
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_wal(w, domain)
-            }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(
+                w,
+                domain,
+                shard_index,
+            ),
             Self::ForcedStop => Ok(()),
         }
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn compute(&mut self, shard_index: u32) -> Result<(), DomainError> {
         match self {
-            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_state(w, domain),
-            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_state(w, domain),
-            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::Genesis(w) => {
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w, shard_index)
+            }
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w, shard_index),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w, shard_index),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w, shard_index),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::compute(w, shard_index)
+            }
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn commit_wal(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => {
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
+            }
+            Self::Roll(w) => {
+                <roll::RollWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
+            }
+            Self::Rupd(w) => {
+                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
+            }
             Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
             }
-            Self::AShard(w) => {
-                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(
+                w,
+                domain,
+                shard_index,
+            ),
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => {
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
             }
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_state(w, domain)
+            Self::Roll(w) => {
+                <roll::RollWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain),
+            Self::Rupd(w) => {
+                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
+            }
+            Self::Ewrap(w) => {
+                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
+            }
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(
+                    w,
+                    domain,
+                    shard_index,
+                )
+            }
             Self::ForcedStop => Err(DomainError::StopEpochReached),
         }
     }
 
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_archive(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
         match self {
             Self::Genesis(w) => {
-                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
             }
-            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
-            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
+            Self::Roll(w) => {
+                <roll::RollWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
+            }
+            Self::Rupd(w) => {
+                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
+            }
             Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
             }
-            Self::AShard(w) => {
-                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(
+                    w,
+                    domain,
+                    shard_index,
+                )
             }
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_archive(w, domain)
-            }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain),
             Self::ForcedStop => Ok(()),
         }
     }
 
-    fn commit_indexes(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_indexes(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
         match self {
             Self::Genesis(w) => {
-                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
             }
-            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
-            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
+            Self::Roll(w) => {
+                <roll::RollWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
+            }
+            Self::Rupd(w) => {
+                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
+            }
             Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
             }
-            Self::AShard(w) => {
-                <ashard::AShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(
+                    w,
+                    domain,
+                    shard_index,
+                )
             }
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::commit_indexes(w, domain)
+            Self::ForcedStop => Ok(()),
+        }
+    }
+
+    fn finalize(&mut self, domain: &D) -> Result<(), DomainError> {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::finalize(w, domain),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::finalize(w, domain),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::finalize(w, domain),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::finalize(w, domain),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::finalize(w, domain)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -233,11 +283,9 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::AShard(w) => <ashard::AShardWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::EStartShard(w) => {
-                <estart_shard::EStartShardWorkUnit as WorkUnit<D>>::tip_events(w)
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
     }
@@ -263,13 +311,6 @@ pub struct CardanoLogic {
     /// Flag indicating the cache needs refresh after a work unit that modifies eras.
     /// Set after Genesis or EStart work units are popped, cleared at next pop_work call.
     needs_cache_refresh: bool,
-    /// Cached effective `account_shards` value: equal to
-    /// `EpochState.ashard_progress.total` when a boundary is in flight, or
-    /// `config.account_shards()` otherwise. Refreshed at every `pop_work`
-    /// call (which has state access) so `receive_block` (which does not)
-    /// can use the up-to-date value when constructing
-    /// `WorkBuffer::AShardingBoundary`.
-    effective_account_shards: u32,
 }
 
 impl CardanoLogic {
@@ -279,24 +320,6 @@ impl CardanoLogic {
         self.cache.eras = eras::load_era_summary::<D>(state)?;
 
         Ok(())
-    }
-
-    /// Compute the effective `account_shards` value: stored
-    /// `ashard_progress.total` or `estart_shard_progress.total` if a
-    /// boundary is in flight (only one of them can ever be populated at a
-    /// time — Ewrap clears `ashard_progress` before any EStart-shard runs,
-    /// and `EpochTransition` clears `estart_shard_progress` for the new
-    /// epoch). Falls back to the configured value otherwise.
-    fn read_effective_account_shards<D: Domain>(&self, state: &D::State) -> u32 {
-        load_epoch::<D>(state)
-            .ok()
-            .and_then(|e| {
-                e.ashard_progress
-                    .as_ref()
-                    .map(|p| p.total)
-                    .or_else(|| e.estart_shard_progress.as_ref().map(|p| p.total))
-            })
-            .unwrap_or_else(|| self.config.account_shards())
     }
 }
 
@@ -332,7 +355,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         // Crash-recovery check: if the previous process crashed mid-boundary,
         // `EpochState.ashard_progress` will be `Some(p)` with `p.committed`
-        // equal to the next AShard that should have run, and `p.total` the
+        // equal to the next Ewrap that should have run, and `p.total` the
         // boundary's shard count captured at the first commit. Detect and
         // warn — full resume requires re-fetching the boundary block from
         // upstream, which is tracked separately. The persisted `total` is
@@ -361,7 +384,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         total_shards = progress.total,
                         "crash detected mid-boundary: ashard_progress is set. \
                          On the next block that triggers the boundary, dolos will \
-                         resume the AShard pipeline; correctness depends on shard \
+                         resume the Ewrap pipeline; correctness depends on shard \
                          idempotency (state deletes are no-ops if already applied; \
                          EpochEndAccumulate guards on shard_index). Operators should \
                          monitor the subsequent boundary for inconsistency. \
@@ -375,7 +398,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         "found EpochState.ashard_progress.committed == total at \
                          startup — Ewrap (closing phase) was not committed \
                          before crash. The next boundary attempt will re-run \
-                         AShards and Ewrap; idempotency should keep the \
+                         Ewraps and Ewrap; idempotency should keep the \
                          result correct."
                     );
                 }
@@ -431,19 +454,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
             }
         }
 
-        // Capture the effective account_shards value: stored total if a
-        // boundary is in flight (either AShard or EStart-shard half),
-        // otherwise the configured value.
-        let effective_account_shards = load_epoch::<D>(state)
-            .ok()
-            .and_then(|e| {
-                e.ashard_progress
-                    .as_ref()
-                    .map(|p| p.total)
-                    .or_else(|| e.estart_shard_progress.as_ref().map(|p| p.total))
-            })
-            .unwrap_or_else(|| config.account_shards());
-
         let eras = eras::load_era_summary::<D>(state)?;
 
         // Use randomness_stability_window (4k/f) for the RUPD trigger boundary.
@@ -461,7 +471,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
             },
             work: Some(work),
             needs_cache_refresh: false,
-            effective_account_shards,
         })
     }
 
@@ -479,12 +488,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
         let work = self.work.take().expect("work buffer is initialized");
 
-        let new_work = work.receive_block(
-            block,
-            &self.cache.eras,
-            self.cache.stability_window,
-            self.effective_account_shards,
-        );
+        let new_work = work.receive_block(block, &self.cache.eras, self.cache.stability_window);
 
         let last = new_work.last_point_seen().slot();
 
@@ -505,22 +509,17 @@ impl dolos_core::ChainLogic for CardanoLogic {
             self.needs_cache_refresh = false;
         }
 
-        // Refresh effective `account_shards` from state. While a boundary is
-        // in flight, `EpochState.ashard_progress.total` overrides config so
-        // the in-progress pipeline isn't disrupted by a config change.
-        self.effective_account_shards =
-            self.read_effective_account_shards::<D>(domain.state());
-
         let work = self.work.take().expect("work buffer is initialized");
 
-        let (work_unit, new_buffer) =
-            work.pop_work(self.config.stop_epoch, self.effective_account_shards);
+        let (work_unit, new_buffer) = work.pop_work(self.config.stop_epoch);
 
         self.work = Some(new_buffer);
 
         let work_unit = work_unit?;
 
-        // Convert internal work unit marker to concrete CardanoWorkUnit
+        // Convert internal work unit marker to concrete CardanoWorkUnit.
+        // Sharding is a property of each work unit (`WorkUnit::total_shards`)
+        // — the buffer no longer enumerates shards.
         match work_unit {
             InternalWorkUnit::Genesis => {
                 // Genesis modifies era summaries, schedule cache refresh
@@ -543,31 +542,17 @@ impl dolos_core::ChainLogic for CardanoLogic {
             InternalWorkUnit::Ewrap(slot) => Some(CardanoWorkUnit::Ewrap(Box::new(
                 ewrap::EwrapWorkUnit::new(slot, self.config.clone(), domain.genesis()),
             ))),
-            InternalWorkUnit::AShard(slot, shard_index) => {
-                Some(CardanoWorkUnit::AShard(Box::new(
-                    ashard::AShardWorkUnit::new(
-                        slot,
-                        self.config.clone(),
-                        domain.genesis(),
-                        shard_index,
-                    ),
-                )))
-            }
-            InternalWorkUnit::EStartShard(slot, shard_index) => {
-                Some(CardanoWorkUnit::EStartShard(Box::new(
-                    estart_shard::EStartShardWorkUnit::new(
-                        slot,
-                        self.config.clone(),
-                        domain.genesis(),
-                        shard_index,
-                    ),
-                )))
-            }
-            InternalWorkUnit::EStart(slot) => {
-                // EStart may trigger era transitions, schedule cache refresh
+            InternalWorkUnit::Estart(slot) => {
+                // Estart's `finalize()` runs the global Estart pass,
+                // which may trigger era transitions — schedule cache
+                // refresh so the next pop_work picks up the new eras.
                 self.needs_cache_refresh = true;
                 Some(CardanoWorkUnit::Estart(Box::new(
-                    estart::EstartWorkUnit::new(slot, self.config.clone(), domain.genesis()),
+                    estart::EstartWorkUnit::new(
+                        slot,
+                        self.config.clone(),
+                        domain.genesis(),
+                    ),
                 )))
             }
             InternalWorkUnit::ForcedStop => Some(CardanoWorkUnit::ForcedStop),

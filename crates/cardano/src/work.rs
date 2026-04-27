@@ -9,14 +9,16 @@ use crate::roll::{WorkBatch, WorkBlock};
 /// Internal work unit marker used by the WorkBuffer state machine.
 ///
 /// These markers tell `CardanoLogic::pop_work` what kind of work unit to construct.
-/// The actual work unit instances are created in `pop_work` with the necessary context.
+/// The actual work unit instances are created in `pop_work` with the necessary
+/// context. Sharding is opaque to the buffer: each per-account leg
+/// (`Ewrap` / `Estart`) is emitted exactly once per boundary; the
+/// resulting work unit reports its shard count via `WorkUnit::total_shards`
+/// and runs its global teardown (Ewrap / Estart) inside its `finalize()`.
 pub(crate) enum InternalWorkUnit {
     Genesis,
     Blocks(WorkBatch),
     Ewrap(BlockSlot),
-    AShard(BlockSlot, u32),
-    EStartShard(BlockSlot, u32),
-    EStart(BlockSlot),
+    Estart(BlockSlot),
     Rupd(BlockSlot),
     ForcedStop,
 }
@@ -30,36 +32,16 @@ pub(crate) enum WorkBuffer {
     RupdBoundary(OwnedMultiEraBlock),
     /// Pre-flushed state when crossing the epoch boundary with a buffered
     /// `WorkBatch`. `pop_work` yields the batch as `InternalWorkUnit::Blocks`
-    /// and advances to `AShardingBoundary { shard_index: 0, total_shards }`
-    /// (or `EwrapBoundary` if `total_shards == 0`).
+    /// and advances to `EwrapBoundary`.
     PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
-    /// Entry state that emits `AShard(shard_index)` until
-    /// `shard_index == total_shards`, then advances to `EwrapBoundary`.
-    /// This is the first phase of the epoch-boundary pipeline.
-    AShardingBoundary {
-        block: OwnedMultiEraBlock,
-        epoch: Epoch,
-        shard_index: u32,
-        total_shards: u32,
-    },
-    /// Closing phase of the AShard half of the epoch-boundary pipeline.
-    /// `pop_work` yields `InternalWorkUnit::Ewrap` (which runs the global
-    /// visitors AND emits `EpochWrapUp` to close the AShard accumulators)
-    /// and advances to `EStartShardingBoundary { ..., shard_index: 0,
-    /// total_shards }` — or directly to `EstartBoundary(block, epoch + 1)`
-    /// when `total_shards == 0`. Reached after all AShards have committed
-    /// (or directly from `PreEwrapBoundary` when `total_shards == 0`).
+    /// Close half of the epoch boundary. Emits a single `Ewrap` work
+    /// unit — its `finalize()` runs the global Ewrap pass — and advances
+    /// to `EstartBoundary(block, epoch + 1)`.
     EwrapBoundary(OwnedMultiEraBlock, Epoch),
-    /// EStart-side per-shard pipeline. Mirrors `AShardingBoundary` but
-    /// for the snapshot-rotation pass. Emits `EStartShard(shard_index)`
-    /// until `shard_index == total_shards`, then advances to
-    /// `EstartBoundary(block, epoch + 1)`.
-    EStartShardingBoundary {
-        block: OwnedMultiEraBlock,
-        epoch: Epoch,
-        shard_index: u32,
-        total_shards: u32,
-    },
+    /// Open half of the epoch boundary. Emits a single `Estart` work
+    /// unit — its `finalize()` runs the global Estart pass and advances
+    /// the cursor — then advances based on stop_epoch (PreForcedStop or
+    /// next OpenBatch).
     EstartBoundary(OwnedMultiEraBlock, Epoch),
     PreForcedStop(OwnedMultiEraBlock),
     ForcedStop,
@@ -80,8 +62,6 @@ impl WorkBuffer {
             WorkBuffer::RupdBoundary(block) => block.point(),
             WorkBuffer::PreEwrapBoundary(_, block, _) => block.point(),
             WorkBuffer::EwrapBoundary(block, _) => block.point(),
-            WorkBuffer::AShardingBoundary { block, .. } => block.point(),
-            WorkBuffer::EStartShardingBoundary { block, .. } => block.point(),
             WorkBuffer::EstartBoundary(block, _) => block.point(),
             WorkBuffer::PreForcedStop(block) => block.point(),
             WorkBuffer::ForcedStop => unreachable!(),
@@ -131,26 +111,9 @@ impl WorkBuffer {
         }
     }
 
-    fn on_ewrap_boundary(
-        self,
-        next_block: OwnedMultiEraBlock,
-        epoch: Epoch,
-        account_shards: u32,
-    ) -> Self {
+    fn on_ewrap_boundary(self, next_block: OwnedMultiEraBlock, epoch: Epoch) -> Self {
         match self {
-            WorkBuffer::Restart(..) => {
-                if account_shards == 0 {
-                    // No shards — entry goes straight to the global Ewrap phase.
-                    WorkBuffer::EwrapBoundary(next_block, epoch)
-                } else {
-                    WorkBuffer::AShardingBoundary {
-                        block: next_block,
-                        epoch,
-                        shard_index: 0,
-                        total_shards: account_shards,
-                    }
-                }
-            }
+            WorkBuffer::Restart(..) => WorkBuffer::EwrapBoundary(next_block, epoch),
             WorkBuffer::OpenBatch(batch) => WorkBuffer::PreEwrapBoundary(batch, next_block, epoch),
             _ => unreachable!(),
         }
@@ -161,7 +124,6 @@ impl WorkBuffer {
         block: OwnedMultiEraBlock,
         eras: &ChainSummary,
         stability_window: u64,
-        account_shards: u32,
     ) -> Self {
         assert!(
             self.can_receive_block(),
@@ -179,7 +141,7 @@ impl WorkBuffer {
         let boundary = pallas_extras::epoch_boundary(eras, prev_slot, next_slot);
 
         if let Some((epoch, _, _)) = boundary {
-            return self.on_ewrap_boundary(block, epoch, account_shards);
+            return self.on_ewrap_boundary(block, epoch);
         }
 
         let rupd_boundary =
@@ -192,11 +154,7 @@ impl WorkBuffer {
         self.extend_batch(block)
     }
 
-    pub fn pop_work(
-        self,
-        stop_epoch: Option<Epoch>,
-        account_shards: u32,
-    ) -> (Option<InternalWorkUnit>, Self) {
+    pub fn pop_work(self, stop_epoch: Option<Epoch>) -> (Option<InternalWorkUnit>, Self) {
         if matches!(self, WorkBuffer::Restart(..)) || matches!(self, WorkBuffer::Empty) {
             return (None, self);
         }
@@ -221,86 +179,34 @@ impl WorkBuffer {
                 Some(InternalWorkUnit::Rupd(block.slot())),
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
-            WorkBuffer::PreEwrapBoundary(batch, block, epoch) => {
-                let next = if account_shards == 0 {
-                    // No shards requested — skip straight to the global Ewrap
-                    // phase. Shouldn't happen with a valid config but keeps
-                    // the state machine safe.
-                    Self::EwrapBoundary(block, epoch)
-                } else {
-                    Self::AShardingBoundary {
-                        block,
-                        epoch,
-                        shard_index: 0,
-                        total_shards: account_shards,
-                    }
-                };
-                (Some(InternalWorkUnit::Blocks(batch)), next)
-            }
-            WorkBuffer::AShardingBoundary {
-                block,
-                epoch,
-                shard_index,
-                total_shards,
-            } => {
-                let slot = block.slot();
-                let next_index = shard_index + 1;
-                let next = if next_index >= total_shards {
-                    Self::EwrapBoundary(block, epoch)
-                } else {
-                    Self::AShardingBoundary {
-                        block,
-                        epoch,
-                        shard_index: next_index,
-                        total_shards,
-                    }
-                };
-                (Some(InternalWorkUnit::AShard(slot, shard_index)), next)
-            }
+            WorkBuffer::PreEwrapBoundary(batch, block, epoch) => (
+                Some(InternalWorkUnit::Blocks(batch)),
+                Self::EwrapBoundary(block, epoch),
+            ),
             WorkBuffer::EwrapBoundary(block, epoch) => {
                 let slot = block.slot();
-                let next = if account_shards == 0 {
-                    // No EStart shards requested — go straight to finalize.
-                    // Same defensive default as `AShardingBoundary`.
-                    Self::EstartBoundary(block, epoch + 1)
-                } else {
-                    Self::EStartShardingBoundary {
-                        block,
-                        epoch: epoch + 1,
-                        shard_index: 0,
-                        total_shards: account_shards,
-                    }
-                };
-                (Some(InternalWorkUnit::Ewrap(slot)), next)
+                (
+                    Some(InternalWorkUnit::Ewrap(slot)),
+                    // The Ewrap work unit's `finalize()` closes the
+                    // ending epoch (Ewrap pass); the next phase opens
+                    // epoch + 1 via Estart.
+                    Self::EstartBoundary(block, epoch + 1),
+                )
             }
-            WorkBuffer::EStartShardingBoundary {
-                block,
-                epoch,
-                shard_index,
-                total_shards,
-            } => {
+            WorkBuffer::EstartBoundary(block, epoch) => {
                 let slot = block.slot();
-                let next_index = shard_index + 1;
-                let next = if next_index >= total_shards {
-                    Self::EstartBoundary(block, epoch)
-                } else {
-                    Self::EStartShardingBoundary {
-                        block,
-                        epoch,
-                        shard_index: next_index,
-                        total_shards,
-                    }
-                };
-                (Some(InternalWorkUnit::EStartShard(slot, shard_index)), next)
+                (
+                    Some(InternalWorkUnit::Estart(slot)),
+                    // Estart's `finalize()` runs the global Estart
+                    // pass (epoch transition + cursor advance). Stopping
+                    // logic moves here from the old EstartBoundary state.
+                    if stop_epoch.is_some_and(|x| x == epoch) {
+                        Self::PreForcedStop(block)
+                    } else {
+                        Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
+                    },
+                )
             }
-            WorkBuffer::EstartBoundary(block, epoch) => (
-                Some(InternalWorkUnit::EStart(block.slot())),
-                if stop_epoch.is_some_and(|x| x == epoch) {
-                    Self::PreForcedStop(block)
-                } else {
-                    Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
-                },
-            ),
             WorkBuffer::PreForcedStop(block) => (
                 Some(InternalWorkUnit::Blocks(WorkBatch::for_single_block(
                     WorkBlock::new(block),
@@ -318,11 +224,6 @@ mod tests {
     use super::*;
     use crate::model::{EraBoundary, EraSummary};
     use dolos_testing::blocks::make_conway_block;
-
-    /// Tests that exercise the WorkBuffer state machine use a small shard
-    /// count to keep per-epoch boundary sequences manageable
-    /// (`AShard ×N` + `Ewrap`).
-    const TEST_TOTAL_SHARDS: u32 = 1;
 
     /// Single Conway era, epoch_length=100, slot_length=1.
     /// Epoch boundaries at slots 0, 100, 200, ...
@@ -368,18 +269,12 @@ mod tests {
                 last: batch.last_slot(),
             },
             InternalWorkUnit::Rupd(s) => WorkTag::Rupd(*s),
-            // For test purposes, collapse the epoch-boundary phases
-            // (AShard ×N + Ewrap) into a single `EWrap` tag keyed by
-            // the boundary slot. Tests care that boundary work was produced
-            // at all, not about phase count.
+            // The merged work units carry their global teardown in
+            // `finalize()`. `Ewrap` covers the close half (Ewrap +
+            // Ewrap); `Estart` covers the open half (Estart +
+            // Estart). Tests use a single tag per half.
             InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
-            InternalWorkUnit::AShard(s, _) => WorkTag::EWrap(*s),
-            // For state-machine tests, collapse the EStart-shard cascade
-            // (EStartShard ×N + EStart) into a single `EStart` tag keyed
-            // by the boundary slot. Tests care that boundary work was
-            // produced at all, not about phase count.
-            InternalWorkUnit::EStartShard(s, _) => WorkTag::EStart(*s),
-            InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),
+            InternalWorkUnit::Estart(s) => WorkTag::EStart(*s),
             InternalWorkUnit::ForcedStop => WorkTag::ForcedStop,
         }
     }
@@ -400,7 +295,7 @@ mod tests {
                 if buf.can_receive_block() {
                     break;
                 }
-                let (wu, next) = buf.pop_work(stop_epoch, TEST_TOTAL_SHARDS);
+                let (wu, next) = buf.pop_work(stop_epoch);
                 buf = next;
                 if let Some(wu) = wu {
                     tags.push(tag_from_internal(&wu));
@@ -409,12 +304,12 @@ mod tests {
                 }
             }
             let block = make_block(slot);
-            buf = buf.receive_block(block, eras, stability_window, TEST_TOTAL_SHARDS);
+            buf = buf.receive_block(block, eras, stability_window);
         }
 
         // drain remaining
         loop {
-            let (wu, next) = buf.pop_work(stop_epoch, TEST_TOTAL_SHARDS);
+            let (wu, next) = buf.pop_work(stop_epoch);
             buf = next;
             match wu {
                 Some(ref wu) if matches!(wu, InternalWorkUnit::ForcedStop) => {
@@ -449,7 +344,7 @@ mod tests {
                 if buf.can_receive_block() {
                     break;
                 }
-                let (wu, next) = buf.pop_work(stop_epoch, TEST_TOTAL_SHARDS);
+                let (wu, next) = buf.pop_work(stop_epoch);
                 buf = next;
                 if let Some(wu) = wu {
                     update_cursor(&wu, &mut cursor);
@@ -459,12 +354,12 @@ mod tests {
                 }
             }
             let block = make_block(slot);
-            buf = buf.receive_block(block, eras, stability_window, TEST_TOTAL_SHARDS);
+            buf = buf.receive_block(block, eras, stability_window);
         }
 
         // drain remaining
         loop {
-            let (wu, next) = buf.pop_work(stop_epoch, TEST_TOTAL_SHARDS);
+            let (wu, next) = buf.pop_work(stop_epoch);
             buf = next;
             match wu {
                 Some(ref wu) if matches!(wu, InternalWorkUnit::ForcedStop) => {
@@ -488,10 +383,13 @@ mod tests {
             InternalWorkUnit::Blocks(batch) => {
                 *cursor = batch.last_point();
             }
-            InternalWorkUnit::EStart(slot) => {
+            // Estart's `finalize()` runs the global Estart pass,
+            // which advances the cursor — the test models this as a
+            // tag-time cursor update keyed by the boundary block's slot.
+            InternalWorkUnit::Estart(slot) => {
                 *cursor = ChainPoint::Slot(*slot);
             }
-            // Genesis, Rupd, EWrap do not advance the cursor
+            // Genesis, Rupd, Ewrap do not advance the cursor.
             _ => {}
         }
     }
@@ -575,12 +473,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Test: epoch boundary emits the EStart-shard cascade
+    // Test: epoch boundary emits Ewrap before Estart
     // ---------------------------------------------------------------
     #[test]
-    fn epoch_boundary_emits_estart_shard_cascade() {
+    fn epoch_boundary_emits_ewrap_then_estart() {
         let eras = test_chain_summary();
-        const SHARDS: u32 = 2;
 
         // Feed blocks crossing the epoch boundary at slot 100.
         let mut buf = WorkBuffer::Restart(ChainPoint::Slot(80));
@@ -589,15 +486,15 @@ mod tests {
                 if buf.can_receive_block() {
                     break;
                 }
-                let (_, next) = buf.pop_work(None, SHARDS);
+                let (_, next) = buf.pop_work(None);
                 buf = next;
             }
-            buf = buf.receive_block(make_block(slot), &eras, 40, SHARDS);
+            buf = buf.receive_block(make_block(slot), &eras, 40);
         }
 
         let mut units = Vec::new();
         loop {
-            let (wu, next) = buf.pop_work(None, SHARDS);
+            let (wu, next) = buf.pop_work(None);
             buf = next;
             match wu {
                 Some(wu) => units.push(wu),
@@ -605,41 +502,36 @@ mod tests {
             }
         }
 
-        let estart_shard_count = units
+        // Exactly one Ewrap and one Estart work unit per boundary;
+        // sharding fan-out is internal to each (via
+        // `WorkUnit::total_shards`), and the global Ewrap / Estart
+        // teardown lives in `finalize()`.
+        let ewrap_count = units
             .iter()
-            .filter(|u| matches!(u, InternalWorkUnit::EStartShard(_, _)))
+            .filter(|u| matches!(u, InternalWorkUnit::Ewrap(_)))
             .count();
+        let estart_count = units
+            .iter()
+            .filter(|u| matches!(u, InternalWorkUnit::Estart(_)))
+            .count();
+        assert_eq!(ewrap_count, 1, "expected exactly 1 Ewrap, got: {ewrap_count}");
         assert_eq!(
-            estart_shard_count, SHARDS as usize,
-            "expected {SHARDS} EStartShard units, got: {estart_shard_count}",
+            estart_count, 1,
+            "expected exactly 1 Estart, got: {estart_count}"
         );
 
-        // EStartShards must precede EStart (finalize) in the emitted sequence.
-        let last_shard_pos = units
+        let ewrap_pos = units
             .iter()
-            .rposition(|u| matches!(u, InternalWorkUnit::EStartShard(_, _)));
+            .position(|u| matches!(u, InternalWorkUnit::Ewrap(_)))
+            .expect("Ewrap");
         let estart_pos = units
             .iter()
-            .position(|u| matches!(u, InternalWorkUnit::EStart(_)));
+            .position(|u| matches!(u, InternalWorkUnit::Estart(_)))
+            .expect("Estart");
         assert!(
-            last_shard_pos.is_some() && estart_pos.is_some(),
-            "expected both EStartShard and EStart"
+            ewrap_pos < estart_pos,
+            "Ewrap (close half) must precede Estart (open half)"
         );
-        assert!(
-            last_shard_pos.unwrap() < estart_pos.unwrap(),
-            "all EStartShards must precede the EStart finalize"
-        );
-
-        // Shard indices appear in order 0..SHARDS.
-        let indices: Vec<u32> = units
-            .iter()
-            .filter_map(|u| match u {
-                InternalWorkUnit::EStartShard(_, i) => Some(*i),
-                _ => None,
-            })
-            .collect();
-        let expected: Vec<u32> = (0..SHARDS).collect();
-        assert_eq!(indices, expected, "EStartShard indices must run 0..{SHARDS}");
     }
 
     // ---------------------------------------------------------------

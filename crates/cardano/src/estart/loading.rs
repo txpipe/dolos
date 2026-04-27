@@ -1,22 +1,34 @@
-use std::sync::Arc;
+//! Load + compute helpers for `EstartWorkUnit`.
+//!
+//! Adds methods to `WorkContext` covering both halves of the open
+//! pipeline: per-shard account transitions (`load_shard` /
+//! `compute_shard_deltas`) and the finalize-time global pass
+//! (`compute_global_deltas` / `load_finalize`). The shared boundary state
+//! (ended_state + chain summary + AVVM reclamation) is built by
+//! `new_empty_with_avvm`; `compute_boundary_avvm` exposes the once-per-
+//! boundary AVVM lookup so the work unit can hoist it into `initialize`.
 
-use dolos_core::{ChainError, Domain, Genesis, StateStore, TxoRef};
+use std::{ops::Range, sync::Arc};
+
+use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore, TxoRef};
 
 use crate::{
-    estart::BoundaryVisitor, load_era_summary, roll::WorkDeltas, DRepState, EraProtocol,
-    FixedNamespace as _, PoolState, ProposalState,
+    estart::{BoundaryVisitor as _, WorkContext},
+    load_era_summary,
+    roll::WorkDeltas,
+    AccountState, DRepState, EStartShardAccumulate, EraProtocol, FixedNamespace as _, PoolState,
+    ProposalState,
 };
 
-impl super::WorkContext {
-    /// Iterate the global (non-account-keyed) entity classes of the ESTART
-    /// boundary — pools, dreps, proposals — and emit transition deltas for
-    /// each. Closes by emitting the single `EpochTransition` delta that
-    /// advances the epoch number, recomputes pots, and (optionally)
-    /// migrates pparams across an era boundary.
+impl WorkContext {
+    /// Iterate the global (non-account-keyed) entity classes of the
+    /// finalize pass — pools, dreps, proposals — and emit transition
+    /// deltas for each. Closes by emitting the single `EpochTransition`
+    /// delta that advances the epoch number, recomputes pots, and
+    /// (optionally) migrates pparams across an era boundary.
     ///
-    /// Account-keyed transitions are handled by `compute_shard_deltas`
-    /// (in the `estart_shard` module), which the work-buffer pipeline
-    /// runs ahead of this finalize pass — once per shard.
+    /// Account-keyed transitions are handled by `compute_shard_deltas`,
+    /// which the executor runs once per shard ahead of this finalize pass.
     pub fn compute_global_deltas<D: Domain>(
         &mut self,
         state: &D::State,
@@ -95,27 +107,46 @@ impl super::WorkContext {
         Ok(total)
     }
 
+    /// Compute the AVVM reclamation total for the boundary closing the
+    /// current epoch. Returns `0` outside the Shelley→Allegra transition.
+    /// Exposed so the work unit can hoist this once-per-boundary state read
+    /// out of the per-shard `load` calls.
+    pub(crate) fn compute_boundary_avvm<D: Domain>(
+        state: &D::State,
+        genesis: &Genesis,
+    ) -> Result<u64, ChainError> {
+        let ended_state = crate::load_epoch::<D>(state)?;
+        if let Some(transition) = ended_state.pparams.era_transition() {
+            if transition.entering_allegra() {
+                return Self::compute_avvm_reclamation::<D>(state, genesis);
+            }
+        }
+        Ok(0)
+    }
+
     /// Build a fresh `WorkContext` (ended_state + chain summary + AVVM
-    /// reclamation) without any computed deltas. Shared between the
-    /// finalize-phase loader and the per-shard loader (in `estart_shard`).
+    /// reclamation) without any computed deltas. Used by the finalize-phase
+    /// loader; for the per-shard loader prefer `new_empty_with_avvm` so the
+    /// AVVM lookup happens once per boundary rather than once per shard.
     pub fn new_empty<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<Self, ChainError> {
+        let avvm_reclamation = Self::compute_boundary_avvm::<D>(state, &genesis)?;
+        Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)
+    }
+
+    /// Variant of `new_empty` that takes a precomputed AVVM reclamation
+    /// total. Used by the per-shard loader so the AVVM state read happens
+    /// once per boundary (in `initialize`) rather than once per shard.
+    pub(crate) fn new_empty_with_avvm<D: Domain>(
+        state: &D::State,
+        genesis: Arc<Genesis>,
+        avvm_reclamation: u64,
+    ) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
-
-        // Check for AVVM reclamation at Shelley→Allegra boundary
-        let avvm_reclamation = if let Some(transition) = ended_state.pparams.era_transition() {
-            if transition.entering_allegra() {
-                Self::compute_avvm_reclamation::<D>(state, &genesis)?
-            } else {
-                0
-            }
-        } else {
-            0
-        };
 
         Ok(Self {
             ended_state,
@@ -128,16 +159,61 @@ impl super::WorkContext {
         })
     }
 
-    /// Load + compute for the ESTART finalize phase: skips per-account
-    /// transitions (those land via `estart_shard` units that ran earlier
-    /// in the boundary) and emits pool / drep / proposal transitions plus
-    /// the closing `EpochTransition`.
+    /// Load + compute for the finalize phase: skips per-account
+    /// transitions (those landed via the preceding per-shard runs) and
+    /// emits pool / drep / proposal transitions plus the closing
+    /// `EpochTransition`.
     pub fn load_finalize<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<Self, ChainError> {
         let mut ctx = Self::new_empty::<D>(state, genesis)?;
         ctx.compute_global_deltas::<D>(state)?;
+        Ok(ctx)
+    }
+
+    /// Iterate accounts in this shard's two ranges and emit
+    /// `AccountTransition` deltas via the snapshot-rotation visitor.
+    /// Closes by emitting `EStartShardAccumulate` to advance
+    /// `EpochState.estart_shard_progress`.
+    fn compute_shard_deltas<D: Domain>(
+        &mut self,
+        state: &D::State,
+        ranges: Vec<Range<EntityKey>>,
+        shard_index: u32,
+        total_shards: u32,
+    ) -> Result<(), ChainError> {
+        let mut visitor_reset = super::reset::BoundaryVisitor;
+
+        for range in ranges {
+            let accounts =
+                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
+
+            for record in accounts {
+                let (account_id, account) = record?;
+                visitor_reset.visit_account(self, &account_id, &account)?;
+            }
+        }
+
+        self.add_delta(EStartShardAccumulate::new(shard_index, total_shards));
+
+        Ok(())
+    }
+
+    /// Load + compute for a per-shard Estart phase: build a fresh
+    /// context (no global iteration) using a precomputed AVVM reclamation
+    /// total (hoisted into the work unit's `initialize`) and run the
+    /// per-shard account branch.
+    pub fn load_shard<D: Domain>(
+        state: &D::State,
+        genesis: Arc<Genesis>,
+        avvm_reclamation: u64,
+        shard_index: u32,
+        total_shards: u32,
+        ranges: Vec<Range<EntityKey>>,
+    ) -> Result<Self, ChainError> {
+        let mut ctx = Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)?;
+        ctx.compute_shard_deltas::<D>(state, ranges, shard_index, total_shards)?;
         Ok(ctx)
     }
 }

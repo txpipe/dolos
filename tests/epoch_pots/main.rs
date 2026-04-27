@@ -21,7 +21,7 @@ use dolos_core::{
     config::{CardanoConfig, FjallStateConfig},
     Domain, StateStore,
 };
-use dolos_testing::harness::cardano::{copy_dir_recursive, Config, LedgerHarness};
+use dolos_testing::harness::cardano::{copy_dir_recursive, Config, HarnessDomain, LedgerHarness};
 
 /// High-performance fjall configuration for epoch tests.
 /// Optimized for maximum speed with 2GB cache.
@@ -202,7 +202,7 @@ fn dump_stake_csv(
 }
 
 /// Dump rewards that were actually applied (spendable) during the
-/// `AShard` phase. Filters out rewards for accounts that deregistered
+/// `Ewrap` phase. Filters out rewards for accounts that deregistered
 /// between RUPD and the boundary.
 fn dump_applied_rewards_csv(
     applied_rewards: &[AppliedReward],
@@ -461,16 +461,26 @@ fn run_epoch_pots_test(
     // When estart fires for epoch N+1, ended_state() holds the completed epoch N.
     let mut captured_epoch: Option<EpochState> = None;
 
-    // Accumulate applied rewards across all AShard work units for the
+    // Accumulate applied rewards across all Ewrap work units for the
     // subject boundary. Each shard holds only its own slice in memory, but
     // the test harness needs the full set at the end for the CSV dump.
     let mut accumulated_applied: Vec<AppliedReward> = Vec::new();
     let mut accumulated_ending_epoch: Option<u64> = None;
 
     harness
-        .run(100, |_domain, work| {
+        .run(100, |_domain, work, shard_index| {
+            // The harness fires this callback once per shard (with
+            // `shard_index = 0..total_shards`) and once after `finalize()`
+            // (with `shard_index == total_shards`). Per-shard introspection
+            // gates on `shard_index < total`; post-finalize introspection
+            // gates on equality.
+            let total = dolos_core::WorkUnit::<HarnessDomain>::total_shards(work);
+            let post_finalize = shard_index == total;
+
             match work {
-                CardanoWorkUnit::Estart(estart) => {
+                CardanoWorkUnit::Estart(estart) if post_finalize => {
+                    // Estart's `finalize()` ran the global Estart
+                    // pass; `ended_state()` now holds the just-closed epoch.
                     if let Some(ended) = estart.ended_state() {
                         if ended.number == subject_epoch {
                             captured_epoch = Some(ended.clone());
@@ -497,8 +507,8 @@ fn run_epoch_pots_test(
                         }
                     }
                 }
-                CardanoWorkUnit::AShard(shard) => {
-                    if shard.shard_index() == 0 {
+                CardanoWorkUnit::Ewrap(shard) if !post_finalize => {
+                    if shard_index == 0 {
                         // First shard of this boundary — reset accumulator
                         // and capture the ending epoch.
                         accumulated_applied.clear();
@@ -512,7 +522,7 @@ fn run_epoch_pots_test(
                     }
                 }
                 CardanoWorkUnit::Ewrap(_) => {
-                    // Boundary close — dump accumulated rewards.
+                    // Post-finalize (Ewrap pass): dump accumulated rewards.
                     if let Some(ending_epoch) = accumulated_ending_epoch.take() {
                         if ending_epoch >= 1 {
                             let performance_epoch = ending_epoch - 1;

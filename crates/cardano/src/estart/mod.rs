@@ -1,3 +1,17 @@
+//! Estart work unit — open half of the epoch boundary.
+//!
+//! Single sharded work unit covering the entire open-half pipeline. The
+//! per-shard body iterates accounts in a key-range slice and emits
+//! `AccountTransition` deltas; `finalize()` runs the global Estart pass
+//! (pool / drep / proposal transitions, nonce, `EpochTransition`, era
+//! transitions) and is the only phase that advances the cursor.
+//!
+//! `WorkContext` and the `BoundaryVisitor` trait live here and are shared
+//! between the shard body and the finalize pass. Both code paths build
+//! deltas onto the same `WorkDeltas` accumulator. The `nonces` and `reset`
+//! visitors run in finalize; the `reset` visitor's `visit_account` arm is
+//! reused by the shard body.
+
 use std::sync::Arc;
 
 use dolos_core::{ChainError, EntityKey, Genesis};
