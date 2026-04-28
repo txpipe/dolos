@@ -984,21 +984,6 @@ pub struct CardanoConfig {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_utxos: Vec<CustomUtxo>,
-
-    /// Number of shards used to partition the per-account leg of the
-    /// epoch-boundary pipeline (see `EwrapWorkUnit`). Must divide 256
-    /// (so shards are whole first-byte prefix buckets) and be >= 1. When
-    /// `None`, defaults to `CardanoConfig::DEFAULT_ACCOUNT_SHARDS`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub account_shards: Option<u32>,
-}
-
-impl CardanoConfig {
-    pub const DEFAULT_ACCOUNT_SHARDS: u32 = 16;
-
-    pub fn account_shards(&self) -> u32 {
-        self.account_shards.unwrap_or(Self::DEFAULT_ACCOUNT_SHARDS)
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

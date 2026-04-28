@@ -15,24 +15,23 @@
 
 use std::sync::Arc;
 
-use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, Genesis, WorkUnit};
+use dolos_core::{BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
 use crate::{ewrap::BoundaryWork, load_epoch, CardanoLogic};
 
-use crate::shard::shard_key_ranges;
+use crate::shard::{shard_key_ranges, ACCOUNT_SHARDS};
 
 pub struct EwrapWorkUnit {
     slot: BlockSlot,
-    config: CardanoConfig,
     genesis: Arc<Genesis>,
 
     /// Number of shards this boundary's pipeline runs.
     ///
     /// Populated in `initialize()` from `EpochState.ewrap_progress.total`
-    /// when a boundary is in flight (so a config change can't disrupt the
-    /// in-progress pipeline) or from `config.account_shards()` for a fresh
-    /// boundary.
+    /// when a boundary is in flight (so a value change across versions
+    /// can't disrupt the in-progress pipeline) or from
+    /// `crate::shard::ACCOUNT_SHARDS` for a fresh boundary.
     total_shards: u32,
 
     /// During the per-shard loop, holds the in-flight shard's
@@ -43,10 +42,9 @@ pub struct EwrapWorkUnit {
 }
 
 impl EwrapWorkUnit {
-    pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
+    pub fn new(slot: BlockSlot, genesis: Arc<Genesis>) -> Self {
         Self {
             slot,
-            config,
             genesis,
             total_shards: 0,
             boundary: None,
@@ -81,8 +79,8 @@ where
                 .ewrap_progress
                 .as_ref()
                 .map(|p| p.total)
-                .unwrap_or_else(|| self.config.account_shards()),
-            Err(_) => self.config.account_shards(),
+                .unwrap_or(ACCOUNT_SHARDS),
+            Err(_) => ACCOUNT_SHARDS,
         };
 
         debug!(

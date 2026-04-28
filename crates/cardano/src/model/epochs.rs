@@ -222,7 +222,7 @@ pub struct ShardProgress {
     #[n(0)]
     pub committed: u32,
     /// Total shard count for this boundary, captured at the first shard's
-    /// commit (snapshots the value of `CardanoConfig::account_shards()`
+    /// commit (snapshots the value of `crate::shard::ACCOUNT_SHARDS`
     /// effective at that moment).
     #[n(1)]
     pub total: u32,

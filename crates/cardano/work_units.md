@@ -31,7 +31,7 @@ The boundary work splits into a *close* half (`Ewrap`, ending epoch N) and an *o
 
 `Rupd` is a third sharded unit, firing mid-epoch at the randomness stability window. It computes rewards from the E-3 stake snapshot and writes one `PendingRewardState` entity per rewarded account in this shard's range; `Ewrap` consumes those entries to apply the rewards.
 
-All three sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `account_shards` config knob; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a config change between shards (e.g. across a crash and restart) can't break an in-flight pipeline.
+All three sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `crate::shard::ACCOUNT_SHARDS` constant; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a value change between shards (e.g. across a crash and restart on a newer build) can't break an in-flight pipeline.
 
 The sections below walk the cycle starting at `Estart` (the first phase of every epoch).
 
@@ -40,11 +40,11 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ## 1. `EstartWorkUnit` — open half (sharded body + Estart finalize)
 
 - Variants: `CardanoWorkUnit::Estart` / `InternalWorkUnit::Estart(BlockSlot)`.
-- Struct: `estart::EstartWorkUnit` (`crates/cardano/src/estart/work_unit.rs`). Reports `total_shards` (default 16) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
+- Struct: `estart::EstartWorkUnit` (`crates/cardano/src/estart/work_unit.rs`). Reports `total_shards` (`crate::shard::ACCOUNT_SHARDS`) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
 
 ### `initialize()`
 
-- Resolves the boundary's effective shard count (`EpochState.estart_progress.total` if a boundary is in flight, else `config.account_shards()`).
+- Resolves the boundary's effective shard count (`EpochState.estart_progress.total` if a boundary is in flight, else `crate::shard::ACCOUNT_SHARDS`).
 - Computes the AVVM reclamation total once (used by every shard's `load` and by `finalize`). Returns 0 except at the Shelley→Allegra hardfork.
 
 ### Per-shard body — per-account snapshot rotation
@@ -110,12 +110,12 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ## 3. `RupdWorkUnit` — computes rewards at the stability window (sharded body + Rupd finalize)
 
 - Variants: `CardanoWorkUnit::Rupd` / `InternalWorkUnit::Rupd(BlockSlot)`.
-- Struct: `rupd::RupdWorkUnit` (`crates/cardano/src/rupd/work_unit.rs`). Reports `total_shards` (default 16) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
+- Struct: `rupd::RupdWorkUnit` (`crates/cardano/src/rupd/work_unit.rs`). Reports `total_shards` (`crate::shard::ACCOUNT_SHARDS`) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
 - Purpose: at `randomness_stability_window` into the epoch, compute the reward distribution from the E-3 stake snapshot and persist `PendingRewardState` entities to be consumed by the close-half `Ewrap`.
 
 ### `initialize()`
 
-- Resolves the boundary's effective shard count (`EpochState.rupd_progress.total` if a RUPD is in flight, else `config.account_shards()`).
+- Resolves the boundary's effective shard count (`EpochState.rupd_progress.total` if a RUPD is in flight, else `crate::shard::ACCOUNT_SHARDS`).
 - Builds boundary-wide globals via `RupdWork::load_globals`: pots, incentives (`epoch_incentives`), pparams (mark snapshot), `blocks_made_total`, chain summary, and the **pool-bounded** half of the stake snapshot — `pools` (`HashMap<PoolHash, EpochValue<PoolSnapshot>>`), `pool_stake` (per-pool totals summed across every account), `active_stake_sum`, `performance_epoch_pool_blocks`. Memory: O(pools) ≈ a few thousand entries; the per-account map is *not* built here.
 
 ### Per-shard body — per-credential reward emission
@@ -142,11 +142,11 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 ## 4. `EwrapWorkUnit` — close half (sharded body + Ewrap finalize)
 
 - Variants: `CardanoWorkUnit::Ewrap` / `InternalWorkUnit::Ewrap(BlockSlot)`.
-- Struct: `ewrap::EwrapWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Reports `total_shards` (default 16) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
+- Struct: `ewrap::EwrapWorkUnit` (`crates/cardano/src/ewrap/work_unit.rs`). Reports `total_shards` (`crate::shard::ACCOUNT_SHARDS`) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
 
 ### `initialize()`
 
-- Resolves the boundary's effective shard count (`EpochState.ewrap_progress.total` if a boundary is in flight, else `config.account_shards()`).
+- Resolves the boundary's effective shard count (`EpochState.ewrap_progress.total` if a boundary is in flight, else `crate::shard::ACCOUNT_SHARDS`).
 
 ### Per-shard body — per-account reward application
 

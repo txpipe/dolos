@@ -71,16 +71,16 @@ pub enum CardanoWorkUnit {
     /// Compute rewards at stability window boundary.
     Rupd(Box<rupd::RupdWorkUnit>),
     /// Close the epoch boundary: per-account reward application across
-    /// `config.account_shards` shards (`WorkUnit::total_shards`), each
-    /// covering a first-byte prefix range of the account key space and
-    /// accumulating its contribution into `EpochState.end` via
+    /// `crate::shard::ACCOUNT_SHARDS` shards (`WorkUnit::total_shards`),
+    /// each covering a first-byte prefix range of the account key space
+    /// and accumulating its contribution into `EpochState.end` via
     /// `EWrapProgress`. After the shard loop, `finalize()` runs the
     /// global Ewrap pass (pool/drep/proposal classification, MIRs,
     /// enactment, deposit refunds) and emits `EpochWrapUp` with the
     /// assembled final `EndStats`.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Open the next epoch: per-account snapshot rotation across
-    /// `config.account_shards` shards (`WorkUnit::total_shards`),
+    /// `crate::shard::ACCOUNT_SHARDS` shards (`WorkUnit::total_shards`),
     /// advancing `EpochState.estart_progress` via
     /// `EStartProgress`. After the shard loop, `finalize()` runs
     /// the global Estart pass (pool / drep / proposal transitions,
@@ -339,13 +339,6 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<Self, ChainError> {
         info!("initializing");
 
-        // Reject misconfigured `account_shards` early. The shard-key-range
-        // helper only `debug_assert!`s the divides-256 invariant, so an
-        // invalid release-build config (0, 3, 7, 100, ...) would silently
-        // corrupt key-range coverage.
-        crate::shard::validate_total_shards(config.account_shards())
-            .map_err(ChainError::InvalidConfig)?;
-
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
@@ -359,19 +352,19 @@ impl dolos_core::ChainLogic for CardanoLogic {
         // boundary's shard count captured at the first commit. Detect and
         // warn — full resume requires re-fetching the boundary block from
         // upstream, which is tracked separately. The persisted `total` is
-        // used for the in-flight boundary even if `config.account_shards()`
-        // changed, to avoid breaking the in-progress pipeline.
+        // used for the in-flight boundary even if `crate::shard::ACCOUNT_SHARDS`
+        // changed across versions, to avoid breaking the in-progress pipeline.
         if let Ok(epoch) = load_epoch::<D>(state) {
             if let Some(progress) = epoch.ewrap_progress.as_ref() {
-                let configured = config.account_shards();
+                let configured = crate::shard::ACCOUNT_SHARDS;
                 if progress.total != configured {
                     tracing::warn!(
                         epoch = epoch.number,
                         stored_total = progress.total,
                         configured_total = configured,
-                        "in-flight boundary uses {} shards but config.account_shards = {}; \
+                        "in-flight boundary uses {} shards but ACCOUNT_SHARDS = {}; \
                          the in-flight boundary will continue with {} (the persisted total) \
-                         and the new config takes effect on the next boundary",
+                         and the new value takes effect on the next boundary",
                         progress.total,
                         configured,
                         progress.total,
@@ -410,16 +403,16 @@ impl dolos_core::ChainLogic for CardanoLogic {
             // EStart-shard runs, and `EpochTransition` clears
             // `estart_progress` when the new epoch opens.
             if let Some(progress) = epoch.estart_progress.as_ref() {
-                let configured = config.account_shards();
+                let configured = crate::shard::ACCOUNT_SHARDS;
                 if progress.total != configured {
                     tracing::warn!(
                         epoch = epoch.number,
                         stored_total = progress.total,
                         configured_total = configured,
                         "in-flight estart-shard boundary uses {} shards but \
-                         config.account_shards = {}; the in-flight boundary will \
+                         ACCOUNT_SHARDS = {}; the in-flight boundary will \
                          continue with {} (the persisted total) and the new \
-                         config takes effect on the next boundary",
+                         value takes effect on the next boundary",
                         progress.total,
                         configured,
                         progress.total,
@@ -537,10 +530,10 @@ impl dolos_core::ChainLogic for CardanoLogic {
                 ))))
             }
             InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(Box::new(
-                rupd::RupdWorkUnit::new(slot, self.config.clone(), domain.genesis()),
+                rupd::RupdWorkUnit::new(slot, domain.genesis()),
             ))),
             InternalWorkUnit::Ewrap(slot) => Some(CardanoWorkUnit::Ewrap(Box::new(
-                ewrap::EwrapWorkUnit::new(slot, self.config.clone(), domain.genesis()),
+                ewrap::EwrapWorkUnit::new(slot, domain.genesis()),
             ))),
             InternalWorkUnit::Estart(slot) => {
                 // Estart's `finalize()` runs the global Estart pass,
@@ -548,11 +541,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                 // refresh so the next pop_work picks up the new eras.
                 self.needs_cache_refresh = true;
                 Some(CardanoWorkUnit::Estart(Box::new(
-                    estart::EstartWorkUnit::new(
-                        slot,
-                        self.config.clone(),
-                        domain.genesis(),
-                    ),
+                    estart::EstartWorkUnit::new(slot, domain.genesis()),
                 )))
             }
             InternalWorkUnit::ForcedStop => Some(CardanoWorkUnit::ForcedStop),

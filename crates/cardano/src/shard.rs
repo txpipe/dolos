@@ -38,6 +38,16 @@ use dolos_core::{EntityKey, KEY_SIZE};
 
 pub const PREFIX_SPACE: u32 = 256;
 
+/// Number of shards used to partition the per-credential leg of the
+/// epoch-boundary pipeline (RUPD, Ewrap, Estart). Must divide 256 (so
+/// shards are whole first-byte prefix buckets) and be >= 1.
+pub const ACCOUNT_SHARDS: u32 = 32;
+
+const _: () = assert!(
+    ACCOUNT_SHARDS >= 1 && PREFIX_SPACE % ACCOUNT_SHARDS == 0,
+    "ACCOUNT_SHARDS must be >= 1 and divide PREFIX_SPACE (256)"
+);
+
 /// Layout constants for the CBOR-encoded `StakeCredential` key prefix.
 /// Asserted by the `cbor_layout_invariant_holds` unit test.
 pub const CRED_KEY_ARRAY_TAG: u8 = 0x82;
@@ -47,14 +57,14 @@ pub const CRED_KEY_BYTES_HEADER: [u8; 2] = [0x58, 0x1c];
 pub const CRED_KEY_HASH_OFFSET: usize = 4;
 
 /// Return `Ok(())` if `total_shards` is a valid sharding factor (>= 1 and
-/// divides 256).
+/// divides 256). Used by `shard_key_ranges` debug-asserts and unit tests.
 pub fn validate_total_shards(total_shards: u32) -> Result<(), String> {
     if total_shards == 0 {
-        return Err("account_shards must be >= 1".into());
+        return Err("total_shards must be >= 1".into());
     }
     if !PREFIX_SPACE.is_multiple_of(total_shards) {
         return Err(format!(
-            "account_shards ({total_shards}) must divide {PREFIX_SPACE}"
+            "total_shards ({total_shards}) must divide {PREFIX_SPACE}"
         ));
     }
     Ok(())

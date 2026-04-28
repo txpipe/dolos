@@ -25,15 +25,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{
-    config::CardanoConfig, ArchiveStore, ArchiveWriter, BlockSlot, Domain, DomainError,
-    EntityDelta as _, EntityKey, Genesis, LogKey, StateStore, StateWriter, TemporalKey, WorkUnit,
+    ArchiveStore, ArchiveWriter, BlockSlot, Domain, DomainError, EntityDelta as _, EntityKey,
+    Genesis, LogKey, StateStore, StateWriter, TemporalKey, WorkUnit,
 };
 use tracing::{debug, info};
 
 use crate::{
     rewards::{Reward, RewardMap},
     rupd::credential_to_key,
-    shard::shard_key_ranges,
+    shard::{shard_key_ranges, ACCOUNT_SHARDS},
     CardanoLogic, ChainPoint, EpochState, FixedNamespace, PendingRewardState, PoolHash, StakeLog,
 };
 
@@ -51,12 +51,11 @@ struct PoolLogShare {
 /// Sharded work unit for computing rewards at the stability window.
 pub struct RupdWorkUnit {
     slot: BlockSlot,
-    config: CardanoConfig,
     genesis: Arc<Genesis>,
 
     /// Shard count for this RUPD pipeline. Resolved in `initialize()`
     /// from `EpochState.rupd_progress.total` if a RUPD is mid-flight,
-    /// else `config.account_shards()` for a fresh RUPD.
+    /// else `crate::shard::ACCOUNT_SHARDS` for a fresh RUPD.
     total_shards: u32,
 
     /// Boundary-wide globals + the in-flight shard's per-account
@@ -79,10 +78,9 @@ pub struct RupdWorkUnit {
 }
 
 impl RupdWorkUnit {
-    pub fn new(slot: BlockSlot, config: CardanoConfig, genesis: Arc<Genesis>) -> Self {
+    pub fn new(slot: BlockSlot, genesis: Arc<Genesis>) -> Self {
         Self {
             slot,
-            config,
             genesis,
             total_shards: 0,
             work: None,
@@ -140,8 +138,8 @@ where
                 .rupd_progress
                 .as_ref()
                 .map(|p| p.total)
-                .unwrap_or_else(|| self.config.account_shards()),
-            Err(_) => self.config.account_shards(),
+                .unwrap_or(ACCOUNT_SHARDS),
+            Err(_) => ACCOUNT_SHARDS,
         };
 
         // Build the boundary-wide globals once. Per-shard maps stay
