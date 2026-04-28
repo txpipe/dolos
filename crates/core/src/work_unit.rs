@@ -5,56 +5,7 @@
 //! allows the core crate to remain chain-agnostic while supporting different
 //! blockchain implementations.
 
-use tracing::info;
-
 use crate::{ChainPoint, Domain, DomainError, TipEvent, TxHash};
-
-/// Resident set size in MB, as reported by the OS. Returns `None` only if
-/// the platform doesn't expose RSS or sampling fails (in practice always
-/// `Some` on macOS/Linux). Cheap to call.
-pub fn rss_mb() -> Option<u64> {
-    memory_stats::memory_stats().map(|s| (s.physical_mem / 1024 / 1024) as u64)
-}
-
-/// Captures RSS at construction; produces (before, after, delta) on `read`.
-pub struct RssProbe {
-    before: Option<u64>,
-}
-
-impl RssProbe {
-    pub fn start() -> Self {
-        Self { before: rss_mb() }
-    }
-
-    /// Returns (before_mb, after_mb, delta_mb). 0 when the platform doesn't
-    /// expose RSS; on macOS/Linux always populated.
-    pub fn read(&self) -> (u64, u64, i64) {
-        let after = rss_mb();
-        let delta = match (self.before, after) {
-            (Some(b), Some(a)) => a as i64 - b as i64,
-            _ => 0,
-        };
-        (self.before.unwrap_or(0), after.unwrap_or(0), delta)
-    }
-}
-
-/// Wrap a work-unit phase with an RSS probe and emit an `info!` event with
-/// `phase`, `rss_before_mb`, `rss_after_mb`, `rss_delta_mb` fields. The
-/// emission inherits the surrounding `#[instrument]` span so the work unit's
-/// `name` (and any other span fields) is attached automatically.
-pub fn run_phase<F, R>(phase: &'static str, f: F) -> Result<R, DomainError>
-where
-    F: FnOnce() -> Result<R, DomainError>,
-{
-    let probe = RssProbe::start();
-    let result = f()?;
-    let (rss_before_mb, rss_after_mb, rss_delta_mb) = probe.read();
-    info!(
-        phase,
-        rss_before_mb, rss_after_mb, rss_delta_mb, "phase complete"
-    );
-    Ok(result)
-}
 
 /// An update for the mempool based on a confirmed block.
 pub struct MempoolUpdate {

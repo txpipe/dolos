@@ -13,9 +13,9 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    work_unit::run_phase, ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityDelta as _, IndexStore as _, IndexWriter as _, MempoolStore, RawBlock,
-    StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
+    ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
+    IndexStore as _, IndexWriter as _, MempoolStore, RawBlock, StateStore, StateWriter as _,
+    TipEvent, WalStore, WorkUnit,
 };
 
 const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
@@ -190,22 +190,30 @@ pub(crate) fn run_lifecycle<D: Domain>(
     work: &mut D::WorkUnit,
     include_wal: bool,
 ) -> Result<(), DomainError> {
-    run_phase("initialize", || work.initialize(domain))?;
+    debug!(phase = "initialize", "running phase");
+    work.initialize(domain)?;
 
     let total_shards = work.total_shards();
     for shard in 0..total_shards {
         let _span = tracing::info_span!("shard", index = shard, total = total_shards).entered();
-        run_phase("load", || work.load(domain, shard))?;
-        run_phase("compute", || work.compute(shard))?;
+        debug!(phase = "load", "running phase");
+        work.load(domain, shard)?;
+        debug!(phase = "compute", "running phase");
+        work.compute(shard)?;
         if include_wal {
-            run_phase("commit_wal", || work.commit_wal(domain, shard))?;
+            debug!(phase = "commit_wal", "running phase");
+            work.commit_wal(domain, shard)?;
         }
-        run_phase("commit_state", || work.commit_state(domain, shard))?;
-        run_phase("commit_archive", || work.commit_archive(domain, shard))?;
-        run_phase("commit_indexes", || work.commit_indexes(domain, shard))?;
+        debug!(phase = "commit_state", "running phase");
+        work.commit_state(domain, shard)?;
+        debug!(phase = "commit_archive", "running phase");
+        work.commit_archive(domain, shard)?;
+        debug!(phase = "commit_indexes", "running phase");
+        work.commit_indexes(domain, shard)?;
     }
 
-    run_phase("finalize", || work.finalize(domain))?;
+    debug!(phase = "finalize", "running phase");
+    work.finalize(domain)?;
 
     Ok(())
 }
