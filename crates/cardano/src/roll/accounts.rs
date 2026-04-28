@@ -1,387 +1,36 @@
-use dolos_core::{BlockSlot, ChainError, Genesis, NsKey, TxOrder};
+use dolos_core::{ChainError, Genesis, TxOrder};
 
 use super::WorkDeltas;
-use pallas::codec::minicbor;
-use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::{
     InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
 };
-use pallas::ledger::primitives::conway::DRep;
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::{
     addresses::Address,
-    primitives::StakeCredential,
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
 };
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
-use crate::model::FixedNamespace as _;
-use crate::rupd::EnqueueMir;
-use crate::{add, sub, DRepDelegation, PParamsSet, PoolDelegation, PoolHash};
-use crate::{model::AccountState, pallas_extras, roll::BlockVisitor};
+use crate::{
+    pallas_extras, roll::BlockVisitor, ControlledAmountDec, ControlledAmountInc, EnqueueMir,
+    PParamsSet, StakeDelegation, StakeDeregistration, StakeRegistration, VoteDelegation,
+    WithdrawalInc,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrackSeenAddresses {
-    cred: StakeCredential,
+    cred: pallas::ledger::primitives::StakeCredential,
     full_address: Vec<u8>,
     full_address_new: Option<bool>,
 }
 
 impl TrackSeenAddresses {
-    pub fn new(cred: StakeCredential, full_address: Address) -> Self {
+    pub fn new(cred: pallas::ledger::primitives::StakeCredential, full_address: Address) -> Self {
         Self {
             cred,
             full_address: full_address.to_vec(),
             full_address_new: None,
         }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlledAmountInc {
-    cred: StakeCredential,
-    is_pointer: bool,
-    amount: u64,
-    epoch: Epoch,
-}
-
-impl dolos_core::EntityDelta for ControlledAmountInc {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.get_or_insert_with(|| AccountState::new(self.epoch, self.cred.clone()));
-
-        let stake = entity.stake.unwrap_live_mut();
-
-        if self.is_pointer {
-            debug!(amount=%self.amount, "adding to pointer utxo sum");
-            stake.utxo_sum_at_pointer_addresses =
-                add!(stake.utxo_sum_at_pointer_addresses, self.amount);
-        } else {
-            stake.utxo_sum = add!(stake.utxo_sum, self.amount);
-        }
-    }
-
-    fn undo(&self, _entity: &mut Option<AccountState>) {
-        // TODO: implement undo
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ControlledAmountDec {
-    cred: StakeCredential,
-    is_pointer: bool,
-    amount: u64,
-}
-
-impl dolos_core::EntityDelta for ControlledAmountDec {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        let stake = entity.stake.unwrap_live_mut();
-
-        if self.is_pointer {
-            stake.utxo_sum_at_pointer_addresses =
-                sub!(stake.utxo_sum_at_pointer_addresses, self.amount);
-        } else {
-            stake.utxo_sum = sub!(stake.utxo_sum, self.amount);
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        let stake = entity.stake.unwrap_live_mut();
-        stake.utxo_sum = add!(stake.utxo_sum, self.amount);
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StakeRegistration {
-    cred: StakeCredential,
-    slot: u64,
-    epoch: Epoch,
-    deposit: u64,
-
-    // undo
-    prev_registered_at: Option<u64>,
-    prev_deregistered_at: Option<u64>,
-    prev_deposit: Option<u64>,
-}
-
-impl StakeRegistration {
-    pub fn new(cred: StakeCredential, slot: u64, epoch: Epoch, deposit: u64) -> Self {
-        Self {
-            cred,
-            slot,
-            epoch,
-            deposit,
-            prev_registered_at: None,
-            prev_deregistered_at: None,
-            prev_deposit: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for StakeRegistration {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.get_or_insert_with(|| AccountState::new(self.epoch, self.cred.clone()));
-
-        // save undo info
-        self.prev_registered_at = entity.registered_at;
-        self.prev_deregistered_at = entity.deregistered_at;
-
-        tracing::debug!(
-            slot = self.slot,
-            account = hex::encode(minicbor::to_vec(&self.cred).unwrap()),
-            "applying registration"
-        );
-
-        entity.registered_at = Some(self.slot);
-        entity.deregistered_at = None;
-    }
-
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        entity.registered_at = self.prev_registered_at;
-        entity.deregistered_at = self.prev_deregistered_at;
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StakeDelegation {
-    cred: StakeCredential,
-    pool: Hash<28>,
-    epoch: Epoch,
-
-    // undo
-    prev_pool: Option<PoolDelegation>,
-    prev_retired_pool: Option<PoolHash>,
-}
-
-impl StakeDelegation {
-    pub fn new(cred: StakeCredential, pool: Hash<28>, epoch: Epoch) -> Self {
-        Self {
-            cred,
-            pool,
-            epoch,
-            prev_pool: None,
-            prev_retired_pool: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for StakeDelegation {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        tracing::debug!(pool = hex::encode(self.pool), "applying delegation");
-
-        // save undo
-        self.prev_pool = entity.pool.live().cloned();
-        self.prev_retired_pool = entity.retired_pool;
-
-        // apply changes
-        entity
-            .pool
-            .replace(PoolDelegation::Pool(self.pool), self.epoch);
-        entity.retired_pool = None;
-    }
-
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        entity.pool.reset(self.prev_pool.clone());
-        entity.retired_pool = self.prev_retired_pool;
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoteDelegation {
-    cred: StakeCredential,
-    drep: DRep,
-    vote_delegated_at: (BlockSlot, TxOrder),
-    epoch: Epoch,
-
-    // undo
-    prev_drep: Option<DRepDelegation>,
-    prev_vote_delegated_at: Option<(BlockSlot, TxOrder)>,
-}
-
-impl VoteDelegation {
-    pub fn new(
-        cred: StakeCredential,
-        drep: DRep,
-        slot: BlockSlot,
-        order: TxOrder,
-        epoch: Epoch,
-    ) -> Self {
-        Self {
-            cred,
-            drep,
-            vote_delegated_at: (slot, order),
-            epoch,
-            prev_drep: None,
-            prev_vote_delegated_at: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for VoteDelegation {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        // save undo
-        self.prev_drep = entity.drep.live().cloned();
-        self.prev_vote_delegated_at = entity.vote_delegated_at;
-
-        // apply changes
-        entity.vote_delegated_at = Some(self.vote_delegated_at);
-        entity
-            .drep
-            .replace(DRepDelegation::Delegated(self.drep.clone()), self.epoch);
-    }
-
-    fn undo(&self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        entity.vote_delegated_at = self.prev_vote_delegated_at;
-        entity.drep.reset(self.prev_drep.clone());
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StakeDeregistration {
-    cred: StakeCredential,
-    slot: u64,
-    epoch: Epoch,
-
-    // undo
-    prev_registered_at: Option<u64>,
-    prev_deregistered_at: Option<u64>,
-    prev_pool: Option<PoolDelegation>,
-    prev_drep: Option<DRepDelegation>,
-    prev_deposit: Option<u64>,
-    prev_retired_pool: Option<PoolHash>,
-}
-
-impl StakeDeregistration {
-    pub fn new(cred: StakeCredential, slot: u64, epoch: Epoch) -> Self {
-        Self {
-            cred,
-            slot,
-            epoch,
-            prev_registered_at: None,
-            prev_deregistered_at: None,
-            prev_pool: None,
-            prev_drep: None,
-            prev_deposit: None,
-            prev_retired_pool: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for StakeDeregistration {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<AccountState>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        tracing::debug!(slot = self.slot, "applying deregistration");
-
-        // save undo info
-        self.prev_registered_at = entity.registered_at;
-        self.prev_deregistered_at = entity.deregistered_at;
-        self.prev_pool = entity.pool.live().cloned();
-        self.prev_drep = entity.drep.live().cloned();
-        self.prev_retired_pool = entity.retired_pool;
-
-        // TODO: understand if we should keep the registered_at value even if the
-        // account is deregistered
-        entity.registered_at = None;
-        entity.deregistered_at = Some(self.slot);
-        entity
-            .pool
-            .replace(PoolDelegation::NotDelegated, self.epoch);
-        entity.retired_pool = None;
-
-        entity
-            .drep
-            .replace(DRepDelegation::NotDelegated, self.epoch);
-    }
-
-    fn undo(&self, _entity: &mut Option<AccountState>) {
-        // todo!()
-        // Placeholder undo logic. Ensure this does not panic.
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WithdrawalInc {
-    cred: StakeCredential,
-    amount: u64,
-}
-
-impl dolos_core::EntityDelta for WithdrawalInc {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        let enc = minicbor::to_vec(&self.cred).unwrap();
-        NsKey::from((AccountState::NS, enc))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        let stake = entity.stake.unwrap_live_mut();
-        stake.withdrawals_sum = add!(stake.withdrawals_sum, self.amount);
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        let stake = entity.stake.unwrap_live_mut();
-        stake.withdrawals_sum = sub!(stake.withdrawals_sum, self.amount);
     }
 }
 
@@ -426,11 +75,11 @@ impl BlockVisitor for AccountVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(ControlledAmountDec {
+        deltas.add_for_entity(ControlledAmountDec::new(
             cred,
             is_pointer,
-            amount: resolved.value().coin(),
-        });
+            resolved.value().coin(),
+        ));
 
         Ok(())
     }
@@ -450,12 +99,12 @@ impl BlockVisitor for AccountVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(ControlledAmountInc {
-            cred: cred.clone(),
+        deltas.add_for_entity(ControlledAmountInc::new(
+            cred.clone(),
             is_pointer,
-            amount: output.value().coin(),
+            output.value().coin(),
             epoch,
-        });
+        ));
 
         Ok(())
     }
@@ -539,7 +188,7 @@ impl BlockVisitor for AccountVisitor {
             return Ok(());
         };
 
-        deltas.add_for_entity(WithdrawalInc { cred, amount });
+        deltas.add_for_entity(WithdrawalInc::new(cred, amount));
 
         Ok(())
     }

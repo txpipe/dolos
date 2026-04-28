@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d107d88b43d468a5d0fcf749d421ff250a47aa1e70ef3b22a785d11bfc7e8c97 # shrinks to entity = None, delta = NewProposal { slot: 0, tx: Hash<32>("0000000000000000000000000000000000000000000000000000000000000000"), idx: 0, action: Other, deposit: None, reward_account: None, validity_period: None, current_epoch: 3, network_magic: 0, protocol: 0 }

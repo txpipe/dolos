@@ -1,0 +1,121 @@
+[upstream]
+peer_address = "relay.cnode-m1.demeter.run:3002"
+
+[storage]
+version = "v3"
+path = "data"
+
+[storage.wal]
+backend = "redb"
+path = "wal"
+cache = 50
+
+[storage.state]
+backend = "fjall"
+path = "state"
+cache = 500
+max_history = 25920
+max_journal_size = 1024
+flush_on_commit = false
+l0_threshold = 4
+worker_threads = 8
+memtable_size_mb = 64
+
+[storage.archive]
+backend = "redb"
+path = "archive"
+blocks_path = "blocks"
+cache = 500
+
+[storage.index]
+backend = "fjall"
+path = "index"
+cache = 500
+max_journal_size = 1024
+flush_on_commit = false
+l0_threshold = 8
+worker_threads = 8
+memtable_size_mb = 128
+
+[storage.mempool]
+backend = "in_memory"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+force_protocol = 6
+
+[sync]
+pull_batch_size = 20
+max_history = 86400
+max_rollback = 25920
+sync_limit = "NoLimit"
+
+[submit]
+prune_height = 200
+
+[serve.ouroboros]
+listen_path = "dolos.socket"
+
+[serve.grpc]
+listen_address = "[::]:6540"
+permissive_cors = true
+
+[serve.minibf]
+listen_address = "[::]:6541"
+permissive_cors = true
+token_registry_url = ""
+url = ""
+max_scan_items = 3000
+
+[serve.trp]
+listen_address = "[::]:6542"
+max_optimize_rounds = 10
+permissive_cors = true
+extra_fees = 0
+
+[serve.minikupo]
+listen_address = "[::]:6543"
+permissive_cors = true
+
+[relay]
+listen_address = "[::]:6544"
+
+[retries]
+max_retries = 20
+backoff_unit_sec = 2
+backoff_factor = 2
+max_backoff_sec = 60
+dismissible = false
+
+[mithril]
+aggregator = "https://aggregator.pre-release-preview.api.mithril.network/aggregator"
+genesis_key = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d"
+ancillary_key = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d"
+
+[snapshot]
+download_url = ""
+
+[chain]
+type = "cardano"
+magic = 2
+is_testnet = true
+custom_utxos = []
+
+[logging]
+max_level = "INFO"
+include_tokio = false
+include_pallas = false
+include_grpc = false
+include_trp = false
+include_minibf = false
+include_minikupo = false
+include_otlp = false
+include_fjall = false
+
+[telemetry]
+enabled = false
+otlp_endpoint = "http://localhost:4317"
+service_name = "dolos"

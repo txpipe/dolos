@@ -14,13 +14,6 @@ pub enum UpstreamConfig {
 }
 
 impl UpstreamConfig {
-    pub fn network_magic(&self) -> Option<u64> {
-        match self {
-            Self::Peer(peer) => Some(peer.network_magic),
-            Self::Emulator(_) => None,
-        }
-    }
-
     pub fn peer_address(&self) -> Option<&str> {
         match self {
             Self::Peer(peer) => Some(&peer.peer_address),
@@ -48,13 +41,9 @@ pub struct EmulatorConfig {
 #[derive(Serialize, Deserialize)]
 pub struct PeerConfig {
     pub peer_address: String,
-    pub network_magic: u64,
-
-    #[serde(default)]
-    pub is_testnet: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub enum SyncLimit {
     #[default]
     NoLimit,
@@ -62,26 +51,59 @@ pub enum SyncLimit {
     MaxBlocks(u64),
 }
 
-#[derive(Serialize, Deserialize)]
+impl SyncLimit {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::NoLimit)
+    }
+}
+
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct SyncConfig {
-    pub pull_batch_size: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pull_batch_size: Option<usize>,
 
     #[serde(default)]
+    pub max_history: Option<u64>,
+
+    #[serde(default)]
+    pub max_rollback: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "SyncLimit::is_default")]
     pub sync_limit: SyncLimit,
 }
 
-impl Default for SyncConfig {
-    fn default() -> Self {
-        Self {
-            pull_batch_size: Some(100),
-            sync_limit: Default::default(),
-        }
+impl SyncConfig {
+    pub fn with_pull_batch_size(mut self, pull_batch_size: usize) -> Self {
+        self.pull_batch_size = Some(pull_batch_size);
+        self
     }
+
+    pub fn pull_batch_size(&self) -> usize {
+        self.pull_batch_size.unwrap_or(default_pull_batch_size())
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.pull_batch_size.is_none()
+            && self.max_history.is_none()
+            && self.max_rollback.is_none()
+            && self.sync_limit.is_default()
+    }
+}
+
+fn default_pull_batch_size() -> usize {
+    100
 }
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct SubmitConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prune_height: Option<u64>,
+}
+
+impl SubmitConfig {
+    pub fn is_default(&self) -> bool {
+        self.prune_height.is_none()
+    }
 }
 
 #[derive(Serialize, Default, PartialEq, Clone, Debug)]
@@ -143,9 +165,12 @@ pub struct RedbWalConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
-    /// Maximum number of slots to keep in the WAL.
-    #[serde(default)]
-    pub max_history: Option<u64>,
+}
+
+impl RedbWalConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none()
+    }
 }
 
 /// WAL store configuration.
@@ -172,16 +197,10 @@ impl WalStoreConfig {
         }
     }
 
-    pub fn max_history(&self) -> Option<u64> {
+    pub fn is_default(&self) -> bool {
         match self {
-            Self::Redb(cfg) => cfg.max_history,
-            Self::InMemory => None,
-        }
-    }
-
-    pub fn set_max_history(&mut self, value: Option<u64>) {
-        if let Self::Redb(cfg) = self {
-            cfg.max_history = value;
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory => false,
         }
     }
 }
@@ -203,6 +222,12 @@ pub struct RedbStateConfig {
     /// Maximum number of slots to keep before pruning.
     #[serde(default)]
     pub max_history: Option<u64>,
+}
+
+impl RedbStateConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none() && self.max_history.is_none()
+    }
 }
 
 /// Configuration for the Fjall state backend.
@@ -233,6 +258,19 @@ pub struct FjallStateConfig {
     /// Memtable size in MB before flush (default: 64).
     #[serde(default)]
     pub memtable_size_mb: Option<usize>,
+}
+
+impl FjallStateConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.cache.is_none()
+            && self.max_history.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
 }
 
 /// State store configuration.
@@ -268,6 +306,14 @@ impl StateStoreConfig {
             Self::InMemory => None,
         }
     }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Fjall(cfg) => cfg.is_default(),
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -289,9 +335,12 @@ pub struct RedbArchiveConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
-    /// Maximum number of slots to keep.
-    #[serde(default)]
-    pub max_history: Option<u64>,
+}
+
+impl RedbArchiveConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.blocks_path.is_none() && self.cache.is_none()
+    }
 }
 
 /// Archive store configuration.
@@ -320,16 +369,10 @@ impl ArchiveStoreConfig {
         }
     }
 
-    pub fn max_history(&self) -> Option<u64> {
+    pub fn is_default(&self) -> bool {
         match self {
-            Self::Redb(cfg) => cfg.max_history,
-            Self::InMemory | Self::NoOp => None,
-        }
-    }
-
-    pub fn set_max_history(&mut self, value: Option<u64>) {
-        if let Self::Redb(cfg) = self {
-            cfg.max_history = value;
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -348,6 +391,12 @@ pub struct RedbIndexConfig {
     /// Size (in MB) of memory allocated for caching.
     #[serde(default)]
     pub cache: Option<usize>,
+}
+
+impl RedbIndexConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none()
+    }
 }
 
 /// Configuration for the Fjall index backend.
@@ -377,6 +426,18 @@ pub struct FjallIndexConfig {
     pub memtable_size_mb: Option<usize>,
 }
 
+impl FjallIndexConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.cache.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
+}
+
 /// Index store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
@@ -404,6 +465,14 @@ impl IndexStoreConfig {
             Self::InMemory | Self::NoOp => None,
         }
     }
+
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::Fjall(cfg) => cfg.is_default(),
+            Self::Redb(cfg) => cfg.is_default(),
+            Self::InMemory | Self::NoOp => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -422,6 +491,12 @@ pub struct RedbMempoolConfig {
     pub cache: Option<usize>,
 }
 
+impl RedbMempoolConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none() && self.cache.is_none()
+    }
+}
+
 /// Mempool store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(tag = "backend", rename_all = "lowercase")]
@@ -431,6 +506,15 @@ pub enum MempoolStoreConfig {
     #[serde(rename = "in_memory")]
     #[default]
     InMemory,
+}
+
+impl MempoolStoreConfig {
+    pub fn is_default(&self) -> bool {
+        match self {
+            Self::InMemory => true,
+            Self::Redb(_) => false,
+        }
+    }
 }
 
 // ============================================================================
@@ -446,23 +530,23 @@ pub struct StorageConfig {
     pub path: std::path::PathBuf,
 
     /// WAL store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "WalStoreConfig::is_default")]
     pub wal: WalStoreConfig,
 
     /// State store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "StateStoreConfig::is_default")]
     pub state: StateStoreConfig,
 
     /// Archive store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "ArchiveStoreConfig::is_default")]
     pub archive: ArchiveStoreConfig,
 
     /// Index store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "IndexStoreConfig::is_default")]
     pub index: IndexStoreConfig,
 
     /// Mempool store configuration.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "MempoolStoreConfig::is_default")]
     pub mempool: MempoolStoreConfig,
 }
 
@@ -596,37 +680,150 @@ pub struct SnapshotConfig {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OuroborosConfig {
     pub listen_path: PathBuf,
-    pub magic: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GrpcConfig {
     pub listen_address: String,
     pub tls_client_ca_root: Option<PathBuf>,
-    pub permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
+}
+
+impl GrpcConfig {
+    pub fn new(listen_address: String, tls_client_ca_root: Option<PathBuf>) -> Self {
+        Self {
+            listen_address,
+            tls_client_ca_root,
+            permissive_cors: None,
+        }
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct MinibfConfig {
     pub listen_address: SocketAddr,
-    pub permissive_cors: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
     pub token_registry_url: Option<String>,
     pub url: Option<String>,
-    pub max_scan_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_scan_items: Option<u64>,
+}
+
+impl MinibfConfig {
+    pub fn new(listen_address: SocketAddr) -> Self {
+        Self {
+            listen_address,
+            permissive_cors: None,
+            token_registry_url: None,
+            url: None,
+            max_scan_items: None,
+        }
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
+
+    pub fn with_max_scan_items(mut self, max_scan_items: u64) -> Self {
+        self.max_scan_items = Some(max_scan_items);
+        self
+    }
+
+    pub fn max_scan_items(&self) -> u64 {
+        self.max_scan_items.unwrap_or(default_max_scan_items())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct MinikupoConfig {
     pub listen_address: SocketAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissive_cors: Option<bool>,
+}
+
+impl MinikupoConfig {
+    pub fn new(listen_address: SocketAddr) -> Self {
+        Self {
+            listen_address,
+            permissive_cors: None,
+        }
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct TrpConfig {
     pub listen_address: SocketAddr,
-    pub max_optimize_rounds: u8,
-    pub permissive_cors: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_optimize_rounds: Option<u8>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    permissive_cors: Option<bool>,
+
     pub extra_fees: Option<u64>,
+}
+
+impl TrpConfig {
+    pub fn new(listen_address: SocketAddr, extra_fees: Option<u64>) -> Self {
+        Self {
+            listen_address,
+            max_optimize_rounds: None,
+            permissive_cors: None,
+            extra_fees,
+        }
+    }
+
+    pub fn with_max_optimize_rounds(mut self, max_optimize_rounds: u8) -> Self {
+        self.max_optimize_rounds = Some(max_optimize_rounds);
+        self
+    }
+
+    pub fn max_optimize_rounds(&self) -> u8 {
+        self.max_optimize_rounds
+            .unwrap_or(default_max_optimize_rounds())
+    }
+
+    pub fn with_permissive_cors(mut self, permissive_cors: bool) -> Self {
+        self.permissive_cors = Some(permissive_cors);
+        self
+    }
+
+    pub fn permissive_cors(&self) -> bool {
+        self.permissive_cors.unwrap_or(true)
+    }
+}
+
+fn default_max_optimize_rounds() -> u8 {
+    10
+}
+
+fn default_max_scan_items() -> u64 {
+    3000
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -638,41 +835,69 @@ pub struct ServeConfig {
     pub trp: Option<TrpConfig>,
 }
 
+impl ServeConfig {
+    pub fn is_default(&self) -> bool {
+        self.ouroboros.is_none()
+            && self.grpc.is_none()
+            && self.minibf.is_none()
+            && self.minikupo.is_none()
+            && self.trp.is_none()
+    }
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoggingConfig {
     #[serde_as(as = "DisplayFromStr")]
+    #[serde(
+        default = "default_log_level",
+        skip_serializing_if = "is_default_log_level"
+    )]
     pub max_level: tracing::Level,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_tokio: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_pallas: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_grpc: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_trp: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_minibf: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_minikupo: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_otlp: bool,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub include_fjall: bool,
+}
+
+impl LoggingConfig {
+    pub fn is_default(&self) -> bool {
+        is_default_log_level(&self.max_level)
+            && !self.include_tokio
+            && !self.include_pallas
+            && !self.include_grpc
+            && !self.include_trp
+            && !self.include_minibf
+            && !self.include_minikupo
+            && !self.include_otlp
+            && !self.include_fjall
+    }
 }
 
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            max_level: tracing::Level::INFO,
+            max_level: default_log_level(),
             include_tokio: Default::default(),
             include_pallas: Default::default(),
             include_grpc: Default::default(),
@@ -685,6 +910,14 @@ impl Default for LoggingConfig {
     }
 }
 
+fn default_log_level() -> tracing::Level {
+    tracing::Level::INFO
+}
+
+fn is_default_log_level(level: &tracing::Level) -> bool {
+    *level == default_log_level()
+}
+
 fn default_otlp_endpoint() -> String {
     "http://localhost:4317".to_string()
 }
@@ -695,12 +928,26 @@ fn default_service_name() -> String {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TelemetryConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub enabled: bool,
-    #[serde(default = "default_otlp_endpoint")]
+    #[serde(
+        default = "default_otlp_endpoint",
+        skip_serializing_if = "is_default_otlp_endpoint"
+    )]
     pub otlp_endpoint: String,
-    #[serde(default = "default_service_name")]
+    #[serde(
+        default = "default_service_name",
+        skip_serializing_if = "is_default_service_name"
+    )]
     pub service_name: String,
+}
+
+impl TelemetryConfig {
+    pub fn is_default(&self) -> bool {
+        !self.enabled
+            && is_default_otlp_endpoint(&self.otlp_endpoint)
+            && is_default_service_name(&self.service_name)
+    }
 }
 
 impl Default for TelemetryConfig {
@@ -713,6 +960,14 @@ impl Default for TelemetryConfig {
     }
 }
 
+fn is_default_otlp_endpoint(value: &str) -> bool {
+    value == default_otlp_endpoint()
+}
+
+fn is_default_service_name(value: &str) -> bool {
+    value == default_service_name()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CustomUtxo {
     #[serde(rename = "ref")]
@@ -723,9 +978,11 @@ pub struct CustomUtxo {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct CardanoConfig {
+    pub magic: u64,
+    pub is_testnet: bool,
     pub stop_epoch: Option<Epoch>,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_utxos: Vec<CustomUtxo>,
 }
 
@@ -741,40 +998,103 @@ impl Default for ChainConfig {
     }
 }
 
+impl ChainConfig {
+    pub fn magic(&self) -> u64 {
+        match self {
+            Self::Cardano(cfg) => cfg.magic,
+        }
+    }
+
+    pub fn set_magic(&mut self, magic: u64) {
+        match self {
+            Self::Cardano(cfg) => cfg.magic = magic,
+        }
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        match self {
+            Self::Cardano(cfg) => cfg.is_testnet,
+        }
+    }
+
+    pub fn set_is_testnet(&mut self, is_testnet: bool) {
+        match self {
+            Self::Cardano(cfg) => cfg.is_testnet = is_testnet,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct RelayConfig {
     pub listen_address: String,
-    pub magic: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize, Default, Debug)]
 pub struct RetryConfig {
-    pub max_retries: usize,
-    pub backoff_unit_sec: u64,
-    pub backoff_factor: u32,
-    pub max_backoff_sec: u64,
-    pub dismissible: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_retries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backoff_unit_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backoff_factor: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_backoff_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dismissible: Option<bool>,
+}
+
+impl RetryConfig {
+    pub fn max_retries(&self) -> usize {
+        self.max_retries.unwrap_or(20)
+    }
+
+    pub fn backoff_unit_sec(&self) -> u64 {
+        self.backoff_unit_sec.unwrap_or(2)
+    }
+
+    pub fn backoff_factor(&self) -> u32 {
+        self.backoff_factor.unwrap_or(2)
+    }
+
+    pub fn max_backoff_sec(&self) -> u64 {
+        self.max_backoff_sec.unwrap_or(60)
+    }
+
+    pub fn dismissible(&self) -> bool {
+        self.dismissible.unwrap_or(false)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct RootConfig {
     pub upstream: UpstreamConfig,
+
     pub storage: StorageConfig,
+
     pub genesis: GenesisConfig,
+
+    #[serde(default, skip_serializing_if = "SyncConfig::is_default")]
     pub sync: SyncConfig,
+
+    #[serde(default, skip_serializing_if = "SubmitConfig::is_default")]
     pub submit: SubmitConfig,
+
+    #[serde(default, skip_serializing_if = "ServeConfig::is_default")]
     pub serve: ServeConfig,
+
     pub relay: Option<RelayConfig>,
+
     pub retries: Option<RetryConfig>,
+
     pub mithril: Option<MithrilConfig>,
+
     pub snapshot: Option<SnapshotConfig>,
 
-    #[serde(default)]
     pub chain: ChainConfig,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "LoggingConfig::is_default")]
     pub logging: LoggingConfig,
 
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
     pub telemetry: TelemetryConfig,
 }

@@ -1,0 +1,57 @@
+---
+title: What is Dolos
+sidebar:
+  order: 1
+---
+
+Dolos is a lightweight Cardano data node. It keeps an up-to-date copy of the ledger and serves queries through a rich API surface, using a fraction of the resources required by traditional infrastructure.
+
+Written in Rust, Dolos connects directly to the Cardano network — no full node required. It syncs the chain, indexes the data, and exposes everything dApps, wallets, and explorers need. Full coverage from Byron through Conway.
+
+## Low resource footprint
+
+Dolos is optimized for minimal CPU, memory, and storage consumption. It is designed to be an efficient gateway to the Cardano blockchain for teams that need reliable access to chain data without the overhead of traditional infrastructure. Combined with configurable storage modes, operators can tune resource usage to match their workload — from a minimal ledger-only deployment to a full archive — keeping operational costs predictable and deployments lean.
+
+## Rich API surface
+
+Dolos provides multiple query interfaces so developers can use the tools they already know. Mini-Blockfrost offers a Blockfrost-compatible HTTP API where existing integrations work out of the box. UTxO-RPC exposes chain data over gRPC. Mini-Kupo provides pattern-matching UTxO queries. TRP exposes the Transaction Resolver Protocol for resolving Tx3 templates into concrete transactions and submitting them. An Ouroboros node-to-client unix socket provides compatibility with `cardano-cli`, Ogmios, and other existing tooling — removing the need for a full node in established workflows.
+
+## High query throughput
+
+Dolos is built for read-heavy workloads. The API layer runs on async I/O and queries are served from an LSM-based storage engine tuned for fast lookups. The result is consistently high throughput across all supported interfaces, making Dolos suitable as the data backend for high-traffic dApps, wallets, and explorers.
+
+## Comprehensive Cardano support
+
+Dolos indexes and serves the full breadth of Cardano ledger primitives. The current UTxO set is always available, along with complete historical records of staking rewards and stake distribution snapshots across epochs. Pool registration, retirement, metadata, and delegator tracking are all indexed, as are native assets and NFTs with their on-chain metadata. Scripts and datums are tracked and queryable. With Conway era support, Dolos also tracks governance data including delegation representatives (DReps) and proposals.
+
+## Flexible storage modes
+
+Dolos adapts to your use case through three storage modes:
+
+**Ledger-only** keeps just the current chain state — UTxO set, stake distribution, protocol parameters, pool registry, reference scripts — at a fraction of the disk space required for full history. Use this when you only need the tip of the chain.
+
+**Sliding history** retains a configurable window of recent history (days or weeks). Clients can query transactions, blocks, mints, rewards, and delegations within that window. This covers the needs of most dApps without the cost of a full archive.
+
+**Full archive** stores the complete history of the chain, including historical rewards, stake distributions, pool metadata, and asset registries.
+
+## Smart mempool
+
+Dolos includes a mempool that performs phase-1 and phase-2 validations locally before submission. In-flight UTxOs are overlaid during validation, enabling tx-chaining — submitting dependent transactions before previous ones are confirmed on-chain. The mempool tracks transaction states through their full lifecycle: pending, inflight, finalized, and confirmed.
+
+## Simple bootstrapping
+
+Dolos supports two bootstrapping mechanisms. Mithril bootstrapping can initialize a mainnet Dolos node in under 20 hours by importing a certified Mithril snapshot. For even faster setup, Dolos snapshots — portable exports of an already-synced node — can be loaded in minutes.
+
+Prebuilt binaries are available for macOS (Apple Silicon), Linux (ARM64 and x64), and Windows x64, alongside Docker images.
+
+## Ready for operations
+
+Dolos is designed for day-2 operations. It integrates with OpenTelemetry (OTLP) for distributed tracing and monitoring, giving operators visibility into sync state, query performance, and mempool activity. Multi-platform binaries and Docker images make deployment straightforward across environments.
+
+## Trust model
+
+Dolos is a data node, not a consensus node. It connects to the Cardano network via Ouroboros node-to-node mini-protocols and relies on an honest upstream peer for block data. This is the tradeoff that enables its low resource footprint — it prioritizes efficient data access over independent block validation.
+
+## Not a block producer
+
+Dolos does not support block production and never will. It is purpose-built as a backend for dApps, wallets, and explorers — not as a replacement for a stake pool or consensus node. By excluding block production from its scope, Dolos stays focused on what it does best: serving chain data efficiently. This constraint is by design, and it is what allows Dolos to remain lightweight, fast, and simple to operate.

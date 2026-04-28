@@ -10,6 +10,12 @@ mod chainsync;
 mod statequery;
 mod utils;
 
+#[derive(Clone)]
+pub struct DriverConfig {
+    pub service: OuroborosConfig,
+    pub network_magic: u64,
+}
+
 // TODO: fix tests
 //#[cfg(test)]
 //mod tests;
@@ -51,16 +57,17 @@ async fn handle_session<D: Domain, C: CancelToken>(
 
 async fn accept_client_connections<D: Domain, C: CancelToken>(
     domain: D,
-    config: &OuroborosConfig,
+    config: &DriverConfig,
     tasks: &mut TaskTracker,
     cancel: C,
 ) -> Result<(), ServeError> {
-    let listener = UnixListener::bind(&config.listen_path).map_err(ServeError::BindError)?;
+    let listener =
+        UnixListener::bind(&config.service.listen_path).map_err(ServeError::BindError)?;
 
-    info!(addr = %config.listen_path.to_string_lossy(), "Ouroboros socket is listening for clients");
+    info!(addr = %config.service.listen_path.to_string_lossy(), "Ouroboros socket is listening for clients");
 
     loop {
-        let connection = NodeServer::accept(&listener, config.magic).await;
+        let connection = NodeServer::accept(&listener, config.network_magic).await;
 
         match connection {
             Ok(connection) => {
@@ -83,14 +90,15 @@ async fn accept_client_connections<D: Domain, C: CancelToken>(
 pub struct Driver;
 
 impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
-    type Config = OuroborosConfig;
+    type Config = DriverConfig;
 
     #[instrument(skip_all)]
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         // preventive removal of socket file in case of unclean shutdown
-        if std::fs::metadata(&cfg.listen_path).is_ok() {
+        if std::fs::metadata(&cfg.service.listen_path).is_ok() {
             debug!("preventive removal of socket file");
-            std::fs::remove_file(&cfg.listen_path).map_err(|e| ServeError::Internal(e.into()))?;
+            std::fs::remove_file(&cfg.service.listen_path)
+                .map_err(|e| ServeError::Internal(e.into()))?;
         }
 
         let mut tasks = TaskTracker::new();
@@ -106,7 +114,11 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
 
         // removing socket file so that it's free for next run
         debug!("removing socket file");
-        std::fs::remove_file(&cfg.listen_path).map_err(|e| ServeError::Internal(e.into()))?;
+        if let Err(error) = std::fs::remove_file(&cfg.service.listen_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(ServeError::Internal(error.into()));
+            }
+        }
 
         // notify the tracker that we're done receiving new tasks. Without this explicit
         // close, the wait will block forever.

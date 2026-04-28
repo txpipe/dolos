@@ -199,10 +199,7 @@ impl BoundaryWork {
                     if total > 0 {
                         // Create delta to add MIR to account rewards
                         self.deltas
-                            .add_for_entity(crate::ewrap::rewards::AssignRewards::new(
-                                account_key.clone(),
-                                total,
-                            ));
+                            .add_for_entity(crate::AssignRewards::new(account_key.clone(), total));
 
                         tracing::debug!(
                             credential = ?credential,
@@ -238,7 +235,7 @@ impl BoundaryWork {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             effective_treasury_mirs = self.effective_treasury_mirs,
             effective_reserve_mirs = self.effective_reserve_mirs,
             invalid_treasury_mirs = self.invalid_treasury_mirs,
@@ -383,7 +380,7 @@ impl BoundaryWork {
         let spendable_count = pending.values().filter(|r| r.is_spendable()).count();
         let unspendable_count = pending.len() - spendable_count;
 
-        tracing::info!(
+        tracing::debug!(
             pending_count = pending.len(),
             %pending_total,
             %spendable_count,

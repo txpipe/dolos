@@ -1,0 +1,45 @@
+---
+title: Operation Modes
+sidebar:
+  order: 1
+---
+
+_Dolos_ has many operation modes dependending on your requirements. Choose the one that fits your need.
+
+## `daemon` mode
+
+This is the normal operation mode. When running in this mode, Dolos will perform all operations as specified in the configuration file.
+
+To start _Dolos_ in `daemon` mode, use the following command:
+
+```sh
+dolos daemon
+```
+
+## `sync` mode
+
+When running in this mode, Dolos will focus on a single task: synchronizing its state from the upstream node.
+
+To start _Dolos_ in `sync` mode, use the following command:
+
+```sh
+dolos sync
+```
+
+## `serve` mode
+
+When running in this mode, Dolos will focus on a single task: serving data through the configured API endpoints.
+
+To start _Dolos_ in `serve` mode, use the following command:
+
+```sh
+dolos serve
+```
+
+## Summary of Modes
+
+| mode   | description                    |
+| ------ | ------------------------------ |
+| daemon | sync + serve (all-in-one)         |
+| sync   | sync from upstream peer only   |
+| serve  | serve data through APIs only   |

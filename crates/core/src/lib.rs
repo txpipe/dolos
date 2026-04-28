@@ -82,6 +82,18 @@ pub struct UndoBlockData {
     pub index_delta: IndexDelta,
     pub tx_hashes: Vec<TxHash>,
 }
+
+/// Data needed to catch up stores from a WAL entry during recovery.
+///
+/// Chain-specific implementations compute this from the raw block CBOR
+/// and the resolved inputs stored in the WAL. Used during bootstrap to
+/// replay blocks that are in the WAL but not yet applied to indexes.
+pub struct CatchUpBlockData {
+    pub utxo_delta: UtxoSetDelta,
+    pub index_delta: IndexDelta,
+    pub tx_hashes: Vec<TxHash>,
+}
+
 pub type OutputIdx = u64;
 pub type UtxoBody = (u16, Cbor);
 pub type ChainTip = pallas::network::miniprotocols::chainsync::Tip;
@@ -504,6 +516,18 @@ pub trait ChainLogic: Sized + Send + Sync {
         point: ChainPoint,
     ) -> Result<UndoBlockData, ChainError>;
 
+    /// Compute catch-up data from a WAL entry for recovery.
+    ///
+    /// Given the raw block CBOR and the resolved inputs stored in the WAL,
+    /// computes the UTxO delta, index delta, and transaction hashes needed
+    /// to replay the block's effects. Used during bootstrap to catch up
+    /// stores that are behind the state store.
+    fn compute_catchup(
+        block: &Cbor,
+        inputs: &HashMap<TxoRef, Arc<EraCbor>>,
+        point: ChainPoint,
+    ) -> Result<CatchUpBlockData, ChainError>;
+
     // TODO: remove from the interface - this is Cardano-specific
     fn decode_utxo(&self, utxo: Arc<EraCbor>) -> Result<Self::Utxo, ChainError>;
 
@@ -545,14 +569,17 @@ pub enum DomainError {
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 
-    #[error("inconsistent state: {0}")]
-    InconsistentState(String),
+    #[error("inconsistent state")]
+    InconsistentState {
+        wal: Option<ChainPoint>,
+        state: Option<ChainPoint>,
+    },
+
+    #[error("{0}")]
+    Internal(String),
 
     #[error("wal is empty")]
     WalIsEmpty,
-
-    #[error("wal is behind state: {0}")]
-    WalIsBehindState(BlockSlot, BlockSlot),
 
     #[error("forced stop epoch reached")]
     StopEpochReached,
@@ -593,6 +620,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type TipSubscription: TipSubscription;
 
     fn storage_config(&self) -> &config::StorageConfig;
+    fn sync_config(&self) -> &config::SyncConfig;
     fn genesis(&self) -> Arc<Genesis>;
 
     fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain>;
@@ -620,7 +648,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         let mut archive_pruned = true;
 
-        if let Some(max_slots) = self.storage_config().archive.max_history() {
+        if let Some(max_slots) = self.sync_config().max_history {
             info!(max_slots, "pruning archive for excess history");
 
             archive_pruned = self
@@ -630,7 +658,7 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         let mut wal_pruned = true;
 
-        if let Some(max_slots) = self.storage_config().wal.max_history() {
+        if let Some(max_slots) = self.sync_config().max_rollback {
             info!(max_slots, "pruning wal for excess history");
 
             wal_pruned = self

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::eras::ChainSummary;
 use crate::{hacks, Lovelace};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MultiEraPoolRegistration {
     pub operator: Hash<28>,
     pub vrf_keyhash: Hash<32>,
@@ -80,6 +80,32 @@ pub fn cert_as_pool_registration(cert: &MultiEraCert) -> Option<MultiEraPoolRegi
                 pool_owners: Vec::from_iter(pool_owners.iter().cloned()),
                 relays: relays.clone(),
                 pool_metadata: pool_metadata.clone(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiEraPoolRetirement {
+    pub operator: Hash<28>,
+    pub epoch: Epoch,
+}
+
+pub fn cert_as_pool_retirement(cert: &MultiEraCert) -> Option<MultiEraPoolRetirement> {
+    match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::PoolRetirement(operator, epoch) => Some(MultiEraPoolRetirement {
+                operator: *operator,
+                epoch: *epoch,
+            }),
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::PoolRetirement(operator, epoch) => Some(MultiEraPoolRetirement {
+                operator: *operator,
+                epoch: *epoch,
             }),
             _ => None,
         },
@@ -413,6 +439,33 @@ pub fn tx_treasury_donation(tx: &MultiEraTx) -> Option<Lovelace> {
         MultiEraTx::Babbage(..) => None,
         MultiEraTx::Byron(..) => None,
         _ => panic!("unexpected tx era"),
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use crate::model::pools::testing::any_pool_params;
+    use crate::model::testing as root;
+    use proptest::prelude::*;
+
+    prop_compose! {
+        pub fn any_multi_era_pool_registration()(
+            operator in root::any_hash_28(),
+            params in any_pool_params(),
+        ) -> MultiEraPoolRegistration {
+            MultiEraPoolRegistration {
+                operator,
+                vrf_keyhash: params.vrf_keyhash,
+                pledge: params.pledge,
+                cost: params.cost,
+                margin: params.margin,
+                reward_account: params.reward_account,
+                pool_owners: params.pool_owners,
+                relays: params.relays,
+                pool_metadata: params.pool_metadata,
+            }
+        }
     }
 }
 

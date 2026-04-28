@@ -1,10 +1,9 @@
 <div align="center">
-  <img src="docs/assets/logo.png" alt="Dolos Logo" width="200">
+  <img src="docs/assets/logo.png" alt="Dolos Logo" width="400">
   <p><strong>A Cardano Data Node</strong></p>
   
   <a href="https://github.com/txpipe/dolos/blob/main/LICENSE"><img src="https://img.shields.io/github/license/txpipe/dolos?style=for-the-badge&color=blue" alt="License: Apache-2.0"></a>
   <a href="https://github.com/txpipe/dolos/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/txpipe/dolos/ci.yml?style=for-the-badge&label=CI" alt="CI Status"></a>
-  <a href="https://crates.io/crates/dolos"><img src="https://img.shields.io/crates/v/dolos?style=for-the-badge&color=orange" alt="Crates.io"></a>
   <a href="https://docs.txpipe.io/dolos"><img src="https://img.shields.io/badge/docs-docs.txpipe.io/dolos-blue?style=for-the-badge" alt="Documentation"></a>
   
   <br>

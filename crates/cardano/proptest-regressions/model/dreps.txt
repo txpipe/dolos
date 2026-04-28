@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2a9589280ae465bd22c5597267a6b377623ba915dae942fa203924e25b9c31e3 # shrinks to entity = None, delta = DRepActivity { drep: Key(Hash<28>("00000000000000000000000000000000000000000000000000000000")), slot: 0, previous_last_active_slot: None }
+cc f766775242f61b2c2c5c0b4753d1a4074cd5880645b9d5ead8224436d8558b75 # shrinks to entity = None, delta = DRepRegistration { drep: Key(Hash<28>("00000000000000000000000000000000000000000000000000000000")), slot: 0, txorder: 0, deposit: 0, anchor: None, prev_deposit: None }
+cc 4fae7133bc21d21adaff84cf0025616ae990214e07e49ff18096313bd07ece48 # shrinks to entity = DRepState { registered_at: None, voting_power: 0, last_active_slot: None, unregistered_at: None, expired: false, deposit: 0, identifier: Key(Hash<28>("00000000000000000000000000000000000000000000000000000000")) }, delta = DRepExpiration { drep_id: EntityKey([34, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]) }
+cc c46b3fe7c7dd19112070eaa20a6cebad8a80786d009202b878d6f3c7c8e22e8f # shrinks to entity = DRepState { registered_at: None, voting_power: 0, last_active_slot: None, unregistered_at: None, expired: false, deposit: 0, identifier: Key(Hash<28>("00000000000000000000000000000000000000000000000000000000")) }, delta = DRepUnRegistration { drep: Key(Hash<28>("00000000000000000000000000000000000000000000000000000000")), slot: 0, txorder: 0, prev_voting_power: None, prev_deposit: None, prev_unregistered_at: None }

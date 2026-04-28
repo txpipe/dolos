@@ -2,6 +2,103 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.3] - 2026-04-04
+
+### 🚀 Features
+
+- *(cli)* Allow skipping sanitization during export (#952)
+
+### 🐛 Bug Fixes
+
+- *(sync)* Restart intersect on header violation (#954)
+- *(minibf)* Avoid using timing-dependant logs for active stake data (#956)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update cargo dist version and scripts (#955)
+- Remove sneaky mac files
+- Update tx3 to v0.16.4 (#957)
+
+## [1.0.2] - 2026-03-19
+
+### 🐛 Bug Fixes
+
+- *(cli)* Reset wal after any kind of bootstrap (#950)
+- *(cli)* Generate deterministic snapshots by removing file metadata (#951)
+
+### Release
+
+- V1.0.2
+
+## [1.0.1] - 2026-03-18
+
+### 🐛 Bug Fixes
+
+- Catch-up stores during init (#947)
+- Avoid slot-only chain intersection (#948)
+- *(cli)* Avoid bootstrap checks when trying to reset-wal (#949)
+
+### 📚 Documentation
+
+- Fix broken doc links (#945)
+
+### Release
+
+- V1.0.1
+
+## [1.0.0] - 2026-03-13
+
+### 🚀 Features
+
+- Introduce mini-kupo api (#898)
+- *(cli)* Introduce doctor check command
+- *(cli)* Improve init flow with better UX (#942)
+
+### 🐛 Bug Fixes
+
+- *(minikupo)* Nest endpoints under `/v1` prefix for compatibility (#937)
+- Don't fail trying to remove non-existing socket file
+- *(storage)* Set quick repair for redb state store (#943)
+
+### 🚜 Refactor
+
+- *(cardano)* Remove track config in favor of simplicity (#933)
+- Remove explicit defaults from storage configs (#935)
+- Use custom tracing target for axum requests (#936)
+- *(storage)* Split index tags keyspace to follow access pattern (#908)
+- *(config)* Turn pull_batch_size into implicit default
+- Turn max_history into a sync config
+- Turn WAL max rollback into a sync config
+- Skip serializing default storage config
+- Move magic field to the chain config
+- Use implicit defaults for logging config
+- Use implicit defaults for telemetry config
+- Treat many defaults as a config concern
+- Skip serializing sync and serve configs if default
+
+### 📚 Documentation
+
+- Improve readme ahead of v1 (#932)
+- Overhaul documentation ahead of v1 (#944)
+- Improve readme header
+
+### 🧪 Testing
+
+- Improve e2e test with latest config changes
+
+### ⚙️ Miscellaneous Tasks
+
+- *(trp)* Update tx3 deps to v0.16.2 (#931)
+- *(fjall)* Bump to fjall 3.1.0 and remove patch (#934)
+- Remove data folder from example
+- *(trp)* Bump tx3 to v0.16.3 (#938)
+- Apply config changes review feedback
+- Improve log messages severity across the board (#941)
+
+### Release
+
+- V1.0.0
+
 ## [1.0.0-rc.12] - 2026-03-05
 
 ### 🚀 Features
@@ -24,6 +121,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - *(trp)* Update tx3 deps to v0.16.1 (#928)
+
+### Release
+
+- V1.0.0-rc.12
 
 ## [1.0.0-rc.11] - 2026-02-27
 

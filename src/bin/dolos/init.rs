@@ -2,12 +2,13 @@ use clap::Parser;
 use dolos_cardano::{include, mutable_slots};
 use dolos_core::{
     config::{
-        GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig, MithrilConfig, PeerConfig,
-        RelayConfig, RootConfig, StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
+        CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
+        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion,
+        TrpConfig, UpstreamConfig,
     },
     Genesis,
 };
-use inquire::{Confirm, Select, Text};
+use inquire::{Confirm, MultiSelect, Select, Text};
 use miette::{miette, Context as _, IntoDiagnostic};
 use std::{
     fmt::Display,
@@ -40,6 +41,47 @@ impl KnownNetwork {
             2 => Some(KnownNetwork::CardanoPreview),
             _ => None,
         }
+    }
+
+    pub fn magic(&self) -> u64 {
+        match self {
+            KnownNetwork::CardanoMainnet => 764824073,
+            KnownNetwork::CardanoPreProd => 1,
+            KnownNetwork::CardanoPreview => 2,
+        }
+    }
+
+    pub fn is_testnet(&self) -> bool {
+        !matches!(self, KnownNetwork::CardanoMainnet)
+    }
+
+    pub fn cardano_foundation_peer_address(&self) -> &'static str {
+        match self {
+            KnownNetwork::CardanoMainnet => "backbone.mainnet.cardanofoundation.org:3001",
+            KnownNetwork::CardanoPreProd => "preprod-node.world.dev.cardano.org:30000",
+            KnownNetwork::CardanoPreview => "preview-node.world.dev.cardano.org:30002",
+        }
+    }
+
+    pub fn demeter_peer_address(&self) -> &'static str {
+        match self {
+            KnownNetwork::CardanoMainnet => "relay.cnode-m1.demeter.run:3000",
+            KnownNetwork::CardanoPreProd => "relay.cnode-m1.demeter.run:3001",
+            KnownNetwork::CardanoPreview => "relay.cnode-m1.demeter.run:3002",
+        }
+    }
+
+    pub fn remote_peer_options(&self) -> Vec<RemotePeerPreset> {
+        vec![
+            RemotePeerPreset {
+                name: "Demeter Relay",
+                address: self.demeter_peer_address(),
+            },
+            RemotePeerPreset {
+                name: "CF Relay",
+                address: self.cardano_foundation_peer_address(),
+            },
+        ]
     }
 
     pub fn load_included_genesis(&self) -> Genesis {
@@ -87,23 +129,19 @@ impl Display for KnownNetwork {
 
 impl From<&KnownNetwork> for PeerConfig {
     fn from(value: &KnownNetwork) -> Self {
-        match value {
-            KnownNetwork::CardanoMainnet => PeerConfig {
-                peer_address: "backbone.mainnet.cardanofoundation.org:3001".into(),
-                network_magic: 764824073,
-                is_testnet: false,
-            },
-            KnownNetwork::CardanoPreProd => PeerConfig {
-                peer_address: "preprod-node.world.dev.cardano.org:30000".into(),
-                network_magic: 1,
-                is_testnet: true,
-            },
-            KnownNetwork::CardanoPreview => PeerConfig {
-                peer_address: "preview-node.world.dev.cardano.org:30002".into(),
-                network_magic: 2,
-                is_testnet: true,
-            },
+        PeerConfig {
+            peer_address: value.demeter_peer_address().into(),
         }
+    }
+}
+
+impl From<&KnownNetwork> for ChainConfig {
+    fn from(value: &KnownNetwork) -> Self {
+        ChainConfig::Cardano(CardanoConfig {
+            magic: value.magic(),
+            is_testnet: value.is_testnet(),
+            ..Default::default()
+        })
     }
 }
 
@@ -202,6 +240,68 @@ impl From<Option<u64>> for HistoryPrunningOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AvailableApi {
+    UtxoRpc,
+    Minibf,
+    Minikupo,
+    Trp,
+    #[cfg(unix)]
+    Ouroboros,
+}
+
+impl Display for AvailableApi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UtxoRpc => f.write_str("UTxO RPC (gRPC): Performant API for UTxO blockchains"),
+            Self::Minibf => f.write_str("Mini-Blockfrost (HTTP): Blockfrost-compatible API"),
+            Self::Minikupo => f.write_str("Mini-Kupo (HTTP): Kupo-compatible API"),
+            Self::Trp => f.write_str("TRP (JSON-RPC): Tx3 transaction resolver protocol"),
+            #[cfg(unix)]
+            Self::Ouroboros => {
+                f.write_str("Ouroboros (unix socket): node-to-client compatible API")
+            }
+        }
+    }
+}
+
+impl AvailableApi {
+    #[cfg(unix)]
+    const VARIANTS: &'static [Self] = &[
+        Self::UtxoRpc,
+        Self::Minibf,
+        Self::Minikupo,
+        Self::Trp,
+        Self::Ouroboros,
+    ];
+
+    #[cfg(windows)]
+    const VARIANTS: &'static [Self] = &[Self::UtxoRpc, Self::Minibf, Self::Minikupo, Self::Trp];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemotePeerPreset {
+    name: &'static str,
+    address: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemotePeerChoice {
+    Preset(RemotePeerPreset),
+    Other,
+}
+
+impl Display for RemotePeerChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemotePeerChoice::Preset(preset) => {
+                write!(f, "{} ({})", preset.name, preset.address)
+            }
+            RemotePeerChoice::Other => f.write_str("Other"),
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 pub struct Args {
     /// Use one of the well-known networks
@@ -212,7 +312,7 @@ pub struct Args {
     #[arg(long)]
     remote_peer: Option<String>,
 
-    /// How much history of the chain to keep in disk
+    /// How much history of the chain to keep on disk
     #[arg(long)]
     max_chain_history: Option<u64>,
 
@@ -247,7 +347,7 @@ struct ConfigEditor(RootConfig, IncludeGenesisFiles);
 
 impl Default for ConfigEditor {
     fn default() -> Self {
-        Self(
+        let editor = Self(
             RootConfig {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
@@ -264,10 +364,21 @@ impl Default for ConfigEditor {
                 retries: Default::default(),
                 logging: Default::default(),
                 telemetry: Default::default(),
-                chain: Default::default(),
+                chain: ChainConfig::from(&KnownNetwork::CardanoMainnet),
             },
             None,
-        )
+        );
+
+        let editor = editor
+            .apply_serve_grpc(Some(true))
+            .apply_serve_minibf(Some(true))
+            .apply_serve_minikupo(Some(true))
+            .apply_serve_trp(Some(true));
+
+        #[cfg(unix)]
+        let editor = editor.apply_serve_ouroboros(Some(true));
+
+        editor
     }
 }
 
@@ -276,15 +387,15 @@ impl ConfigEditor {
         if let Some(network) = network {
             self.0.genesis = network.into();
             self.0.upstream = network.into();
+            self.0.chain = network.into();
             self.0.mithril = Some(network.into());
             self.1 = Some(network.clone());
 
-            // Add max wal history for network from Genesis.
-            let genesis = network.load_included_genesis();
-            self.0
-                .storage
-                .wal
-                .set_max_history(Some(mutable_slots(&genesis)));
+            // Add max rollback window for network from Genesis.
+            if self.0.sync.max_rollback.is_none() {
+                let genesis = network.load_included_genesis();
+                self.0.sync.max_rollback = Some(mutable_slots(&genesis));
+            }
         }
 
         self
@@ -303,7 +414,7 @@ impl ConfigEditor {
     }
 
     fn apply_history_pruning(mut self, value: HistoryPrunningOptions) -> Self {
-        self.0.storage.archive.set_max_history(value.into());
+        self.0.sync.max_history = value.into();
 
         self
     }
@@ -311,12 +422,7 @@ impl ConfigEditor {
     fn apply_serve_grpc(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.grpc = GrpcConfig {
-                    listen_address: "[::]:50051".into(),
-                    tls_client_ca_root: None,
-                    permissive_cors: Some(true),
-                }
-                .into();
+                self.0.serve.grpc = GrpcConfig::new("[::]:50051".into(), None).into();
             } else {
                 self.0.serve.grpc = None;
             }
@@ -328,14 +434,7 @@ impl ConfigEditor {
     fn apply_serve_minibf(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.minibf = MinibfConfig {
-                    listen_address: "[::]:3000".parse().unwrap(),
-                    permissive_cors: Some(true),
-                    token_registry_url: None,
-                    url: None,
-                    max_scan_items: None,
-                }
-                .into();
+                self.0.serve.minibf = MinibfConfig::new("[::]:3000".parse().unwrap()).into();
             } else {
                 self.0.serve.minibf = None;
             }
@@ -347,11 +446,7 @@ impl ConfigEditor {
     fn apply_serve_minikupo(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.minikupo = MinikupoConfig {
-                    listen_address: "[::]:1442".parse().unwrap(),
-                    permissive_cors: Some(true),
-                }
-                .into();
+                self.0.serve.minikupo = MinikupoConfig::new("[::]:1442".parse().unwrap()).into();
             } else {
                 self.0.serve.minikupo = None;
             }
@@ -363,13 +458,7 @@ impl ConfigEditor {
     fn apply_serve_trp(mut self, value: Option<bool>) -> Self {
         if let Some(value) = value {
             if value {
-                self.0.serve.trp = TrpConfig {
-                    listen_address: "[::]:8000".parse().unwrap(),
-                    max_optimize_rounds: 10,
-                    permissive_cors: Some(true),
-                    extra_fees: None,
-                }
-                .into();
+                self.0.serve.trp = TrpConfig::new("[::]:8164".parse().unwrap(), None).into();
             } else {
                 self.0.serve.trp = None;
             }
@@ -386,7 +475,6 @@ impl ConfigEditor {
 
                 self.0.serve.ouroboros = OuroborosConfig {
                     listen_path: "dolos.socket".into(),
-                    magic: self.0.upstream.network_magic().unwrap_or_default(),
                 }
                 .into();
             } else {
@@ -408,7 +496,6 @@ impl ConfigEditor {
             if value {
                 self.0.relay = RelayConfig {
                     listen_address: "[::]:30031".into(),
-                    magic: self.0.upstream.network_magic().unwrap_or_default(),
                 }
                 .into();
             } else {
@@ -435,7 +522,7 @@ impl ConfigEditor {
         if self.0.storage.version != StorageVersion::V3 {
             self.0.storage.version = StorageVersion::V3;
 
-            let delete = Confirm::new("Your storage is incompatible with current version. Do you want to delete data and bootstrap?")
+            let delete = Confirm::new("Your storage is incompatible with the current version. Do you want to delete data and bootstrap?")
                 .with_default(true)
                 .prompt()
                 .into_diagnostic()
@@ -454,11 +541,7 @@ impl ConfigEditor {
     fn prompt_known_network(self) -> miette::Result<Self> {
         let options = KnownNetwork::VARIANTS.to_vec();
 
-        let selected = self
-            .0
-            .upstream
-            .network_magic()
-            .and_then(KnownNetwork::from_magic);
+        let selected = KnownNetwork::from_magic(self.0.chain.magic());
 
         let starting_cursor = selected
             .and_then(|x| options.iter().position(|y| y.eq(&x)))
@@ -475,7 +558,7 @@ impl ConfigEditor {
 
     fn prompt_include_genesis(mut self) -> miette::Result<Self> {
         if let Some(network) = self.1 {
-            let value = Confirm::new("Do you want to us to provide the genesis files?")
+            let value = Confirm::new("Do you want us to provide the genesis files?")
                 .with_default(true)
                 .prompt()
                 .into_diagnostic()
@@ -488,71 +571,93 @@ impl ConfigEditor {
     }
 
     fn prompt_remote_peer(self) -> miette::Result<Self> {
-        let value = Text::new("Which remote peer (relay) do you want to use?")
-            .with_default(self.0.upstream.peer_address().unwrap_or_default())
+        let current = self.0.upstream.peer_address().unwrap_or_default();
+
+        let Some(network) = KnownNetwork::from_magic(self.0.chain.magic()) else {
+            let value = Text::new("Which remote peer (relay) do you want to use?")
+                .with_default(current)
+                .prompt()
+                .into_diagnostic()
+                .context("asking for remote peer")?;
+
+            return Ok(self.apply_remote_peer(Some(&value)));
+        };
+
+        let mut options: Vec<_> = network
+            .remote_peer_options()
+            .into_iter()
+            .map(RemotePeerChoice::Preset)
+            .collect();
+
+        options.push(RemotePeerChoice::Other);
+
+        let starting_cursor = options
+            .iter()
+            .position(
+                |x| matches!(x, RemotePeerChoice::Preset(preset) if preset.address == current),
+            )
+            .unwrap_or(options.len() - 1);
+
+        let selected = Select::new("Which remote peer (relay) do you want to use?", options)
+            .with_starting_cursor(starting_cursor)
             .prompt()
             .into_diagnostic()
             .context("asking for remote peer")?;
 
+        let value = match selected {
+            RemotePeerChoice::Preset(preset) => preset.address.to_string(),
+            RemotePeerChoice::Other => Text::new("Custom remote peer (relay address host:port):")
+                .with_default(current)
+                .with_help_message("Format: host:port")
+                .prompt()
+                .into_diagnostic()
+                .context("asking for custom remote peer")?,
+        };
+
         Ok(self.apply_remote_peer(Some(&value)))
     }
 
-    fn prompt_serve_grpc(self) -> miette::Result<Self> {
-        let value = Confirm::new("Do you want to serve clients via gRPC?")
-            .with_default(self.0.serve.grpc.is_some())
-            .prompt()
-            .into_diagnostic()
-            .context("asking for serve grpc")?;
-
-        Ok(self.apply_serve_grpc(Some(value)))
+    fn is_api_enabled(&self, api: AvailableApi) -> bool {
+        match api {
+            AvailableApi::UtxoRpc => self.0.serve.grpc.is_some(),
+            AvailableApi::Minibf => self.0.serve.minibf.is_some(),
+            AvailableApi::Minikupo => self.0.serve.minikupo.is_some(),
+            AvailableApi::Trp => self.0.serve.trp.is_some(),
+            #[cfg(unix)]
+            AvailableApi::Ouroboros => self.0.serve.ouroboros.is_some(),
+        }
     }
 
-    fn prompt_serve_minibf(self) -> miette::Result<Self> {
-        let value =
-            Confirm::new("Do you want to serve clients via a Blockfrost-like HTTP endpoint?")
-                .with_default(self.0.serve.minibf.is_some())
-                .prompt()
-                .into_diagnostic()
-                .context("asking for serve http")?;
-
-        Ok(self.apply_serve_minibf(Some(value)))
+    fn default_api_indexes(&self) -> Vec<usize> {
+        AvailableApi::VARIANTS
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(idx, api)| self.is_api_enabled(api).then_some(idx))
+            .collect()
     }
 
-    fn prompt_serve_minikupo(self) -> miette::Result<Self> {
-        let value = Confirm::new("Do you want to serve clients via a Kupo-like HTTP endpoint?")
-            .with_default(self.0.serve.minikupo.is_some())
-            .prompt()
-            .into_diagnostic()
-            .context("asking for serve minikupo")?;
+    fn prompt_serve_apis(self) -> miette::Result<Self> {
+        let value = MultiSelect::new(
+            "Which APIs do you want to enable?",
+            AvailableApi::VARIANTS.to_vec(),
+        )
+        .with_default(&self.default_api_indexes())
+        .without_filtering()
+        .prompt()
+        .into_diagnostic()
+        .context("asking for APIs to serve")?;
 
-        Ok(self.apply_serve_minikupo(Some(value)))
-    }
+        let config = self
+            .apply_serve_grpc(Some(value.contains(&AvailableApi::UtxoRpc)))
+            .apply_serve_minibf(Some(value.contains(&AvailableApi::Minibf)))
+            .apply_serve_minikupo(Some(value.contains(&AvailableApi::Minikupo)))
+            .apply_serve_trp(Some(value.contains(&AvailableApi::Trp)));
 
-    fn prompt_serve_trp(self) -> miette::Result<Self> {
-        let value = Confirm::new("Do you want to serve clients a TRP endpoint?")
-            .with_default(self.0.serve.trp.is_some())
-            .prompt()
-            .into_diagnostic()
-            .context("asking for serve trp")?;
+        #[cfg(unix)]
+        let config = config.apply_serve_ouroboros(Some(value.contains(&AvailableApi::Ouroboros)));
 
-        Ok(self.apply_serve_trp(Some(value)))
-    }
-
-    #[cfg(unix)]
-    fn prompt_serve_ouroboros(self) -> miette::Result<Self> {
-        let value = Confirm::new("Do you want to serve clients via Ouroboros (aka: node socket)?")
-            .with_default(self.0.serve.ouroboros.is_some())
-            .prompt()
-            .into_diagnostic()
-            .context("asking for serve ouroboros")?;
-
-        Ok(self.apply_serve_ouroboros(Some(value)))
-    }
-
-    #[cfg(windows)]
-    fn prompt_serve_ouroboros(self) -> miette::Result<Self> {
-        // skip for windows
-        Ok(self)
+        Ok(config)
     }
 
     fn prompt_enable_relay(self) -> miette::Result<Self> {
@@ -567,7 +672,7 @@ impl ConfigEditor {
 
     fn prompt_history_pruning(self) -> miette::Result<Self> {
         let value = Select::new(
-            "How much history of the chain do you want to keep in disk?",
+            "How much history of the chain do you want to keep on disk?",
             HistoryPrunningOptions::VARIANTS.to_vec(),
         )
         .prompt()
@@ -584,11 +689,7 @@ impl ConfigEditor {
             .prompt_include_genesis()?
             .prompt_remote_peer()?
             .prompt_history_pruning()?
-            .prompt_serve_grpc()?
-            .prompt_serve_minibf()?
-            .prompt_serve_minikupo()?
-            .prompt_serve_trp()?
-            .prompt_serve_ouroboros()?
+            .prompt_serve_apis()?
             .prompt_enable_relay()?;
 
         Ok(self)
@@ -620,6 +721,8 @@ pub fn run(
     args: &Args,
     feedback: &Feedback,
 ) -> miette::Result<()> {
+    crate::banner::print_init_banner();
+
     config
         .map(|x| ConfigEditor(x, None))
         .unwrap_or_default()

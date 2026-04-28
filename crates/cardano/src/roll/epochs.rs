@@ -1,129 +1,20 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use dolos_core::{BrokenInvariant, ChainError, Genesis, NsKey, TxOrder, TxoRef};
-use pallas::{
-    crypto::hash::Hash,
-    ledger::{
-        primitives::{
-            alonzo::{
-                InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
-            },
-            conway::RationalNumber,
-            Epoch,
-        },
-        traverse::{fees::compute_byron_fee, MultiEraBlock, MultiEraCert, MultiEraTx},
+use dolos_core::{BrokenInvariant, ChainError, Genesis, TxOrder, TxoRef};
+use pallas::ledger::{
+    primitives::{
+        alonzo::{InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward},
+        conway::RationalNumber,
+        Epoch,
     },
+    traverse::{fees::compute_byron_fee, MultiEraBlock, MultiEraCert, MultiEraTx},
 };
-use serde::{Deserialize, Serialize};
 
 use super::WorkDeltas;
 use crate::{
-    model::{EpochState, FixedNamespace as _},
-    owned::OwnedMultiEraOutput,
-    pallas_extras,
-    roll::BlockVisitor,
-    Lovelace, Nonces, PParamsSet, PoolHash, CURRENT_EPOCH_KEY,
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, EpochStatsUpdate, Lovelace,
+    NoncesUpdate, PParamsSet,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EpochStatsUpdate {
-    epoch: Epoch,
-    block_fees: u64,
-
-    // we need to use a delta approach instead of simple increments because the total size of moved
-    // lovelace can be higher than u64, causing overflows
-    utxo_delta: i64,
-
-    new_accounts: u64,
-    removed_accounts: u64,
-    withdrawals: u64,
-    registered_pools: HashSet<PoolHash>,
-    drep_deposits: Lovelace,
-    proposal_deposits: Lovelace,
-    drep_refunds: Lovelace,
-    treasury_donations: Lovelace,
-    reserve_mirs: Lovelace,
-    treasury_mirs: Lovelace,
-    non_overlay_blocks_minted: u32,
-}
-
-impl dolos_core::EntityDelta for EpochStatsUpdate {
-    type Entity = EpochState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
-    }
-
-    fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let entity = entity.as_mut().expect("existing epoch");
-
-        let stats = entity.rolling.live_mut(self.epoch).get_or_insert_default();
-
-        stats.blocks_minted += 1;
-
-        if self.utxo_delta > 0 {
-            stats.produced_utxos += self.utxo_delta.unsigned_abs();
-        } else {
-            stats.consumed_utxos += self.utxo_delta.unsigned_abs();
-        }
-
-        stats.gathered_fees += self.block_fees;
-        stats.new_accounts += self.new_accounts;
-        stats.removed_accounts += self.removed_accounts;
-        stats.withdrawals += self.withdrawals;
-        stats.proposal_deposits += self.proposal_deposits;
-        stats.drep_deposits += self.drep_deposits;
-        stats.drep_refunds += self.drep_refunds;
-        stats.treasury_donations += self.treasury_donations;
-        stats.reserve_mirs += self.reserve_mirs;
-        stats.treasury_mirs += self.treasury_mirs;
-        stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
-
-        stats.registered_pools = stats
-            .registered_pools
-            .union(&self.registered_pools)
-            .cloned()
-            .collect();
-    }
-
-    fn undo(&self, _entity: &mut Option<EpochState>) {
-        // TODO: implement undo
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NoncesUpdate {
-    slot: u64,
-    tail: Option<Hash<32>>,
-    nonce_vrf_output: Vec<u8>,
-
-    previous: Option<Nonces>,
-}
-
-impl dolos_core::EntityDelta for NoncesUpdate {
-    type Entity = EpochState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
-    }
-
-    fn apply(&mut self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
-        if let Some(nonces) = entity.nonces.as_ref() {
-            self.previous = Some(nonces.clone());
-            entity.nonces = Some(nonces.roll(
-                self.slot < entity.largest_stable_slot,
-                &self.nonce_vrf_output,
-                self.tail,
-            ));
-        }
-    }
-
-    fn undo(&self, entity: &mut Option<EpochState>) {
-        let Some(entity) = entity else { return };
-        entity.nonces = self.previous.clone();
-    }
-}
 
 // HACK: There are txs that don't have an explicit value for total collateral
 // and Alonzo txs don't even have the total collateral field. This is why we
@@ -221,12 +112,11 @@ impl BlockVisitor for EpochStateVisitor {
         }
         // we only track nonces for Shelley and later
         if block.era() >= pallas::ledger::traverse::Era::Shelley {
-            self.nonces_delta = Some(NoncesUpdate {
-                slot: block.header().slot(),
-                tail: block.header().previous_hash(),
-                nonce_vrf_output: block.header().nonce_vrf_output()?,
-                previous: None,
-            });
+            self.nonces_delta = Some(NoncesUpdate::new(
+                block.header().slot(),
+                block.header().previous_hash(),
+                block.header().nonce_vrf_output()?,
+            ));
         }
 
         Ok(())
@@ -347,7 +237,7 @@ impl BlockVisitor for EpochStateVisitor {
                             );
                         }
                         let amount_u64 = amount.max(0) as u64;
-                        tracing::info!(
+                        tracing::debug!(
                             source = "treasury",
                             credential = ?cred,
                             amount = amount,
@@ -372,7 +262,7 @@ impl BlockVisitor for EpochStateVisitor {
         proposal: &pallas::ledger::traverse::MultiEraProposal,
         _: usize,
     ) -> Result<(), ChainError> {
-        tracing::warn!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
+        tracing::debug!(proposal=?proposal.gov_action(), deposit=proposal.deposit(), "proposal deposit");
 
         self.stats_delta.as_mut().unwrap().proposal_deposits += proposal.deposit();
 

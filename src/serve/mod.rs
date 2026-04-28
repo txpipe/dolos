@@ -44,13 +44,21 @@ macro_rules! feature_not_included {
 pub fn load_drivers(
     all_drivers: &FuturesUnordered<tokio::task::JoinHandle<Result<(), ServeError>>>,
     config: ServeConfig,
+    network_magic: u64,
     domain: DomainAdapter,
     exit: CancellationToken,
 ) {
     if let Some(cfg) = config.ouroboros {
         info!("found Ouroboros config");
 
-        let driver = o7s::Driver::run(cfg.clone(), domain.clone(), CancelTokenImpl(exit.clone()));
+        let driver = o7s::Driver::run(
+            o7s::DriverConfig {
+                service: cfg.clone(),
+                network_magic,
+            },
+            domain.clone(),
+            CancelTokenImpl(exit.clone()),
+        );
 
         let task = tokio::spawn(driver);
 

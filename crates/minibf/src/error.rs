@@ -7,11 +7,13 @@ use serde::Serialize;
 
 use crate::pagination::PaginationError;
 
+#[derive(Debug)]
 pub enum Error {
     Pagination(PaginationError),
     Code(StatusCode),
     InvalidAddress,
     InvalidAsset,
+    InvalidPoolId,
     InvalidBlockNumber,
     InvalidBlockHash,
 }
@@ -67,6 +69,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Invalid or malformed asset format.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidPoolId => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid or malformed pool id format.",
                 )),
             )
                 .into_response(),

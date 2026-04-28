@@ -3,7 +3,10 @@ pub mod storage;
 use std::sync::Arc;
 
 use dolos_cardano::CardanoLogic;
-use dolos_core::{config::StorageConfig, *};
+use dolos_core::{
+    config::{StorageConfig, SyncConfig},
+    *,
+};
 
 pub use storage::{
     ArchiveStoreBackend, IndexStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
@@ -31,6 +34,7 @@ impl dolos_core::TipSubscription for TipSubscription {
 #[derive(Clone)]
 pub struct DomainAdapter {
     pub storage_config: Arc<StorageConfig>,
+    pub sync_config: Arc<SyncConfig>,
     pub genesis: Arc<Genesis>,
     pub wal: WalAdapter,
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
@@ -140,6 +144,10 @@ impl Domain for DomainAdapter {
 
     fn storage_config(&self) -> &StorageConfig {
         &self.storage_config
+    }
+
+    fn sync_config(&self) -> &SyncConfig {
+        &self.sync_config
     }
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {

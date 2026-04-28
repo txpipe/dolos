@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use dolos_core::{config::CardanoConfig, BlockSlot, Domain, DomainError, Genesis, WorkUnit};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::CardanoLogic;
 
@@ -55,12 +55,14 @@ where
     fn load(&mut self, domain: &D) -> Result<(), DomainError> {
         debug!(slot = self.slot, "loading estart work context");
 
-        self.context = Some(WorkContext::load::<D>(
-            domain.state(),
-            self.genesis.clone(),
-        )?);
+        let context = WorkContext::load::<D>(domain.state(), self.genesis.clone())?;
+
+        info!(epoch = context.starting_epoch_no(), "starting epoch");
+
+        self.context = Some(context);
 
         debug!("estart context loaded");
+
         Ok(())
     }
 
@@ -73,9 +75,10 @@ where
     fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
         debug!(slot = self.slot, "committing estart state changes");
 
-        let context = self.context.as_mut().ok_or_else(|| {
-            DomainError::InconsistentState("estart context not loaded".to_string())
-        })?;
+        let context = self
+            .context
+            .as_mut()
+            .ok_or_else(|| DomainError::Internal("estart context not loaded".into()))?;
 
         context.commit::<D>(domain.state(), domain.archive(), self.slot)?;
 

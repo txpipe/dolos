@@ -631,6 +631,22 @@ pub mod proposals {
                 "dfdac5921ab657241fce58583d61bef59a369e01d2ba78191d6df6632a07fdfd#0" => {
                     Canceled(614)
                 }
+                // Treasury Withdrawal (10,142,000 ADA across 5 outputs)
+                "2f2fc2539dde550d3c83bea67c11b03861407976bbe8d07c5b0e124aa8a12baa#0" => {
+                    Ratified(620)
+                }
+                // Treasury Withdrawal (50,000,000 ADA)
+                "8807e3cee3be5647742c329c1dea242f0c1c29b8ad050e15169e3b0302fcbfd6#0" => {
+                    Ratified(623)
+                }
+                // Treasury Withdrawal (800,000 ADA)
+                "e5c4d7ebaad03ac127ec19a286605a188d6fea1c54e075c619ca6993b7fa9fd1#0" => {
+                    Ratified(624)
+                }
+                // Treasury Withdrawal (6,900,000 ADA)
+                "f35285db3c4e085ad331843b3007737952b8a322bb3216311edc37fdf44ad3da#0" => {
+                    Ratified(624)
+                }
 
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,

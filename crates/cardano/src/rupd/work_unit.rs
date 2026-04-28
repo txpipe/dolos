@@ -73,7 +73,7 @@ where
         let work = self
             .work
             .as_ref()
-            .ok_or_else(|| DomainError::InconsistentState("rupd work not loaded".to_string()))?;
+            .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
         let rewards = crate::rewards::define_rewards(work)?;
 
@@ -89,12 +89,12 @@ where
         let _work = self
             .work
             .as_ref()
-            .ok_or_else(|| DomainError::InconsistentState("rupd work not loaded".to_string()))?;
+            .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
         let rewards = self
             .rewards
             .as_ref()
-            .ok_or_else(|| DomainError::InconsistentState("rewards not computed".to_string()))?;
+            .ok_or_else(|| DomainError::Internal("rewards not computed".into()))?;
 
         debug!(
             pending_count = rewards.len(),
@@ -159,12 +159,12 @@ where
         let work = self
             .work
             .as_ref()
-            .ok_or_else(|| DomainError::InconsistentState("rupd work not loaded".to_string()))?;
+            .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
 
         let rewards = self
             .rewards
             .as_ref()
-            .ok_or_else(|| DomainError::InconsistentState("rewards not computed".to_string()))?;
+            .ok_or_else(|| DomainError::Internal("rewards not computed".into()))?;
 
         // Log stake snapshot data to archive
         super::log_work::<D>(work, rewards, domain.archive())?;

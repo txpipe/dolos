@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use dolos_cardano::consensus::{ChainFragment, RollbackResult};
 use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
+use dolos_core::ChainPoint;
 use gasket::framework::*;
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraHeader;
 use pallas::network::facades::PeerClient;
-use pallas::network::miniprotocols::chainsync::{
-    HeaderContent, NextResponse, RollbackBuffer, RollbackEffect, Tip,
-};
+use pallas::network::miniprotocols::chainsync::{HeaderContent, NextResponse, Tip};
 use pallas::network::miniprotocols::Point;
 use tracing::{debug, info, warn};
 
@@ -23,11 +23,15 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
     out.or_panic()
 }
 
+// ============================================================================
+// Pull stage
+// ============================================================================
+
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
-enum PullBatch {
-    BlockRange(Point, Point),
-    OutOfScopeRollback(Point),
+enum PullResult {
+    Blocks(Vec<ChainPoint>),
+    Rollback(ChainPoint),
     Empty,
 }
 
@@ -79,38 +83,121 @@ impl From<SyncLimit> for PullQuota {
 
 pub struct Worker {
     peer_session: PeerClient,
+    chain: ChainFragment,
 }
 
 impl Worker {
-    async fn gather_pull_batch(&mut self, stage: &mut Stage) -> Result<PullBatch, WorkerError> {
+    /// Receive the next chainsync response, using the appropriate method
+    /// depending on whether we have agency (catching up) or not (at the tip).
+    async fn recv_next_header(&mut self) -> Result<NextResponse<HeaderContent>, WorkerError> {
         let client = self.peer_session.chainsync();
-        let mut buffer = RollbackBuffer::new();
 
-        while buffer.size() < stage.block_fetch_batch_size {
-            let next = client.request_next().await.or_restart()?;
+        if client.has_agency() {
+            client.request_next().await.or_restart()
+        } else {
+            client.recv_while_must_reply().await.or_restart()
+        }
+    }
+
+    /// Gather up to `max_headers` headers from the upstream peer.
+    ///
+    /// For each chainsync response:
+    /// - RollForward: validate chain continuity, track in fragment
+    /// - RollBackward: update fragment; if out of scope, return as rollback
+    /// - Await: stop gathering (peer has no more blocks)
+    ///
+    /// Returns the gathered points to fetch, a rollback to propagate, or empty.
+    async fn pull_headers(
+        &mut self,
+        max_headers: usize,
+        stage: &mut Stage,
+    ) -> Result<PullResult, WorkerError> {
+        let mut gathered = 0;
+
+        while gathered < max_headers {
+            let next = self.recv_next_header().await?;
 
             match next {
                 NextResponse::RollForward(header, tip) => {
                     let header = to_traverse(&header).or_panic()?;
-                    let point = Point::Specific(header.slot(), header.hash().to_vec());
-                    buffer.roll_forward(point);
+                    let point = ChainPoint::Specific(header.slot(), header.hash());
+                    let prev_hash = header.previous_hash();
+
+                    self.chain.roll_forward(point.clone(), prev_hash).map_err(
+                        |err| {
+                            warn!(%err, "consensus error, reconnecting");
+                            WorkerError::Restart
+                        },
+                    )?;
+
+                    debug!(%point, "header received from upstream peer");
+                    gathered += 1;
 
                     stage.track_tip(&tip);
                 }
-                NextResponse::RollBackward(point, _) => match buffer.roll_back(&point) {
-                    RollbackEffect::OutOfScope => return Ok(PullBatch::OutOfScopeRollback(point)),
-                    RollbackEffect::Handled => (),
-                },
+                NextResponse::RollBackward(point, tip) => {
+                    debug!(?point, "rollback sent by upstream peer");
+
+                    let chain_point = ChainPoint::from(point);
+
+                    match self.chain.roll_back(&chain_point) {
+                        RollbackResult::OutOfScope(point) => {
+                            return Ok(PullResult::Rollback(point))
+                        }
+                        RollbackResult::Handled => (),
+                    }
+
+                    stage.track_tip(&tip);
+                }
                 NextResponse::Await => break,
             }
         }
 
-        let range = match (buffer.oldest(), buffer.latest()) {
-            (Some(a), Some(b)) => PullBatch::BlockRange(a.clone(), b.clone()),
-            _ => PullBatch::Empty,
+        let points = self.chain.take_pending();
+
+        if points.is_empty() {
+            Ok(PullResult::Empty)
+        } else {
+            Ok(PullResult::Blocks(points))
+        }
+    }
+
+    /// Fetch block bodies for the given points and flush them downstream.
+    async fn fetch_and_flush(
+        &mut self,
+        points: &[ChainPoint],
+        stage: &mut Stage,
+    ) -> Result<(), WorkerError> {
+        let to_pallas = |cp: &ChainPoint| -> Point {
+            Point::try_from(cp.clone()).expect("pending points are always Specific")
         };
 
-        Ok(range)
+        let blocks = match points {
+            [single] => {
+                let block = self
+                    .peer_session
+                    .blockfetch()
+                    .fetch_single(to_pallas(single))
+                    .await
+                    .or_restart()?;
+
+                vec![block]
+            }
+            [first, .., last] => self
+                .peer_session
+                .blockfetch()
+                .fetch_range((to_pallas(first), to_pallas(last)))
+                .await
+                .or_restart()?,
+            [] => return Ok(()),
+        };
+
+        debug!(len = blocks.len(), "block batch pulled from peer");
+
+        stage.quota.consume_blocks(blocks.len() as u64);
+        stage.flush_blocks(blocks).await?;
+
+        Ok(())
     }
 }
 
@@ -158,7 +245,10 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         info!(?intersection, "found intersection");
 
-        let worker = Self { peer_session };
+        let worker = Self {
+            peer_session,
+            chain: ChainFragment::start(ChainPoint::from(intersection)),
+        };
 
         Ok(worker)
     }
@@ -181,73 +271,19 @@ impl gasket::framework::Worker<Stage> for Worker {
     }
 
     async fn execute(&mut self, unit: &WorkUnit, stage: &mut Stage) -> Result<(), WorkerError> {
-        match unit {
-            WorkUnit::Pull => {
-                info!("pulling block batch from upstream peer");
-                let batch = self.gather_pull_batch(stage).await?;
+        let max_headers = match unit {
+            WorkUnit::Pull => stage.block_fetch_batch_size,
+            WorkUnit::Await => 1,
+        };
 
-                match batch {
-                    PullBatch::BlockRange(start, end) => {
-                        let blocks = self
-                            .peer_session
-                            .blockfetch()
-                            .fetch_range((start, end))
-                            .await
-                            .or_restart()?;
+        match self.pull_headers(max_headers, stage).await? {
+            PullResult::Blocks(points) => self.fetch_and_flush(&points, stage).await?,
+            PullResult::Rollback(point) => stage.flush_rollback(point).await?,
+            PullResult::Empty => (),
+        }
 
-                        info!(len = blocks.len(), "block batch pulled from peer");
-
-                        stage.quota.consume_blocks(blocks.len() as u64);
-                        stage.flush_blocks(blocks).await?;
-                    }
-                    PullBatch::OutOfScopeRollback(point) => {
-                        stage.flush_rollback(point).await?;
-                    }
-                    PullBatch::Empty => (),
-                };
-                if !self.peer_session.chainsync().has_agency() {
-                    stage.quota.on_tip();
-                }
-            }
-            WorkUnit::Await => {
-                info!("waiting for new block");
-
-                let next = self
-                    .peer_session
-                    .chainsync()
-                    .recv_while_must_reply()
-                    .await
-                    .or_restart()?;
-
-                match next {
-                    NextResponse::RollForward(header, tip) => {
-                        let header = to_traverse(&header).or_panic()?;
-                        let point = Point::Specific(header.slot(), header.hash().to_vec());
-
-                        info!(?point, "new block sent by upstream peer");
-
-                        let block = self
-                            .peer_session
-                            .blockfetch()
-                            .fetch_single(point)
-                            .await
-                            .or_restart()?;
-
-                        stage.flush_blocks(vec![block]).await?;
-                        stage.quota.consume_blocks(1);
-                        stage.track_tip(&tip);
-                    }
-                    NextResponse::RollBackward(point, tip) => {
-                        info!(?point, "rollback sent by upstream peer");
-
-                        stage.flush_rollback(point).await?;
-                        stage.track_tip(&tip);
-                    }
-                    NextResponse::Await => {
-                        warn!("unexpected response, skipping");
-                    }
-                }
-            }
+        if !self.peer_session.chainsync().has_agency() {
+            stage.quota.on_tip();
         }
 
         Ok(())
@@ -273,12 +309,17 @@ pub struct Stage {
 }
 
 impl Stage {
-    pub fn new(config: &SyncConfig, upstream: &PeerConfig, wal: WalAdapter) -> Self {
+    pub fn new(
+        config: &SyncConfig,
+        upstream: &PeerConfig,
+        network_magic: u64,
+        wal: WalAdapter,
+    ) -> Self {
         Self {
             peer_address: upstream.peer_address.clone(),
-            network_magic: upstream.network_magic,
+            network_magic,
             quota: config.sync_limit.clone().into(),
-            block_fetch_batch_size: config.pull_batch_size.unwrap_or(50),
+            block_fetch_batch_size: config.pull_batch_size(),
             wal,
             downstream: Default::default(),
             block_count: Default::default(),
@@ -297,14 +338,11 @@ impl Stage {
         Ok(())
     }
 
-    async fn flush_rollback(&mut self, point: Point) -> Result<(), WorkerError> {
-        match &point {
-            Point::Origin => debug!("rollback to origin"),
-            Point::Specific(slot, _) => debug!(slot, "rollback"),
-        };
+    async fn flush_rollback(&mut self, point: ChainPoint) -> Result<(), WorkerError> {
+        debug!(slot = point.slot(), "rollback");
 
         self.downstream
-            .send(PullEvent::Rollback(point.into()).into())
+            .send(PullEvent::Rollback(point).into())
             .await
             .or_panic()?;
 

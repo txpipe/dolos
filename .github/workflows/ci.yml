@@ -53,9 +53,16 @@ jobs:
           command: test
           args: --workspace --all-targets
 
-      - name: Run external smoke tests
+      - name: Run e2e smoke tests
         if: runner.os != 'Windows'
         uses: actions-rs/cargo@v1
         with:
-          command: run
-          args: -p xtask -- external-test
+          command: test
+          args: --test smoke -- --ignored
+
+      - name: Run e2e tests
+        if: runner.os != 'Windows'
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --test sync --test snapshot -- --ignored

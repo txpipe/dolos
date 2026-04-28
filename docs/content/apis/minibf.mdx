@@ -6,69 +6,6 @@ sidebar:
 
 Dolos provides an HTTP endpoint to access data using [Blockfrost OpenAPI](https://github.com/blockfrost/openapi) specification.
 
-## Coverage
-
-Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos:
-
-| Endpoint                                   | Description                                              |
-|--------------------------------------------|----------------------------------------------------------|
-| `/`                                        | Service info (version, revision)                         |
-| `/health`                                  | Health check                                             |
-| `/health/clock`                            | Clock health                                             |
-| `/metrics`                                 | Prometheus metrics                                       |
-| `/accounts/{stake_address}`                | Get account information for a stake address              |
-| `/accounts/{stake_address}/addresses`      | Get addresses for a stake address                        |
-| `/accounts/{stake_address}/delegations`    | Get delegations for a stake address                      |
-| `/accounts/{stake_address}/registrations`  | Get registrations for a stake address                    |
-| `/accounts/{stake_address}/rewards`        | Get rewards for a stake address                          |
-| `/accounts/{stake_address}/utxos`          | Get UTXOs for a stake address                            |
-| `/addresses/{address}`                     | Get general information for a specific address           |
-| `/addresses/{address}/transactions`        | Get transactions for a specific address                  |
-| `/addresses/{address}/txs`                 | Alias of `/addresses/{address}/transactions`             |
-| `/addresses/{address}/utxos`               | Get UTXOs for a specific address                         |
-| `/addresses/{address}/utxos/{asset}`       | Get UTXOs for a specific address and asset               |
-| `/assets/{subject}`                        | Get asset information                                    |
-| `/assets/{subject}/addresses`              | Get addresses holding a specific asset                   |
-| `/assets/{subject}/transactions`           | Get transactions involving a specific asset              |
-| `/blocks/latest`                           | Get latest block information                             |
-| `/blocks/latest/txs`                       | Get transactions for the latest block                    |
-| `/blocks/slot/{slot_number}`               | Get block by slot number                                 |
-| `/blocks/{hash_or_number}`                 | Get block information                                    |
-| `/blocks/{hash_or_number}/addresses`       | Get addresses in a specific block                        |
-| `/blocks/{hash_or_number}/next`            | Get next block                                           |
-| `/blocks/{hash_or_number}/previous`        | Get previous block                                       |
-| `/blocks/{hash_or_number}/txs`             | Get transactions for a specific block                    |
-| `/epochs/latest/parameters`                | Get latest epoch parameters                              |
-| `/epochs/{epoch}/blocks`                   | Get blocks in a specific epoch                           |
-| `/epochs/{epoch}/parameters`               | Get epoch parameters                                     |
-| `/genesis`                                 | Get genesis information                                  |
-| `/governance/dreps/{drep_id}`              | Get DRep information                                     |
-| `/metadata/txs/labels/{label}`             | Get metadata for transactions with a specific label      |
-| `/metadata/txs/labels/{label}/cbor`        | Get CBOR metadata for transactions with a specific label |
-| `/network`                                 | Get network information                                  |
-| `/network/eras`                            | Get network eras information                             |
-| `/pools/extended`                          | Get extended pool information                            |
-| `/pools/{id}/delegators`                   | Get delegators for a specific pool                       |
-| `/pools/{id}/history`                      | Get history for a specific pool                          |
-| `/scripts/{script_hash}`                   | Get script information                                   |
-| `/scripts/{script_hash}/json`              | Get script JSON                                          |
-| `/scripts/{script_hash}/cbor`              | Get script CBOR                                          |
-| `/scripts/datum/{datum_hash}`              | Get datum by hash                                        |
-| `/scripts/datum/{datum_hash}/cbor`         | Get datum CBOR by hash                                   |
-| `/tx/submit`                               | Submit a transaction                                     |
-| `/txs/{tx_hash}`                           | Get transaction information                              |
-| `/txs/{tx_hash}/cbor`                      | Get CBOR data for a transaction                          |
-| `/txs/{tx_hash}/delegations`               | Get delegations for a specific transaction               |
-| `/txs/{tx_hash}/metadata`                  | Get metadata for a specific transaction                  |
-| `/txs/{tx_hash}/metadata/cbor`             | Get CBOR metadata for a specific transaction             |
-| `/txs/{tx_hash}/mirs`                      | Get MIRs for a specific transaction                      |
-| `/txs/{tx_hash}/pool_retires`              | Get pool retirements for a specific transaction          |
-| `/txs/{tx_hash}/pool_updates`              | Get pool updates for a specific transaction              |
-| `/txs/{tx_hash}/redeemers`                 | Get redeemers for a specific transaction                 |
-| `/txs/{tx_hash}/stakes`                    | Get stakes for a specific transaction                    |
-| `/txs/{tx_hash}/utxos`                     | Get UTXOs for a specific transaction                     |
-| `/txs/{tx_hash}/withdrawals`               | Get withdrawals for a specific transaction               |
-
 ## Usage
 
 If enabled via configuration, _Dolos_ will expose a TCP port accepting HTTP connections. The default port number is `3000`, but this value can be changed via configuration.
@@ -155,3 +92,66 @@ max_scan_items = 3000
 ```
 
 Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.
+
+## Coverage
+
+Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos:
+
+| Endpoint                                   | Description                                              |
+|--------------------------------------------|----------------------------------------------------------|
+| `/`                                        | Service info (version, revision)                         |
+| `/health`                                  | Health check                                             |
+| `/health/clock`                            | Clock health                                             |
+| `/metrics`                                 | Prometheus metrics                                       |
+| `/accounts/{stake_address}`                | Get account information for a stake address              |
+| `/accounts/{stake_address}/addresses`      | Get addresses for a stake address                        |
+| `/accounts/{stake_address}/delegations`    | Get delegations for a stake address                      |
+| `/accounts/{stake_address}/registrations`  | Get registrations for a stake address                    |
+| `/accounts/{stake_address}/rewards`        | Get rewards for a stake address                          |
+| `/accounts/{stake_address}/utxos`          | Get UTXOs for a stake address                            |
+| `/addresses/{address}`                     | Get general information for a specific address           |
+| `/addresses/{address}/transactions`        | Get transactions for a specific address                  |
+| `/addresses/{address}/txs`                 | Alias of `/addresses/{address}/transactions`             |
+| `/addresses/{address}/utxos`               | Get UTXOs for a specific address                         |
+| `/addresses/{address}/utxos/{asset}`       | Get UTXOs for a specific address and asset               |
+| `/assets/{subject}`                        | Get asset information                                    |
+| `/assets/{subject}/addresses`              | Get addresses holding a specific asset                   |
+| `/assets/{subject}/transactions`           | Get transactions involving a specific asset              |
+| `/blocks/latest`                           | Get latest block information                             |
+| `/blocks/latest/txs`                       | Get transactions for the latest block                    |
+| `/blocks/slot/{slot_number}`               | Get block by slot number                                 |
+| `/blocks/{hash_or_number}`                 | Get block information                                    |
+| `/blocks/{hash_or_number}/addresses`       | Get addresses in a specific block                        |
+| `/blocks/{hash_or_number}/next`            | Get next block                                           |
+| `/blocks/{hash_or_number}/previous`        | Get previous block                                       |
+| `/blocks/{hash_or_number}/txs`             | Get transactions for a specific block                    |
+| `/epochs/latest/parameters`                | Get latest epoch parameters                              |
+| `/epochs/{epoch}/blocks`                   | Get blocks in a specific epoch                           |
+| `/epochs/{epoch}/parameters`               | Get epoch parameters                                     |
+| `/genesis`                                 | Get genesis information                                  |
+| `/governance/dreps/{drep_id}`              | Get DRep information                                     |
+| `/metadata/txs/labels/{label}`             | Get metadata for transactions with a specific label      |
+| `/metadata/txs/labels/{label}/cbor`        | Get CBOR metadata for transactions with a specific label |
+| `/network`                                 | Get network information                                  |
+| `/network/eras`                            | Get network eras information                             |
+| `/pools/extended`                          | Get extended pool information                            |
+| `/pools/{id}/delegators`                   | Get delegators for a specific pool                       |
+| `/pools/{id}/history`                      | Get history for a specific pool                          |
+| `/scripts/{script_hash}`                   | Get script information                                   |
+| `/scripts/{script_hash}/json`              | Get script JSON                                          |
+| `/scripts/{script_hash}/cbor`              | Get script CBOR                                          |
+| `/scripts/datum/{datum_hash}`              | Get datum by hash                                        |
+| `/scripts/datum/{datum_hash}/cbor`         | Get datum CBOR by hash                                   |
+| `/tx/submit`                               | Submit a transaction                                     |
+| `/txs/{tx_hash}`                           | Get transaction information                              |
+| `/txs/{tx_hash}/cbor`                      | Get CBOR data for a transaction                          |
+| `/txs/{tx_hash}/delegations`               | Get delegations for a specific transaction               |
+| `/txs/{tx_hash}/metadata`                  | Get metadata for a specific transaction                  |
+| `/txs/{tx_hash}/metadata/cbor`             | Get CBOR metadata for a specific transaction             |
+| `/txs/{tx_hash}/mirs`                      | Get MIRs for a specific transaction                      |
+| `/txs/{tx_hash}/pool_retires`              | Get pool retirements for a specific transaction          |
+| `/txs/{tx_hash}/pool_updates`              | Get pool updates for a specific transaction              |
+| `/txs/{tx_hash}/redeemers`                 | Get redeemers for a specific transaction                 |
+| `/txs/{tx_hash}/stakes`                    | Get stakes for a specific transaction                    |
+| `/txs/{tx_hash}/utxos`                     | Get UTXOs for a specific transaction                     |
+| `/txs/{tx_hash}/withdrawals`               | Get withdrawals for a specific transaction               |

@@ -42,29 +42,19 @@ In this guide we're going to learn how to go from zero to a running Dolos instan
       </TabItem>
     </Tabs>
 
-    For more detailed information on how to install Dolos, check the [installation section](./installation)
+    For more detailed information on how to install Dolos, check the [installation section](./dolos/installation)
 
-2. ### Configuration
+2. ### Configuration & Bootstrap
 
-    To configure _Dolos_, run the following command that will guide you through a set of questions to automatically configure your instance:
+    To configure and bootstrap _Dolos_, run the following command that will guide you through a set of questions to automatically configure your instance and sync the history of the chain:
 
     ```sh
     dolos init
     ```
 
-    For more detailed information on how to configure Dolos, check the [configuration section](./configuration)
+    For more detailed information on how to configure Dolos, check the [configuration section](./dolos/configuration)
 
-3. ### Bootstrap
-
-    To bootstrap _Dolos_ (aka: sync the history of the chain), run the following command to import a Mithril snapshot:
-
-    ```sh
-    dolos bootstrap
-    ```
-
-    For more detailed information on how to bootstrap Dolos, check the [bootstrap section](./bootstrap)
-
-4. ### Running
+3. ### Running
 
     Run the following command to start Dolos in `daemon` mode. This will keep runnig forever while syncing the chain from the upstream node and serving data through the APIs. 
 
@@ -72,7 +62,7 @@ In this guide we're going to learn how to go from zero to a running Dolos instan
     dolos daemon
     ```
 
-    For more detailed information on different ways to run _Dolos_, check the [running section](./bootstrap)
+    For more detailed information on different ways to run _Dolos_, check the [operations section](./dolos/operations/modes)
 
 {/* 
 ### That's it!

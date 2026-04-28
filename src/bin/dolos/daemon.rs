@@ -16,6 +16,7 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
 
     let sync = dolos::sync::pipeline(
         &config.sync,
+        &config.chain,
         &config.upstream,
         domain.clone(),
         &config.retries,
@@ -29,9 +30,22 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
     ));
 
     let drivers = FuturesUnordered::new();
+    let network_magic = config.chain.magic();
 
-    dolos::serve::load_drivers(&drivers, config.serve, domain.clone(), exit.clone());
-    dolos::relay::load_drivers(&drivers, config.relay, domain.clone(), exit.clone());
+    dolos::serve::load_drivers(
+        &drivers,
+        config.serve,
+        network_magic,
+        domain.clone(),
+        exit.clone(),
+    );
+    dolos::relay::load_drivers(
+        &drivers,
+        config.relay,
+        network_magic,
+        domain.clone(),
+        exit.clone(),
+    );
 
     for result in drivers {
         if let Err(e) = result.await.unwrap() {

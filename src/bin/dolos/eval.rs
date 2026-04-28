@@ -94,7 +94,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let context = ValidationContext {
         block_slot: args.block_slot,
-        prot_magic: config.upstream.network_magic().unwrap() as u32,
+        prot_magic: config.chain.magic() as u32,
         network_id: args.network_id,
         prot_params: pparams,
         acnt: None,

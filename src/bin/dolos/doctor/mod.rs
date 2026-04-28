@@ -4,6 +4,7 @@ use dolos_core::config::RootConfig;
 use crate::feedback::Feedback;
 
 mod catchup_stores;
+mod check;
 mod reset_wal;
 mod rollback;
 mod update_entity;
@@ -14,6 +15,9 @@ mod reset_genesis;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// validates configuration and data by loading the domain
+    Check(check::Args),
+
     /// catch up store data from WAL records
     CatchupStores(catchup_stores::Args),
 
@@ -42,6 +46,7 @@ pub struct Args {
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
+        Command::Check(x) => check::run(config, x)?,
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,

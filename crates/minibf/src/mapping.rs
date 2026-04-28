@@ -82,6 +82,7 @@ pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 
 const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
+const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
 
 #[inline]
 pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -115,6 +116,10 @@ pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
     bech32(POOL_HRP, key)
 }
 
+pub fn bech32_calidus(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
+    bech32(CALIDUS_HRP, key)
+}
+
 pub fn asset_fingerprint(subject: &[u8]) -> Result<String, StatusCode> {
     let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
     hasher.input(subject);
@@ -141,7 +146,25 @@ pub struct PoolOffchainMetadata {
     pub homepage: String,
 }
 
-pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
+fn parse_pool_offchain_metadata(
+    body: &[u8],
+    expected_hash: Option<&[u8]>,
+) -> Option<PoolOffchainMetadata> {
+    if let Some(expected_hash) = expected_hash {
+        let actual_hash = Hasher::<256>::hash(body);
+
+        if actual_hash.as_ref() != expected_hash {
+            return None;
+        }
+    }
+
+    serde_json::from_slice(body).ok()
+}
+
+pub async fn pool_offchain_metadata(
+    url: &str,
+    expected_hash: Option<&[u8]>,
+) -> Option<PoolOffchainMetadata> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::limited(3))
@@ -155,7 +178,9 @@ pub async fn pool_offchain_metadata(url: &str) -> Option<PoolOffchainMetadata> {
         return None;
     }
 
-    res.json().await.ok()
+    let body = res.bytes().await.ok()?;
+
+    parse_pool_offchain_metadata(body.as_ref(), expected_hash)
 }
 
 pub trait IntoModel<T>
@@ -699,7 +724,7 @@ impl<'a> TxModelBuilder<'a> {
                     {
                         pool_metadata
                             .as_ref()
-                            .map(|meta| (operator, meta.url.clone()))
+                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
                     } else {
                         None
                     }
@@ -713,7 +738,7 @@ impl<'a> TxModelBuilder<'a> {
                     {
                         pool_metadata
                             .as_ref()
-                            .map(|meta| (operator, meta.url.clone()))
+                            .map(|meta| (operator, meta.url.clone(), meta.hash.clone()))
                     } else {
                         None
                     }
@@ -723,8 +748,8 @@ impl<'a> TxModelBuilder<'a> {
             .collect_vec();
 
         self.pool_metadata = join_all(pool_registrations.iter().map(
-            |(pool_hash, url)| async move {
-                pool_offchain_metadata(url)
+            |(pool_hash, url, hash)| async move {
+                pool_offchain_metadata(url, Some(hash.as_slice()))
                     .await
                     .map(|meta| (*pool_hash, meta))
             },
@@ -1031,6 +1056,12 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
         let chain = self.chain_or_500()?;
 
         let block_time = chain.slot_time(block.slot());
+        let treasury_donation = tx
+            .as_conway()
+            .and_then(|x| x.transaction_body.donation.as_ref())
+            .map(u64::from)
+            .unwrap_or_default()
+            .to_string();
 
         let tx = TxContent {
             hash: tx.hash().to_string(),
@@ -1063,6 +1094,7 @@ impl IntoModel<TxContent> for TxModelBuilder<'_> {
             pool_retire_count: count_certs!(tx, PoolRetirement) as i32,
             asset_mint_or_burn_count: tx.mints().iter().flat_map(|x| x.assets()).count() as i32,
             deposit: self.deposit.unwrap_or_default().to_string(),
+            treasury_donation,
         };
 
         Ok(tx)

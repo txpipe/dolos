@@ -1,93 +1,11 @@
-use dolos_core::{ChainError, EntityKey, NsKey};
+use dolos_core::{ChainError, EntityKey};
 
-use pallas::ledger::primitives::StakeCredential;
-use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{
-    add,
-    ewrap::AppliedReward,
-    rupd::{credential_to_key, AccountId},
-    sub, AccountState, CardanoDelta, CardanoEntity, FixedNamespace, LeaderRewardLog,
-    MemberRewardLog, PendingRewardState,
+    ewrap::AppliedReward, AccountState, AssignRewards, CardanoDelta, CardanoEntity,
+    LeaderRewardLog, MemberRewardLog,
 };
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AssignRewards {
-    account: AccountId,
-    reward: u64,
-}
-
-impl AssignRewards {
-    pub fn new(account: AccountId, reward: u64) -> Self {
-        Self { account, reward }
-    }
-}
-
-impl dolos_core::EntityDelta for AssignRewards {
-    type Entity = AccountState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((AccountState::NS, self.account.clone()))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing account");
-
-        debug!(account=%self.account, "assigning rewards");
-
-        let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum = add!(stake.rewards_sum, self.reward);
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        let Some(entity) = entity else {
-            warn!("missing reward account");
-            return;
-        };
-
-        debug!(account=%self.account, "undoing rewards");
-
-        let stake = entity.stake.unwrap_live_mut();
-        stake.rewards_sum = sub!(stake.rewards_sum, self.reward);
-    }
-}
-
-/// Delta to dequeue (consume) a pending reward after applying it.
-/// Applied by EWRAP after rewards are assigned to accounts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DequeueReward {
-    pub credential: StakeCredential,
-    /// Previous state stored for rollback
-    prev: Option<PendingRewardState>,
-}
-
-impl DequeueReward {
-    pub fn new(credential: StakeCredential) -> Self {
-        Self {
-            credential,
-            prev: None,
-        }
-    }
-}
-
-impl dolos_core::EntityDelta for DequeueReward {
-    type Entity = PendingRewardState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((PendingRewardState::NS, credential_to_key(&self.credential)))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        // Store previous state for undo, then remove the entity
-        self.prev = entity.take();
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        // Restore the previous state
-        *entity = self.prev.clone();
-    }
-}
 
 #[derive(Default)]
 pub struct BoundaryVisitor {
@@ -125,7 +43,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         // Debug: log accounts with both registered_at and deregistered_at
         if account.registered_at.is_some() && account.deregistered_at.is_some() {
-            tracing::info!(
+            tracing::debug!(
                 account=%id,
                 registered_at=?account.registered_at,
                 deregistered_at=?account.deregistered_at,
@@ -146,7 +64,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             // (epoch_start + randomness_stability_window) are pre-filtered during
             // reward computation and never appear here. Their share stays in reserves
             // implicitly through returned_rewards.
-            warn!(
+            debug!(
                 account=%id,
                 credential=?account.credential,
                 amount=total,
@@ -158,10 +76,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
             return Ok(());
         }
 
-        self.change(AssignRewards {
-            account: id.clone(),
-            reward: reward.total_value(),
-        });
+        self.change(AssignRewards::new(id.clone(), reward.total_value()));
 
         for (pool, value, as_leader) in reward.into_vec() {
             ctx.applied_rewards.push(AppliedReward {
@@ -219,7 +134,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
                 .map(|(_, r)| r.total_value())
                 .sum();
 
-            tracing::warn!(
+            tracing::debug!(
                 epoch = ctx.ending_state().number,
                 %pending_before_drain,
                 %pending_spendable,

@@ -1,3 +1,4 @@
+.DS_Store
 /target
 tmp
 benches
@@ -8,3 +9,4 @@ opencode.json
 xtask.toml
 .claude
 CLAUDE.md
+/todo

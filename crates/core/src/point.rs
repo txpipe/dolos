@@ -29,6 +29,17 @@ impl ChainPoint {
             _ => None,
         }
     }
+
+    /// Returns true if this point can be used as an intersection point.
+    /// Origin and Specific points with non-zero hashes are fully defined;
+    /// Slot-only points and zero-hash Specifics are not.
+    pub fn is_fully_defined(&self) -> bool {
+        match self {
+            Self::Origin => true,
+            Self::Specific(_, hash) => hash.as_slice() != [0u8; 32],
+            Self::Slot(_) => false,
+        }
+    }
 }
 
 impl Display for ChainPoint {

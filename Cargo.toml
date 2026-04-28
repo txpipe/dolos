@@ -68,7 +68,7 @@ async-stream = "0.3.5"
 protoc-wkt = "1.0.0"
 indicatif = "0.17.8"
 comfy-table = { version = "7.1.1", optional = true }
-inquire = { version = "0.7.5", optional = true }
+inquire = { version = "0.9.4", optional = true }
 toml = { version = "0.8.13", optional = true }
 console-subscriber = { version = "0.3.0", optional = true }
 flate2 = "1.0.34"
@@ -112,9 +112,20 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 dolos-redb3 = { path = "crates/redb3" }
 
+[build-dependencies]
+vergen-gitcl = "9.1.0"
+
 [[test]]
 name = "smoke"
-path = "tests/external/smoke.rs"
+path = "tests/e2e/smoke.rs"
+
+[[test]]
+name = "sync"
+path = "tests/e2e/sync.rs"
+
+[[test]]
+name = "snapshot"
+path = "tests/e2e/snapshot.rs"
 
 [[test]]
 name = "epoch_pots"
@@ -127,6 +138,10 @@ path = "tests/memory.rs"
 [[test]]
 name = "mempool"
 path = "tests/mempool.rs"
+
+[[test]]
+name = "bootstrap"
+path = "tests/bootstrap.rs"
 
 [features]
 strict = ["dolos-cardano/strict"]
@@ -174,7 +189,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.12"
+version = "1.0.3"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
@@ -213,6 +228,7 @@ base64 = "0.22.1"
 bech32 = "0.11.1"
 reqwest = { version = "0.12.7", default-features = false, features = [
     "blocking",
+    "json",
     "rustls-tls",
 ] }
 rayon = "1.11.0"

@@ -1,68 +1,5 @@
-use crate::{
-    AccountState, CardanoDelta, EndStats, EpochState, FixedNamespace as _, PoolHash, PoolState,
-    CURRENT_EPOCH_KEY,
-};
-use dolos_core::{ChainError, NsKey};
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PoolWrapUp {
-    pool_hash: PoolHash,
-}
-
-impl PoolWrapUp {
-    pub fn new(pool_hash: PoolHash) -> Self {
-        Self { pool_hash }
-    }
-}
-
-impl dolos_core::EntityDelta for PoolWrapUp {
-    type Entity = PoolState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((PoolState::NS, self.pool_hash.as_slice()))
-    }
-
-    fn apply(&mut self, entity: &mut Option<PoolState>) {
-        let entity = entity.as_mut().expect("existing pool");
-
-        let snapshot = entity.snapshot.scheduled_or_default();
-
-        snapshot.is_retired = true;
-    }
-
-    fn undo(&self, _entity: &mut Option<PoolState>) {
-        // todo!()
-        // Placeholder undo logic. Ensure this does not panic.
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EpochWrapUp {
-    stats: EndStats,
-}
-
-impl dolos_core::EntityDelta for EpochWrapUp {
-    type Entity = EpochState;
-
-    fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
-    }
-
-    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing epoch");
-
-        entity.rolling.scheduled_or_default();
-        entity.pparams.scheduled_or_default();
-        entity.end = Some(self.stats.clone());
-    }
-
-    fn undo(&self, entity: &mut Option<Self::Entity>) {
-        let entity = entity.as_mut().expect("existing epoch");
-
-        entity.end = None;
-    }
-}
+use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUp, PoolHash, PoolState, PoolWrapUp};
+use dolos_core::ChainError;
 
 #[derive(Default)]
 pub struct BoundaryVisitor {
@@ -160,7 +97,7 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         effective as i64 - applied_rewards_sum as i64
     );
 
-    tracing::info!(
+    tracing::debug!(
         epoch = ctx.ending_state().number,
         available_rewards = %incentives.available_rewards,
         %effective,
@@ -213,7 +150,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
 
         let stats = define_end_stats(ctx);
 
-        ctx.deltas.add_for_entity(EpochWrapUp { stats });
+        ctx.deltas.add_for_entity(EpochWrapUp::new(stats));
 
         Ok(())
     }

@@ -1,0 +1,32 @@
+[upstream]
+peer_address = "relay.cnode-m1.demeter.run:3001"
+
+[storage]
+version = "v3"
+path = "data"
+
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+
+[serve.ouroboros]
+listen_path = "dolos.socket"
+
+[serve.grpc]
+listen_address = "[::]:6580"
+
+[serve.minibf]
+listen_address = "[::]:6581"
+
+[serve.trp]
+listen_address = "[::]:6582"
+
+[serve.minikupo]
+listen_address = "[::]:6583"
+
+[chain]
+type = "cardano"
+magic = 1
+is_testnet = true

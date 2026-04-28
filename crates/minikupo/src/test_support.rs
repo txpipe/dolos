@@ -119,6 +119,7 @@ impl TestApp {
                 pool_id: String::new(),
                 drep_id: String::new(),
                 tx_cbor: vec![],
+                account_withdrawals: vec![],
             },
         }
     }

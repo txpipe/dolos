@@ -115,13 +115,7 @@ impl TestApp {
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig {
-            listen_address: "[::]:0".parse().expect("invalid listen address"),
-            permissive_cors: None,
-            token_registry_url: None,
-            url: None,
-            max_scan_items: None,
-        };
+        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
 
         let facade = Facade {
             inner: domain.clone(),

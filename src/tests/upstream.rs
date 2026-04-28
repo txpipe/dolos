@@ -1,5 +1,5 @@
 use gasket::{framework::*, runtime::Policy};
-use tracing::{error, info};
+use tracing::{debug, info};
 
 use dolos_core::{
     config::{PeerConfig, SyncConfig},
@@ -33,7 +33,7 @@ impl Worker<WitnessStage> for WitnessWorker {
         &mut self,
         stage: &mut WitnessStage,
     ) -> Result<WorkSchedule<PullEvent>, WorkerError> {
-        error!("dequeing form witness");
+        debug!("dequeing form witness");
         let msg = stage.input.recv().await.or_panic()?;
         Ok(WorkSchedule::Unit(msg.payload))
     }
@@ -60,15 +60,11 @@ fn test_mainnet_upstream() {
     let (send, receive) = gasket::messaging::tokio::mpsc_channel(200);
 
     let mut upstream = crate::sync::pull::Stage::new(
-        &SyncConfig {
-            pull_batch_size: Some(20),
-            sync_limit: Default::default(),
-        },
+        &SyncConfig::default().with_pull_batch_size(20),
         &PeerConfig {
             peer_address: "relays-new.cardano-mainnet.iohk.io:3001".into(),
-            network_magic: 764824073,
-            is_testnet: false,
         },
+        764824073,
         wal,
     );
 

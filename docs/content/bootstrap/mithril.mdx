@@ -6,9 +6,9 @@ sidebar:
 
 import { Aside } from '@astrojs/starlight/components';
 
-_Mithril_ is a signature scheme that generates a certificate to convince verifiers that a portion of the stake of a system has signed a message. There's currently a network of Cardano SPOs continuosuly verifing snapshots of the history of the chain and making them available for consumption by client applications, such as Dolos.
+_Mithril_ is a signature scheme that generates a certificate to convince verifiers that a portion of the stake of a system has signed a message. There's currently a network of Cardano SPOs continuously verifying snapshots of the history of the chain and making them available for consumption by client applications, such as Dolos.
 
-From _Dolos'_ perspective, the process of bootsrapping with _Mihtril_ involves the following steps (which are executed automatically):
+From _Dolos'_ perspective, the process of bootstrapping with _Mithril_ involves the following steps (which are executed automatically):
 
 1. Downloading a snapshot from a cloud server
 2. Verifying that the _Mithril_ signature is valid
@@ -19,13 +19,15 @@ From _Dolos'_ perspective, the process of bootsrapping with _Mihtril_ involves t
 
 To use _Mithril_ snapshots, _Dolos_ requires a few configuration values to download and verify data:
 
-| property     | type   | example          |
-| ------------ | ------ | ---------------- |
-| aggregator   | string | "https://aggregator.release-preprod.api.mithril.network/aggregator"  |
-| genesis_key | string |  "5b3...45d" (redacted) |
+| property      | type   | example          |
+| ------------- | ------ | ---------------- |
+| aggregator    | string | "https://aggregator.release-preprod.api.mithril.network/aggregator"  |
+| genesis_key   | string | "5b3...45d" (redacted) |
+| ancillary_key | string | "5b3...36d" (redacted) |
 
 - `aggregator`: url of the Mithril aggregator
 - `genesis_key`: hex-encoded value of the Mithril genesis key
+- `ancillary_key`: optional hex-encoded value of the Mithril ancillary verification key
 
 This is how the configuration fragment would look like inside a `dolos.toml` file:
 
@@ -33,6 +35,7 @@ This is how the configuration fragment would look like inside a `dolos.toml` fil
 [mithril]
 aggregator = "https://aggregator.release-preprod.api.mithril.network/aggregator"
 genesis_key = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d"
+ancillary_key = "5b3138392c3139322c3231362c3135302c3131342c3231362c3233372c3231302c34352c31382c32312c3139362c3230382c3234362c3134362c322c3235322c3234332c3235312c3139372c32382c3135372c3230342c3134352c33302c31342c3232382c3136382c3132392c38332c3133362c33365d"
 ```
 
 <Aside type="note">
@@ -44,25 +47,26 @@ If you use the `dolos init` command to initialize your configuration, these valu
 To execute the _Mithril_ bootstrap procedure, you need to run the following command line:
 
 ```sh
-dolos bootstrap
+dolos bootstrap mithril
 ```
 
-The process will take from several minutes to a few hours depending on the network. You'll see a sequence of progress bars describing the each of the steps of the process.
-
-<Aside type="caution">
-The process doesn't support resuming from previous runs, if you interrupt the process you'll need to start over.
-</Aside>
+The process will take from several minutes to a few hours depending on the network. You'll see a sequence of progress bars describing each of the steps of the process.
 
 <Aside type="note">
-The above command won't proceed if it detects that you already have data from previous Dolos runs. It will prompt a confirmation dialog to decide if existing data should be deleted.
+If you use the `dolos init` command, bootstrap is triggered automatically after configuration so you don't need to run this manually.
 </Aside>
 
-The `bootstrap` command has a few optional arguments to help with specific scenarios:
+<Aside type="caution">
+The import step supports resuming from previous runs via the `--continue` flag. However, the download step does not support resuming.
+</Aside>
+
+In addition to the [global bootstrap flags](../bootstrap), the `mithril` subcommand accepts the following flags:
 
 | arg | description | default |
 | --- | ----------- | ------- |
-| `--download-dir <DOWNLOAD_DIR>` | Directory to store the downloaded snapshot |  `./snapshot` |
-| `--skip-if-not-empty` | Skip the bootstrap if there's already data in the stores | `false` |
+| `--download-dir <DIR>` | Directory to store the downloaded snapshot | `./snapshot` |
 | `--skip-validation` | Skip the Mithril certificate validation | `false` |
 | `--skip-download` | Assume the snapshot is already available in the download dir | `false` |
 | `--retain-snapshot` | Retain downloaded snapshot instead of deleting it | `false` |
+| `--chunk-size <N>` | Number of blocks to process per chunk (more is faster but uses more memory) | `500` |
+| `--start-from <POINT>` | Resume import from a specific chain point | none |

@@ -294,7 +294,7 @@ where
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
 {
-    let permissive_cors = facade.config.permissive_cors.unwrap_or_default();
+    let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -326,6 +326,10 @@ where
         .route(
             "/accounts/{stake_address}/rewards",
             get(routes::accounts::by_stake_rewards::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/withdrawals",
+            get(routes::accounts::by_stake_withdrawals::<D>),
         )
         .route(
             "/addresses/{address}",
@@ -461,7 +465,12 @@ where
             "/pools/{id}/history",
             get(routes::pools::by_id_history::<D>),
         )
+        .route(
+            "/pools/{id}/metadata",
+            get(routes::pools::by_id_metadata::<D>),
+        )
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
+        .route("/pools/{id}", get(routes::pools::by_id::<D>))
         .route(
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),

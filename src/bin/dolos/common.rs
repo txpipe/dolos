@@ -79,6 +79,7 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
 
     let domain = DomainAdapter {
         storage_config: Arc::new(config.storage.clone()),
+        sync_config: Arc::new(config.sync.clone()),
         genesis,
         chain: Arc::new(std::sync::RwLock::new(chain)),
         wal: stores.wal,
@@ -90,7 +91,22 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     };
 
     // this will make sure the domain is correctly initialized and in a valid state.
-    domain.bootstrap().map_err(|x| miette::miette!("{:?}", x))?;
+    domain.bootstrap().map_err(|e| match e {
+        dolos_core::DomainError::InconsistentState { ref wal, ref state } => {
+            let msg = match (wal, state) {
+                (Some(w), Some(s)) => format!("state (slot {}) is ahead of WAL (slot {})", s.slot(), w.slot()),
+                (None, Some(s)) => format!("WAL is empty but state exists at slot {}", s.slot()),
+                (Some(w), None) => format!("WAL at slot {} but state has no cursor", w.slot()),
+                (None, None) => "WAL and state are both missing".into(),
+            };
+            let help: &str = match (wal, state) {
+                (_, Some(_)) => "run `dolos doctor reset-wal` to rebuild the WAL from the current state",
+                _ => "storage may be corrupted; consider re-bootstrapping with `dolos bootstrap`",
+            };
+            miette::miette!(help = help, "{msg}")
+        }
+        other => miette::miette!("{other:?}"),
+    })?;
 
     Ok(domain)
 }

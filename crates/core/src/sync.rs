@@ -162,9 +162,9 @@ pub(crate) fn drain_pending_work<D: Domain>(
 ///
 /// This function is public primarily for testing scenarios where direct
 /// work unit execution is needed (e.g., manual genesis initialization).
-#[instrument(skip_all, fields(work_unit = %work.name()))]
+#[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
-    info!("executing work unit");
+    debug!("executing work unit");
 
     work.load(domain)?;
     debug!("load phase complete");
@@ -191,7 +191,7 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
         domain.notify_tip(event);
     }
 
-    info!("work unit completed");
+    debug!("work unit completed");
     Ok(())
 }
 

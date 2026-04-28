@@ -1,0 +1,134 @@
+---
+title: Tx3
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+
+Tx3 is a toolkit for authoring and interacting with UTxO protocols on Cardano. It provides a DSL for declaring protocol interfaces using transaction templates — reusable patterns that generate concrete transactions from runtime parameters. You can learn more about Tx3 in the [official documentation](/tx3).
+
+Tx3 relies on a TRP (Transaction Resolver Protocol) server to resolve transaction templates into concrete, signable transactions. Dolos includes a built-in TRP server, making it a natural backend for Tx3 workflows.
+
+## Enabling the TRP Server
+
+Enable the TRP endpoint in your `dolos.toml` configuration:
+
+```toml
+[serve.trp]
+listen_address = "[::]:8164"
+```
+
+| Property            | Type    | Description                                              |
+|---------------------|---------|----------------------------------------------------------|
+| listen_address      | string  | Local address (`IP:PORT`) to listen for TRP connections  |
+| max_optimize_rounds | integer | Max optimization rounds for fee balancing (default: 10)  |
+| permissive_cors     | boolean | Allow cross-origin requests from any origin (default: true) |
+| extra_fees          | integer | Optional extra lovelace to add during fee optimization   |
+
+Once the daemon is running, the TRP server accepts JSON-RPC requests at `http://localhost:8164`.
+
+## Connecting Tx3
+
+### Using the CLI
+
+Define a custom network in your `trix.toml` that points to the Dolos TRP endpoint:
+
+```toml
+[networks.my-dolos]
+name = "my-dolos"
+is_testnet = true
+
+[networks.my-dolos.trp]
+url = "http://localhost:8164"
+
+[profiles.my-dolos]
+network = "my-dolos"
+```
+
+Then invoke transactions using that profile:
+
+```bash
+trix invoke --profile my-dolos
+```
+
+<Aside type="note">
+The built-in `cardano-local` network already defaults to `http://localhost:8164`, matching the default Dolos TRP port. If you're running Dolos locally with default settings, you can use the `local` profile directly:
+
+```bash
+trix invoke --profile local
+```
+</Aside>
+
+### Using the Rust SDK
+
+```rust
+use tx3_sdk::{tii::Protocol, trp::Client, trp::ClientOptions, Tx3Client, Party};
+use tx3_sdk::signer::CardanoSigner;
+use serde_json::json;
+
+let protocol = Protocol::from_file("./my-protocol.tii")?;
+
+let client = Client::new(ClientOptions {
+    endpoint: "http://localhost:8164".to_string(),
+    headers: None,
+});
+
+let tx3 = Tx3Client::new(protocol, client)
+    .with_party("sender", Party::signer(
+        CardanoSigner::from_mnemonic("addr_test1...", "word1 word2 ... word24")?
+    ))
+    .with_party("receiver", Party::address("addr_test1..."));
+
+let status = tx3.tx("transfer")
+    .arg("quantity", json!(5_000_000))
+    .resolve().await?
+    .sign()?
+    .submit().await?
+    .wait_for_confirmed(Default::default()).await?;
+```
+
+### Using the TypeScript SDK
+
+```typescript
+import { Client } from "@tx3-lang/sdk";
+
+const client = new Client({
+    endpoint: "http://localhost:8164",
+});
+
+const resolved = await client.resolve({
+    tir: { encoding: "hex", version: "v1beta0", content: tirHex },
+    args: { quantity: 5_000_000 },
+    env: {},
+});
+```
+
+### Generating Client Code
+
+Tx3 can generate strongly-typed clients for multiple languages. Configure code generation in your `trix.toml`:
+
+```toml
+[[codegen]]
+plugin = "ts-client"
+output_dir = "./gen/typescript"
+```
+
+Then run:
+
+```bash
+trix codegen
+```
+
+Available plugins: `ts-client`, `rust-client`, `python-client`, `go-client`.
+
+## How It Works
+
+The Tx3 + Dolos workflow follows three steps:
+
+1. **Resolve** — the Tx3 client sends a compiled transaction template (TIR) and arguments to the Dolos TRP endpoint. Dolos resolves UTxO inputs from the chain, balances fees, and returns a CBOR-encoded transaction ready for signing.
+2. **Sign** — the client signs the transaction hash locally using the wallet's private key.
+3. **Submit** — the client sends the signed transaction back to the Dolos TRP endpoint, which submits it to the Cardano network.
+
+<Aside type="note">
+The `trix devnet` command launches an ephemeral local blockchain powered by Dolos, useful for development and testing without connecting to a public network.
+</Aside>

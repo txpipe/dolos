@@ -75,7 +75,7 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 /// Skipped phases:
 /// - `commit_wal()` - Not needed for immutable data import
 /// - `notify_tip()` - No subscribers during bulk import
-#[instrument(skip_all, fields(work_unit = %work.name()))]
+#[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
 fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     debug!("executing work unit (import)");
 

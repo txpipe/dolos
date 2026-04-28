@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use dolos_core::config::RootConfig;
 use flate2::read::GzDecoder;
 use inquire::list_option::ListOption;
@@ -9,12 +11,16 @@ use crate::feedback::{Feedback, ProgressReader};
 #[derive(Debug, clap::Args, Default, Clone)]
 pub struct Args {
     /// The variant of the snapshot to download (full, ledger).
-    #[arg(long)]
+    #[arg(long, default_value = "full")]
     pub variant: String,
 
     /// The point in history of the snapshot (eg: era, epoch or `latest`).
     #[arg(long, default_value = "latest")]
     pub point: String,
+
+    /// Path to a local snapshot tar.gz file to import instead of downloading.
+    #[arg(long)]
+    pub file: Option<PathBuf>,
 }
 
 impl Args {
@@ -38,6 +44,7 @@ impl Args {
         Ok(Self {
             variant,
             point: "latest".to_string(),
+            file: None,
         })
     }
 }
@@ -50,7 +57,7 @@ fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
         return None;
     }
 
-    let magic = config.upstream.network_magic()?;
+    let magic = config.chain.magic();
 
     let download_url_template = config
         .snapshot
@@ -65,6 +72,28 @@ fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
         .replace("${VARIANT}", &args.variant);
 
     Some(snapshot_url)
+}
+
+fn import_local_snapshot(config: &RootConfig, path: &PathBuf) -> miette::Result<()> {
+    let root = &config.storage.path;
+
+    std::fs::create_dir_all(root)
+        .into_diagnostic()
+        .context("Failed to create target directory")?;
+
+    let file = std::fs::File::open(path)
+        .into_diagnostic()
+        .context("Failed to open local snapshot file")?;
+
+    let tar_gz = GzDecoder::new(file);
+    let mut archive = Archive::new(tar_gz);
+
+    archive
+        .unpack(root)
+        .into_diagnostic()
+        .context("Failed to extract snapshot")?;
+
+    Ok(())
 }
 
 fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
@@ -114,7 +143,11 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
-    fetch_snapshot(config, args, feedback)?;
+    if let Some(path) = &args.file {
+        import_local_snapshot(config, path)?;
+    } else {
+        fetch_snapshot(config, args, feedback)?;
+    }
 
     Ok(())
 }

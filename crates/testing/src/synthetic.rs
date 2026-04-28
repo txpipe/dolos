@@ -43,6 +43,7 @@ pub struct SyntheticBlockConfig {
     pub slot: u64,
     pub metadata_label: u64,
     pub metadata_value: String,
+    pub metadata_entries: Vec<(u64, alonzo::Metadatum)>,
     pub policy_id: [u8; 28],
     pub asset_name: String,
     pub lovelace: u64,
@@ -93,6 +94,7 @@ impl Default for SyntheticBlockConfig {
             slot: 1,
             metadata_label: 1990,
             metadata_value: "synthetic".to_string(),
+            metadata_entries: vec![],
             policy_id: [1u8; 28],
             asset_name: "SYNTH".to_string(),
             lovelace: crate::MIN_UTXO_AMOUNT,
@@ -125,9 +127,16 @@ pub struct SyntheticVectors {
     pub account_addresses: Vec<String>,
     pub account_address_blocks: Vec<(String, u64)>,
     pub account_address_bounds: Vec<(String, u64, u64)>,
+    pub account_withdrawals: Vec<AccountWithdrawalVector>,
     pub pool_id: String,
     pub drep_id: String,
     pub tx_cbor: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AccountWithdrawalVector {
+    pub tx_hash: String,
+    pub amount: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -196,7 +205,18 @@ pub fn build_synthetic_blocks(
             Address::Stake(_) | Address::Byron(_) => None,
         })
         .unwrap_or(Network::Testnet);
-    let metadata_label = cfg.metadata_label;
+    let metadata_entries = if cfg.metadata_entries.is_empty() {
+        vec![(
+            cfg.metadata_label,
+            alonzo::Metadatum::Text(cfg.metadata_value.clone()),
+        )]
+    } else {
+        cfg.metadata_entries.clone()
+    };
+    let metadata_label = metadata_entries
+        .first()
+        .map(|(label, _)| *label)
+        .unwrap_or(cfg.metadata_label);
 
     let policy_id = Hash::from(cfg.policy_id);
     let asset_name = Bytes::from(cfg.asset_name.as_bytes().to_vec());
@@ -227,6 +247,7 @@ pub fn build_synthetic_blocks(
     let mut account_addresses_seen = std::collections::HashSet::new();
     let mut account_address_bounds: std::collections::HashMap<String, (u64, u64)> =
         std::collections::HashMap::new();
+    let mut account_withdrawals = Vec::new();
 
     let block_count = cfg.block_count.max(1);
     let txs_per_block = cfg.txs_per_block.max(1);
@@ -244,13 +265,9 @@ pub fn build_synthetic_blocks(
         let block_number = cfg.start_block + offset as u64;
         let mut tx_specs = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
+        let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
 
-        let metadata: alonzo::Metadata = vec![(
-            metadata_label,
-            alonzo::Metadatum::Text(cfg.metadata_value.clone()),
-        )]
-        .into_iter()
-        .collect();
+        let metadata: alonzo::Metadata = metadata_entries.clone().into_iter().collect();
 
         let aux_data = alonzo::AuxiliaryData::ShelleyMa(alonzo::ShelleyMaAuxiliaryData {
             transaction_metadata: metadata,
@@ -301,6 +318,9 @@ pub fn build_synthetic_blocks(
                 None
             };
 
+            let withdrawal_amount = (tx_offset == 0).then_some(1_000_000 + block_number);
+            withdrawal_amounts.push(withdrawal_amount);
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -313,6 +333,7 @@ pub fn build_synthetic_blocks(
                 pool_keyhash,
                 cfg.drep_keyhash,
                 cfg.drep_deposit,
+                withdrawal_amount,
                 if tx_offset == 0 { Some(aux_hash) } else { None },
                 extras,
             ));
@@ -320,8 +341,13 @@ pub fn build_synthetic_blocks(
 
         let (block, hashes) = sample_block(block_number, slot, tx_specs, Some(aux_data));
 
-        for hash in &hashes {
-            tx_hashes.push(hex::encode(hash.as_ref()));
+        for (idx, hash) in hashes.iter().enumerate() {
+            let tx_hash = hex::encode(hash.as_ref());
+            tx_hashes.push(tx_hash.clone());
+
+            if let Some(amount) = withdrawal_amounts[idx] {
+                account_withdrawals.push(AccountWithdrawalVector { tx_hash, amount });
+            }
         }
 
         let block_hash = block.header.compute_hash();
@@ -405,6 +431,7 @@ pub fn build_synthetic_blocks(
         account_addresses,
         account_address_blocks,
         account_address_bounds,
+        account_withdrawals,
         pool_id,
         drep_id,
         tx_cbor,
@@ -510,6 +537,7 @@ fn sample_transaction(
     pool_keyhash: Hash<28>,
     drep_keyhash: [u8; 28],
     drep_deposit: u64,
+    withdrawal_amount: Option<u64>,
     auxiliary_data_hash: Option<Hash<32>>,
     extras: Option<&SyntheticFixtureExtras>,
 ) -> SyntheticTxSpec {
@@ -552,6 +580,8 @@ fn sample_transaction(
         StakeCredential::ScriptHash(hash) => StakePayload::Script(hash),
     };
     let reward_account = StakeAddress::new(Network::Testnet, reward_payload);
+    let withdrawals = withdrawal_amount
+        .map(|amount| BTreeMap::from_iter([(Bytes::from(reward_account.to_vec()), amount)]));
     let pool_cert = Certificate::PoolRegistration {
         operator: pool_keyhash,
         vrf_keyhash,
@@ -582,7 +612,7 @@ fn sample_transaction(
         fee: 7,
         ttl: Some(10),
         certificates: Some(certificates),
-        withdrawals: None,
+        withdrawals,
         auxiliary_data_hash,
         validity_interval_start: Some(5),
         mint: Some(mint),

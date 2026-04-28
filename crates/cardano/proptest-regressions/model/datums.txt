@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e0b8e02e6c2a5bc79e9dd8c4e56548b688fc97860e369e41edb2ca57fd1a9678 # shrinks to entity = None, delta = DatumRefIncrement { datum_hash: Hash<32>("0000000000000000000000000000000000000000000000000000000000000000"), datum_bytes: [], was_new: false }
+cc 1d06b7651150c1c4bd997e9aa2b232981a755028c5a9bd24648385e1a6004b44 # shrinks to entity = Some(DatumState { refcount: 0, bytes: [] }), delta = DatumRefDecrement { datum_hash: Hash<32>("0000000000000000000000000000000000000000000000000000000000000000"), prev_state: None }

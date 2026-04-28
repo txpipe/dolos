@@ -79,7 +79,7 @@ impl super::WorkContext {
             })
             .sum();
 
-        tracing::warn!(
+        tracing::debug!(
             remaining_count = remaining.len(),
             total_avvm = total,
             "AVVM reclamation at Shelley→Allegra boundary"

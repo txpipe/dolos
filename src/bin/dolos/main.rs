@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use miette::{Context, IntoDiagnostic, Result};
 
+mod banner;
 mod common;
 mod daemon;
 mod doctor;

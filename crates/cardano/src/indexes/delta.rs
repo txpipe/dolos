@@ -237,6 +237,25 @@ impl CardanoIndexDeltaBuilder {
                 .tags
                 .push(Tag::new(archive::ACCOUNT_CERTS, bytes));
         }
+
+        if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {
+            self.current_block()
+                .tags
+                .push(Tag::new(archive::POOL_CERTS, cert.operator.to_vec()));
+        }
+
+        if let Some(cert) = pallas_extras::cert_as_pool_retirement(cert) {
+            self.current_block()
+                .tags
+                .push(Tag::new(archive::POOL_CERTS, cert.operator.to_vec()));
+        }
+    }
+
+    /// Add withdrawal tags to the current block.
+    pub fn add_withdrawal(&mut self, account: &[u8]) {
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::ACCOUNT_WITHDRAWALS, account.to_vec()));
     }
 
     /// Add a metadata label to the current block.
@@ -244,6 +263,105 @@ impl CardanoIndexDeltaBuilder {
         self.current_block()
             .tags
             .push(Tag::new(archive::METADATA, label.to_be_bytes().to_vec()));
+    }
+
+    /// Index all archive entries for a single block.
+    ///
+    /// Calls `start_block`, then iterates all transactions adding
+    /// tx hashes, metadata, inputs (with resolved UTxO lookups),
+    /// outputs (with script refs), witness scripts/datums, certs, and redeemers.
+    pub fn index_block(
+        &mut self,
+        block: &pallas::ledger::traverse::MultiEraBlock<'_>,
+        resolved_inputs: &std::collections::HashMap<TxoRef, crate::OwnedMultiEraOutput>,
+    ) {
+        use pallas::ledger::{
+            primitives::conway::ScriptRef,
+            traverse::{ComputeHash as _, OriginalHash as _},
+        };
+
+        self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
+
+        for tx in block.txs() {
+            self.add_tx_hash(tx.hash().to_vec());
+
+            for (label, _) in tx.metadata().collect::<Vec<_>>() {
+                self.add_metadata_label(label);
+            }
+
+            for input in tx.inputs() {
+                self.add_spent_input(&input);
+
+                let txo_ref: TxoRef = (&input).into();
+                if let Some(resolved) = resolved_inputs.get(&txo_ref) {
+                    resolved.with_dependent(|_, output| {
+                        if let Ok(addr) = output.address() {
+                            self.add_address(&addr);
+                        }
+                        self.add_assets(&output.value());
+                        if let Some(datum) = output.datum() {
+                            self.add_datum(&datum);
+                        }
+                    });
+                }
+            }
+
+            for (_, output) in tx.produces() {
+                if let Ok(addr) = output.address() {
+                    self.add_address(&addr);
+                }
+                self.add_assets(&output.value());
+                if let Some(datum) = output.datum() {
+                    self.add_datum(&datum);
+                }
+
+                if let Some(script_ref) = output.script_ref() {
+                    match script_ref {
+                        ScriptRef::NativeScript(script) => {
+                            self.add_script_hash(script.original_hash().to_vec());
+                        }
+                        ScriptRef::PlutusV1Script(script) => {
+                            self.add_script_hash(script.compute_hash().to_vec());
+                        }
+                        ScriptRef::PlutusV2Script(script) => {
+                            self.add_script_hash(script.compute_hash().to_vec());
+                        }
+                        ScriptRef::PlutusV3Script(script) => {
+                            self.add_script_hash(script.compute_hash().to_vec());
+                        }
+                    }
+                }
+            }
+
+            for script in tx.native_scripts() {
+                self.add_script_hash(script.original_hash().to_vec());
+            }
+            for script in tx.plutus_v1_scripts() {
+                self.add_script_hash(script.compute_hash().to_vec());
+            }
+            for script in tx.plutus_v2_scripts() {
+                self.add_script_hash(script.compute_hash().to_vec());
+            }
+            for script in tx.plutus_v3_scripts() {
+                self.add_script_hash(script.compute_hash().to_vec());
+            }
+
+            for datum in tx.plutus_data() {
+                self.add_datum_hash(datum.original_hash().to_vec());
+            }
+
+            for cert in tx.certs() {
+                self.add_cert(&cert);
+            }
+
+            for (account, _) in tx.withdrawals().collect::<Vec<_>>() {
+                self.add_withdrawal(account);
+            }
+
+            for redeemer in tx.redeemers() {
+                self.add_datum_hash(redeemer.data().compute_hash().to_vec());
+            }
+        }
     }
 
     /// Build the final `IndexDelta`.
