@@ -58,6 +58,14 @@ pub struct RupdWorkUnit {
     /// else `crate::shard::ACCOUNT_SHARDS` for a fresh RUPD.
     total_shards: u32,
 
+    /// First shard to run on this invocation. Populated in `initialize()`
+    /// from `EpochState.rupd_progress.committed` so a restart after a
+    /// mid-RUPD crash skips already-committed shards. Per-shard reward
+    /// emissions land as `PendingRewardState` upserts (overwrite-by-key,
+    /// idempotent on payload), but skipping committed shards still
+    /// avoids wasted load + compute work.
+    start_shard: u32,
+
     /// Boundary-wide globals + the in-flight shard's per-account
     /// snapshot. Built fresh in `initialize()` from the state store and
     /// re-merged with each shard's range during `load()`. After
@@ -83,6 +91,7 @@ impl RupdWorkUnit {
             slot,
             genesis,
             total_shards: 0,
+            start_shard: 0,
             work: None,
             rewards: None,
             pool_log_shares: HashMap::new(),
@@ -127,20 +136,23 @@ where
         self.total_shards
     }
 
+    fn start_shard(&self) -> u32 {
+        self.start_shard
+    }
+
     fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
-        // Resolve the effective shard count for this RUPD. While a RUPD
-        // is in flight, the persisted `rupd_progress.total` is
-        // authoritative — guards against a config change between shards
-        // (e.g. across a crash and restart). Falls back to the current
-        // config for a fresh RUPD.
-        self.total_shards = match crate::load_epoch::<D>(domain.state()) {
-            Ok(epoch) => epoch
-                .rupd_progress
-                .as_ref()
-                .map(|p| p.total)
-                .unwrap_or(ACCOUNT_SHARDS),
-            Err(_) => ACCOUNT_SHARDS,
-        };
+        // Resolve the effective shard count + resume cursor for this
+        // RUPD. While a RUPD is in flight, the persisted
+        // `rupd_progress` is authoritative — `total` guards against a
+        // config change mid-RUPD, and `committed` lets a restart skip
+        // shards whose state already landed.
+        //
+        // Errors propagate: state-read failure must not silently fall
+        // back to a fresh RUPD's defaults.
+        let epoch = crate::load_epoch::<D>(domain.state())?;
+        let progress = epoch.rupd_progress.as_ref();
+        self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
+        self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
 
         // Build the boundary-wide globals once. Per-shard maps stay
         // empty here; each `load()` fills its own slice via
@@ -150,6 +162,7 @@ where
         debug!(
             slot = self.slot,
             total = self.total_shards,
+            start = self.start_shard,
             current_epoch = work.current_epoch,
             "rupd initialize"
         );

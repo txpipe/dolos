@@ -39,14 +39,16 @@ fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain) {
     {
         WorkUnit::<ToyDomain>::initialize(&mut work, domain).unwrap();
         let total_shards = WorkUnit::<ToyDomain>::total_shards(&work);
-        for shard in 0..total_shards {
+        let start_shard = WorkUnit::<ToyDomain>::start_shard(&work);
+        for shard in start_shard..total_shards {
             WorkUnit::<ToyDomain>::load(&mut work, domain, shard).unwrap();
             WorkUnit::<ToyDomain>::compute(&mut work, shard).unwrap();
             WorkUnit::<ToyDomain>::commit_wal(&mut work, domain, shard).unwrap();
             WorkUnit::<ToyDomain>::commit_state(&mut work, domain, shard).unwrap();
-            // Intentionally skip commit_archive and commit_indexes.
+            // Intentionally skip commit_archive and commit_indexes — and
+            // intentionally skip finalize() to model "crash after state
+            // commit", which is what the recovery test below exercises.
         }
-        WorkUnit::<ToyDomain>::finalize(&mut work, domain).unwrap();
     }
 }
 

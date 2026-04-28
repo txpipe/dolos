@@ -68,6 +68,22 @@ pub trait WorkUnit<D: Domain>: Send {
         1
     }
 
+    /// First shard the executor will run.
+    ///
+    /// Defaults to `0` (run every shard from the start). Restart-aware
+    /// work units override this to resume mid-pipeline after a crash:
+    /// they read a persisted commit cursor (e.g. `*_progress.committed`)
+    /// in `initialize()` and return it here. The executor then runs
+    /// `start_shard()..total_shards()` so already-committed shards are
+    /// skipped, which matters when the per-shard deltas are
+    /// non-idempotent (replaying a committed shard would double-apply).
+    ///
+    /// Must satisfy `start_shard() <= total_shards()`. The returned
+    /// value must be valid after `initialize()` has run.
+    fn start_shard(&self) -> u32 {
+        0
+    }
+
     /// Shard-agnostic setup, run once before any shard executes.
     ///
     /// Use this to compute `total_shards()`, load boundary-wide data

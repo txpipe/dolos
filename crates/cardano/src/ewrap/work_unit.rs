@@ -34,6 +34,12 @@ pub struct EwrapWorkUnit {
     /// `crate::shard::ACCOUNT_SHARDS` for a fresh boundary.
     total_shards: u32,
 
+    /// First shard to run on this invocation. Populated in `initialize()`
+    /// from `EpochState.ewrap_progress.committed` so a restart after a
+    /// mid-boundary crash skips already-committed shards (the per-shard
+    /// account-mutation deltas are non-idempotent on replay).
+    start_shard: u32,
+
     /// During the per-shard loop, holds the in-flight shard's
     /// `BoundaryWork` (build-and-discard between shards). After
     /// `finalize()`, holds the global Ewrap pass's `BoundaryWork` so
@@ -47,6 +53,7 @@ impl EwrapWorkUnit {
             slot,
             genesis,
             total_shards: 0,
+            start_shard: 0,
             boundary: None,
         }
     }
@@ -68,24 +75,29 @@ where
         self.total_shards
     }
 
+    fn start_shard(&self) -> u32 {
+        self.start_shard
+    }
+
     fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
-        // Resolve the effective shard count for this boundary. While a
-        // boundary is in flight, the persisted `ewrap_progress.total` is
-        // authoritative — guards against a config change between shards
-        // (e.g. across a crash and restart) breaking the in-flight
-        // pipeline. Falls back to current config for a fresh boundary.
-        self.total_shards = match load_epoch::<D>(domain.state()) {
-            Ok(epoch) => epoch
-                .ewrap_progress
-                .as_ref()
-                .map(|p| p.total)
-                .unwrap_or(ACCOUNT_SHARDS),
-            Err(_) => ACCOUNT_SHARDS,
-        };
+        // Resolve the effective shard count + resume cursor for this
+        // boundary. While a boundary is in flight, the persisted
+        // `ewrap_progress` is authoritative — `total` guards against a
+        // config change mid-boundary, and `committed` lets a restart
+        // skip shards whose state already landed (the per-shard account
+        // deltas are non-idempotent on replay).
+        //
+        // Errors propagate: state-read failure must not silently fall
+        // back to a fresh boundary's defaults.
+        let epoch = load_epoch::<D>(domain.state())?;
+        let progress = epoch.ewrap_progress.as_ref();
+        self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
+        self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
 
         debug!(
             slot = self.slot,
             total = self.total_shards,
+            start = self.start_shard,
             "ewrap initialize"
         );
         Ok(())

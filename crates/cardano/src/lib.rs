@@ -119,6 +119,17 @@ where
         }
     }
 
+    fn start_shard(&self) -> u32 {
+        match self {
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::start_shard(w),
+            Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::start_shard(w),
+            Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::start_shard(w),
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::start_shard(w),
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::start_shard(w),
+            Self::ForcedStop => 0,
+        }
+    }
+
     fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
         match self {
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::initialize(w, domain),

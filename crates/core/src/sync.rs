@@ -194,8 +194,21 @@ pub(crate) fn run_lifecycle<D: Domain>(
     work.initialize(domain)?;
 
     let total_shards = work.total_shards();
-    for shard in 0..total_shards {
-        let _span = tracing::info_span!("shard", index = shard, total = total_shards).entered();
+    let start_shard = work.start_shard();
+    debug_assert!(
+        start_shard <= total_shards,
+        "WorkUnit::start_shard ({}) exceeds total_shards ({})",
+        start_shard,
+        total_shards,
+    );
+    for shard in start_shard..total_shards {
+        let _span = tracing::info_span!(
+            "shard",
+            index = shard,
+            total = total_shards,
+            resumed = start_shard > 0,
+        )
+        .entered();
         debug!(phase = "load", "running phase");
         work.load(domain, shard)?;
         debug!(phase = "compute", "running phase");

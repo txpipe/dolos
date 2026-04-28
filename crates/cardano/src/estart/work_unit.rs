@@ -42,6 +42,13 @@ pub struct EstartWorkUnit {
     /// for a fresh boundary.
     total_shards: u32,
 
+    /// First shard to run on this invocation. Populated in `initialize()`
+    /// from `EpochState.estart_progress.committed` so a restart after a
+    /// mid-boundary crash skips already-committed shards
+    /// (`AccountTransition` is non-idempotent on replay — would double-
+    /// rotate every account in the replayed shard).
+    start_shard: u32,
+
     /// AVVM reclamation total for this boundary, computed once in
     /// `initialize()`. Reused across all shards so the per-shard `load`
     /// doesn't re-query the UTxO set.
@@ -61,6 +68,7 @@ impl EstartWorkUnit {
             slot,
             genesis,
             total_shards: 0,
+            start_shard: 0,
             avvm_reclamation: 0,
             context: None,
         }
@@ -90,20 +98,25 @@ where
         self.total_shards
     }
 
+    fn start_shard(&self) -> u32 {
+        self.start_shard
+    }
+
     fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
-        // Resolve the effective shard count for this boundary. While a
-        // boundary is in flight, the persisted
-        // `estart_progress.total` is authoritative — guards against
-        // a config change between shards (e.g. across a crash and
-        // restart). Falls back to current config for a fresh boundary.
-        self.total_shards = match load_epoch::<D>(domain.state()) {
-            Ok(epoch) => epoch
-                .estart_progress
-                .as_ref()
-                .map(|p| p.total)
-                .unwrap_or(ACCOUNT_SHARDS),
-            Err(_) => ACCOUNT_SHARDS,
-        };
+        // Resolve the effective shard count + resume cursor for this
+        // boundary. While a boundary is in flight, the persisted
+        // `estart_progress` is authoritative — `total` guards against a
+        // config change mid-boundary, and `committed` lets a restart
+        // skip shards whose state already landed (`AccountTransition`
+        // is non-idempotent on replay — would double-rotate every
+        // account in the replayed shard).
+        //
+        // Errors propagate: state-read failure must not silently fall
+        // back to a fresh boundary's defaults.
+        let epoch = load_epoch::<D>(domain.state())?;
+        let progress = epoch.estart_progress.as_ref();
+        self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
+        self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
 
         // Compute AVVM reclamation once per boundary instead of once per
         // shard. Returns 0 unless we're crossing the Shelley→Allegra
@@ -115,6 +128,7 @@ where
         debug!(
             slot = self.slot,
             total = self.total_shards,
+            start = self.start_shard,
             avvm = self.avvm_reclamation,
             "estart initialize"
         );
