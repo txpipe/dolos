@@ -343,12 +343,13 @@ pub(crate) mod testing {
             gathered_fees in root::any_lovelace(),
             blocks_minted in 0u32..1000u32,
         ) -> RollingStats {
-            let mut stats = RollingStats::default();
-            stats.produced_utxos = produced_utxos;
-            stats.consumed_utxos = consumed_utxos;
-            stats.gathered_fees = gathered_fees;
-            stats.blocks_minted = blocks_minted;
-            stats
+            RollingStats {
+                produced_utxos,
+                consumed_utxos,
+                gathered_fees,
+                blocks_minted,
+                ..Default::default()
+            }
         }
     }
 
@@ -1427,8 +1428,9 @@ mod prop_tests {
     use crate::pots::testing::{any_epoch_incentives, any_pots};
     use proptest::prelude::*;
 
-    /// `EpochStatsUpdate::apply` calls `rolling.live_mut` which asserts `next` is None,
-    /// so we need a specialized generator that keeps `rolling.next` empty.
+    // `EpochStatsUpdate::apply` calls `rolling.live_mut` which asserts `next`
+    // is None, so we need a specialized generator that keeps `rolling.next`
+    // empty.
     prop_compose! {
         fn any_epoch_state_no_rolling_next()(
             number in root::any_epoch(),

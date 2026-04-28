@@ -44,7 +44,7 @@ pub const PREFIX_SPACE: u32 = 256;
 pub const ACCOUNT_SHARDS: u32 = 32;
 
 const _: () = assert!(
-    ACCOUNT_SHARDS >= 1 && PREFIX_SPACE % ACCOUNT_SHARDS == 0,
+    ACCOUNT_SHARDS >= 1 && PREFIX_SPACE.is_multiple_of(ACCOUNT_SHARDS),
     "ACCOUNT_SHARDS must be >= 1 and divide PREFIX_SPACE (256)"
 );
 
