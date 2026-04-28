@@ -1416,6 +1416,8 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // prop_compose! macro expansions reference legacy
+                     // EpochWrapUp/EpochTransition for back-compat tests
 mod prop_tests {
     use super::*;
     use super::testing::{any_end_stats, any_epoch_state, any_nonces};
@@ -1487,7 +1489,6 @@ mod prop_tests {
         Just(PParamsUpdate::new(crate::model::pparams::PParamsSet::default()))
     }
 
-    #[allow(deprecated)]
     prop_compose! {
         fn any_epoch_wrap_up()(
             stats in any_end_stats(),
@@ -1600,7 +1601,6 @@ mod prop_tests {
         }
     }
 
-    #[allow(deprecated)]
     prop_compose! {
         fn any_epoch_transition()(
             new_epoch in root::any_epoch(),
@@ -1657,7 +1657,6 @@ mod prop_tests {
         }
 
         #[test]
-        #[allow(deprecated)]
         fn epoch_wrap_up_roundtrip(
             entity in any_epoch_state(),
             delta in any_epoch_wrap_up(),
@@ -1682,7 +1681,6 @@ mod prop_tests {
         }
 
         #[test]
-        #[allow(deprecated)]
         fn epoch_transition_roundtrip(
             entity in any_epoch_state(),
             mut delta in any_epoch_transition(),

@@ -2,7 +2,7 @@
 
 ## Natural sequence within an epoch
 
-```
+```text
 Estart  →  Roll …  →  Rupd  →  Roll …  →  Ewrap
 (open half:    (blocks)    (RUPD:     (blocks)    (close half:
  per-account                per-account            per-account
@@ -164,7 +164,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 ### `finalize()` — Ewrap global pass
 
-- Builds a fresh `BoundaryWork` via `BoundaryWork::load_ewrap`.
+- Builds a fresh `BoundaryWork` via `BoundaryWork::load_finalize`.
 - Classifies retiring pools / expiring dreps / enacting+dropping proposals; processes pending MIRs; runs enactment + refund + wrapup-global visitors.
 - Assembles the final `EndStats` (prepare-time fields combined with the accumulator fields populated by the preceding shard runs) and emits a single `EpochWrapUp` to close the boundary.
 - Direct writes: writes the completed `EpochState` to the archive under the epoch-start temporal key.

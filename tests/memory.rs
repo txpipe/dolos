@@ -144,15 +144,29 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
         .iter_entities(NS, range)
         .expect("iter_entities with range failed");
 
-    let stats = reg.change();
-    let heap_delta = stats.bytes_allocated;
+    let construction_stats = reg.change();
+    let construction_delta = construction_stats.bytes_allocated;
 
     let threshold = 10 * 1024 * 1024; // 10 MB
     assert!(
-        heap_delta < threshold,
-        "shard-range iter_entities should allocate O(1) memory. \
+        construction_delta < threshold,
+        "shard-range iter_entities construction should allocate O(1) memory. \
          Allocated {} bytes but threshold is {} bytes.",
-        heap_delta,
+        construction_delta,
+        threshold,
+    );
+
+    // Now sample again *across* full iteration. A backend that buffers
+    // the shard on first `next()` would pass the construction check but
+    // blow the budget here.
+    let iteration_reg = Region::new(GLOBAL);
+    let count = iter.count();
+    let iteration_delta = iteration_reg.change().bytes_allocated;
+    assert!(
+        iteration_delta < threshold,
+        "shard-range iter_entities full iteration should stay O(1). \
+         Allocated {} bytes during iteration but threshold is {} bytes.",
+        iteration_delta,
         threshold,
     );
 
@@ -160,7 +174,6 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
     // With 50,000 evenly-distributed keys over 256 prefixes, each bucket
     // should hold ~195 entries; one 16-prefix shard should hold ~3,120.
     // We just assert it's non-empty and much smaller than the full store.
-    let count = iter.count();
     assert!(
         count > 0,
         "shard range should contain some entities (got 0)"
