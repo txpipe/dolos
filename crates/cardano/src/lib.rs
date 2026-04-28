@@ -74,15 +74,15 @@ pub enum CardanoWorkUnit {
     /// `config.account_shards` shards (`WorkUnit::total_shards`), each
     /// covering a first-byte prefix range of the account key space and
     /// accumulating its contribution into `EpochState.end` via
-    /// `EpochEndAccumulate`. After the shard loop, `finalize()` runs the
+    /// `EWrapProgress`. After the shard loop, `finalize()` runs the
     /// global Ewrap pass (pool/drep/proposal classification, MIRs,
     /// enactment, deposit refunds) and emits `EpochWrapUp` with the
     /// assembled final `EndStats`.
     Ewrap(Box<ewrap::EwrapWorkUnit>),
     /// Open the next epoch: per-account snapshot rotation across
     /// `config.account_shards` shards (`WorkUnit::total_shards`),
-    /// advancing `EpochState.estart_shard_progress` via
-    /// `EStartShardAccumulate`. After the shard loop, `finalize()` runs
+    /// advancing `EpochState.estart_progress` via
+    /// `EStartProgress`. After the shard loop, `finalize()` runs
     /// the global Estart pass (pool / drep / proposal transitions,
     /// `EpochTransition`, era transition, cursor advance). The cursor
     /// only moves in `finalize()`.
@@ -354,7 +354,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         };
 
         // Crash-recovery check: if the previous process crashed mid-boundary,
-        // `EpochState.ashard_progress` will be `Some(p)` with `p.committed`
+        // `EpochState.ewrap_progress` will be `Some(p)` with `p.committed`
         // equal to the next Ewrap that should have run, and `p.total` the
         // boundary's shard count captured at the first commit. Detect and
         // warn — full resume requires re-fetching the boundary block from
@@ -362,7 +362,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
         // used for the in-flight boundary even if `config.account_shards()`
         // changed, to avoid breaking the in-progress pipeline.
         if let Ok(epoch) = load_epoch::<D>(state) {
-            if let Some(progress) = epoch.ashard_progress.as_ref() {
+            if let Some(progress) = epoch.ewrap_progress.as_ref() {
                 let configured = config.account_shards();
                 if progress.total != configured {
                     tracing::warn!(
@@ -382,11 +382,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         epoch = epoch.number,
                         next_shard = progress.committed,
                         total_shards = progress.total,
-                        "crash detected mid-boundary: ashard_progress is set. \
+                        "crash detected mid-boundary: ewrap_progress is set. \
                          On the next block that triggers the boundary, dolos will \
                          resume the Ewrap pipeline; correctness depends on shard \
                          idempotency (state deletes are no-ops if already applied; \
-                         EpochEndAccumulate guards on shard_index). Operators should \
+                         EWrapProgress guards on shard_index). Operators should \
                          monitor the subsequent boundary for inconsistency. \
                          TODO: implement true shard resume."
                     );
@@ -395,7 +395,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         epoch = epoch.number,
                         committed = progress.committed,
                         total_shards = progress.total,
-                        "found EpochState.ashard_progress.committed == total at \
+                        "found EpochState.ewrap_progress.committed == total at \
                          startup — Ewrap (closing phase) was not committed \
                          before crash. The next boundary attempt will re-run \
                          Ewraps and Ewrap; idempotency should keep the \
@@ -406,10 +406,10 @@ impl dolos_core::ChainLogic for CardanoLogic {
 
             // Same crash-recovery check for the EStart-shard half of the
             // boundary. Only one of the two progress fields can be set at
-            // any time — Ewrap clears `ashard_progress` before any
+            // any time — Ewrap clears `ewrap_progress` before any
             // EStart-shard runs, and `EpochTransition` clears
-            // `estart_shard_progress` when the new epoch opens.
-            if let Some(progress) = epoch.estart_shard_progress.as_ref() {
+            // `estart_progress` when the new epoch opens.
+            if let Some(progress) = epoch.estart_progress.as_ref() {
                 let configured = config.account_shards();
                 if progress.total != configured {
                     tracing::warn!(
@@ -430,10 +430,10 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         epoch = epoch.number,
                         next_shard = progress.committed,
                         total_shards = progress.total,
-                        "crash detected mid-boundary: estart_shard_progress is set. \
+                        "crash detected mid-boundary: estart_progress is set. \
                          On the next block that triggers the boundary, dolos will \
                          resume the EStart-shard pipeline; correctness depends on \
-                         shard idempotency (EStartShardAccumulate guards on \
+                         shard idempotency (EStartProgress guards on \
                          shard_index, but AccountTransition is not natively \
                          idempotent). Operators should monitor the subsequent \
                          boundary for inconsistency. TODO: implement true shard \
@@ -444,7 +444,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         epoch = epoch.number,
                         committed = progress.committed,
                         total_shards = progress.total,
-                        "found EpochState.estart_shard_progress.committed == total \
+                        "found EpochState.estart_progress.committed == total \
                          at startup — Estart finalize was not committed before \
                          crash. The next boundary attempt will re-run \
                          EStart-shards and finalize; idempotency should keep the \

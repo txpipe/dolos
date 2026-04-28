@@ -16,7 +16,7 @@ use crate::{
     estart::{BoundaryVisitor as _, WorkContext},
     load_era_summary,
     roll::WorkDeltas,
-    AccountState, DRepState, EStartShardAccumulate, EraProtocol, FixedNamespace as _, PoolState,
+    AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, PoolState,
     ProposalState,
 };
 
@@ -174,8 +174,8 @@ impl WorkContext {
 
     /// Iterate accounts in this shard's two ranges and emit
     /// `AccountTransition` deltas via the snapshot-rotation visitor.
-    /// Closes by emitting `EStartShardAccumulate` to advance
-    /// `EpochState.estart_shard_progress`.
+    /// Closes by emitting `EStartProgress` to advance
+    /// `EpochState.estart_progress`.
     fn compute_shard_deltas<D: Domain>(
         &mut self,
         state: &D::State,
@@ -195,7 +195,7 @@ impl WorkContext {
             }
         }
 
-        self.add_delta(EStartShardAccumulate::new(shard_index, total_shards));
+        self.add_delta(EStartProgress::new(shard_index, total_shards));
 
         Ok(())
     }

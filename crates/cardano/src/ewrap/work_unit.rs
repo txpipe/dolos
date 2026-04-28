@@ -4,7 +4,7 @@
 //! executor invokes `load` / `commit_state` once per shard. Each shard
 //! covers a first-byte prefix range of the account key space, range-loads
 //! pending rewards, iterates accounts in range, applies rewards + drops
-//! visitors, and emits `EpochEndAccumulate` to populate the reward
+//! visitors, and emits `EWrapProgress` to populate the reward
 //! accumulators on `EpochState.end` (the slot is opened by
 //! `EpochTransition` during the previous epoch's Estart finalize).
 //!
@@ -29,7 +29,7 @@ pub struct EwrapWorkUnit {
 
     /// Number of shards this boundary's pipeline runs.
     ///
-    /// Populated in `initialize()` from `EpochState.ashard_progress.total`
+    /// Populated in `initialize()` from `EpochState.ewrap_progress.total`
     /// when a boundary is in flight (so a config change can't disrupt the
     /// in-progress pipeline) or from `config.account_shards()` for a fresh
     /// boundary.
@@ -72,13 +72,13 @@ where
 
     fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
         // Resolve the effective shard count for this boundary. While a
-        // boundary is in flight, the persisted `ashard_progress.total` is
+        // boundary is in flight, the persisted `ewrap_progress.total` is
         // authoritative — guards against a config change between shards
         // (e.g. across a crash and restart) breaking the in-flight
         // pipeline. Falls back to current config for a fresh boundary.
         self.total_shards = match load_epoch::<D>(domain.state()) {
             Ok(epoch) => epoch
-                .ashard_progress
+                .ewrap_progress
                 .as_ref()
                 .map(|p| p.total)
                 .unwrap_or_else(|| self.config.account_shards()),

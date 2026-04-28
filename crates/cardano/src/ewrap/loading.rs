@@ -116,7 +116,7 @@ impl BoundaryWork {
     ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
     ///   * range-load pending rewards for this shard's key range,
     ///   * iterate accounts in range, applying rewards+drops visitors, and
-    ///   * emit an `EpochEndAccumulate` delta carrying the shard's reward
+    ///   * emit an `EWrapProgress` delta carrying the shard's reward
     ///     contribution.
     pub fn load_shard<D: Domain>(
         state: &D::State,
@@ -181,7 +181,7 @@ impl BoundaryWork {
         self.shard_applied_unspendable_to_reserves =
             self.rewards.applied_unspendable_to_reserves();
 
-        self.add_delta(crate::EpochEndAccumulate::new(
+        self.add_delta(crate::EWrapProgress::new(
             self.shard_applied_effective,
             self.shard_applied_unspendable_to_treasury,
             self.shard_applied_unspendable_to_reserves,

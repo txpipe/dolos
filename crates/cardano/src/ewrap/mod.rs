@@ -182,19 +182,19 @@ pub struct BoundaryWork {
     pub applied_mir_credentials: Vec<StakeCredential>,
 
     /// Shard-local reward accumulator — total effective rewards applied by
-    /// the current per-shard run. Snapshot into `EpochEndAccumulate`
+    /// the current per-shard run. Snapshot into `EWrapProgress`
     /// before the shard commits. Populated only by per-shard runs; zero
     /// in the finalize-pass `BoundaryWork`.
     pub shard_applied_effective: u64,
 
     /// Shard-local unspendable reward routed to treasury (accounts that
     /// deregistered between RUPD and EWRAP). Snapshot into
-    /// `EpochEndAccumulate` before the shard commits. Zero in the
+    /// `EWrapProgress` before the shard commits. Zero in the
     /// finalize pass.
     pub shard_applied_unspendable_to_treasury: u64,
 
     /// Shard-local unspendable reward that returns to reserves (pre-Babbage
-    /// filtered entries). Snapshot into `EpochEndAccumulate` before the
+    /// filtered entries). Snapshot into `EWrapProgress` before the
     /// shard commits. Zero in the finalize pass.
     pub shard_applied_unspendable_to_reserves: u64,
 }

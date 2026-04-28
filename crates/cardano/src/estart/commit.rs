@@ -4,7 +4,7 @@
 //! Both code paths use the same streaming pattern: each entity namespace
 //! is read one record at a time, deltas for that record are applied, and
 //! the result is written immediately. Per-shard commits flush
-//! `EpochState`'s `EStartShardAccumulate` and the shard's account-range
+//! `EpochState`'s `EStartProgress` and the shard's account-range
 //! slice; the finalize commit flushes pool / drep / proposal transitions,
 //! the closing `EpochTransition`, optional era-summary writes, archive
 //! logs, and advances the cursor.
@@ -116,7 +116,7 @@ impl super::WorkContext {
 
     /// Commit a single per-shard run: stream-and-apply per-account snapshot
     /// transitions for the shard's key ranges, then commit the
-    /// `EStartShardAccumulate` delta against `EpochState`. Archive logs
+    /// `EStartProgress` delta against `EpochState`. Archive logs
     /// (if any) are flushed too — the start-of-epoch temporal key is
     /// shared across shards.
     ///
@@ -142,7 +142,7 @@ impl super::WorkContext {
             self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
         }
 
-        // EpochState gets the EStartShardAccumulate delta (single entity).
+        // EpochState gets the EStartProgress delta (single entity).
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
 
         // Archive logs — share the start-of-epoch temporal key across shards.

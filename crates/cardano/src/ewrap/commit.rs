@@ -5,7 +5,7 @@
 //! halves use the same streaming pattern: each entity namespace is read
 //! one record at a time, deltas for that record are applied, and the
 //! result is written immediately. Per-shard commits flush
-//! `EpochState`'s `EpochEndAccumulate` and the shard's account-range
+//! `EpochState`'s `EWrapProgress` and the shard's account-range
 //! slice; the finalize commit flushes pool/drep/proposal globals plus
 //! the closing `EpochWrapUp` and writes the completed `EpochState` to
 //! archive.
@@ -63,7 +63,7 @@ impl BoundaryWork {
     }
 
     /// Commit a single per-shard run: apply per-account deltas (rewards +
-    /// drops) and the `EpochEndAccumulate` delta against `EpochState`,
+    /// drops) and the `EWrapProgress` delta against `EpochState`,
     /// flush archive logs (`{Leader,Member}RewardLog`), and delete applied
     /// pending rewards.
     #[instrument(skip(self, state, archive))]
@@ -86,7 +86,7 @@ impl BoundaryWork {
             self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
         }
 
-        // EpochState gets the EpochEndAccumulate delta (single entity).
+        // EpochState gets the EWrapProgress delta (single entity).
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
 
         // Delete applied pending rewards.
@@ -137,7 +137,7 @@ impl BoundaryWork {
     /// wrapup-global deltas for pools, dreps, proposals, plus the
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
-    /// rolling/pparams snapshots, clears `ashard_progress`). Also writes
+    /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes
     /// archive logs produced by the global visitors (e.g.
     /// `PoolDepositRefundLog`) and the completed `EpochState` snapshot
     /// under the epoch-start temporal key.

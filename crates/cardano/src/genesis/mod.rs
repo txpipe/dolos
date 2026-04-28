@@ -82,8 +82,8 @@ pub fn bootstrap_epoch<D: Domain>(
         // `EpochTransition` re-seeds it on every subsequent epoch.
         end: Some(EndStats::default()),
         incentives: None,
-        ashard_progress: None,
-        estart_shard_progress: None,
+        ewrap_progress: None,
+        estart_progress: None,
     };
 
     let writer = state.start_writer()?;

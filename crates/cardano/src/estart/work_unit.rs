@@ -4,8 +4,8 @@
 //! executor invokes `load` / `commit_state` once per shard. Each shard
 //! covers a first-byte prefix range of the credential key space, iterates
 //! accounts in range, runs the snapshot-rotation visitor
-//! (`AccountTransition`), and emits `EStartShardAccumulate` to advance
-//! `EpochState.estart_shard_progress`.
+//! (`AccountTransition`), and emits `EStartProgress` to advance
+//! `EpochState.estart_progress`.
 //!
 //! After the per-shard loop, `finalize()` runs the global "Estart" pass:
 //! pool / drep / proposal snapshot transitions, nonce transition, pot
@@ -34,7 +34,7 @@ pub struct EstartWorkUnit {
     /// Number of shards this boundary's pipeline runs.
     ///
     /// Populated in `initialize()` from
-    /// `EpochState.estart_shard_progress.total` when a boundary is in
+    /// `EpochState.estart_progress.total` when a boundary is in
     /// flight (so a config change can't disrupt the in-progress pipeline)
     /// or from `config.account_shards()` for a fresh boundary.
     total_shards: u32,
@@ -91,12 +91,12 @@ where
     fn initialize(&mut self, domain: &D) -> Result<(), DomainError> {
         // Resolve the effective shard count for this boundary. While a
         // boundary is in flight, the persisted
-        // `estart_shard_progress.total` is authoritative — guards against
+        // `estart_progress.total` is authoritative — guards against
         // a config change between shards (e.g. across a crash and
         // restart). Falls back to current config for a fresh boundary.
         self.total_shards = match load_epoch::<D>(domain.state()) {
             Ok(epoch) => epoch
-                .estart_shard_progress
+                .estart_progress
                 .as_ref()
                 .map(|p| p.total)
                 .unwrap_or_else(|| self.config.account_shards()),

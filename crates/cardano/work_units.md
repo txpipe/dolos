@@ -29,7 +29,7 @@ The boundary work splits into a *close* half (`Ewrap`, ending epoch N) and an *o
 | Close (epoch N) | `Ewrap` — per-account reward apply | Ewrap globals + `EpochWrapUp` | no |
 | Open (epoch N+1) | `Estart` — per-account snapshot rotation | Estart globals + `EpochTransition` + era transitions | yes (only here) |
 
-Both sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `account_shards` config knob; progress for each half is tracked separately on `EpochState.ashard_progress` and `EpochState.estart_shard_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a config change between shards (e.g. across a crash and restart) can't break an in-flight pipeline.
+Both sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `account_shards` config knob; progress for each half is tracked separately on `EpochState.ewrap_progress` and `EpochState.estart_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a config change between shards (e.g. across a crash and restart) can't break an in-flight pipeline.
 
 The sections below walk the cycle starting at `Estart` (the first phase of every epoch).
 
@@ -42,7 +42,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 ### `initialize()`
 
-- Resolves the boundary's effective shard count (`EpochState.estart_shard_progress.total` if a boundary is in flight, else `config.account_shards()`).
+- Resolves the boundary's effective shard count (`EpochState.estart_progress.total` if a boundary is in flight, else `config.account_shards()`).
 - Computes the AVVM reclamation total once (used by every shard's `load` and by `finalize`). Returns 0 except at the Shelley→Allegra hardfork.
 
 ### Per-shard body — per-account snapshot rotation
@@ -51,13 +51,13 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 - Streams per-account snapshot transitions (rotate `EpochValue.go ← set ← mark ← live ← next`) for the accounts in this shard's range. Splits the account pass into bounded-memory chunks so `AccountTransition` deltas don't accumulate by the millions.
 - Deltas emitted per shard:
   - `AccountTransition` — `estart/reset.rs:130` (visitor reused by the shard pass). One per account in range. Targets `accounts`.
-  - `EStartShardAccumulate` — `estart/loading.rs:42`. Single per shard. Targets `epochs` — advances `estart_shard_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotent + ordered + total-mismatch guarded, mirroring `EpochEndAccumulate`.
+  - `EStartProgress` — `estart/loading.rs:42`. Single per shard. Targets `epochs` — advances `estart_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotent + ordered + total-mismatch guarded, mirroring `EWrapProgress`.
 
 ### `finalize()` — Estart global pass
 
 - Builds a fresh `WorkContext` via `WorkContext::load_finalize` (using the AVVM total computed in `initialize`).
 - Iterates pools / dreps / proposals; emits transition deltas via the `nonces` and `reset` visitors.
-- Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ashard_progress = None` and `estart_shard_progress = None`).
+- Emits the closing `EpochTransition` delta (rotates `number` / `initial_pots` / `rolling` / `pparams`, seeds `EpochState.end = Some(EndStats::default())`, resets *both* `ewrap_progress = None` and `estart_progress = None`).
 - Direct writes: `EraSummary` writes during era transitions (Shelley→Allegra etc.).
 - **Sets the cursor** to `ChainPoint::Slot(boundary_slot)` — the only phase across all work units that moves the cursor. A crash before `finalize()` restarts from the boundary block.
 - Deltas emitted in finalize:
@@ -120,7 +120,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
 
 ### `initialize()`
 
-- Resolves the boundary's effective shard count (`EpochState.ashard_progress.total` if a boundary is in flight, else `config.account_shards()`).
+- Resolves the boundary's effective shard count (`EpochState.ewrap_progress.total` if a boundary is in flight, else `config.account_shards()`).
 
 ### Per-shard body — per-account reward application
 
@@ -133,7 +133,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
     - `PoolDelegatorRetire:32`
     - `DRepDelegatorDrop:53`
   - **Accumulator** (`ewrap/loading.rs`):
-    - `EpochEndAccumulate` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, and writes `ashard_progress = Some(ShardProgress { committed: shard_index + 1, total })`)
+    - `EWrapProgress` (rolls up the shard's `effective` / `unspendable_to_treasury` / `unspendable_to_reserves` totals into `EpochState.end`, and writes `ewrap_progress = Some(ShardProgress { committed: shard_index + 1, total })`)
 - Direct deletes: `PendingRewardState` entries for credentials whose rewards landed.
 
 ### `finalize()` — Ewrap global pass
@@ -156,7 +156,7 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
     - `PoolDelegatorRetire:32` *(also fires in shard body for accounts)*
   - **Wrap-up globals** (`ewrap/wrapup.rs`):
     - `PoolWrapUp:119`
-    - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ashard_progress`)
+    - `EpochWrapUp` (carries the final assembled `EndStats`; apply overwrites `entity.end`, rotates `rolling`/`pparams` snapshots forward, clears `ewrap_progress`)
   - **MIR processing** (`ewrap/loading.rs`):
     - `AssignRewards:207` (one per registered MIR recipient)
 
