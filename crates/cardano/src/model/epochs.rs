@@ -613,13 +613,76 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     }
 }
 
-/// Delta emitted once by `Ewrap` to close the epoch boundary. Carries the
-/// fully populated `EndStats` (prepare-time fields from the wrap-up visitor +
-/// reward accumulators from the preceding `Ewrap` runs). Apply
-/// overwrites `entity.end` with these final stats, rotates the rolling and
-/// pparams snapshots forward, and clears `ewrap_progress`.
+// TODO(wal-compat): legacy variant kept for backward-compatible WAL decoding.
+// Remove this struct, its `EntityDelta` impl, and the `EpochWrapUp` variant
+// of `CardanoDelta` (along with its `delta_from!` and match arms in
+// `key`/`apply`/`undo`) once the WAL backfill window has rolled past the
+// `feat/shard-ewrap-work-units` upgrade — at that point no on-disk WAL row
+// will reference variant index 26 carrying this 4-field shape. A reasonable
+// trigger is "no production node has WAL rows older than the V2 cutover".
+/// Legacy variant of `EpochWrapUp`. Kept verbatim from pre-PR `main` so
+/// pre-upgrade WAL rows (variant index 26 in `CardanoDelta`) still decode.
+/// New commit paths must construct `EpochWrapUpV2` instead.
+#[deprecated(note = "kept for WAL replay; emit `EpochWrapUpV2` instead")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUp {
+    pub(crate) stats: EndStats,
+
+    // undo
+    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_end: Option<EndStats>,
+}
+
+#[allow(deprecated)]
+impl EpochWrapUp {
+    pub fn new(stats: EndStats) -> Self {
+        Self {
+            stats,
+            prev_rolling: None,
+            prev_pparams: None,
+            prev_end: None,
+        }
+    }
+}
+
+#[allow(deprecated)]
+impl dolos_core::EntityDelta for EpochWrapUp {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        self.prev_rolling = Some(entity.rolling.clone());
+        self.prev_pparams = Some(entity.pparams.clone());
+        self.prev_end = entity.end.clone();
+
+        entity.rolling.scheduled_or_default();
+        entity.pparams.scheduled_or_default();
+        entity.end = Some(self.stats.clone());
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
+        entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
+        entity.end = self.prev_end.clone();
+    }
+}
+
+/// V2 of `EpochWrapUp` — adds `prev_ewrap_progress` undo state for the
+/// new sharded ewrap pipeline. Constructed by all post-cutover commit paths;
+/// the legacy `EpochWrapUp` is kept solely for replay of older WAL rows.
+/// Carries the fully populated `EndStats` (prepare-time fields from the
+/// wrap-up visitor + reward accumulators from the preceding `Ewrap` runs).
+/// Apply overwrites `entity.end` with these final stats, rotates the
+/// rolling and pparams snapshots forward, and clears `ewrap_progress`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochWrapUpV2 {
     pub(crate) stats: EndStats,
 
     // undo
@@ -629,7 +692,7 @@ pub struct EpochWrapUp {
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
 }
 
-impl EpochWrapUp {
+impl EpochWrapUpV2 {
     pub fn new(stats: EndStats) -> Self {
         Self {
             stats,
@@ -641,7 +704,7 @@ impl EpochWrapUp {
     }
 }
 
-impl dolos_core::EntityDelta for EpochWrapUp {
+impl dolos_core::EntityDelta for EpochWrapUpV2 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
@@ -1083,8 +1146,121 @@ impl dolos_core::EntityDelta for NonceTransition {
     }
 }
 
+// TODO(wal-compat): legacy variant kept for backward-compatible WAL decoding.
+// Remove this struct, its `EntityDelta` impl, and the `EpochTransition`
+// variant of `CardanoDelta` (along with its `delta_from!` and match arms
+// in `key`/`apply`/`undo`) once the WAL backfill window has rolled past
+// the `feat/shard-ewrap-work-units` upgrade — at that point no on-disk
+// WAL row will reference variant index 25 carrying this 8-field shape.
+/// Legacy variant of `EpochTransition`. Kept verbatim from pre-PR `main`
+/// so pre-upgrade WAL rows (variant index 25 in `CardanoDelta`) still
+/// decode. New commit paths must construct `EpochTransitionV2` instead.
+#[deprecated(note = "kept for WAL replay; emit `EpochTransitionV2` instead")]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EpochTransition {
+    pub(crate) new_epoch: Epoch,
+    pub(crate) new_pots: Pots,
+    pub(crate) era_transition: Option<EraTransition>,
+
+    #[serde(skip)]
+    pub(crate) genesis: Option<Arc<Genesis>>,
+
+    // undo
+    pub(crate) prev_number: Epoch,
+    pub(crate) prev_initial_pots: Option<Pots>,
+    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+}
+
+#[allow(deprecated)]
+impl EpochTransition {
+    pub fn new(
+        new_epoch: Epoch,
+        new_pots: Pots,
+        era_transition: Option<EraTransition>,
+        genesis: Option<Arc<Genesis>>,
+    ) -> Self {
+        Self {
+            new_epoch,
+            new_pots,
+            era_transition,
+            genesis,
+            prev_number: 0,
+            prev_initial_pots: None,
+            prev_rolling: None,
+            prev_pparams: None,
+        }
+    }
+}
+
+#[allow(deprecated)]
+impl std::fmt::Debug for EpochTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EpochTransition")?;
+        Ok(())
+    }
+}
+
+#[allow(deprecated)]
+impl dolos_core::EntityDelta for EpochTransition {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        debug_assert!(self
+            .new_pots
+            .is_consistent(entity.initial_pots.max_supply()));
+
+        // save undo info (snapshot whole EpochValues so rotation + any era migration are
+        // both covered)
+        self.prev_number = entity.number;
+        self.prev_initial_pots = Some(entity.initial_pots.clone());
+        self.prev_rolling = Some(entity.rolling.clone());
+        self.prev_pparams = Some(entity.pparams.clone());
+
+        entity.number = self.new_epoch;
+        entity.initial_pots = self.new_pots.clone();
+        entity.rolling.default_transition(self.new_epoch);
+        entity.pparams.default_transition(self.new_epoch);
+
+        // if we have an era transition, we need to migrate the pparams
+        if let Some(transition) = &self.era_transition {
+            let current = entity.pparams.unwrap_live_mut();
+
+            *current = crate::forks::migrate_pparams_version(
+                transition.prev_version.into(),
+                transition.new_version.into(),
+                current,
+                self.genesis.as_ref().expect("genesis not set"),
+            );
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
+        entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
+        entity.number = self.prev_number;
+        entity.initial_pots = self
+            .prev_initial_pots
+            .clone()
+            .expect("apply captured initial_pots");
+    }
+}
+
+/// V2 of `EpochTransition` — adds `prev_end` plus three `prev_*_progress`
+/// undo fields and reseeds `entity.end`/`entity.*_progress` on apply, all
+/// to support the new sharded ewrap/estart/rupd pipelines. Constructed by
+/// all post-cutover commit paths; the legacy `EpochTransition` is kept
+/// solely for replay of older WAL rows.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EpochTransitionV2 {
     pub(crate) new_epoch: Epoch,
     pub(crate) new_pots: Pots,
     pub(crate) era_transition: Option<EraTransition>,
@@ -1103,7 +1279,7 @@ pub struct EpochTransition {
     pub(crate) prev_rupd_progress: Option<ShardProgress>,
 }
 
-impl EpochTransition {
+impl EpochTransitionV2 {
     pub fn new(
         new_epoch: Epoch,
         new_pots: Pots,
@@ -1127,14 +1303,14 @@ impl EpochTransition {
     }
 }
 
-impl std::fmt::Debug for EpochTransition {
+impl std::fmt::Debug for EpochTransitionV2 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EpochTransition")?;
+        write!(f, "EpochTransitionV2")?;
         Ok(())
     }
 }
 
-impl dolos_core::EntityDelta for EpochTransition {
+impl dolos_core::EntityDelta for EpochTransitionV2 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
@@ -1311,11 +1487,20 @@ mod prop_tests {
         Just(PParamsUpdate::new(crate::model::pparams::PParamsSet::default()))
     }
 
+    #[allow(deprecated)]
     prop_compose! {
         fn any_epoch_wrap_up()(
             stats in any_end_stats(),
         ) -> EpochWrapUp {
             EpochWrapUp::new(stats)
+        }
+    }
+
+    prop_compose! {
+        fn any_epoch_wrap_up_v2()(
+            stats in any_end_stats(),
+        ) -> EpochWrapUpV2 {
+            EpochWrapUpV2::new(stats)
         }
     }
 
@@ -1415,6 +1600,7 @@ mod prop_tests {
         }
     }
 
+    #[allow(deprecated)]
     prop_compose! {
         fn any_epoch_transition()(
             new_epoch in root::any_epoch(),
@@ -1423,6 +1609,17 @@ mod prop_tests {
             // so that `new_pots.max_supply() == entity.initial_pots.max_supply()` holds
             // (which `apply`'s debug_assert requires).
             EpochTransition::new(new_epoch, crate::pots::Pots::default(), None, None)
+        }
+    }
+
+    prop_compose! {
+        fn any_epoch_transition_v2()(
+            new_epoch in root::any_epoch(),
+        ) -> EpochTransitionV2 {
+            // new_pots is filled in by the test harness from the entity's initial_pots
+            // so that `new_pots.max_supply() == entity.initial_pots.max_supply()` holds
+            // (which `apply`'s debug_assert requires).
+            EpochTransitionV2::new(new_epoch, crate::pots::Pots::default(), None, None)
         }
     }
 
@@ -1460,9 +1657,18 @@ mod prop_tests {
         }
 
         #[test]
+        #[allow(deprecated)]
         fn epoch_wrap_up_roundtrip(
             entity in any_epoch_state(),
             delta in any_epoch_wrap_up(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn epoch_wrap_up_v2_roundtrip(
+            entity in any_epoch_state(),
+            delta in any_epoch_wrap_up_v2(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
@@ -1476,9 +1682,21 @@ mod prop_tests {
         }
 
         #[test]
+        #[allow(deprecated)]
         fn epoch_transition_roundtrip(
             entity in any_epoch_state(),
             mut delta in any_epoch_transition(),
+        ) {
+            // align new_pots with the entity's initial_pots so apply's max_supply
+            // consistency debug_assert holds.
+            delta.new_pots = entity.initial_pots.clone();
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn epoch_transition_v2_roundtrip(
+            entity in any_epoch_state(),
+            mut delta in any_epoch_transition_v2(),
         ) {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.

@@ -3,7 +3,7 @@ use dolos_core::ChainError;
 use crate::{
     estart::{AccountId, PoolId, WorkContext},
     pots::{apply_delta, PotDelta, Pots},
-    AccountState, AccountTransition, EpochTransition, PoolState, PoolTransition,
+    AccountState, AccountTransition, EpochTransitionV2, PoolState, PoolTransition,
 };
 
 pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
@@ -155,7 +155,7 @@ pub fn emit_epoch_transition(ctx: &mut WorkContext) {
     let new_pots = define_new_pots(ctx);
     let era_transition = ctx.ended_state().pparams.era_transition();
     let genesis = ctx.genesis.clone();
-    ctx.deltas.add_for_entity(EpochTransition::new(
+    ctx.deltas.add_for_entity(EpochTransitionV2::new(
         ctx.starting_epoch_no(),
         new_pots,
         era_transition,

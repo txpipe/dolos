@@ -1,4 +1,4 @@
-use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUp, PoolHash, PoolState, PoolWrapUp};
+use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUpV2, PoolHash, PoolState, PoolWrapUp};
 use dolos_core::ChainError;
 
 #[derive(Default)]
@@ -146,7 +146,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         // archive write in `commit_ewrap` reflects the finalised state.
         ctx.ending_state.end = Some(final_stats.clone());
 
-        ctx.deltas.add_for_entity(EpochWrapUp::new(final_stats));
+        ctx.deltas.add_for_entity(EpochWrapUpV2::new(final_stats));
 
         Ok(())
     }
