@@ -1,17 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
-use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainError, ChainPoint, Domain, EntityKey, Genesis,
-    LogKey, TemporalKey,
-};
+use dolos_core::{ChainError, EntityKey};
 use pallas::ledger::primitives::StakeCredential;
-use tracing::{debug, instrument};
 
 use crate::{
     pots::{EpochIncentives, Pots},
-    rewards::RewardMap,
     AccountState, ChainSummary, EpochValue, PParamsSet, PoolHash, PoolSnapshot, PoolState,
-    StakeLog,
 };
 
 pub mod deltas;
@@ -126,82 +121,12 @@ pub struct RupdWork {
     pub max_supply: u64,
     pub chain: ChainSummary,
     pub pparams: Option<PParamsSet>,
+    /// Shard key ranges this `RupdWork` covers, set by `merge_shard`.
+    /// `None` means "unsharded" — `should_include` returns true for
+    /// every credential. `Some(ranges)` means `should_include` returns
+    /// true only for credentials whose `EntityKey` falls in one of the
+    /// listed ranges, so `define_rewards` running on a sharded context
+    /// emits only rewards owned by this shard.
+    pub shard_ranges: Option<Vec<Range<EntityKey>>>,
 }
 
-fn log_work<D: Domain>(
-    work: &RupdWork,
-    rewards: &RewardMap<RupdWork>,
-    archive: &D::Archive,
-) -> Result<(), ChainError> {
-    let Some((_, epoch)) = work.relevant_epochs() else {
-        return Ok(());
-    };
-
-    let start_of_epoch = work.chain.epoch_start(epoch);
-    let start_of_epoch = ChainPoint::Slot(start_of_epoch);
-    let temporal_key = TemporalKey::from(&start_of_epoch);
-
-    let snapshot = &work.snapshot;
-
-    let pool_rewards = rewards.aggregate_pool_rewards();
-
-    let writer = archive.start_writer()?;
-
-    for (pool_hash, pool_state) in snapshot.pools.iter() {
-        let pool_id = EntityKey::from(pool_hash.as_slice());
-        let pool_stake = snapshot.get_pool_stake(pool_hash);
-        let relative_size = (pool_stake as f64) / snapshot.active_stake_sum as f64;
-        let params = pool_state.go().map(|x| &x.params);
-        let declared_pledge = params.map(|x| x.pledge).unwrap_or(0);
-        let delegators_count = snapshot.accounts_by_pool.count_delegators(pool_hash);
-        let fixed_cost = params.map(|x| x.cost).unwrap_or(0);
-        let margin_cost = params.map(|x| x.margin.clone());
-        let blocks_minted = pool_state.mark().map(|x| x.blocks_minted).unwrap_or(0) as u64;
-
-        // TODO: implement
-        //let live_pledge = snapshot.get_live_pledge(&pool);
-
-        let (total_rewards, operator_share) = pool_rewards.get(pool_hash).unwrap_or(&(0, 0));
-
-        let log = StakeLog {
-            blocks_minted,
-            total_stake: pool_stake,
-            relative_size,
-            live_pledge: 0,
-            declared_pledge,
-            delegators_count,
-            total_rewards: *total_rewards,
-            operator_share: *operator_share,
-            fixed_cost,
-            margin_cost,
-        };
-
-        let log_key = LogKey::from((temporal_key.clone(), pool_id));
-        writer.write_log_typed(&log_key, &log)?;
-    }
-
-    writer.commit()?;
-
-    Ok(())
-}
-
-#[instrument("rupd", skip_all, fields(slot = %slot))]
-pub fn execute<D: Domain>(
-    state: &D::State,
-    archive: &D::Archive,
-    slot: BlockSlot,
-    genesis: &Genesis,
-) -> Result<RewardMap<RupdWork>, ChainError> {
-    debug!(slot, "executing rupd work unit");
-
-    let work = RupdWork::load::<D>(state, genesis)?;
-
-    let rewards = crate::rewards::define_rewards(&work)?;
-
-    // TODO: logging the snapshot at this stage is not the right place. We should
-    // treat this problem as part of the epoch transition logic. We put it here for
-    // the time being for simplicity.
-    log_work::<D>(&work, &rewards, archive)?;
-
-    Ok(rewards)
-}

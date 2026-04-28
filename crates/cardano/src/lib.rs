@@ -537,7 +537,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
                 ))))
             }
             InternalWorkUnit::Rupd(slot) => Some(CardanoWorkUnit::Rupd(Box::new(
-                rupd::RupdWorkUnit::new(slot, domain.genesis()),
+                rupd::RupdWorkUnit::new(slot, self.config.clone(), domain.genesis()),
             ))),
             InternalWorkUnit::Ewrap(slot) => Some(CardanoWorkUnit::Ewrap(Box::new(
                 ewrap::EwrapWorkUnit::new(slot, self.config.clone(), domain.genesis()),

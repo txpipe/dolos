@@ -4,13 +4,13 @@
 
 ```
 Estart  →  Roll …  →  Rupd  →  Roll …  →  Ewrap
-(open half:    (blocks)    (RUPD)    (blocks)    (close half:
- per-account                                       per-account
- snapshot                                          reward apply
- rotation                                          + global
- + global                                          Ewrap pass
- Estart pass                                       in finalize())
- in finalize())                                                     │
+(open half:    (blocks)    (RUPD:     (blocks)    (close half:
+ per-account                per-account            per-account
+ snapshot                   reward                 reward apply
+ rotation                   compute                + global
+ + global                   sharded                Ewrap pass
+ Estart pass                + finalize             in finalize())
+ in finalize())             incentives)                              │
                                                                     ▼
                                                           next epoch's Estart
 ```
@@ -29,7 +29,9 @@ The boundary work splits into a *close* half (`Ewrap`, ending epoch N) and an *o
 | Close (epoch N) | `Ewrap` — per-account reward apply | Ewrap globals + `EpochWrapUp` | no |
 | Open (epoch N+1) | `Estart` — per-account snapshot rotation | Estart globals + `EpochTransition` + era transitions | yes (only here) |
 
-Both sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `account_shards` config knob; progress for each half is tracked separately on `EpochState.ewrap_progress` and `EpochState.estart_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a config change between shards (e.g. across a crash and restart) can't break an in-flight pipeline.
+`Rupd` is a third sharded unit, firing mid-epoch at the randomness stability window. It computes rewards from the E-3 stake snapshot and writes one `PendingRewardState` entity per rewarded account in this shard's range; `Ewrap` consumes those entries to apply the rewards.
+
+All three sharded units share credential-key partitioning (`crate::shard::shard_key_ranges`) and the `account_shards` config knob; progress for each is tracked separately on `EpochState.ewrap_progress`, `EpochState.estart_progress`, and `EpochState.rupd_progress`. The shard count is captured at the first per-shard commit and persisted on `ShardProgress.total` so a config change between shards (e.g. across a crash and restart) can't break an in-flight pipeline.
 
 The sections below walk the cycle starting at `Estart` (the first phase of every epoch).
 
@@ -105,13 +107,37 @@ The sections below walk the cycle starting at `Estart` (the first phase of every
     - `NoncesUpdate:115`
 - Namespaces touched: `accounts`, `pools`, `dreps`, `proposals`, `assets`, `datums`, `epochs`, `pending_mirs`.
 
-## 3. `RupdWorkUnit` — computes rewards at the stability window
+## 3. `RupdWorkUnit` — computes rewards at the stability window (sharded body + Rupd finalize)
 
 - Variants: `CardanoWorkUnit::Rupd` / `InternalWorkUnit::Rupd(BlockSlot)`.
-- Struct: `rupd::RupdWorkUnit` (`crates/cardano/src/rupd/work_unit.rs`).
-- Purpose: at `randomness_stability_window` into the epoch, compute the reward distribution and persist pending rewards.
-- Deltas: **none**. Writes `PendingRewardState` entities directly and updates `EpochState.incentives`.
-- Namespaces touched: `pending_rewards`, `epochs`.
+- Struct: `rupd::RupdWorkUnit` (`crates/cardano/src/rupd/work_unit.rs`). Reports `total_shards` (default 16) via `WorkUnit::total_shards`; the executor invokes `load(shard) → compute(shard) → commit_state(shard)` once per shard, then `finalize()`.
+- Purpose: at `randomness_stability_window` into the epoch, compute the reward distribution from the E-3 stake snapshot and persist `PendingRewardState` entities to be consumed by the close-half `Ewrap`.
+
+### `initialize()`
+
+- Resolves the boundary's effective shard count (`EpochState.rupd_progress.total` if a RUPD is in flight, else `config.account_shards()`).
+- Builds boundary-wide globals via `RupdWork::load_globals`: pots, incentives (`epoch_incentives`), pparams (mark snapshot), `blocks_made_total`, chain summary, and the **pool-bounded** half of the stake snapshot — `pools` (`HashMap<PoolHash, EpochValue<PoolSnapshot>>`), `pool_stake` (per-pool totals summed across every account), `active_stake_sum`, `performance_epoch_pool_blocks`. Memory: O(pools) ≈ a few thousand entries; the per-account map is *not* built here.
+
+### Per-shard body — per-credential reward emission
+
+- Each shard is scoped to a first-byte prefix bucket of the credential key space.
+- `load(shard)` extends the globals with shard-scoped `accounts_by_pool` (delegators in range) and `registered_accounts` (registered creds in range) by streaming `AccountState` only over the shard's two `EntityKey` ranges. Stashes the ranges on `RupdWork.shard_ranges` so `should_include` can gate emissions.
+- `compute(shard)` runs `define_rewards` over **every pool** (pool rewards depend on global pool stake / blocks, both hoisted to `initialize`) but emits only credentials this shard owns:
+  - delegator rewards are filtered naturally — `pool_delegators(pool)` returns only in-range creds
+  - leader rewards are gated by `should_include(operator_account)`; the shard whose range contains the operator credential is the sole emitter for that pool's leader reward
+- `commit_state(shard)` writes the in-range `PendingRewardState` entities (overwrite-by-key, idempotent) and emits a single `RupdProgress` delta to advance `EpochState.rupd_progress`. Per-pool reward + delegator-count contributions are accumulated on the work unit (O(pools)) for the finalize-phase StakeLog.
+- Deltas emitted per shard:
+  - `RupdProgress` — `rupd/work_unit.rs:commit_state`. Single per shard. Targets `epochs` — advances `rupd_progress = Some(ShardProgress { committed: shard_index + 1, total })`. Idempotency + ordering + total-mismatch guarded, mirroring `EWrapProgress` / `EStartProgress`.
+
+### `finalize()` — Rupd global pass
+
+- Direct write: `EpochState.incentives = Some(work.incentives)` and `EpochState.rupd_progress = None`. Single one-shot write so concurrent shard commits can't race.
+- Direct writes: per-pool `StakeLog` archive entries from the shard-accumulator (`total_rewards`, `operator_share`, `delegators_count` rolled up across shards; `blocks_minted`, `total_stake`, `relative_size`, `declared_pledge`, `fixed_cost`, `margin_cost` from globals).
+- No deltas emitted in finalize.
+
+`PendingRewardState` writes are overwrite-by-key, so true mid-shard resume is safe (rerunning a shard rewrites the same credentials with identical data).
+
+- Namespaces touched: `accounts` (read only, shard range, per shard), `pending_rewards` (write, shard range, per shard), `epochs` (`rupd_progress` per shard via delta; `incentives` direct-write in finalize).
 
 ## 4. `EwrapWorkUnit` — close half (sharded body + Ewrap finalize)
 
@@ -186,4 +212,4 @@ The following variants exist on `CardanoDelta` (`crates/cardano/src/model/mod.rs
 - `DequeueReward`
 - `SetEpochIncentives`
 
-Pending entities (`PendingMirState`, `PendingRewardState`) are removed via direct `delete_entity` calls instead. TODO: either wire these deltas in or remove the variants.
+Pending entities (`PendingMirState`, `PendingRewardState`) are removed via direct `delete_entity` calls instead, and `EpochState.incentives` is direct-written by `RupdWorkUnit::finalize` (rather than via `SetEpochIncentives`). TODO: either wire these deltas in or remove the variants.

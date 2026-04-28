@@ -206,6 +206,7 @@ pub enum CardanoDelta {
     EpochWrapUp(Box<EpochWrapUp>),
     EWrapProgress(Box<EWrapProgress>),
     EStartProgress(Box<EStartProgress>),
+    RupdProgress(Box<RupdProgress>),
     DRepDelegatorDrop(Box<DRepDelegatorDrop>),
     PoolDelegatorRetire(Box<PoolDelegatorRetire>),
     PoolWrapUp(Box<PoolWrapUp>),
@@ -283,6 +284,7 @@ delta_from!(EpochTransition);
 delta_from!(EpochWrapUp);
 delta_from!(EWrapProgress);
 delta_from!(EStartProgress);
+delta_from!(RupdProgress);
 delta_from!(DRepDelegatorDrop);
 delta_from!(PoolDelegatorRetire);
 delta_from!(PoolWrapUp);
@@ -330,6 +332,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => x.key(),
             Self::EWrapProgress(x) => x.key(),
             Self::EStartProgress(x) => x.key(),
+            Self::RupdProgress(x) => x.key(),
             Self::PoolDelegatorRetire(x) => x.key(),
             Self::DRepDelegatorDrop(x) => x.key(),
             Self::PoolWrapUp(x) => x.key(),
@@ -376,6 +379,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EWrapProgress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::EStartProgress(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::RupdProgress(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolDelegatorRetire(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolWrapUp(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -422,6 +426,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EpochWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EWrapProgress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::EStartProgress(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::RupdProgress(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepDelegatorDrop(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolDelegatorRetire(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolWrapUp(x) => Self::downcast_undo(x.as_ref(), entity),

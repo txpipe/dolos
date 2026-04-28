@@ -282,6 +282,17 @@ pub struct EpochState {
     #[n(16)]
     #[cbor(default)]
     pub estart_progress: Option<ShardProgress>,
+
+    /// Cursor + total snapshot for the RUPD-shard pipeline within this
+    /// epoch. Mirrors `ewrap_progress` / `estart_progress` for the
+    /// reward-update phase: each `RupdProgress` advances `committed`;
+    /// `RupdWorkUnit::finalize` clears the field back to `None` after
+    /// writing the global `incentives` for this epoch. The persisted
+    /// `total` guards against a config change mid-RUPD breaking the
+    /// in-flight pipeline.
+    #[n(17)]
+    #[cbor(default)]
+    pub rupd_progress: Option<ShardProgress>,
 }
 
 impl Default for EpochState {
@@ -298,6 +309,7 @@ impl Default for EpochState {
             incentives: None,
             ewrap_progress: None,
             estart_progress: None,
+            rupd_progress: None,
         }
     }
 }
@@ -385,6 +397,9 @@ pub(crate) mod testing {
             estart_progress in prop::option::of(
                 (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
+            rupd_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
         ) -> EpochState {
             EpochState {
                 number,
@@ -398,6 +413,7 @@ pub(crate) mod testing {
                 incentives,
                 ewrap_progress,
                 estart_progress,
+                rupd_progress,
             }
         }
     }
@@ -910,6 +926,113 @@ impl dolos_core::EntityDelta for EStartProgress {
     }
 }
 
+/// Delta emitted once per `Rupd` shard to advance `rupd_progress` to the
+/// next shard index. Carries `total_shards` so the boundary's shard count
+/// is captured in state at the first commit, which makes the in-flight
+/// pipeline robust against a config change between shards (e.g. across a
+/// crash and restart).
+///
+/// Like `EStartProgress` this delta carries no per-shard accumulator
+/// payload: the per-shard reward emissions land directly as
+/// `PendingRewardState` entity writes (overwrite-by-key, so re-applying
+/// is idempotent), not into a global pot. The delta exists purely to
+/// track shard progress so the executor can resume mid-RUPD after a
+/// crash.
+///
+/// Idempotent on repeat-apply by guarding on the committed shard count —
+/// a shard that was already committed will have
+/// `rupd_progress.committed > completed_shard_index` and should skip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RupdProgress {
+    pub(crate) completed_shard_index: u32,
+    pub(crate) total_shards: u32,
+
+    // undo — captured by `apply` only when state was actually mutated
+    // (i.e. the idempotency / ordering / consistency guards all passed).
+    pub(crate) applied: bool,
+    pub(crate) prev_rupd_progress: Option<ShardProgress>,
+}
+
+impl RupdProgress {
+    pub fn new(completed_shard_index: u32, total_shards: u32) -> Self {
+        Self {
+            completed_shard_index,
+            total_shards,
+            applied: false,
+            prev_rupd_progress: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for RupdProgress {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        // Idempotency + ordering guard. `rupd_progress` is the
+        // authoritative cursor for which RUPD shards have landed: `None`
+        // means no shard has run yet (shard 0 is next), `Some(p)` means
+        // shards `0..p.committed` have committed. RUPD fires mid-epoch
+        // and `EpochTransition` clears the field on the previous epoch
+        // boundary, so the natural starting state is `None`.
+        let stored = entity.rupd_progress.as_ref();
+        let expected = stored.map(|p| p.committed).unwrap_or(0);
+        if expected > self.completed_shard_index {
+            tracing::debug!(
+                completed_shard = self.completed_shard_index,
+                committed = expected,
+                "RupdProgress already applied — skipping (idempotent)"
+            );
+            return;
+        }
+        if expected < self.completed_shard_index {
+            tracing::error!(
+                completed_shard = self.completed_shard_index,
+                committed = expected,
+                "RupdProgress applied out of order — skipping to avoid corruption"
+            );
+            return;
+        }
+
+        if let Some(p) = stored {
+            if p.total != self.total_shards {
+                tracing::error!(
+                    completed_shard = self.completed_shard_index,
+                    stored_total = p.total,
+                    delta_total = self.total_shards,
+                    "RupdProgress total_shards disagrees with in-flight \
+                     boundary — skipping to avoid corruption (config changed \
+                     mid-boundary?)"
+                );
+                return;
+            }
+        }
+
+        self.prev_rupd_progress = entity.rupd_progress.clone();
+
+        entity.rupd_progress = Some(ShardProgress {
+            committed: self.completed_shard_index + 1,
+            total: self.total_shards,
+        });
+
+        self.applied = true;
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        if !self.applied {
+            return;
+        }
+
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.rupd_progress = self.prev_rupd_progress.clone();
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NonceTransition {
     pub(crate) next_nonce: Option<Nonces>,
@@ -977,6 +1100,7 @@ pub struct EpochTransition {
     pub(crate) prev_end: Option<EndStats>,
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
     pub(crate) prev_estart_progress: Option<ShardProgress>,
+    pub(crate) prev_rupd_progress: Option<ShardProgress>,
 }
 
 impl EpochTransition {
@@ -998,6 +1122,7 @@ impl EpochTransition {
             prev_end: None,
             prev_ewrap_progress: None,
             prev_estart_progress: None,
+            prev_rupd_progress: None,
         }
     }
 }
@@ -1032,6 +1157,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         self.prev_end = entity.end.clone();
         self.prev_ewrap_progress = entity.ewrap_progress.clone();
         self.prev_estart_progress = entity.estart_progress.clone();
+        self.prev_rupd_progress = entity.rupd_progress.clone();
 
         entity.number = self.new_epoch;
         entity.initial_pots = self.new_pots.clone();
@@ -1057,6 +1183,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         entity.end = Some(EndStats::default());
         entity.ewrap_progress = None;
         entity.estart_progress = None;
+        entity.rupd_progress = None;
     }
 
     fn undo(&self, entity: &mut Option<Self::Entity>) {
@@ -1072,6 +1199,7 @@ impl dolos_core::EntityDelta for EpochTransition {
         entity.end = self.prev_end.clone();
         entity.ewrap_progress = self.prev_ewrap_progress.clone();
         entity.estart_progress = self.prev_estart_progress.clone();
+        entity.rupd_progress = self.prev_rupd_progress.clone();
     }
 }
 
@@ -1147,6 +1275,7 @@ mod prop_tests {
                 incentives,
                 ewrap_progress: None,
                 estart_progress: None,
+                rupd_progress: None,
             }
         }
     }
@@ -1249,6 +1378,30 @@ mod prop_tests {
             )),
         ) -> EpochState {
             entity.estart_progress = progress;
+            entity
+        }
+    }
+
+    prop_compose! {
+        fn any_rupd_accumulate()(
+            completed_shard_index in 0u32..16u32,
+            total_shards in 1u32..=16u32,
+        ) -> RupdProgress {
+            RupdProgress::new(completed_shard_index, total_shards)
+        }
+    }
+
+    // Entity generator parallel to `any_epoch_state_for_estart_accumulate`
+    // but for the RUPD-shard progress cursor. Lets `rupd_progress` vary
+    // across `None`, matching, ahead, behind, and `total` mismatch.
+    prop_compose! {
+        fn any_epoch_state_for_rupd_accumulate()(
+            mut entity in any_epoch_state(),
+            progress in prop::option::of((0u32..32u32, 1u32..=32u32).prop_map(
+                |(committed, total)| ShardProgress { committed, total }
+            )),
+        ) -> EpochState {
+            entity.rupd_progress = progress;
             entity
         }
     }
@@ -1364,6 +1517,18 @@ mod prop_tests {
         fn estart_accumulate_roundtrip(
             entity in any_epoch_state_for_estart_accumulate(),
             delta in any_estart_accumulate(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        /// Roundtrip across all branches of `RupdProgress::apply` —
+        /// includes entity states whose `rupd_progress` is ahead of,
+        /// behind, equal to, or `None` relative to the delta's
+        /// `completed_shard_index`, plus `total_shards` mismatches.
+        #[test]
+        fn rupd_accumulate_roundtrip(
+            entity in any_epoch_state_for_rupd_accumulate(),
+            delta in any_rupd_accumulate(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
