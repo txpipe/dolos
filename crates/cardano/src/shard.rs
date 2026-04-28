@@ -57,7 +57,7 @@ pub const CRED_KEY_BYTES_HEADER: [u8; 2] = [0x58, 0x1c];
 pub const CRED_KEY_HASH_OFFSET: usize = 4;
 
 /// Return `Ok(())` if `total_shards` is a valid sharding factor (>= 1 and
-/// divides 256). Used by `shard_key_ranges` debug-asserts and unit tests.
+/// divides 256). Used by `shard_key_ranges` invariants and unit tests.
 pub fn validate_total_shards(total_shards: u32) -> Result<(), String> {
     if total_shards == 0 {
         return Err("total_shards must be >= 1".into());
@@ -73,9 +73,22 @@ pub fn validate_total_shards(total_shards: u32) -> Result<(), String> {
 /// Compute the per-variant key ranges for `shard_index` of `total_shards`.
 /// Returns one range per `StakeCredential` variant (AddrKeyhash and
 /// ScriptHash). Both must be iterated to cover the shard's full slice.
+///
+/// Panics in **all** build profiles (not just debug) on invalid inputs:
+/// `total_shards == 0` would divide by zero in `variant_range`, and a
+/// non-divisor of 256 would silently produce broken partitions. The
+/// `ACCOUNT_SHARDS` constant is validated at compile time, but
+/// `total_shards` can also come from persisted `ShardProgress.total`,
+/// so a release-mode `debug_assert!` would let storage corruption pass
+/// silently — hence the unconditional `assert!`/`panic!` here.
 pub fn shard_key_ranges(shard_index: u32, total_shards: u32) -> Vec<Range<EntityKey>> {
-    debug_assert!(validate_total_shards(total_shards).is_ok());
-    debug_assert!(shard_index < total_shards);
+    if let Err(e) = validate_total_shards(total_shards) {
+        panic!("shard_key_ranges: {e}");
+    }
+    assert!(
+        shard_index < total_shards,
+        "shard_key_ranges: shard_index ({shard_index}) must be < total_shards ({total_shards})",
+    );
 
     [CRED_KEY_VARIANT_ADDRKEYHASH, CRED_KEY_VARIANT_SCRIPTHASH]
         .into_iter()
