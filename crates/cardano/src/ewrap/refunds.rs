@@ -1,8 +1,8 @@
 use dolos_core::{ChainError, EntityKey};
 
 use crate::{
-    credential_to_key,
     ewrap::{BoundaryWork, ProposalId},
+    credential_to_key,
     AccountState, CardanoDelta, CardanoEntity, PoolDepositRefund, PoolDepositRefundLog, PoolHash,
     PoolState, ProposalDepositRefund, ProposalState,
 };

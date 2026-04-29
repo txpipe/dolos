@@ -3,8 +3,8 @@ use dolos_core::{ChainError, EntityKey};
 use tracing::debug;
 
 use crate::{
-    ewrap::AppliedReward, AccountState, AssignRewards, CardanoDelta, CardanoEntity,
-    LeaderRewardLog, MemberRewardLog,
+    ewrap::{AccountId, AppliedReward, BoundaryWork},
+    AccountState, AssignRewards, CardanoDelta, CardanoEntity, LeaderRewardLog, MemberRewardLog,
 };
 
 #[derive(Default)]
@@ -23,11 +23,11 @@ impl BoundaryVisitor {
     }
 }
 
-impl super::BoundaryVisitor for BoundaryVisitor {
+impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
     fn visit_account(
         &mut self,
-        ctx: &mut super::BoundaryWork,
-        id: &super::AccountId,
+        ctx: &mut BoundaryWork,
+        id: &AccountId,
         account: &AccountState,
     ) -> Result<(), ChainError> {
         let Some(reward) = ctx.rewards.take_for_apply(&account.credential) else {
@@ -79,6 +79,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         self.change(AssignRewards::new(id.clone(), reward.total_value()));
 
         for (pool, value, as_leader) in reward.into_vec() {
+            // Per-shard bookkeeping: each shard's applied_rewards is bounded
+            // by the shard's account count, so holding it for the duration of
+            // the shard is fine (the memory bound is per-shard, not epoch).
             ctx.applied_rewards.push(AppliedReward {
                 credential: account.credential.clone(),
                 pool,
@@ -108,7 +111,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         Ok(())
     }
 
-    fn flush(&mut self, ctx: &mut super::BoundaryWork) -> Result<(), ChainError> {
+    fn flush(&mut self, ctx: &mut BoundaryWork) -> Result<(), ChainError> {
         let mark_protocol = ctx
             .ending_state()
             .pparams

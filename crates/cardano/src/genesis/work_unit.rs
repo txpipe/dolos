@@ -32,25 +32,25 @@ where
         "genesis"
     }
 
-    fn load(&mut self, _domain: &D) -> Result<(), DomainError> {
+    fn load(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         // Genesis doesn't load existing state - it creates initial state
         debug!("genesis work unit: no loading required");
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
+    fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
         // Genesis is mostly I/O-bound, minimal compute
         debug!("genesis work unit: no computation required");
         Ok(())
     }
 
-    fn commit_wal(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_wal(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         // Reset WAL to origin for genesis
         domain.wal().reset_to(&ChainPoint::Origin)?;
         Ok(())
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_state(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         info!("bootstrapping chain from genesis");
 
         // Execute the genesis bootstrap
@@ -65,7 +65,7 @@ where
         Ok(())
     }
 
-    fn commit_archive(&mut self, _domain: &D) -> Result<(), DomainError> {
+    fn commit_archive(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         // Genesis doesn't write to archive
         Ok(())
     }

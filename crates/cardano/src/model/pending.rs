@@ -13,8 +13,9 @@ pub fn credential_to_key(cred: &StakeCredential) -> EntityKey {
     EntityKey::from(enc)
 }
 
-/// Pending reward for a single account, waiting to be applied at epoch boundary.
-/// Created by RUPD, consumed by EWRAP.
+/// Pending reward for a single account, waiting to be applied at the epoch
+/// boundary. Created by RUPD, consumed by `Ewrap` (the per-account
+/// leg of the boundary pipeline).
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingRewardState {
     #[n(0)]
@@ -48,13 +49,14 @@ impl PendingRewardState {
 
 entity_boilerplate!(PendingRewardState, "pending_rewards");
 
-/// Pending MIR (Move Instantaneous Reward) for a single account, waiting to be
-/// applied at epoch boundary. Created during block roll when MIR certificates
-/// are processed, consumed by EWRAP.
+/// Pending MIR (Move Instantaneous Reward) for a single account, waiting to
+/// be applied at the epoch boundary. Created during block roll when MIR
+/// certificates are processed, consumed by `Ewrap` (MIR processing is part
+/// of the global Ewrap phase, not the per-account `Ewrap` phase).
 ///
 /// Unlike regular rewards, MIRs come from either reserves or treasury.
-/// At EWRAP, MIRs are only applied to registered accounts - MIRs to unregistered
-/// accounts stay in their source pot (no transfer occurs).
+/// During Ewrap, MIRs are only applied to registered accounts — MIRs to
+/// unregistered accounts stay in their source pot (no transfer occurs).
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingMirState {
     #[n(0)]
@@ -159,7 +161,7 @@ impl dolos_core::EntityDelta for EnqueueReward {
 }
 
 /// Delta to dequeue (consume) a pending reward after applying it.
-/// Applied by EWRAP after rewards are assigned to accounts.
+/// Applied by `Ewrap` after rewards are assigned to accounts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DequeueReward {
     pub credential: StakeCredential,
@@ -275,7 +277,7 @@ impl dolos_core::EntityDelta for EnqueueMir {
 }
 
 /// Delta to dequeue (consume) a pending MIR after applying it.
-/// Applied by EWRAP after MIRs are assigned to accounts.
+/// Applied by `Ewrap` after MIRs are assigned to accounts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DequeueMir {
     pub credential: StakeCredential,

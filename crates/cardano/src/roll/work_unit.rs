@@ -51,7 +51,7 @@ where
         "roll"
     }
 
-    fn load(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn load(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!(blocks = self.batch.blocks.len(), "loading roll batch UTxOs");
 
         self.batch.load_utxos(domain)?;
@@ -68,12 +68,12 @@ where
         Ok(())
     }
 
-    fn compute(&mut self) -> Result<(), DomainError> {
+    fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
         // Deltas are computed during load() since they require state access.
         Ok(())
     }
 
-    fn commit_wal(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_wal(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!("committing roll batch to WAL");
 
         // Ensure blocks are sorted before WAL commit
@@ -84,7 +84,7 @@ where
         Ok(())
     }
 
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_state(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!("loading entities for roll batch");
 
         // Load entities that will be modified
@@ -106,7 +106,7 @@ where
         Ok(())
     }
 
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_archive(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!("committing roll batch to archive");
 
         self.batch.commit_archive(domain)?;
@@ -114,7 +114,7 @@ where
         Ok(())
     }
 
-    fn commit_indexes(&mut self, domain: &D) -> Result<(), DomainError> {
+    fn commit_indexes(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!("committing roll batch to indexes");
 
         self.batch.commit_indexes(domain)?;

@@ -9,12 +9,16 @@ use crate::roll::{WorkBatch, WorkBlock};
 /// Internal work unit marker used by the WorkBuffer state machine.
 ///
 /// These markers tell `CardanoLogic::pop_work` what kind of work unit to construct.
-/// The actual work unit instances are created in `pop_work` with the necessary context.
+/// The actual work unit instances are created in `pop_work` with the necessary
+/// context. Sharding is opaque to the buffer: each per-account leg
+/// (`Ewrap` / `Estart`) is emitted exactly once per boundary; the
+/// resulting work unit reports its shard count via `WorkUnit::total_shards`
+/// and runs its global teardown (Ewrap / Estart) inside its `finalize()`.
 pub(crate) enum InternalWorkUnit {
     Genesis,
     Blocks(WorkBatch),
-    EWrap(BlockSlot),
-    EStart(BlockSlot),
+    Ewrap(BlockSlot),
+    Estart(BlockSlot),
     Rupd(BlockSlot),
     ForcedStop,
 }
@@ -26,8 +30,18 @@ pub(crate) enum WorkBuffer {
     OpenBatch(WorkBatch),
     PreRupdBoundary(WorkBatch, OwnedMultiEraBlock),
     RupdBoundary(OwnedMultiEraBlock),
+    /// Pre-flushed state when crossing the epoch boundary with a buffered
+    /// `WorkBatch`. `pop_work` yields the batch as `InternalWorkUnit::Blocks`
+    /// and advances to `EwrapBoundary`.
     PreEwrapBoundary(WorkBatch, OwnedMultiEraBlock, Epoch),
+    /// Close half of the epoch boundary. Emits a single `Ewrap` work
+    /// unit — its `finalize()` runs the global Ewrap pass — and advances
+    /// to `EstartBoundary(block, epoch + 1)`.
     EwrapBoundary(OwnedMultiEraBlock, Epoch),
+    /// Open half of the epoch boundary. Emits a single `Estart` work
+    /// unit — its `finalize()` runs the global Estart pass and advances
+    /// the cursor — then advances based on stop_epoch (PreForcedStop or
+    /// next OpenBatch).
     EstartBoundary(OwnedMultiEraBlock, Epoch),
     PreForcedStop(OwnedMultiEraBlock),
     ForcedStop,
@@ -169,18 +183,30 @@ impl WorkBuffer {
                 Some(InternalWorkUnit::Blocks(batch)),
                 Self::EwrapBoundary(block, epoch),
             ),
-            WorkBuffer::EwrapBoundary(block, epoch) => (
-                Some(InternalWorkUnit::EWrap(block.slot())),
-                Self::EstartBoundary(block, epoch + 1),
-            ),
-            WorkBuffer::EstartBoundary(block, epoch) => (
-                Some(InternalWorkUnit::EStart(block.slot())),
-                if stop_epoch.is_some_and(|x| x == epoch) {
-                    Self::PreForcedStop(block)
-                } else {
-                    Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
-                },
-            ),
+            WorkBuffer::EwrapBoundary(block, epoch) => {
+                let slot = block.slot();
+                (
+                    Some(InternalWorkUnit::Ewrap(slot)),
+                    // The Ewrap work unit's `finalize()` closes the
+                    // ending epoch (Ewrap pass); the next phase opens
+                    // epoch + 1 via Estart.
+                    Self::EstartBoundary(block, epoch + 1),
+                )
+            }
+            WorkBuffer::EstartBoundary(block, epoch) => {
+                let slot = block.slot();
+                (
+                    Some(InternalWorkUnit::Estart(slot)),
+                    // Estart's `finalize()` runs the global Estart
+                    // pass (epoch transition + cursor advance). Stopping
+                    // logic moves here from the old EstartBoundary state.
+                    if stop_epoch.is_some_and(|x| x == epoch) {
+                        Self::PreForcedStop(block)
+                    } else {
+                        Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block)))
+                    },
+                )
+            }
             WorkBuffer::PreForcedStop(block) => (
                 Some(InternalWorkUnit::Blocks(WorkBatch::for_single_block(
                     WorkBlock::new(block),
@@ -243,8 +269,12 @@ mod tests {
                 last: batch.last_slot(),
             },
             InternalWorkUnit::Rupd(s) => WorkTag::Rupd(*s),
-            InternalWorkUnit::EWrap(s) => WorkTag::EWrap(*s),
-            InternalWorkUnit::EStart(s) => WorkTag::EStart(*s),
+            // The merged work units carry their global teardown in
+            // `finalize()`. `Ewrap` covers the close half (Ewrap +
+            // Ewrap); `Estart` covers the open half (Estart +
+            // Estart). Tests use a single tag per half.
+            InternalWorkUnit::Ewrap(s) => WorkTag::EWrap(*s),
+            InternalWorkUnit::Estart(s) => WorkTag::EStart(*s),
             InternalWorkUnit::ForcedStop => WorkTag::ForcedStop,
         }
     }
@@ -353,10 +383,13 @@ mod tests {
             InternalWorkUnit::Blocks(batch) => {
                 *cursor = batch.last_point();
             }
-            InternalWorkUnit::EStart(slot) => {
+            // Estart's `finalize()` runs the global Estart pass,
+            // which advances the cursor — the test models this as a
+            // tag-time cursor update keyed by the boundary block's slot.
+            InternalWorkUnit::Estart(slot) => {
                 *cursor = ChainPoint::Slot(*slot);
             }
-            // Genesis, Rupd, EWrap do not advance the cursor
+            // Genesis, Rupd, Ewrap do not advance the cursor.
             _ => {}
         }
     }
@@ -436,6 +469,68 @@ mod tests {
             tags.iter().any(|t| matches!(t, WorkTag::EStart(_))),
             "expected EStart, got: {:?}",
             tags
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Test: epoch boundary emits Ewrap before Estart
+    // ---------------------------------------------------------------
+    #[test]
+    fn epoch_boundary_emits_ewrap_then_estart() {
+        let eras = test_chain_summary();
+
+        // Feed blocks crossing the epoch boundary at slot 100.
+        let mut buf = WorkBuffer::Restart(ChainPoint::Slot(80));
+        for &slot in &[90u64, 110] {
+            loop {
+                if buf.can_receive_block() {
+                    break;
+                }
+                let (_, next) = buf.pop_work(None);
+                buf = next;
+            }
+            buf = buf.receive_block(make_block(slot), &eras, 40);
+        }
+
+        let mut units = Vec::new();
+        loop {
+            let (wu, next) = buf.pop_work(None);
+            buf = next;
+            match wu {
+                Some(wu) => units.push(wu),
+                None => break,
+            }
+        }
+
+        // Exactly one Ewrap and one Estart work unit per boundary;
+        // sharding fan-out is internal to each (via
+        // `WorkUnit::total_shards`), and the global Ewrap / Estart
+        // teardown lives in `finalize()`.
+        let ewrap_count = units
+            .iter()
+            .filter(|u| matches!(u, InternalWorkUnit::Ewrap(_)))
+            .count();
+        let estart_count = units
+            .iter()
+            .filter(|u| matches!(u, InternalWorkUnit::Estart(_)))
+            .count();
+        assert_eq!(ewrap_count, 1, "expected exactly 1 Ewrap, got: {ewrap_count}");
+        assert_eq!(
+            estart_count, 1,
+            "expected exactly 1 Estart, got: {estart_count}"
+        );
+
+        let ewrap_pos = units
+            .iter()
+            .position(|u| matches!(u, InternalWorkUnit::Ewrap(_)))
+            .expect("Ewrap");
+        let estart_pos = units
+            .iter()
+            .position(|u| matches!(u, InternalWorkUnit::Estart(_)))
+            .expect("Estart");
+        assert!(
+            ewrap_pos < estart_pos,
+            "Ewrap (close half) must precede Estart (open half)"
         );
     }
 

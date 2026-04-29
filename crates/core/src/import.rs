@@ -11,7 +11,9 @@
 
 use tracing::{debug, instrument};
 
-use crate::{BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
+use crate::{
+    sync::run_lifecycle, BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit,
+};
 
 /// Extension trait for bulk block import operations.
 ///
@@ -66,11 +68,14 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 /// Execute a work unit through the import lifecycle.
 ///
 /// Import lifecycle skips WAL commits and tip notifications for performance:
-/// 1. `load()` - Load required data from storage
-/// 2. `compute()` - Execute computation over loaded data
-/// 3. `commit_state()` - Apply changes to state store
-/// 4. `commit_archive()` - Apply changes to archive store
-/// 5. `commit_indexes()` - Apply changes to index stores
+/// 1. `initialize()` - Shard-agnostic setup
+/// 2. For each shard `0..total_shards()`:
+///    a. `load()` - Load required data from storage
+///    b. `compute()` - Execute computation over loaded data
+///    c. `commit_state()` - Apply changes to state store
+///    d. `commit_archive()` - Apply changes to archive store
+///    e. `commit_indexes()` - Apply changes to index stores
+/// 3. `finalize()` - Shard-agnostic teardown
 ///
 /// Skipped phases:
 /// - `commit_wal()` - Not needed for immutable data import
@@ -79,23 +84,7 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     debug!("executing work unit (import)");
 
-    work.load(domain)?;
-    debug!("load phase complete");
-
-    work.compute()?;
-    debug!("compute phase complete");
-
-    // Skip WAL commit for import - data comes from trusted immutable source
-    debug!("skipping wal commit (import mode)");
-
-    work.commit_state(domain)?;
-    debug!("state commit complete");
-
-    work.commit_archive(domain)?;
-    debug!("archive commit complete");
-
-    work.commit_indexes(domain)?;
-    debug!("index commit complete");
+    run_lifecycle(domain, work, false)?;
 
     // Skip tip notifications for import - no live subscribers
     debug!("skipping tip notifications (import mode)");

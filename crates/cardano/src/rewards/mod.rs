@@ -454,6 +454,19 @@ pub trait RewardsContext: Sync {
 
         live_pledge
     }
+
+    /// Whether a credential should be emitted into this context's
+    /// `RewardMap`. The unsharded path returns `true` for every
+    /// credential. A sharded RUPD context returns `true` only for
+    /// credentials whose `EntityKey` falls in the shard's range, so the
+    /// pool-outer reward loop can run on every shard while keeping
+    /// emissions scoped to the credentials this shard owns. Both leader
+    /// and delegator emission sites are gated on this so a pool whose
+    /// operator credential lives in another shard does not produce a
+    /// duplicate `PendingRewardState` write here.
+    fn should_include(&self, _account: &StakeCredential) -> bool {
+        true
+    }
 }
 
 /// Chunk size for parallel delegator processing.
@@ -583,7 +596,9 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let babbage_or_later = protocol_major >= 7;
         let is_operator_registered = ctx.is_account_registered(&operator_account);
 
-        if babbage_or_later || is_operator_registered {
+        if (babbage_or_later || is_operator_registered)
+            && ctx.should_include(&operator_account)
+        {
             map.include(ctx, &operator_account, operator_share, pool, true);
         }
 
@@ -611,9 +626,14 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
             .flatten()
             .collect();
 
-        // Sequential merge of results
+        // Sequential merge of results — `pool_delegators` already filtered
+        // to in-range credentials in the sharded path, but defensively gate
+        // each emission on `should_include` so the inner loop stays
+        // correct if a future context returns out-of-range delegators.
         for (delegator, reward) in delegator_rewards {
-            map.include(ctx, &delegator, reward, pool, false);
+            if ctx.should_include(&delegator) {
+                map.include(ctx, &delegator, reward, pool, false);
+            }
         }
     }
 
