@@ -1006,7 +1006,7 @@ impl dolos_core::EntityDelta for AccountTransition {
 mod prop_tests {
     use super::*;
     use super::testing::any_account_state;
-    use crate::model::testing::{self as root, assert_delta_roundtrip};
+    use crate::model::testing::{self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip};
     use proptest::prelude::*;
 
     /// Build an `AccountState` whose `pool.live` is guaranteed to be `PoolDelegation::Pool(..)`.
@@ -1272,6 +1272,72 @@ mod prop_tests {
             delta in any_account_transition(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        // --- WAL serialize → deserialize → undo round-trips ---
+        //
+        // These exercise the path the WAL takes: serialize the (post-apply)
+        // delta with bincode (which is what `crates/redb3/src/wal/mod.rs`
+        // uses), deserialize it, then assert undo still restores the original
+        // entity. The plain `_roundtrip` variants above use the same in-memory
+        // delta instance for apply and undo and so don't catch regressions
+        // where a `prev_*` field isn't `serde`-serialized or where the WAL
+        // row is written before apply runs.
+
+        #[test]
+        fn controlled_amount_inc_serde_roundtrip(
+            entity in prop::option::of(any_account_state()),
+            delta in any_controlled_amount_inc(),
+        ) {
+            assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn controlled_amount_dec_serde_roundtrip(
+            entity in any_account_state(),
+            delta in any_controlled_amount_dec(),
+        ) {
+            assert_delta_serde_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn stake_registration_serde_roundtrip(
+            entity in prop::option::of(any_account_state()),
+            delta in any_stake_registration(),
+        ) {
+            assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn stake_delegation_serde_roundtrip(
+            entity in any_account_state(),
+            delta in any_stake_delegation(),
+        ) {
+            assert_delta_serde_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn stake_deregistration_serde_roundtrip(
+            entity in any_account_state(),
+            delta in any_stake_deregistration(),
+        ) {
+            assert_delta_serde_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn vote_delegation_serde_roundtrip(
+            entity in any_account_state(),
+            delta in any_vote_delegation(),
+        ) {
+            assert_delta_serde_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn withdrawal_inc_serde_roundtrip(
+            entity in any_account_state(),
+            delta in any_withdrawal_inc(),
+        ) {
+            assert_delta_serde_roundtrip(Some(entity), delta);
         }
     }
 }

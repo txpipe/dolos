@@ -14,6 +14,7 @@ use pallas::ledger::primitives::{
     Epoch, StakeCredential,
 };
 use proptest::prelude::*;
+use serde::{de::DeserializeOwned, Serialize};
 
 use super::pools::PoolHash;
 
@@ -33,6 +34,42 @@ where
     assert_eq!(
         state, original,
         "delta apply/undo is not reversible: undo did not restore original state"
+    );
+}
+
+/// Asserts that the WAL serialize/deserialize round-trip preserves apply→undo
+/// reversibility.
+///
+/// The lifecycle in `core/sync.rs::run_lifecycle` writes `commit_wal` *before*
+/// `commit_state`, then `apply_entities` mutates each delta in-place to capture
+/// `prev_*` undo state — but those mutations only land on the in-memory copy.
+/// The WAL row itself is encoded **after** apply runs (post-fix), so the
+/// deserialized form must still admit a valid undo.
+///
+/// This helper exercises that contract: serialize the *post-apply* delta,
+/// deserialize it, and assert that calling `undo` on the deserialized instance
+/// restores the original entity. Catches regressions where a delta forgets to
+/// mark a `prev_*` field as `serde`-serialized, or relies on transient state
+/// that doesn't survive the wire format.
+pub fn assert_delta_serde_roundtrip<T, D>(entity: Option<T>, mut delta: D)
+where
+    T: Clone + PartialEq + core::fmt::Debug,
+    D: EntityDelta<Entity = T> + Serialize + DeserializeOwned,
+{
+    let original = entity.clone();
+    let mut state = entity;
+
+    delta.apply(&mut state);
+
+    // Bincode is the WAL's encoding (see crates/redb3/src/wal/mod.rs).
+    let bytes = bincode::serialize(&delta).expect("serialize delta");
+    let restored: D = bincode::deserialize(&bytes).expect("deserialize delta");
+
+    restored.undo(&mut state);
+
+    assert_eq!(
+        state, original,
+        "delta serde-then-undo is not reversible: deserialized undo did not restore original state",
     );
 }
 

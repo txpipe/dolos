@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    BootstrapExt, ChainLogic, ChainPoint, Domain, IndexStore, StateStore, StateWriter, WalStore,
-    WorkUnit,
+    sync::SyncExt as _, BootstrapExt, ChainLogic, ChainPoint, Domain, IndexStore, StateStore,
+    StateWriter, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -111,6 +111,69 @@ fn test_catchup_recovers_archive_and_indexes() {
         slot.is_some(),
         "tx hash {} should be found in index after catch-up",
         tx_hash_hex
+    );
+}
+
+/// Regression: rolling back through WAL entries that came out of the full sync
+/// lifecycle must not panic.
+///
+/// Before the lifecycle reshuffle, `RollWorkUnit::commit_wal` ran *before*
+/// `apply_entities`, so each WAL row's deltas had `prev_*` undo state still set
+/// to `None`. When the chainsync handshake (or any later peer rollback) hit
+/// `domain.rollback(...)`, the loop in `core/sync.rs::rollback` deserialized
+/// those deltas and called `undo()` on them, panicking with
+/// `panicked at … "apply captured stake"` on the first non-trivial delta
+/// (typically `ControlledAmountInc`).
+///
+/// This test feeds blocks through the *full* sync lifecycle (every phase,
+/// including `commit_archive` and `commit_indexes`) and then rolls back to a
+/// prior point. With the lifecycle correctly ordered, the WAL rows carry their
+/// `prev_*` data, undo executes cleanly, and the cursor lands on the rollback
+/// target.
+#[test]
+fn test_rollback_after_full_sync_lifecycle() {
+    let cfg = SyntheticBlockConfig::default();
+    let (blocks, _vectors, cardano_config) = build_synthetic_blocks(cfg);
+    assert!(
+        blocks.len() >= 2,
+        "synthetic config must produce at least 2 blocks for the rollback target to differ from the tip",
+    );
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    // Capture the point we'll roll back to before any blocks have been applied
+    // past it. Must be a fully-defined ChainPoint (slot + hash), since
+    // domain.rollback compares with `point == *to` and a Specific(slot, hash)
+    // entry from the WAL won't match a Slot(slot)-only target.
+    let rollback_target = {
+        let block = pallas::ledger::traverse::MultiEraBlock::decode(&blocks[0]).unwrap();
+        ChainPoint::Specific(block.slot(), block.hash())
+    };
+
+    // Feed every block through the live sync lifecycle. `roll_forward` uses
+    // `run_lifecycle` with `include_wal=true`, so this exercises the same path
+    // as the live sync pipeline.
+    for block in &blocks {
+        domain.roll_forward(block.clone()).unwrap();
+    }
+
+    let tip_before_rollback = domain.state().read_cursor().unwrap();
+    assert_ne!(
+        tip_before_rollback.as_ref(),
+        Some(&rollback_target),
+        "tip should be past the rollback target",
+    );
+
+    // Roll back. Without the fix, this panics inside delta.undo() because the
+    // WAL-deserialized deltas have prev_*=None.
+    domain.rollback(&rollback_target).unwrap();
+
+    let cursor_after = domain.state().read_cursor().unwrap();
+    assert_eq!(
+        cursor_after.as_ref(),
+        Some(&rollback_target),
+        "state cursor should be at the rollback target after rollback",
     );
 }
 

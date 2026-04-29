@@ -1345,6 +1345,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bech32 0.11.1",
+ "bincode",
  "chrono",
  "crc",
  "dolos-core",
