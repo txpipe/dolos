@@ -34,6 +34,7 @@ hex = "0.4.3"
 serde_json = "1.0.140"
 dolos-testing = { path = "../testing" }
 proptest = "1.7.0"
+bincode.workspace = true
 
 [features]
 include-genesis = []

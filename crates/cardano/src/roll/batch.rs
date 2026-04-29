@@ -85,6 +85,7 @@ pub struct WorkBatch {
 
     // internal checks
     is_sorted: bool,
+    applied: bool,
 }
 
 impl WorkBatch {
@@ -190,6 +191,10 @@ impl WorkBatch {
         D: Domain<Chain = CardanoLogic, EntityDelta = CardanoDelta>,
     {
         debug_assert!(self.is_sorted);
+        debug_assert!(
+            self.applied,
+            "commit_wal must run after apply_entities so deltas carry prev_* undo state"
+        );
 
         let mut entries = Vec::new();
 
@@ -262,6 +267,8 @@ impl WorkBatch {
                 }
             }
         }
+
+        self.applied = true;
 
         Ok(())
     }

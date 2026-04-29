@@ -92,7 +92,11 @@ impl<D: Domain> SyncExt for D {
                 crate::state::load_entity_chunk::<Self>(entities.as_slice(), self.state())?;
 
             for (key, entity) in entities.iter_mut() {
-                for delta in log.delta.iter_mut() {
+                // Undo deltas in reverse application order. Each delta's `prev_*`
+                // captures the state immediately before its own apply, so multiple
+                // deltas keyed to the same entity must be reversed last-first to
+                // correctly walk back through the apply chain.
+                for delta in log.delta.iter_mut().rev() {
                     if delta.key() == *key {
                         delta.undo(entity);
                     }
