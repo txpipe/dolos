@@ -1,6 +1,6 @@
 use bincode;
 use itertools::Itertools;
-use redb::{Range, ReadableDatabase, TableDefinition};
+use redb::{Range, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{marker::PhantomData, ops::RangeBounds, path::Path, sync::Arc};
 use thiserror::Error;
@@ -175,6 +175,17 @@ where
 
 const WAL: TableDefinition<DbChainPoint, DbLogValue> = TableDefinition::new("wal");
 
+const WAL_METADATA: TableDefinition<&str, u32> = TableDefinition::new("wal_metadata");
+
+const WAL_METADATA_VERSION_KEY: &str = "version";
+
+/// Current WAL on-disk schema version.
+///
+/// Bump this whenever the serialized format of WAL entries changes in a way
+/// that breaks reading older data. On open, an older or missing version
+/// triggers an automatic wipe; a newer version triggers a refusal to start.
+pub const CURRENT_WAL_VERSION: u32 = 1;
+
 pub struct LogIter<'a, T>(Range<'a, DbChainPoint, DbLogValue>, PhantomData<T>);
 
 impl<'a, T> From<Range<'a, DbChainPoint, DbLogValue>> for LogIter<'a, T>
@@ -272,6 +283,9 @@ where
     }
 
     pub fn is_empty(&self) -> Result<bool, RedbWalError> {
+        // "Empty" here refers to absence of WAL data entries. The metadata
+        // table is always present after `ensure_version()`, so an empty WAL
+        // can still have a populated `wal_metadata` table.
         let wr = self.db.begin_read()?;
 
         let tables = wr.list_tables()?;
@@ -300,6 +314,7 @@ where
         };
 
         out.ensure_initialized()?;
+        out.ensure_version()?;
 
         Ok(out)
     }
@@ -317,6 +332,7 @@ where
         };
 
         out.ensure_initialized()?;
+        out.ensure_version()?;
 
         Ok(out)
     }
@@ -331,6 +347,106 @@ where
         wx.open_table(WAL)?;
         wx.commit()?;
         Ok(())
+    }
+
+    /// Read the current on-disk WAL schema version.
+    ///
+    /// Returns `Ok(None)` if the metadata table doesn't exist (legacy DB
+    /// predating the versioning mechanism) or has no version key set.
+    fn read_version(&self) -> Result<Option<u32>, RedbWalError> {
+        let rx = self.db.begin_read()?;
+
+        let table = match rx.open_table(WAL_METADATA) {
+            Ok(t) => t,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(RedbWalError::from(e)),
+        };
+
+        let value = table
+            .get(WAL_METADATA_VERSION_KEY)?
+            .map(|v| v.value());
+
+        Ok(value)
+    }
+
+    /// Stamp the metadata table with the given version. Used when the WAL
+    /// data table is empty (no destructive action needed).
+    fn stamp_version(&self, version: u32) -> Result<(), RedbWalError> {
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
+        {
+            let mut metadata = wx.open_table(WAL_METADATA)?;
+            metadata.insert(WAL_METADATA_VERSION_KEY, version)?;
+        }
+        wx.commit()?;
+        Ok(())
+    }
+
+    /// Atomically drain every entry from the WAL data table and stamp the
+    /// metadata with the new version.
+    ///
+    /// This is a single redb transaction, so a crash between the drain and
+    /// the version write cannot leave the DB in a half-upgraded state.
+    fn wipe_and_stamp(&self, version: u32) -> Result<(), RedbWalError> {
+        let mut wx = self.db.begin_write()?;
+        wx.set_quick_repair(true);
+        {
+            let mut wal = wx.open_table(WAL)?;
+            wal.retain(|_, _| false)?;
+        }
+        {
+            let mut metadata = wx.open_table(WAL_METADATA)?;
+            metadata.insert(WAL_METADATA_VERSION_KEY, version)?;
+        }
+        wx.commit()?;
+        Ok(())
+    }
+
+    /// Verify that the on-disk WAL is compatible with `CURRENT_WAL_VERSION`,
+    /// performing a forced wipe + version bump if not.
+    ///
+    /// - Matching version → no-op.
+    /// - Newer on-disk version → returns `WalError::IncompatibleVersion` to
+    ///   prevent an old binary from destroying newer data.
+    /// - Older or missing version with empty data → just stamps the version.
+    /// - Older or missing version with non-empty data → wipes the data and
+    ///   stamps the version (logs a warning).
+    pub fn ensure_version(&self) -> Result<(), RedbWalError> {
+        let found = self.read_version()?;
+
+        match found {
+            Some(v) if v == CURRENT_WAL_VERSION => Ok(()),
+            Some(v) if v > CURRENT_WAL_VERSION => Err(RedbWalError(WalError::IncompatibleVersion {
+                found: v,
+                expected: CURRENT_WAL_VERSION,
+            })),
+            _ => {
+                if self.data_table_is_empty()? {
+                    info!(
+                        version = CURRENT_WAL_VERSION,
+                        "initializing WAL metadata version"
+                    );
+                    self.stamp_version(CURRENT_WAL_VERSION)?;
+                } else {
+                    warn!(
+                        found = ?found,
+                        expected = CURRENT_WAL_VERSION,
+                        "WAL on-disk version is incompatible with running code; wiping WAL data"
+                    );
+                    self.wipe_and_stamp(CURRENT_WAL_VERSION)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Low-level check on whether the WAL data table contains any entries,
+    /// using redb's `is_empty()` directly without deserializing values.
+    /// Safe to call against incompatible on-disk data.
+    fn data_table_is_empty(&self) -> Result<bool, RedbWalError> {
+        let rx = self.db.begin_read()?;
+        let table = rx.open_table(WAL)?;
+        Ok(table.is_empty()?)
     }
 
     /// Prunes the WAL history to maintain a maximum number of slots.
@@ -739,5 +855,145 @@ where
         let iter = RedbWalStore::iter_logs(self, start, end)?;
         let iter = BlockIter::from(iter);
         Ok(iter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dolos_core::{ChainError, Entity, EntityValue, Namespace, NsKey};
+    use serde::{Deserialize, Serialize};
+
+    /// Minimal delta type used by tests to satisfy `RedbWalStore`'s generic
+    /// bounds. Tests in this module never round-trip data through the WAL,
+    /// so the apply/undo/encode/decode methods can be inert.
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct TestDelta;
+
+    #[derive(Clone, Debug)]
+    struct TestEntity;
+
+    impl Entity for TestEntity {
+        fn decode_entity(_: Namespace, _: &EntityValue) -> Result<Self, ChainError> {
+            unimplemented!("not exercised in WAL versioning tests")
+        }
+
+        fn encode_entity(_: &Self) -> (Namespace, EntityValue) {
+            unimplemented!("not exercised in WAL versioning tests")
+        }
+    }
+
+    impl EntityDelta for TestDelta {
+        type Entity = TestEntity;
+
+        fn key(&self) -> NsKey {
+            unimplemented!("not exercised in WAL versioning tests")
+        }
+
+        fn apply(&mut self, _: &mut Option<Self::Entity>) {}
+
+        fn undo(&self, _: &mut Option<Self::Entity>) {}
+    }
+
+    type TestStore = RedbWalStore<TestDelta>;
+
+    fn open_test_store(path: &Path) -> Result<TestStore, WalError> {
+        TestStore::open(path, &RedbWalConfig::default())
+    }
+
+    /// Open a redb DB directly (bypassing RedbWalStore::open) so tests can
+    /// simulate legacy on-disk state that predates the metadata table.
+    fn open_raw_db(path: &Path) -> redb::Database {
+        redb::Database::builder().create(path).unwrap()
+    }
+
+    #[test]
+    fn fresh_in_memory_stamps_current_version() {
+        let store = TestStore::memory().unwrap();
+        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+    }
+
+    #[test]
+    fn fresh_on_disk_stamps_current_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+    }
+
+    #[test]
+    fn legacy_db_with_data_gets_wiped_on_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        // Create a legacy DB: WAL table populated, no metadata table.
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut table = wx.open_table(WAL).unwrap();
+                let key = DbChainPoint::from(ChainPoint::Specific(42, [1u8; 32].into()));
+                table.insert(key, vec![0xDEu8, 0xAD, 0xBE, 0xEF]).unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        // Sanity-check the legacy state.
+        {
+            let db = open_raw_db(&path);
+            let rx = db.begin_read().unwrap();
+            let table = rx.open_table(WAL).unwrap();
+            assert!(!table.is_empty().unwrap());
+            assert!(matches!(
+                rx.open_table(WAL_METADATA),
+                Err(redb::TableError::TableDoesNotExist(_))
+            ));
+        }
+
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+        assert!(store.data_table_is_empty().unwrap());
+    }
+
+    #[test]
+    fn newer_version_on_disk_refuses_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        // Stamp metadata with a version newer than CURRENT_WAL_VERSION.
+        {
+            let db = open_raw_db(&path);
+            let wx = db.begin_write().unwrap();
+            {
+                let mut metadata = wx.open_table(WAL_METADATA).unwrap();
+                metadata
+                    .insert(WAL_METADATA_VERSION_KEY, CURRENT_WAL_VERSION + 1)
+                    .unwrap();
+            }
+            wx.commit().unwrap();
+        }
+
+        let err = open_test_store(&path).unwrap_err();
+        match err {
+            WalError::IncompatibleVersion { found, expected } => {
+                assert_eq!(found, CURRENT_WAL_VERSION + 1);
+                assert_eq!(expected, CURRENT_WAL_VERSION);
+            }
+            other => panic!("expected IncompatibleVersion, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_version_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.redb");
+
+        // First open: stamps current version.
+        open_test_store(&path).unwrap();
+
+        // Second open: should succeed without rewriting (no panic, version intact).
+        let store = open_test_store(&path).unwrap();
+        assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
     }
 }

@@ -308,6 +308,9 @@ pub enum WalError {
     #[error("slot not found in chain {0}")]
     SlotNotFound(BlockSlot),
 
+    #[error("WAL version is incompatible: found {found}, expected {expected}")]
+    IncompatibleVersion { found: u32, expected: u32 },
+
     #[error("IO error: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
