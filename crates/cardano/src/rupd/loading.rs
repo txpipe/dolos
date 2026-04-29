@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ops::Range;
 
 use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore};
@@ -5,7 +6,7 @@ use pallas::ledger::primitives::StakeCredential;
 use tracing::{debug, trace};
 
 use crate::{
-    pallas_ratio,
+    pallas_extras, pallas_ratio,
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{credential_to_key, RupdWork, StakeSnapshot},
@@ -163,6 +164,22 @@ impl StakeSnapshot {
             }
         }
 
+        // Build owner-credential → pools-they-own index from the same
+        // go-snapshot params that `define_rewards` passes to
+        // `live_pledge`. This is shard-agnostic: owners can be in any
+        // first-byte prefix, so the index is built once over every pool
+        // and then consulted while iterating accounts globally.
+        let mut owner_to_pools: HashMap<StakeCredential, Vec<PoolHash>> = HashMap::new();
+        for (pool_hash, pool_snapshot) in &snapshot.pools {
+            let Some(go_snapshot) = pool_snapshot.go() else {
+                continue;
+            };
+            for owner_hash in &go_snapshot.params.pool_owners {
+                let cred = pallas_extras::keyhash_to_stake_cred(*owner_hash);
+                owner_to_pools.entry(cred).or_default().push(*pool_hash);
+            }
+        }
+
         let accounts = state.iter_entities_typed::<AccountState>(AccountState::NS, None)?;
 
         for record in accounts {
@@ -192,6 +209,18 @@ impl StakeSnapshot {
             // in_shard = false: globals pass keeps only pool-level totals,
             // not the per-account map.
             snapshot.track_stake(&account.credential, *pool, stake, false)?;
+
+            // If this account is a declared owner of the pool it
+            // delegates to, contribute its stake to the pool's live
+            // pledge. Must be done in `load_globals` (not
+            // `merge_shard`) because owners can live in any shard while
+            // every shard needs the *full* live pledge to reproduce
+            // `pool_rewards` faithfully.
+            if let Some(owned_pools) = owner_to_pools.get(&account.credential) {
+                if owned_pools.contains(pool) {
+                    *snapshot.pool_live_pledges.entry(*pool).or_insert(0) += stake;
+                }
+            }
         }
 
         for (pool_id, stake) in snapshot.pool_stake.iter() {
@@ -507,6 +536,19 @@ impl crate::rewards::RewardsContext for RupdWork {
 
     fn pre_allegra(&self) -> bool {
         self.pparams().protocol_major().unwrap_or(0) < 3
+    }
+
+    fn live_pledge(&self, pool: PoolHash, _owners: &[StakeCredential]) -> u64 {
+        // Use the precomputed per-pool live pledge populated in
+        // `load_globals` (which sees every account, regardless of
+        // shard). The trait default sums `account_stake` across the
+        // owner list, which under sharded RUPD only sees the slice of
+        // `accounts_by_pool` belonging to the current shard's key
+        // range — owners in other shards would silently contribute 0,
+        // tripping the `live_pledge < declared_pledge` short-circuit
+        // in `pool_rewards` and zeroing every emission for the pool
+        // from this shard.
+        *self.snapshot.pool_live_pledges.get(&pool).unwrap_or(&0)
     }
 
     fn should_include(&self, account: &StakeCredential) -> bool {

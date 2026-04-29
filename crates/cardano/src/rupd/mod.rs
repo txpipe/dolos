@@ -93,6 +93,15 @@ pub struct StakeSnapshot {
     pub registered_accounts: HashSet<StakeCredential>,
     pub pools: HashMap<PoolHash, EpochValue<PoolSnapshot>>,
     pub pool_stake: HashMap<PoolHash, u64>,
+    /// Per-pool live pledge: sum of stake delegated to the pool by its
+    /// declared owners, computed in `load_globals` over every account.
+    /// Owner credentials can land in any shard, so a per-shard
+    /// `account_stake`-based sum (the trait default for `live_pledge`)
+    /// would silently return 0 in shards that don't contain the
+    /// owners — causing `pool_rewards` to short-circuit to 0 via the
+    /// `live_pledge < declared_pledge` guard. The live pledge depends
+    /// only on global stake, so we precompute it once.
+    pub pool_live_pledges: HashMap<PoolHash, u64>,
     /// Total blocks minted by ALL pools in the performance epoch (mark snapshot).
     /// This includes blocks from pools created after the stake snapshot epoch.
     /// Used for the `epoch_blocks` denominator in apparent performance calculation.
