@@ -15,25 +15,37 @@ pub struct MempoolUpdate {
 
 /// A unit of work defined by the chain but executed by the node infrastructure.
 ///
-/// The lifecycle of a work unit consists of several phases:
+/// Every work unit is conceptually sharded: `total_shards()` reports how
+/// many shards the work splits into, and the executor invokes the load /
+/// compute / commit phases once per shard. Work units that don't need
+/// sharding take the default `total_shards() = 1` and ignore the
+/// `shard_index` parameter passed to each phase.
+///
+/// The lifecycle is:
 ///
 /// 1. **Definition** - Lightweight construction with required parameters.
-///    This happens when the work unit is created by the chain logic.
+///    Happens when the work unit is created by the chain logic.
 ///
-/// 2. **Loading** - Query state/archive stores to gather data needed for
-///    execution. This phase may involve I/O operations.
+/// 2. **Initialize** - Shard-agnostic setup that runs once before any
+///    shard. The implementation can use this to compute and cache its
+///    `total_shards()` value, hoist boundary-wide reads out of the
+///    per-shard loop, etc.
 ///
-/// 3. **Compute** - Execute CPU-intensive work over the loaded data.
-///    This phase should NOT access storage.
+/// 3. **Per-shard loop**, repeated `total_shards()` times with `shard_index`
+///    advancing from `0` to `total_shards() - 1`:
 ///
-/// 4. **Commit WAL** - Persist to write-ahead log for crash recovery.
-///    Called after compute, before state commits.
+///    a. **Load** - Query state/archive stores for this shard.
+///    b. **Compute** - CPU work over loaded data; no storage access.
+///    c. **Commit WAL** - Persist to write-ahead log.
+///    d. **Commit State** - Apply changes to the state store.
+///    e. **Commit Archive** - Apply changes to the archive store.
+///    f. **Commit Indexes** - Apply changes to index stores.
 ///
-/// 5. **Commit State** - Apply computed changes to the state store.
+/// 4. **Finalize** - Shard-agnostic teardown that runs once after the
+///    last shard's commits succeed.
 ///
-/// 6. **Commit Archive** - Apply computed changes to the archive store.
-///
-/// 7. **Commit Indexes** - Apply computed changes to index stores (optional).
+/// 5. **Tip notifications + mempool updates** - shard-agnostic, fired once
+///    after `finalize()`.
 ///
 /// # Type Parameters
 ///
@@ -45,6 +57,46 @@ pub trait WorkUnit<D: Domain>: Send {
     /// such as "genesis", "roll", "rupd", "ewrap", or "estart".
     fn name(&self) -> &'static str;
 
+    /// Number of shards this work unit splits into.
+    ///
+    /// The executor calls each per-shard phase `total_shards()` times.
+    /// Defaults to `1` for non-sharded work units. The returned value
+    /// must be valid after `initialize()` has run — implementations that
+    /// derive the count from persisted state should compute it inside
+    /// `initialize()` and cache it on `self`.
+    fn total_shards(&self) -> u32 {
+        1
+    }
+
+    /// First shard the executor will run.
+    ///
+    /// Defaults to `0` (run every shard from the start). Restart-aware
+    /// work units override this to resume mid-pipeline after a crash:
+    /// they read a persisted commit cursor (e.g. `*_progress.committed`)
+    /// in `initialize()` and return it here. The executor then runs
+    /// `start_shard()..total_shards()` so already-committed shards are
+    /// skipped, which matters when the per-shard deltas are
+    /// non-idempotent (replaying a committed shard would double-apply).
+    ///
+    /// Must satisfy `start_shard() <= total_shards()`. The returned
+    /// value must be valid after `initialize()` has run.
+    fn start_shard(&self) -> u32 {
+        0
+    }
+
+    /// Shard-agnostic setup, run once before any shard executes.
+    ///
+    /// Use this to compute `total_shards()`, load boundary-wide data
+    /// that doesn't depend on the shard, or perform any other one-shot
+    /// preparation. The default implementation does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setup fails.
+    fn initialize(&mut self, _domain: &D) -> Result<(), DomainError> {
+        Ok(())
+    }
+
     /// Load data from state/archive stores needed for computation.
     ///
     /// This phase is called before `compute()` and is the appropriate place
@@ -55,7 +107,7 @@ pub trait WorkUnit<D: Domain>: Send {
     ///
     /// Returns an error if data loading fails (e.g., storage errors,
     /// missing required data).
-    fn load(&mut self, domain: &D) -> Result<(), DomainError>;
+    fn load(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError>;
 
     /// Execute CPU-intensive computation over loaded data.
     ///
@@ -67,7 +119,7 @@ pub trait WorkUnit<D: Domain>: Send {
     ///
     /// Returns an error if computation fails (e.g., invalid data,
     /// computation errors).
-    fn compute(&mut self) -> Result<(), DomainError>;
+    fn compute(&mut self, shard_index: u32) -> Result<(), DomainError>;
 
     /// Persist to write-ahead log for crash recovery.
     ///
@@ -81,7 +133,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if WAL persistence fails.
-    fn commit_wal(&mut self, _domain: &D) -> Result<(), DomainError> {
+    fn commit_wal(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         Ok(())
     }
 
@@ -94,7 +146,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if state persistence fails.
-    fn commit_state(&mut self, domain: &D) -> Result<(), DomainError>;
+    fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError>;
 
     /// Apply computed changes to the archive store.
     ///
@@ -104,7 +156,7 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if archive persistence fails.
-    fn commit_archive(&mut self, domain: &D) -> Result<(), DomainError>;
+    fn commit_archive(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError>;
 
     /// Apply computed changes to index stores.
     ///
@@ -115,7 +167,18 @@ pub trait WorkUnit<D: Domain>: Send {
     /// # Errors
     ///
     /// Returns an error if index persistence fails.
-    fn commit_indexes(&mut self, _domain: &D) -> Result<(), DomainError> {
+    fn commit_indexes(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
+        Ok(())
+    }
+
+    /// Shard-agnostic teardown, run once after the last shard's commits.
+    ///
+    /// The default implementation does nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if teardown fails.
+    fn finalize(&mut self, _domain: &D) -> Result<(), DomainError> {
         Ok(())
     }
 

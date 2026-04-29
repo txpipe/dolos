@@ -1,8 +1,13 @@
-//! Commit logic for epoch start (estart) work unit.
+//! Commit logic for the open half of the epoch boundary (per-shard runs
+//! plus the finalize pass).
 //!
-//! This module uses a streaming pattern that processes entities one-by-one,
-//! applying deltas and writing immediately without accumulating all entities
-//! in memory.
+//! Both code paths use the same streaming pattern: each entity namespace
+//! is read one record at a time, deltas for that record are applied, and
+//! the result is written immediately. Per-shard commits flush
+//! `EpochState`'s `EStartProgress` and the shard's account-range
+//! slice; the finalize commit flushes pool / drep / proposal transitions,
+//! the closing `EpochTransition`, optional era-summary writes, archive
+//! logs, and advances the cursor.
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
@@ -71,16 +76,17 @@ impl super::WorkContext {
     ///
     /// Processes entities one at a time without accumulating them in memory,
     /// reducing peak memory usage during epoch boundary commits.
-    fn stream_and_apply_namespace<D, E>(
+    pub(crate) fn stream_and_apply_namespace<D, E>(
         &mut self,
         state: &D::State,
         writer: &<D::State as StateStore>::Writer,
+        range: Option<std::ops::Range<dolos_core::EntityKey>>,
     ) -> Result<(), ChainError>
     where
         D: Domain,
         E: Entity + FixedNamespace + Into<CardanoEntity>,
     {
-        let records = state.iter_entities_typed::<E>(E::NS, None)?;
+        let records = state.iter_entities_typed::<E>(E::NS, range)?;
 
         for record in records {
             let (entity_id, entity) = record?;
@@ -108,40 +114,99 @@ impl super::WorkContext {
         Ok(())
     }
 
+    /// Commit a single per-shard run: stream-and-apply per-account snapshot
+    /// transitions for the shard's key ranges, then commit the
+    /// `EStartProgress` delta against `EpochState`. Archive logs
+    /// (if any) are flushed too — the start-of-epoch temporal key is
+    /// shared across shards.
+    ///
+    /// **Does not advance the cursor.** Cursor moves only in
+    /// `commit_finalize`.
+    #[instrument(skip(self, state, archive))]
+    pub fn commit_shard<D: Domain>(
+        &mut self,
+        state: &D::State,
+        archive: &D::Archive,
+        ranges: Vec<std::ops::Range<EntityKey>>,
+    ) -> Result<(), ChainError> {
+        debug!("committing estart changes");
+
+        let writer = state.start_writer()?;
+        let archive_writer = archive.start_writer()?;
+
+        // Stream accounts in this shard's ranges only (one per
+        // StakeCredential variant). Each call drains the matching deltas
+        // from `self.deltas`, so a delta keyed inside range N stays in
+        // the map until range N is streamed.
+        for range in ranges {
+            self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
+        }
+
+        // EpochState gets the EStartProgress delta (single entity).
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+
+        // Archive logs — share the start-of-epoch temporal key across shards.
+        let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+
+        debug!(log_count = self.logs.len(), "writing shard archive logs");
+        for (entity_key, log) in self.logs.drain(..) {
+            let log_key = LogKey::from((temporal_key.clone(), entity_key));
+            archive_writer.write_log_typed(&log_key, &log)?;
+        }
+
+        if !self.deltas.entities.is_empty() {
+            warn!(quantity = %self.deltas.entities.len(), "uncommitted shard deltas");
+        }
+
+        writer.commit()?;
+        archive_writer.commit()?;
+
+        debug!("estart commit complete");
+        Ok(())
+    }
+
+    /// Commit the finalize half: pool / drep / proposal transitions + the
+    /// closing `EpochTransition` + (optional) era-summary writes + archive
+    /// logs + cursor advance.
+    ///
+    /// `AccountState` is intentionally **not** streamed here — per-account
+    /// snapshot transitions were committed by the preceding per-shard
+    /// runs. The cursor is set only here, so a crash mid-shard restarts
+    /// from the boundary block and the pre-finalize state stays at the
+    /// previous-epoch cursor.
     #[instrument(skip_all)]
-    pub fn commit<D: Domain>(
+    pub fn commit_finalize<D: Domain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
-        debug!("committing estart changes");
+        debug!("committing estart finalize changes");
 
         // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;
 
-        // Prepare archive logs (still accumulated during compute_deltas)
+        // Prepare archive logs
         let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
         let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
 
         let writer = state.start_writer()?;
         let archive_writer = archive.start_writer()?;
 
-        // Stream each namespace - entities are read, processed, and written one at a time
-        debug!("streaming account entities");
-        self.stream_and_apply_namespace::<D, AccountState>(state, &writer)?;
+        // Skip AccountState — committed earlier by per-shard runs.
 
         debug!("streaming pool entities");
-        self.stream_and_apply_namespace::<D, PoolState>(state, &writer)?;
+        self.stream_and_apply_namespace::<D, PoolState>(state, &writer, None)?;
 
         debug!("streaming drep entities");
-        self.stream_and_apply_namespace::<D, DRepState>(state, &writer)?;
+        self.stream_and_apply_namespace::<D, DRepState>(state, &writer, None)?;
 
         debug!("streaming proposal entities");
-        self.stream_and_apply_namespace::<D, ProposalState>(state, &writer)?;
+        self.stream_and_apply_namespace::<D, ProposalState>(state, &writer, None)?;
 
         debug!("streaming epoch entities");
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer)?;
+        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
 
         // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {
@@ -151,7 +216,7 @@ impl super::WorkContext {
                 .write_entity_typed::<EraSummary>(&transition.new_key, &transition.new_summary)?;
         }
 
-        // Write archive logs (still accumulated during compute_deltas, but much smaller than entities)
+        // Write archive logs (accumulated during compute_global_deltas, much smaller than entities)
         debug!(log_count = self.logs.len(), "writing archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
@@ -163,14 +228,14 @@ impl super::WorkContext {
             warn!(quantity = %self.deltas.entities.len(), "uncommitted deltas");
         }
 
-        // Set cursor
+        // Set cursor — only in finalize, never in shards.
         writer.set_cursor(ChainPoint::Slot(slot))?;
 
         // Commit both writers atomically
         writer.commit()?;
         archive_writer.commit()?;
 
-        debug!("estart commit complete");
+        debug!("estart finalize commit complete");
 
         Ok(())
     }

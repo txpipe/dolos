@@ -423,6 +423,9 @@ pub enum ChainError {
     #[error("genesis field missing: {0}")]
     GenesisFieldMissing(String),
 
+    #[error("invalid chain config: {0}")]
+    InvalidConfig(String),
+
     #[error("protocol params not found: {0}")]
     PParamsNotFound(String),
 
