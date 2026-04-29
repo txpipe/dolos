@@ -76,9 +76,19 @@ fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError
                 state: Some(state.clone()),
             });
         }
+        (None, Some(ref state)) if state.is_fully_defined() => {
+            // WAL is empty but state has a fully-defined cursor — likely a
+            // post-bootstrap or post-version-wipe situation. Auto-reseed the
+            // WAL from the state cursor so the node can resume syncing
+            // without manual intervention.
+            warn!(%state, "WAL is empty but state cursor is fully defined; reseeding WAL from state");
+            domain.wal().reset_to(state)?;
+        }
         (None, Some(ref state)) => {
-            // WAL is missing but state exists (e.g. after import without WAL seeding).
-            error!(%state, "WAL is empty but state exists");
+            // State cursor is partially defined (e.g. only a slot, no hash):
+            // we can't safely reseed without a chain hash. Surface as an
+            // error so the user can recover deliberately.
+            error!(%state, "WAL is empty but state cursor is not fully defined");
             return Err(DomainError::InconsistentState {
                 wal: None,
                 state: Some(state.clone()),

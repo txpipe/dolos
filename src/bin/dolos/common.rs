@@ -62,7 +62,15 @@ pub fn load_config(
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
-    let stores = open_data_stores(config)?;
+    let stores = open_data_stores(config).map_err(|e| match e {
+        Error::WalError(WalError::IncompatibleVersion { found, expected }) => miette::miette!(
+            help = format!(
+                "WAL was created by a newer dolos version (v{found}) than this binary supports (v{expected}); upgrade dolos or run `dolos bootstrap --force` to wipe storage and re-bootstrap",
+            ),
+            "incompatible WAL version: found v{found}, expected v{expected}",
+        ),
+        other => miette::miette!("{other}"),
+    })?;
     let genesis = Arc::new(open_genesis_files(&config.genesis)?);
     let mempool = stores.mempool.clone();
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
