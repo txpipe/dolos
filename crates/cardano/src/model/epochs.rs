@@ -1420,8 +1420,8 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
 #[allow(deprecated)] // prop_compose! macro expansions reference legacy
                      // EpochWrapUp/EpochTransition for back-compat tests
 mod prop_tests {
-    use super::*;
     use super::testing::{any_end_stats, any_epoch_state, any_nonces};
+    use super::*;
     use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_no_next};
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
@@ -1488,7 +1488,9 @@ mod prop_tests {
     }
 
     fn any_pparams_update() -> impl Strategy<Value = PParamsUpdate> {
-        Just(PParamsUpdate::new(crate::model::pparams::PParamsSet::default()))
+        Just(PParamsUpdate::new(
+            crate::model::pparams::PParamsSet::default(),
+        ))
     }
 
     prop_compose! {

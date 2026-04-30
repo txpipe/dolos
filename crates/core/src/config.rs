@@ -754,7 +754,7 @@ impl MinibfConfig {
 pub struct MinikupoConfig {
     pub listen_address: SocketAddr,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    permissive_cors: Option<bool>,
+    pub permissive_cors: Option<bool>,
 }
 
 impl MinikupoConfig {
