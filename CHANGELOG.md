@@ -2,6 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-04-30
+
+### 🚀 Features
+
+- *(minibf)* Introduce `/accounts/{account}/withdrawals` (#974)
+- *(minibf)* Introduce `/pools/{pool_id}/metadata` endpoint (#975)
+- *(minibf)* Introduce `/pools/{pool_id}` endpoint (#976)
+- *(utxorpc)* Implement read_genesis / read_era_summary queries (#964)
+- *(wal)* Version on-disk schema and force-reset on incompatibility (#984)
+- *(u5c)* Allow LedgerContext to query archive for spent UTxOs (#962)
+
+### 🐛 Bug Fixes
+
+- *(sync)* Apply deltas before WAL commit so rollback undo works (#985)
+
+### 🚜 Refactor
+
+- *(cardano)* Move delta structs alongside entities (#968)
+- *(cardano)* Enforce undo axiom via proptest (#971)
+- *(cardano)* Shard mem-hungry work units (#978)
+
+### 📚 Documentation
+
+- Reconcile schema and minibf coverage with code (#986)
+
+### 🧪 Testing
+
+- *(minikupo)* Add comprehensive unit test coverage (#939)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update tx3 to v0.17.0 (#965)
+- *(minibf)* Upgrade minibf to version 0.1.87 (#973)
+- *(cardano)* Update proposal outcomes (#979)
+- *(cardano)* Update proposal outcomes (#983)
+
 ## [1.0.3] - 2026-04-04
 
 ### 🚀 Features
@@ -18,6 +54,10 @@ All notable changes to this project will be documented in this file.
 - Update cargo dist version and scripts (#955)
 - Remove sneaky mac files
 - Update tx3 to v0.16.4 (#957)
+
+### Release
+
+- V1.0.3
 
 ## [1.0.2] - 2026-03-19
 
