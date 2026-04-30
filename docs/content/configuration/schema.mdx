@@ -50,7 +50,7 @@ listen_address = "[::]:3000"
 listen_path = "dolos.socket"
 
 [serve.minikupo]
-listen_address = "[::]:3100"
+listen_address = "[::]:1442"
 
 [serve.trp]
 listen_address = "[::]:8164"
@@ -298,7 +298,7 @@ The `serve.minikupo` section controls the options for the HTTP endpoint that hos
 
 | property        | type    | example      |
 | --------------- | ------- | ------------ |
-| listen_address  | string  | "[::]:3100"  |
+| listen_address  | string  | "[::]:1442"  |
 | permissive_cors | boolean | true (default) |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
@@ -404,6 +404,7 @@ The `logging` section controls the logging options to define the level of detail
 - `include_grpc`: include logs from the gRPC server.
 - `include_trp`: include logs from the TRP server.
 - `include_minibf`: include logs from the MiniBF server.
+- `include_minikupo`: include logs from the MiniKupo server.
 - `include_otlp`: include logs from OpenTelemetry exporters.
 - `include_fjall`: include logs from Fjall storage.
 
