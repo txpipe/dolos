@@ -175,7 +175,41 @@ where
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
 
-        let from = msg.start_token.map(|x| x.slot);
+        let mut from = None;
+
+        if let Some(ref br) = msg.start_token {
+            let mut slot: Option<u64> = None;
+
+            if !br.hash.is_empty() {
+                slot = self
+                    .domain
+                    .indexes()
+                    .slot_by_block_hash(&br.hash)
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
+
+            if slot.is_none() && br.height != 0 {
+                slot = self
+                    .domain
+                    .indexes()
+                    .slot_by_block_number(br.height)
+                    .map_err(|_| Status::internal("Failed to query chain service."))?;
+            }
+
+            if slot.is_none() && br.slot != 0 {
+                slot = Some(br.slot);
+            }
+
+            from = match slot {
+                Some(s) => Some(s),
+                None if !br.hash.is_empty() || br.height != 0 || br.slot != 0 => {
+                    return Err(Status::not_found(format!(
+                        "Failed to find block for start_token: {br:?}"
+                    )));
+                }
+                None => None,
+            };
+        }
 
         if msg.max_items > MAX_DUMP_HISTORY_ITEMS {
             return Err(Status::invalid_argument(format!(
