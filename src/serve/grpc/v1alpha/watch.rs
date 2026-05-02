@@ -1,15 +1,15 @@
 use futures_core::Stream;
 use futures_util::StreamExt;
-use pallas::interop::utxorpc::spec as u5c;
-use pallas::interop::utxorpc::{self as interop, LedgerContext};
+use pallas::interop::utxorpc::v1alpha::{self as interop, spec as u5c};
+use pallas::interop::utxorpc::LedgerContext;
 use pallas::{
-    interop::utxorpc::spec::watch::any_chain_tx_pattern::Chain,
+    interop::utxorpc::v1alpha::spec::watch::any_chain_tx_pattern::Chain,
     ledger::{addresses::Address, traverse::MultiEraBlock},
 };
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use super::stream::ChainStream;
+use crate::serve::grpc::stream::ChainStream;
 use crate::prelude::*;
 
 fn outputs_match_address(

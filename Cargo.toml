@@ -63,7 +63,7 @@ tracing-subscriber = "0.3.17"
 tracing-log = "0.2"
 miette = { version = "7.6.0", features = ["fancy"] }
 async-trait = "0.1.81"
-bytes = "1.9.0"
+bytes = "1.11"
 async-stream = "0.3.5"
 protoc-wkt = "1.0.0"
 indicatif = "0.17.8"
@@ -199,8 +199,8 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-# pallas = { git = "https://github.com/txpipe/pallas.git", rev = "4986428", features = ["hardano", "phase2"] }
-pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
+# pallas = { version = "1.0.0-alpha.4", features = ["hardano", "phase2", "unstable"] }
+pallas = { git = "https://github.com/txpipe/pallas.git", rev = "0da71c2", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2"] }
 
 thiserror = "2.0.12"

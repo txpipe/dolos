@@ -1,10 +1,10 @@
 use futures_core::Stream;
 use futures_util::StreamExt;
 use itertools::Itertools;
-use pallas::interop::utxorpc as interop;
-use pallas::interop::utxorpc::spec::sync::BlockRef;
+use pallas::interop::utxorpc::v1alpha as interop;
+use pallas::interop::utxorpc::v1alpha::spec::sync::BlockRef;
+use pallas::interop::utxorpc::v1alpha::{spec as u5c, Mapper};
 use pallas::interop::utxorpc::LedgerContext;
-use pallas::interop::utxorpc::{spec as u5c, Mapper};
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
@@ -15,14 +15,9 @@ const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
 fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Status> {
     Ok(ChainPoint::Specific(
         block_ref.slot,
-        super::convert::bytes_to_hash32(&block_ref.hash)?,
+        crate::serve::grpc::convert::bytes_to_hash32(&block_ref.hash)?,
     ))
 }
-
-// fn raw_to_anychain2(raw: &[u8]) -> AnyChainBlock {
-//     let block = any_chain_block::Chain::Raw(Bytes::copy_from_slice(raw));
-//     AnyChainBlock { chain: Some(block) }
-// }
 
 fn raw_to_anychain<C: LedgerContext>(
     mapper: &Mapper<C>,
@@ -221,13 +216,7 @@ where
             .map(u5c_to_chain_point)
             .try_collect()?;
 
-        // let (stream, point) = super::stream::ChainStream::<D>::start(
-        //     self.domain.wal().clone(),
-        //     self.domain.archive().clone(),
-        //     &intersect,
-        // );
-
-        let stream = super::stream::ChainStream::start::<D, _>(
+        let stream = crate::serve::grpc::stream::ChainStream::start::<D, _>(
             self.domain.clone(),
             intersect.clone(),
             self.cancel.clone(),
@@ -263,7 +252,7 @@ where
 #[cfg(test)]
 mod tests {
     use dolos_testing::toy_domain::ToyDomain;
-    use pallas::interop::utxorpc::spec::sync::sync_service_server::SyncService as _;
+    use pallas::interop::utxorpc::v1alpha::spec::sync::sync_service_server::SyncService as _;
 
     use super::*;
 

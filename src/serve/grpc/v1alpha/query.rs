@@ -1,13 +1,14 @@
 use dolos_cardano::indexes::CardanoIndexExt;
 use itertools::Itertools as _;
-use pallas::interop::utxorpc::{self as interop, spec::query::any_utxo_pattern::UtxoPattern};
-use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
+use pallas::interop::utxorpc::v1alpha::spec::query::any_utxo_pattern::UtxoPattern;
+use pallas::interop::utxorpc::v1alpha::{self as interop, spec as u5c};
+use pallas::interop::utxorpc::LedgerContext;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
 use std::collections::HashSet;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use super::masking::apply_mask;
+use crate::serve::grpc::masking::apply_mask;
 use crate::prelude::*;
 use dolos_cardano::indexes::AsyncCardanoQueryExt;
 
@@ -199,7 +200,7 @@ impl IntoSet for u5c::query::AnyUtxoPattern {
 }
 
 fn from_u5c_txoref(txo: u5c::query::TxoRef) -> Result<TxoRef, Status> {
-    let hash = super::convert::bytes_to_hash32(&txo.hash)?;
+    let hash = crate::serve::grpc::convert::bytes_to_hash32(&txo.hash)?;
     Ok(TxoRef(hash, txo.index))
 }
 
@@ -288,12 +289,14 @@ fn map_cost_models(
         plutus_v1: plutus_v1.clone(),
         plutus_v2: plutus_v2.clone(),
         plutus_v3: plutus_v3.clone(),
+        plutus_v4: None,
     };
 
     let cost_model_map = u5c::cardano::CostModelMap {
         plutus_v1,
         plutus_v2,
         plutus_v3,
+        plutus_v4: None,
     };
 
     (
@@ -1053,7 +1056,7 @@ mod tests {
     use std::sync::Arc;
 
     use dolos_testing::toy_domain::ToyDomain;
-    use pallas::interop::utxorpc::spec::query::query_service_server::QueryService;
+    use pallas::interop::utxorpc::v1alpha::spec::query::query_service_server::QueryService;
 
     use super::*;
 
