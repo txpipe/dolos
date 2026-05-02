@@ -3,10 +3,10 @@ use dolos_core::SubmitExt;
 use futures_core::Stream;
 use futures_util::{StreamExt as _, TryStreamExt as _};
 use pallas::crypto::hash::Hash;
-use pallas::interop::utxorpc as u5c;
-use pallas::interop::utxorpc::spec::cardano::ExUnits;
-use pallas::interop::utxorpc::spec::submit::{WaitForTxResponse, *};
-use pallas::interop::utxorpc::{self as interop, LedgerContext};
+use pallas::interop::utxorpc::v1beta::spec::cardano::ExUnits;
+use pallas::interop::utxorpc::v1beta::spec::submit::{WaitForTxResponse, *};
+use pallas::interop::utxorpc::v1beta::spec as u5c;
+use pallas::interop::utxorpc::LedgerContext;
 use std::collections::HashSet;
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
@@ -19,7 +19,6 @@ where
     D: Domain + LedgerContext,
 {
     domain: D,
-    _mapper: interop::Mapper<D>,
 }
 
 impl<D> SubmitServiceImpl<D>
@@ -27,9 +26,7 @@ where
     D: Domain + LedgerContext,
 {
     pub fn new(domain: D) -> Self {
-        let _mapper = interop::Mapper::new(domain.clone());
-
-        Self { domain, _mapper }
+        Self { domain }
     }
 }
 
@@ -62,11 +59,11 @@ fn event_to_wait_for_tx_response(event: MempoolEvent) -> WaitForTxResponse {
     }
 }
 
-fn tx_eval_to_u5c(eval: Result<MempoolTx, DomainError>) -> u5c::spec::cardano::TxEval {
+fn tx_eval_to_u5c(eval: Result<MempoolTx, DomainError>) -> u5c::cardano::TxEval {
     match eval {
-        Ok(tx) => u5c::spec::cardano::TxEval {
+        Ok(tx) => u5c::cardano::TxEval {
             ex_units: tx.report.iter().flatten().try_fold(
-                u5c::spec::cardano::ExUnits::default(),
+                u5c::cardano::ExUnits::default(),
                 |acc, eval| {
                     Some(ExUnits {
                         steps: acc.steps + eval.units.steps,
@@ -78,10 +75,10 @@ fn tx_eval_to_u5c(eval: Result<MempoolTx, DomainError>) -> u5c::spec::cardano::T
                 .report
                 .iter()
                 .flatten()
-                .map(|x| u5c::spec::cardano::Redeemer {
+                .map(|x| u5c::cardano::Redeemer {
                     purpose: x.tag as i32,
                     index: x.index,
-                    ex_units: Some(u5c::spec::cardano::ExUnits {
+                    ex_units: Some(u5c::cardano::ExUnits {
                         steps: x.units.steps,
                         memory: x.units.mem,
                     }),
@@ -92,8 +89,8 @@ fn tx_eval_to_u5c(eval: Result<MempoolTx, DomainError>) -> u5c::spec::cardano::T
             traces: vec![], // TODO
             ..Default::default()
         },
-        Err(e) => u5c::spec::cardano::TxEval {
-            errors: vec![u5c::spec::cardano::EvalError {
+        Err(e) => u5c::cardano::TxEval {
+            errors: vec![u5c::cardano::EvalError {
                 msg: format!("{e:#?}"),
             }],
             ..Default::default()

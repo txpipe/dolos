@@ -1,5 +1,5 @@
 use dolos_core::config::GrpcConfig;
-use pallas::interop::utxorpc::{spec as u5c, LedgerContext};
+use pallas::interop::utxorpc::LedgerContext;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
 use tracing::info;
@@ -8,11 +8,9 @@ use crate::prelude::*;
 
 mod convert;
 mod masking;
-mod query;
 mod stream;
-mod submit;
-mod sync;
-mod watch;
+mod v1alpha;
+mod v1beta;
 
 #[derive(Clone)]
 pub struct ContextAdapter<T: dolos_core::StateStore>(T);
@@ -29,27 +27,46 @@ where
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
         let addr = cfg.listen_address.parse().unwrap();
 
-        let sync_service = sync::SyncServiceImpl::new(domain.clone(), cancel.clone());
-        let sync_service = u5c::sync::sync_service_server::SyncServiceServer::new(sync_service);
+        let sync_v1alpha = v1alpha::spec::sync::sync_service_server::SyncServiceServer::new(
+            v1alpha::sync::SyncServiceImpl::new(domain.clone(), cancel.clone()),
+        );
+        let sync_v1beta = v1beta::spec::sync::sync_service_server::SyncServiceServer::new(
+            v1beta::sync::SyncServiceImpl::new(domain.clone(), cancel.clone()),
+        );
 
-        let query_service = query::QueryServiceImpl::new(domain.clone());
-        let query_service =
-            u5c::query::query_service_server::QueryServiceServer::new(query_service);
+        let query_v1alpha = v1alpha::spec::query::query_service_server::QueryServiceServer::new(
+            v1alpha::query::QueryServiceImpl::new(domain.clone()),
+        );
+        let query_v1beta = v1beta::spec::query::query_service_server::QueryServiceServer::new(
+            v1beta::query::QueryServiceImpl::new(domain.clone()),
+        );
 
-        let watch_service = watch::WatchServiceImpl::new(domain.clone(), cancel.clone());
-        let watch_service =
-            u5c::watch::watch_service_server::WatchServiceServer::new(watch_service);
+        let watch_v1alpha = v1alpha::spec::watch::watch_service_server::WatchServiceServer::new(
+            v1alpha::watch::WatchServiceImpl::new(domain.clone(), cancel.clone()),
+        );
+        let watch_v1beta = v1beta::spec::watch::watch_service_server::WatchServiceServer::new(
+            v1beta::watch::WatchServiceImpl::new(domain.clone(), cancel.clone()),
+        );
 
-        let submit_service = submit::SubmitServiceImpl::new(domain.clone());
-        let submit_service =
-            u5c::submit::submit_service_server::SubmitServiceServer::new(submit_service);
+        let submit_v1alpha =
+            v1alpha::spec::submit::submit_service_server::SubmitServiceServer::new(
+                v1alpha::submit::SubmitServiceImpl::new(domain.clone()),
+            );
+        let submit_v1beta = v1beta::spec::submit::submit_service_server::SubmitServiceServer::new(
+            v1beta::submit::SubmitServiceImpl::new(domain.clone()),
+        );
 
         let reflection = tonic_reflection::server::Builder::configure()
-            .register_encoded_file_descriptor_set(u5c::cardano::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(u5c::sync::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(u5c::query::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(u5c::submit::FILE_DESCRIPTOR_SET)
-            .register_encoded_file_descriptor_set(u5c::watch::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1alpha::spec::cardano::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1alpha::spec::sync::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1alpha::spec::query::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1alpha::spec::submit::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1alpha::spec::watch::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1beta::spec::cardano::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1beta::spec::sync::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1beta::spec::query::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1beta::spec::submit::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(v1beta::spec::watch::FILE_DESCRIPTOR_SET)
             .register_encoded_file_descriptor_set(protoc_wkt::google::protobuf::FILE_DESCRIPTOR_SET)
             .build_v1()
             .unwrap();
@@ -78,10 +95,14 @@ where
 
         // to allow GrpcWeb we must enable http1
         server
-            .add_service(tonic_web::enable(sync_service))
-            .add_service(tonic_web::enable(query_service))
-            .add_service(tonic_web::enable(submit_service))
-            .add_service(tonic_web::enable(watch_service))
+            .add_service(tonic_web::enable(sync_v1alpha))
+            .add_service(tonic_web::enable(sync_v1beta))
+            .add_service(tonic_web::enable(query_v1alpha))
+            .add_service(tonic_web::enable(query_v1beta))
+            .add_service(tonic_web::enable(submit_v1alpha))
+            .add_service(tonic_web::enable(submit_v1beta))
+            .add_service(tonic_web::enable(watch_v1alpha))
+            .add_service(tonic_web::enable(watch_v1beta))
             .add_service(reflection)
             .serve_with_shutdown(addr, cancel.cancelled())
             .await

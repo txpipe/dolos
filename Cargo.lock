@@ -560,9 +560,9 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
-version = "1.10.1"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
+checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "byteview"
@@ -1308,7 +1308,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "paste",
  "protoc-wkt",
  "rayon",
@@ -1355,7 +1355,7 @@ dependencies = [
  "itertools 0.14.0",
  "num-bigint",
  "num-rational",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "paste",
  "proptest",
  "rayon",
@@ -1376,7 +1376,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "opentelemetry",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "proptest",
  "rayon",
  "regex",
@@ -1398,7 +1398,7 @@ dependencies = [
  "dolos-core",
  "dolos-testing",
  "fjall",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "tempfile",
  "thiserror 2.0.12",
  "tracing",
@@ -1427,7 +1427,7 @@ dependencies = [
  "num-bigint",
  "num-rational",
  "num-traits",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "rayon",
  "reqwest 0.12.22",
  "serde",
@@ -1451,7 +1451,7 @@ dependencies = [
  "dolos-testing",
  "hex",
  "http-body-util",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "serde",
  "serde_json",
  "tokio",
@@ -1471,7 +1471,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.14.0",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "redb",
  "redb-extras",
  "serde",
@@ -1498,7 +1498,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools 0.14.0",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "rand 0.9.1",
  "tokio",
  "tokio-stream",
@@ -1518,7 +1518,7 @@ dependencies = [
  "jsonrpsee",
  "opentelemetry",
  "opentelemetry_sdk",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "rand 0.9.1",
  "serde",
  "serde_json",
@@ -3338,15 +3338,32 @@ checksum = "c593225da7e45c57d209c8315805533ca597c0975ceeaf9c53ca96315c52bbb6"
 dependencies = [
  "pallas-addresses 1.0.0-alpha.4",
  "pallas-codec 1.0.0-alpha.4",
- "pallas-configs",
+ "pallas-configs 1.0.0-alpha.4",
  "pallas-crypto 1.0.0-alpha.4",
- "pallas-hardano",
  "pallas-network 1.0.0-alpha.4",
  "pallas-primitives 1.0.0-alpha.4",
  "pallas-traverse 1.0.0-alpha.4",
- "pallas-txbuilder",
- "pallas-utxorpc",
- "pallas-validate",
+ "pallas-txbuilder 1.0.0-alpha.4",
+ "pallas-utxorpc 1.0.0-alpha.4",
+ "pallas-validate 1.0.0-alpha.4",
+]
+
+[[package]]
+name = "pallas"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-configs 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-hardano",
+ "pallas-network 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
+ "pallas-txbuilder 1.0.0-alpha.6",
+ "pallas-utxorpc 1.0.0-alpha.6",
+ "pallas-validate 1.0.0-alpha.6",
 ]
 
 [[package]]
@@ -3382,6 +3399,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-addresses"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "base58",
+ "bech32 0.9.1",
+ "crc",
+ "cryptoxide",
+ "hex",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "pallas-codec"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3406,6 +3438,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-codec"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "hex",
+ "minicbor 0.26.4",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "pallas-configs"
 version = "1.0.0-alpha.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3416,6 +3459,21 @@ dependencies = [
  "pallas-addresses 1.0.0-alpha.4",
  "pallas-crypto 1.0.0-alpha.4",
  "pallas-primitives 1.0.0-alpha.4",
+ "serde",
+ "serde_json",
+ "serde_with 3.16.0",
+]
+
+[[package]]
+name = "pallas-configs"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "base64 0.22.1",
+ "num-rational",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
  "serde",
  "serde_json",
  "serde_with 3.16.0",
@@ -3451,18 +3509,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-crypto"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "cryptoxide",
+ "hex",
+ "pallas-codec 1.0.0-alpha.6",
+ "rand_core 0.9.3",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "pallas-hardano"
-version = "1.0.0-alpha.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62fe7b454c3b3e175b0cd7deade25a2298972370ed2b06f63ea7ea4ec7fe62ca"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
 dependencies = [
  "binary-layout",
  "hex",
- "pallas-addresses 1.0.0-alpha.4",
- "pallas-codec 1.0.0-alpha.4",
- "pallas-crypto 1.0.0-alpha.4",
- "pallas-network 1.0.0-alpha.4",
- "pallas-traverse 1.0.0-alpha.4",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-network 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
  "serde",
  "serde_json",
  "serde_with 3.16.0",
@@ -3508,6 +3578,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-network"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "byteorder",
+ "hex",
+ "itertools 0.13.0",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "rand 0.8.5",
+ "socket2 0.5.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pallas-primitives"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3532,6 +3619,18 @@ dependencies = [
  "hex",
  "pallas-codec 1.0.0-alpha.4",
  "pallas-crypto 1.0.0-alpha.4",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "pallas-primitives"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "hex",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
  "serde",
  "serde_json",
 ]
@@ -3571,6 +3670,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallas-traverse"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "hex",
+ "itertools 0.13.0",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "paste",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "pallas-txbuilder"
 version = "1.0.0-alpha.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3582,6 +3697,22 @@ dependencies = [
  "pallas-crypto 1.0.0-alpha.4",
  "pallas-primitives 1.0.0-alpha.4",
  "pallas-traverse 1.0.0-alpha.4",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pallas-txbuilder"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "hex",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3615,9 +3746,23 @@ dependencies = [
  "pallas-crypto 1.0.0-alpha.4",
  "pallas-primitives 1.0.0-alpha.4",
  "pallas-traverse 1.0.0-alpha.4",
- "pallas-validate",
+ "pallas-validate 1.0.0-alpha.4",
  "prost-types 0.13.5",
  "utxorpc-spec 0.18.1",
+]
+
+[[package]]
+name = "pallas-utxorpc"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
+ "pallas-validate 1.0.0-alpha.6",
+ "prost-types 0.13.5",
+ "utxorpc-spec 0.19.0",
 ]
 
 [[package]]
@@ -3634,6 +3779,24 @@ dependencies = [
  "pallas-crypto 1.0.0-alpha.4",
  "pallas-primitives 1.0.0-alpha.4",
  "pallas-traverse 1.0.0-alpha.4",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "pallas-validate"
+version = "1.0.0-alpha.6"
+source = "git+https://github.com/txpipe/pallas.git?rev=0da71c2#0da71c2d477147a8c1ed4edb87aaa93faf96ebee"
+dependencies = [
+ "chrono",
+ "hex",
+ "itertools 0.14.0",
+ "pallas-addresses 1.0.0-alpha.6",
+ "pallas-codec 1.0.0-alpha.6",
+ "pallas-crypto 1.0.0-alpha.6",
+ "pallas-primitives 1.0.0-alpha.6",
+ "pallas-traverse 1.0.0-alpha.6",
  "pallas-uplc",
  "serde",
  "thiserror 1.0.69",
@@ -5860,7 +6023,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5bd80f6082e524c6cca2f86ae9b9e7c652e3b0fd1f50a7e5a727ab8a27d43701"
 dependencies = [
  "hex",
- "pallas",
+ "pallas 1.0.0-alpha.4",
  "serde",
  "thiserror 2.0.12",
  "trait-variant",
@@ -6104,6 +6267,22 @@ name = "utxorpc-spec"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e59de89d0dfd8e594377b53a8f67a10de01bb63b15b169248760188fa06fb92a"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "pbjson",
+ "pbjson-types",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "tonic 0.12.3",
+]
+
+[[package]]
+name = "utxorpc-spec"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c5b06a64d715d79a25bebafacd4c24bfed6fd1e9725fab03e02fb67db08663"
 dependencies = [
  "bytes",
  "futures-core",
@@ -6621,7 +6800,7 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "hex",
- "pallas",
+ "pallas 1.0.0-alpha.6",
  "postgres",
  "postgres-native-tls",
  "serde",
