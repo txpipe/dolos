@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.1] - 2026-05-05
+
+### 🚀 Features
+
+- *(u5c)* Serve v1alpha and v1beta gRPC side-by-side (#987)
+- *(cardano)* Stage van Rossem fork - protocol v11 (#990)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Add v11 new cost model mapping names (#988)
+- *(cardano)* Short-circuit ewrap replay between boundary phases (#991)
+
 ## [1.1.0] - 2026-04-30
 
 ### 🚀 Features
@@ -37,6 +49,10 @@ All notable changes to this project will be documented in this file.
 - *(minibf)* Upgrade minibf to version 0.1.87 (#973)
 - *(cardano)* Update proposal outcomes (#979)
 - *(cardano)* Update proposal outcomes (#983)
+
+### Release
+
+- V1.1.0
 
 ## [1.0.3] - 2026-04-04
 
