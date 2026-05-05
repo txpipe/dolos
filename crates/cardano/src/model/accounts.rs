@@ -709,6 +709,17 @@ impl dolos_core::EntityDelta for PoolDelegatorRetire {
         self.prev_pool = Some(entity.pool.clone());
         self.prev_retired_pool = entity.retired_pool;
 
+        // TODO: read via `entity.pool.snapshot_at(self.epoch)` (the same
+        // accessor the visitor uses in `ewrap::drops::BoundaryVisitor`)
+        // instead of `live()`, and guard the `schedule` call below on
+        // `entity.pool.epoch() == Some(self.epoch)` with skip-on-mismatch.
+        // The visitor reads the snapshot at `current_epoch`; once the
+        // entity has been rotated past that epoch, `live()` and
+        // `snapshot_at(epoch)` disagree, and the `unreachable!` below
+        // fires (see the EWRAP-replay crash recovery analysis). The
+        // `ewrap_progress` short-circuit removes the known way to hit
+        // this divergence, but the underlying invariant — visitor and
+        // delta agree on which slot to read — is still fragile.
         let prev_pool_live = entity.pool.live().cloned();
 
         // apply changes
@@ -763,7 +774,11 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
         // save undo info
         self.prev_drep = Some(entity.drep.clone());
 
-        // apply changes
+        // TODO: guard the `schedule` call on `entity.drep.epoch() == Some(self.epoch)`
+        // with skip-on-mismatch, mirroring the planned hardening in
+        // `PoolDelegatorRetire::apply`. `schedule` writes to `next` regardless
+        // of the entity's current epoch; if the entity has been rotated past
+        // `self.epoch`, this scheduling lands on the wrong boundary.
         entity
             .drep
             .schedule(self.epoch, Some(DRepDelegation::NotDelegated));

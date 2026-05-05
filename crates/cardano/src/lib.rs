@@ -399,11 +399,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
                         epoch = epoch.number,
                         committed = progress.committed,
                         total_shards = progress.total,
-                        "found EpochState.ewrap_progress.committed == total at \
-                         startup — Ewrap (closing phase) was not committed \
-                         before crash. The next boundary attempt will re-run \
-                         Ewraps and Ewrap; idempotency should keep the \
-                         result correct."
+                        "found EpochState.ewrap_progress.committed == total \
+                         at startup — EWRAP for this boundary closed in a \
+                         prior run but ESTART finalize did not commit before \
+                         crash. The next boundary trigger will short-circuit \
+                         the EwrapWorkUnit (no replay) and resume the ESTART \
+                         pipeline from estart_progress.committed."
                     );
                 }
             }

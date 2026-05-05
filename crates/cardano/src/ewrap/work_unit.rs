@@ -38,6 +38,12 @@ pub struct EwrapWorkUnit {
     /// from `EpochState.ewrap_progress.committed` so a restart after a
     /// mid-boundary crash skips already-committed shards (the per-shard
     /// account-mutation deltas are non-idempotent on replay).
+    ///
+    /// When `initialize()` detects the boundary was closed in a prior
+    /// run (`ewrap_progress.committed == total`), `start_shard` is set
+    /// to `total_shards` so the runtime's shard loop runs zero
+    /// iterations. `is_replay_noop()` reads back this signal to make
+    /// `finalize()` a no-op — see that method for the full rationale.
     start_shard: u32,
 
     /// During the per-shard loop, holds the in-flight shard's
@@ -60,6 +66,22 @@ impl EwrapWorkUnit {
 
     pub fn boundary(&self) -> Option<&BoundaryWork> {
         self.boundary.as_ref()
+    }
+
+    /// True when this work unit represents a replay of a boundary whose
+    /// EWRAP already closed in a prior run — i.e. `initialize()` saw
+    /// `ewrap_progress.committed == total` and set
+    /// `start_shard = total_shards` to skip the shard loop. In that
+    /// case `finalize()` must also no-op so we don't re-emit
+    /// `EpochWrapUpV3` over already-committed state; the next boundary
+    /// trigger will fall through to ESTART, which resumes from
+    /// `estart_progress.committed` via the existing per-shard path.
+    ///
+    /// Derived rather than stored: `start_shard >= total_shards` is a
+    /// state we only enter via the `initialize()` short-circuit, since
+    /// neither field changes after `initialize()` returns.
+    fn is_replay_noop(&self) -> bool {
+        self.start_shard >= self.total_shards
     }
 }
 
@@ -92,6 +114,32 @@ where
         let epoch = load_epoch::<D>(domain.state())?;
         let progress = epoch.ewrap_progress.as_ref();
         self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
+
+        // `committed == total` means EWRAP for this boundary already
+        // closed in a prior run (per `EpochWrapUpV3` semantics — the
+        // field stays populated after EWRAP finalize and is cleared
+        // only by `EpochTransitionV2` at ESTART finalize). The current
+        // boundary trigger is a replay caused by the cursor not having
+        // advanced past the boundary block (cursor only moves at ESTART
+        // finalize, in `estart::commit::commit_finalize`). Short-circuit:
+        // run zero shards, no-op finalize. The work buffer will then
+        // emit ESTART, which resumes from `estart_progress.committed`.
+        if let Some(p) = progress {
+            if p.committed == p.total {
+                // Set start_shard == total_shards so the runtime's shard
+                // loop runs zero iterations; `is_replay_noop()` reads
+                // back this signal to make `finalize()` skip too.
+                self.start_shard = p.total;
+                tracing::info!(
+                    slot = self.slot,
+                    committed = p.committed,
+                    total = p.total,
+                    "ewrap already completed in prior run; short-circuiting on replay"
+                );
+                return Ok(());
+            }
+        }
+
         self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
 
         debug!(
@@ -155,6 +203,14 @@ where
     }
 
     fn finalize(&mut self, domain: &D) -> Result<(), DomainError> {
+        if self.is_replay_noop() {
+            debug!(
+                slot = self.slot,
+                "ewrap finalize skipped (boundary already closed in prior run)"
+            );
+            return Ok(());
+        }
+
         debug!(slot = self.slot, "loading ewrap context");
 
         let mut boundary = BoundaryWork::load_finalize::<D>(domain.state(), self.genesis.clone())?;

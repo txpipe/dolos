@@ -675,13 +675,18 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     }
 }
 
-/// V2 of `EpochWrapUp` — adds `prev_ewrap_progress` undo state for the
-/// new sharded ewrap pipeline. Constructed by all post-cutover commit paths;
-/// the legacy `EpochWrapUp` is kept solely for replay of older WAL rows.
-/// Carries the fully populated `EndStats` (prepare-time fields from the
-/// wrap-up visitor + reward accumulators from the preceding `Ewrap` runs).
-/// Apply overwrites `entity.end` with these final stats, rotates the
-/// rolling and pparams snapshots forward, and clears `ewrap_progress`.
+/// Superseded by `EpochWrapUpV3`. Kept for WAL replay of rows emitted
+/// by the V2-era binary (variant index 40 in `CardanoDelta`). New
+/// commit paths must construct `EpochWrapUpV3` instead.
+///
+/// V2's `apply` cleared `EpochState.ewrap_progress` to `None` at EWRAP
+/// finalize. V3 leaves the field at `Some(total, total)` so that the
+/// "EWRAP done, ESTART pending finalize" window is unambiguously
+/// distinguishable from "no boundary in flight" — required by the
+/// EwrapWorkUnit replay short-circuit. V2 is preserved verbatim so
+/// historical rows replay/undo identically to how the original
+/// binary applied them.
+#[deprecated(note = "kept for WAL replay; emit `EpochWrapUpV3` instead")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochWrapUpV2 {
     pub(crate) stats: EndStats,
@@ -693,6 +698,7 @@ pub struct EpochWrapUpV2 {
     pub(crate) prev_ewrap_progress: Option<ShardProgress>,
 }
 
+#[allow(deprecated)]
 impl EpochWrapUpV2 {
     pub fn new(stats: EndStats) -> Self {
         Self {
@@ -705,6 +711,7 @@ impl EpochWrapUpV2 {
     }
 }
 
+#[allow(deprecated)]
 impl dolos_core::EntityDelta for EpochWrapUpV2 {
     type Entity = EpochState;
 
@@ -732,6 +739,66 @@ impl dolos_core::EntityDelta for EpochWrapUpV2 {
         entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
         entity.end = self.prev_end.clone();
         entity.ewrap_progress = self.prev_ewrap_progress.clone();
+    }
+}
+
+/// V3 of `EpochWrapUp` — drops the `prev_ewrap_progress` undo field
+/// because `apply` no longer mutates `EpochState.ewrap_progress`. After
+/// V3 commits, `ewrap_progress` is left at `Some(total, total)` from the
+/// last `EWrapProgress` shard delta and serves as the unambiguous
+/// "EWRAP done, ESTART pending finalize" marker. `EpochTransitionV2`
+/// (run at ESTART finalize) is the only remaining writer that clears
+/// the field; that single-writer invariant is what lets a crash
+/// between EWRAP finalize and ESTART finalize be recovered cleanly:
+/// the next boundary trigger sees `committed == total` and short-
+/// circuits the EwrapWorkUnit instead of replaying it over partially-
+/// rotated state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochWrapUpV3 {
+    pub(crate) stats: EndStats,
+
+    // undo
+    pub(crate) prev_rolling: Option<EpochValue<RollingStats>>,
+    pub(crate) prev_pparams: Option<EpochValue<PParamsSet>>,
+    pub(crate) prev_end: Option<EndStats>,
+    // No prev_ewrap_progress — apply does not mutate ewrap_progress.
+}
+
+impl EpochWrapUpV3 {
+    pub fn new(stats: EndStats) -> Self {
+        Self {
+            stats,
+            prev_rolling: None,
+            prev_pparams: None,
+            prev_end: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for EpochWrapUpV3 {
+    type Entity = EpochState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+    }
+
+    fn apply(&mut self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+
+        self.prev_rolling = Some(entity.rolling.clone());
+        self.prev_pparams = Some(entity.pparams.clone());
+        self.prev_end = entity.end.clone();
+
+        entity.rolling.scheduled_or_default();
+        entity.pparams.scheduled_or_default();
+        entity.end = Some(self.stats.clone());
+    }
+
+    fn undo(&self, entity: &mut Option<Self::Entity>) {
+        let entity = entity.as_mut().expect("existing epoch");
+        entity.rolling = self.prev_rolling.clone().expect("apply captured rolling");
+        entity.pparams = self.prev_pparams.clone().expect("apply captured pparams");
+        entity.end = self.prev_end.clone();
     }
 }
 
@@ -1501,11 +1568,25 @@ mod prop_tests {
         }
     }
 
+    #[allow(deprecated)]
+    fn make_epoch_wrap_up_v2(stats: EndStats) -> EpochWrapUpV2 {
+        EpochWrapUpV2::new(stats)
+    }
+
     prop_compose! {
+        #[allow(deprecated)]
         fn any_epoch_wrap_up_v2()(
             stats in any_end_stats(),
         ) -> EpochWrapUpV2 {
-            EpochWrapUpV2::new(stats)
+            make_epoch_wrap_up_v2(stats)
+        }
+    }
+
+    prop_compose! {
+        fn any_epoch_wrap_up_v3()(
+            stats in any_end_stats(),
+        ) -> EpochWrapUpV3 {
+            EpochWrapUpV3::new(stats)
         }
     }
 
@@ -1669,9 +1750,18 @@ mod prop_tests {
         }
 
         #[test]
+        #[allow(deprecated)]
         fn epoch_wrap_up_v2_roundtrip(
             entity in any_epoch_state(),
             delta in any_epoch_wrap_up_v2(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn epoch_wrap_up_v3_roundtrip(
+            entity in any_epoch_state(),
+            delta in any_epoch_wrap_up_v3(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
