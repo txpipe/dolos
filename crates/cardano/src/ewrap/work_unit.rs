@@ -80,6 +80,11 @@ impl EwrapWorkUnit {
     /// Derived rather than stored: `start_shard >= total_shards` is a
     /// state we only enter via the `initialize()` short-circuit, since
     /// neither field changes after `initialize()` returns.
+    ///
+    /// Precondition: `initialize()` has been called. A freshly
+    /// `new()`-constructed unit has both fields at 0 and would
+    /// spuriously report `true`; in practice the runtime always calls
+    /// `initialize()` before any phase that reads this predicate.
     fn is_replay_noop(&self) -> bool {
         self.start_shard >= self.total_shards
     }

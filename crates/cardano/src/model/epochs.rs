@@ -675,8 +675,16 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     }
 }
 
+// TODO(wal-compat): legacy variant kept for backward-compatible WAL decoding.
+// Remove this struct, its `EntityDelta` impl, the `EpochWrapUpV2` variant of
+// `CardanoDelta` (along with its `delta_from!` in `legacy_delta_from` and the
+// match arms in `key`/`apply`/`undo`), and the `epoch_wrap_up_v2_roundtrip`
+// proptest once the WAL backfill window has rolled past the V3 cutover — at
+// that point no on-disk WAL row will reference variant index 42 carrying
+// `prev_ewrap_progress`. A reasonable trigger is "no production node has WAL
+// rows older than the V3 cutover".
 /// Superseded by `EpochWrapUpV3`. Kept for WAL replay of rows emitted
-/// by the V2-era binary (variant index 40 in `CardanoDelta`). New
+/// by the V2-era binary (variant index 42 in `CardanoDelta`). New
 /// commit paths must construct `EpochWrapUpV3` instead.
 ///
 /// V2's `apply` cleared `EpochState.ewrap_progress` to `None` at EWRAP
