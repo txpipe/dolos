@@ -243,6 +243,8 @@ pub fn migrate_pparams_version(
         (8, 9) => into_conway(current, &genesis.conway),
         // One intra-era hard-fork in conway at protocol version 10
         (9, 10) => intra_era_hardfork(current, to),
+        // Van Rossem: intra-era hard-fork to protocol version 11
+        (10, 11) => intra_era_hardfork(current, to),
         (from, to) => {
             unimplemented!("don't know how to bump from version {from} to {to}",)
         }
@@ -284,5 +286,25 @@ pub fn protocol_constants(version: u16, genesis: &Genesis) -> ProtocolConstants 
             epoch_length: genesis.shelley.epoch_length.unwrap_or_default() as u64,
             slot_length: genesis.shelley.slot_length.unwrap_or_default() as u64,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::load_genesis;
+
+    #[test]
+    fn force_pparams_to_van_rossem() {
+        let path = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("test_data")
+            .join("mainnet")
+            .join("genesis");
+
+        let genesis = load_genesis(&path);
+        let initial = from_byron_genesis(&genesis.byron);
+        let result = force_pparams_version(&initial, &genesis, 0, 11).unwrap();
+
+        assert_eq!(result.protocol_major(), Some(11));
     }
 }

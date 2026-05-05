@@ -243,6 +243,19 @@ pub mod proposals {
                 "f046a88280e6c5b18dd057027964860f6b0b7918f4532d50455ad257a14a70ed#0" => {
                     Canceled(1096)
                 }
+                // ParameterChange proposals superseded by 014c32e5...#0 enacted at 1270
+                "4ac138ad9ffc3021bb6168d042d86becb595ec25db02ae0f142fbc23d10c08da#0" => {
+                    Canceled(1270)
+                }
+                "4ac138ad9ffc3021bb6168d042d86becb595ec25db02ae0f142fbc23d10c08da#1" => {
+                    Canceled(1270)
+                }
+                "2585fa3772a1866ae8e79bc4f19cf094c7815f4e7963e363078c8f573bd6268a#0" => {
+                    Canceled(1270)
+                }
+                "4c885796072684fe8d0cccf1cec57972d63434b75b285754db8e5140c4ff30c7#0" => {
+                    Canceled(1270)
+                }
                 // v7→v8 hard fork proposals (epoch 20, 2-epoch lag: effect at 22)
                 "cbc14ec74b2a20d6c4cc307e73b5a2465eb6cd68df64704f7bc844dac6018500#0" => {
                     Ratified(21)
