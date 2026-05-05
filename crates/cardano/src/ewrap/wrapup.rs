@@ -1,4 +1,4 @@
-use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUpV2, PoolHash, PoolState, PoolWrapUp};
+use crate::{AccountState, CardanoDelta, EndStats, EpochWrapUpV3, PoolHash, PoolState, PoolWrapUp};
 use dolos_core::ChainError;
 
 #[derive(Default)]
@@ -138,15 +138,20 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         // Assemble the final `EndStats` from the prepare-time fields plus the
         // shard-populated accumulators (already in `ending_state.end`), and
         // emit `EpochWrapUp` to close the epoch boundary. Apply will
-        // overwrite `entity.end` with these stats, rotate the rolling/pparams
-        // snapshots forward, and clear `ewrap_progress`.
+        // overwrite `entity.end` with these stats and rotate the
+        // rolling/pparams snapshots forward. `ewrap_progress` is left
+        // at `Some(total, total)` from the last `EWrapProgress` shard
+        // so the EwrapWorkUnit can short-circuit a replay if a crash
+        // lands between EWRAP finalize and ESTART finalize;
+        // `EpochTransitionV2` (run at ESTART finalize) is the single
+        // writer that clears the field.
         let final_stats = define_end_stats(ctx);
 
         // Stash the final stats on `ending_state.end` so the post-commit
         // archive write in `commit_ewrap` reflects the finalised state.
         ctx.ending_state.end = Some(final_stats.clone());
 
-        ctx.deltas.add_for_entity(EpochWrapUpV2::new(final_stats));
+        ctx.deltas.add_for_entity(EpochWrapUpV3::new(final_stats));
 
         Ok(())
     }

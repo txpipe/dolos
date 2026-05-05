@@ -38,6 +38,12 @@ pub struct EwrapWorkUnit {
     /// from `EpochState.ewrap_progress.committed` so a restart after a
     /// mid-boundary crash skips already-committed shards (the per-shard
     /// account-mutation deltas are non-idempotent on replay).
+    ///
+    /// When `initialize()` detects the boundary was closed in a prior
+    /// run (`ewrap_progress.committed == total`), this lands at
+    /// `total_shards` so the runtime's shard loop runs zero iterations.
+    /// `is_complete()` reads back this signal to make `finalize()` a
+    /// no-op — see that method for the full rationale.
     start_shard: u32,
 
     /// During the per-shard loop, holds the in-flight shard's
@@ -60,6 +66,33 @@ impl EwrapWorkUnit {
 
     pub fn boundary(&self) -> Option<&BoundaryWork> {
         self.boundary.as_ref()
+    }
+
+    /// True when this work unit's shard plan has nothing left to run —
+    /// i.e. the persisted `ewrap_progress` shows `committed == total`,
+    /// meaning EWRAP for this boundary closed in a prior run. The
+    /// boundary is being re-triggered because the cursor only advances
+    /// at ESTART finalize (`estart::commit::commit_finalize`), so a
+    /// crash between EWRAP and ESTART finalize leaves the cursor behind
+    /// the boundary block and the next live block re-emits both work
+    /// units. Both `initialize()` (to log + skip the assignment of
+    /// shard work) and `finalize()` (to skip re-emitting `EpochWrapUpV3`
+    /// over already-committed state) consult this predicate; the work
+    /// buffer then flips to ESTART, which resumes from
+    /// `estart_progress.committed` via the existing per-shard path.
+    ///
+    /// Derived rather than stored: `start_shard >= total_shards` is a
+    /// state we only enter when `initialize()` reads
+    /// `ewrap_progress.committed == ewrap_progress.total` and assigns
+    /// `start_shard = committed`. Neither field changes after
+    /// `initialize()` returns.
+    ///
+    /// Precondition: `initialize()` has been called. A freshly
+    /// `new()`-constructed unit has both fields at 0 and would
+    /// spuriously report `true`; in practice the runtime always calls
+    /// `initialize()` before any phase that reads this predicate.
+    fn is_complete(&self) -> bool {
+        self.start_shard >= self.total_shards
     }
 }
 
@@ -93,6 +126,22 @@ where
         let progress = epoch.ewrap_progress.as_ref();
         self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
         self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
+
+        // When `is_complete()` holds, `committed == total` from a prior
+        // run that closed EWRAP but didn't reach ESTART finalize (per
+        // `EpochWrapUpV3` semantics — the field stays populated after
+        // EWRAP finalize and is cleared only by `EpochTransitionV2`).
+        // The runtime's shard loop will run zero iterations and
+        // `finalize()` will short-circuit on the same predicate.
+        if self.is_complete() {
+            tracing::info!(
+                slot = self.slot,
+                committed = self.start_shard,
+                total = self.total_shards,
+                "ewrap already completed in prior run; short-circuiting on replay"
+            );
+            return Ok(());
+        }
 
         debug!(
             slot = self.slot,
@@ -155,6 +204,14 @@ where
     }
 
     fn finalize(&mut self, domain: &D) -> Result<(), DomainError> {
+        if self.is_complete() {
+            debug!(
+                slot = self.slot,
+                "ewrap finalize skipped (boundary already closed in prior run)"
+            );
+            return Ok(());
+        }
+
         debug!(slot = self.slot, "loading ewrap context");
 
         let mut boundary = BoundaryWork::load_finalize::<D>(domain.state(), self.genesis.clone())?;
