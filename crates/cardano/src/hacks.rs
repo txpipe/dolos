@@ -105,6 +105,10 @@ pub mod proposals {
                 "014c32e57347d114744210e1934a2084c5d0052a2312170d93758bfd566f3956#0" => {
                     Ratified(1269)
                 }
+                // Hard Fork Initiation enacted at epoch 1291
+                "fa2b252c9d645b376ee68f94ea87764dad6510e201726921e0cb733161ca6ef8#0" => {
+                    Ratified(1290)
+                }
                 "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69#0" => {
                     Ratified(1095)
                 }
