@@ -82,6 +82,204 @@ fn matches_output(
     address_match && asset_match
 }
 
+fn credential_hash_eq(cred: &u5c::cardano::StakeCredential, hash: &[u8]) -> bool {
+    use u5c::cardano::stake_credential::StakeCredential as SC;
+    match &cred.stake_credential {
+        Some(SC::AddrKeyHash(h) | SC::ScriptHash(h)) => h == hash,
+        None => false,
+    }
+}
+
+fn drep_hash_eq(drep: &u5c::cardano::DRep, hash: &[u8]) -> bool {
+    use u5c::cardano::d_rep::Drep;
+    match &drep.drep {
+        Some(Drep::AddrKeyHash(h) | Drep::ScriptHash(h)) => h == hash,
+        _ => false,
+    }
+}
+
+fn matches_stake_credential_pattern(
+    pattern: &u5c::cardano::StakeCredential,
+    actual: &u5c::cardano::StakeCredential,
+) -> bool {
+    pattern.stake_credential.is_none() || pattern.stake_credential == actual.stake_credential
+}
+
+fn cert_involves_stake_credential(
+    cert: &u5c::cardano::certificate::Certificate,
+    hash: &[u8],
+) -> bool {
+    use u5c::cardano::certificate::Certificate as C;
+    match cert {
+        C::StakeRegistration(c) | C::StakeDeregistration(c) => credential_hash_eq(c, hash),
+        C::StakeDelegation(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::RegCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::UnregCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::VoteDelegCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::StakeVoteDelegCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::StakeRegDelegCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::VoteRegDelegCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::StakeVoteRegDelegCert(c) => c
+            .stake_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::AuthCommitteeHotCert(c) => {
+            c.committee_cold_credential
+                .as_ref()
+                .is_some_and(|sc| credential_hash_eq(sc, hash))
+                || c.committee_hot_credential
+                    .as_ref()
+                    .is_some_and(|sc| credential_hash_eq(sc, hash))
+        }
+        C::ResignCommitteeColdCert(c) => c
+            .committee_cold_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::RegDrepCert(c) => c
+            .drep_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::UnregDrepCert(c) => c
+            .drep_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::UpdateDrepCert(c) => c
+            .drep_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::MirCert(c) => c.to.iter().any(|t| {
+            t.stake_credential
+                .as_ref()
+                .is_some_and(|sc| credential_hash_eq(sc, hash))
+        }),
+        _ => false,
+    }
+}
+
+fn cert_involves_pool(cert: &u5c::cardano::certificate::Certificate, hash: &[u8]) -> bool {
+    use u5c::cardano::certificate::Certificate as C;
+    match cert {
+        C::StakeDelegation(c) => c.pool_keyhash == hash,
+        C::PoolRegistration(c) => c.operator == hash,
+        C::PoolRetirement(c) => c.pool_keyhash == hash,
+        C::StakeVoteDelegCert(c) => c.pool_keyhash == hash,
+        C::StakeRegDelegCert(c) => c.pool_keyhash == hash,
+        C::StakeVoteRegDelegCert(c) => c.pool_keyhash == hash,
+        _ => false,
+    }
+}
+
+fn cert_involves_drep(cert: &u5c::cardano::certificate::Certificate, hash: &[u8]) -> bool {
+    use u5c::cardano::certificate::Certificate as C;
+    match cert {
+        C::VoteDelegCert(c) => c.drep.as_ref().is_some_and(|d| drep_hash_eq(d, hash)),
+        C::StakeVoteDelegCert(c) => c.drep.as_ref().is_some_and(|d| drep_hash_eq(d, hash)),
+        C::VoteRegDelegCert(c) => c.drep.as_ref().is_some_and(|d| drep_hash_eq(d, hash)),
+        C::StakeVoteRegDelegCert(c) => c.drep.as_ref().is_some_and(|d| drep_hash_eq(d, hash)),
+        C::RegDrepCert(c) => c
+            .drep_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::UnregDrepCert(c) => c
+            .drep_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        C::UpdateDrepCert(c) => c
+            .drep_credential
+            .as_ref()
+            .is_some_and(|sc| credential_hash_eq(sc, hash)),
+        _ => false,
+    }
+}
+
+fn matches_certificate_pattern(
+    pattern: &u5c::cardano::CertificatePattern,
+    certs: &[u5c::cardano::Certificate],
+) -> bool {
+    use u5c::cardano::certificate::Certificate as Cert;
+    use u5c::cardano::certificate_pattern::CertificateType;
+
+    let Some(ref cert_type) = pattern.certificate_type else {
+        return true;
+    };
+
+    certs.iter().any(|cert| {
+        let Some(ref c) = cert.certificate else {
+            return false;
+        };
+
+        match cert_type {
+            CertificateType::StakeRegistration(pat) => {
+                matches!(c, Cert::StakeRegistration(cred) if matches_stake_credential_pattern(pat, cred))
+            }
+            CertificateType::StakeDeregistration(pat) => {
+                matches!(c, Cert::StakeDeregistration(cred) if matches_stake_credential_pattern(pat, cred))
+            }
+            CertificateType::StakeDelegation(pat) => {
+                if let Cert::StakeDelegation(deleg) = c {
+                    let cred_match = pat.stake_credential.as_ref().is_none_or(|p| {
+                        deleg
+                            .stake_credential
+                            .as_ref()
+                            .is_some_and(|a| matches_stake_credential_pattern(p, a))
+                    });
+                    let pool_match =
+                        pat.pool_keyhash.is_empty() || pat.pool_keyhash == deleg.pool_keyhash;
+                    cred_match && pool_match
+                } else {
+                    false
+                }
+            }
+            CertificateType::PoolRegistration(pat) => {
+                if let Cert::PoolRegistration(reg) = c {
+                    let operator_match = pat.operator.is_empty() || pat.operator == reg.operator;
+                    let pool_match =
+                        pat.pool_keyhash.is_empty() || pat.pool_keyhash == reg.operator;
+                    operator_match && pool_match
+                } else {
+                    false
+                }
+            }
+            CertificateType::PoolRetirement(pat) => {
+                if let Cert::PoolRetirement(ret) = c {
+                    let pool_match =
+                        pat.pool_keyhash.is_empty() || pat.pool_keyhash == ret.pool_keyhash;
+                    let epoch_match = pat.epoch == 0 || pat.epoch == ret.epoch;
+                    pool_match && epoch_match
+                } else {
+                    false
+                }
+            }
+            CertificateType::AnyStakeCredential(hash) => {
+                cert_involves_stake_credential(c, hash)
+            }
+            CertificateType::AnyPoolKeyhash(hash) => cert_involves_pool(c, hash),
+            CertificateType::AnyDrep(hash) => cert_involves_drep(c, hash),
+        }
+    })
+}
+
 fn matches_cardano_pattern(tx_pattern: &u5c::cardano::TxPattern, tx: &u5c::cardano::Tx) -> bool {
     let has_address_match = tx_pattern.has_address.as_ref().is_none_or(|addr_pattern| {
         let outputs: Vec<_> = tx.outputs.to_vec();
@@ -124,7 +322,17 @@ fn matches_cardano_pattern(tx_pattern: &u5c::cardano::TxPattern, tx: &u5c::carda
         .as_ref()
         .is_none_or(|out_pattern| matches_output(out_pattern, &tx.outputs));
 
-    has_address_match && consumes_match && mints_asset_match && moves_asset_match && produces_match
+    let has_certificate_match = tx_pattern
+        .has_certificate
+        .as_ref()
+        .is_none_or(|cert_pattern| matches_certificate_pattern(cert_pattern, &tx.certificates));
+
+    has_address_match
+        && consumes_match
+        && mints_asset_match
+        && moves_asset_match
+        && produces_match
+        && has_certificate_match
 }
 
 fn matches_chain(chain: &Chain, tx: &u5c::cardano::Tx) -> bool {
