@@ -167,14 +167,20 @@ impl IntoSet for ByAssetQuery {
 
 impl IntoSet for u5c::cardano::AssetPattern {
     fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        let by_policy = ByPolicyQuery::maybe_from(self.policy_id);
-        let by_asset = ByAssetQuery::maybe_from(self.asset_name);
+        let by_policy = ByPolicyQuery::maybe_from(self.policy_id.clone());
+        let by_asset = ByAssetQuery::maybe_from(self.asset_name.clone());
 
         match (by_policy, by_asset) {
+            (Some(_), Some(_)) => {
+                let mut subject = self.policy_id.to_vec();
+                subject.extend_from_slice(&self.asset_name);
+                ByAssetQuery(bytes::Bytes::from(subject)).into_set(indexes)
+            }
             (Some(x), None) => x.into_set(indexes),
-            (None, Some(x)) => x.into_set(indexes),
+            (None, Some(_)) => Err(Status::invalid_argument(
+                "asset name query requires a policy_id",
+            )),
             (None, None) => Ok(HashSet::default()),
-            _ => Err(Status::invalid_argument("conflicting asset criteria")),
         }
     }
 }
