@@ -32,6 +32,8 @@ pub struct XtaskConfig {
     pub dbsync: DbSyncConfig,
     #[serde(default)]
     pub seeds: SeedConfig,
+    #[serde(default)]
+    pub fixtures: FixtureConfig,
 }
 
 impl Default for XtaskConfig {
@@ -41,6 +43,7 @@ impl Default for XtaskConfig {
             snapshots: SnapshotConfig::default(),
             dbsync: DbSyncConfig::default(),
             seeds: SeedConfig::default(),
+            fixtures: FixtureConfig::default(),
         }
     }
 }
@@ -93,6 +96,21 @@ impl SeedConfig {
             Network::Preprod => self.preprod.as_ref(),
         }
     }
+}
+
+/// Fixture packaging / registry configuration.
+///
+/// `local_dir` is the base under which fixtures live on disk, with subdirs
+/// `seeds/`, `ground-truth/`, `upstream/`. This is also where fixture pulls
+/// extract to and where pushes read from — i.e. the path the test harness
+/// uses as `DOLOS_FIXTURE_DIR`.
+///
+/// `registry` is the OCI registry + repo reference (without a tag) used for
+/// pushing and pulling test-fixture artifacts.
+#[derive(Debug, Deserialize, Default)]
+pub struct FixtureConfig {
+    pub local_dir: Option<PathBuf>,
+    pub registry: Option<String>,
 }
 
 /// DBSync connection URLs per network.

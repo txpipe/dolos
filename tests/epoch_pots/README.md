@@ -68,3 +68,39 @@ cargo test --test epoch_pots -- --nocapture
 ```
 
 Set `EPOCH_POTS_KEEP_DIR=1` to preserve the temporary working directories for debugging.
+
+## Pulling Fixtures From GHCR
+
+Fixtures are published as OCI artifacts on the GitHub Container Registry, one
+tag per test: `ghcr.io/txpipe/dolos-fixtures:{network}-{subject_epoch}`. Each
+tag bundles the seed, ground-truth, and upstream-fragment layers a single test
+needs.
+
+```bash
+# one-time: install oras (see https://oras.land/docs/installation)
+# one-time: log in to GHCR
+echo "$GH_PAT" | oras login ghcr.io -u <your-user> --password-stdin
+
+# pull everything preview-100 needs
+cargo xtask fixture pull --network preview --epoch 100
+
+# run the test
+cargo test --test epoch_pots --release -- --nocapture
+```
+
+`cargo xtask fixture pull` extracts the three layers into
+`$DOLOS_FIXTURE_DIR/{seeds,ground-truth,upstream}/<key>/` (the same layout the
+test harness discovers). `DOLOS_FIXTURE_DIR` defaults to the `fixtures.local_dir`
+value in `xtask.toml` but can be overridden by exporting the env var.
+
+To publish a new fixture bundle: arrange the three source directories under
+`$DOLOS_FIXTURE_DIR` (seed under `seeds/<network>-<seed_epoch>/`, ground-truth
+under `ground-truth/<network>-<subject_epoch>/`, upstream fragment under
+`upstream/<network>-<start>-<end>/`), then:
+
+```bash
+cargo xtask fixture push \
+  --network <net> --epoch <subject_epoch> \
+  --seed-epoch <seed_epoch> \
+  --upstream-start <start> --upstream-end <end>
+```
