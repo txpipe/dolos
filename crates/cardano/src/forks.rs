@@ -2,12 +2,10 @@ use crate::{utils::float_to_rational, PParamValue, PParamsSet};
 use dolos_core::{BrokenInvariant, Genesis};
 use pallas::{
     crypto::hash::Hash,
-    ledger::{
-        configs::{alonzo, byron, conway, shelley},
-        primitives::{
-            conway::{DRepVotingThresholds, PoolVotingThresholds},
-            CostModel, ExUnits, Nonce, NonceVariant,
-        },
+    interop::hardano::configs::{alonzo, byron, conway, shelley},
+    ledger::primitives::{
+        conway::{DRepVotingThresholds, PoolVotingThresholds},
+        CostModel, ExUnits, Nonce, NonceVariant,
     },
 };
 use tracing::debug;

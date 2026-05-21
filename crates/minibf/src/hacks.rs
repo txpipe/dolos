@@ -4,8 +4,8 @@ use blockfrost_openapi::models::{block_content::BlockContent, tx_content::TxCont
 use dolos_cardano::indexes::AsyncCardanoQueryExt;
 use dolos_core::{ArchiveStore as _, Domain, TxoRef};
 use pallas::crypto::hash::Hash;
+use pallas::interop::hardano::configs::{byron, shelley};
 use pallas::ledger::{
-    configs::{byron, shelley},
     primitives::{alonzo, byron as byron_primitives, conway},
     traverse::MultiEraBlock,
     traverse::MultiEraOutput,

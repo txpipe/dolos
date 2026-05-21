@@ -15,11 +15,11 @@ pub mod work_unit;
 pub use work_unit::GenesisWorkUnit;
 
 fn get_utxo_amount(genesis: &Genesis) -> Lovelace {
-    let byron_utxo = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron)
+    let byron_utxo = pallas::interop::hardano::configs::byron::genesis_utxos(&genesis.byron)
         .iter()
         .fold(0, |acc, (_, _, amount)| acc + amount);
 
-    let shelley_utxo = pallas::ledger::configs::shelley::shelley_utxos(&genesis.shelley)
+    let shelley_utxo = pallas::interop::hardano::configs::shelley::shelley_utxos(&genesis.shelley)
         .iter()
         .fold(0, |acc, (_, _, amount)| acc + amount);
 

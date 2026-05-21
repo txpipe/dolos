@@ -363,10 +363,10 @@ impl Genesis {
         hasher.input(&shelley_bytes);
         let shelley_hash = hasher.finalize();
 
-        let byron = pallas::ledger::configs::byron::from_file(byron.as_ref())?;
-        let shelley = pallas::ledger::configs::shelley::from_file(shelley.as_ref())?;
-        let alonzo = pallas::ledger::configs::alonzo::from_file(alonzo.as_ref())?;
-        let conway = pallas::ledger::configs::conway::from_file(conway.as_ref())?;
+        let byron = pallas::interop::hardano::configs::byron::from_file(byron.as_ref())?;
+        let shelley = pallas::interop::hardano::configs::shelley::from_file(shelley.as_ref())?;
+        let alonzo = pallas::interop::hardano::configs::alonzo::from_file(alonzo.as_ref())?;
+        let conway = pallas::interop::hardano::configs::conway::from_file(conway.as_ref())?;
 
         Ok(Self {
             byron,

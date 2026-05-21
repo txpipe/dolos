@@ -80,7 +80,7 @@ impl WorkContext {
         state: &D::State,
         genesis: &Genesis,
     ) -> Result<u64, ChainError> {
-        let avvm_utxos = pallas::ledger::configs::byron::genesis_avvm_utxos(&genesis.byron);
+        let avvm_utxos = pallas::interop::hardano::configs::byron::genesis_avvm_utxos(&genesis.byron);
 
         // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
         let refs: Vec<TxoRef> = avvm_utxos.iter().map(|(tx, _, _)| TxoRef(*tx, 0)).collect();
