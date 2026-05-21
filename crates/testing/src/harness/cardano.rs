@@ -265,7 +265,7 @@ impl LedgerHarness {
             .map(|c| c.try_into().unwrap())
             .unwrap_or(Point::Origin);
 
-        let mut iter = pallas::storage::hardano::immutable::read_blocks_from_point(
+        let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
             &self.immutable_path,
             cursor.clone(),
         )?;

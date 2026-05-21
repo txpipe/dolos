@@ -9,7 +9,7 @@ use crate::{
 };
 
 use pallas::crypto::hash::Hash;
-use pallas::ledger::configs::shelley::{
+use pallas::interop::hardano::configs::shelley::{
     Credential as ConfigCredential, Pool as ConfigPool, RewardAccount as ConfigRewardAccount,
 };
 

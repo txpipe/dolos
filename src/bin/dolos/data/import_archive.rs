@@ -55,7 +55,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     let archive = crate::common::open_archive_store(config)?;
 
     // Get immutable DB tip to know the end point
-    let immutable_tip = pallas::storage::hardano::immutable::get_tip(source_path)
+    let immutable_tip = pallas::interop::hardano::storage::immutable::get_tip(source_path)
         .map_err(|e| miette::miette!("failed to read immutable DB tip: {}", e))?
         .ok_or_else(|| miette::miette!("immutable DB has no tip"))?;
 
@@ -88,7 +88,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     );
 
     let mut iter =
-        pallas::storage::hardano::immutable::read_blocks_from_point(source_path, cursor.clone())
+        pallas::interop::hardano::storage::immutable::read_blocks_from_point(source_path, cursor.clone())
             .map_err(|e| miette::miette!("failed to open immutable DB: {}", e))?;
 
     // When resuming, skip the first block since the cursor points at the last

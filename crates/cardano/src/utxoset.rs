@@ -117,7 +117,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
 
     // byron
     {
-        let utxos = pallas::ledger::configs::byron::genesis_utxos(&genesis.byron);
+        let utxos = pallas::interop::hardano::configs::byron::genesis_utxos(&genesis.byron);
 
         for (tx, addr, amount) in utxos {
             let utxo_ref = TxoRef(tx, 0);
@@ -137,7 +137,7 @@ pub fn compute_origin_delta(genesis: &Genesis) -> UtxoSetDelta {
     }
     // shelley
     {
-        let utxos = pallas::ledger::configs::shelley::shelley_utxos(&genesis.shelley);
+        let utxos = pallas::interop::hardano::configs::shelley::shelley_utxos(&genesis.shelley);
 
         for (tx, addr, amount) in utxos {
             let utxo_ref = TxoRef(tx, 0);

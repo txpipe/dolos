@@ -189,7 +189,7 @@ fn do_import(
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let tip = pallas::storage::hardano::immutable::get_tip(immutable_path)
+    let tip = pallas::interop::hardano::storage::immutable::get_tip(immutable_path)
         .map_err(|err| miette::miette!(err.to_string()))
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
@@ -197,7 +197,7 @@ fn do_import(
     let cursor = define_starting_point(args, domain.state())?;
 
     let mut iter =
-        pallas::storage::hardano::immutable::read_blocks_from_point(immutable_path, cursor.clone())
+        pallas::interop::hardano::storage::immutable::read_blocks_from_point(immutable_path, cursor.clone())
             .map_err(|err| miette::miette!(err.to_string()))
             .context("reading immutable db tip")?;
 
