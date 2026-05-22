@@ -777,6 +777,36 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
         }
     }
 
+    // TODO: batch and dedupe per-page — UTxOs sharing a source tx currently re-decode the
+    // same block once each. Acceptable for typical query sizes; revisit if pages get large.
+    let block_ref = match query.block_by_tx_hash(txo.0.to_vec()).await {
+        Ok(Some((block_bytes, _tx_index))) => match MultiEraBlock::decode(&block_bytes) {
+            Ok(block) => Some(u5c::query::ChainPoint {
+                slot: block.slot(),
+                hash: block.hash().to_vec().into(),
+                height: block.header().number(),
+                timestamp: domain.get_slot_timestamp(block.slot()).unwrap_or(0),
+            }),
+            Err(e) => {
+                warn!(
+                    tx_hash = hex::encode(txo.0),
+                    error = %e,
+                    "Failed to decode block for UTxO block_ref lookup"
+                );
+                None
+            }
+        },
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                tx_hash = hex::encode(txo.0),
+                error = %e,
+                "block_by_tx_hash lookup failed for UTxO"
+            );
+            None
+        }
+    };
+
     Ok(u5c::query::AnyUtxoData {
         txo_ref: Some(u5c::query::TxoRef {
             hash: txo.0.to_vec().into(),
@@ -784,7 +814,7 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
         }),
         native_bytes: body.1.clone().into(),
         parsed_state: Some(u5c::query::any_utxo_data::ParsedState::Cardano(parsed)),
-        block_ref: None,
+        block_ref,
     })
 }
 
