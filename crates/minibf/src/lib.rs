@@ -269,7 +269,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Result<Router, ServeError>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -285,7 +285,7 @@ where
     })
 }
 
-pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
+pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Result<Router, ServeError>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -295,6 +295,7 @@ where
     Option<DRepState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
+    let base_path = facade.config.base_path.clone();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -507,7 +508,25 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+
+    if let Some(base_path) = &base_path {
+        let base_path = base_path.trim_end_matches('/');
+        if base_path.is_empty()
+            || base_path == "/"
+            || !base_path.starts_with('/')
+            || base_path.contains('*')
+        {
+            return Err(ServeError::ConfigError(format!(
+                "base_path must start with '/', must not be just '/', and must not contain wildcards; got: \"{}\"",
+                base_path
+            )));
+        }
+        Ok(Router::new()
+            .nest(base_path, app)
+            .layer(NormalizePathLayer::trim_trailing_slash()))
+    } else {
+        Ok(app.layer(NormalizePathLayer::trim_trailing_slash()))
+    }
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -522,7 +541,7 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        let app = build_router(cfg.clone(), domain);
+        let app = build_router(cfg.clone(), domain)?;
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
             .await
@@ -534,5 +553,51 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod base_path_tests {
+    use axum::http::StatusCode;
+    use dolos_core::ServeError;
+
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn routes_resolve_under_configured_base_path() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
+            .expect("router should build with valid base_path");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK, "prefixed route should resolve");
+
+        let (status, _) = app.get_bytes("/network").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "root route should 404 when base_path is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_base_path_is_normalized() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0/".into()))
+            .expect("router should build with trailing-slash base_path");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invalid_base_path_returns_config_error() {
+        for invalid in ["", "/", "no-leading-slash", "/with*wildcard"] {
+            let err = TestApp::try_new_with_base_path(Some(invalid.into()))
+                .err()
+                .unwrap_or_else(|| panic!("expected ConfigError for base_path = {invalid:?}"));
+            assert!(
+                matches!(err, ServeError::ConfigError(_)),
+                "expected ServeError::ConfigError for {invalid:?}, got {err:?}"
+            );
+        }
     }
 }
