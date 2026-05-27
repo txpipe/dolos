@@ -1,0 +1,98 @@
+---
+title: Performance
+sidebar:
+  order: 4
+---
+
+## Sync time
+
+There are three very different sync profiles in Dolos:
+
+- **Dolos snapshot bootstrap** is the fastest way to initialize a node. If you already have access to a recent snapshot, startup can complete in minutes.
+- **Mithril bootstrap** is the fastest trust-minimized cold start currently documented for mainnet. Under normal conditions, it can initialize a mainnet node in under 20 hours.
+- **Relay or local-node sync from origin** is the slowest path because Dolos must pull and process the full chain history block by block. Depending on network, hardware, and peer quality, this can take from several hours to several days.
+
+Initial bootstrap and steady-state syncing are different workloads. Catching up from origin is dominated by chain download and historical processing, while a node that is already near tip usually only needs to ingest new blocks as they arrive.
+
+For bootstrap options and tradeoffs, see [Snapshot](../bootstrap/snapshot), [Mithril](../bootstrap/mithril), [Public Relay](../bootstrap/relay), and [Local Full Node](../bootstrap/local).
+
+## Resource usage
+
+Dolos is built to stay lightweight relative to a traditional full-node stack. On mainnet, Dolos stays under `2 GB` of memory even during epoch boundaries, which are among the heaviest periods for ledger processing.
+
+The main drivers of resource usage are:
+
+- **Storage mode**. Ledger-only uses the least disk and I/O. Sliding history adds a bounded historical window. Full archive retains the full chain history and is the most expensive mode.
+- **Enabled APIs**. Running only sync is cheaper than serving gRPC, Mini-Blockfrost, Mini-Kupo, TRP, and Ouroboros compatibility interfaces at the same time.
+- **Storage backend and cache tuning**. Cache sizes and backend options in the [`[storage]`](../configuration/schema#storage-section) configuration directly affect memory use, disk activity, and throughput.
+- **Query mix**. A node serving mostly current-state lookups behaves differently from one serving heavy historical scans or broad asset and address searches.
+
+If your goal is to minimize operational cost, start with the smallest storage mode and API surface that satisfies your workload, then increase capacity only where measurements show a bottleneck.
+
+## Query latency
+
+Query latency is workload-dependent. Dolos generally performs best on indexed and current-state lookups, where the request can be satisfied directly from the state and index stores. Historical queries can be more expensive because they may require joining index results with archived block data.
+
+The biggest factors affecting latency are:
+
+- whether the query hits current state or historical archive data
+- cache sizing for state, archive, and index stores
+- storage backend performance under concurrent load
+- the number of enabled clients and the burstiness of their traffic
+
+In practice, you should evaluate latency using the query patterns your applications actually issue. A wallet backend, explorer, and ingest service will stress Dolos in different ways.
+
+To observe latency and throughput in production:
+
+- use service metrics where available, such as the `/metrics` endpoints documented for [Mini-Blockfrost](../apis/minibf) and [Mini-Kupo](../apis/minikupo)
+- enable [logging](../operations/logging) when investigating slow paths or sync stalls
+- enable [tracing](../operations/tracing) when you need deeper visibility into instrumented request flows such as mempool transaction handling
+
+## Uptime
+
+Dolos is designed to run continuously in [`daemon` mode](../operations/modes). In steady state, uptime is mostly determined by external conditions and operator choices rather than any special maintenance cycle.
+
+The most common uptime risks are:
+
+- unstable or overloaded upstream peers
+- insufficient disk space for the configured history window
+- undersized CPU, memory, or storage for the traffic being served
+- overly aggressive debug or trace logging in production
+
+For high uptime, use a stable upstream peer, keep enough free disk for both current state and expected growth, and monitor sync progress together with API health.
+
+## Failure recovery
+
+Dolos includes a write-ahead log and bounded rollback history to support restart safety and recovery from normal chain events. Recovery time depends on what happened:
+
+- **Process restart or host reboot** usually requires replaying local pending work and catching up from the last persisted position.
+- **Normal chain rollback** is handled within the configured rollback window.
+- **Corruption, missing data, or deliberate rebootstrap** may require importing from snapshot, Mithril, or syncing again from a peer.
+
+The most relevant configuration knobs are in the [`[sync]`](../configuration/schema#sync-section) section:
+
+- `max_rollback` controls how much rollback history Dolos keeps available for rollback handling.
+- `max_history` controls how much recent archive history remains before pruning.
+
+Bootstrap commands also provide flags such as `--continue` and `--skip-if-data` to help operators resume or safely avoid repeating work when data already exists. See the [bootstrap overview](../bootstrap).
+
+## Compatibility with current network load
+
+Dolos is built to track the Cardano network as a lightweight data node rather than a consensus-validating node. In normal conditions, it is compatible with current network load provided that:
+
+- the upstream peer is healthy and well connected
+- the host has enough disk and I/O capacity for the selected storage mode
+- the enabled APIs and query traffic match the hardware profile
+
+The main question is usually not whether Dolos can follow the chain near tip, but whether one deployment is sized correctly for the combination of sync, indexing, and query traffic you place on it.
+
+Epoch boundaries are a useful stress case because they concentrate heavier ledger activity. Even then, Dolos remains under `2 GB` of memory on mainnet, which is a strong indicator that it can operate predictably under present-day chain conditions.
+
+## Practical guidance
+
+- Use snapshot bootstrap when fast recovery or rapid deployment matters most.
+- Use Mithril when you want a fast cold start without depending on a pre-exported Dolos snapshot.
+- Choose the smallest storage mode that satisfies your product requirements.
+- Keep storage caches conservative at first, then tune with real measurements.
+- Monitor sync position, API latency, disk growth, and restart behavior under realistic traffic.
+- Validate production sizing with your own query mix, not only synthetic benchmarks.
