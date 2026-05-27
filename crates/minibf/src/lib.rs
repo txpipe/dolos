@@ -114,6 +114,21 @@ impl<D: Domain> Facade<D> {
         Ok(pparams)
     }
 
+    pub fn get_effective_pparams_for_epoch(
+        &self,
+        effective_in_epoch: Epoch,
+        chain_summary: &ChainSummary,
+    ) -> Result<PParamsSet, StatusCode> {
+        let tip = self.get_tip_slot()?;
+        let (current_epoch, _) = chain_summary.slot_epoch(tip);
+
+        if effective_in_epoch == current_epoch {
+            self.get_current_effective_pparams()
+        } else {
+            self.get_historical_effective_pparams(effective_in_epoch, chain_summary)
+        }
+    }
+
     pub fn get_epoch_log(
         &self,
         epoch: Epoch,
