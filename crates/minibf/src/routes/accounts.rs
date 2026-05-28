@@ -285,14 +285,11 @@ where
     Ok(Json(utxos))
 }
 
-fn build_delegation(
+fn build_delegation<D: Domain>(
+    ctx: &AccountActionContext<'_, D>,
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
     cert: &MultiEraCert,
-    epoch: Epoch,
-    network: Network,
-    block: &MultiEraBlock,
-    chain: &ChainSummary,
 ) -> Result<Option<AccountDelegationContentInner>, StatusCode> {
     let (cred, pool) = match cert {
         MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
@@ -306,7 +303,7 @@ fn build_delegation(
         _ => return Ok(None),
     };
 
-    let address = mapping::stake_cred_to_address(cred, network);
+    let address = mapping::stake_cred_to_address(cred, ctx.network);
 
     if address != *stake_address {
         return Ok(None);
@@ -315,7 +312,7 @@ fn build_delegation(
     let pool = mapping::bech32_pool(pool)?;
 
     Ok(Some(AccountDelegationContentInner {
-        active_epoch: (epoch + 2) as i32,
+        active_epoch: (ctx.epoch + 2) as i32,
         tx_hash: tx.hash().to_string(),
         amount: tx
             .outputs()
@@ -324,40 +321,46 @@ fn build_delegation(
             .sum::<u64>()
             .to_string(),
         pool_id: pool,
-        tx_slot: block.slot() as i32,
-        block_time: chain.slot_time(block.slot()) as i32,
-        block_height: block.number() as i32,
+        tx_slot: ctx.block.slot() as i32,
+        block_time: ctx.chain.slot_time(ctx.block.slot()) as i32,
+        block_height: ctx.block.number() as i32,
     }))
 }
 
-fn build_registration(
+fn build_registration<D: Domain>(
+    ctx: &AccountActionContext<'_, D>,
     stake_address: &StakeAddress,
     tx: &MultiEraTx,
     cert: &MultiEraCert,
-    _epoch: Epoch,
-    network: Network,
-    block: &MultiEraBlock,
-    chain: &ChainSummary,
 ) -> Result<Option<AccountRegistrationContentInner>, StatusCode> {
-    let (cred, is_registration) = match cert {
+    let key_deposit = || -> Result<String, StatusCode> {
+        Ok(ctx
+            .domain
+            .get_effective_pparams_for_epoch(ctx.epoch, ctx.chain)?
+            .key_deposit()
+            .unwrap_or_default()
+            .to_string())
+    };
+
+    let (cred, is_registration, deposit) = match cert {
         MultiEraCert::AlonzoCompatible(cert) => match cert.deref().deref() {
-            AlonzoCert::StakeRegistration(cred) => (cred, true),
-            AlonzoCert::StakeDeregistration(cred) => (cred, false),
+            AlonzoCert::StakeRegistration(cred) => (cred, true, Some(key_deposit()?)),
+            AlonzoCert::StakeDeregistration(cred) => (cred, false, None),
             _ => return Ok(None),
         },
         MultiEraCert::Conway(cert) => match cert.deref().deref() {
-            ConwayCert::StakeRegistration(cred) => (cred, true),
-            ConwayCert::StakeDeregistration(cred) => (cred, false),
-            ConwayCert::Reg(cred, _) => (cred, true),
-            ConwayCert::UnReg(cred, _) => (cred, false),
-            ConwayCert::StakeRegDeleg(cred, _, _) => (cred, true),
-            ConwayCert::StakeVoteRegDeleg(cred, _, _, _) => (cred, true),
+            ConwayCert::StakeRegistration(cred) => (cred, true, Some(key_deposit()?)),
+            ConwayCert::StakeDeregistration(cred) => (cred, false, None),
+            ConwayCert::Reg(cred, coin) => (cred, true, Some(coin.to_string())),
+            ConwayCert::UnReg(cred, _) => (cred, false, None),
+            ConwayCert::StakeRegDeleg(cred, _, coin) => (cred, true, Some(coin.to_string())),
+            ConwayCert::StakeVoteRegDeleg(cred, _, _, coin) => (cred, true, Some(coin.to_string())),
             _ => return Ok(None),
         },
         _ => return Ok(None),
     };
 
-    let address = mapping::stake_cred_to_address(cred, network);
+    let address = mapping::stake_cred_to_address(cred, ctx.network);
 
     if address != *stake_address {
         return Ok(None);
@@ -370,9 +373,10 @@ fn build_registration(
         } else {
             Action::Deregistered
         },
-        tx_slot: block.slot() as i32,
-        block_time: chain.slot_time(block.slot()) as i32,
-        block_height: block.number() as i32,
+        deposit,
+        tx_slot: ctx.block.slot() as i32,
+        block_time: ctx.chain.slot_time(ctx.block.slot()) as i32,
+        block_height: ctx.block.number() as i32,
     }))
 }
 
@@ -425,6 +429,14 @@ struct AccountActivityModelBuilder<T> {
     items: Vec<T>,
 }
 
+struct AccountActionContext<'a, D: Domain> {
+    domain: &'a Facade<D>,
+    epoch: Epoch,
+    network: Network,
+    block: &'a MultiEraBlock<'a>,
+    chain: &'a ChainSummary,
+}
+
 impl<T> AccountActivityModelBuilder<T> {
     fn new(
         stake_address: StakeAddress,
@@ -458,8 +470,9 @@ impl<T> AccountActivityModelBuilder<T> {
         self.items.len() < self.page_size
     }
 
-    fn scan_block_certs<F>(
+    fn scan_block_certs<D, F>(
         &mut self,
+        domain: &Facade<D>,
         epoch: Epoch,
         block: &MultiEraBlock,
         chain: &ChainSummary,
@@ -467,30 +480,27 @@ impl<T> AccountActivityModelBuilder<T> {
         order: crate::pagination::Order,
     ) -> Result<(), StatusCode>
     where
+        D: Domain,
         F: Fn(
+            &AccountActionContext<'_, D>,
             &StakeAddress,
             &MultiEraTx,
             &MultiEraCert,
-            Epoch,
-            Network,
-            &MultiEraBlock,
-            &ChainSummary,
         ) -> Result<Option<T>, StatusCode>,
     {
         let txs = block.txs();
         let mut block_items = vec![];
+        let ctx = AccountActionContext {
+            domain,
+            epoch,
+            network: self.network,
+            block,
+            chain,
+        };
 
         for tx in txs {
             for cert in tx.certs() {
-                if let Some(model) = mapper(
-                    &self.stake_address,
-                    &tx,
-                    &cert,
-                    epoch,
-                    self.network,
-                    block,
-                    chain,
-                )? {
+                if let Some(model) = mapper(&ctx, &self.stake_address, &tx, &cert)? {
                     block_items.push(model);
                 }
             }
@@ -531,7 +541,7 @@ impl IntoModel<Vec<AccountAddressesContentInner>>
     }
 }
 
-pub async fn by_stake_actions<D, F, T>(
+async fn by_stake_actions<D, F, T>(
     stake_address: &str,
     pagination: Pagination,
     domain: Facade<D>,
@@ -540,13 +550,10 @@ pub async fn by_stake_actions<D, F, T>(
 where
     Option<AccountState>: From<D::Entity>,
     F: Fn(
+        &AccountActionContext<'_, D>,
         &StakeAddress,
         &MultiEraTx,
         &MultiEraCert,
-        Epoch,
-        Network,
-        &MultiEraBlock,
-        &ChainSummary,
     ) -> Result<Option<T>, StatusCode>,
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -596,7 +603,7 @@ where
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        builder.scan_block_certs(epoch, &block, &chain, &mapper, pagination.order)?;
+        builder.scan_block_certs(&domain, epoch, &block, &chain, &mapper, pagination.order)?;
     }
 
     Ok(builder.items)
@@ -1174,6 +1181,23 @@ mod tests {
         );
         let _: Vec<AccountRegistrationContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_registrations_include_resolved_deposit() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/registrations?page=1");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AccountRegistrationContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account registrations");
+
+        assert!(
+            items.iter().any(|x| x.deposit.as_deref() != Some("0")),
+            "expected at least one registration item with a resolved deposit, got: {items:?}"
+        );
     }
 
     #[tokio::test]

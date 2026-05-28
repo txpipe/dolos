@@ -1,6 +1,6 @@
 openapi: 3.0.0
 info:
-  version: 0.1.87
+  version: 0.1.88
   title: Blockfrost.io ~ API Documentation
   x-logo:
     url: https://staging.blockfrost.io/images/logo.svg
