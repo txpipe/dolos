@@ -5,14 +5,14 @@ use axum::{
     Json,
 };
 use dolos_cardano::{indexes::CardanoIndexExt, network_from_genesis, pallas_extras};
-use dolos_core::{Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet};
+use dolos_core::{
+    async_query::BlockRefMeta, Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet,
+};
 use pallas::codec::minicbor;
 use pallas::ledger::{
     addresses::{Address, StakeAddress},
     primitives::{conway::DatumOption, conway::ScriptRef, StakeCredential},
-    traverse::{
-        ComputeHash, Era, MultiEraBlock, MultiEraOutput, MultiEraTx, MultiEraValue, OriginalHash,
-    },
+    traverse::{ComputeHash, Era, MultiEraOutput, MultiEraTx, MultiEraValue, OriginalHash},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -228,13 +228,6 @@ enum OutputFilter {
     Asset(AssetFilter),
 }
 
-#[derive(Clone, Copy)]
-struct BlockInfo {
-    slot_no: u64,
-    header_hash: pallas::crypto::hash::Hash<32>,
-    tx_index: usize,
-}
-
 fn refs_for_address_pattern<D: Domain>(
     facade: &Facade<D>,
     pattern: &patterns::AddressPattern,
@@ -432,7 +425,7 @@ async fn build_matches<D: Domain>(
         .get_utxos(refs.into_iter().collect())
         .map_err(|_| MatchError::Internal)?;
 
-    let mut block_cache: HashMap<pallas::crypto::hash::Hash<32>, BlockInfo> = HashMap::new();
+    let mut block_cache: HashMap<pallas::crypto::hash::Hash<32>, BlockRefMeta> = HashMap::new();
     let mut out = Vec::new();
 
     for (txo_ref, cbor) in utxos {
@@ -446,24 +439,18 @@ async fn build_matches<D: Domain>(
 
         let tx_hash = txo_ref.0;
         let block_info = match block_cache.get(&tx_hash) {
-            Some(info) => *info,
+            Some(info) => info.clone(),
             None => {
-                let Some((raw_block, tx_index)) = facade
+                let Some(info) = facade
                     .query()
-                    .block_by_tx_hash(tx_hash.to_vec())
+                    .block_meta_by_tx_hash(tx_hash.to_vec())
                     .await
                     .map_err(|_| MatchError::Internal)?
                 else {
                     return Err(MatchError::Internal);
                 };
 
-                let block = MultiEraBlock::decode(&raw_block).map_err(|_| MatchError::Internal)?;
-                let info = BlockInfo {
-                    slot_no: block.slot(),
-                    header_hash: block.header().hash(),
-                    tx_index,
-                };
-                block_cache.insert(tx_hash, info);
+                block_cache.insert(tx_hash, info.clone());
                 info
             }
         };
@@ -488,8 +475,8 @@ async fn build_matches<D: Domain>(
             script_hash: script_hash.map(|hash: pallas::crypto::hash::Hash<28>| hash.to_string()),
             script,
             created_at: PointResponse {
-                slot_no: block_info.slot_no,
-                header_hash: block_info.header_hash.to_string(),
+                slot_no: block_info.slot,
+                header_hash: block_info.hash.to_string(),
             },
             spent_at: None,
         });
