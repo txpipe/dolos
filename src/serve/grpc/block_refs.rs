@@ -68,7 +68,7 @@ where
                         slot,
                         hash: *hash,
                         height,
-                        timestamp: chain_summary.slot_time(slot),
+                        timestamp: chain_summary.slot_time(slot) * 1000,
                     },
                 );
             }
