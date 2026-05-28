@@ -1,19 +1,12 @@
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 use futures_core::Stream;
 
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
-}
-
 /// Build a no-op waker for synchronously driving streams in tests.
 pub fn noop_waker() -> Waker {
-    Arc::new(NoopWake).into()
+    Waker::noop().clone()
 }
 
 /// A generic stream backed by a scripted sequence of poll results.

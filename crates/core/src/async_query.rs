@@ -5,9 +5,22 @@ use tokio::sync::Semaphore;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
-    archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension, TxOrder,
+    archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockHash, BlockHeight,
+    BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension,
+    TxOrder,
 };
+
+/// Lightweight block metadata for a transaction, extracted via a single decode.
+///
+/// Returned by `block_meta_by_tx_hash`. Callers that need the full block body
+/// should use `block_by_tx_hash` instead.
+#[derive(Debug, Clone)]
+pub struct BlockRefMeta {
+    pub slot: BlockSlot,
+    pub hash: BlockHash,
+    pub height: BlockHeight,
+    pub tx_index: TxOrder,
+}
 
 #[derive(Debug, Clone)]
 pub struct AsyncQueryOptions {
@@ -132,6 +145,42 @@ where
         }
 
         Ok(None)
+    }
+
+    /// Look up the block containing a given transaction hash and return only
+    /// chain-point metadata, decoding the block once inside the blocking task.
+    ///
+    /// Prefer this over `block_by_tx_hash` when only the chain point is needed —
+    /// it avoids a second `MultiEraBlock::decode` in the caller.
+    pub async fn block_meta_by_tx_hash(
+        &self,
+        tx_hash: Vec<u8>,
+    ) -> Result<Option<BlockRefMeta>, DomainError> {
+        self.run_blocking(move |domain| {
+            let Some(slot) = domain.indexes().slot_by_tx_hash(&tx_hash)? else {
+                return Ok(None);
+            };
+            let Some(raw) = domain.archive().get_block_by_slot(&slot)? else {
+                return Ok(None);
+            };
+            let block = MultiEraBlock::decode(raw.as_slice())
+                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
+            let Some((tx_index, _)) = block
+                .txs()
+                .iter()
+                .enumerate()
+                .find(|(_, tx)| tx.hash().as_slice() == tx_hash.as_slice())
+            else {
+                return Ok(None);
+            };
+            Ok(Some(BlockRefMeta {
+                slot: block.slot(),
+                hash: block.hash(),
+                height: block.number(),
+                tx_index,
+            }))
+        })
+        .await
     }
 
     pub async fn tx_cbor(&self, tx_hash: Vec<u8>) -> Result<Option<EraCbor>, DomainError> {

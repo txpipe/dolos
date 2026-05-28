@@ -274,7 +274,11 @@ where
             .map_err(|e| Status::internal(format!("Unable to read WAL: {e:?}")))?
             .ok_or(Status::internal("chain has no data."))?;
 
-        let timestamp = self.domain.get_slot_timestamp(point.slot()).unwrap_or(0);
+        let timestamp = self
+            .domain
+            .get_slot_timestamp(point.slot())
+            .map(|s| s * 1000)
+            .unwrap_or(0);
         let response = u5c::sync::ReadTipResponse {
             tip: Some(point_to_blockref(&point, timestamp)),
         };
