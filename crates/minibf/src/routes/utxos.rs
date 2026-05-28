@@ -2,14 +2,14 @@ use axum::http::StatusCode;
 use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
 use futures::future::join_all;
 use itertools::Itertools;
-use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::{HashMap, HashSet};
 
 use dolos_cardano::indexes::AsyncCardanoQueryExt;
-use dolos_core::{Domain, StateStore as _, TxHash, TxoRef};
+use dolos_core::{async_query::BlockRefMeta, Domain, StateStore as _, TxHash, TxoRef};
 
 use crate::{
-    mapping::{IntoModel, UtxoBlockData, UtxoOutputModelBuilder},
+    mapping::{IntoModel, UtxoOutputModelBuilder},
     pagination::{Order, Pagination},
     Facade,
 };
@@ -35,20 +35,11 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
-    let block_deps: HashMap<TxHash, UtxoBlockData> = join_all(tx_deps.iter().map(|tx| {
+    let block_deps: HashMap<TxHash, BlockRefMeta> = join_all(tx_deps.iter().map(|tx| {
         let tx = *tx;
         async move {
-            match domain.query().block_by_tx_hash(tx.to_vec()).await {
-                Ok(Some((cbor, txorder))) => {
-                    let Ok(block) = MultiEraBlock::decode(&cbor) else {
-                        return Some(Err(StatusCode::INTERNAL_SERVER_ERROR));
-                    };
-                    let block_data = match UtxoBlockData::try_from((block, txorder)) {
-                        Ok(data) => data,
-                        Err(err) => return Some(Err(err)),
-                    };
-                    Some(Ok((tx, block_data)))
-                }
+            match domain.query().block_meta_by_tx_hash(tx.to_vec()).await {
+                Ok(Some(block_data)) => Some(Ok((tx, block_data))),
                 Ok(None) => None,
                 Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
             }

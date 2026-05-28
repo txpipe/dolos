@@ -7,7 +7,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 use crate::{
     archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockHash, BlockHeight,
     BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension,
-    TxOrder,
+    TxHash, TxOrder,
 };
 
 /// Lightweight block metadata for a transaction, extracted via a single decode.
@@ -19,6 +19,7 @@ pub struct BlockRefMeta {
     pub slot: BlockSlot,
     pub hash: BlockHash,
     pub height: BlockHeight,
+    pub tx_hash: TxHash,
     pub tx_index: TxOrder,
 }
 
@@ -177,6 +178,7 @@ where
                 slot: block.slot(),
                 hash: block.hash(),
                 height: block.number(),
+                tx_hash: tx_hash.as_slice().into(),
                 tx_index,
             }))
         })

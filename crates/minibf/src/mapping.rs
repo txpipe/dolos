@@ -56,7 +56,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
 };
-use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+use dolos_core::{async_query::BlockRefMeta, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
 
@@ -377,36 +377,11 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
     }
 }
 
-#[derive(Clone)]
-pub struct UtxoBlockData {
-    pub block_slot: BlockSlot,
-    pub block_hash: Hash<32>,
-    pub tx_hash: Hash<32>,
-    pub tx_order: TxOrder,
-}
-
-impl TryFrom<(MultiEraBlock<'_>, TxOrder)> for UtxoBlockData {
-    type Error = StatusCode;
-    fn try_from(value: (MultiEraBlock<'_>, TxOrder)) -> Result<Self, Self::Error> {
-        Ok(Self {
-            block_slot: value.0.slot(),
-            block_hash: value.0.hash(),
-            tx_hash: value
-                .0
-                .txs()
-                .get(value.1)
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-                .hash(),
-            tx_order: value.1,
-        })
-    }
-}
-
 pub struct UtxoOutputModelBuilder<'a> {
     txo_ref: TxoRef,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
-    block_data: Option<UtxoBlockData>,
+    block_data: Option<BlockRefMeta>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -440,7 +415,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
         }
     }
 
-    pub fn with_block_data(self, block_data: UtxoBlockData) -> Self {
+    pub fn with_block_data(self, block_data: BlockRefMeta) -> Self {
         Self {
             block_data: Some(block_data),
             ..self
@@ -500,7 +475,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     fn sort_key(&self) -> Option<Self::SortKey> {
         self.block_data
             .as_ref()
-            .map(|data| (data.block_slot, data.tx_order, self.txo_ref.1))
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
@@ -514,7 +489,7 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
             block: self
                 .block_data
                 .as_ref()
-                .map(|b| b.block_hash.to_string())
+                .map(|b| b.hash.to_string())
                 .unwrap_or_default(),
             output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
