@@ -6,6 +6,7 @@ use tracing::info;
 
 use crate::prelude::*;
 
+pub(crate) mod block_refs;
 mod convert;
 mod masking;
 mod stream;
@@ -48,10 +49,9 @@ where
             v1beta::watch::WatchServiceImpl::new(domain.clone(), cancel.clone()),
         );
 
-        let submit_v1alpha =
-            v1alpha::spec::submit::submit_service_server::SubmitServiceServer::new(
-                v1alpha::submit::SubmitServiceImpl::new(domain.clone()),
-            );
+        let submit_v1alpha = v1alpha::spec::submit::submit_service_server::SubmitServiceServer::new(
+            v1alpha::submit::SubmitServiceImpl::new(domain.clone()),
+        );
         let submit_v1beta = v1beta::spec::submit::submit_service_server::SubmitServiceServer::new(
             v1beta::submit::SubmitServiceImpl::new(domain.clone()),
         );
