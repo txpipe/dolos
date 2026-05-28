@@ -83,7 +83,9 @@ fn append_path_filtered(
 
     let header = deterministic_header(source)?;
     let file = File::open(source).into_diagnostic()?;
-    archive.append_data(&mut header.clone(), name, file).into_diagnostic()?;
+    archive
+        .append_data(&mut header.clone(), name, file)
+        .into_diagnostic()?;
 
     Ok(())
 }
@@ -94,7 +96,9 @@ fn append_dir_filtered(
     name: &Path,
 ) -> miette::Result<()> {
     let header = deterministic_header(source)?;
-    archive.append_data(&mut header.clone(), name, &[] as &[u8]).into_diagnostic()?;
+    archive
+        .append_data(&mut header.clone(), name, &[] as &[u8])
+        .into_diagnostic()?;
 
     let mut entries: Vec<_> = std::fs::read_dir(source)
         .into_diagnostic()?
@@ -117,7 +121,9 @@ fn append_dir_filtered(
         } else {
             let header = deterministic_header(&path)?;
             let file = File::open(&path).into_diagnostic()?;
-            archive.append_data(&mut header.clone(), &entry_name, file).into_diagnostic()?;
+            archive
+                .append_data(&mut header.clone(), &entry_name, file)
+                .into_diagnostic()?;
         }
     }
 
@@ -154,14 +160,20 @@ pub fn run(
 
     // prepare_archive requires direct redb access
     match &mut stores.archive {
-        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => {
-            prepare_archive(s, &pb)?
-        }
+        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
         ArchiveStoreBackend::Redb(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
             bail!("export command is not available for noop archive backend")
         }
     }
+
+    // Ensure all stores flush pending work and release filesystem state before
+    // we archive their on-disk files.
+    stores.wal.shutdown().into_diagnostic()?;
+    stores.state.shutdown().into_diagnostic()?;
+    stores.archive.shutdown().into_diagnostic()?;
+    stores.indexes.shutdown().into_diagnostic()?;
+    drop(stores);
 
     if args.include_archive {
         let path = root.join("archive");
