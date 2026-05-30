@@ -4,7 +4,7 @@ use tx3_resolver::{Expression, StructExpr};
 
 use dolos_core::{EraCbor, TxoRef};
 use pallas::{
-    codec::utils::KeyValuePairs,
+    codec::{minicbor, utils::KeyValuePairs},
     ledger::{
         primitives::{conway::DatumOption, BigInt, Constr, PlutusData},
         traverse::{Era, MultiEraAsset, MultiEraOutput, MultiEraPolicyAssets, MultiEraValue},
@@ -132,11 +132,22 @@ pub fn into_tx3_utxo(
         _ => None,
     };
 
+    // Carry the full tagged `ScriptRef` CBOR (the `[tag, body]` array) so the
+    // compiler can read the reference script's Plutus language directly from
+    // its tag. We must NOT store only the inner script body, which would drop
+    // the language tag.
+    let script = parsed
+        .script_ref()
+        .map(|script_ref| minicbor::to_vec(&script_ref))
+        .transpose()
+        .map_err(|e| tx3_resolver::Error::StoreError(e.to_string()))?
+        .map(Expression::Bytes);
+
     Ok(tx3_resolver::Utxo {
         r#ref,
         address,
         datum,
         assets,
-        script: None,
+        script,
     })
 }
