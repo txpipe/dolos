@@ -10,7 +10,7 @@ jobs:
     name: Check Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
 
       - uses: actions-rs/toolchain@v1
@@ -39,7 +39,7 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
 
       - uses: actions-rs/toolchain@v1
