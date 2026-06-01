@@ -38,6 +38,6 @@ tx3-resolver = "0.21.0"
 dolos-testing = { path = "../testing" }
 rand = "0.9.1"
 
-# tx3-sdk = "0.13.0"
+tx3-sdk = "0.12.0"
 # tx3-sdk = { path = "../../../../rust-sdk" }
-tx3-sdk = { git = "https://github.com/tx3-lang/rust-sdk.git" }
+# tx3-sdk = { git = "https://github.com/tx3-lang/rust-sdk.git" }
