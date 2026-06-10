@@ -688,6 +688,27 @@ pub struct GrpcConfig {
     pub tls_client_ca_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permissive_cors: Option<bool>,
+
+    // --- HTTP/2 transport tuning ---
+    /// Enable hyper's adaptive (BDP-based) flow-control windowing. Defaults to
+    /// `true`. When enabled, the explicit `http2_initial_*_window_size` values
+    /// are ignored by hyper (adaptive sizing takes precedence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_adaptive_window: Option<bool>,
+    /// Initial HTTP/2 stream-level flow-control window, in bytes. Ignored when
+    /// `http2_adaptive_window` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_initial_stream_window_size: Option<u32>,
+    /// Initial HTTP/2 connection-level flow-control window, in bytes. Ignored
+    /// when `http2_adaptive_window` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_initial_connection_window_size: Option<u32>,
+    /// Maximum HTTP/2 frame size, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_max_frame_size: Option<u32>,
+    /// Maximum number of concurrent HTTP/2 streams per connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_max_concurrent_streams: Option<u32>,
 }
 
 impl GrpcConfig {
@@ -696,6 +717,11 @@ impl GrpcConfig {
             listen_address,
             tls_client_ca_root,
             permissive_cors: None,
+            http2_adaptive_window: None,
+            http2_initial_stream_window_size: None,
+            http2_initial_connection_window_size: None,
+            http2_max_frame_size: None,
+            http2_max_concurrent_streams: None,
         }
     }
 
@@ -706,6 +732,11 @@ impl GrpcConfig {
 
     pub fn permissive_cors(&self) -> bool {
         self.permissive_cors.unwrap_or(true)
+    }
+
+    /// Whether adaptive HTTP/2 windowing should be used. Defaults to `true`.
+    pub fn http2_adaptive_window(&self) -> bool {
+        self.http2_adaptive_window.unwrap_or(true)
     }
 }
 
