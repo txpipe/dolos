@@ -264,15 +264,27 @@ The `submit` section controls how Dolos submits transactions to the network. Thi
 
 The `serve.grpc` section controls the options for the gRPC endpoint that can be used by clients.
 
-| property           | type    | example             |
-| ------------------ | ------- | ------------------- |
-| listen_address     | string  | "[::]:50051"        |
-| tls_client_ca_root | string  | "./ca.pem"          |
-| permissive_cors    | boolean | true (default)      |
+| property                             | type    | example        |
+| ------------------------------------ | ------- | -------------- |
+| listen_address                       | string  | "[::]:50051"   |
+| tls_client_ca_root                   | string  | "./ca.pem"     |
+| permissive_cors                      | boolean | true (default) |
+| http2_adaptive_window                | boolean | true (default) |
+| http2_initial_stream_window_size     | integer | 8388608        |
+| http2_initial_connection_window_size | integer | 16777216       |
+| http2_max_frame_size                 | integer | 16384          |
+| http2_max_concurrent_streams         | integer | 256            |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming gRPC connections (`[::]` represents any IP address).
 - `tls_client_ca_root`: optional path to a CA root file for client TLS authentication.
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
+- `http2_adaptive_window`: enable hyper's adaptive (BDP-based) HTTP/2 flow-control windowing, auto-sizing the stream/connection windows to the link instead of pinning them at the 64 KiB default. Defaults to `true`. When enabled, `http2_initial_stream_window_size` and `http2_initial_connection_window_size` are ignored (the two modes are mutually exclusive in hyper).
+- `http2_initial_stream_window_size`: explicit initial stream-level flow-control window in bytes. Only takes effect when `http2_adaptive_window` is set to `false`.
+- `http2_initial_connection_window_size`: explicit initial connection-level flow-control window in bytes. Only takes effect when `http2_adaptive_window` is set to `false`.
+- `http2_max_frame_size`: maximum HTTP/2 frame size in bytes.
+- `http2_max_concurrent_streams`: maximum number of concurrent HTTP/2 streams per connection.
+
+Note: HTTP/2 flow control is hop-by-hop and the receiver advertises the window that gates the sender. For server-streaming RPCs dolos is the sender, so these server-side windows govern downloads only when a client connects to dolos directly; behind a proxy the proxy's advertised window applies instead.
 
 ## `serve.minibf` section
 

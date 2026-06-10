@@ -2,7 +2,7 @@ use dolos_core::config::GrpcConfig;
 use pallas::interop::utxorpc::LedgerContext;
 use tonic::transport::{Certificate, Server, ServerTlsConfig};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::prelude::*;
 
@@ -12,6 +12,43 @@ mod masking;
 mod stream;
 mod v1alpha;
 mod v1beta;
+
+/// Applies the HTTP/2 transport tuning from [`GrpcConfig`] to the tonic server
+/// builder.
+///
+/// Adaptive windowing (BDP-based) is on by default and, when enabled, makes the
+/// explicit window sizes moot — hyper auto-sizes the stream/connection windows
+/// to the link. The two modes are mutually exclusive in hyper, so we warn if
+/// both are set rather than silently dropping the fixed sizes.
+fn apply_http2_tuning(mut server: Server, cfg: &GrpcConfig) -> Server {
+    if let Some(f) = cfg.http2_max_frame_size {
+        server = server.max_frame_size(Some(f));
+    }
+    if let Some(s) = cfg.http2_max_concurrent_streams {
+        server = server.max_concurrent_streams(Some(s));
+    }
+
+    if cfg.http2_adaptive_window() {
+        if cfg.http2_initial_stream_window_size.is_some()
+            || cfg.http2_initial_connection_window_size.is_some()
+        {
+            warn!(
+                "grpc: http2_adaptive_window is enabled, so http2_initial_stream_window_size \
+                 and http2_initial_connection_window_size are ignored"
+            );
+        }
+        return server.http2_adaptive_window(Some(true));
+    }
+
+    if let Some(w) = cfg.http2_initial_stream_window_size {
+        server = server.initial_stream_window_size(Some(w));
+    }
+    if let Some(w) = cfg.http2_initial_connection_window_size {
+        server = server.initial_connection_window_size(Some(w));
+    }
+
+    server
+}
 
 #[derive(Clone)]
 pub struct ContextAdapter<T: dolos_core::StateStore>(T);
@@ -77,7 +114,9 @@ where
             CorsLayer::new()
         };
 
-        let mut server = Server::builder().accept_http1(true).layer(cors_layer);
+        let builder = apply_http2_tuning(Server::builder().accept_http1(true), &cfg);
+
+        let mut server = builder.layer(cors_layer);
 
         if let Some(pem) = &cfg.tls_client_ca_root {
             let pem = std::env::current_dir().unwrap().join(pem);
