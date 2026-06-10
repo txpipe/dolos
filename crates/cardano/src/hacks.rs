@@ -321,6 +321,14 @@ pub mod proposals {
                 "17e78f5e08ba112509729d81f28005caa161878238df3cfc4af983abdc96f9f3#0" => {
                     Canceled(252)
                 }
+                // Parameter Change enacted at epoch 289
+                "3e1b4d548e3cb10944aa42168c9e0e6c43636e96d0db7fa630645e713c722451#0" => {
+                    Ratified(288)
+                }
+                // Hard Fork Initiation enacted at epoch 294
+                "79fb4bac13dfc272a53357309f70bc8c60f1950137b24585b850147251ff2554#0" => {
+                    Ratified(293)
+                }
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
                     _ => Unknown,
@@ -667,6 +675,34 @@ pub mod proposals {
                 // Treasury Withdrawal (6,900,000 ADA)
                 "f35285db3c4e085ad331843b3007737952b8a322bb3216311edc37fdf44ad3da#0" => {
                     Ratified(624)
+                }
+
+                // Treasury Withdrawals batch enacted at epoch 634 (6 outputs)
+                "73e171a4c0730b4b59ecae271ab89f12a9d56360b02920e1f95107dbdc1d6762#0" => {
+                    Ratified(633)
+                }
+                "73e171a4c0730b4b59ecae271ab89f12a9d56360b02920e1f95107dbdc1d6762#1" => {
+                    Ratified(633)
+                }
+                "73e171a4c0730b4b59ecae271ab89f12a9d56360b02920e1f95107dbdc1d6762#2" => {
+                    Ratified(633)
+                }
+                "73e171a4c0730b4b59ecae271ab89f12a9d56360b02920e1f95107dbdc1d6762#3" => {
+                    Ratified(633)
+                }
+                "73e171a4c0730b4b59ecae271ab89f12a9d56360b02920e1f95107dbdc1d6762#5" => {
+                    Ratified(633)
+                }
+                "73e171a4c0730b4b59ecae271ab89f12a9d56360b02920e1f95107dbdc1d6762#6" => {
+                    Ratified(633)
+                }
+                // Treasury Withdrawal (3,303,750 ADA) enacted at epoch 635
+                "3f0ff0d848cab1036621f92732fef5ea1cb6466305889777ee95496933dfd1e4#0" => {
+                    Ratified(634)
+                }
+                // Treasury Withdrawal (4,600,000 ADA) enacted at epoch 635
+                "4206ae0bc11ba74f9eb86cd561ba684e44f0f9dfe12bc8f23911422a7e0a75f3#0" => {
+                    Ratified(634)
                 }
 
                 _ => match protocol {
