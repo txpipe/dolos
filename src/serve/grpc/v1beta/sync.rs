@@ -9,6 +9,7 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::prelude::*;
+use crate::serve::grpc::masking::BlockMask;
 
 const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
 
@@ -17,60 +18,6 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Stat
         block_ref.slot,
         crate::serve::grpc::convert::bytes_to_hash32(&block_ref.hash)?,
     ))
-}
-
-/// Selects which representations of an `AnyChainBlock` are populated.
-///
-/// `AnyChainBlock` can carry both the raw `native_bytes` and a fully parsed
-/// chain block. Parsing (and serializing) the parsed block is the dominant cost
-/// of a sync response, so we honor the request's `field_mask` to avoid doing
-/// work the consumer didn't ask for.
-#[derive(Clone, Copy)]
-struct BlockMask {
-    native_bytes: bool,
-    chain: bool,
-}
-
-impl BlockMask {
-    const fn all() -> Self {
-        Self {
-            native_bytes: true,
-            chain: true,
-        }
-    }
-
-    /// Interprets a `google.protobuf.FieldMask`'s paths against `AnyChainBlock`.
-    ///
-    /// An absent or empty mask selects everything (backwards compatible). Paths
-    /// are matched leniently: a leading `block.` segment (referring to the
-    /// repeated `block` field in the response message) is tolerated, as is a
-    /// bare leaf name. Recognized leaves are `native_bytes` and the parsed
-    /// chain (`cardano`/`chain`). Selecting the whole `block` field keeps both.
-    fn from_paths(paths: &[String]) -> Self {
-        if paths.is_empty() {
-            return Self::all();
-        }
-
-        let mut mask = Self {
-            native_bytes: false,
-            chain: false,
-        };
-
-        for path in paths {
-            // Tolerate the response-relative `block.` prefix.
-            let field = path.strip_prefix("block.").unwrap_or(path);
-            // Only the first segment matters for deciding what to populate.
-            match field.split('.').next().unwrap_or("") {
-                "native_bytes" => mask.native_bytes = true,
-                "cardano" | "chain" => mask.chain = true,
-                // The whole block (or an unrecognized empty path) keeps both.
-                "" | "block" => return Self::all(),
-                _ => {}
-            }
-        }
-
-        mask
-    }
 }
 
 fn raw_to_anychain<C: LedgerContext>(
@@ -427,37 +374,6 @@ mod tests {
 
         assert_eq!(response.block.len(), 4);
         assert_eq!(response.next_token, None);
-    }
-
-    #[test]
-    fn block_mask_from_paths_semantics() {
-        // Absent/empty mask keeps everything.
-        let all = BlockMask::from_paths(&[]);
-        assert!(all.native_bytes && all.chain);
-
-        // Bare leaf names.
-        let bytes_only = BlockMask::from_paths(&["native_bytes".to_string()]);
-        assert!(bytes_only.native_bytes && !bytes_only.chain);
-
-        let chain_only = BlockMask::from_paths(&["cardano".to_string()]);
-        assert!(!chain_only.native_bytes && chain_only.chain);
-
-        // Response-relative `block.` prefix is tolerated (as the user reported).
-        let prefixed = BlockMask::from_paths(&["block.native_bytes".to_string()]);
-        assert!(prefixed.native_bytes && !prefixed.chain);
-
-        // Deeper paths into the parsed block select the chain representation.
-        let deep = BlockMask::from_paths(&["block.cardano.header".to_string()]);
-        assert!(!deep.native_bytes && deep.chain);
-
-        // Selecting the whole block keeps both.
-        let whole = BlockMask::from_paths(&["block".to_string()]);
-        assert!(whole.native_bytes && whole.chain);
-
-        // Multiple paths accumulate.
-        let both =
-            BlockMask::from_paths(&["native_bytes".to_string(), "cardano".to_string()]);
-        assert!(both.native_bytes && both.chain);
     }
 
     #[tokio::test]
