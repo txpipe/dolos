@@ -19,15 +19,76 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Stat
     ))
 }
 
+/// Selects which representations of an `AnyChainBlock` are populated.
+///
+/// `AnyChainBlock` can carry both the raw `native_bytes` and a fully parsed
+/// chain block. Parsing (and serializing) the parsed block is the dominant cost
+/// of a sync response, so we honor the request's `field_mask` to avoid doing
+/// work the consumer didn't ask for.
+#[derive(Clone, Copy)]
+struct BlockMask {
+    native_bytes: bool,
+    chain: bool,
+}
+
+impl BlockMask {
+    const fn all() -> Self {
+        Self {
+            native_bytes: true,
+            chain: true,
+        }
+    }
+
+    /// Interprets a `google.protobuf.FieldMask`'s paths against `AnyChainBlock`.
+    ///
+    /// An absent or empty mask selects everything (backwards compatible). Paths
+    /// are matched leniently: a leading `block.` segment (referring to the
+    /// repeated `block` field in the response message) is tolerated, as is a
+    /// bare leaf name. Recognized leaves are `native_bytes` and the parsed
+    /// chain (`cardano`/`chain`). Selecting the whole `block` field keeps both.
+    fn from_paths(paths: &[String]) -> Self {
+        if paths.is_empty() {
+            return Self::all();
+        }
+
+        let mut mask = Self {
+            native_bytes: false,
+            chain: false,
+        };
+
+        for path in paths {
+            // Tolerate the response-relative `block.` prefix.
+            let field = path.strip_prefix("block.").unwrap_or(path);
+            // Only the first segment matters for deciding what to populate.
+            match field.split('.').next().unwrap_or("") {
+                "native_bytes" => mask.native_bytes = true,
+                "cardano" | "chain" => mask.chain = true,
+                // The whole block (or an unrecognized empty path) keeps both.
+                "" | "block" => return Self::all(),
+                _ => {}
+            }
+        }
+
+        mask
+    }
+}
+
 fn raw_to_anychain<C: LedgerContext>(
     mapper: &Mapper<C>,
     body: &BlockBody,
+    mask: BlockMask,
 ) -> u5c::sync::AnyChainBlock {
-    let block = mapper.map_block_cbor(body);
-
     u5c::sync::AnyChainBlock {
-        native_bytes: body.to_vec().into(),
-        chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
+        native_bytes: if mask.native_bytes {
+            body.to_vec().into()
+        } else {
+            Default::default()
+        },
+        chain: if mask.chain {
+            u5c::sync::any_chain_block::Chain::Cardano(mapper.map_block_cbor(body)).into()
+        } else {
+            None
+        },
     }
 }
 
@@ -58,20 +119,21 @@ fn point_to_blockref(point: &ChainPoint, timestamp: u64) -> u5c::sync::BlockRef 
 fn tip_event_to_response<C: LedgerContext>(
     mapper: &Mapper<C>,
     event: &TipEvent,
+    mask: BlockMask,
 ) -> u5c::sync::FollowTipResponse {
     match event {
         TipEvent::Apply(_, block) => {
             let block_ref = raw_to_blockref(mapper, block);
             u5c::sync::FollowTipResponse {
                 action: Some(u5c::sync::follow_tip_response::Action::Apply(
-                    raw_to_anychain(mapper, block),
+                    raw_to_anychain(mapper, block, mask),
                 )),
                 tip: block_ref,
             }
         }
         TipEvent::Undo(_, block) => u5c::sync::FollowTipResponse {
             action: Some(u5c::sync::follow_tip_response::Action::Undo(
-                raw_to_anychain(mapper, block),
+                raw_to_anychain(mapper, block, mask),
             )),
             tip: None, // TODO: we don't have easy access to the new tip here
         },
@@ -125,6 +187,14 @@ where
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
+        let mask = BlockMask::from_paths(
+            message
+                .field_mask
+                .as_ref()
+                .map(|m| m.paths.as_slice())
+                .unwrap_or_default(),
+        );
+
         let query = dolos_core::AsyncQueryFacade::new(self.domain.clone());
 
         let mut out = Vec::new();
@@ -156,7 +226,7 @@ where
                 return Err(Status::not_found(format!("Failed to find block: {br:?}")));
             };
 
-            out.push(raw_to_anychain(&self.mapper, &body));
+            out.push(raw_to_anychain(&self.mapper, &body, mask));
         }
 
         let response = u5c::sync::FetchBlockResponse { block: out };
@@ -169,6 +239,13 @@ where
         request: Request<u5c::sync::DumpHistoryRequest>,
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
+
+        let mask = BlockMask::from_paths(
+            msg.field_mask
+                .as_ref()
+                .map(|m| m.paths.as_slice())
+                .unwrap_or_default(),
+        );
 
         let mut from = None;
 
@@ -223,7 +300,7 @@ where
         let items = range
             .by_ref()
             .take(len)
-            .map(|(_, body)| raw_to_anychain(&self.mapper, &body))
+            .map(|(_, body)| raw_to_anychain(&self.mapper, &body, mask))
             .collect();
 
         let next_token = range
@@ -244,6 +321,14 @@ where
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
+        let mask = BlockMask::from_paths(
+            request
+                .field_mask
+                .as_ref()
+                .map(|m| m.paths.as_slice())
+                .unwrap_or_default(),
+        );
+
         let intersect: Vec<_> = request
             .intersect
             .into_iter()
@@ -258,7 +343,7 @@ where
 
         let mapper = self.mapper.clone();
 
-        let stream = stream.map(move |log| Ok(tip_event_to_response(&mapper, &log)));
+        let stream = stream.map(move |log| Ok(tip_event_to_response(&mapper, &log, mask)));
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -342,6 +427,71 @@ mod tests {
 
         assert_eq!(response.block.len(), 4);
         assert_eq!(response.next_token, None);
+    }
+
+    #[test]
+    fn block_mask_from_paths_semantics() {
+        // Absent/empty mask keeps everything.
+        let all = BlockMask::from_paths(&[]);
+        assert!(all.native_bytes && all.chain);
+
+        // Bare leaf names.
+        let bytes_only = BlockMask::from_paths(&["native_bytes".to_string()]);
+        assert!(bytes_only.native_bytes && !bytes_only.chain);
+
+        let chain_only = BlockMask::from_paths(&["cardano".to_string()]);
+        assert!(!chain_only.native_bytes && chain_only.chain);
+
+        // Response-relative `block.` prefix is tolerated (as the user reported).
+        let prefixed = BlockMask::from_paths(&["block.native_bytes".to_string()]);
+        assert!(prefixed.native_bytes && !prefixed.chain);
+
+        // Deeper paths into the parsed block select the chain representation.
+        let deep = BlockMask::from_paths(&["block.cardano.header".to_string()]);
+        assert!(!deep.native_bytes && deep.chain);
+
+        // Selecting the whole block keeps both.
+        let whole = BlockMask::from_paths(&["block".to_string()]);
+        assert!(whole.native_bytes && whole.chain);
+
+        // Multiple paths accumulate.
+        let both =
+            BlockMask::from_paths(&["native_bytes".to_string(), "cardano".to_string()]);
+        assert!(both.native_bytes && both.chain);
+    }
+
+    #[tokio::test]
+    async fn dump_history_applies_field_mask() {
+        let domain = ToyDomain::new(None, None);
+        let cancel = CancelTokenImpl::default();
+
+        let batch = (0..3)
+            .map(|i| dolos_testing::blocks::make_conway_block(i).1)
+            .collect_vec();
+
+        use dolos_core::ImportExt;
+        domain.import_blocks(batch).unwrap();
+
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let mut request = u5c::sync::DumpHistoryRequest {
+            start_token: None,
+            max_items: 10,
+            field_mask: Some(Default::default()),
+        };
+        request.field_mask.as_mut().unwrap().paths = vec!["block.native_bytes".to_string()];
+
+        let response = service
+            .dump_history(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.block.is_empty());
+        for block in response.block {
+            assert!(!block.native_bytes.is_empty());
+            assert!(block.chain.is_none());
+        }
     }
 
     #[tokio::test]
