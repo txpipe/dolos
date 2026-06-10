@@ -9,6 +9,7 @@ use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
 use crate::prelude::*;
+use crate::serve::grpc::masking::BlockMask;
 
 const MAX_DUMP_HISTORY_ITEMS: u32 = 100;
 
@@ -22,12 +23,19 @@ fn u5c_to_chain_point(block_ref: u5c::sync::BlockRef) -> Result<ChainPoint, Stat
 fn raw_to_anychain<C: LedgerContext>(
     mapper: &Mapper<C>,
     body: &BlockBody,
+    mask: BlockMask,
 ) -> u5c::sync::AnyChainBlock {
-    let block = mapper.map_block_cbor(body);
-
     u5c::sync::AnyChainBlock {
-        native_bytes: body.to_vec().into(),
-        chain: u5c::sync::any_chain_block::Chain::Cardano(block).into(),
+        native_bytes: if mask.native_bytes {
+            body.to_vec().into()
+        } else {
+            Default::default()
+        },
+        chain: if mask.chain {
+            u5c::sync::any_chain_block::Chain::Cardano(mapper.map_block_cbor(body)).into()
+        } else {
+            None
+        },
     }
 }
 
@@ -58,20 +66,21 @@ fn point_to_blockref(point: &ChainPoint, timestamp: u64) -> u5c::sync::BlockRef 
 fn tip_event_to_response<C: LedgerContext>(
     mapper: &Mapper<C>,
     event: &TipEvent,
+    mask: BlockMask,
 ) -> u5c::sync::FollowTipResponse {
     match event {
         TipEvent::Apply(_, block) => {
             let block_ref = raw_to_blockref(mapper, block);
             u5c::sync::FollowTipResponse {
                 action: Some(u5c::sync::follow_tip_response::Action::Apply(
-                    raw_to_anychain(mapper, block),
+                    raw_to_anychain(mapper, block, mask),
                 )),
                 tip: block_ref,
             }
         }
         TipEvent::Undo(_, block) => u5c::sync::FollowTipResponse {
             action: Some(u5c::sync::follow_tip_response::Action::Undo(
-                raw_to_anychain(mapper, block),
+                raw_to_anychain(mapper, block, mask),
             )),
             tip: None, // TODO: we don't have easy access to the new tip here
         },
@@ -125,6 +134,14 @@ where
     ) -> Result<Response<u5c::sync::FetchBlockResponse>, Status> {
         let message = request.into_inner();
 
+        let mask = BlockMask::from_paths(
+            message
+                .field_mask
+                .as_ref()
+                .map(|m| m.paths.as_slice())
+                .unwrap_or_default(),
+        );
+
         let query = dolos_core::AsyncQueryFacade::new(self.domain.clone());
 
         let mut out = Vec::new();
@@ -156,7 +173,7 @@ where
                 return Err(Status::not_found(format!("Failed to find block: {br:?}")));
             };
 
-            out.push(raw_to_anychain(&self.mapper, &body));
+            out.push(raw_to_anychain(&self.mapper, &body, mask));
         }
 
         let response = u5c::sync::FetchBlockResponse { block: out };
@@ -169,6 +186,13 @@ where
         request: Request<u5c::sync::DumpHistoryRequest>,
     ) -> Result<Response<u5c::sync::DumpHistoryResponse>, Status> {
         let msg = request.into_inner();
+
+        let mask = BlockMask::from_paths(
+            msg.field_mask
+                .as_ref()
+                .map(|m| m.paths.as_slice())
+                .unwrap_or_default(),
+        );
 
         let mut from = None;
 
@@ -223,7 +247,7 @@ where
         let items = range
             .by_ref()
             .take(len)
-            .map(|(_, body)| raw_to_anychain(&self.mapper, &body))
+            .map(|(_, body)| raw_to_anychain(&self.mapper, &body, mask))
             .collect();
 
         let next_token = range
@@ -244,6 +268,14 @@ where
     ) -> Result<Response<Self::FollowTipStream>, tonic::Status> {
         let request = request.into_inner();
 
+        let mask = BlockMask::from_paths(
+            request
+                .field_mask
+                .as_ref()
+                .map(|m| m.paths.as_slice())
+                .unwrap_or_default(),
+        );
+
         let intersect: Vec<_> = request
             .intersect
             .into_iter()
@@ -258,7 +290,7 @@ where
 
         let mapper = self.mapper.clone();
 
-        let stream = stream.map(move |log| Ok(tip_event_to_response(&mapper, &log)));
+        let stream = stream.map(move |log| Ok(tip_event_to_response(&mapper, &log, mask)));
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -342,6 +374,40 @@ mod tests {
 
         assert_eq!(response.block.len(), 4);
         assert_eq!(response.next_token, None);
+    }
+
+    #[tokio::test]
+    async fn dump_history_applies_field_mask() {
+        let domain = ToyDomain::new(None, None);
+        let cancel = CancelTokenImpl::default();
+
+        let batch = (0..3)
+            .map(|i| dolos_testing::blocks::make_conway_block(i).1)
+            .collect_vec();
+
+        use dolos_core::ImportExt;
+        domain.import_blocks(batch).unwrap();
+
+        let service = SyncServiceImpl::new(domain, cancel);
+
+        let mut request = u5c::sync::DumpHistoryRequest {
+            start_token: None,
+            max_items: 10,
+            field_mask: Some(Default::default()),
+        };
+        request.field_mask.as_mut().unwrap().paths = vec!["block.native_bytes".to_string()];
+
+        let response = service
+            .dump_history(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!response.block.is_empty());
+        for block in response.block {
+            assert!(!block.native_bytes.is_empty());
+            assert!(block.chain.is_none());
+        }
     }
 
     #[tokio::test]
