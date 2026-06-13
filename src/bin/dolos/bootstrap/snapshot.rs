@@ -50,7 +50,7 @@ impl Args {
 }
 
 const DEFAULT_URL_TEMPLATE: &str =
-    "https://dolos-snapshots.s3-accelerate.amazonaws.com/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
+    "https://dolos-snapshots.txpipe.cloud/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz";
 
 fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
     if config.upstream.is_emulator() {
