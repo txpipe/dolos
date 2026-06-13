@@ -1,4 +1,4 @@
-use ::redb::{Database, ReadableDatabase};
+use ::redb::{Database, ReadableDatabase, ReadableMultimapTable as _};
 use redb::ReadTransaction;
 use std::{
     collections::HashMap,
@@ -105,6 +105,12 @@ impl From<::redb::TransactionError> for RedbArchiveError {
 
 impl From<BucketError> for RedbArchiveError {
     fn from(value: BucketError) -> Self {
+        Self(ArchiveError::InternalError(value.to_string()))
+    }
+}
+
+impl From<::redb::CompactionError> for RedbArchiveError {
+    fn from(value: ::redb::CompactionError) -> Self {
         Self(ArchiveError::InternalError(value.to_string()))
     }
 }
@@ -762,6 +768,63 @@ impl ArchiveStore {
         wx.commit()?;
 
         Ok(done)
+    }
+
+    /// Write all tables in key order into a fresh redb file at `dest_index_path`, then compact.
+    pub fn rebuild_index_to(
+        &self,
+        dest_index_path: impl AsRef<Path>,
+    ) -> Result<(), RedbArchiveError> {
+        let mut fresh = Database::builder().create(dest_index_path.as_ref())?;
+
+        let src_rx = self.db().begin_read()?;
+        let dst_wx = fresh.begin_write()?;
+
+        // BlocksTable: u64 → &[u8]
+        {
+            let src_t = src_rx.open_table(tables::BlocksTable::DEF)?;
+            let mut dst_t = dst_wx.open_table(tables::BlocksTable::DEF)?;
+            for entry in src_t.range(0u64..)? {
+                let (k, v) = entry?;
+                dst_t.insert(k.value(), v.value())?;
+            }
+        }
+
+        // Entity log tables from schema: both &[u8] keyed
+        let mut sorted: Vec<_> = self.tables.iter().collect();
+        sorted.sort_by_key(|(ns, _)| *ns);
+        for (_, table) in sorted {
+            match table {
+                Table::Value(def) => {
+                    let src_t = src_rx.open_table(*def)?;
+                    let mut dst_t = dst_wx.open_table(*def)?;
+                    for entry in src_t.range::<&[u8]>(..)? {
+                        let (k, v) = entry?;
+                        dst_t.insert(k.value(), v.value())?;
+                    }
+                }
+                Table::MultiValue(def) => {
+                    let src_t = src_rx.open_multimap_table(*def)?;
+                    let mut dst_t = dst_wx.open_multimap_table(*def)?;
+                    for entry in src_t.iter()? {
+                        let (k, vals) = entry?;
+                        for val in vals {
+                            let val = val?;
+                            dst_t.insert(k.value(), val.value())?;
+                        }
+                    }
+                }
+            }
+        }
+
+        indexes::Indexes::copy(&src_rx, &dst_wx)?;
+
+        dst_wx.commit()?;
+
+        // Loop-compact the fresh file until the B-tree is fully packed.
+        while fresh.compact()? {}
+
+        Ok(())
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), RedbArchiveError> {
