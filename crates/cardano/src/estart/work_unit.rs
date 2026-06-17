@@ -15,7 +15,8 @@
 //!
 //! `AccountTransition` is not natively idempotent (re-applying double-rolls
 //! the EpochValue snapshot), so true mid-shard resume requires additional
-//! work — same TODO posture as `EwrapWorkUnit`.
+//! work — same TODO posture as `EwrapWorkUnit`. `finalize` is separately
+//! guarded to run exactly once (see `commit_finalize`).
 
 use std::sync::Arc;
 

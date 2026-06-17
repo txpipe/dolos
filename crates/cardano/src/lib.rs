@@ -357,105 +357,51 @@ impl dolos_core::ChainLogic for CardanoLogic {
             None => WorkBuffer::Empty,
         };
 
-        // Crash-recovery check: if the previous process crashed mid-boundary,
-        // `EpochState.ewrap_progress` will be `Some(p)` with `p.committed`
-        // equal to the next Ewrap that should have run, and `p.total` the
-        // boundary's shard count captured at the first commit. Detect and
-        // warn — full resume requires re-fetching the boundary block from
-        // upstream, which is tracked separately. The persisted `total` is
-        // used for the in-flight boundary even if `crate::shard::ACCOUNT_SHARDS`
-        // changed across versions, to avoid breaking the in-progress pipeline.
+        // Crash-recovery diagnostics for a boundary interrupted by a prior
+        // crash. The two progress fields are NOT mutually exclusive: under
+        // `EpochWrapUpV3`, `ewrap_progress` is left at `Some(total, total)`
+        // once the close phase finishes and is only cleared by
+        // `EpochTransition` at ESTART finalize — so mid-open both fields are
+        // set and both checks can fire. These only warn; resume itself is not
+        // yet fully idempotent.
+        // TODO: implement true shard resume (#1018).
         if let Ok(epoch) = load_epoch::<D>(state) {
-            if let Some(progress) = epoch.ewrap_progress.as_ref() {
-                let configured = crate::shard::ACCOUNT_SHARDS;
-                if progress.total != configured {
+            let configured = crate::shard::ACCOUNT_SHARDS;
+            let warn_resume = |phase: &'static str, p: &ShardProgress| {
+                if p.total != configured {
                     tracing::warn!(
+                        phase,
                         epoch = epoch.number,
-                        stored_total = progress.total,
+                        stored_total = p.total,
                         configured_total = configured,
-                        "in-flight boundary uses {} shards but ACCOUNT_SHARDS = {}; \
-                         the in-flight boundary will continue with {} (the persisted total) \
-                         and the new value takes effect on the next boundary",
-                        progress.total,
-                        configured,
-                        progress.total,
+                        "CARDANO-003: in-flight boundary shard count differs from configured; \
+                         continuing with the persisted total"
                     );
                 }
-                if progress.committed < progress.total {
+                if p.committed < p.total {
                     tracing::warn!(
+                        phase,
                         epoch = epoch.number,
-                        next_shard = progress.committed,
-                        total_shards = progress.total,
-                        "crash detected mid-boundary: ewrap_progress is set. \
-                         On the next block that triggers the boundary, dolos will \
-                         resume the Ewrap pipeline; correctness depends on shard \
-                         idempotency (state deletes are no-ops if already applied; \
-                         EWrapProgress guards on shard_index). Operators should \
-                         monitor the subsequent boundary for inconsistency. \
-                         TODO: implement true shard resume."
+                        next_shard = p.committed,
+                        total_shards = p.total,
+                        "CARDANO-004: crash detected mid-boundary; resuming on the next boundary trigger"
                     );
                 } else {
                     tracing::warn!(
+                        phase,
                         epoch = epoch.number,
-                        committed = progress.committed,
-                        total_shards = progress.total,
-                        "found EpochState.ewrap_progress.committed == total \
-                         at startup — EWRAP for this boundary closed in a \
-                         prior run but ESTART finalize did not commit before \
-                         crash. The next boundary trigger will short-circuit \
-                         the EwrapWorkUnit (no replay) and resume the ESTART \
-                         pipeline from estart_progress.committed."
+                        committed = p.committed,
+                        total_shards = p.total,
+                        "CARDANO-005: boundary half-closed at startup; resuming the remaining phase"
                     );
                 }
-            }
+            };
 
-            // Same crash-recovery check for the EStart-shard half of the
-            // boundary. Only one of the two progress fields can be set at
-            // any time — Ewrap clears `ewrap_progress` before any
-            // EStart-shard runs, and `EpochTransition` clears
-            // `estart_progress` when the new epoch opens.
-            if let Some(progress) = epoch.estart_progress.as_ref() {
-                let configured = crate::shard::ACCOUNT_SHARDS;
-                if progress.total != configured {
-                    tracing::warn!(
-                        epoch = epoch.number,
-                        stored_total = progress.total,
-                        configured_total = configured,
-                        "in-flight estart-shard boundary uses {} shards but \
-                         ACCOUNT_SHARDS = {}; the in-flight boundary will \
-                         continue with {} (the persisted total) and the new \
-                         value takes effect on the next boundary",
-                        progress.total,
-                        configured,
-                        progress.total,
-                    );
-                }
-                if progress.committed < progress.total {
-                    tracing::warn!(
-                        epoch = epoch.number,
-                        next_shard = progress.committed,
-                        total_shards = progress.total,
-                        "crash detected mid-boundary: estart_progress is set. \
-                         On the next block that triggers the boundary, dolos will \
-                         resume the EStart-shard pipeline; correctness depends on \
-                         shard idempotency (EStartProgress guards on \
-                         shard_index, but AccountTransition is not natively \
-                         idempotent). Operators should monitor the subsequent \
-                         boundary for inconsistency. TODO: implement true shard \
-                         resume."
-                    );
-                } else {
-                    tracing::warn!(
-                        epoch = epoch.number,
-                        committed = progress.committed,
-                        total_shards = progress.total,
-                        "found EpochState.estart_progress.committed == total \
-                         at startup — Estart finalize was not committed before \
-                         crash. The next boundary attempt will re-run \
-                         EStart-shards and finalize; idempotency should keep the \
-                         result correct."
-                    );
-                }
+            if let Some(p) = epoch.ewrap_progress.as_ref() {
+                warn_resume("ewrap", p);
+            }
+            if let Some(p) = epoch.estart_progress.as_ref() {
+                warn_resume("estart", p);
             }
         }
 
