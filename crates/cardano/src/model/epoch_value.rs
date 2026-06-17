@@ -175,6 +175,17 @@ where
         }
     }
 
+    /// Whether the live position sits exactly at `epoch`.
+    ///
+    /// Snapshot accessors (`mark`/`set`/`go`) are positional relative to the
+    /// live epoch, so they only map to the intended epochs when the value has
+    /// been transitioned in lockstep with the ledger. A healthy entity is
+    /// always at the current epoch (ESTART transitions every entity each
+    /// boundary); a `false` here means the value is lagging.
+    pub fn is_at_epoch(&self, epoch: Epoch) -> bool {
+        self.epoch() == Some(epoch)
+    }
+
     /// Returns a reference to the live value that matches the ongoing epoch.
     pub fn live(&self) -> Option<&T> {
         self.live.as_ref()
@@ -377,5 +388,32 @@ pub(crate) mod testing {
             .prop_map(|(epoch, live, mark, set, go)| {
                 EpochValue::from_parts(epoch, Some(live), None, mark, set, go)
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_at_epoch_matches_live_position() {
+        let value = EpochValue::<u32>::new(1223);
+        assert!(value.is_at_epoch(1223));
+        assert!(!value.is_at_epoch(1222));
+        assert!(!value.is_at_epoch(1224));
+    }
+
+    #[test]
+    fn is_at_epoch_false_at_genesis_position() {
+        let value = EpochValue::<u32> {
+            epoch: EpochPosition::Genesis,
+            next: None,
+            live: None,
+            mark: None,
+            set: None,
+            go: None,
+        };
+        assert_eq!(value.epoch(), None);
+        assert!(!value.is_at_epoch(0));
     }
 }
