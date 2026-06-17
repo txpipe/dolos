@@ -184,6 +184,23 @@ impl super::WorkContext {
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
 
+        // Finalize advances the epoch and rotates every pool in one commit, so
+        // it must run exactly once and only after all shards committed. Require
+        // `committed == total` and that the epoch has not advanced, turning a
+        // would-be double-rotation into a loud error. (Guards finalize only,
+        // not per-shard replay — see the "true shard resume" TODO.)
+        let ended = self.ended_state();
+        let progress = ended.estart_progress.as_ref();
+        let all_shards_committed = progress.is_some_and(|p| p.committed == p.total);
+        if !all_shards_committed {
+            return Err(dolos_core::BrokenInvariant::EpochBoundaryIncomplete {
+                epoch: ended.number,
+                committed: progress.map(|p| p.committed),
+                total: progress.map(|p| p.total),
+            }
+            .into());
+        }
+
         // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;
 

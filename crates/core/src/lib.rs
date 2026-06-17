@@ -250,8 +250,12 @@ pub enum BrokenInvariant {
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
 
-    #[error("epoch boundary incomplete")]
-    EpochBoundaryIncomplete,
+    #[error("CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})")]
+    EpochBoundaryIncomplete {
+        epoch: Epoch,
+        committed: Option<u32>,
+        total: Option<u32>,
+    },
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
@@ -441,10 +445,7 @@ pub enum ChainError {
     #[error("epoch value version not found for epoch {0}")]
     EpochValueVersionNotFound(Epoch),
 
-    #[error(
-        "pool snapshot lagging: pool {pool} at epoch {pool_epoch:?}, expected current epoch \
-         {current_epoch} (stake/performance snapshot unavailable for reward calculation)"
-    )]
+    #[error("CARDANO-001: pool {pool} snapshot at epoch {pool_epoch:?}, expected {current_epoch}")]
     PoolSnapshotLagging {
         pool: String,
         pool_epoch: Option<Epoch>,

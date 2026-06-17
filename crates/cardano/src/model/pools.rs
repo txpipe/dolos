@@ -319,6 +319,12 @@ impl dolos_core::EntityDelta for PoolRegistration {
 pub struct MintedBlocksInc {
     pub(crate) operator: Hash<28>,
     pub(crate) count: u32,
+
+    /// Block epoch, used by `apply` to assert snapshot alignment. Transient
+    /// (`#[serde(skip)]`): WAL deltas are only ever undone, never re-applied,
+    /// so the `0` it decodes to off the WAL is never read.
+    #[serde(skip)]
+    pub(crate) epoch: Epoch,
 }
 
 impl dolos_core::EntityDelta for MintedBlocksInc {
@@ -330,6 +336,18 @@ impl dolos_core::EntityDelta for MintedBlocksInc {
 
     fn apply(&mut self, entity: &mut Option<PoolState>) {
         if let Some(entity) = entity {
+            // `live` is positional: minting into a snapshot that lags this
+            // epoch folds the blocks into a mislabeled slot and corrupts
+            // `blocks_minted`. ESTART keeps every pool aligned, so a mismatch
+            // is a broken invariant — fail loud rather than corrupt.
+            assert!(
+                entity.snapshot.is_at_epoch(self.epoch),
+                "CARDANO-001: pool {} snapshot at epoch {:?} lags block epoch {}",
+                hex::encode(self.operator),
+                entity.snapshot.epoch(),
+                self.epoch,
+            );
+
             entity.blocks_minted_total += self.count;
             let live = entity.snapshot.unwrap_live_mut();
             live.blocks_minted += self.count;
@@ -499,15 +517,6 @@ mod prop_tests {
     }
 
     prop_compose! {
-        fn any_minted_blocks_inc()(
-            operator in root::any_hash_28(),
-            count in 1u32..100u32,
-        ) -> MintedBlocksInc {
-            MintedBlocksInc { operator, count }
-        }
-    }
-
-    prop_compose! {
         fn any_pool_deregistration()(
             operator in root::any_hash_28(),
             epoch in root::any_epoch(),
@@ -547,10 +556,13 @@ mod prop_tests {
 
         #[test]
         fn minted_blocks_inc_roundtrip(
-            entity in prop::option::of(any_pool_state()),
-            delta in any_minted_blocks_inc(),
+            pool in any_pool_state(),
+            count in 1u32..100u32,
         ) {
-            assert_delta_roundtrip(entity, delta);
+            // `apply` asserts alignment, so the delta carries the pool's epoch.
+            let epoch = pool.snapshot.epoch().expect("any_pool_state fills a concrete epoch");
+            let delta = MintedBlocksInc { operator: pool.operator, count, epoch };
+            assert_delta_roundtrip(Some(pool), delta);
         }
 
         #[test]
@@ -576,5 +588,41 @@ mod prop_tests {
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
+    }
+
+    /// A snapshot lagging the block's epoch must panic, not silently corrupt
+    /// `blocks_minted`.
+    #[test]
+    #[should_panic(expected = "CARDANO-001")]
+    fn minting_into_lagging_pool_panics() {
+        use dolos_core::EntityDelta as _;
+
+        let operator = Hash::<28>::from([1u8; 28]);
+        let snapshot = PoolSnapshot {
+            is_retired: false,
+            blocks_minted: 0,
+            is_new: false,
+            params: PoolParams {
+                vrf_keyhash: Hash::from([0u8; 32]),
+                pledge: 0,
+                cost: 0,
+                margin: RationalNumber { numerator: 0, denominator: 1 },
+                reward_account: vec![],
+                pool_owners: vec![],
+                relays: vec![],
+                pool_metadata: None,
+            },
+        };
+        let pool = PoolState {
+            operator,
+            snapshot: EpochValue::with_live(5, snapshot),
+            blocks_minted_total: 0,
+            register_slot: 0,
+            retiring_epoch: None,
+            deposit: 0,
+        };
+
+        // Block epoch 6 runs ahead of the pool's epoch-5 snapshot.
+        MintedBlocksInc { operator, count: 1, epoch: 6 }.apply(&mut Some(pool));
     }
 }

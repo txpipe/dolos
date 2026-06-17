@@ -32,7 +32,11 @@ impl BlockVisitor for PoolStateVisitor {
 
         if let Some(key) = block.header().issuer_vkey() {
             let operator: Hash<28> = Hasher::<224>::hash(key);
-            deltas.add_for_entity(MintedBlocksInc { operator, count: 1 });
+            deltas.add_for_entity(MintedBlocksInc {
+                operator,
+                count: 1,
+                epoch,
+            });
         }
 
         Ok(())
