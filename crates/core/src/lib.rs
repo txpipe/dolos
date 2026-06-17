@@ -441,6 +441,16 @@ pub enum ChainError {
     #[error("epoch value version not found for epoch {0}")]
     EpochValueVersionNotFound(Epoch),
 
+    #[error(
+        "pool snapshot lagging: pool {pool} at epoch {pool_epoch:?}, expected current epoch \
+         {current_epoch} (stake/performance snapshot unavailable for reward calculation)"
+    )]
+    PoolSnapshotLagging {
+        pool: String,
+        pool_epoch: Option<Epoch>,
+        current_epoch: Epoch,
+    },
+
     #[error("missing rewards")]
     MissingRewards,
 
