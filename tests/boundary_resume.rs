@@ -89,6 +89,10 @@ fn synthetic_world(block_count: usize) -> (Vec<dolos_core::RawBlock>, ToyDomain)
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     epoch: u64,
+    /// `EpochState.initial_pots` as (reserves, treasury, utxos, rewards, fees).
+    /// Captures monetary-accounting corruption (e.g. a skipped EWRAP finalize
+    /// that leaves `end.epoch_incentives` unapplied at ESTART reset).
+    pots: (u64, u64, u64, u64, u64),
     /// hex(pool key) -> pool `snapshot.epoch()`
     pools: BTreeMap<String, Option<u64>>,
     /// hex(account key) -> account `stake.epoch()`
@@ -96,7 +100,10 @@ struct Fingerprint {
 }
 
 fn fingerprint(domain: &ToyDomain) -> Fingerprint {
-    let epoch = load_epoch::<ToyDomain>(domain.state()).unwrap().number;
+    let epoch_state = load_epoch::<ToyDomain>(domain.state()).unwrap();
+    let epoch = epoch_state.number;
+    let p = &epoch_state.initial_pots;
+    let pots = (p.reserves, p.treasury, p.utxos, p.rewards, p.fees);
 
     let mut pools = BTreeMap::new();
     for item in domain
@@ -120,6 +127,7 @@ fn fingerprint(domain: &ToyDomain) -> Fingerprint {
 
     Fingerprint {
         epoch,
+        pots,
         pools,
         accounts,
     }
@@ -425,5 +433,115 @@ fn rollback_across_boundary_reapplies_to_identical_state() {
         } else {
             "epoch matches; entity-level divergence"
         },
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scenario C — import crash in the EWRAP *finalize window*.
+//
+// The last EWRAP shard sets ewrap_progress.committed == total
+// (EWrapProgress::apply). EpochWrapUpV3 (the finalize delta that assembles the
+// final EndStats and rotates rolling/pparams) runs in a SEPARATE commit and
+// does not touch ewrap_progress. On restart, EwrapWorkUnit::initialize reads
+// committed == total -> is_complete() -> skips both shards AND finalize.
+//
+// So a crash in [last EWRAP shard committed, before EpochWrapUpV3 commits]
+// permanently skips EpochWrapUpV3 on resume. This test commits every EWRAP
+// shard, stops before finalize, then resumes (re-init sees committed == total
+// and short-circuits finalize), then lets ESTART run — and checks the result
+// against a clean run. ESTART's reset consumes end.epoch_incentives, so if the
+// finalize was wrongly skipped the pots diverge.
+//
+// Targets the 2nd boundary (epoch 1->2), where incentives are non-zero.
+// ---------------------------------------------------------------------------
+
+/// Crash in the EWRAP finalize window, then resume on the same work unit.
+fn run_ewrap_finalize_window_crash_resume(work: &mut CardanoWorkUnit, domain: &ToyDomain) {
+    // crash leg: commit ALL shards (committed -> total), no finalize.
+    WorkUnit::<ToyDomain>::initialize(work, domain).unwrap();
+    let total = WorkUnit::<ToyDomain>::total_shards(work);
+    for shard in 0..total {
+        run_shard(work, domain, shard);
+    }
+    // resume leg: re-init now reads committed == total.
+    WorkUnit::<ToyDomain>::initialize(work, domain).unwrap();
+    let total = WorkUnit::<ToyDomain>::total_shards(work);
+    let start = WorkUnit::<ToyDomain>::start_shard(work);
+    assert_eq!(
+        start, total,
+        "resumed EWRAP should see committed == total (finalize window)"
+    );
+    for shard in start..total {
+        run_shard(work, domain, shard); // empty range
+    }
+    // is_complete() -> finalize short-circuits (EpochWrapUpV3 skipped).
+    WorkUnit::<ToyDomain>::finalize(work, domain).unwrap();
+}
+
+fn feed_import_nth_ewrap_finalize_crash(
+    domain: &ToyDomain,
+    blocks: &[dolos_core::RawBlock],
+    nth: u32,
+) -> bool {
+    fn drain(
+        chain: &mut dolos_cardano::CardanoLogic,
+        domain: &ToyDomain,
+        seen: &mut u32,
+        crashed: &mut bool,
+        nth: u32,
+    ) {
+        while let Some(mut work) =
+            <dolos_cardano::CardanoLogic as ChainLogic>::pop_work::<ToyDomain>(chain, domain)
+        {
+            if matches!(work, CardanoWorkUnit::Ewrap(_)) {
+                *seen += 1;
+                if !*crashed && *seen == nth {
+                    *crashed = true;
+                    run_ewrap_finalize_window_crash_resume(&mut work, domain);
+                    continue;
+                }
+            }
+            run_work_unit_full(&mut work, domain);
+        }
+    }
+
+    let mut seen = 0;
+    let mut crashed = false;
+    let mut chain = domain.write_chain();
+    for block in blocks {
+        if !chain.can_receive_block() {
+            drain(&mut chain, domain, &mut seen, &mut crashed, nth);
+        }
+        chain.receive_block(block.clone()).unwrap();
+    }
+    drain(&mut chain, domain, &mut seen, &mut crashed, nth);
+    crashed
+}
+
+#[test]
+#[ignore = "reproduces #1018: import crash in the EWRAP finalize window skips EpochWrapUpV3 on resume (un-ignore once fixed)"]
+fn import_crash_ewrap_finalize_window_resumes_to_identical_state() {
+    if !require_release() {
+        return;
+    }
+
+    let (blocks, clean) = synthetic_world(260);
+    feed_import_full(&clean, &blocks);
+    let fp_clean = fingerprint(&clean);
+
+    let (blocks2, dom) = synthetic_world(260);
+    let crashed = feed_import_nth_ewrap_finalize_crash(&dom, &blocks2, 2);
+    assert!(crashed, "test should have crashed the 2nd EWRAP");
+    let fp = fingerprint(&dom);
+
+    assert_eq!(
+        fp, fp_clean,
+        "import crash in the EWRAP finalize window must resume to identical state, but diverged.\n\
+         clean   epoch={} pots(reserves,treasury,utxos,rewards,fees)={:?}\n\
+         crashed epoch={} pots(reserves,treasury,utxos,rewards,fees)={:?}\n\
+         The crashed run skipped EpochWrapUpV3 (committed==total was set by the last shard, \
+         one commit before finalize), so epoch incentives + rolling rotation were never applied \
+         at ESTART reset: reserves stay too high and treasury too low.",
+        fp_clean.epoch, fp_clean.pots, fp.epoch, fp.pots,
     );
 }
