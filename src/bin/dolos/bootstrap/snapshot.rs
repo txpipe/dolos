@@ -142,6 +142,10 @@ fn fetch_snapshot_ranged(
 
     let progress = feedback.bytes_progress_bar();
     progress.set_length(total_size);
+    // Keep the bar redrawing even while the downloader is blocked on
+    // backpressure (waiting for the extractor to free a window slot), so it
+    // never looks frozen during a legitimate pause.
+    progress.enable_steady_tick(std::time::Duration::from_millis(120));
 
     let reader = ranged::ranged_reader(
         client.clone(),
