@@ -109,6 +109,14 @@ pub mod proposals {
                 "fa2b252c9d645b376ee68f94ea87764dad6510e201726921e0cb733161ca6ef8#0" => {
                     Ratified(1290)
                 }
+                // Parameter Change enacted at epoch 1330
+                "2a2dc37b22939d3ae7395c8a409d4d0625201c88926d641d6f4441c3287e39ba#0" => {
+                    Ratified(1329)
+                }
+                // ParameterChange superseded by 2a2dc37b...#0 enacted at 1330
+                "1ec9c47c32bbdcd8054bae9d72fde39ea6de02227f91b003a5d3569f7d434f67#0" => {
+                    Canceled(1330)
+                }
                 "69c948cde90c6b9d7d61595e8534c106ec44132cb049ab2558399db1260c1f69#0" => {
                     Ratified(1095)
                 }
@@ -703,6 +711,14 @@ pub mod proposals {
                 // Treasury Withdrawal (4,600,000 ADA) enacted at epoch 635
                 "4206ae0bc11ba74f9eb86cd561ba684e44f0f9dfe12bc8f23911422a7e0a75f3#0" => {
                     Ratified(634)
+                }
+                // Treasury Withdrawal enacted at epoch 637
+                "5ad10ad39f49a0f93ac91e70482f114fdbcbc05b20ac774dbe23a82efbcb820a#0" => {
+                    Ratified(636)
+                }
+                // Parameter Change enacted at epoch 638
+                "c82f3834898e4d70d3605fa0d92ffe31345701075b107a54309c1525f9581f62#0" => {
+                    Ratified(637)
                 }
 
                 _ => match protocol {
