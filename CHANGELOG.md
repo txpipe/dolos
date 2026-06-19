@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-06-19
+
+### 🚀 Features
+
+- *(utxorpc)* Expose configurable HTTP/2 transport tuning (#1011)
+- *(utxorpc)* Honor field_mask in Sync service to skip unused block representations (#1012)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Surface lagging pool snapshots in RUPD instead of obscure panic (#1016)
+- *(cardano)* Fail loud on lagging pool snapshots and unfinished epoch boundaries (#1017)
+- *(minibf)* Source address-utxo tx_hash from TxoRef, not archive block_data (#1009)
+
+### 📚 Documentation
+
+- Re-generate wiped-out changelog
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Add more gov proposal mappings (#1013)
+- Switch snapshot source to R2 (#1014)
+- *(cardano)* Update gov proposal mappings (#1023)
+- *(trp)* Bump tx3-cardano and tx3-resolver to 0.22.0 (#1022)
+- Bump pallas to 1.1.1 (#1024)
+
 ## [1.2.0] - 2026-06-01
 
 ### 🚀 Features
