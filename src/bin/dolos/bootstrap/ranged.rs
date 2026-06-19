@@ -206,10 +206,9 @@ fn download_chunk(
                 let _ = std::fs::remove_file(path);
 
                 if attempt >= MAX_RETRIES {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("range {range} failed after {MAX_RETRIES} retries: {e}"),
-                    ));
+                    return Err(io::Error::other(format!(
+                        "range {range} failed after {MAX_RETRIES} retries: {e}"
+                    )));
                 }
 
                 // Exponential backoff, capped at 16s.
@@ -227,15 +226,13 @@ fn try_download_chunk(client: &Client, url: &str, range: &str, path: &Path) -> i
         .header(RANGE, range)
         .send()
         .and_then(|r| r.error_for_status())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     let mut file = File::create(path)?;
     let mut buf = vec![0u8; 256 * 1024];
 
     loop {
-        let n = response
-            .read(&mut buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let n = response.read(&mut buf).map_err(io::Error::other)?;
         if n == 0 {
             break;
         }
