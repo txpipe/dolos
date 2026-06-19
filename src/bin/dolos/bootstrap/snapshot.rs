@@ -6,6 +6,7 @@ use inquire::list_option::ListOption;
 use miette::{Context, IntoDiagnostic};
 use tar::Archive;
 
+use super::ranged;
 use crate::feedback::{Feedback, ProgressReader};
 
 #[derive(Debug, clap::Args, Default, Clone)]
@@ -107,8 +108,76 @@ fn fetch_snapshot(config: &RootConfig, args: &Args, feedback: &Feedback) -> miet
         "can't find a valid snapshot for this configuration"
     ))?;
 
+    let client = ranged::build_client()?;
+
+    let probe = ranged::probe(&client, &snapshot_url)?;
+
+    if probe.supports_ranges && probe.total_size > 0 {
+        fetch_snapshot_ranged(root, &client, snapshot_url, probe.total_size, feedback)
+    } else {
+        // Fall back to a single streamed response for endpoints that don't
+        // advertise range support (e.g. a custom download_url behind a proxy
+        // that strips Accept-Ranges).
+        fetch_snapshot_streaming(root, snapshot_url, feedback)
+    }
+}
+
+/// Download via bounded byte ranges staged on disk, extracting as chunks land.
+/// Resilient to servers (such as Cloudflare R2) that drop long-lived, slowly
+/// drained streamed responses.
+fn fetch_snapshot_ranged(
+    root: &PathBuf,
+    client: &reqwest::blocking::Client,
+    snapshot_url: String,
+    total_size: u64,
+    feedback: &Feedback,
+) -> miette::Result<()> {
+    let staging = root.join(".dolos-snapshot-tmp");
+
+    // Start from a clean staging dir in case a previous attempt left chunks behind.
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging)
+        .into_diagnostic()
+        .context("Failed to create snapshot staging directory")?;
+
+    let progress = feedback.bytes_progress_bar();
+    progress.set_length(total_size);
+
+    let reader = ranged::ranged_reader(
+        client.clone(),
+        snapshot_url,
+        total_size,
+        staging.clone(),
+        progress,
+    );
+
+    let tar_gz = GzDecoder::new(reader);
+    let mut archive = Archive::new(tar_gz);
+
+    let result = archive
+        .unpack(root)
+        .into_diagnostic()
+        .context("Failed to extract snapshot");
+
+    // Drop the archive (and its reader) before tearing down staging so the
+    // downloader thread is joined and all chunk files are released.
+    drop(archive);
+    let _ = std::fs::remove_dir_all(&staging);
+
+    result
+}
+
+/// Stream a single HTTP response directly into the extractor. Used only when the
+/// endpoint does not support range requests.
+fn fetch_snapshot_streaming(
+    root: &PathBuf,
+    snapshot_url: String,
+    feedback: &Feedback,
+) -> miette::Result<()> {
+    // A single full-body stream must NOT carry an overall request timeout, which
+    // would cap the entire multi-GB transfer. Use a dedicated untimed client.
     let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(10)) // Follow up to 10 redirects
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .into_diagnostic()
         .context("Failed to build HTTP client")?;
