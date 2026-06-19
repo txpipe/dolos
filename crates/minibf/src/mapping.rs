@@ -481,11 +481,10 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
-            tx_hash: self
-                .block_data
-                .as_ref()
-                .map(|data| data.tx_hash.to_string())
-                .unwrap_or_default(),
+            // source the tx_hash from the UTxO's own TxoRef (always present),
+            // not the archive block_data lookup which is None for blocks older
+            // than `max_history` and would yield an empty hash.
+            tx_hash: self.txo_ref.0.to_string(),
             block: self
                 .block_data
                 .as_ref()
