@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-06-20
+
+### 🐛 Bug Fixes
+
+- *(cli)* Download snapshots via ranged ring buffer (#1025)
+- *(cli)* Keep snapshot progress bar live during ranged download (#1026)
+
 ## [1.3.0] - 2026-06-19
 
 ### 🚀 Features
@@ -26,6 +33,10 @@ All notable changes to this project will be documented in this file.
 - *(cardano)* Update gov proposal mappings (#1023)
 - *(trp)* Bump tx3-cardano and tx3-resolver to 0.22.0 (#1022)
 - Bump pallas to 1.1.1 (#1024)
+
+### Release
+
+- V1.3.0
 
 ## [1.2.0] - 2026-06-01
 
