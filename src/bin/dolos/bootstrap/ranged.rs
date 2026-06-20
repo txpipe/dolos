@@ -182,8 +182,8 @@ impl Drop for RangedReader {
 }
 
 /// Download a single byte range `[start, end]` into `path`, retrying transient
-/// failures. Progress is advanced by the chunk length only on success, so a
-/// retried chunk is never double-counted.
+/// failures. Progress advances as bytes arrive; a failed attempt rolls its
+/// bytes back before retrying, so a retried chunk is never double-counted.
 fn download_chunk(
     client: &Client,
     url: &str,
@@ -196,11 +196,8 @@ fn download_chunk(
     let mut attempt = 0;
 
     loop {
-        match try_download_chunk(client, url, &range, path) {
-            Ok(()) => {
-                progress.inc(end - start + 1);
-                return Ok(());
-            }
+        match try_download_chunk(client, url, &range, path, progress) {
+            Ok(()) => return Ok(()),
             Err(e) => {
                 // Clean up any partial file before retrying.
                 let _ = std::fs::remove_file(path);
@@ -220,7 +217,13 @@ fn download_chunk(
     }
 }
 
-fn try_download_chunk(client: &Client, url: &str, range: &str, path: &Path) -> io::Result<()> {
+fn try_download_chunk(
+    client: &Client,
+    url: &str,
+    range: &str,
+    path: &Path,
+    progress: &ProgressBar,
+) -> io::Result<()> {
     let mut response = client
         .get(url)
         .header(RANGE, range)
@@ -231,16 +234,30 @@ fn try_download_chunk(client: &Client, url: &str, range: &str, path: &Path) -> i
     let mut file = File::create(path)?;
     let mut buf = vec![0u8; 256 * 1024];
 
-    loop {
-        let n = response.read(&mut buf).map_err(io::Error::other)?;
-        if n == 0 {
-            break;
+    // Advance the bar as bytes arrive so it animates continuously rather than
+    // jumping once per completed chunk. `written` tracks this attempt so a
+    // failed attempt can be rolled back before a retry re-downloads the range,
+    // keeping the bar from over-counting past the total.
+    let mut written = 0u64;
+    let result = (|| -> io::Result<()> {
+        loop {
+            let n = response.read(&mut buf).map_err(io::Error::other)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            progress.inc(n as u64);
+            written += n as u64;
         }
-        file.write_all(&buf[..n])?;
+        file.flush()?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        progress.set_position(progress.position().saturating_sub(written));
     }
 
-    file.flush()?;
-    Ok(())
+    result
 }
 
 /// Spawn the background downloader and return a reader over the staged chunks.
