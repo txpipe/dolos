@@ -143,6 +143,10 @@ path = "tests/mempool.rs"
 name = "bootstrap"
 path = "tests/bootstrap.rs"
 
+[[test]]
+name = "boundary_resume"
+path = "tests/boundary_resume.rs"
+
 [features]
 strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]
