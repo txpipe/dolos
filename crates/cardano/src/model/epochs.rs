@@ -1,4 +1,6 @@
-use std::{collections::HashSet, sync::Arc};
+// BTreeSet (not HashSet) so the CBOR encoding of `registered_pools` is in
+// sorted key order and therefore byte-deterministic across independent syncs.
+use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_core::{BlockSlot, EntityKey, Genesis, NsKey};
 use pallas::{
@@ -105,7 +107,7 @@ pub struct RollingStats {
     pub withdrawals: Lovelace,
 
     #[n(8)]
-    pub registered_pools: HashSet<PoolHash>,
+    pub registered_pools: BTreeSet<PoolHash>,
 
     #[n(13)]
     pub blocks_minted: u32,
@@ -430,7 +432,7 @@ pub struct EpochStatsUpdate {
     pub(crate) new_accounts: u64,
     pub(crate) removed_accounts: u64,
     pub(crate) withdrawals: u64,
-    pub(crate) registered_pools: HashSet<PoolHash>,
+    pub(crate) registered_pools: BTreeSet<PoolHash>,
     pub(crate) drep_deposits: Lovelace,
     pub(crate) proposal_deposits: Lovelace,
     pub(crate) drep_refunds: Lovelace,
@@ -442,7 +444,7 @@ pub struct EpochStatsUpdate {
     // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
     // can't be recovered by set subtraction (a pool in both prev and self would be removed).
     pub(crate) was_new: bool,
-    pub(crate) prev_registered_pools: HashSet<PoolHash>,
+    pub(crate) prev_registered_pools: BTreeSet<PoolHash>,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {

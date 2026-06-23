@@ -195,6 +195,43 @@ impl StateStore {
         tracing::info!("state store: graceful shutdown complete");
         Ok(())
     }
+
+    /// Copy all keyspaces into a fresh fjall database at `dest_path` and major-compact each one.
+    pub fn rebuild_canonical(&self, dest_path: impl AsRef<Path>) -> Result<(), Error> {
+        let snapshot = self.db.snapshot();
+
+        let fresh_db = Database::builder(dest_path.as_ref()).open()?;
+        let fresh_cursor =
+            fresh_db.keyspace(keyspace_names::CURSOR, KeyspaceCreateOptions::default)?;
+        let fresh_utxos =
+            fresh_db.keyspace(keyspace_names::UTXOS, KeyspaceCreateOptions::default)?;
+        let fresh_entities =
+            fresh_db.keyspace(keyspace_names::ENTITIES, KeyspaceCreateOptions::default)?;
+
+        let mut batch = fresh_db.batch();
+        for guard in snapshot.iter(&self.cursor) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_cursor, k.as_ref(), v.as_ref());
+        }
+        for guard in snapshot.iter(&self.utxos) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_utxos, k.as_ref(), v.as_ref());
+        }
+        for guard in snapshot.iter(&self.entities) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_entities, k.as_ref(), v.as_ref());
+        }
+        batch.commit()?;
+
+        for ks in [&fresh_cursor, &fresh_utxos, &fresh_entities] {
+            ks.rotate_memtable_and_wait()?;
+            ks.major_compact()?;
+        }
+
+        fresh_db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
 }
 
 /// Writer for batched state operations.
