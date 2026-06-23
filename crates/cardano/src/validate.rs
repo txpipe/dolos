@@ -108,11 +108,9 @@ pub fn evaluate_tx<D: Domain>(
 
     let pparams = crate::utils::pparams_to_pallas(&pparams);
 
-    let slot_config = pallas::ledger::validate::phase2::script_context::SlotConfig {
-        slot_length: pparams.slot_length(),
-        zero_slot: eras.edge().start.slot,
-        zero_time: eras.edge().start.timestamp,
-    };
+    // `eras` keeps slot_length/timestamp in seconds; the Plutus ScriptContext
+    // needs POSIXTime in milliseconds. The conversion lives in the helper.
+    let slot_config = eras.to_pallas_slot_config();
 
     let input_refs = tx.requires().iter().map(From::from).collect();
 
