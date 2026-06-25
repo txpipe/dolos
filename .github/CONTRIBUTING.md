@@ -45,7 +45,7 @@ Please follow these basic guidelines when filling a feature request:
 Issues are organized with a few small label families:
 
 - **Type** — the kind of work: `bug`, `enhancement`, `documentation`, `question`.
-- **`area:*`** — the affected subsystem, mirroring our commit scopes: `area:cardano`, `area:minibf`, `area:trp`, `area:utxorpc`, `area:cli`, `area:sync`, `area:storage`, `area:ogmios`, `area:bootstrap`, `area:observability`, `area:testing`.
+- **`area:*`** — the affected subsystem, mirroring our commit scopes: `area:cardano`, `area:minibf`, `area:trp`, `area:utxorpc`, `area:cli`, `area:sync`, `area:storage`, `area:bootstrap`, `area:observability`, `area:testing`.
 - **Status** — triage state: `needs-triage` (not yet reviewed), `needs-info` (waiting on the reporter), `blocked`, `duplicate`, `invalid`, `wontfix`.
 - **Contributor** — good entry points: `good first issue`, `help wanted`, `agent-friendly` (well-scoped for an AI coding agent), `githoney-bounty` (has an associated Githoney bounty).
 
