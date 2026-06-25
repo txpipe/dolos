@@ -40,6 +40,17 @@ Please follow these basic guidelines when filling a feature request:
 - Create a new github issue
 - Provide a description of your use case (how would you use the new feature)
 
+## Issue Labels
+
+Issues are organized with a few small label families:
+
+- **Type** — the kind of work: `bug`, `enhancement`, `documentation`, `question`.
+- **`area:*`** — the affected subsystem, mirroring our commit scopes: `area:cardano`, `area:minibf`, `area:trp`, `area:utxorpc`, `area:cli`, `area:sync`, `area:storage`, `area:ogmios`, `area:bootstrap`, `area:observability`, `area:testing`.
+- **Status** — triage state: `needs-triage` (not yet reviewed), `needs-info` (waiting on the reporter), `blocked`, `duplicate`, `invalid`, `wontfix`.
+- **Contributor** — good entry points: `good first issue`, `help wanted`, `agent-friendly` (well-scoped for an AI coding agent), `githoney-bounty` (has an associated Githoney bounty).
+
+Maintainers apply labels during triage, so you don't need to label your own issues. New here? Start by filtering for `good first issue` and `help wanted`.
+
 ## Pull Requests
 
 All PRs are welcome, but please take into account these requirements for your contribution to be considered by the maintainers:
