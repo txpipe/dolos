@@ -129,7 +129,7 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             } else {
                 return Err(ServeError::Internal(
                     format!("socket {} is in use by PID {}", cfg.service.listen_path.display(), 
-                        std::fs::read_to_string(&lock_path).unwrap_or_default().trim().to_string()).into(),
+                        std::fs::read_to_string(&lock_path).unwrap_or_default().trim()).into(),
                 ));
             }
         }
