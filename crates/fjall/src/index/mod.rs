@@ -314,7 +314,7 @@ impl CoreIndexStore for IndexStore {
     }
 
     fn copy(&self, _target: &Self) -> Result<(), IndexError> {
-        todo!("copy not implemented for fjall index store")
+        todo!("copy not implemented for fjall index store (#1036)")
     }
 
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {

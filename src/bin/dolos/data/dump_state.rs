@@ -54,7 +54,7 @@ fn format_stake_at(account: &AccountState, epoch: Epoch) -> String {
 impl TableRow for AccountState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for accounts state");
+            todo!("dbsync format not supported for accounts state (#1032)");
         }
         vec![
             "cred",
@@ -72,7 +72,7 @@ impl TableRow for AccountState {
 
     fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for accounts state");
+            todo!("dbsync format not supported for accounts state (#1032)");
         }
         let epoch = self.stake.epoch().unwrap_or_default();
 
@@ -97,7 +97,7 @@ impl TableRow for AccountState {
 impl TableRow for EpochState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for epochs state");
+            todo!("dbsync format not supported for epochs state (#1032)");
         }
         vec![
             "number",
@@ -116,7 +116,7 @@ impl TableRow for EpochState {
 
     fn row(&self, _key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for epochs state");
+            todo!("dbsync format not supported for epochs state (#1032)");
         }
         let pparams = self.pparams.live();
 
@@ -205,7 +205,7 @@ impl TableRow for EraSummary {
 impl TableRow for PendingRewardState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pending rewards state");
+            todo!("dbsync format not supported for pending rewards state (#1032)");
         }
         vec![
             "stake bech32",
@@ -221,7 +221,7 @@ impl TableRow for PendingRewardState {
 
     fn row(&self, key: &EntityKey, network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pending rewards state");
+            todo!("dbsync format not supported for pending rewards state (#1032)");
         }
         let stake_hex = hex::encode(key.as_ref());
         let stake_bech32 = pallas_extras::stake_credential_to_address(network, &self.credential)
@@ -278,7 +278,7 @@ fn format_pool_epoch(values: &EpochValue<PoolSnapshot>, epoch_delta: u64) -> Str
 impl TableRow for PoolState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pools state");
+            todo!("dbsync format not supported for pools state (#1032)");
         }
         vec![
             "key",
@@ -295,7 +295,7 @@ impl TableRow for PoolState {
 
     fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for pools state");
+            todo!("dbsync format not supported for pools state (#1032)");
         }
         let entity_key = key.clone();
         let pool_hash = entity_key.as_ref()[..28].try_into().unwrap();
@@ -323,7 +323,7 @@ impl TableRow for PoolState {
 impl TableRow for ProposalState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for proposals state");
+            todo!("dbsync format not supported for proposals state (#1032)");
         }
         vec![
             "key",
@@ -340,7 +340,7 @@ impl TableRow for ProposalState {
 
     fn row(&self, key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for proposals state");
+            todo!("dbsync format not supported for proposals state (#1032)");
         }
         let action = match &self.action {
             ProposalAction::ParamChange(x) => format!("Params({})", x.len()),

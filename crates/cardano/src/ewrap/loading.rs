@@ -162,7 +162,7 @@ impl BoundaryWork {
                 // refund schedule. With this order, the refund clones the live
                 // values with rewards already applied.
                 // TODO: move retires to ESTART (after the snapshot has been taken)
-                // and drop this ordering hack.
+                // and drop this ordering hack. (#1037)
                 visitor_rewards.visit_account(self, &account_id, &account)?;
                 visitor_drops.visit_account(self, &account_id, &account)?;
             }

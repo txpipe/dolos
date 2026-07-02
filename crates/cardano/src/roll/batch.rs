@@ -148,7 +148,7 @@ impl WorkBatch {
     where
         D: Domain<Chain = CardanoLogic>,
     {
-        // TODO: paralelize in chunks
+        // TODO: paralelize in chunks (#1040)
 
         let all_refs: Vec<_> = self
             .blocks
@@ -285,7 +285,7 @@ impl WorkBatch {
         }
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system.
+        // this into the entity system. (#1042)
         for block in self.blocks.iter() {
             if let Some(utxo_delta) = &block.utxo_delta {
                 writer.apply_utxoset(utxo_delta)?;

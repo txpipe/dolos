@@ -321,7 +321,7 @@ impl CoreStateStore for StateStore {
     ) -> Result<Self::EntityValueIter, StateError> {
         // Multimap not supported - panic if called
         unimplemented!(
-            "iter_entity_values is not supported in fjall state store (no multimap support)"
+            "iter_entity_values is not supported in fjall state store (no multimap support) (#1036)"
         )
     }
 

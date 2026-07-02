@@ -137,7 +137,7 @@ impl StateStore {
             table.initialize(&mut wx)?;
         }
 
-        // TODO: refactor into entities model
+        // TODO: refactor into entities model (#1042)
         utxoset::UtxosTable::initialize(&wx)?;
 
         wx.commit()?;
