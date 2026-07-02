@@ -1,0 +1,54 @@
+---
+title: Serving Layer & APIs
+sidebar:
+  order: 5
+---
+
+The serving layer is everything that reads ledger data back out and exposes it to clients. Dolos offers several API surfaces so developers can use the tools they already know, but they all share the same foundation: each is a thin adapter that queries the shared domain read-only. This page explains that shared foundation, the surfaces built on top of it, and the transaction-submission path.
+
+## One domain, many adapters
+
+Every API server receives a handle to the same `DomainAdapter` (see the [Overview](../architecture)) and reads through the storage traits — it never owns its own copy of the data. Read access is provided through query facades (`Facade` / `AsyncQueryFacade`) that translate a request into lookups against the state, archive, and index stores. Because the sync pipeline commits as it advances, these reads always see an up-to-date, consistent view.
+
+Streaming endpoints (chain-follow, tip-watch) subscribe to the tip broadcast channel that the sync pipeline publishes to, so they push new blocks to clients the moment a block is applied.
+
+This design means the serving layer adds no new storage and imposes no coupling on the ledger rules — adding an API surface is a matter of writing another adapter over `Domain`.
+
+## API surfaces
+
+| Surface | Protocol / framework | Crate / module | Purpose |
+| ------- | -------------------- | -------------- | ------- |
+| **UTxO RPC** | gRPC (tonic) + gRPC-Web | `src/serve/grpc` | The primary programmatic interface — query, submit, and follow the chain over the [UTxO RPC](https://utxorpc.org) spec. |
+| **Mini-Blockfrost** | HTTP REST (axum) | `dolos-minibf` | A Blockfrost-compatible API so existing Blockfrost integrations work unchanged. |
+| **Mini-Kupo** | HTTP REST (axum) | `dolos-minikupo` | Kupo-compatible pattern-matching over UTxOs, plus datum and script resolution. |
+| **Ouroboros node-to-client** | Unix socket / named pipe | `src/serve/o7s_unix`, `o7s_win` | The local node protocol, for compatibility with `cardano-cli`, Ogmios, and similar tooling — no full node required. |
+| **TRP** | JSON-RPC (jsonrpsee) | `dolos-trp` | The Transaction Resolver Protocol — resolve [Tx3](../integrations/tx3) templates into concrete transactions and submit them. |
+
+Each surface is enabled by a Cargo feature and configured independently. For endpoint-level details and configuration, see the [APIs section](../apis/grpc) and the per-API pages ([UTxO RPC](../apis/grpc), [Mini-Blockfrost](../apis/minibf), [Mini-Kupo](../apis/minikupo)).
+
+## Mempool and transaction submission
+
+Submitting a transaction — whether over gRPC, TRP, or the node-to-client socket — flows through the mempool, which performs validation locally before the transaction ever reaches the network.
+
+```
+   client
+     │  submit tx
+     ▼
+   validation ── phase-1 (ledger rules) ── phase-2 (Plutus evaluation)
+     │
+     ▼
+   mempool  ── overlays in-flight UTxOs → enables tx-chaining
+     │
+     ▼
+   submit stage ── txsubmission → upstream peer
+     │
+     ▼
+   confirmed on chain → finalized
+```
+
+- **Local validation.** Before accepting a transaction, Dolos runs phase-1 checks (structure and ledger rules) and phase-2 checks (Plutus script evaluation via Pallas), so invalid transactions are rejected immediately with a report.
+- **In-flight overlay and tx-chaining.** The mempool overlays the UTxOs produced by pending transactions on top of committed state during validation, so a client can submit a transaction that spends the output of another not-yet-confirmed transaction.
+- **Lifecycle.** Each transaction moves through a set of stages — pending, propagated/in-flight, confirmed, and finalized (with dropped/rolled-back as failure paths) — tracked in the mempool store and queryable by clients.
+- **Network path.** The sync pipeline's [submit stage](./sync-pipeline) takes pending transactions from the mempool and offers them to the upstream peer over the Ouroboros txsubmission protocol.
+
+Source: `src/serve/*`, `src/adapters/mod.rs`, the `dolos-minibf` / `dolos-minikupo` / `dolos-trp` crates, and the mempool/submit traits in `crates/core/src/{mempool,submit}.rs`.

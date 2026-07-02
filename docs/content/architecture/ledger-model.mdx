@@ -1,0 +1,65 @@
+---
+title: Ledger Model & Epoch Transitions
+sidebar:
+  order: 4
+---
+
+This page is the deepest part of the architecture overview: how Cardano ledger state actually evolves inside Dolos. It stays at a conceptual level — enough to understand the moving parts and where they live in the code. Contributors working on ledger correctness should also read the "Fix Journal" and ledger notes in the repository's `CLAUDE.md`, which document the rules and edge cases in detail.
+
+The Cardano ledger is implemented in the `dolos-cardano` crate as the `CardanoLogic` type, which fulfills the generic `ChainLogic` trait from `dolos-core`.
+
+## Work units
+
+When the sync pipeline hands a block to `CardanoLogic`, it does not mutate state directly — it produces **work units**, the pipelined units of ledger work introduced in the [Sync Pipeline](./sync-pipeline). Cardano defines these variants (`CardanoWorkUnit`):
+
+| Work unit | When | What it does |
+| --------- | ---- | ------------ |
+| **Genesis** | node bootstrap | Builds the initial ledger from the genesis configuration. |
+| **Roll** | every block | Applies a block: inputs, outputs, mints/burns, certificates, withdrawals, and parameter updates. |
+| **Rupd** | mid-epoch (stability window) | Computes the epoch's reward distribution from a stake snapshot. |
+| **Ewrap** | epoch boundary (close) | Closes the epoch: applies rewards, refunds deposits, enacts governance, and finalizes the pots. |
+| **Estart** | epoch boundary (open) | Opens the next epoch: rotates snapshots, transitions pools/DReps/proposals, updates nonces, and advances the era. |
+| **ForcedStop** | testing | Halts at a target epoch (used by the integration test harness). |
+
+## The snapshot window
+
+Cardano does not reward stake based on its *current* delegation — it uses delegation as it stood a few epochs earlier, so that the stake distribution used for leader election and rewards is stable and known in advance. Dolos models this with a rotating window of snapshots, `EpochValue<T>`, attached to every entity that participates in staking (accounts, pools, DReps).
+
+Each `EpochValue` holds several named snapshots:
+
+```
+   next  ← being written for the upcoming epoch (E+1)
+   live  ← current epoch (E)
+   mark  ← previous epoch (E-1)
+   set   ← two epochs ago (E-2)   ← the stake used for this epoch's rewards
+   go    ← three epochs ago (E-3)
+```
+
+On each epoch transition the window rotates forward: `go ← set ← mark ← live ← next`. Reward calculations read from the appropriate historical slot (e.g. the `mark`/`set` snapshots), which is why a correct implementation must write each change into the right slot at the right time. Getting a snapshot's timing wrong is a common class of ledger bug.
+
+## Epoch boundary phases
+
+The transition between epochs happens in a defined order — this ordering matters, because rewards, snapshots, and deposit refunds interact.
+
+```
+   … mid-epoch …        epoch boundary
+   ─────────────┬───────────────┬───────────────▶
+                │               │
+              Rupd            Ewrap  →  Estart
+   (snapshot rewards      (close epoch)  (open next epoch)
+    at stability window)
+```
+
+1. **RUPD** — partway through the epoch, at the randomness-stability window, Dolos snapshots the stake distribution and computes the rewards that will be paid out. Registration status at this moment determines who is eligible.
+2. **EWRAP** — at the boundary, the epoch is *closed*: pending rewards are applied to accounts (filtered for anyone who deregistered since RUPD), deposits are refunded, governance actions are enacted, and the treasury/reserves accounting is settled.
+3. **ESTART** — the next epoch is *opened*: the snapshot window rotates, pool/DRep/proposal state transitions forward, epoch nonces update, era changes take effect, and the chain cursor advances.
+
+## The pots
+
+Dolos tracks the Cardano money supply as a set of **pots** — reserves, treasury, the rewards pot, the UTxO total, and collected fees — plus outstanding deposits. These satisfy the ledger invariant that they always sum to the fixed maximum supply. During an epoch, changes accumulate as a delta; at the boundary the delta is applied to produce the new pots: monetary expansion is drawn from reserves, the treasury takes its cut, rewards are distributed, and fees roll over. The formulas (monetary expansion η, epoch incentives, and how unspendable rewards are routed) are documented alongside the implementation in `crates/cardano/src/pots.rs` and in `CLAUDE.md`.
+
+## Sharding
+
+The epoch boundary touches every stake account, which on mainnet is a large set. To keep transitions fast, EWRAP and ESTART split the per-account work across a fixed number of shards (`ACCOUNT_SHARDS`), each covering a prefix range of the account key space, and run them in parallel through the work-unit `load` step before a final global pass. Progress is tracked per shard so an interrupted boundary can resume rather than restart.
+
+Source: `crates/cardano/src/{work,model/*,rupd,ewrap,estart,pots,rewards,shard}.rs`.

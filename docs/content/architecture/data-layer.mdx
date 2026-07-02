@@ -1,0 +1,62 @@
+---
+title: Data Layer
+sidebar:
+  order: 2
+---
+
+Dolos keeps everything it needs on local disk in a handful of embedded key-value stores. Rather than one monolithic database, it uses several purpose-built stores — each optimized for a different access pattern — behind a common set of traits, so the underlying engine can be swapped without touching the rest of the system.
+
+## The stores
+
+Under the configured `storage.path`, a running node maintains four on-disk stores plus an in-memory (or persistent) mempool:
+
+```
+<storage.path>/
+├── wal/       Write-Ahead Log — recent blocks as reversible deltas (rollback buffer)
+├── state/     Ledger state — current UTxO set, pools, accounts, epoch state, protocol params
+├── archive/   Historical blocks — full block bodies + temporal entity logs
+└── index/     Secondary indexes — reverse lookups (address → UTxO, asset → UTxO, …)
+```
+
+| Store | Holds | Why it's separate |
+| ----- | ----- | ----------------- |
+| **WAL** | The most recent blocks, stored as `EntityDelta`s that can be applied or undone. | Rollbacks (chain reorganizations) are resolved by replaying these deltas in reverse. It is a bounded buffer, not long-term history. |
+| **State** | The *current* ledger: UTxO set, stake pool registry, account/stake state, DReps, protocol parameters, and per-epoch ledger state. | This is the hot, always-current view the ledger rules read and write on every block. |
+| **Archive** | Immutable history: full block bodies plus time-indexed logs of entity changes. | History is append-only and read differently from current state, so it uses its own layout (see below). |
+| **Index** | Reverse lookups over UTxOs by address, payment credential, stake credential, policy, and asset. | The APIs need "find all UTxOs for X" queries that the primary state store isn't keyed for. |
+| **Mempool** | Submitted-but-unconfirmed transactions and their lifecycle state. | Pending transactions are transient and overlaid on top of committed state during validation. |
+
+## Storage traits and pluggable backends
+
+Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `ArchiveStore`, `IndexStore`, and `MempoolStore` — and the rest of Dolos only ever talks to those traits. Concrete implementations are selected at runtime in `src/adapters/storage.rs`, which wraps each backend in an enum so a node can mix engines per store.
+
+Available backends:
+
+- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation), and can back state, archive, and indexes.
+- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys, available for the state and index stores.
+- **no-op** — a store that silently discards writes, used to *disable* the archive and/or index stores.
+- **in-memory** — non-persistent variants used for testing and ephemeral nodes.
+
+## Storage modes
+
+The three storage modes exposed in configuration are really combinations of backend selection and history-pruning limits:
+
+| Mode | Archive / Index | History | Use case |
+| ---- | --------------- | ------- | -------- |
+| **Ledger-only** | no-op | none | Only the tip of the chain — smallest footprint, query-light deployments. |
+| **Sliding history** | enabled, pruned | a rolling window (`sync.max_history`) | Recent history for most dApp queries without a full archive. |
+| **Full archive** | enabled, unpruned | complete | The entire chain history — research, validation, explorers. |
+
+Pruning is driven by `prune_history()` on the WAL and archive stores. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
+
+## Data model primitives
+
+A few concepts recur across the stores:
+
+- **Namespaced entities.** State and archive data are organized into namespaces (UTxOs, pools, accounts, rewards, …), each a logical table keyed by an entity key. A store may hold a single value per key or multiple values per key.
+- **`EntityDelta` (apply / undo).** Every state change is expressed as a delta that carries enough of the previous value to reverse itself. Applying deltas rolls the ledger forward; undoing them (from the WAL) rolls it back. This is the mechanism that makes rollbacks exact — see the [Sync Pipeline](./sync-pipeline).
+- **`EpochValue` snapshot window.** Cardano staking reads state as it was several epochs ago. State entities that participate in staking are stored as a rotating window of snapshots (live / mark / set / go / next). The details are covered in the [Ledger Model](./ledger-model).
+- **Archive dual storage.** Block bodies are written to append-only flatfile segments (one segment per Cardano epoch), while a compact index maps each slot to its `(segment, offset, length)` location. Historical entity changes are stored as `(slot, entity-key) → value` logs, enabling range queries over time.
+- **Index dimensions.** The index store maintains multimaps keyed by address, payment credential, stake credential, policy id, and asset id, each pointing at the matching UTxOs (for current state) or slots (for historical lookups).
+
+Source: `crates/core/src/{state,archive,wal,indexes,mempool}.rs`, `crates/redb3/src/*`, `crates/fjall/src/*`, and storage configuration in `crates/core/src/config.rs`.
