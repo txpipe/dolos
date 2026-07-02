@@ -296,7 +296,7 @@ const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 impl TableRow for StakeLog {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for stakes logs");
+            todo!("dbsync format not supported for stakes logs (#1032)");
         }
         vec![
             //"pool hex",
@@ -314,7 +314,7 @@ impl TableRow for StakeLog {
 
     fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
         if matches!(ctx.format, OutputFormat::Dbsync) {
-            todo!("dbsync format not supported for stakes logs");
+            todo!("dbsync format not supported for stakes logs (#1032)");
         }
         let temporal = TemporalKey::from(key.clone());
         let epoch = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());

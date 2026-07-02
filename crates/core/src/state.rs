@@ -394,7 +394,7 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     //     Ok(EntityValueIterTyped::<E>::new(inner, ns))
     // }
 
-    // TODO: generalize UTxO Set into generic entity system
+    // TODO: generalize UTxO Set into generic entity system (#1042)
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
 }

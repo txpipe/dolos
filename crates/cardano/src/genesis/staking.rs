@@ -48,7 +48,7 @@ fn parse_pool(dto: &ConfigPool) -> PoolState {
             reward_account: parse_reward_account(&dto.reward_account),
             vrf_keyhash: dto.vrf.parse().unwrap(),
 
-            // TODO: finish parsing the initial pool set
+            // TODO: finish parsing the initial pool set (#1038)
             pool_owners: vec![],
             relays: vec![],
             pool_metadata: None,

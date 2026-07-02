@@ -635,5 +635,5 @@ mod tests {
     }
 
     // TODO: add property based testing that ensures that the pots are
-    // consistent
+    // consistent (#1039)
 }

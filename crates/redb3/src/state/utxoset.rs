@@ -280,7 +280,7 @@ mod tests {
         apply_utxoset!(store, &indexes, [&genesis]);
 
         // TODO: the store is not persisting the cursor unless it's a specific point. We
-        // need to fix this in the next breaking change version.
+        // need to fix this in the next breaking change version. (#1035)
         //assert_eq!(store.cursor().unwrap(), Some(ChainPoint::Origin));
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
@@ -329,7 +329,7 @@ mod tests {
         apply_utxoset!(store, &indexes, [&undo]);
 
         // TODO: the store is not persisting the origin cursor, instead it's keeping it
-        // empty. We should fix this in the next breaking change version.
+        // empty. We should fix this in the next breaking change version. (#1035)
         assert_eq!(store.read_cursor().unwrap(), None);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
