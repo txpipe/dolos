@@ -108,6 +108,31 @@ impl TestApp {
     }
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::build(cfg, fault, minibf).expect("build_router_with_facade")
+    }
+
+    pub fn try_new_with_base_path(
+        base_path: Option<String>,
+    ) -> Result<Self, dolos_core::ServeError> {
+        let mut minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        minibf.base_path = base_path;
+        Self::build(
+            SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            None,
+            minibf,
+        )
+    }
+
+    fn build(
+        cfg: SyntheticBlockConfig,
+        fault: Option<TestFault>,
+        minibf: MinibfConfig,
+    ) -> Result<Self, dolos_core::ServeError> {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
 
         let domain = match fault {
@@ -115,21 +140,19 @@ impl TestApp {
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-
         let facade = Facade {
             inner: domain.clone(),
-            config: cfg,
+            config: minibf,
             cache: crate::cache::CacheService::default(),
         };
 
-        let router = build_router_with_facade(facade);
+        let router = build_router_with_facade(facade)?;
 
-        Self {
+        Ok(Self {
             router,
             _domain: domain,
             vectors,
-        }
+        })
     }
 
     pub async fn get_bytes(&self, path: &str) -> (StatusCode, Vec<u8>) {
