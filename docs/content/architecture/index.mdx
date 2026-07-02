@@ -12,33 +12,18 @@ Dolos is a data node, not a consensus node. It connects to the Cardano network a
 
 At the highest level, data flows in one direction — from an upstream peer, through the sync pipeline, into local storage — and is then read back out by the serving layer.
 
-```
-        ┌─────────────────┐
-        │  Upstream peer  │   Ouroboros node-to-node (chainsync + blockfetch)
-        └────────┬────────┘
-                 │ blocks / rollbacks
-                 ▼
-        ┌─────────────────┐
-        │  Sync pipeline  │   pull → apply (→ submit)   [gasket stages]
-        └────────┬────────┘
-                 │ work units (apply / undo deltas)
-                 ▼
-   ┌───────────────────────────────────────────────┐
-   │                  Storage                       │
-   │   WAL · State · Archive · Index · Mempool      │   [redb / fjall]
-   └────────┬──────────────────────────────────────┘
-            │ read-only queries
-            ▼
-   ┌───────────────────────────────────────────────┐
-   │                Serving layer                   │
-   │  gRPC · Mini-Blockfrost · Mini-Kupo ·          │
-   │  Ouroboros n2c socket · TRP                     │
-   └────────┬──────────────────────────────────────┘
-            │
-            ▼
-        ┌─────────────────┐
-        │     Clients     │   dApps · wallets · explorers · cardano-cli
-        └─────────────────┘
+```mermaid
+flowchart TD
+    peer["Upstream peer<br/><small>Ouroboros node-to-node (chainsync + blockfetch)</small>"]
+    sync["Sync pipeline<br/><small>pull → apply (→ submit) — gasket stages</small>"]
+    storage["Storage<br/><small>WAL · State · Archive · Index · Mempool (redb / fjall)</small>"]
+    serve["Serving layer<br/><small>gRPC · Mini-Blockfrost · Mini-Kupo · Ouroboros n2c socket · TRP</small>"]
+    clients["Clients<br/><small>dApps · wallets · explorers · cardano-cli</small>"]
+
+    peer -- "blocks / rollbacks" --> sync
+    sync -- "work units (apply / undo deltas)" --> storage
+    storage -- "read-only queries" --> serve
+    serve --> clients
 ```
 
 Each layer is covered in its own page:

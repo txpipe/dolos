@@ -19,17 +19,20 @@ The same protocols run in the other direction too: the `relay/` module (`src/rel
 
 Synchronization runs as a [gasket](https://github.com/construkts/gasket-rs) pipeline — independent stages connected by bounded channels, which gives natural backpressure when one stage is slower than another. The stages live in `src/sync/`:
 
-```
-   upstream peer
-        │
-        ▼
-   ┌─────────┐   PullEvent      ┌─────────┐
-   │  pull   │ ───────────────▶ │  apply  │ ──▶ stores (state · archive · index · WAL)
-   └─────────┘  RollForward /   └─────────┘
-                Rollback
-                                ┌─────────┐
-   mempool ───────────────────▶ │ submit  │ ──▶ upstream peer (txsubmission)
-                                └─────────┘
+```mermaid
+flowchart LR
+    peer["upstream peer"]
+    pull["pull"]
+    apply["apply"]
+    stores["stores<br/><small>state · archive · index · WAL</small>"]
+    mempool["mempool"]
+    submit["submit"]
+
+    peer --> pull
+    pull -- "PullEvent<br/>RollForward / Rollback" --> apply
+    apply --> stores
+    mempool --> submit
+    submit -- "txsubmission" --> peer
 ```
 
 - **pull** (`pull.rs`) — drives chainsync and blockfetch. It validates header continuity (parent hash, slot order) against a chain fragment, fetches bodies, and emits `PullEvent::RollForward(block)` or `PullEvent::Rollback(point)`.

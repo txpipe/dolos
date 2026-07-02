@@ -27,16 +27,20 @@ The API-server crates and several subsystems are gated behind Cargo features. Th
 
 Dependencies point in one direction — from concrete implementations toward the abstract core. Nothing in `dolos-core` depends on a storage engine or an API server.
 
-```
-                       dolos-core            (traits: Domain, ChainLogic, WorkUnit, stores)
-                          ▲  ▲  ▲
-        ┌─────────────────┘  │  └───────────────────┐
-   dolos-cardano       dolos-redb3 / dolos-fjall     dolos-minibf / minikupo / trp
-   (ChainLogic impl)   (StateStore/… impls)          (serving adapters over Domain)
-        ▲                    ▲                              ▲
-        └──────────┬─────────┴──────────────┬──────────────┘
-                   │                         │
-                dolos (root binary: CLI · sync · relay · serve · adapters)
+```mermaid
+flowchart BT
+    core["dolos-core<br/><small>traits: Domain · ChainLogic · WorkUnit · stores</small>"]
+    cardano["dolos-cardano<br/><small>ChainLogic impl</small>"]
+    backends["dolos-redb3 / dolos-fjall<br/><small>StateStore/… impls</small>"]
+    services["dolos-minibf / minikupo / trp<br/><small>serving adapters over Domain</small>"]
+    bin["dolos<br/><small>root binary: CLI · sync · relay · serve · adapters</small>"]
+
+    cardano --> core
+    backends --> core
+    services --> core
+    bin --> cardano
+    bin --> backends
+    bin --> services
 ```
 
 The root binary is the only place that picks concrete backends and API servers and assembles them into a running node.

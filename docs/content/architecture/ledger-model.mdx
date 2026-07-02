@@ -25,29 +25,32 @@ When the sync pipeline hands a block to `CardanoLogic`, it does not mutate state
 
 Cardano does not reward stake based on its *current* delegation — it uses delegation as it stood a few epochs earlier, so that the stake distribution used for leader election and rewards is stable and known in advance. Dolos models this with a rotating window of snapshots, `EpochValue<T>`, attached to every entity that participates in staking (accounts, pools, DReps).
 
-Each `EpochValue` holds several named snapshots:
+Each `EpochValue` holds several named snapshots — the arrows show where each value moves on an epoch transition:
 
-```
-   next  ← being written for the upcoming epoch (E+1)
-   live  ← current epoch (E)
-   mark  ← previous epoch (E-1)
-   set   ← two epochs ago (E-2)   ← the stake used for this epoch's rewards
-   go    ← three epochs ago (E-3)
+```mermaid
+flowchart LR
+    next["next<br/><small>upcoming epoch (E+1)</small>"]
+    live["live<br/><small>current epoch (E)</small>"]
+    mark["mark<br/><small>previous epoch (E-1)</small>"]
+    set["set<br/><small>two epochs ago (E-2)<br/>stake used for this epoch's rewards</small>"]
+    go["go<br/><small>three epochs ago (E-3)</small>"]
+
+    next --> live --> mark --> set --> go
 ```
 
-On each epoch transition the window rotates forward: `go ← set ← mark ← live ← next`. Reward calculations read from the appropriate historical slot (e.g. the `mark`/`set` snapshots), which is why a correct implementation must write each change into the right slot at the right time. Getting a snapshot's timing wrong is a common class of ledger bug.
+Reward calculations read from the appropriate historical slot (e.g. the `mark`/`set` snapshots), which is why a correct implementation must write each change into the right slot at the right time. Getting a snapshot's timing wrong is a common class of ledger bug.
 
 ## Epoch boundary phases
 
 The transition between epochs happens in a defined order — this ordering matters, because rewards, snapshots, and deposit refunds interact.
 
-```
-   … mid-epoch …        epoch boundary
-   ─────────────┬───────────────┬───────────────▶
-                │               │
-              Rupd            Ewrap  →  Estart
-   (snapshot rewards      (close epoch)  (open next epoch)
-    at stability window)
+```mermaid
+flowchart LR
+    rupd["RUPD<br/><small>snapshot rewards at stability window (mid-epoch)</small>"]
+    ewrap["EWRAP<br/><small>close epoch (at boundary)</small>"]
+    estart["ESTART<br/><small>open next epoch (at boundary)</small>"]
+
+    rupd --> ewrap --> estart
 ```
 
 1. **RUPD** — partway through the epoch, at the randomness-stability window, Dolos snapshots the stake distribution and computes the rewards that will be paid out. Registration status at this moment determines who is eligible.

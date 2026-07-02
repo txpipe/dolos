@@ -30,20 +30,18 @@ Each surface is enabled by a Cargo feature and configured independently. For end
 
 Submitting a transaction — whether over gRPC, TRP, or the node-to-client socket — flows through the mempool, which performs validation locally before the transaction ever reaches the network.
 
-```
-   client
-     │  submit tx
-     ▼
-   validation ── phase-1 (ledger rules) ── phase-2 (Plutus evaluation)
-     │
-     ▼
-   mempool  ── overlays in-flight UTxOs → enables tx-chaining
-     │
-     ▼
-   submit stage ── txsubmission → upstream peer
-     │
-     ▼
-   confirmed on chain → finalized
+```mermaid
+flowchart TD
+    client["client"]
+    validation["validation<br/><small>phase-1 (ledger rules) · phase-2 (Plutus evaluation)</small>"]
+    mempool["mempool<br/><small>overlays in-flight UTxOs → enables tx-chaining</small>"]
+    submitstage["submit stage<br/><small>txsubmission → upstream peer</small>"]
+    confirmed["confirmed on chain → finalized"]
+
+    client -- "submit tx" --> validation
+    validation --> mempool
+    mempool --> submitstage
+    submitstage --> confirmed
 ```
 
 - **Local validation.** Before accepting a transaction, Dolos runs phase-1 checks (structure and ledger rules) and phase-2 checks (Plutus script evaluation via Pallas), so invalid transactions are rejected immediately with a report.
