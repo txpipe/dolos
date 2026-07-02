@@ -61,7 +61,7 @@ The `dolos-cardano` crate implements those traits for Cardano — block parsing,
 
 At runtime the whole node is wired together by a single `DomainAdapter` (in `src/adapters/`), which holds handles to every store plus the live Cardano ledger state (`Arc<RwLock<CardanoLogic>>`). The sync pipeline takes the write side of that lock to apply blocks; the serving layer takes read handles to answer queries concurrently. A tip broadcast channel lets streaming endpoints (chain follow, watch) react to new blocks as they are applied.
 
-Because state, archive, and index writes are committed as the pipeline advances, the serving layer always reads a consistent, up-to-date view without the two sides blocking each other beyond the brief window where a block is applied.
+Because state, archive, and index writes are committed as the pipeline advances, the serving layer reads an up-to-date view without the two sides blocking each other. Commits to the individual stores are sequential rather than atomic across stores, so a reader can briefly observe one store slightly ahead of another while a block is being applied.
 
 ## Trust model
 

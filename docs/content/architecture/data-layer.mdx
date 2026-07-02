@@ -4,7 +4,7 @@ sidebar:
   order: 2
 ---
 
-Dolos keeps everything it needs on local disk in a handful of embedded key-value stores. Rather than one monolithic database, it uses several purpose-built stores — each optimized for a different access pattern — behind a common set of traits, so the underlying engine can be swapped without touching the rest of the system.
+Dolos keeps everything it needs on local disk in a handful of embedded stores — key-value engines for live data, plus append-only flatfiles for archived block bodies. Rather than one monolithic database, it uses several purpose-built stores — each optimized for a different access pattern — behind a common set of traits, so the underlying engine can be swapped without touching the rest of the system.
 
 ## The stores
 

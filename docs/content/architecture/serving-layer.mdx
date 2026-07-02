@@ -10,7 +10,7 @@ The serving layer is everything that reads ledger data back out and exposes it t
 
 Every API server receives a handle to the same `DomainAdapter` (see the [Overview](../architecture)) and reads through the storage traits — it never owns its own copy of the data. Read access is provided through query facades (`Facade` / `AsyncQueryFacade`) that translate a request into lookups against the state, archive, and index stores. Because the sync pipeline commits as it advances, these reads always see an up-to-date, consistent view.
 
-Streaming endpoints (chain-follow, tip-watch) subscribe to the tip broadcast channel that the sync pipeline publishes to, so they push new blocks to clients the moment a block is applied.
+Streaming endpoints (chain-follow, tip-watch) subscribe to the tip broadcast channel that the sync pipeline publishes to, so they push new blocks to clients as they are applied.
 
 This design means the serving layer adds no new storage and imposes no coupling on the ledger rules — adding an API surface is a matter of writing another adapter over `Domain`.
 
