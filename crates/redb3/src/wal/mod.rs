@@ -64,28 +64,40 @@ pub type DbLogValue = Vec<u8>;
 pub struct DbChainPoint([u8; 40]);
 
 impl DbChainPoint {
+    /// Smallest key at `slot`: big-endian slot bytes + zero hash. Big-endian is
+    /// required so redb's lexicographic key order matches slot order (see
+    /// `ChainPoint::into_bytes`).
+    fn min_bound(slot: BlockSlot) -> DbChainPoint {
+        let mut point = [0u8; 40];
+        point[0..8].copy_from_slice(&slot.to_be_bytes());
+        DbChainPoint(point)
+    }
+
+    /// Largest key at `slot`: big-endian slot bytes + all-ones hash.
+    fn max_bound(slot: BlockSlot) -> DbChainPoint {
+        let mut point = [255u8; 40];
+        point[0..8].copy_from_slice(&slot.to_be_bytes());
+        DbChainPoint(point)
+    }
+
     pub fn slot_range(range: impl RangeBounds<BlockSlot>) -> impl RangeBounds<DbChainPoint> {
-        let min_slot = match range.start_bound() {
-            std::ops::Bound::Included(x) => *x,
-            std::ops::Bound::Excluded(x) => *x + 1,
-            std::ops::Bound::Unbounded => BlockSlot::MIN,
+        use std::ops::Bound;
+
+        // Map bounds to key bounds directly; no `+1`/`-1` shift (would overflow
+        // at BlockSlot::MAX / underflow at MIN). Excluded flips the hash extreme.
+        let start = match range.start_bound() {
+            Bound::Included(x) => Bound::Included(DbChainPoint::min_bound(*x)),
+            Bound::Excluded(x) => Bound::Excluded(DbChainPoint::max_bound(*x)),
+            Bound::Unbounded => Bound::Unbounded,
         };
 
-        let mut min_point = [0u8; 40];
-        min_point[0..8].copy_from_slice(&min_slot.to_le_bytes());
-        let min_point = DbChainPoint(min_point);
-
-        let max_slot = match range.end_bound() {
-            std::ops::Bound::Included(x) => *x,
-            std::ops::Bound::Excluded(x) => *x - 1,
-            std::ops::Bound::Unbounded => BlockSlot::MAX,
+        let end = match range.end_bound() {
+            Bound::Included(x) => Bound::Included(DbChainPoint::max_bound(*x)),
+            Bound::Excluded(x) => Bound::Excluded(DbChainPoint::min_bound(*x)),
+            Bound::Unbounded => Bound::Unbounded,
         };
 
-        let mut max_point = [255u8; 40];
-        max_point[0..8].copy_from_slice(&max_slot.to_le_bytes());
-        let max_point = DbChainPoint(max_point);
-
-        std::ops::RangeInclusive::new(min_point, max_point)
+        DbChainPointRange { start, end }
     }
 }
 
@@ -469,9 +481,11 @@ where
     ///
     /// # Returns
     ///
-    /// Returns `Ok` if the operation was successful, or a `WalError` if an
-    /// error occurred. If the target slot is not found, it logs a warning and
-    /// returns `Ok`.
+    /// Returns `Ok(true)` when the WAL is within `max_slots` (or was pruned all
+    /// the way down to it), and `Ok(false)` when `max_prune` capped this call
+    /// before the target was reached and another round is needed. Pruning is
+    /// deterministic: `remove_before` removes by cutoff bound, and any error it
+    /// raises is propagated (the write transaction is not committed).
     ///
     /// # Notes
     ///
@@ -524,14 +538,9 @@ where
             start_slot, excess, "pruning wal for excess history"
         );
 
-        match self.remove_before(prune_before) {
-            Err(RedbWalError(WalError::SlotNotFound(_))) => {
-                warn!("pruning target slot not found, skipping");
-                Ok(true)
-            }
-            Err(e) => Err(e),
-            Ok(_) => Ok(done),
-        }
+        self.remove_before(prune_before)?;
+
+        Ok(done)
     }
 
     /// Approximates the LogSeq for a given BlockSlot within a specified delta
@@ -663,25 +672,22 @@ where
         let mut wx = self.db.begin_write()?;
         wx.set_quick_repair(true);
 
-        let last_point = self
-            .approximate_slot_with_retry(slot, |attempt| {
-                let start = slot - (20 * attempt as u64);
-                start..=slot
-            })?
-            .ok_or(RedbWalError(WalError::SlotNotFound(slot)))?;
-
-        debug!(%last_point, "found max chain point to remove");
-
         {
             let mut wal = wx.open_table(WAL)?;
 
-            let last_point = DbChainPoint::from(last_point);
-            let mut to_remove = wal.extract_from_if(..last_point, |_, _| true)?;
+            // `..min_bound(slot)` removes every entry with slot < target and
+            // keeps real entries at `slot` (nonzero hash). Deterministic even
+            // where no entry exists near the cutoff.
+            let bound = DbChainPoint::min_bound(slot);
+            let to_remove = wal.extract_from_if(..bound, |_, _| true)?;
 
-            while let Some(Ok((point, _))) = to_remove.next() {
+            // Drain fully; `?` propagates storage errors before commit, so an
+            // error aborts the txn instead of persisting a partial prune.
+            for entry in to_remove {
+                let (point, _) = entry?;
+
                 if event_enabled!(Level::TRACE) {
-                    let point = point.value();
-                    let point = ChainPoint::from(point);
+                    let point = ChainPoint::from(point.value());
                     trace!(%point, "removing wal table entry");
                 }
             }
@@ -995,5 +1001,202 @@ mod tests {
         // Second open: should succeed without rewriting (no panic, version intact).
         let store = open_test_store(&path).unwrap();
         assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
+    }
+
+    /// WAL entry at `slot` with a deterministic nonzero hash (distinct from the
+    /// zero-hash cutoff bound `remove_before` uses).
+    fn entry(slot: BlockSlot) -> LogEntry<TestDelta> {
+        let mut hash = [1u8; 32];
+        hash[0..8].copy_from_slice(&slot.to_be_bytes());
+        (ChainPoint::Specific(slot, hash.into()), LogValue::origin())
+    }
+
+    fn slots(store: &TestStore) -> Vec<BlockSlot> {
+        store
+            .iter_logs(None, None)
+            .unwrap()
+            .map(|(p, _)| p.slot())
+            .collect()
+    }
+
+    /// Endianness regression: key order must equal slot order across the
+    /// 2^8/2^16/2^32 boundaries, and scans must find realistic slots.
+    #[test]
+    fn slot_range_round_trip_across_byte_boundaries() {
+        let store = TestStore::memory().unwrap();
+
+        let targets: Vec<BlockSlot> = vec![
+            255,
+            256,
+            65_535,
+            65_536,
+            4_294_967_295,
+            4_294_967_296,
+            127_000_000, // preprod-scale slot from the bug report
+        ];
+
+        // Insert in shuffled order to prove ordering comes from the keys.
+        let mut insert_order = targets.clone();
+        insert_order.rotate_left(3);
+        let entries: Vec<_> = insert_order.iter().map(|s| entry(*s)).collect();
+        store.append_entries(&entries).unwrap();
+
+        // Lexicographic key order must equal slot order.
+        let mut sorted = targets.clone();
+        sorted.sort_unstable();
+        assert_eq!(slots(&store), sorted, "key order must equal slot order");
+
+        // Every slot is locatable and approximates to itself.
+        for &s in &targets {
+            let located = store.locate_point(s).unwrap();
+            assert_eq!(
+                located.map(|p| p.slot()),
+                Some(s),
+                "locate_point failed for slot {s}"
+            );
+
+            let approx = store.approximate_slot(s, s..=s).unwrap();
+            assert_eq!(
+                approx.map(|p| p.slot()),
+                Some(s),
+                "approximate_slot failed for slot {s}"
+            );
+        }
+
+        // Scanning from a mid boundary returns exactly the at-or-after suffix.
+        let from = entry(65_536).0;
+        let suffix: Vec<BlockSlot> = store
+            .iter_logs(Some(from), None)
+            .unwrap()
+            .map(|(p, _)| p.slot())
+            .collect();
+        assert_eq!(
+            suffix,
+            vec![65_536, 127_000_000, 4_294_967_295, 4_294_967_296]
+        );
+    }
+
+    /// `slot_range` maps bounds to the enclosing key bounds without
+    /// overflowing at `BlockSlot::MAX` / underflowing at `MIN` on `Excluded`.
+    #[test]
+    fn slot_range_handles_extreme_and_exclusive_bounds() {
+        use std::ops::Bound;
+
+        let r = DbChainPoint::slot_range((Bound::Excluded(BlockSlot::MAX), Bound::Unbounded));
+        assert_eq!(
+            r.start_bound(),
+            Bound::Excluded(&DbChainPoint::max_bound(BlockSlot::MAX))
+        );
+        assert_eq!(r.end_bound(), Bound::Unbounded);
+
+        let r = DbChainPoint::slot_range((Bound::Unbounded, Bound::Excluded(BlockSlot::MIN)));
+        assert_eq!(r.start_bound(), Bound::Unbounded);
+        assert_eq!(
+            r.end_bound(),
+            Bound::Excluded(&DbChainPoint::min_bound(BlockSlot::MIN))
+        );
+
+        let r = DbChainPoint::slot_range(10..=20);
+        assert_eq!(r.start_bound(), Bound::Included(&DbChainPoint::min_bound(10)));
+        assert_eq!(r.end_bound(), Bound::Included(&DbChainPoint::max_bound(20)));
+    }
+
+    /// Unbatched prune shrinks the WAL to exactly `max_slots`, tip preserved.
+    #[test]
+    fn prune_history_full_shrinks_to_max_slots() {
+        let store = TestStore::memory().unwrap();
+
+        let base: BlockSlot = 100_000_000;
+        let count: u64 = 20_000;
+        let entries: Vec<_> = (0..count).map(|i| entry(base + i)).collect();
+        store.append_entries(&entries).unwrap();
+
+        let last = base + count - 1;
+        let max_slots = 5_000;
+
+        let done = store.prune_history(max_slots, None).unwrap();
+        assert!(done, "unbatched prune must finish in one call");
+
+        let start = store.find_start().unwrap().unwrap().0.slot();
+        let tip = store.find_tip().unwrap().unwrap().0.slot();
+
+        assert_eq!(tip, last, "tip must be preserved");
+        assert_eq!(start, last - max_slots, "retained window must be max_slots");
+        assert_eq!(
+            slots(&store).len() as u64,
+            max_slots + 1,
+            "exactly the protected window remains"
+        );
+    }
+
+    /// Batched prune makes bounded progress, converges, and never prunes into
+    /// the protected `max_slots` window.
+    #[test]
+    fn prune_history_batched_converges() {
+        let store = TestStore::memory().unwrap();
+
+        let base: BlockSlot = 100_000_000;
+        let count: u64 = 20_000;
+        let entries: Vec<_> = (0..count).map(|i| entry(base + i)).collect();
+        store.append_entries(&entries).unwrap();
+
+        let last = base + count - 1;
+        let max_slots = 5_000;
+        let max_prune = 3_000;
+
+        // First round: large backlog is not cleared in one batch.
+        let start_before = store.find_start().unwrap().unwrap().0.slot();
+        let done = store.prune_history(max_slots, Some(max_prune)).unwrap();
+        assert!(!done, "large backlog should not finish in one batch");
+
+        let start_after = store.find_start().unwrap().unwrap().0.slot();
+        assert!(start_after > start_before, "batch must advance the start");
+        assert!(
+            last - start_after >= max_slots,
+            "must never prune into the protected window"
+        );
+
+        // Loop to completion, bounded to detect non-convergence.
+        let mut done = false;
+        let mut rounds = 0;
+        while !done {
+            done = store.prune_history(max_slots, Some(max_prune)).unwrap();
+            rounds += 1;
+            assert!(rounds < 100, "batched pruning did not converge");
+        }
+
+        let start = store.find_start().unwrap().unwrap().0.slot();
+        let tip = store.find_tip().unwrap().unwrap().0.slot();
+        assert_eq!(tip, last, "tip must be preserved");
+        assert_eq!(start, last - max_slots, "converges to the max_slots window");
+    }
+
+    /// `remove_before` deletes older entries even with no entry near the cutoff
+    /// (the old `approximate_slot(±180)` lookup silently skipped this case).
+    #[test]
+    fn remove_before_handles_sparse_wal() {
+        let store = TestStore::memory().unwrap();
+
+        let old = [1_000u64, 1_001, 1_002];
+        let new = [1_000_000u64, 1_000_001, 1_000_002];
+        let entries: Vec<_> = old.iter().chain(new.iter()).map(|s| entry(*s)).collect();
+        store.append_entries(&entries).unwrap();
+
+        // Cutoff sits in the empty gap, far from any entry.
+        store.remove_before(500_000).unwrap();
+
+        assert_eq!(slots(&store), new.to_vec(), "old cluster removed, new kept");
+    }
+
+    /// "remove before slot" keeps the cutoff slot itself.
+    #[test]
+    fn remove_before_keeps_entry_at_cutoff_slot() {
+        let store = TestStore::memory().unwrap();
+        let entries: Vec<_> = [10u64, 20, 30, 40].iter().map(|s| entry(*s)).collect();
+        store.append_entries(&entries).unwrap();
+
+        store.remove_before(30).unwrap();
+
+        assert_eq!(slots(&store), vec![30, 40], "cutoff slot is retained");
     }
 }
