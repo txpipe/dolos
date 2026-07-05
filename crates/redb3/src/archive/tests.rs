@@ -189,7 +189,8 @@ fn test_prune_history() {
     // Prune: keep max 500_000 slots of history.
     // Tip is 864_100, so prune before 864_100 - 500_000 = 364_100.
     // Slots 100 and 200 should be pruned.
-    store.prune_history(500_000, None).unwrap();
+    let done = store.prune_history(500_000, None).unwrap();
+    assert!(done, "unbatched prune must finish in one call");
 
     assert_eq!(store.get_block_by_slot(&100).unwrap(), None);
     assert_eq!(store.get_block_by_slot(&200).unwrap(), None);
@@ -201,6 +202,72 @@ fn test_prune_history() {
         store.get_block_by_slot(&864_100).unwrap(),
         Some(fake_block(864_100))
     );
+}
+
+/// Slots currently held by the archive, ascending.
+fn stored_slots(store: &ArchiveStore) -> Vec<BlockSlot> {
+    store
+        .get_range(None, None)
+        .unwrap()
+        .map(|(s, _)| s)
+        .collect()
+}
+
+#[test]
+fn test_prune_history_no_excess_is_noop() {
+    let store = test_store();
+
+    let writer = store.start_writer().unwrap();
+    for slot in [100, 200, 300] {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+    }
+    writer.commit().unwrap();
+
+    // History (300 - 100 = 200) is within the 1000-slot window: nothing to prune.
+    let done = store.prune_history(1_000, Some(10)).unwrap();
+    assert!(done, "no-excess prune must report done");
+    assert_eq!(stored_slots(&store), vec![100, 200, 300], "nothing removed");
+}
+
+#[test]
+fn test_prune_history_batched_converges() {
+    let store = test_store();
+
+    let writer = store.start_writer().unwrap();
+    for slot in [0, 100, 200, 300, 400, 500] {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+    }
+    writer.commit().unwrap();
+
+    let max_slots = 100;
+    let max_prune = 150;
+
+    // First round: excess (500 - 0 - 100 = 400) exceeds the batch, so more work remains.
+    let done = store.prune_history(max_slots, Some(max_prune)).unwrap();
+    assert!(!done, "large backlog should not finish in one batch");
+    let after_first = stored_slots(&store);
+    assert_eq!(after_first.first(), Some(&200), "batch must advance the start");
+    assert_eq!(
+        store.get_tip().unwrap().map(|(s, _)| s),
+        Some(500),
+        "tip preserved across batches"
+    );
+
+    // Loop to completion, bounded to detect non-convergence.
+    let mut done = false;
+    let mut rounds = 1;
+    while !done {
+        done = store.prune_history(max_slots, Some(max_prune)).unwrap();
+        rounds += 1;
+        assert!(rounds < 100, "batched pruning did not converge");
+    }
+
+    // Converges to exactly the protected window: 500 - 400 = 100 = max_slots.
+    assert_eq!(stored_slots(&store), vec![400, 500], "only the window remains");
 }
 
 #[test]
