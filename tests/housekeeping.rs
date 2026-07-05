@@ -200,3 +200,16 @@ fn drain_housekeeping_stops_when_done() {
 
     assert_eq!(rounds, 1, "converged run stops early, not at max_rounds");
 }
+
+/// A zero budget is a genuine no-op: no rounds run, nothing is pruned.
+#[test]
+fn drain_housekeeping_zero_rounds_is_noop() {
+    let domain = ToyDomain::new(None, None).with_sync_config(sync_config(Some(100), None));
+    seed_wal(&domain, 2000..2600); // tip 2599, over the window
+
+    let before = (wal_start(&domain), wal_tip(&domain));
+    let rounds = domain.drain_housekeeping(Some(0)).unwrap();
+
+    assert_eq!(rounds, 0, "zero budget runs no rounds");
+    assert_eq!((wal_start(&domain), wal_tip(&domain)), before, "wal untouched");
+}

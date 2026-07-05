@@ -694,17 +694,18 @@ pub trait Domain: Send + Sync + Clone + 'static {
         let mut rounds = 0;
 
         loop {
+            // Check the budget before running so `Some(0)` is a genuine no-op.
+            if let Some(max) = max_rounds {
+                if rounds >= max {
+                    break;
+                }
+            }
+
             let done = self.housekeeping()?;
             rounds += 1;
 
             if done {
                 break;
-            }
-
-            if let Some(max) = max_rounds {
-                if rounds >= max {
-                    break;
-                }
             }
         }
 
