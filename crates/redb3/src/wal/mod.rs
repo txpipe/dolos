@@ -86,22 +86,27 @@ impl DbChainPoint {
     }
 
     pub fn slot_range(range: impl RangeBounds<BlockSlot>) -> impl RangeBounds<DbChainPoint> {
-        let min_slot = match range.start_bound() {
-            std::ops::Bound::Included(x) => *x,
-            std::ops::Bound::Excluded(x) => *x + 1,
-            std::ops::Bound::Unbounded => BlockSlot::MIN,
+        use std::ops::Bound;
+
+        // Map each slot bound to the enclosing key bound without any slot
+        // arithmetic (a `+1`/`-1` shift would overflow at `BlockSlot::MAX` /
+        // underflow at `BlockSlot::MIN`). `min_bound`/`max_bound` are the
+        // smallest/largest possible keys at a slot, so an inclusive slot bound
+        // maps to an inclusive key bound and an exclusive slot bound maps to an
+        // exclusive key bound on the opposite hash extreme.
+        let start = match range.start_bound() {
+            Bound::Included(x) => Bound::Included(DbChainPoint::min_bound(*x)),
+            Bound::Excluded(x) => Bound::Excluded(DbChainPoint::max_bound(*x)),
+            Bound::Unbounded => Bound::Unbounded,
         };
 
-        let max_slot = match range.end_bound() {
-            std::ops::Bound::Included(x) => *x,
-            std::ops::Bound::Excluded(x) => *x - 1,
-            std::ops::Bound::Unbounded => BlockSlot::MAX,
+        let end = match range.end_bound() {
+            Bound::Included(x) => Bound::Included(DbChainPoint::max_bound(*x)),
+            Bound::Excluded(x) => Bound::Excluded(DbChainPoint::min_bound(*x)),
+            Bound::Unbounded => Bound::Unbounded,
         };
 
-        std::ops::RangeInclusive::new(
-            DbChainPoint::min_bound(min_slot),
-            DbChainPoint::max_bound(max_slot),
-        )
+        DbChainPointRange { start, end }
     }
 }
 
@@ -485,9 +490,11 @@ where
     ///
     /// # Returns
     ///
-    /// Returns `Ok` if the operation was successful, or a `WalError` if an
-    /// error occurred. If the target slot is not found, it logs a warning and
-    /// returns `Ok`.
+    /// Returns `Ok(true)` when the WAL is within `max_slots` (or was pruned all
+    /// the way down to it), and `Ok(false)` when `max_prune` capped this call
+    /// before the target was reached and another round is needed. Pruning is
+    /// deterministic: `remove_before` removes by cutoff bound, and any error it
+    /// raises is propagated (the write transaction is not committed).
     ///
     /// # Notes
     ///
@@ -685,12 +692,17 @@ where
             // is deterministic even in sparse regions where no entry exists near
             // the cutoff.
             let bound = DbChainPoint::min_bound(slot);
-            let mut to_remove = wal.extract_from_if(..bound, |_, _| true)?;
+            let to_remove = wal.extract_from_if(..bound, |_, _| true)?;
 
-            while let Some(Ok((point, _))) = to_remove.next() {
+            // Fully drain the iterator, propagating any storage error with `?`.
+            // On error we return before `wx.commit()`, so the aborted
+            // transaction leaves the WAL untouched rather than persisting a
+            // partial prune.
+            for entry in to_remove {
+                let (point, _) = entry?;
+
                 if event_enabled!(Level::TRACE) {
-                    let point = point.value();
-                    let point = ChainPoint::from(point);
+                    let point = ChainPoint::from(point.value());
                     trace!(%point, "removing wal table entry");
                 }
             }
@@ -1080,6 +1092,33 @@ mod tests {
             suffix,
             vec![65_536, 127_000_000, 4_294_967_295, 4_294_967_296]
         );
+    }
+
+    /// `slot_range` must not overflow/underflow on exclusive bounds at the
+    /// `BlockSlot` extremes, and must map each slot bound to the enclosing key
+    /// bound. `Excluded(MAX)` previously overflowed and `Excluded(MIN)`
+    /// underflowed via `*x + 1` / `*x - 1`.
+    #[test]
+    fn slot_range_handles_extreme_and_exclusive_bounds() {
+        use std::ops::Bound;
+
+        let r = DbChainPoint::slot_range((Bound::Excluded(BlockSlot::MAX), Bound::Unbounded));
+        assert_eq!(
+            r.start_bound(),
+            Bound::Excluded(&DbChainPoint::max_bound(BlockSlot::MAX))
+        );
+        assert_eq!(r.end_bound(), Bound::Unbounded);
+
+        let r = DbChainPoint::slot_range((Bound::Unbounded, Bound::Excluded(BlockSlot::MIN)));
+        assert_eq!(r.start_bound(), Bound::Unbounded);
+        assert_eq!(
+            r.end_bound(),
+            Bound::Excluded(&DbChainPoint::min_bound(BlockSlot::MIN))
+        );
+
+        let r = DbChainPoint::slot_range(10..=20);
+        assert_eq!(r.start_bound(), Bound::Included(&DbChainPoint::min_bound(10)));
+        assert_eq!(r.end_bound(), Bound::Included(&DbChainPoint::max_bound(20)));
     }
 
     /// End-to-end prune with no per-call cap: the WAL shrinks to exactly the
