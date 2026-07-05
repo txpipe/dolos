@@ -237,6 +237,13 @@ impl ToyDomain {
 
         domain
     }
+
+    /// Override the sync config so tests can exercise pruning windows
+    /// (`max_rollback` / `max_history`); default leaves both `None`.
+    pub fn with_sync_config(mut self, sync_config: SyncConfig) -> Self {
+        self.sync_config = sync_config;
+        self
+    }
 }
 
 pub struct TipSubscription {

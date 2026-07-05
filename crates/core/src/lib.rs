@@ -685,6 +685,32 @@ pub trait Domain: Send + Sync + Clone + 'static {
 
         Ok(archive_pruned && wal_pruned)
     }
+
+    /// Runs [`Self::housekeeping`] repeatedly until it reports no remaining
+    /// backlog (each call prunes at most `MAX_PRUNE_SLOTS_PER_HOUSEKEEPING`).
+    /// `max_rounds` is an upper bound, not a fixed count: a converged run stops
+    /// early. Returns the number of rounds executed.
+    fn drain_housekeeping(&self, max_rounds: Option<u64>) -> Result<u64, DomainError> {
+        let mut rounds = 0;
+
+        loop {
+            // Check the budget before running so `Some(0)` is a genuine no-op.
+            if let Some(max) = max_rounds {
+                if rounds >= max {
+                    break;
+                }
+            }
+
+            let done = self.housekeeping()?;
+            rounds += 1;
+
+            if done {
+                break;
+            }
+        }
+
+        Ok(rounds)
+    }
 }
 
 #[trait_variant::make(Send)]
