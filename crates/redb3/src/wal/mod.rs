@@ -64,21 +64,16 @@ pub type DbLogValue = Vec<u8>;
 pub struct DbChainPoint([u8; 40]);
 
 impl DbChainPoint {
-    /// Smallest possible key at `slot`: big-endian slot bytes followed by the
-    /// all-zero (minimum) hash. Sorts at-or-below every real entry for `slot`.
-    ///
-    /// The slot bytes MUST be big-endian to match `ChainPoint::into_bytes`
-    /// (`crates/core/src/point.rs`), which is what stored keys use. redb
-    /// compares keys lexicographically, so big-endian encoding makes byte order
-    /// equal to slot order.
+    /// Smallest key at `slot`: big-endian slot bytes + zero hash. Big-endian is
+    /// required so redb's lexicographic key order matches slot order (see
+    /// `ChainPoint::into_bytes`).
     fn min_bound(slot: BlockSlot) -> DbChainPoint {
         let mut point = [0u8; 40];
         point[0..8].copy_from_slice(&slot.to_be_bytes());
         DbChainPoint(point)
     }
 
-    /// Largest possible key at `slot`: big-endian slot bytes followed by the
-    /// all-ones (maximum) hash. Sorts at-or-above every real entry for `slot`.
+    /// Largest key at `slot`: big-endian slot bytes + all-ones hash.
     fn max_bound(slot: BlockSlot) -> DbChainPoint {
         let mut point = [255u8; 40];
         point[0..8].copy_from_slice(&slot.to_be_bytes());
@@ -88,12 +83,8 @@ impl DbChainPoint {
     pub fn slot_range(range: impl RangeBounds<BlockSlot>) -> impl RangeBounds<DbChainPoint> {
         use std::ops::Bound;
 
-        // Map each slot bound to the enclosing key bound without any slot
-        // arithmetic (a `+1`/`-1` shift would overflow at `BlockSlot::MAX` /
-        // underflow at `BlockSlot::MIN`). `min_bound`/`max_bound` are the
-        // smallest/largest possible keys at a slot, so an inclusive slot bound
-        // maps to an inclusive key bound and an exclusive slot bound maps to an
-        // exclusive key bound on the opposite hash extreme.
+        // Map bounds to key bounds directly; no `+1`/`-1` shift (would overflow
+        // at BlockSlot::MAX / underflow at MIN). Excluded flips the hash extreme.
         let start = match range.start_bound() {
             Bound::Included(x) => Bound::Included(DbChainPoint::min_bound(*x)),
             Bound::Excluded(x) => Bound::Excluded(DbChainPoint::max_bound(*x)),
@@ -684,20 +675,14 @@ where
         {
             let mut wal = wx.open_table(WAL)?;
 
-            // Build the cutoff bound directly from the target slot rather than
-            // locating a real nearby entry. `min_bound(slot)` is the smallest
-            // possible key at `slot` (zero hash) and the range is exclusive of
-            // it, so this removes exactly every entry with slot < target and
-            // retains real entries at `slot` (which have a nonzero hash). This
-            // is deterministic even in sparse regions where no entry exists near
-            // the cutoff.
+            // `..min_bound(slot)` removes every entry with slot < target and
+            // keeps real entries at `slot` (nonzero hash). Deterministic even
+            // where no entry exists near the cutoff.
             let bound = DbChainPoint::min_bound(slot);
             let to_remove = wal.extract_from_if(..bound, |_, _| true)?;
 
-            // Fully drain the iterator, propagating any storage error with `?`.
-            // On error we return before `wx.commit()`, so the aborted
-            // transaction leaves the WAL untouched rather than persisting a
-            // partial prune.
+            // Drain fully; `?` propagates storage errors before commit, so an
+            // error aborts the txn instead of persisting a partial prune.
             for entry in to_remove {
                 let (point, _) = entry?;
 
@@ -1018,9 +1003,8 @@ mod tests {
         assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
     }
 
-    /// Build a WAL entry at `slot` with a deterministic, always-nonzero hash so
-    /// the point is fully defined and distinct from the synthetic zero-hash
-    /// cutoff bound that `remove_before` compares against.
+    /// WAL entry at `slot` with a deterministic nonzero hash (distinct from the
+    /// zero-hash cutoff bound `remove_before` uses).
     fn entry(slot: BlockSlot) -> LogEntry<TestDelta> {
         let mut hash = [1u8; 32];
         hash[0..8].copy_from_slice(&slot.to_be_bytes());
@@ -1035,10 +1019,8 @@ mod tests {
             .collect()
     }
 
-    /// Regression for the slot-range endianness bug: slot-range scans must find
-    /// entries at realistic slot values, and key order must equal slot order
-    /// across the 2^8 / 2^16 / 2^32 byte boundaries. Fails with little-endian
-    /// range bounds because the scan range excludes every real key.
+    /// Endianness regression: key order must equal slot order across the
+    /// 2^8/2^16/2^32 boundaries, and scans must find realistic slots.
     #[test]
     fn slot_range_round_trip_across_byte_boundaries() {
         let store = TestStore::memory().unwrap();
@@ -1094,10 +1076,8 @@ mod tests {
         );
     }
 
-    /// `slot_range` must not overflow/underflow on exclusive bounds at the
-    /// `BlockSlot` extremes, and must map each slot bound to the enclosing key
-    /// bound. `Excluded(MAX)` previously overflowed and `Excluded(MIN)`
-    /// underflowed via `*x + 1` / `*x - 1`.
+    /// `slot_range` maps bounds to the enclosing key bounds without
+    /// overflowing at `BlockSlot::MAX` / underflowing at `MIN` on `Excluded`.
     #[test]
     fn slot_range_handles_extreme_and_exclusive_bounds() {
         use std::ops::Bound;
@@ -1121,9 +1101,7 @@ mod tests {
         assert_eq!(r.end_bound(), Bound::Included(&DbChainPoint::max_bound(20)));
     }
 
-    /// End-to-end prune with no per-call cap: the WAL shrinks to exactly the
-    /// `max_slots` window, tip preserved. Would be a silent no-op before the
-    /// endianness fix.
+    /// Unbatched prune shrinks the WAL to exactly `max_slots`, tip preserved.
     #[test]
     fn prune_history_full_shrinks_to_max_slots() {
         let store = TestStore::memory().unwrap();
@@ -1151,8 +1129,8 @@ mod tests {
         );
     }
 
-    /// Batched prune makes bounded incremental progress and converges, never
-    /// pruning into the protected `max_slots` window.
+    /// Batched prune makes bounded progress, converges, and never prunes into
+    /// the protected `max_slots` window.
     #[test]
     fn prune_history_batched_converges() {
         let store = TestStore::memory().unwrap();
@@ -1193,9 +1171,8 @@ mod tests {
         assert_eq!(start, last - max_slots, "converges to the max_slots window");
     }
 
-    /// `remove_before` must delete older entries even when no entry exists near
-    /// the cutoff. The old `approximate_slot(±180)` lookup would silently find
-    /// nothing here and skip pruning entirely.
+    /// `remove_before` deletes older entries even with no entry near the cutoff
+    /// (the old `approximate_slot(±180)` lookup silently skipped this case).
     #[test]
     fn remove_before_handles_sparse_wal() {
         let store = TestStore::memory().unwrap();
