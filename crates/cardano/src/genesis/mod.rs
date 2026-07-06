@@ -167,5 +167,14 @@ pub fn execute<D: Domain>(
 
     staking::bootstrap::<D>(state, genesis)?;
 
+    // Mark genesis state as applied by setting the cursor to Origin. This
+    // lets crash recovery distinguish "genesis done, no blocks yet" (cursor
+    // at Origin) from "genesis never ran" (no cursor), so a restart doesn't
+    // re-run genesis and reset a WAL that already holds blocks. Set last so
+    // a crash mid-genesis leaves no cursor and genesis re-runs cleanly.
+    let writer = state.start_writer()?;
+    writer.set_cursor(ChainPoint::Origin)?;
+    writer.commit()?;
+
     Ok(())
 }
