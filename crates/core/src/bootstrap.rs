@@ -8,7 +8,8 @@ use tracing::{error, info, warn};
 
 use crate::{
     sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, ChainLogic, ChainPoint, Domain,
-    DomainError, IndexStore, IndexWriter as _, StateStore, WalStore,
+    DomainError, EntityDelta as _, IndexStore, IndexWriter as _, NsKey, StateStore,
+    StateWriter as _, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -54,9 +55,10 @@ impl<D: Domain> BootstrapExt for D {
 
 /// Check that WAL is consistent with the state store.
 ///
-/// WAL at or ahead of state is normal — the existing `catch_up_stores` handles
-/// replaying WAL entries to bring other stores up. State ahead of WAL is an
-/// error that requires explicit repair via `dolos doctor reset-wal`.
+/// WAL at or ahead of state is normal — `catch_up_stores` replays WAL entries
+/// to bring every other store (state included) up to the WAL tip. State ahead
+/// of WAL is an error that requires explicit repair via `dolos doctor
+/// reset-wal`.
 fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let wal = domain.wal().find_tip()?.map(|(point, _)| point);
     let state = domain.state().read_cursor()?;
@@ -138,34 +140,125 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
     Ok(())
 }
 
-/// Catch up archive and index stores by replaying WAL entries.
+/// Catch up state, archive and index stores by replaying WAL entries.
 ///
-/// After `check_wal_in_sync_with_state`, the WAL is at or ahead of the state.
-/// If archive or index stores are behind (e.g., crash between state commit
-/// and archive/index commit), this function replays the missing WAL entries
-/// to bring them back in sync.
+/// The WAL commits first in the work-unit lifecycle, so after a crash it is
+/// the most advanced store. Every other store reconciles forward to the WAL
+/// tip: state first (covering a crash between `commit_wal` and
+/// `commit_state`), then archive and indexes (covering a crash between the
+/// state commit and the archive/index commits).
 fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
-    let state_cursor = match domain.state().read_cursor()? {
+    let target = match domain.wal().find_tip()? {
         // nothing to catch up
         None => return Ok(()),
-        // Origin means no blocks have been processed yet — archive and indexes
-        // are correctly empty, so there is nothing to replay.
-        Some(ChainPoint::Origin) => return Ok(()),
-        Some(cursor) => cursor,
+        // Origin means no blocks have been processed yet — state, archive and
+        // indexes are correctly empty, so there is nothing to replay.
+        Some((ChainPoint::Origin, _)) => return Ok(()),
+        Some((point, _)) => point,
     };
 
-    catch_up_archive(domain, &state_cursor)?;
-    catch_up_indexes(domain, &state_cursor)?;
+    catch_up_state(domain, &target)?;
+    catch_up_archive(domain, &target)?;
+    catch_up_indexes(domain, &target)?;
+
+    Ok(())
+}
+
+/// Catch up the state store by replaying WAL entries.
+///
+/// A crash between `commit_wal` and `commit_state` leaves the WAL holding
+/// blocks whose effects never reached the state store. Only roll work units
+/// write WAL entries, and each entry fully captures its state mutation
+/// (entity deltas + block + resolved inputs), so forward-replaying them here
+/// is lossless. Boundary work units never write the WAL, so they can't leave
+/// the WAL ahead of state; recovering a crash *during* a boundary is a
+/// separate concern (#1018).
+fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
+    let state_cursor = domain.state().read_cursor()?;
+
+    if state_cursor.as_ref() == Some(target) {
+        return Ok(());
+    }
+
+    // Origin (or no cursor) means nothing has been applied yet — replay the
+    // whole WAL.
+    let state_slot = match &state_cursor {
+        None | Some(ChainPoint::Origin) => None,
+        Some(point) => Some(point.slot()),
+    };
+
+    // Find the WAL start point from the state cursor
+    let start = match state_slot {
+        Some(slot) => domain.wal().locate_point(slot)?,
+        None => None,
+    };
+
+    let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
+
+    let mut count = 0u64;
+
+    for (point, mut log) in logs {
+        // Skip entries at or before the current state cursor
+        if Some(point.slot()) <= state_slot {
+            continue;
+        }
+
+        // Skip synthetic entries (from reset_to) — they carry no effects
+        if log.block.is_empty() {
+            continue;
+        }
+
+        let writer = domain.state().start_writer()?;
+
+        // Forward mirror of the rollback loop in `sync.rs`: load each entity
+        // at its pre-block value and apply the deltas in block order.
+        let keys = log
+            .delta
+            .iter()
+            .map(|delta| delta.key())
+            .collect::<Vec<_>>();
+
+        let mut entities = crate::state::load_entity_chunk::<D>(keys.as_slice(), domain.state())?;
+
+        for (key, entity) in entities.iter_mut() {
+            for delta in log.delta.iter_mut() {
+                if delta.key() == *key {
+                    delta.apply(entity);
+                }
+            }
+        }
+
+        for (key, entity) in entities.iter() {
+            let NsKey(ns, key) = key;
+            writer.save_entity_typed(ns, key, entity.as_ref())?;
+        }
+
+        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
+
+        writer.apply_utxoset(&catchup.utxo_delta)?;
+
+        writer.set_cursor(point.clone())?;
+
+        // Commit per entry so a later block touching the same entity reloads
+        // the value this block just wrote.
+        writer.commit()?;
+
+        count += 1;
+    }
+
+    if count > 0 {
+        info!(count, "state caught up from WAL");
+    }
 
     Ok(())
 }
 
 /// Catch up archive store by replaying WAL blocks.
-fn catch_up_archive<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<(), DomainError> {
+fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
     let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
-    let state_slot = state_cursor.slot();
+    let target_slot = target.slot();
 
-    if archive_tip == Some(state_slot) {
+    if archive_tip == Some(target_slot) {
         return Ok(());
     }
 
@@ -176,9 +269,7 @@ fn catch_up_archive<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<
         None => None,
     };
 
-    let blocks = domain
-        .wal()
-        .iter_blocks(start, Some(state_cursor.clone()))?;
+    let blocks = domain.wal().iter_blocks(start, Some(target.clone()))?;
 
     let writer = domain.archive().start_writer()?;
     let mut count = 0u64;
@@ -186,6 +277,11 @@ fn catch_up_archive<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<
     for (point, block) in blocks {
         // Skip the start point itself (already in archive) and anything at or before it
         if Some(point.slot()) <= archive_tip {
+            continue;
+        }
+
+        // Skip synthetic entries (from reset_to) — they carry no block
+        if block.is_empty() {
             continue;
         }
 
@@ -202,10 +298,10 @@ fn catch_up_archive<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<
 }
 
 /// Catch up index store by replaying WAL log entries.
-fn catch_up_indexes<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<(), DomainError> {
+fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
     let index_cursor = domain.indexes().cursor()?;
 
-    if index_cursor.as_ref() == Some(state_cursor) {
+    if index_cursor.as_ref() == Some(target) {
         return Ok(());
     }
 
@@ -217,7 +313,7 @@ fn catch_up_indexes<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<
         None => None,
     };
 
-    let logs = domain.wal().iter_logs(start, Some(state_cursor.clone()))?;
+    let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
 
     let writer = domain.indexes().start_writer()?;
     let mut count = 0u64;
@@ -225,6 +321,11 @@ fn catch_up_indexes<D: Domain>(domain: &D, state_cursor: &ChainPoint) -> Result<
     for (point, log) in logs {
         // Skip entries at or before the current index cursor
         if Some(point.slot()) <= index_slot {
+            continue;
+        }
+
+        // Skip synthetic entries (from reset_to) — they carry no effects
+        if log.block.is_empty() {
             continue;
         }
 

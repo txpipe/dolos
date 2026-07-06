@@ -4,36 +4,46 @@
 //! lifecycle with partial commits (WAL + state only), then verifies that
 //! `bootstrap()` recovers archive and index stores from WAL replay.
 
+use std::str::FromStr as _;
 use std::sync::Arc;
 
 use dolos_core::{
     sync::SyncExt as _, BootstrapExt, ChainLogic, ChainPoint, Domain, IndexStore, StateStore,
-    StateWriter, WalStore, WorkUnit,
+    StateWriter, TxoRef, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
     toy_domain::ToyDomain,
 };
 
+/// Which commit phases to run when feeding blocks, simulating a crash at
+/// different points of the work-unit lifecycle. `commit_wal` always runs;
+/// commit_archive/commit_indexes/finalize are always skipped.
+#[derive(Clone, Copy)]
+enum CrashAfter {
+    /// Run commit_wal only — models a crash between `commit_wal` and
+    /// `commit_state`.
+    Wal,
+    /// Run commit_wal + commit_state — models a crash between the state
+    /// commit and the archive/index commits.
+    State,
+}
+
 /// Helper: feed blocks into a domain with partial work-unit execution.
-///
-/// Runs load → compute → commit_wal → commit_state but **skips**
-/// commit_archive and commit_indexes, simulating a crash between
-/// the state commit and the archive/index commits.
-fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock]) {
+fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock], crash_after: CrashAfter) {
     let mut chain = domain.write_chain();
 
     for block in blocks {
         if !chain.can_receive_block() {
-            drain_partial(&mut chain, domain);
+            drain_partial(&mut chain, domain, crash_after);
         }
         chain.receive_block(block.clone()).unwrap();
     }
 
-    drain_partial(&mut chain, domain);
+    drain_partial(&mut chain, domain, crash_after);
 }
 
-fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain) {
+fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain, crash_after: CrashAfter) {
     while let Some(mut work) =
         <dolos_cardano::CardanoLogic as ChainLogic>::pop_work::<ToyDomain>(chain, domain)
     {
@@ -44,10 +54,12 @@ fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain) {
             WorkUnit::<ToyDomain>::load(&mut work, domain, shard).unwrap();
             WorkUnit::<ToyDomain>::compute(&mut work, shard).unwrap();
             WorkUnit::<ToyDomain>::commit_wal(&mut work, domain, shard).unwrap();
-            WorkUnit::<ToyDomain>::commit_state(&mut work, domain, shard).unwrap();
+            if let CrashAfter::State = crash_after {
+                WorkUnit::<ToyDomain>::commit_state(&mut work, domain, shard).unwrap();
+            }
             // Intentionally skip commit_archive and commit_indexes — and
-            // intentionally skip finalize() to model "crash after state
-            // commit", which is what the recovery test below exercises.
+            // intentionally skip finalize() to model a crash mid-lifecycle,
+            // which is what the recovery tests below exercise.
         }
     }
 }
@@ -67,7 +79,7 @@ fn test_catchup_recovers_archive_and_indexes() {
     let baseline_index = domain.indexes().cursor().unwrap();
 
     // Feed synthetic blocks with partial execution (skip archive + indexes).
-    feed_blocks_partial(&domain, &blocks);
+    feed_blocks_partial(&domain, &blocks, CrashAfter::State);
 
     // State should have advanced.
     let state_cursor = domain.state().read_cursor().unwrap().unwrap();
@@ -111,6 +123,119 @@ fn test_catchup_recovers_archive_and_indexes() {
         slot.is_some(),
         "tx hash {} should be found in index after catch-up",
         tx_hash_hex
+    );
+}
+
+/// A crash between `commit_wal` and `commit_state` leaves the WAL ahead of
+/// every other store. Bootstrap must replay the WAL entries into state (and
+/// then archive/indexes) instead of leaving state behind — otherwise the
+/// upstream intersection resumes from the WAL tip and the skipped blocks'
+/// effects are silently lost.
+#[test]
+fn test_catchup_recovers_state_from_wal() {
+    let cfg = SyntheticBlockConfig::default();
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    let baseline_state = domain.state().read_cursor().unwrap();
+
+    // Feed blocks committing the WAL only.
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Wal);
+
+    // WAL advanced; state stayed behind.
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    let state_cursor = domain.state().read_cursor().unwrap();
+    assert_eq!(state_cursor, baseline_state, "state should not have advanced");
+    assert_ne!(
+        Some(&wal_tip),
+        baseline_state.as_ref(),
+        "WAL should have advanced"
+    );
+
+    // --- Run bootstrap (which calls catch_up_stores internally) ---
+    domain.bootstrap().unwrap();
+
+    // Every store must converge to the WAL tip.
+    let state_cursor_after = domain.state().read_cursor().unwrap();
+    assert_eq!(
+        state_cursor_after.as_ref(),
+        Some(&wal_tip),
+        "state cursor should be at the WAL tip after catch-up"
+    );
+
+    let archive_tip_after = domain.archive().get_tip().unwrap().map(|(s, _)| s);
+    assert_eq!(
+        archive_tip_after,
+        Some(wal_tip.slot()),
+        "archive tip should be at the WAL tip after catch-up"
+    );
+
+    let index_cursor_after = domain.indexes().cursor().unwrap();
+    assert_eq!(
+        index_cursor_after.as_ref(),
+        Some(&wal_tip),
+        "index cursor should be at the WAL tip after catch-up"
+    );
+
+    // The replayed blocks' UTxO effects must be visible in state. Use the
+    // last tx of the last block — nothing after it can consume its output.
+    let last_tx = vectors.blocks.last().unwrap().tx_hashes.last().unwrap();
+    let txo = TxoRef::from_str(&format!("{last_tx}#0")).unwrap();
+    let utxos = domain.state().get_utxos(vec![txo]).unwrap();
+    assert_eq!(
+        utxos.len(),
+        1,
+        "utxo produced by replayed block should be queryable from state"
+    );
+}
+
+/// Crash-recovery matrix: state, archive and indexes each at a different
+/// point behind the WAL tip. Bootstrap must converge all of them to the
+/// WAL tip.
+#[test]
+fn test_catchup_converges_all_stores_to_wal_tip() {
+    let cfg = SyntheticBlockConfig::default();
+    let (blocks, _vectors, cardano_config) = build_synthetic_blocks(cfg);
+    assert!(
+        blocks.len() >= 2,
+        "synthetic config must produce at least 2 blocks to stagger the stores"
+    );
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    // First batch: WAL + state commit (archive/index stay at baseline).
+    feed_blocks_partial(&domain, &blocks[..1], CrashAfter::State);
+
+    // Second batch: WAL only (state stays at the first batch).
+    feed_blocks_partial(&domain, &blocks[1..], CrashAfter::Wal);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    let state_mid = domain.state().read_cursor().unwrap();
+    assert_ne!(
+        state_mid.as_ref(),
+        Some(&wal_tip),
+        "state should be behind the WAL tip"
+    );
+
+    domain.bootstrap().unwrap();
+
+    assert_eq!(
+        domain.state().read_cursor().unwrap().as_ref(),
+        Some(&wal_tip),
+        "state cursor should be at the WAL tip after catch-up"
+    );
+    assert_eq!(
+        domain.archive().get_tip().unwrap().map(|(s, _)| s),
+        Some(wal_tip.slot()),
+        "archive tip should be at the WAL tip after catch-up"
+    );
+    assert_eq!(
+        domain.indexes().cursor().unwrap().as_ref(),
+        Some(&wal_tip),
+        "index cursor should be at the WAL tip after catch-up"
     );
 }
 
