@@ -319,7 +319,7 @@ entity_boilerplate!(EpochState, "epochs");
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_at, any_epoch_value_no_next_at};
     use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing as root;
     use crate::pots::testing::{any_epoch_incentives, any_pots};
@@ -404,6 +404,80 @@ pub(crate) mod testing {
         ) -> EpochState {
             EpochState {
                 number,
+                initial_pots,
+                rolling,
+                pparams,
+                largest_stable_slot,
+                previous_nonce_tail,
+                nonces,
+                end,
+                incentives,
+                ewrap_progress,
+                estart_progress,
+                rupd_progress,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_epoch_state_at(epoch: Epoch)(
+            initial_pots in any_pots(),
+            rolling in any_epoch_value_at(epoch, any_rolling_stats().boxed()),
+            pparams in any_epoch_value_at(epoch, any_pparams_set().boxed()),
+            largest_stable_slot in root::any_slot(),
+            previous_nonce_tail in prop::option::of(root::any_hash_32()),
+            nonces in prop::option::of(any_nonces()),
+            end in prop::option::of(any_end_stats()),
+            incentives in prop::option::of(any_epoch_incentives()),
+            ewrap_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+            estart_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+            rupd_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+        ) -> EpochState {
+            EpochState {
+                number: epoch,
+                initial_pots,
+                rolling,
+                pparams,
+                largest_stable_slot,
+                previous_nonce_tail,
+                nonces,
+                end,
+                incentives,
+                ewrap_progress,
+                estart_progress,
+                rupd_progress,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_epoch_state_no_rolling_next_at(epoch: Epoch)(
+            initial_pots in any_pots(),
+            rolling in any_epoch_value_no_next_at(epoch, any_rolling_stats().boxed()),
+            pparams in any_epoch_value_at(epoch, any_pparams_set().boxed()),
+            largest_stable_slot in root::any_slot(),
+            previous_nonce_tail in prop::option::of(root::any_hash_32()),
+            nonces in prop::option::of(any_nonces()),
+            end in prop::option::of(any_end_stats()),
+            incentives in prop::option::of(any_epoch_incentives()),
+            ewrap_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+            estart_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+            rupd_progress in prop::option::of(
+                (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
+            ),
+        ) -> EpochState {
+            EpochState {
+                number: epoch,
                 initial_pots,
                 rolling,
                 pparams,
@@ -1495,62 +1569,11 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
 #[allow(deprecated)] // prop_compose! macro expansions reference legacy
                      // EpochWrapUp/EpochTransition for back-compat tests
 mod prop_tests {
-    use super::testing::{any_end_stats, any_epoch_state, any_nonces};
+    use super::testing::{any_end_stats, any_epoch_state, any_epoch_state_at, any_epoch_state_no_rolling_next_at, any_nonces};
     use super::*;
-    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_no_next};
-    use crate::model::pparams::testing::any_pparams_set;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
-    use crate::pots::testing::{any_epoch_incentives, any_pots};
+    use crate::pots::testing::any_epoch_incentives;
     use proptest::prelude::*;
-
-    // `EpochStatsUpdate::apply` calls `rolling.live_mut` which asserts `next`
-    // is None, so we need a specialized generator that keeps `rolling.next`
-    // empty.
-    prop_compose! {
-        fn any_epoch_state_no_rolling_next()(
-            number in root::any_epoch(),
-            initial_pots in any_pots(),
-            rolling in any_epoch_value_no_next(super::testing::any_rolling_stats().boxed()),
-            pparams in any_epoch_value(any_pparams_set().boxed()),
-            largest_stable_slot in root::any_slot(),
-            previous_nonce_tail in prop::option::of(root::any_hash_32()),
-            nonces in prop::option::of(any_nonces()),
-            end in prop::option::of(any_end_stats()),
-            incentives in prop::option::of(any_epoch_incentives()),
-        ) -> EpochState {
-            EpochState {
-                number,
-                initial_pots,
-                rolling,
-                pparams,
-                largest_stable_slot,
-                previous_nonce_tail,
-                nonces,
-                end,
-                incentives,
-                ewrap_progress: None,
-                estart_progress: None,
-                rupd_progress: None,
-            }
-        }
-    }
-
-    prop_compose! {
-        fn any_epoch_stats_update()(
-            epoch in root::any_epoch(),
-            block_fees in root::any_lovelace(),
-            utxo_delta in -1_000_000i64..1_000_000i64,
-            new_accounts in 0u64..100u64,
-            removed_accounts in 0u64..100u64,
-            withdrawals in root::any_lovelace(),
-        ) -> EpochStatsUpdate {
-            EpochStatsUpdate {
-                epoch, block_fees, utxo_delta,
-                new_accounts, removed_accounts, withdrawals,
-                ..EpochStatsUpdate::default()
-            }
-        }
-    }
 
     prop_compose! {
         fn any_nonces_update()(
@@ -1694,25 +1717,27 @@ mod prop_tests {
         }
     }
 
-    prop_compose! {
-        fn any_epoch_transition()(
-            new_epoch in root::any_epoch(),
-        ) -> EpochTransition {
-            // new_pots is filled in by the test harness from the entity's initial_pots
-            // so that `new_pots.max_supply() == entity.initial_pots.max_supply()` holds
-            // (which `apply`'s debug_assert requires).
-            EpochTransition::new(new_epoch, crate::pots::Pots::default(), None, None)
-        }
+    fn any_epoch_transition_at(new_epoch: Epoch) -> impl Strategy<Value = EpochTransition> {
+        Just(EpochTransition::new(new_epoch, crate::pots::Pots::default(), None, None))
+    }
+
+    fn any_epoch_transition_v2_at(new_epoch: Epoch) -> impl Strategy<Value = EpochTransitionV2> {
+        Just(EpochTransitionV2::new(new_epoch, crate::pots::Pots::default(), None, None))
     }
 
     prop_compose! {
-        fn any_epoch_transition_v2()(
-            new_epoch in root::any_epoch(),
-        ) -> EpochTransitionV2 {
-            // new_pots is filled in by the test harness from the entity's initial_pots
-            // so that `new_pots.max_supply() == entity.initial_pots.max_supply()` holds
-            // (which `apply`'s debug_assert requires).
-            EpochTransitionV2::new(new_epoch, crate::pots::Pots::default(), None, None)
+        fn any_epoch_stats_update_at(epoch: Epoch)(
+            block_fees in root::any_lovelace(),
+            utxo_delta in -1_000_000i64..1_000_000i64,
+            new_accounts in 0u64..100u64,
+            removed_accounts in 0u64..100u64,
+            withdrawals in root::any_lovelace(),
+        ) -> EpochStatsUpdate {
+            EpochStatsUpdate {
+                epoch, block_fees, utxo_delta,
+                new_accounts, removed_accounts, withdrawals,
+                ..EpochStatsUpdate::default()
+            }
         }
     }
 
@@ -1727,8 +1752,9 @@ mod prop_tests {
     proptest! {
         #[test]
         fn epoch_stats_update_roundtrip(
-            entity in any_epoch_state_no_rolling_next(),
-            delta in any_epoch_stats_update(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_epoch_state_no_rolling_next_at(epoch), any_epoch_stats_update_at(epoch))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
@@ -1784,8 +1810,9 @@ mod prop_tests {
 
         #[test]
         fn epoch_transition_roundtrip(
-            entity in any_epoch_state(),
-            mut delta in any_epoch_transition(),
+            (entity, mut delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_epoch_state_at(epoch), any_epoch_transition_at(epoch + 1))
+            }),
         ) {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.
@@ -1795,8 +1822,9 @@ mod prop_tests {
 
         #[test]
         fn epoch_transition_v2_roundtrip(
-            entity in any_epoch_state(),
-            mut delta in any_epoch_transition_v2(),
+            (entity, mut delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_epoch_state_at(epoch), any_epoch_transition_v2_at(epoch + 1))
+            }),
         ) {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.

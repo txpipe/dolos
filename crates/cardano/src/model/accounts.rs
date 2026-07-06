@@ -133,7 +133,7 @@ entity_boilerplate!(AccountState, "accounts");
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_at};
     use crate::model::testing as root;
     use proptest::prelude::*;
 
@@ -177,6 +177,30 @@ pub(crate) mod testing {
             stake in any_epoch_value(any_stake().boxed()),
             pool in any_epoch_value(any_pool_delegation().boxed()),
             drep in any_epoch_value(any_drep_delegation().boxed()),
+            vote_delegated_at in prop::option::of((root::any_slot(), root::any_tx_order())),
+            retired_pool in prop::option::of(root::any_pool_hash()),
+        ) -> AccountState {
+            AccountState {
+                credential,
+                registered_at,
+                deregistered_at,
+                stake,
+                pool,
+                drep,
+                vote_delegated_at,
+                retired_pool,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_account_state_at(epoch: Epoch)(
+            credential in root::any_stake_credential(),
+            registered_at in prop::option::of(root::any_slot()),
+            deregistered_at in prop::option::of(root::any_slot()),
+            stake in any_epoch_value_at(epoch, any_stake().boxed()),
+            pool in any_epoch_value_at(epoch, any_pool_delegation().boxed()),
+            drep in any_epoch_value_at(epoch, any_drep_delegation().boxed()),
             vote_delegated_at in prop::option::of((root::any_slot(), root::any_tx_order())),
             retired_pool in prop::option::of(root::any_pool_hash()),
         ) -> AccountState {
@@ -1020,22 +1044,16 @@ impl dolos_core::EntityDelta for AccountTransition {
 #[cfg(test)]
 mod prop_tests {
     use super::*;
-    use super::testing::any_account_state;
+    use super::testing::{any_account_state, any_account_state_at};
     use crate::model::testing::{self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip};
     use proptest::prelude::*;
 
-    /// Build an `AccountState` whose `pool.live` is guaranteed to be `PoolDelegation::Pool(..)`.
-    /// Required by `PoolDelegatorRetire`, which panics via `unreachable!()` if `prev_pool` isn't
-    /// a real pool delegation.
-    fn any_account_with_active_pool() -> impl Strategy<Value = AccountState> {
-        (any_account_state(), root::any_pool_hash()).prop_map(|(mut acct, pool)| {
-            let live = acct.pool.live().cloned();
-            let epoch = acct.pool.epoch().unwrap_or(3);
-            if live.is_some() {
-                acct.pool.replace(PoolDelegation::Pool(pool), epoch);
-            } else {
-                acct.pool = EpochValue::with_live(epoch, PoolDelegation::Pool(pool));
-            }
+    /// Like `any_account_with_active_pool` but pinned to a specific epoch so the
+    /// entity's `EpochValue` fields align with the delta's epoch (required by
+    /// `strict` assertions).
+    fn any_account_with_active_pool_at(epoch: Epoch) -> impl Strategy<Value = AccountState> {
+        (any_account_state_at(epoch), root::any_pool_hash()).prop_map(move |(mut acct, pool)| {
+            acct.pool = EpochValue::with_live(epoch, PoolDelegation::Pool(pool));
             acct
         })
     }
@@ -1073,32 +1091,29 @@ mod prop_tests {
     }
 
     prop_compose! {
-        fn any_stake_delegation()(
+        fn any_stake_delegation_at(epoch: Epoch)(
             cred in root::any_stake_credential(),
             pool in root::any_hash_28(),
-            epoch in root::any_epoch(),
         ) -> StakeDelegation {
             StakeDelegation::new(cred, pool, epoch)
         }
     }
 
     prop_compose! {
-        fn any_vote_delegation()(
+        fn any_vote_delegation_at(epoch: Epoch)(
             cred in root::any_stake_credential(),
             drep in root::any_drep(),
             slot in root::any_slot(),
             order in root::any_tx_order(),
-            epoch in root::any_epoch(),
         ) -> VoteDelegation {
             VoteDelegation::new(cred, drep, slot, order, epoch)
         }
     }
 
     prop_compose! {
-        fn any_stake_deregistration()(
+        fn any_stake_deregistration_at(epoch: Epoch)(
             cred in root::any_stake_credential(),
             slot in root::any_slot(),
-            epoch in root::any_epoch(),
         ) -> StakeDeregistration {
             StakeDeregistration::new(cred, slot, epoch)
         }
@@ -1114,18 +1129,16 @@ mod prop_tests {
     }
 
     prop_compose! {
-        fn any_pool_delegator_retire()(
+        fn any_pool_delegator_retire_at(epoch: Epoch)(
             pool in root::any_hash_28(),
-            epoch in root::any_epoch(),
         ) -> PoolDelegatorRetire {
             PoolDelegatorRetire::new(dolos_core::EntityKey::from(pool.as_slice()), epoch)
         }
     }
 
     prop_compose! {
-        fn any_drep_delegator_drop()(
+        fn any_drep_delegator_drop_at(epoch: Epoch)(
             cred_hash in root::any_hash_28(),
-            epoch in root::any_epoch(),
         ) -> DRepDelegatorDrop {
             DRepDelegatorDrop::new(dolos_core::EntityKey::from(cred_hash.as_slice()), epoch)
         }
@@ -1168,9 +1181,8 @@ mod prop_tests {
     }
 
     prop_compose! {
-        fn any_account_transition()(
+        fn any_account_transition_at(next_epoch: Epoch)(
             account_hash in root::any_hash_28(),
-            next_epoch in root::any_epoch(),
         ) -> AccountTransition {
             AccountTransition::new(dolos_core::EntityKey::from(account_hash.as_slice()), next_epoch)
         }
@@ -1203,24 +1215,27 @@ mod prop_tests {
 
         #[test]
         fn stake_delegation_roundtrip(
-            entity in any_account_state(),
-            delta in any_stake_delegation(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_stake_delegation_at(epoch))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn vote_delegation_roundtrip(
-            entity in any_account_state(),
-            delta in any_vote_delegation(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_vote_delegation_at(epoch))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn stake_deregistration_roundtrip(
-            entity in any_account_state(),
-            delta in any_stake_deregistration(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_stake_deregistration_at(epoch))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
@@ -1235,16 +1250,18 @@ mod prop_tests {
 
         #[test]
         fn pool_delegator_retire_roundtrip(
-            entity in any_account_with_active_pool(),
-            delta in any_pool_delegator_retire(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_with_active_pool_at(epoch), any_pool_delegator_retire_at(epoch))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn drep_delegator_drop_roundtrip(
-            entity in any_account_state(),
-            delta in any_drep_delegator_drop(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_drep_delegator_drop_at(epoch))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
@@ -1283,8 +1300,9 @@ mod prop_tests {
 
         #[test]
         fn account_transition_roundtrip(
-            entity in any_account_state(),
-            delta in any_account_transition(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_account_transition_at(epoch + 1))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
@@ -1325,24 +1343,27 @@ mod prop_tests {
 
         #[test]
         fn stake_delegation_serde_roundtrip(
-            entity in any_account_state(),
-            delta in any_stake_delegation(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_stake_delegation_at(epoch))
+            }),
         ) {
             assert_delta_serde_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn stake_deregistration_serde_roundtrip(
-            entity in any_account_state(),
-            delta in any_stake_deregistration(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_stake_deregistration_at(epoch))
+            }),
         ) {
             assert_delta_serde_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn vote_delegation_serde_roundtrip(
-            entity in any_account_state(),
-            delta in any_vote_delegation(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_account_state_at(epoch), any_vote_delegation_at(epoch))
+            }),
         ) {
             assert_delta_serde_roundtrip(Some(entity), delta);
         }

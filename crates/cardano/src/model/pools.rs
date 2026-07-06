@@ -122,7 +122,7 @@ impl From<MultiEraPoolRegistration> for PoolParams {
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
-    use crate::model::epoch_value::testing::any_epoch_value;
+    use crate::model::epoch_value::testing::{any_epoch_value, any_epoch_value_at};
     use crate::model::testing as root;
     use proptest::prelude::*;
 
@@ -170,6 +170,26 @@ pub(crate) mod testing {
         pub fn any_pool_state()(
             operator in root::any_pool_hash(),
             snapshot in any_epoch_value(any_pool_snapshot().boxed()),
+            blocks_minted_total in 0u32..10_000u32,
+            register_slot in root::any_slot(),
+            retiring_epoch in prop::option::of(root::any_epoch()),
+            deposit in root::any_lovelace(),
+        ) -> PoolState {
+            PoolState {
+                operator,
+                snapshot,
+                blocks_minted_total,
+                register_slot,
+                retiring_epoch,
+                deposit,
+            }
+        }
+    }
+
+    prop_compose! {
+        pub fn any_pool_state_at(epoch: Epoch)(
+            operator in root::any_pool_hash(),
+            snapshot in any_epoch_value_at(epoch, any_pool_snapshot().boxed()),
             blocks_minted_total in 0u32..10_000u32,
             register_slot in root::any_slot(),
             retiring_epoch in prop::option::of(root::any_epoch()),
@@ -500,7 +520,7 @@ impl dolos_core::EntityDelta for PoolTransition {
 #[cfg(test)]
 mod prop_tests {
     use super::*;
-    use super::testing::any_pool_state;
+    use super::testing::{any_pool_state, any_pool_state_at};
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use crate::pallas_extras::testing::any_multi_era_pool_registration;
     use proptest::prelude::*;
@@ -510,6 +530,16 @@ mod prop_tests {
             cert in any_multi_era_pool_registration(),
             slot in root::any_slot(),
             epoch in root::any_epoch(),
+            pool_deposit in root::any_lovelace(),
+        ) -> PoolRegistration {
+            PoolRegistration::new(cert, slot, epoch, pool_deposit)
+        }
+    }
+
+    prop_compose! {
+        fn any_pool_registration_at(epoch: Epoch)(
+            cert in any_multi_era_pool_registration(),
+            slot in root::any_slot(),
             pool_deposit in root::any_lovelace(),
         ) -> PoolRegistration {
             PoolRegistration::new(cert, slot, epoch, pool_deposit)
@@ -533,13 +563,9 @@ mod prop_tests {
         }
     }
 
-    // `PoolTransition::apply` expects `entity.snapshot.live` populated so the
-    // `TransitionDefault` impl on `PoolSnapshot` can clone it forward.
-    // Our `any_pool_state` always fills `live`, so this holds.
     prop_compose! {
-        fn any_pool_transition()(
+        fn any_pool_transition_at(next_epoch: Epoch)(
             pool in root::any_hash_28(),
-            next_epoch in root::any_epoch(),
         ) -> PoolTransition {
             PoolTransition::new(dolos_core::EntityKey::from(pool.as_slice()), next_epoch)
         }
@@ -548,8 +574,12 @@ mod prop_tests {
     proptest! {
         #[test]
         fn pool_registration_roundtrip(
-            entity in prop::option::of(any_pool_state()),
-            delta in any_pool_registration(),
+            (entity, delta) in prop_oneof![
+                any_pool_registration().prop_map(|delta| (None, delta)),
+                root::any_epoch().prop_flat_map(|epoch| {
+                    (any_pool_state_at(epoch).prop_map(Some), any_pool_registration_at(epoch))
+                }),
+            ],
         ) {
             assert_delta_roundtrip(entity, delta);
         }
@@ -583,8 +613,9 @@ mod prop_tests {
 
         #[test]
         fn pool_transition_roundtrip(
-            entity in any_pool_state(),
-            delta in any_pool_transition(),
+            (entity, delta) in root::any_epoch().prop_flat_map(|epoch| {
+                (any_pool_state_at(epoch), any_pool_transition_at(epoch + 1))
+            }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
