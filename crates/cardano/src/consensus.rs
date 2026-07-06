@@ -5,26 +5,11 @@
 //! ordering on each new header, and accumulates pending points for block
 //! fetching.
 
-use dolos_core::{BlockHash, BlockSlot, ChainPoint};
+use dolos_core::{BlockHash, BlockSlot, ChainPoint, ConsensusError};
 
-/// Errors that can occur during consensus validation.
-#[derive(Debug, thiserror::Error)]
-pub enum ConsensusError {
-    /// A header's `previous_hash` doesn't match the expected chain tip.
-    #[error("block at slot {slot} has parent hash {got} but expected {expected}")]
-    BrokenContinuity {
-        slot: BlockSlot,
-        expected: BlockHash,
-        got: BlockHash,
-    },
-
-    /// A header's slot is not strictly greater than the current tip slot.
-    #[error("block slot {slot} does not advance from tip slot {tip_slot}")]
-    SlotNotIncreasing {
-        slot: BlockSlot,
-        tip_slot: BlockSlot,
-    },
-}
+// ConsensusError is now defined in dolos-core so that both the pull stage
+// (ChainFragment) and the apply stage (WorkBatch::check_continuity) share
+// the same error type, and ChainError can wrap it via #[from].
 
 /// Outcome of a [`ChainFragment::roll_back`] operation.
 pub enum RollbackResult {

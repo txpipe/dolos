@@ -233,6 +233,30 @@ impl FromStr for TxoRef {
 // #[derive(Debug, Eq, PartialEq, Hash)]
 // pub struct ChainPoint(pub BlockSlot, pub BlockHash);
 
+/// Errors that can occur during chain sequence validation.
+///
+/// Used by both the pull stage's header continuity checks
+/// ([`ChainFragment`](dolos_cardano::consensus::ChainFragment)) and the
+/// apply stage's batch continuity check
+/// ([`WorkBatch::check_continuity`](dolos_cardano::roll::WorkBatch)).
+#[derive(Debug, Error)]
+pub enum ConsensusError {
+    /// A block's `previous_hash` doesn't match the expected parent.
+    #[error("block at slot {slot} has parent hash {got} but expected {expected}")]
+    BrokenContinuity {
+        slot: BlockSlot,
+        expected: BlockHash,
+        got: BlockHash,
+    },
+
+    /// A block's slot does not advance from the expected slot.
+    #[error("block slot {slot} does not advance from tip slot {tip_slot}")]
+    SlotNotIncreasing {
+        slot: BlockSlot,
+        tip_slot: BlockSlot,
+    },
+}
+
 #[derive(Debug, Error)]
 pub enum BrokenInvariant {
     #[error("missing utxo {0:?}")]
@@ -470,18 +494,8 @@ pub enum ChainError {
     #[error("phase-2 script rejected the transaction")]
     Phase2ValidationRejected(Phase2Log),
 
-    #[error("non-contiguous block at slot {slot}: expected parent {expected}, got {got}")]
-    NonContiguousBlock {
-        slot: BlockSlot,
-        expected: BlockHash,
-        got: BlockHash,
-    },
-
-    #[error("non-contiguous block at slot {slot}: slot does not advance from {expected_slot}")]
-    SlotRegression {
-        slot: BlockSlot,
-        expected_slot: BlockSlot,
-    },
+    #[error(transparent)]
+    Consensus(#[from] ConsensusError),
 }
 
 // Note: The WorkUnit trait is now defined in work_unit.rs

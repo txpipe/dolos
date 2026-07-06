@@ -94,7 +94,7 @@ mod integrity {
     use dolos_cardano::owned::OwnedMultiEraBlock;
     use dolos_cardano::roll::{WorkBatch, WorkBlock};
     use dolos_core::{
-        ChainError, Domain as _, DomainError, StateStore as _, SyncExt as _,
+        ChainError, ConsensusError, Domain as _, DomainError, StateStore as _, SyncExt as _,
     };
     use dolos_testing::{blocks::make_conway_block_with_prev, toy_domain::ToyDomain};
     use pallas::crypto::hash::Hash;
@@ -105,7 +105,7 @@ mod integrity {
     }
 
     /// Feeding a block whose `previous_hash` doesn't match the state cursor's
-    /// hash must fail with `NonContiguousBlock` — not `InputNotFound` or any
+    /// hash must fail with `BrokenContinuity` — not `InputNotFound` or any
     /// other downstream symptom.
     #[test]
     fn apply_rejects_non_contiguous_block() {
@@ -122,9 +122,11 @@ mod integrity {
         assert!(
             matches!(
                 err,
-                DomainError::ChainError(ChainError::NonContiguousBlock { .. })
+                DomainError::ChainError(ChainError::Consensus(
+                    ConsensusError::BrokenContinuity { .. }
+                ))
             ),
-            "expected NonContiguousBlock, got {err:?}"
+            "expected BrokenContinuity, got {err:?}"
         );
 
         // State cursor must be unchanged — the guard fires before commit_state.
@@ -137,7 +139,7 @@ mod integrity {
     }
 
     /// A block whose slot is less than the cursor's slot must fail with
-    /// `SlotRegression`, even if the parent hash is correct.
+    /// `SlotNotIncreasing`, even if the parent hash is correct.
     #[test]
     fn apply_rejects_slot_regression() {
         let domain = ToyDomain::new(None, None);
@@ -154,9 +156,11 @@ mod integrity {
         assert!(
             matches!(
                 err,
-                DomainError::ChainError(ChainError::SlotRegression { .. })
+                DomainError::ChainError(ChainError::Consensus(
+                    ConsensusError::SlotNotIncreasing { .. }
+                ))
             ),
-            "expected SlotRegression, got {err:?}"
+            "expected SlotNotIncreasing, got {err:?}"
         );
 
         let cursor = domain.state().read_cursor().unwrap();
@@ -294,12 +298,12 @@ mod integrity {
 
         let err = bad_batch.check_continuity(cursor.as_ref()).unwrap_err();
         assert!(
-            matches!(err, ChainError::NonContiguousBlock { .. }),
-            "expected NonContiguousBlock for broken intra-batch link, got {err:?}"
+            matches!(err, ConsensusError::BrokenContinuity { .. }),
+            "expected BrokenContinuity for broken intra-batch link, got {err:?}"
         );
 
         // Note: intra-batch slot regression is unreachable after sort_by_slot
-        // (slots are monotonic by construction). The SlotRegression check only
+        // (slots are monotonic by construction). The SlotNotIncreasing check only
         // fires for the first block vs the cursor, which is covered by
         // `apply_rejects_slot_regression` above.
     }

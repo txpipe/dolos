@@ -12,9 +12,9 @@ use crate::indexes::CardanoIndexDeltaBuilder;
 use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
 use dolos_core::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockHash, BlockSlot, ChainError, ChainPoint,
-    Domain, DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _,
-    LogValue, NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _,
-    TxoRef, UtxoSetDelta, WalStore as _,
+    ConsensusError, Domain, DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _,
+    IndexWriter as _, LogValue, NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _,
+    StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -144,7 +144,7 @@ impl WorkBatch {
     /// cursor is `Origin`.
     ///
     /// Must be called after [`sort_by_slot`](Self::sort_by_slot).
-    pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ChainError> {
+    pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ConsensusError> {
         debug_assert!(self.is_sorted, "check_continuity must run after sort_by_slot");
 
         let mut expected_parent: Option<BlockHash> = cursor.and_then(|c| c.hash());
@@ -158,7 +158,7 @@ impl WorkBatch {
 
             if let (Some(expected), Some(got)) = (expected_parent, prev_hash) {
                 if expected != got {
-                    return Err(ChainError::NonContiguousBlock {
+                    return Err(ConsensusError::BrokenContinuity {
                         slot,
                         expected,
                         got,
@@ -167,9 +167,9 @@ impl WorkBatch {
             }
 
             if (!cursor_is_origin || expected_parent.is_some()) && slot < expected_slot {
-                return Err(ChainError::SlotRegression {
+                return Err(ConsensusError::SlotNotIncreasing {
                     slot,
-                    expected_slot,
+                    tip_slot: expected_slot,
                 });
             }
 
