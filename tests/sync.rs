@@ -7,6 +7,8 @@
 //! that prevents silent state poisoning from non-contiguous block delivery
 //! — the root cause of the `input not found` incident at block 4,436,119.
 
+use dolos_cardano::owned::OwnedMultiEraBlock;
+use dolos_cardano::roll::{WorkBatch, WorkBlock};
 use dolos_core::{
     ChainError, Domain as _, DomainError, StateStore as _, SyncExt as _,
 };
@@ -179,32 +181,57 @@ fn continuity_check_allows_same_slot_ebb() {
     assert_eq!(cursor, Some(point_b), "cursor should advance to the same-slot block");
 }
 
-/// A batch with multiple blocks must validate internal chaining: each
-/// block's prev_hash must match the previous block's hash, and slots must
-/// not regress within the batch.
+/// A multi-block batch must validate internal chaining: each block's
+/// prev_hash must match the previous block's hash, and slots must not
+/// regress within the batch. This exercises `WorkBatch::check_continuity`
+/// directly with 2+ blocks in a single batch — the path that
+/// `SyncExt::roll_forward` (one block per call) cannot reach.
 #[test]
 fn batch_internal_continuity_validated() {
     let domain = ToyDomain::new(None, None);
 
-    // Feed block A to establish a cursor.
+    // Establish a cursor at block A via the normal apply path.
     let (point_a, block_a) = make_conway_block_with_prev(1, None, 0);
     domain.roll_forward(block_a).expect("block A should apply");
+    let cursor = domain.state().read_cursor().unwrap();
     let hash_a = point_a.hash().unwrap();
 
-    // Feed block B (prev=A) and block C (prev=B) — both contiguous.
-    // Each roll_forward processes one block at a time, so these are
-    // separate batches. The check validates each against the cursor.
-    let (point_b, block_b) = make_conway_block_with_prev(2, Some(hash_a), 1);
-    domain
-        .roll_forward(block_b)
-        .expect("block B (contiguous with A) should apply");
+    // Build a multi-block batch: B (prev=A) → C (prev=B), both contiguous.
+    let (_, block_b_raw) = make_conway_block_with_prev(2, Some(hash_a), 1);
+    let block_b = WorkBlock::new(OwnedMultiEraBlock::decode(block_b_raw).unwrap());
+    let hash_b = block_b.block.view().hash();
 
-    let hash_b = point_b.hash().unwrap();
-    let (point_c, block_c) = make_conway_block_with_prev(3, Some(hash_b), 2);
-    domain
-        .roll_forward(block_c)
-        .expect("block C (contiguous with B) should apply");
+    let (_, block_c_raw) = make_conway_block_with_prev(3, Some(hash_b), 2);
+    let block_c = WorkBlock::new(OwnedMultiEraBlock::decode(block_c_raw).unwrap());
 
-    let cursor = domain.state().read_cursor().unwrap();
-    assert_eq!(cursor, Some(point_c), "cursor should advance through the chain");
+    let mut batch = WorkBatch::for_single_block(block_b);
+    batch.add_work(block_c);
+    batch.sort_by_slot();
+
+    // Contiguous batch extending from cursor A → must pass.
+    batch
+        .check_continuity(cursor.as_ref())
+        .expect("contiguous batch should pass check_continuity");
+
+    // Now build a batch with a broken intra-batch link: B (prev=A) → D (prev=wrong).
+    let (_, block_b_raw) = make_conway_block_with_prev(2, Some(hash_a), 1);
+    let block_b = WorkBlock::new(OwnedMultiEraBlock::decode(block_b_raw).unwrap());
+
+    let (_, block_d_raw) = make_conway_block_with_prev(3, Some(wrong_hash(99)), 3);
+    let block_d = WorkBlock::new(OwnedMultiEraBlock::decode(block_d_raw).unwrap());
+
+    let mut bad_batch = WorkBatch::for_single_block(block_b);
+    bad_batch.add_work(block_d);
+    bad_batch.sort_by_slot();
+
+    let err = bad_batch.check_continuity(cursor.as_ref()).unwrap_err();
+    assert!(
+        matches!(err, ChainError::NonContiguousBlock { .. }),
+        "expected NonContiguousBlock for broken intra-batch link, got {err:?}"
+    );
+
+    // Note: intra-batch slot regression is unreachable after sort_by_slot
+    // (slots are monotonic by construction). The SlotRegression check only
+    // fires for the first block vs the cursor, which is covered by
+    // `apply_rejects_slot_regression` above.
 }

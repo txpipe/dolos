@@ -145,6 +145,8 @@ impl WorkBatch {
     ///
     /// Must be called after [`sort_by_slot`](Self::sort_by_slot).
     pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ChainError> {
+        debug_assert!(self.is_sorted, "check_continuity must run after sort_by_slot");
+
         let mut expected_parent: Option<BlockHash> = cursor.and_then(|c| c.hash());
         let mut expected_slot: BlockSlot = cursor.map(|c| c.slot()).unwrap_or(0);
         let cursor_is_origin = cursor.map(|c| matches!(c, ChainPoint::Origin)).unwrap_or(true);
