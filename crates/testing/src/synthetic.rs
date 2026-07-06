@@ -260,6 +260,8 @@ pub fn build_synthetic_blocks(
         era: Some(pallas::ledger::traverse::Era::Conway.into()),
         cbor: submit_cbor,
     });
+    let mut prev_block_hash: Option<Hash<32>> = None;
+
     for offset in 0..block_count {
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
@@ -339,7 +341,7 @@ pub fn build_synthetic_blocks(
             ));
         }
 
-        let (block, hashes) = sample_block(block_number, slot, tx_specs, Some(aux_data));
+        let (block, hashes) = sample_block(block_number, slot, prev_block_hash, tx_specs, Some(aux_data));
 
         for (idx, hash) in hashes.iter().enumerate() {
             let tx_hash = hex::encode(hash.as_ref());
@@ -351,6 +353,7 @@ pub fn build_synthetic_blocks(
         }
 
         let block_hash = block.header.compute_hash();
+        prev_block_hash = Some(block_hash);
         let wrapper = (7, block);
         let raw_block = Arc::new(minicbor::to_vec(wrapper).unwrap());
 
@@ -652,6 +655,7 @@ fn sample_transaction(
 fn sample_block(
     block_number: u64,
     slot: u64,
+    prev_hash: Option<Hash<32>>,
     tx_specs: Vec<SyntheticTxSpec>,
     aux_data: Option<alonzo::AuxiliaryData>,
 ) -> (
@@ -661,7 +665,7 @@ fn sample_block(
     let header_body = pallas::ledger::primitives::conway::HeaderBody {
         block_number,
         slot,
-        prev_hash: Some(Hash::from([9u8; 32])),
+        prev_hash,
         issuer_vkey: Bytes::from(vec![0x10, 0x11]),
         vrf_vkey: Bytes::from(vec![0x12, 0x13]),
         vrf_result: pallas::ledger::primitives::VrfCert(

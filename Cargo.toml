@@ -143,6 +143,10 @@ path = "tests/mempool.rs"
 name = "bootstrap"
 path = "tests/bootstrap.rs"
 
+[[test]]
+name = "sync_integrity"
+path = "tests/sync.rs"
+
 [features]
 strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]

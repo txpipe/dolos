@@ -22,14 +22,22 @@ pub fn slot_to_hash(slot: u64) -> BlockHash {
 }
 
 pub fn make_conway_block(slot: BlockSlot) -> (ChainPoint, RawBlock) {
+    make_conway_block_with_prev(slot, None, 0)
+}
+
+pub fn make_conway_block_with_prev(
+    slot: BlockSlot,
+    prev_hash: Option<Hash<32>>,
+    block_number: u64,
+) -> (ChainPoint, RawBlock) {
     let block_body_hash = slot_to_hash(slot);
 
     let header = KeepRaw::from(Header {
         header_body: pallas::ledger::primitives::conway::HeaderBody {
             slot,
             block_body_hash,
-            block_number: 0,
-            prev_hash: None,
+            block_number,
+            prev_hash,
             issuer_vkey: vec![].into(),
             vrf_vkey: vec![].into(),
             vrf_result: VrfCert(vec![].into(), vec![].into()),

@@ -469,6 +469,19 @@ pub enum ChainError {
 
     #[error("phase-2 script rejected the transaction")]
     Phase2ValidationRejected(Phase2Log),
+
+    #[error("non-contiguous block at slot {slot}: expected parent {expected}, got {got}")]
+    NonContiguousBlock {
+        slot: BlockSlot,
+        expected: BlockHash,
+        got: BlockHash,
+    },
+
+    #[error("non-contiguous block at slot {slot}: slot does not advance from {expected_slot}")]
+    SlotRegression {
+        slot: BlockSlot,
+        expected_slot: BlockSlot,
+    },
 }
 
 // Note: The WorkUnit trait is now defined in work_unit.rs
