@@ -96,8 +96,13 @@ fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError
             });
         }
         (Some(ref wal_tip), None) if wal_tip == &ChainPoint::Origin => {
-            // WAL at Origin with no state cursor — fresh node after genesis.
-            info!(%wal_tip, "WAL at origin, no state cursor (post-genesis)");
+            // WAL reset to Origin but no state cursor — a crash mid-genesis
+            // (genesis `commit_wal` resets the WAL to Origin before
+            // `commit_state` writes the cursor). A completed genesis leaves
+            // the cursor at Origin, so it takes the `(Some, Some)` arm above;
+            // this arm only fires when genesis was interrupted. Genesis
+            // re-runs cleanly on the next block.
+            info!(%wal_tip, "WAL at origin, no state cursor (interrupted genesis)");
         }
         (Some(ref wal_tip), None) => {
             error!(%wal_tip, "WAL exists but no state found");
@@ -137,6 +142,51 @@ fn check_archive_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainE
     }
 
     Ok(())
+}
+
+/// How to react when a store fails to reach the catch-up target.
+enum CatchUpSeverity {
+    /// Consensus-critical (state): a residual gap is unrecoverable, so abort
+    /// the boot with `InconsistentState`.
+    Fatal,
+    /// Not consensus-critical (archive, indexes): a residual gap is logged
+    /// but the node still boots, matching `check_archive_in_sync_with_state`.
+    Lenient,
+}
+
+/// Verify a store reached the catch-up `target` after replay.
+///
+/// `reached` is the store's position after catch-up. Comparison is by slot: a
+/// `Slot`-only cursor at the target's slot (e.g. post-ESTART) counts as
+/// reached even though the points differ. A store can fall short when the WAL
+/// no longer holds the entries needed to replay (e.g. after `reset_to`);
+/// `severity` decides whether that aborts the boot or is only flagged.
+fn verify_caught_up(
+    store: &str,
+    reached: Option<ChainPoint>,
+    target: &ChainPoint,
+    severity: CatchUpSeverity,
+) -> Result<(), DomainError> {
+    if reached
+        .as_ref()
+        .is_some_and(|point| point.slot() >= target.slot())
+    {
+        return Ok(());
+    }
+
+    match severity {
+        CatchUpSeverity::Fatal => {
+            error!(?reached, %target, store, "catch-up could not reach the WAL target");
+            Err(DomainError::InconsistentState {
+                wal: Some(target.clone()),
+                state: reached,
+            })
+        }
+        CatchUpSeverity::Lenient => {
+            error!(?reached, %target, store, "store still behind WAL target after catch-up");
+            Ok(())
+        }
+    }
 }
 
 /// Catch up state, archive and index stores by replaying WAL entries.
@@ -232,26 +282,15 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         info!(count, "state caught up from WAL");
     }
 
-    // Post-condition: the replay must actually reach the target. A WAL that
-    // claims a tip the state can't reach (e.g. entries wiped by `reset_to`)
-    // is unrecoverable here — fail loudly instead of leaving a silent gap.
-    // Compared by slot: a Slot-only cursor at the target's slot (post-ESTART)
-    // is already at the target even though the points differ.
-    let cursor = domain.state().read_cursor()?;
-
-    let reached = cursor
-        .as_ref()
-        .is_some_and(|cursor| cursor.slot() >= target.slot());
-
-    if !reached {
-        error!(?cursor, %target, "state catch-up could not reach the WAL target");
-        return Err(DomainError::InconsistentState {
-            wal: Some(target.clone()),
-            state: cursor,
-        });
-    }
-
-    Ok(())
+    // A WAL that claims a tip the state can't reach (e.g. entries wiped by
+    // `reset_to`) is unrecoverable — fail loudly instead of leaving a silent
+    // gap the upstream intersection would then skip past.
+    verify_caught_up(
+        "state",
+        domain.state().read_cursor()?,
+        target,
+        CatchUpSeverity::Fatal,
+    )
 }
 
 /// Catch up archive store by replaying WAL blocks.
@@ -295,20 +334,9 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
         info!(count, "archive caught up from WAL");
     }
 
-    // Archive can legitimately remain behind when the WAL no longer holds the
-    // missing blocks (e.g. after `reset_to`). Flag it instead of failing —
-    // archive completeness is not consensus-critical, matching the lenient
-    // handling in `check_archive_in_sync_with_state`.
-    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
+    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| ChainPoint::Slot(slot));
 
-    if archive_tip < Some(target_slot) {
-        error!(
-            ?archive_tip,
-            target_slot, "archive still behind WAL target after catch-up"
-        );
-    }
-
-    Ok(())
+    verify_caught_up("archive", archive_tip, target, CatchUpSeverity::Lenient)
 }
 
 /// Catch up index store by replaying WAL log entries.
@@ -354,16 +382,12 @@ fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
         info!(count, "indexes caught up from WAL");
     }
 
-    // Same lenient handling as archive: flag a residual lag instead of
-    // failing the boot.
-    let index_cursor = domain.indexes().cursor()?;
-    let index_slot = index_cursor.as_ref().map(|p| p.slot());
-
-    if index_slot < Some(target.slot()) {
-        error!(?index_cursor, %target, "indexes still behind WAL target after catch-up");
-    }
-
-    Ok(())
+    verify_caught_up(
+        "indexes",
+        domain.indexes().cursor()?,
+        target,
+        CatchUpSeverity::Lenient,
+    )
 }
 
 #[cfg(test)]
