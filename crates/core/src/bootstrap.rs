@@ -232,6 +232,25 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         info!(count, "state caught up from WAL");
     }
 
+    // Post-condition: the replay must actually reach the target. A WAL that
+    // claims a tip the state can't reach (e.g. entries wiped by `reset_to`)
+    // is unrecoverable here — fail loudly instead of leaving a silent gap.
+    // Compared by slot: a Slot-only cursor at the target's slot (post-ESTART)
+    // is already at the target even though the points differ.
+    let cursor = domain.state().read_cursor()?;
+
+    let reached = cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.slot() >= target.slot());
+
+    if !reached {
+        error!(?cursor, %target, "state catch-up could not reach the WAL target");
+        return Err(DomainError::InconsistentState {
+            wal: Some(target.clone()),
+            state: cursor,
+        });
+    }
+
     Ok(())
 }
 
@@ -274,6 +293,19 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
     if count > 0 {
         writer.commit()?;
         info!(count, "archive caught up from WAL");
+    }
+
+    // Archive can legitimately remain behind when the WAL no longer holds the
+    // missing blocks (e.g. after `reset_to`). Flag it instead of failing —
+    // archive completeness is not consensus-critical, matching the lenient
+    // handling in `check_archive_in_sync_with_state`.
+    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
+
+    if archive_tip < Some(target_slot) {
+        error!(
+            ?archive_tip,
+            target_slot, "archive still behind WAL target after catch-up"
+        );
     }
 
     Ok(())
@@ -320,6 +352,15 @@ fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
     if count > 0 {
         writer.commit()?;
         info!(count, "indexes caught up from WAL");
+    }
+
+    // Same lenient handling as archive: flag a residual lag instead of
+    // failing the boot.
+    let index_cursor = domain.indexes().cursor()?;
+    let index_slot = index_cursor.as_ref().map(|p| p.slot());
+
+    if index_slot < Some(target.slot()) {
+        error!(?index_cursor, %target, "indexes still behind WAL target after catch-up");
     }
 
     Ok(())
