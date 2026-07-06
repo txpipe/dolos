@@ -1,15 +1,35 @@
-//! Chain consensus utilities for the pull stage.
+//! Chain consensus utilities.
 //!
 //! This module provides [`ChainFragment`], a lightweight tracker for the
-//! upstream chain position that validates parent-hash continuity and slot
-//! ordering on each new header, and accumulates pending points for block
-//! fetching.
+//! upstream chain position used by the pull stage, and the continuity
+//! rules ([`check_extension`]) shared with the apply stage's batch guard.
 
-use dolos_core::{BlockHash, BlockSlot, ChainPoint, ConsensusError};
+use dolos_core::{BlockHash, BlockSlot, ChainError, ChainPoint};
 
-// ConsensusError is now defined in dolos-core so that both the pull stage
-// (ChainFragment) and the apply stage (WorkBatch::check_continuity) share
-// the same error type, and ChainError can wrap it via #[from].
+/// Errors that can occur during chain sequence validation.
+#[derive(Debug, thiserror::Error)]
+pub enum ConsensusError {
+    /// A block's `previous_hash` doesn't match the expected parent.
+    #[error("block at slot {slot} has parent hash {got} but expected {expected}")]
+    BrokenContinuity {
+        slot: BlockSlot,
+        expected: BlockHash,
+        got: BlockHash,
+    },
+
+    /// A block's slot does not advance from the expected slot.
+    #[error("block slot {slot} does not advance from tip slot {tip_slot}")]
+    SlotNotIncreasing {
+        slot: BlockSlot,
+        tip_slot: BlockSlot,
+    },
+}
+
+impl From<ConsensusError> for ChainError {
+    fn from(value: ConsensusError) -> Self {
+        ChainError::consensus(value)
+    }
+}
 
 /// Outcome of a [`ChainFragment::roll_back`] operation.
 pub enum RollbackResult {
@@ -59,6 +79,23 @@ fn check_slot_increase(slot: BlockSlot, tip: &ChainPoint) -> Result<(), Consensu
     }
 }
 
+/// Check that a block at `slot` whose header declares `prev_hash` as its
+/// parent validly extends the chain at `tip`.
+///
+/// Single source of truth for both enforcement layers: the pull stage
+/// ([`ChainFragment`], per-header vs. the in-memory tip, failure → peer
+/// reconnect) and the apply stage (`WorkBatch::check_continuity`,
+/// per-batch vs. the persisted cursor, failure → abort before any commit).
+pub(crate) fn check_extension(
+    tip: &ChainPoint,
+    slot: BlockSlot,
+    prev_hash: Option<BlockHash>,
+) -> Result<(), ConsensusError> {
+    check_continuity(slot, prev_hash, tip)?;
+    check_slot_increase(slot, tip)?;
+    Ok(())
+}
+
 // ============================================================================
 // ChainFragment
 // ============================================================================
@@ -96,8 +133,7 @@ impl ChainFragment {
         point: ChainPoint,
         prev_hash: Option<BlockHash>,
     ) -> Result<ChainPoint, ConsensusError> {
-        check_continuity(point.slot(), prev_hash, &self.tip)?;
-        check_slot_increase(point.slot(), &self.tip)?;
+        check_extension(&self.tip, point.slot(), prev_hash)?;
 
         self.tip = point.clone();
         self.pending.push(point.clone());
@@ -280,6 +316,64 @@ mod tests {
         // Can continue building from the same tip
         let result = chain.roll_forward(point_of(3, 3), Some(hash_of(2)));
         assert!(result.is_ok());
+    }
+
+    // -- check_extension --
+    // Direct coverage of the shared primitive. Slot-only tips are exercised
+    // here because they can't be reached through ChainFragment (the apply
+    // side hits them when Estart leaves a `ChainPoint::Slot` cursor).
+
+    #[test]
+    fn extension_from_origin_skips_both_checks() {
+        assert!(check_extension(&ChainPoint::Origin, 0, Some(hash_of(9))).is_ok());
+        assert!(check_extension(&ChainPoint::Origin, 0, None).is_ok());
+    }
+
+    #[test]
+    fn extension_accepts_matching_parent() {
+        assert!(check_extension(&point_of(10, 10), 11, Some(hash_of(10))).is_ok());
+    }
+
+    #[test]
+    fn extension_rejects_mismatched_parent() {
+        let err = check_extension(&point_of(10, 10), 11, Some(hash_of(99))).unwrap_err();
+        assert!(matches!(
+            err,
+            ConsensusError::BrokenContinuity { slot: 11, expected, got }
+                if expected == hash_of(10) && got == hash_of(99)
+        ));
+    }
+
+    #[test]
+    fn extension_skips_hash_check_when_prev_unknown() {
+        // EBB-style header with no declared parent.
+        assert!(check_extension(&point_of(10, 10), 11, None).is_ok());
+    }
+
+    #[test]
+    fn extension_from_slot_only_tip_skips_hash_but_enforces_slot() {
+        assert!(check_extension(&ChainPoint::Slot(10), 11, Some(hash_of(9))).is_ok());
+
+        let err = check_extension(&ChainPoint::Slot(10), 5, None).unwrap_err();
+        assert!(matches!(
+            err,
+            ConsensusError::SlotNotIncreasing {
+                slot: 5,
+                tip_slot: 10,
+            }
+        ));
+    }
+
+    #[test]
+    fn extension_allows_same_slot() {
+        // Byron EBBs share the slot with the first block of the epoch.
+        assert!(check_extension(&point_of(10, 10), 10, Some(hash_of(10))).is_ok());
+    }
+
+    #[test]
+    fn extension_rejects_regressing_slot_with_correct_parent() {
+        let err = check_extension(&point_of(10, 10), 5, Some(hash_of(10))).unwrap_err();
+        assert!(matches!(err, ConsensusError::SlotNotIncreasing { .. }));
     }
 
     // -- rollback --

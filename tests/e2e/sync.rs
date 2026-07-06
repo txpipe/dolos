@@ -91,11 +91,10 @@ test_for_scenario!(daemon_syncs_for_custom_network, daemon_syncs, 5);
 // ===========================================================================
 
 mod integrity {
+    use dolos_cardano::consensus::ConsensusError;
     use dolos_cardano::owned::OwnedMultiEraBlock;
     use dolos_cardano::roll::{WorkBatch, WorkBlock};
-    use dolos_core::{
-        ChainError, ConsensusError, Domain as _, DomainError, StateStore as _, SyncExt as _,
-    };
+    use dolos_core::{ChainError, Domain as _, DomainError, StateStore as _, SyncExt as _};
     use dolos_testing::{blocks::make_conway_block_with_prev, toy_domain::ToyDomain};
     use pallas::crypto::hash::Hash;
 
@@ -119,14 +118,15 @@ mod integrity {
         let (_, block_c) = make_conway_block_with_prev(2, Some(wrong_hash(99)), 1);
         let err = domain.roll_forward(block_c).unwrap_err();
 
+        let DomainError::ChainError(ChainError::Consensus(inner)) = &err else {
+            panic!("expected consensus error, got {err:?}");
+        };
         assert!(
             matches!(
-                err,
-                DomainError::ChainError(ChainError::Consensus(
-                    ConsensusError::BrokenContinuity { .. }
-                ))
+                inner.downcast_ref::<ConsensusError>(),
+                Some(ConsensusError::BrokenContinuity { .. })
             ),
-            "expected BrokenContinuity, got {err:?}"
+            "expected BrokenContinuity, got {inner:?}"
         );
 
         // State cursor must be unchanged — the guard fires before commit_state.
@@ -153,14 +153,15 @@ mod integrity {
         let (_, block_b) = make_conway_block_with_prev(5, Some(hash_a), 1);
         let err = domain.roll_forward(block_b).unwrap_err();
 
+        let DomainError::ChainError(ChainError::Consensus(inner)) = &err else {
+            panic!("expected consensus error, got {err:?}");
+        };
         assert!(
             matches!(
-                err,
-                DomainError::ChainError(ChainError::Consensus(
-                    ConsensusError::SlotNotIncreasing { .. }
-                ))
+                inner.downcast_ref::<ConsensusError>(),
+                Some(ConsensusError::SlotNotIncreasing { .. })
             ),
-            "expected SlotNotIncreasing, got {err:?}"
+            "expected SlotNotIncreasing, got {inner:?}"
         );
 
         let cursor = domain.state().read_cursor().unwrap();

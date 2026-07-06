@@ -8,13 +8,14 @@ use std::{collections::HashMap, ops::RangeInclusive};
 use itertools::Itertools as _;
 use rayon::prelude::*;
 
+use crate::consensus::ConsensusError;
 use crate::indexes::CardanoIndexDeltaBuilder;
 use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
 use dolos_core::{
-    ArchiveStore, ArchiveWriter as _, Block as _, BlockHash, BlockSlot, ChainError, ChainPoint,
-    ConsensusError, Domain, DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _,
-    IndexWriter as _, LogValue, NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _,
-    StateWriter as _, TxoRef, UtxoSetDelta, WalStore as _,
+    ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError, ChainPoint, Domain,
+    DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _, LogValue,
+    NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
+    UtxoSetDelta, WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -135,46 +136,21 @@ impl WorkBatch {
     }
 
     /// Verify that the batch forms a contiguous chain extending from the
-    /// persisted state cursor.
-    ///
-    /// Checks each block's `previous_hash` against the expected parent and
-    /// that each slot does not regress (`>=` to allow same-slot Byron EBBs).
-    /// Skips the hash check when either side is `None` (genesis, Byron EBB,
-    /// or a `Slot`-only cursor from Estart). Skips the slot check when the
-    /// cursor is `Origin`.
+    /// persisted state cursor — the apply-side integrity guard. Folds
+    /// [`consensus::check_extension`](crate::consensus) over the blocks
+    /// starting from `cursor` (or `Origin` when unset) and advancing the
+    /// tip after each block, so intra-batch links are validated too.
     ///
     /// Must be called after [`sort_by_slot`](Self::sort_by_slot).
     pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ConsensusError> {
         debug_assert!(self.is_sorted, "check_continuity must run after sort_by_slot");
 
-        let mut expected_parent: Option<BlockHash> = cursor.and_then(|c| c.hash());
-        let mut expected_slot: BlockSlot = cursor.map(|c| c.slot()).unwrap_or(0);
-        let cursor_is_origin = cursor.map(|c| matches!(c, ChainPoint::Origin)).unwrap_or(true);
+        let mut tip = cursor.cloned().unwrap_or(ChainPoint::Origin);
 
         for block in &self.blocks {
             let view = block.block.view();
-            let prev_hash = view.header().previous_hash();
-            let slot = view.slot();
-
-            if let (Some(expected), Some(got)) = (expected_parent, prev_hash) {
-                if expected != got {
-                    return Err(ConsensusError::BrokenContinuity {
-                        slot,
-                        expected,
-                        got,
-                    });
-                }
-            }
-
-            if (!cursor_is_origin || expected_parent.is_some()) && slot < expected_slot {
-                return Err(ConsensusError::SlotNotIncreasing {
-                    slot,
-                    tip_slot: expected_slot,
-                });
-            }
-
-            expected_parent = Some(view.hash());
-            expected_slot = slot;
+            crate::consensus::check_extension(&tip, view.slot(), view.header().previous_hash())?;
+            tip = ChainPoint::Specific(view.slot(), view.hash());
         }
 
         Ok(())
