@@ -469,6 +469,18 @@ pub enum ChainError {
 
     #[error("phase-2 script rejected the transaction")]
     Phase2ValidationRejected(Phase2Log),
+
+    #[error("consensus error: {0}")]
+    Consensus(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl ChainError {
+    pub fn consensus<T>(value: T) -> Self
+    where
+        T: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        ChainError::Consensus(value.into())
+    }
 }
 
 // Note: The WorkUnit trait is now defined in work_unit.rs

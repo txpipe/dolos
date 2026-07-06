@@ -8,6 +8,7 @@ use std::{collections::HashMap, ops::RangeInclusive};
 use itertools::Itertools as _;
 use rayon::prelude::*;
 
+use crate::consensus::ConsensusError;
 use crate::indexes::CardanoIndexDeltaBuilder;
 use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
 use dolos_core::{
@@ -132,6 +133,27 @@ impl WorkBatch {
 
     pub fn last_point(&self) -> ChainPoint {
         self.blocks.last().unwrap().point()
+    }
+
+    /// Verify that the batch forms a contiguous chain extending from the
+    /// persisted state cursor — the apply-side integrity guard. Folds
+    /// [`consensus::check_extension`](crate::consensus) over the blocks
+    /// starting from `cursor` (or `Origin` when unset) and advancing the
+    /// tip after each block, so intra-batch links are validated too.
+    ///
+    /// Must be called after [`sort_by_slot`](Self::sort_by_slot).
+    pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ConsensusError> {
+        debug_assert!(self.is_sorted, "check_continuity must run after sort_by_slot");
+
+        let mut tip = cursor.cloned().unwrap_or(ChainPoint::Origin);
+
+        for block in &self.blocks {
+            let view = block.block.view();
+            crate::consensus::check_extension(&tip, view.slot(), view.header().previous_hash())?;
+            tip = ChainPoint::Specific(view.slot(), view.hash());
+        }
+
+        Ok(())
     }
 
     #[allow(dead_code)]

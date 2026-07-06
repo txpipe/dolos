@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use dolos_core::{Domain, DomainError, Genesis, MempoolUpdate, RawBlock, TipEvent, WorkUnit};
+use dolos_core::{
+    ChainError, Domain, DomainError, Genesis, MempoolUpdate, RawBlock, StateStore as _,
+    TipEvent, WorkUnit,
+};
 use tracing::{debug, info};
 
 use crate::roll::batch::WorkBatch;
@@ -53,6 +56,10 @@ where
 
     fn load(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         debug!(blocks = self.batch.blocks.len(), "loading roll batch UTxOs");
+
+        let cursor = domain.state().read_cursor()?;
+        self.batch.sort_by_slot();
+        self.batch.check_continuity(cursor.as_ref()).map_err(ChainError::from)?;
 
         self.batch.load_utxos(domain)?;
         self.batch.decode_utxos()?;
