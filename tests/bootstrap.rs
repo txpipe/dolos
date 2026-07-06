@@ -17,16 +17,24 @@ use dolos_testing::{
 };
 
 /// Which commit phases to run when feeding blocks, simulating a crash at
-/// different points of the work-unit lifecycle. `commit_wal` always runs;
-/// commit_archive/commit_indexes/finalize are always skipped.
+/// each inter-store boundary of the work-unit lifecycle
+/// (commit_wal → commit_state → commit_archive → commit_indexes).
+/// `commit_wal` always runs; commit_indexes and finalize never do.
+///
+/// Out of scope here: crashes *inside* a phase (mid-shard) and crashes
+/// during epoch-boundary work units (RUPD/EWRAP/ESTART), which don't write
+/// the WAL — see #1018.
 #[derive(Clone, Copy)]
 enum CrashAfter {
     /// Run commit_wal only — models a crash between `commit_wal` and
     /// `commit_state`.
     Wal,
     /// Run commit_wal + commit_state — models a crash between the state
-    /// commit and the archive/index commits.
+    /// commit and the archive commit.
     State,
+    /// Run commit_wal + commit_state + commit_archive — models a crash
+    /// between the archive commit and the index commit.
+    Archive,
 }
 
 /// Helper: feed blocks into a domain with partial work-unit execution.
@@ -54,12 +62,15 @@ fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain, cr
             WorkUnit::<ToyDomain>::load(&mut work, domain, shard).unwrap();
             WorkUnit::<ToyDomain>::compute(&mut work, shard).unwrap();
             WorkUnit::<ToyDomain>::commit_wal(&mut work, domain, shard).unwrap();
-            if let CrashAfter::State = crash_after {
+            if matches!(crash_after, CrashAfter::State | CrashAfter::Archive) {
                 WorkUnit::<ToyDomain>::commit_state(&mut work, domain, shard).unwrap();
             }
-            // Intentionally skip commit_archive and commit_indexes — and
-            // intentionally skip finalize() to model a crash mid-lifecycle,
-            // which is what the recovery tests below exercise.
+            if matches!(crash_after, CrashAfter::Archive) {
+                WorkUnit::<ToyDomain>::commit_archive(&mut work, domain, shard).unwrap();
+            }
+            // Intentionally skip commit_indexes — and intentionally skip
+            // finalize() to model a crash mid-lifecycle, which is what the
+            // recovery tests below exercise.
         }
     }
 }
@@ -239,6 +250,58 @@ fn test_catchup_converges_all_stores_to_wal_tip() {
     );
 }
 
+/// Crash between `commit_archive` and `commit_indexes`: WAL, state and
+/// archive are all at the tip, only indexes lag. Bootstrap must catch
+/// indexes up while leaving the already-current stores untouched.
+#[test]
+fn test_catchup_recovers_indexes_when_archive_ahead() {
+    let cfg = SyntheticBlockConfig::default();
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
+
+    let genesis = Arc::new(dolos_cardano::include::devnet::load());
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+
+    let baseline_index = domain.indexes().cursor().unwrap();
+
+    // Feed blocks committing everything except indexes.
+    feed_blocks_partial(&domain, &blocks, CrashAfter::Archive);
+
+    let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
+    assert_eq!(
+        domain.state().read_cursor().unwrap().as_ref(),
+        Some(&wal_tip),
+        "state should be at the WAL tip"
+    );
+    assert_eq!(
+        domain.archive().get_tip().unwrap().map(|(s, _)| s),
+        Some(wal_tip.slot()),
+        "archive should be at the WAL tip"
+    );
+    assert_eq!(
+        domain.indexes().cursor().unwrap(),
+        baseline_index,
+        "indexes should not have advanced"
+    );
+
+    domain.bootstrap().unwrap();
+
+    assert_eq!(
+        domain.indexes().cursor().unwrap().as_ref(),
+        Some(&wal_tip),
+        "index cursor should be at the WAL tip after catch-up"
+    );
+
+    // Verify index content came through the replay.
+    let tx_hash_hex = &vectors.blocks[0].tx_hashes[0];
+    let tx_hash_bytes = hex::decode(tx_hash_hex).unwrap();
+    let slot = domain.indexes().slot_by_tx_hash(&tx_hash_bytes).unwrap();
+    assert!(
+        slot.is_some(),
+        "tx hash {} should be found in index after catch-up",
+        tx_hash_hex
+    );
+}
+
 /// Regression: rolling back through WAL entries that came out of the full sync
 /// lifecycle must not panic.
 ///
@@ -255,6 +318,11 @@ fn test_catchup_converges_all_stores_to_wal_tip() {
 /// prior point. With the lifecycle correctly ordered, the WAL rows carry their
 /// `prev_*` data, undo executes cleanly, and the cursor lands on the rollback
 /// target.
+///
+/// It also verifies entity *persistence*: the accounts namespace must be
+/// byte-identical to its snapshot at the rollback target. Before the fix,
+/// rollback undid entities in memory but never saved them, leaving entity
+/// state reflecting the undone blocks.
 #[test]
 fn test_rollback_after_full_sync_lifecycle() {
     let cfg = SyntheticBlockConfig::default();
@@ -276,10 +344,15 @@ fn test_rollback_after_full_sync_lifecycle() {
         ChainPoint::Specific(block.slot(), block.hash())
     };
 
-    // Feed every block through the live sync lifecycle. `roll_forward` uses
+    // Feed blocks through the live sync lifecycle. `roll_forward` uses
     // `run_lifecycle` with `include_wal=true`, so this exercises the same path
-    // as the live sync pipeline.
-    for block in &blocks {
+    // as the live sync pipeline. Feed the first block alone so we can capture
+    // the entity state that rollback is expected to restore.
+    domain.roll_forward(blocks[0].clone()).unwrap();
+
+    let accounts_at_target = snapshot_namespace(&domain, "accounts");
+
+    for block in &blocks[1..] {
         domain.roll_forward(block.clone()).unwrap();
     }
 
@@ -288,6 +361,14 @@ fn test_rollback_after_full_sync_lifecycle() {
         tip_before_rollback.as_ref(),
         Some(&rollback_target),
         "tip should be past the rollback target",
+    );
+
+    // Guard: the blocks past the target must actually touch account state,
+    // otherwise the restoration assertion below is vacuous.
+    assert_ne!(
+        snapshot_namespace(&domain, "accounts"),
+        accounts_at_target,
+        "blocks past the rollback target should modify account entities",
     );
 
     // Roll back. Without the fix, this panics inside delta.undo() because the
@@ -300,6 +381,27 @@ fn test_rollback_after_full_sync_lifecycle() {
         Some(&rollback_target),
         "state cursor should be at the rollback target after rollback",
     );
+
+    // Undone entities must be persisted, restoring the exact state at the
+    // rollback target.
+    assert_eq!(
+        snapshot_namespace(&domain, "accounts"),
+        accounts_at_target,
+        "account entities should be restored to their state at the rollback target",
+    );
+}
+
+/// Collect all raw (key, value) pairs in a state namespace.
+fn snapshot_namespace(
+    domain: &ToyDomain,
+    ns: dolos_core::Namespace,
+) -> Vec<(dolos_core::EntityKey, dolos_core::EntityValue)> {
+    domain
+        .state()
+        .iter_entities(ns, dolos_core::EntityKey::full_range())
+        .unwrap()
+        .map(|x| x.unwrap())
+        .collect()
 }
 
 #[test]
