@@ -53,6 +53,12 @@ jobs:
           command: test
           args: --workspace --all-targets
 
+      - name: Run unit tests (all features)
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --workspace --all-targets --all-features
+
       - name: Run e2e smoke tests
         if: runner.os != 'Windows'
         uses: actions-rs/cargo@v1
