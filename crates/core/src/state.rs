@@ -424,3 +424,91 @@ pub fn load_entity_chunk<D: Domain>(
 
     Ok(loaded)
 }
+
+/// Load into `entities` any entity referenced by `deltas` that isn't already
+/// tracked. Entities already in the map keep their in-memory value, so the
+/// map doubles as a read-your-own-writes cache for callers that replay
+/// multiple delta chunks before committing.
+fn load_missing_entities<D: Domain>(
+    entities: &mut EntityMap<D::Entity>,
+    store: &D::State,
+    deltas: &[D::EntityDelta],
+) -> Result<(), StateError> {
+    let missing: Vec<NsKey> = deltas
+        .iter()
+        .map(|delta| delta.key())
+        .filter(|key| !entities.contains_key(key))
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let loaded = load_entity_chunk::<D>(missing.as_slice(), store)?;
+    entities.extend(loaded);
+
+    Ok(())
+}
+
+/// Replay a chunk of deltas forward over the tracked entities, loading any
+/// entity not already in the map from the store.
+///
+/// This is the same delta application that runs in-memory during normal
+/// sync before `commit_state` persists the results; it's shared here so
+/// crash-recovery WAL replay (bootstrap catch-up) uses the exact same logic.
+pub fn apply_delta_chunk<D: Domain>(
+    entities: &mut EntityMap<D::Entity>,
+    store: &D::State,
+    deltas: &mut [D::EntityDelta],
+) -> Result<(), StateError> {
+    load_missing_entities::<D>(entities, store, deltas)?;
+
+    for delta in deltas.iter_mut() {
+        let entity = entities
+            .get_mut(&delta.key())
+            .expect("entity loaded by load_missing_entities");
+
+        delta.apply(entity);
+    }
+
+    Ok(())
+}
+
+/// Counterpart of [`apply_delta_chunk`]: undo a chunk of deltas over the
+/// tracked entities.
+///
+/// Deltas are undone in reverse application order. Each delta's `prev_*`
+/// captures the state immediately before its own apply, so multiple deltas
+/// keyed to the same entity must be reversed last-first to correctly walk
+/// back through the apply chain.
+pub fn undo_delta_chunk<D: Domain>(
+    entities: &mut EntityMap<D::Entity>,
+    store: &D::State,
+    deltas: &[D::EntityDelta],
+) -> Result<(), StateError> {
+    load_missing_entities::<D>(entities, store, deltas)?;
+
+    for delta in deltas.iter().rev() {
+        let entity = entities
+            .get_mut(&delta.key())
+            .expect("entity loaded by load_missing_entities");
+
+        delta.undo(entity);
+    }
+
+    Ok(())
+}
+
+/// Persist every tracked entity through the writer: `Some` upserts the
+/// record, `None` deletes it.
+pub fn save_entities<D: Domain>(
+    writer: &<D::State as StateStore>::Writer,
+    entities: &EntityMap<D::Entity>,
+) -> Result<(), StateError> {
+    for (key, entity) in entities.iter() {
+        let NsKey(ns, key) = key;
+        writer.save_entity_typed(ns, key, entity.as_ref())?;
+    }
+
+    Ok(())
+}

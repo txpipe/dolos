@@ -8,8 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityDelta as _, IndexStore, IndexWriter as _, NsKey, StateStore,
-    StateWriter as _, WalStore,
+    DomainError, EntityMap, IndexStore, IndexWriter as _, StateStore, StateWriter as _, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -211,27 +210,10 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         let writer = domain.state().start_writer()?;
 
         // Forward mirror of the rollback loop in `sync.rs`: load each entity
-        // at its pre-block value and apply the deltas in block order.
-        let keys = log
-            .delta
-            .iter()
-            .map(|delta| delta.key())
-            .collect::<Vec<_>>();
-
-        let mut entities = crate::state::load_entity_chunk::<D>(keys.as_slice(), domain.state())?;
-
-        for (key, entity) in entities.iter_mut() {
-            for delta in log.delta.iter_mut() {
-                if delta.key() == *key {
-                    delta.apply(entity);
-                }
-            }
-        }
-
-        for (key, entity) in entities.iter() {
-            let NsKey(ns, key) = key;
-            writer.save_entity_typed(ns, key, entity.as_ref())?;
-        }
+        // at its pre-block value, apply the deltas in block order, persist.
+        let mut entities = EntityMap::default();
+        crate::state::apply_delta_chunk::<D>(&mut entities, domain.state(), &mut log.delta)?;
+        crate::state::save_entities::<D>(&writer, &entities)?;
 
         let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
 
