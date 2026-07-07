@@ -389,6 +389,47 @@ pub(crate) mod testing {
                 EpochValue::from_parts(epoch, Some(live), None, mark, set, go)
             })
     }
+
+    /// Like `any_epoch_value` but pins the EpochValue to a caller-chosen epoch
+    /// instead of drawing one at random. Used by tests that need to align the
+    /// entity's epoch with the delta's epoch (required by `strict` assertions).
+    pub fn any_epoch_value_at<T>(
+        epoch: Epoch,
+        inner: BoxedStrategy<T>,
+    ) -> impl Strategy<Value = EpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        (
+            inner.clone(),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner),
+        )
+            .prop_map(move |(live, next, mark, set, go)| {
+                EpochValue::from_parts(epoch, Some(live), next, mark, set, go)
+            })
+    }
+
+    /// Like `any_epoch_value_no_next` but pinned to a caller-chosen epoch.
+    pub fn any_epoch_value_no_next_at<T>(
+        epoch: Epoch,
+        inner: BoxedStrategy<T>,
+    ) -> impl Strategy<Value = EpochValue<T>>
+    where
+        T: Clone + std::fmt::Debug + 'static,
+    {
+        (
+            inner.clone(),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner.clone()),
+            prop::option::of(inner),
+        )
+            .prop_map(move |(live, mark, set, go)| {
+                EpochValue::from_parts(epoch, Some(live), None, mark, set, go)
+            })
+    }
 }
 
 #[cfg(test)]
