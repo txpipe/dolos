@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    ChainError, Domain, DomainError, Genesis, MempoolUpdate, RawBlock, StateStore as _,
-    TipEvent, WorkUnit,
+    ChainError, Domain, DomainError, Genesis, MempoolUpdate, RawBlock, StateStore as _, TipEvent,
+    WorkUnit,
 };
 use tracing::{debug, info};
 
@@ -59,7 +59,9 @@ where
 
         let cursor = domain.state().read_cursor()?;
         self.batch.sort_by_slot();
-        self.batch.check_continuity(cursor.as_ref()).map_err(ChainError::from)?;
+        self.batch
+            .check_continuity(cursor.as_ref())
+            .map_err(ChainError::from)?;
 
         self.batch.load_utxos(domain)?;
         self.batch.decode_utxos()?;

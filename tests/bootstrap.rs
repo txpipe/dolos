@@ -38,7 +38,11 @@ enum CrashAfter {
 }
 
 /// Helper: feed blocks into a domain with partial work-unit execution.
-fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock], crash_after: CrashAfter) {
+fn feed_blocks_partial(
+    domain: &ToyDomain,
+    blocks: &[dolos_core::RawBlock],
+    crash_after: CrashAfter,
+) {
     let mut chain = domain.write_chain();
 
     for block in blocks {
@@ -51,7 +55,11 @@ fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock], cras
     drain_partial(&mut chain, domain, crash_after);
 }
 
-fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain, crash_after: CrashAfter) {
+fn drain_partial(
+    chain: &mut dolos_cardano::CardanoLogic,
+    domain: &ToyDomain,
+    crash_after: CrashAfter,
+) {
     while let Some(mut work) =
         <dolos_cardano::CardanoLogic as ChainLogic>::pop_work::<ToyDomain>(chain, domain)
     {
@@ -163,7 +171,10 @@ fn test_catchup_recovers_state_from_wal() {
     // WAL advanced; state stayed behind.
     let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
     let state_cursor = domain.state().read_cursor().unwrap();
-    assert_eq!(state_cursor, baseline_state, "state should not have advanced");
+    assert_eq!(
+        state_cursor, baseline_state,
+        "state should not have advanced"
+    );
     assert_ne!(
         Some(&wal_tip),
         baseline_state.as_ref(),

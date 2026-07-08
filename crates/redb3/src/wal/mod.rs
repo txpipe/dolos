@@ -1097,7 +1097,10 @@ mod tests {
         );
 
         let r = DbChainPoint::slot_range(10..=20);
-        assert_eq!(r.start_bound(), Bound::Included(&DbChainPoint::min_bound(10)));
+        assert_eq!(
+            r.start_bound(),
+            Bound::Included(&DbChainPoint::min_bound(10))
+        );
         assert_eq!(r.end_bound(), Bound::Included(&DbChainPoint::max_bound(20)));
     }
 

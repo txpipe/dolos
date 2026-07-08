@@ -343,7 +343,13 @@ pub fn build_synthetic_blocks(
             ));
         }
 
-        let (block, hashes) = sample_block(block_number, slot, prev_block_hash, tx_specs, Some(aux_data));
+        let (block, hashes) = sample_block(
+            block_number,
+            slot,
+            prev_block_hash,
+            tx_specs,
+            Some(aux_data),
+        );
 
         for (idx, hash) in hashes.iter().enumerate() {
             let tx_hash = hex::encode(hash.as_ref());

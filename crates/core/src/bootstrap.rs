@@ -334,7 +334,10 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
         info!(count, "archive caught up from WAL");
     }
 
-    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| ChainPoint::Slot(slot));
+    let archive_tip = domain
+        .archive()
+        .get_tip()?
+        .map(|(slot, _)| ChainPoint::Slot(slot));
 
     verify_caught_up("archive", archive_tip, target, CatchUpSeverity::Lenient)
 }
