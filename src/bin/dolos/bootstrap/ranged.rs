@@ -343,8 +343,7 @@ pub fn ranged_reader_with_chunk(
 mod tests {
     use super::*;
 
-    const TEST_URL: &str =
-        "https://dolos-snapshots.txpipe.cloud/v3/764824073/full/latest.tar.gz";
+    const TEST_URL: &str = "https://dolos-snapshots.txpipe.cloud/v3/764824073/full/latest.tar.gz";
 
     /// End-to-end check against the real R2 endpoint: download a small prefix in
     /// many small chunks through the ring buffer and confirm the bytes match a

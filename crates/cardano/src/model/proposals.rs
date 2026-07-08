@@ -278,8 +278,8 @@ impl dolos_core::EntityDelta for NewProposal {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::*;
     use super::testing::any_proposal_state;
+    use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use proptest::prelude::*;
 

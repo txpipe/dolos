@@ -10,9 +10,7 @@
 
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
-use dolos_core::{
-    BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder,
-};
+use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder};
 use pallas::codec::minicbor;
 use pallas::ledger::primitives::StakeCredential;
 
@@ -176,10 +174,8 @@ impl BoundaryWork {
         // this shard's contribution (the map was created fresh for this shard
         // with just this shard's pending rewards).
         self.shard_applied_effective = self.rewards.applied_effective();
-        self.shard_applied_unspendable_to_treasury =
-            self.rewards.applied_unspendable_to_treasury();
-        self.shard_applied_unspendable_to_reserves =
-            self.rewards.applied_unspendable_to_reserves();
+        self.shard_applied_unspendable_to_treasury = self.rewards.applied_unspendable_to_treasury();
+        self.shard_applied_unspendable_to_reserves = self.rewards.applied_unspendable_to_reserves();
 
         self.add_delta(crate::EWrapProgress::new(
             self.shard_applied_effective,

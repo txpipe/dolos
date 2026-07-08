@@ -596,9 +596,7 @@ pub fn define_rewards<C: RewardsContext>(ctx: &C) -> Result<RewardMap<C>, ChainE
         let babbage_or_later = protocol_major >= 7;
         let is_operator_registered = ctx.is_account_registered(&operator_account);
 
-        if (babbage_or_later || is_operator_registered)
-            && ctx.should_include(&operator_account)
-        {
+        if (babbage_or_later || is_operator_registered) && ctx.should_include(&operator_account) {
             map.include(ctx, &operator_account, operator_share, pool, true);
         }
 

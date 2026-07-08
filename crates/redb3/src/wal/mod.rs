@@ -374,9 +374,7 @@ where
             Err(e) => return Err(RedbWalError::from(e)),
         };
 
-        let value = table
-            .get(WAL_METADATA_VERSION_KEY)?
-            .map(|v| v.value());
+        let value = table.get(WAL_METADATA_VERSION_KEY)?.map(|v| v.value());
 
         Ok(value)
     }
@@ -428,10 +426,12 @@ where
 
         match found {
             Some(v) if v == CURRENT_WAL_VERSION => Ok(()),
-            Some(v) if v > CURRENT_WAL_VERSION => Err(RedbWalError(WalError::IncompatibleVersion {
-                found: v,
-                expected: CURRENT_WAL_VERSION,
-            })),
+            Some(v) if v > CURRENT_WAL_VERSION => {
+                Err(RedbWalError(WalError::IncompatibleVersion {
+                    found: v,
+                    expected: CURRENT_WAL_VERSION,
+                }))
+            }
             _ => {
                 if self.data_table_is_empty()? {
                     info!(

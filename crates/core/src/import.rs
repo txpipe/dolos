@@ -11,9 +11,7 @@
 
 use tracing::{debug, instrument};
 
-use crate::{
-    sync::run_lifecycle, BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit,
-};
+use crate::{sync::run_lifecycle, BlockSlot, ChainLogic, Domain, DomainError, RawBlock, WorkUnit};
 
 /// Extension trait for bulk block import operations.
 ///

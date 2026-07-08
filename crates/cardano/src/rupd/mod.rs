@@ -138,4 +138,3 @@ pub struct RupdWork {
     /// emits only rewards owned by this shard.
     pub shard_ranges: Option<Vec<Range<EntityKey>>>,
 }
-

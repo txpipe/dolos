@@ -1019,9 +1019,11 @@ impl dolos_core::EntityDelta for AccountTransition {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::*;
     use super::testing::any_account_state;
-    use crate::model::testing::{self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip};
+    use super::*;
+    use crate::model::testing::{
+        self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
+    };
     use proptest::prelude::*;
 
     /// Build an `AccountState` whose `pool.live` is guaranteed to be `PoolDelegation::Pool(..)`.

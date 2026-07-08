@@ -514,7 +514,10 @@ mod tests {
             .iter()
             .filter(|u| matches!(u, InternalWorkUnit::Estart(_)))
             .count();
-        assert_eq!(ewrap_count, 1, "expected exactly 1 Ewrap, got: {ewrap_count}");
+        assert_eq!(
+            ewrap_count, 1,
+            "expected exactly 1 Ewrap, got: {ewrap_count}"
+        );
         assert_eq!(
             estart_count, 1,
             "expected exactly 1 Estart, got: {estart_count}"

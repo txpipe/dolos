@@ -9,8 +9,8 @@ use pallas::{
 use std::pin::Pin;
 use tonic::{Request, Response, Status};
 
-use crate::serve::grpc::stream::ChainStream;
 use crate::prelude::*;
+use crate::serve::grpc::stream::ChainStream;
 
 fn outputs_match_address(
     pattern: &u5c::cardano::AddressPattern,

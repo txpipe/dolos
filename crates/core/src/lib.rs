@@ -250,7 +250,9 @@ pub enum BrokenInvariant {
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
 
-    #[error("CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})")]
+    #[error(
+        "CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})"
+    )]
     EpochBoundaryIncomplete {
         epoch: Epoch,
         committed: Option<u32>,

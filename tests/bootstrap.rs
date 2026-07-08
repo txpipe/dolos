@@ -81,8 +81,7 @@ fn test_catchup_recovers_archive_and_indexes() {
     let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
 
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
-    let domain =
-        ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
 
     // Record baseline cursors — all stores are in sync after initial bootstrap.
     let baseline_state = domain.state().read_cursor().unwrap();
@@ -103,8 +102,14 @@ fn test_catchup_recovers_archive_and_indexes() {
     // Archive and indexes should still be at the baseline.
     let archive_tip = domain.archive().get_tip().unwrap().map(|(s, _)| s);
     let index_cursor = domain.indexes().cursor().unwrap();
-    assert_eq!(archive_tip, baseline_archive, "archive should not have advanced");
-    assert_eq!(index_cursor, baseline_index, "indexes should not have advanced");
+    assert_eq!(
+        archive_tip, baseline_archive,
+        "archive should not have advanced"
+    );
+    assert_eq!(
+        index_cursor, baseline_index,
+        "indexes should not have advanced"
+    );
 
     // --- Run bootstrap (which calls catch_up_stores internally) ---
     domain.bootstrap().unwrap();

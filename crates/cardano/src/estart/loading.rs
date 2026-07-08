@@ -29,10 +29,7 @@ impl WorkContext {
     ///
     /// Account-keyed transitions are handled by `compute_shard_deltas`,
     /// which the executor runs once per shard ahead of this finalize pass.
-    pub fn compute_global_deltas<D: Domain>(
-        &mut self,
-        state: &D::State,
-    ) -> Result<(), ChainError> {
+    pub fn compute_global_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor;
 
@@ -80,7 +77,8 @@ impl WorkContext {
         state: &D::State,
         genesis: &Genesis,
     ) -> Result<u64, ChainError> {
-        let avvm_utxos = pallas::interop::hardano::configs::byron::genesis_avvm_utxos(&genesis.byron);
+        let avvm_utxos =
+            pallas::interop::hardano::configs::byron::genesis_avvm_utxos(&genesis.byron);
 
         // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
         let refs: Vec<TxoRef> = avvm_utxos.iter().map(|(tx, _, _)| TxoRef(*tx, 0)).collect();

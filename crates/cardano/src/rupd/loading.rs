@@ -280,10 +280,8 @@ impl StakeSnapshot {
         ranges: &[Range<EntityKey>],
     ) -> Result<(), ChainError> {
         for range in ranges {
-            let accounts = state.iter_entities_typed::<AccountState>(
-                AccountState::NS,
-                Some(range.clone()),
-            )?;
+            let accounts =
+                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range.clone()))?;
 
             for record in accounts {
                 let (_, account) = record?;
