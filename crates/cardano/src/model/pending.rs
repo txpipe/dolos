@@ -199,7 +199,8 @@ impl dolos_core::EntityDelta for DequeueReward {
 /// Created during block roll when MIR certificates are processed.
 ///
 /// Behavior varies by protocol version:
-/// - Pre-Alonzo (protocol < 5): MIRs OVERWRITE previous values for the same credential.
+/// - Pre-Alonzo (protocol < 5): MIRs OVERWRITE previous values for the same
+///   credential.
 /// - Alonzo+ (protocol >= 5): MIRs ACCUMULATE for the same credential.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnqueueMir {
@@ -249,7 +250,8 @@ impl dolos_core::EntityDelta for EnqueueMir {
         self.prev = entity.clone();
 
         // Behavior depends on overwrite flag (determined by protocol version):
-        // - Pre-Alonzo (overwrite=true): Later MIRs overwrite earlier ones (Map.union semantics)
+        // - Pre-Alonzo (overwrite=true): Later MIRs overwrite earlier ones (Map.union
+        //   semantics)
         // - Alonzo+ (overwrite=false): MIRs accumulate (Map.unionWith (<>) semantics)
         if self.overwrite {
             // Pre-Alonzo: overwrite with new values

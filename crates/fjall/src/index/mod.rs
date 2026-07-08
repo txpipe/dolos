@@ -1,31 +1,36 @@
 //! Fjall-based index store implementation for Dolos (chain-agnostic).
 //!
-//! This module provides an implementation of the `IndexStore` trait using fjall,
-//! an LSM-tree based embedded database. This is optimized for write-heavy workloads
-//! with many keys, which is ideal for blockchain index data.
+//! This module provides an implementation of the `IndexStore` trait using
+//! fjall, an LSM-tree based embedded database. This is optimized for
+//! write-heavy workloads with many keys, which is ideal for blockchain index
+//! data.
 //!
 //! ## Four Keyspace Design
 //!
 //! Indexes are organized into four keyspaces based on access patterns:
 //!
-//! 1. **`index-cursor`**: Chain position tracking (separate for different access pattern)
+//! 1. **`index-cursor`**: Chain position tracking (separate for different
+//!    access pattern)
 //!
-//! 2. **`index-exact`**: Exact-match lookups (point queries)
-//!    Key format: `[dim_hash:8][key_data:var]` -> `[slot:8]`
+//! 2. **`index-exact`**: Exact-match lookups (point queries) Key format:
+//!    `[dim_hash:8][key_data:var]` -> `[slot:8]`
 //!
-//! 3. **`state-tags`**: UTxO tag queries (mutable: insert on produce, delete on consume)
-//!    Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
+//! 3. **`state-tags`**: UTxO tag queries (mutable: insert on produce, delete on
+//!    consume) Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
 //!
-//! 4. **`archive-tags`**: Block tag queries (append-only, never deleted)
-//!    Key format: `[dim_hash:8][xxh3(tag_key):8][slot:8]` -> empty
+//! 4. **`archive-tags`**: Block tag queries (append-only, never deleted) Key
+//!    format: `[dim_hash:8][xxh3(tag_key):8][slot:8]` -> empty
 //!
-//! The `dim_hash` is computed as `xxh3(prefix + ":" + dimension)` where prefix is
-//! "exact", "utxo", or "block". This makes the storage layer fully chain-agnostic.
+//! The `dim_hash` is computed as `xxh3(prefix + ":" + dimension)` where prefix
+//! is "exact", "utxo", or "block". This makes the storage layer fully
+//! chain-agnostic.
 //!
 //! Splitting UTxO tags (mutable, high-churn) from block tags (append-only) into
-//! separate keyspaces reduces write amplification and allows independent compaction.
+//! separate keyspaces reduces write amplification and allows independent
+//! compaction.
 //!
-//! All multi-byte integers are big-endian encoded for correct lexicographic ordering.
+//! All multi-byte integers are big-endian encoded for correct lexicographic
+//! ordering.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -79,7 +84,8 @@ const CURSOR_KEY: &[u8] = &[0u8];
 /// Uses 4 keyspaces split by workload class:
 /// - `cursor`: Chain position tracking
 /// - `exact`: Exact-match lookups (block/tx hash, block number)
-/// - `utxo_tags`: UTxO tags (mutable: insert+delete, needs tombstone compaction)
+/// - `utxo_tags`: UTxO tags (mutable: insert+delete, needs tombstone
+///   compaction)
 /// - `block_tags`: Block tags (append-only, can use relaxed compaction)
 #[derive(Clone)]
 pub struct IndexStore {

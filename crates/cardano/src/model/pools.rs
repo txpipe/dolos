@@ -247,8 +247,9 @@ impl dolos_core::EntityDelta for PoolRegistration {
             let is_currently_retired = entity.snapshot.unwrap_live().is_retired;
 
             if is_currently_retired {
-                // if the pool is currently retired, we need to assume this overrides the record as a new registration.
-                // Preserve blocks_minted accrued in the current epoch so we don't lose leader rewards.
+                // if the pool is currently retired, we need to assume this overrides the record
+                // as a new registration. Preserve blocks_minted accrued in the
+                // current epoch so we don't lose leader rewards.
                 let preserved_blocks = entity.snapshot.unwrap_live().blocks_minted;
                 entity.snapshot.replace(
                     PoolSnapshot {

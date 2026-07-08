@@ -52,7 +52,8 @@ pub mod dim_prefix {
 /// Hash a qualified dimension string to 8 bytes.
 ///
 /// Combines prefix and dimension with ":" separator, then hashes with xxh3.
-/// This ensures dimensions with the same name but different types don't collide.
+/// This ensures dimensions with the same name but different types don't
+/// collide.
 ///
 /// # Examples
 ///

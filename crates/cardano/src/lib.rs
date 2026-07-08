@@ -289,8 +289,9 @@ pub struct CardanoLogic {
     config: CardanoConfig,
     work: Option<WorkBuffer>,
     pub(crate) cache: Cache,
-    /// Flag indicating the cache needs refresh after a work unit that modifies eras.
-    /// Set after Genesis or EStart work units are popped, cleared at next pop_work call.
+    /// Flag indicating the cache needs refresh after a work unit that modifies
+    /// eras. Set after Genesis or EStart work units are popped, cleared at
+    /// next pop_work call.
     needs_cache_refresh: bool,
 }
 

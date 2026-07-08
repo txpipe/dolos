@@ -102,9 +102,10 @@ pub struct StakeSnapshot {
     /// `live_pledge < declared_pledge` guard. The live pledge depends
     /// only on global stake, so we precompute it once.
     pub pool_live_pledges: HashMap<PoolHash, u64>,
-    /// Total blocks minted by ALL pools in the performance epoch (mark snapshot).
-    /// This includes blocks from pools created after the stake snapshot epoch.
-    /// Used for the `epoch_blocks` denominator in apparent performance calculation.
+    /// Total blocks minted by ALL pools in the performance epoch (mark
+    /// snapshot). This includes blocks from pools created after the stake
+    /// snapshot epoch. Used for the `epoch_blocks` denominator in apparent
+    /// performance calculation.
     pub performance_epoch_pool_blocks: u64,
 }
 

@@ -56,7 +56,8 @@ pub struct DatumRefIncrement {
     pub(crate) datum_hash: Hash<32>,
     pub(crate) datum_bytes: Vec<u8>,
 
-    /// For undo: was this datum newly created (true) or did it already exist (false)?
+    /// For undo: was this datum newly created (true) or did it already exist
+    /// (false)?
     pub(crate) was_new: bool,
 }
 
@@ -109,7 +110,8 @@ impl dolos_core::EntityDelta for DatumRefIncrement {
 pub struct DatumRefDecrement {
     pub(crate) datum_hash: Hash<32>,
 
-    /// For undo: the previous state before decrement (needed to restore if deleted)
+    /// For undo: the previous state before decrement (needed to restore if
+    /// deleted)
     pub(crate) prev_state: Option<DatumState>,
 }
 

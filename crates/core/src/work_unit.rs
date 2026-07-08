@@ -26,10 +26,9 @@ pub struct MempoolUpdate {
 /// 1. **Definition** - Lightweight construction with required parameters.
 ///    Happens when the work unit is created by the chain logic.
 ///
-/// 2. **Initialize** - Shard-agnostic setup that runs once before any
-///    shard. The implementation can use this to compute and cache its
-///    `total_shards()` value, hoist boundary-wide reads out of the
-///    per-shard loop, etc.
+/// 2. **Initialize** - Shard-agnostic setup that runs once before any shard.
+///    The implementation can use this to compute and cache its `total_shards()`
+///    value, hoist boundary-wide reads out of the per-shard loop, etc.
 ///
 /// 3. **Per-shard loop**, repeated `total_shards()` times with `shard_index`
 ///    advancing from `0` to `total_shards() - 1`:
@@ -41,8 +40,8 @@ pub struct MempoolUpdate {
 ///    e. **Commit Archive** - Apply changes to the archive store.
 ///    f. **Commit Indexes** - Apply changes to index stores.
 ///
-/// 4. **Finalize** - Shard-agnostic teardown that runs once after the
-///    last shard's commits succeed.
+/// 4. **Finalize** - Shard-agnostic teardown that runs once after the last
+///    shard's commits succeed.
 ///
 /// 5. **Tip notifications + mempool updates** - shard-agnostic, fired once
 ///    after `finalize()`.

@@ -121,11 +121,13 @@ pub struct PotDelta {
     #[n(9)]
     pub effective_rewards: Lovelace,
 
-    /// Unspendable rewards that go to treasury (accounts deregistered late after RUPD).
+    /// Unspendable rewards that go to treasury (accounts deregistered late
+    /// after RUPD).
     #[n(10)]
     pub unspendable_to_treasury: Lovelace,
 
-    /// Unspendable rewards that return to reserves (accounts deregistered soon after RUPD).
+    /// Unspendable rewards that return to reserves (accounts deregistered soon
+    /// after RUPD).
     #[n(22)]
     #[cbor(default)]
     pub unspendable_to_reserves: Lovelace,
@@ -215,8 +217,9 @@ impl PotDelta {
     }
 
     /// Total rewards consumed from the available incentives pool.
-    /// Includes effective (applied) and unspendable rewards that go to treasury.
-    /// Unspendable rewards that return to reserves are NOT consumed (they stay in reserves).
+    /// Includes effective (applied) and unspendable rewards that go to
+    /// treasury. Unspendable rewards that return to reserves are NOT
+    /// consumed (they stay in reserves).
     pub fn consumed_incentives(&self) -> Lovelace {
         self.effective_rewards + self.unspendable_to_treasury
     }
@@ -427,7 +430,8 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.account_count = add!(pots.account_count, delta.new_accounts);
     pots.account_count = sub!(pots.account_count, delta.removed_accounts);
 
-    // for governance, since each cert contains the specific deposit amount, we deal directly with lovelace values.
+    // for governance, since each cert contains the specific deposit amount, we deal
+    // directly with lovelace values.
 
     pots.drep_deposits = add!(pots.drep_deposits, delta.drep_deposits);
     pots.drep_deposits = sub!(pots.drep_deposits, delta.drep_refunds);

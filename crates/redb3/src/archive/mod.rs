@@ -129,7 +129,8 @@ impl ArchiveStore {
     ///
     /// `path` is the archive **directory** (e.g. `<storage.path>/archive/`).
     /// The redb index is stored at `<path>/index`.
-    /// Segment files are stored in `config.blocks_path` if set, otherwise in `<path>/`.
+    /// Segment files are stored in `config.blocks_path` if set, otherwise in
+    /// `<path>/`.
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,

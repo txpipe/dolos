@@ -67,12 +67,11 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 ///
 /// Import lifecycle skips WAL commits and tip notifications for performance:
 /// 1. `initialize()` - Shard-agnostic setup
-/// 2. For each shard `0..total_shards()`:
-///    a. `load()` - Load required data from storage
-///    b. `compute()` - Execute computation over loaded data
-///    c. `commit_state()` - Apply changes to state store
-///    d. `commit_archive()` - Apply changes to archive store
-///    e. `commit_indexes()` - Apply changes to index stores
+/// 2. For each shard `0..total_shards()`: a. `load()` - Load required data from
+///    storage b. `compute()` - Execute computation over loaded data c.
+///    `commit_state()` - Apply changes to state store d. `commit_archive()` -
+///    Apply changes to archive store e. `commit_indexes()` - Apply changes to
+///    index stores
 /// 3. `finalize()` - Shard-agnostic teardown
 ///
 /// Skipped phases:

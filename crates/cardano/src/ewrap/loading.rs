@@ -25,8 +25,9 @@ use crate::{
 };
 
 impl BoundaryWork {
-    /// Construct an empty `BoundaryWork` with the small globals every phase needs
-    /// (ending_state, chain summary, active protocol, genesis, incentives).
+    /// Construct an empty `BoundaryWork` with the small globals every phase
+    /// needs (ending_state, chain summary, active protocol, genesis,
+    /// incentives).
     pub(crate) fn new_empty<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
@@ -347,8 +348,9 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Process pending MIRs: check registration status and apply to registered accounts.
-    /// MIRs to unregistered accounts stay in their source pot (no transfer).
+    /// Process pending MIRs: check registration status and apply to registered
+    /// accounts. MIRs to unregistered accounts stay in their source pot (no
+    /// transfer).
     fn process_pending_mirs<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let pending_iter =
             state.iter_entities_typed::<PendingMirState>(PendingMirState::NS, None)?;

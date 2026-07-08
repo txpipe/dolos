@@ -12,7 +12,8 @@ pub(super) struct EraRow {
     pub slot_length: u64,
 }
 
-/// Fetch era summaries from DBSync up to (and including) the era containing `max_epoch`.
+/// Fetch era summaries from DBSync up to (and including) the era containing
+/// `max_epoch`.
 pub(super) fn fetch(dbsync_url: &str, max_epoch: u64, network: &Network) -> Result<Vec<EraRow>> {
     let mut client = super::connect_to_dbsync(dbsync_url)?;
 

@@ -50,7 +50,8 @@ pub struct Args {
     #[arg(long, alias = "skip-if-not-empty", global = true)]
     skip_if_data: bool,
 
-    /// Continue bootstrap even if data exists, trusting the subcommand to handle resumption
+    /// Continue bootstrap even if data exists, trusting the subcommand to
+    /// handle resumption
     #[arg(long, alias = "resume", global = true)]
     r#continue: bool,
 
@@ -91,7 +92,8 @@ fn clear_storage(config: &RootConfig) -> miette::Result<()> {
 }
 
 /// Checks existing data in storage and decides how to proceed based on flags.
-/// Returns `Ok(true)` if bootstrap should continue, `Ok(false)` if it should be skipped.
+/// Returns `Ok(true)` if bootstrap should continue, `Ok(false)` if it should be
+/// skipped.
 fn handle_existing_data(config: &RootConfig, args: &Args) -> miette::Result<bool> {
     if args.r#continue {
         return Ok(true);
@@ -122,11 +124,12 @@ fn dispatch(config: &RootConfig, command: &Command, feedback: &Feedback) -> miet
     }
 }
 
-/// Seed the WAL from the state cursor so that `find_intersect` works after bootstrap.
+/// Seed the WAL from the state cursor so that `find_intersect` works after
+/// bootstrap.
 ///
-/// Some bootstrap mechanisms skip WAL commits for performance, leaving it empty.
-/// This ensures the WAL tip matches the state cursor regardless of which bootstrap
-/// method was used.
+/// Some bootstrap mechanisms skip WAL commits for performance, leaving it
+/// empty. This ensures the WAL tip matches the state cursor regardless of which
+/// bootstrap method was used.
 fn seed_wal_from_state(config: &RootConfig) -> miette::Result<()> {
     let state = crate::common::open_state_store(config)?;
     let wal = crate::common::open_wal_store(config)?;

@@ -1,7 +1,7 @@
 //! Cardano-specific index delta builder.
 //!
-//! This module provides `CardanoIndexDeltaBuilder` for constructing `IndexDelta`
-//! structures from Cardano block data.
+//! This module provides `CardanoIndexDeltaBuilder` for constructing
+//! `IndexDelta` structures from Cardano block data.
 
 use dolos_core::{
     ArchiveIndexDelta, BlockSlot, ChainPoint, EraCbor, IndexDelta, Tag, TxoRef, UtxoIndexDelta,
@@ -59,8 +59,8 @@ impl CardanoIndexDeltaBuilder {
 
     /// Add a produced UTxO to the delta.
     ///
-    /// Extracts tags from the output (address, assets) and adds them to the UTxO
-    /// filter delta for insertion.
+    /// Extracts tags from the output (address, assets) and adds them to the
+    /// UTxO filter delta for insertion.
     pub fn add_produced_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
         let tags = Self::extract_utxo_tags(output);
         self.delta.utxo.produced.push((txo_ref, tags));
@@ -68,8 +68,8 @@ impl CardanoIndexDeltaBuilder {
 
     /// Add a consumed UTxO to the delta.
     ///
-    /// Extracts tags from the output (address, assets) and adds them to the UTxO
-    /// filter delta for removal.
+    /// Extracts tags from the output (address, assets) and adds them to the
+    /// UTxO filter delta for removal.
     pub fn add_consumed_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
         let tags = Self::extract_utxo_tags(output);
         self.delta.utxo.consumed.push((txo_ref, tags));
@@ -269,7 +269,8 @@ impl CardanoIndexDeltaBuilder {
     ///
     /// Calls `start_block`, then iterates all transactions adding
     /// tx hashes, metadata, inputs (with resolved UTxO lookups),
-    /// outputs (with script refs), witness scripts/datums, certs, and redeemers.
+    /// outputs (with script refs), witness scripts/datums, certs, and
+    /// redeemers.
     pub fn index_block(
         &mut self,
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,

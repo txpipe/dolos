@@ -20,7 +20,8 @@ pub enum ProposalAction {
     #[n(2)]
     TreasuryWithdrawal(#[n(0)] Vec<(StakeCredential, Coin)>),
 
-    /// Used to track any other proposal that isn't relevant for Dolos' purposes.
+    /// Used to track any other proposal that isn't relevant for Dolos'
+    /// purposes.
     #[n(3)]
     Other,
 }
@@ -39,7 +40,8 @@ pub struct ProposalState {
     #[n(3)]
     pub action: ProposalAction,
 
-    /// Set at the initialization of the proposal representing the last valid epoch. The existence of a value doesn't mean the proposal has expired.
+    /// Set at the initialization of the proposal representing the last valid
+    /// epoch. The existence of a value doesn't mean the proposal has expired.
     #[n(4)]
     pub max_epoch: Option<Epoch>,
 
@@ -138,7 +140,8 @@ impl ProposalState {
         false
     }
 
-    /// Returns true if the proposal is still beign evaluated. Not to confuse with `is_enacted`.
+    /// Returns true if the proposal is still beign evaluated. Not to confuse
+    /// with `is_enacted`.
     pub fn is_active(&self, current_epoch: Epoch) -> bool {
         if self.was_enacted(current_epoch) {
             return false;
@@ -156,7 +159,9 @@ impl ProposalState {
         true
     }
 
-    /// Returns true if the proposal should be enacted at the starting epoch. It does a strict comparision with the ratified epoch, it will return false if asked at a later epoch.
+    /// Returns true if the proposal should be enacted at the starting epoch. It
+    /// does a strict comparision with the ratified epoch, it will return false
+    /// if asked at a later epoch.
     pub fn should_enact(&self, starting_epoch: Epoch) -> bool {
         self.ratified_epoch.is_some_and(|x| x + 1 == starting_epoch)
     }

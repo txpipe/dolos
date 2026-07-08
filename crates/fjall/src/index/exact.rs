@@ -1,7 +1,8 @@
-//! Exact-match index operations for the `index-exact` keyspace (chain-agnostic).
+//! Exact-match index operations for the `index-exact` keyspace
+//! (chain-agnostic).
 //!
-//! This module handles key encoding, batch writes (apply/undo), and read queries
-//! for the `index-exact` keyspace:
+//! This module handles key encoding, batch writes (apply/undo), and read
+//! queries for the `index-exact` keyspace:
 //! - Block hash -> slot
 //! - Transaction hash -> slot
 //! - Block number -> slot

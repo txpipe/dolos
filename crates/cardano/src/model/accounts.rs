@@ -225,12 +225,13 @@ impl AccountState {
     }
 
     /// Check if the account was registered at a specific slot.
-    /// Used for RUPD-time filtering where we need registration status at the RUPD slot,
-    /// not the current chain tip.
+    /// Used for RUPD-time filtering where we need registration status at the
+    /// RUPD slot, not the current chain tip.
     ///
     /// Note: When an account deregisters, `registered_at` is cleared to `None`.
-    /// So we handle the case where `deregistered_at` is set but `registered_at` is not:
-    /// if the deregistration slot is after the target slot, the account was registered.
+    /// So we handle the case where `deregistered_at` is set but `registered_at`
+    /// is not: if the deregistration slot is after the target slot, the
+    /// account was registered.
     pub fn is_registered_at(&self, slot: u64) -> bool {
         match (self.registered_at, self.deregistered_at) {
             // Never registered and never deregistered
@@ -1026,9 +1027,10 @@ mod prop_tests {
     };
     use proptest::prelude::*;
 
-    /// Build an `AccountState` whose `pool.live` is guaranteed to be `PoolDelegation::Pool(..)`.
-    /// Required by `PoolDelegatorRetire`, which panics via `unreachable!()` if `prev_pool` isn't
-    /// a real pool delegation.
+    /// Build an `AccountState` whose `pool.live` is guaranteed to be
+    /// `PoolDelegation::Pool(..)`. Required by `PoolDelegatorRetire`, which
+    /// panics via `unreachable!()` if `prev_pool` isn't a real pool
+    /// delegation.
     fn any_account_with_active_pool() -> impl Strategy<Value = AccountState> {
         (any_account_state(), root::any_pool_hash()).prop_map(|(mut acct, pool)| {
             let live = acct.pool.live().cloned();

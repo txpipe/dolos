@@ -214,7 +214,8 @@ impl BlocksTable {
     }
 
     /// Get a range of (slot, BlockLocation) from the index.
-    /// Block data is NOT fetched here; callers use FlatFileStore to read lazily.
+    /// Block data is NOT fetched here; callers use FlatFileStore to read
+    /// lazily.
     pub fn get_range(
         rx: &ReadTransaction,
         from: Option<BlockSlot>,

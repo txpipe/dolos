@@ -203,8 +203,9 @@ fn do_import(
     .map_err(|err| miette::miette!(err.to_string()))
     .context("reading immutable db tip")?;
 
-    // unless we're starting from the origin of the chain, we need to skip the first result since
-    // the iterator will be standing in the last slot already processed, we don't want to import it twice.
+    // unless we're starting from the origin of the chain, we need to skip the first
+    // result since the iterator will be standing in the last slot already
+    // processed, we don't want to import it twice.
     if cursor != pallas::network::miniprotocols::Point::Origin {
         iter.next();
     }

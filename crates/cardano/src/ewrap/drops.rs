@@ -25,7 +25,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         let current_epoch = ctx.ending_state.number;
 
-        // Notice that instead of dropping delegators when a pool is retired, we're moving the data to a different field to be able to still track the relationsihp between the pool and the delegators.
+        // Notice that instead of dropping delegators when a pool is retired, we're
+        // moving the data to a different field to be able to still track the
+        // relationsihp between the pool and the delegators.
 
         if let Some(pool) = account.delegated_pool_at(current_epoch) {
             if ctx.retiring_pools.contains_key(pool) {

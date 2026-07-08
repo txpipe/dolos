@@ -1,13 +1,14 @@
 //! Index store trait for cross-cutting indexes.
 //!
-//! The `IndexStore` provides lookups that return primitive index values (slots, UTxO refs)
-//! rather than full block data. To get block data, use `AsyncQueryFacade` from the
-//! `async_query` module which combines index lookups with archive fetches.
+//! The `IndexStore` provides lookups that return primitive index values (slots,
+//! UTxO refs) rather than full block data. To get block data, use
+//! `AsyncQueryFacade` from the `async_query` module which combines index
+//! lookups with archive fetches.
 //!
-//! This module defines a chain-agnostic indexing system based on "tags" - associations
-//! between entities (blocks, transactions, UTxOs) and dimension keys. Chain-specific
-//! code (e.g., Cardano) defines the dimensions and provides extension traits for
-//! convenient access.
+//! This module defines a chain-agnostic indexing system based on "tags" -
+//! associations between entities (blocks, transactions, UTxOs) and dimension
+//! keys. Chain-specific code (e.g., Cardano) defines the dimensions and
+//! provides extension traits for convenient access.
 
 use thiserror::Error;
 
@@ -113,7 +114,8 @@ pub trait IndexWriter: Send + Sync + 'static {
     /// Apply index changes from a delta.
     ///
     /// This applies all UTxO filter changes and archive index entries
-    /// contained in the delta. The cursor is set internally from `delta.cursor`.
+    /// contained in the delta. The cursor is set internally from
+    /// `delta.cursor`.
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError>;
 
     /// Undo index changes from a delta (rollback).
@@ -134,8 +136,9 @@ pub trait IndexWriter: Send + Sync + 'static {
 /// `BlockSlot` or `UtxoSet` rather than full block data. For high-level queries
 /// that also fetch block data, use `AsyncQueryFacade`.
 ///
-/// The trait is chain-agnostic, using dimension strings to identify index types.
-/// Chain-specific code should provide extension traits with convenient methods.
+/// The trait is chain-agnostic, using dimension strings to identify index
+/// types. Chain-specific code should provide extension traits with convenient
+/// methods.
 #[trait_variant::make(Send)]
 pub trait IndexStore: Clone + Send + Sync + 'static {
     /// Writer type for batched write operations.

@@ -75,7 +75,8 @@ pub struct PreAllegraReward {
 }
 
 impl PreAllegraReward {
-    /// Merge two pre-Allegra rewards, keeping the minimum per Haskell Ord instance.
+    /// Merge two pre-Allegra rewards, keeping the minimum per Haskell Ord
+    /// instance.
     ///
     /// The Haskell Ord for Reward is:
     ///   1. LeaderReward < MemberReward (leader takes priority)
@@ -196,9 +197,11 @@ pub struct RewardMap<C: RewardsContext> {
     incentives: EpochIncentives,
     pending: HashMap<StakeCredential, Reward>,
     applied_effective: u64,
-    /// Unspendable rewards that go to treasury (accounts that deregistered late after RUPD).
+    /// Unspendable rewards that go to treasury (accounts that deregistered late
+    /// after RUPD).
     applied_unspendable_to_treasury: u64,
-    /// Unspendable rewards that return to reserves (accounts that deregistered soon after RUPD).
+    /// Unspendable rewards that return to reserves (accounts that deregistered
+    /// soon after RUPD).
     applied_unspendable_to_reserves: u64,
     _phantom: PhantomData<C>,
 }
@@ -314,13 +317,15 @@ impl<C: RewardsContext> RewardMap<C> {
         Some(reward)
     }
 
-    /// Return an unspendable reward to treasury (for accounts that deregistered late after RUPD).
+    /// Return an unspendable reward to treasury (for accounts that deregistered
+    /// late after RUPD).
     pub fn return_reward_to_treasury(&mut self, amount: Lovelace) {
         self.applied_effective = sub!(self.applied_effective, amount);
         self.applied_unspendable_to_treasury = add!(self.applied_unspendable_to_treasury, amount);
     }
 
-    /// Return an unspendable reward to reserves (for accounts that deregistered soon after RUPD).
+    /// Return an unspendable reward to reserves (for accounts that deregistered
+    /// soon after RUPD).
     pub fn return_reward_to_reserves(&mut self, amount: Lovelace) {
         self.applied_effective = sub!(self.applied_effective, amount);
         self.applied_unspendable_to_reserves = add!(self.applied_unspendable_to_reserves, amount);

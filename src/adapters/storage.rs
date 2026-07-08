@@ -1,12 +1,13 @@
 //! Storage backend wrappers for runtime backend selection.
 //!
-//! This module provides enum wrappers around the concrete storage implementations
-//! (redb3, fjall, and noop) that implement the core storage traits. This enables runtime
-//! selection of storage backends via configuration.
+//! This module provides enum wrappers around the concrete storage
+//! implementations (redb3, fjall, and noop) that implement the core storage
+//! traits. This enables runtime selection of storage backends via
+//! configuration.
 //!
 //! The `open` functions are simple matchers that delegate directly to concrete
-//! implementations, passing through the backend-specific config struct. All path
-//! resolution and directory creation is handled by the caller.
+//! implementations, passing through the backend-specific config struct. All
+//! path resolution and directory creation is handled by the caller.
 
 use std::{ops::Range, path::Path, path::PathBuf};
 

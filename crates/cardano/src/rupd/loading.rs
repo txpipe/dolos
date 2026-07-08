@@ -393,7 +393,8 @@ impl RupdWork {
 
         let pots = epoch.initial_pots.clone();
 
-        // Use non-overlay block count for eta calculation (matches ledger BlocksMade total).
+        // Use non-overlay block count for eta calculation (matches ledger BlocksMade
+        // total).
         let blocks_made_total = epoch
             .rolling
             .mark()

@@ -150,7 +150,8 @@ pub enum MempoolError {
 /// - **Propagated** — sent to a peer, awaiting acknowledgement.
 /// - **Acknowledged** — the peer accepted the transaction.
 /// - **Confirmed** — observed on-chain; confirmation counter tracks depth.
-/// - **Finalized** — enough confirmations accumulated; no longer actively tracked.
+/// - **Finalized** — enough confirmations accumulated; no longer actively
+///   tracked.
 ///
 /// The "inflight" umbrella covers all post-pending, pre-finalized stages
 /// (Propagated, Acknowledged, Confirmed).
@@ -171,7 +172,8 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
     /// same hash is already pending.
     fn receive(&self, tx: MempoolTx) -> Result<(), MempoolError>;
 
-    /// Returns `true` if there is at least one transaction in the pending queue.
+    /// Returns `true` if there is at least one transaction in the pending
+    /// queue.
     fn has_pending(&self) -> bool;
 
     /// Returns all transactions from the pending queue in insertion order.
@@ -187,8 +189,8 @@ pub trait MempoolStore: Clone + Send + Sync + 'static {
 
     /// Transitions `Propagated` transactions to `Acknowledged`.
     ///
-    /// Only transitions transactions currently in `Propagated`; other stages are
-    /// silently skipped.
+    /// Only transitions transactions currently in `Propagated`; other stages
+    /// are silently skipped.
     fn mark_acknowledged(&self, hashes: &[TxHash]) -> Result<(), MempoolError>;
 
     /// Returns the transaction if it is currently in any inflight sub-stage
@@ -393,10 +395,11 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         self.indexes
     }
 
-    /// Get UTxOs by a tag dimension and key, merging results from both the index
-    /// and the mempool.
+    /// Get UTxOs by a tag dimension and key, merging results from both the
+    /// index and the mempool.
     ///
-    /// The `predicate` is used to filter mempool UTxOs that match the query criteria.
+    /// The `predicate` is used to filter mempool UTxOs that match the query
+    /// criteria.
     pub fn get_utxos_by_tag<F>(
         &self,
         dimension: TagDimension,

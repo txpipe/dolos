@@ -151,8 +151,8 @@ where
     /// Look up the block containing a given transaction hash and return only
     /// chain-point metadata, decoding the block once inside the blocking task.
     ///
-    /// Prefer this over `block_by_tx_hash` when only the chain point is needed —
-    /// it avoids a second `MultiEraBlock::decode` in the caller.
+    /// Prefer this over `block_by_tx_hash` when only the chain point is needed
+    /// — it avoids a second `MultiEraBlock::decode` in the caller.
     pub async fn block_meta_by_tx_hash(
         &self,
         tx_hash: Vec<u8>,

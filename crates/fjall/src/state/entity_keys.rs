@@ -15,7 +15,8 @@
 //! (e.g., "accounts", "pools"). This provides:
 //! - Deterministic IDs without hardcoded mapping
 //! - Extensibility for new entity types without code changes
-//! - Consistent ordering within each namespace (entities with same namespace are grouped)
+//! - Consistent ordering within each namespace (entities with same namespace
+//!   are grouped)
 
 use dolos_core::{EntityKey, Namespace};
 
@@ -32,7 +33,8 @@ pub const PREFIXED_KEY_SIZE: usize = NS_HASH_SIZE + ENTITY_KEY_SIZE;
 
 /// Hash a namespace string to an 8-byte prefix using xxh3.
 ///
-/// The hash is stored as big-endian bytes for consistent lexicographic ordering.
+/// The hash is stored as big-endian bytes for consistent lexicographic
+/// ordering.
 pub fn hash_namespace(ns: Namespace) -> [u8; NS_HASH_SIZE] {
     let hash = hash_key(ns.as_bytes());
     hash.to_be_bytes()

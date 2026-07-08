@@ -1,9 +1,9 @@
 //! Cross-cutting helpers for delta round-trip property tests.
 //!
-//! Only the `assert_delta_roundtrip` helper and primitive/pallas-typed strategies live here.
-//! Strategies for entity states and for types owned by a specific module live next to
-//! those types — see `pub(crate) mod testing` in each `model/*.rs` (and in `pots.rs`,
-//! `pallas_extras.rs`).
+//! Only the `assert_delta_roundtrip` helper and primitive/pallas-typed
+//! strategies live here. Strategies for entity states and for types owned by a
+//! specific module live next to those types — see `pub(crate) mod testing` in
+//! each `model/*.rs` (and in `pots.rs`, `pallas_extras.rs`).
 
 #![allow(dead_code)]
 
@@ -18,7 +18,8 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use super::pools::PoolHash;
 
-/// Asserts that applying then undoing a delta restores the original entity state.
+/// Asserts that applying then undoing a delta restores the original entity
+/// state.
 ///
 /// Requires `PartialEq` on the entity type — we added derives for this on every
 /// entity/component specifically to get good shrink output from proptest.
@@ -91,8 +92,8 @@ pub fn any_pool_hash() -> impl Strategy<Value = PoolHash> {
     any_hash_28()
 }
 
-/// Bounded epoch range so transitions and arithmetic stay well-defined. Kept ≥ 3 so
-/// `go`/`set`/`mark` positions are always reachable.
+/// Bounded epoch range so transitions and arithmetic stay well-defined. Kept ≥
+/// 3 so `go`/`set`/`mark` positions are always reachable.
 pub fn any_epoch() -> impl Strategy<Value = Epoch> {
     3u64..1_000_000u64
 }
@@ -101,8 +102,8 @@ pub fn any_slot() -> impl Strategy<Value = u64> {
     0u64..1_000_000_000u64
 }
 
-/// Bounded lovelace amount. Avoids near-u64::MAX so saturating arithmetic in delta
-/// apply implementations doesn't mask asymmetry with undo.
+/// Bounded lovelace amount. Avoids near-u64::MAX so saturating arithmetic in
+/// delta apply implementations doesn't mask asymmetry with undo.
 pub fn any_lovelace() -> impl Strategy<Value = u64> {
     0u64..1_000_000_000_000u64
 }

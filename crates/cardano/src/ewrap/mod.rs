@@ -178,7 +178,8 @@ pub struct BoundaryWork {
     /// MIRs from reserves to unregistered accounts (stays in reserves).
     pub invalid_reserve_mirs: u64,
 
-    /// Credentials whose pending MIRs were processed (need to be dequeued from state).
+    /// Credentials whose pending MIRs were processed (need to be dequeued from
+    /// state).
     pub applied_mir_credentials: Vec<StakeCredential>,
 
     /// Shard-local reward accumulator — total effective rewards applied by
