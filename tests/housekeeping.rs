@@ -9,10 +9,10 @@
 
 use std::sync::Arc;
 
+use dolos_cardano::CardanoDelta;
 use dolos_core::{
     config::SyncConfig, ArchiveWriter, ChainPoint, Domain, LogEntry, LogValue, WalStore,
 };
-use dolos_cardano::CardanoDelta;
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},
     toy_domain::ToyDomain,
@@ -83,11 +83,19 @@ fn housekeeping_prunes_configured_stores() {
     assert!(done, "backlog within one batch must finish");
 
     assert_eq!(wal_tip(&domain), Some(2599), "wal tip preserved");
-    assert_eq!(wal_start(&domain), Some(2499), "wal pruned to tip - max_rollback");
+    assert_eq!(
+        wal_start(&domain),
+        Some(2499),
+        "wal pruned to tip - max_rollback"
+    );
 
     assert_eq!(archive_tip(&domain), Some(2599), "archive tip preserved");
     let archived = archive_slots(&domain);
-    assert_eq!(archived.first(), Some(&2499), "archive pruned to tip - max_history");
+    assert_eq!(
+        archived.first(),
+        Some(&2499),
+        "archive pruned to tip - max_history"
+    );
     assert_eq!(archived.last(), Some(&2599));
 }
 
@@ -107,7 +115,11 @@ fn housekeeping_returns_false_until_converged() {
     }
 
     assert_eq!(wal_tip(&domain), Some(14_999), "tip preserved");
-    assert_eq!(wal_start(&domain), Some(13_999), "converges to tip - max_rollback");
+    assert_eq!(
+        wal_start(&domain),
+        Some(13_999),
+        "converges to tip - max_rollback"
+    );
 }
 
 /// Unconfigured windows (`None`) leave a store untouched, and `housekeeping`
@@ -123,7 +135,11 @@ fn housekeeping_skips_unconfigured_stores() {
 
     assert!(domain.housekeeping().unwrap(), "nothing to prune → done");
 
-    assert_eq!((wal_start(&domain), wal_tip(&domain)), wal_before, "wal untouched");
+    assert_eq!(
+        (wal_start(&domain), wal_tip(&domain)),
+        wal_before,
+        "wal untouched"
+    );
     assert_eq!(archive_slots(&domain), archive_before, "archive untouched");
 }
 
@@ -139,7 +155,11 @@ fn housekeeping_only_prunes_configured_store() {
     assert!(domain.housekeeping().unwrap());
 
     assert_eq!(wal_start(&domain), Some(2499), "wal pruned to window");
-    assert_eq!(archive_slots(&domain), archive_before, "archive untouched (max_history None)");
+    assert_eq!(
+        archive_slots(&domain),
+        archive_before,
+        "archive untouched (max_history None)"
+    );
 }
 
 /// A WAL store error surfaces out of `housekeeping` instead of being swallowed.
@@ -148,7 +168,10 @@ fn housekeeping_propagates_wal_error() {
     let inner = ToyDomain::new(None, None).with_sync_config(sync_config(Some(100), None));
     let domain = FaultyToyDomain::new(inner, TestFault::WalStoreError);
 
-    assert!(domain.housekeeping().is_err(), "wal store error must surface");
+    assert!(
+        domain.housekeeping().is_err(),
+        "wal store error must surface"
+    );
 }
 
 /// An archive store error surfaces out of `housekeeping`.
@@ -157,7 +180,10 @@ fn housekeeping_propagates_archive_error() {
     let inner = ToyDomain::new(None, None).with_sync_config(sync_config(None, Some(100)));
     let domain = FaultyToyDomain::new(inner, TestFault::ArchiveStoreError);
 
-    assert!(domain.housekeeping().is_err(), "archive store error must surface");
+    assert!(
+        domain.housekeeping().is_err(),
+        "archive store error must surface"
+    );
 }
 
 /// `drain_housekeeping(None)` loops until the backlog is fully drained.
@@ -170,7 +196,11 @@ fn drain_housekeeping_converges() {
 
     assert!(rounds > 1, "multi-batch backlog must take multiple rounds");
     assert_eq!(wal_tip(&domain), Some(30_000), "tip preserved");
-    assert_eq!(wal_start(&domain), Some(29_000), "drained to tip - max_rollback");
+    assert_eq!(
+        wal_start(&domain),
+        Some(29_000),
+        "drained to tip - max_rollback"
+    );
 }
 
 /// `max_rounds` caps the loop: it stops after the budget with backlog left.
@@ -211,5 +241,9 @@ fn drain_housekeeping_zero_rounds_is_noop() {
     let rounds = domain.drain_housekeeping(Some(0)).unwrap();
 
     assert_eq!(rounds, 0, "zero budget runs no rounds");
-    assert_eq!((wal_start(&domain), wal_tip(&domain)), before, "wal untouched");
+    assert_eq!(
+        (wal_start(&domain), wal_tip(&domain)),
+        before,
+        "wal untouched"
+    );
 }

@@ -123,12 +123,12 @@ impl Worker {
                     let point = ChainPoint::Specific(header.slot(), header.hash());
                     let prev_hash = header.previous_hash();
 
-                    self.chain.roll_forward(point.clone(), prev_hash).map_err(
-                        |err| {
+                    self.chain
+                        .roll_forward(point.clone(), prev_hash)
+                        .map_err(|err| {
                             warn!(%err, "consensus error, reconnecting");
                             WorkerError::Restart
-                        },
-                    )?;
+                        })?;
 
                     debug!(%point, "header received from upstream peer");
                     gathered += 1;

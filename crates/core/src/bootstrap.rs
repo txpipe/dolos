@@ -334,7 +334,10 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
         info!(count, "archive caught up from WAL");
     }
 
-    let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| ChainPoint::Slot(slot));
+    let archive_tip = domain
+        .archive()
+        .get_tip()?
+        .map(|(slot, _)| ChainPoint::Slot(slot));
 
     verify_caught_up("archive", archive_tip, target, CatchUpSeverity::Lenient)
 }
@@ -392,8 +395,8 @@ fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
 
 #[cfg(test)]
 mod tests {
-    // Tests for bootstrap catch-up live in `tests/bootstrap.rs` (workspace-level
-    // integration test) because they need `ToyDomain` from `dolos-testing`,
-    // which re-exports `dolos-core` and would create a duplicate-crate conflict
-    // inside lib-level `#[cfg(test)]`.
+    // Tests for bootstrap catch-up live in `tests/bootstrap.rs`
+    // (workspace-level integration test) because they need `ToyDomain` from
+    // `dolos-testing`, which re-exports `dolos-core` and would create a
+    // duplicate-crate conflict inside lib-level `#[cfg(test)]`.
 }

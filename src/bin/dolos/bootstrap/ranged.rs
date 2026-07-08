@@ -1,11 +1,11 @@
 //! Ranged ring-buffer downloader for bootstrap snapshots.
 //!
 //! Instead of streaming a single long-lived HTTP response directly into the tar
-//! extractor (which couples the connection lifetime to disk-write backpressure),
-//! this downloads the snapshot in bounded byte ranges. A background thread keeps
-//! a small, fixed-size window of chunks staged on disk ahead of the extractor;
-//! when extraction falls behind, the downloader simply stops issuing range
-//! requests rather than holding a connection open and idle.
+//! extractor (which couples the connection lifetime to disk-write
+//! backpressure), this downloads the snapshot in bounded byte ranges. A
+//! background thread keeps a small, fixed-size window of chunks staged on disk
+//! ahead of the extractor; when extraction falls behind, the downloader simply
+//! stops issuing range requests rather than holding a connection open and idle.
 //!
 //! This matters for Cloudflare R2, which tears down long-lived / slow-drained
 //! streamed responses where S3 tolerated them. Each range request here is
@@ -67,8 +67,8 @@ pub fn build_client() -> miette::Result<Client> {
         .context("Failed to build HTTP client")
 }
 
-/// Probe the URL with a HEAD request to learn its size and whether it advertises
-/// `Accept-Ranges: bytes`.
+/// Probe the URL with a HEAD request to learn its size and whether it
+/// advertises `Accept-Ranges: bytes`.
 pub fn probe(client: &Client, url: &str) -> miette::Result<RangeProbe> {
     let response = client
         .head(url)
@@ -343,14 +343,14 @@ pub fn ranged_reader_with_chunk(
 mod tests {
     use super::*;
 
-    const TEST_URL: &str =
-        "https://dolos-snapshots.txpipe.cloud/v3/764824073/full/latest.tar.gz";
+    const TEST_URL: &str = "https://dolos-snapshots.txpipe.cloud/v3/764824073/full/latest.tar.gz";
 
-    /// End-to-end check against the real R2 endpoint: download a small prefix in
-    /// many small chunks through the ring buffer and confirm the bytes match a
-    /// single plain ranged GET of the same prefix. Ignored by default (network +
-    /// ~5 MB transfer); run with:
-    ///   cargo test --bin dolos ranged_matches_direct_fetch -- --ignored --nocapture
+    /// End-to-end check against the real R2 endpoint: download a small prefix
+    /// in many small chunks through the ring buffer and confirm the bytes
+    /// match a single plain ranged GET of the same prefix. Ignored by
+    /// default (network + ~5 MB transfer); run with:
+    ///   cargo test --bin dolos ranged_matches_direct_fetch -- --ignored
+    /// --nocapture
     #[test]
     #[ignore]
     fn ranged_matches_direct_fetch() {

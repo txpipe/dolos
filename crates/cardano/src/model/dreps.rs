@@ -226,7 +226,9 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
-        let state = entity.as_mut().expect("can't undo unregister on missing drep");
+        let state = entity
+            .as_mut()
+            .expect("can't undo unregister on missing drep");
         state.voting_power = self.prev_voting_power.unwrap_or(0);
         state.unregistered_at = self.prev_unregistered_at;
         state.deposit = self.prev_deposit.unwrap_or(0);
@@ -320,8 +322,8 @@ impl dolos_core::EntityDelta for DRepExpiration {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::*;
     use super::testing::any_drep_state;
+    use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use proptest::prelude::*;
 

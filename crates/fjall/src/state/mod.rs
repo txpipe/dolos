@@ -1,7 +1,7 @@
 //! Fjall-based state store implementation for Dolos.
 //!
-//! This module provides an implementation of the `StateStore` trait using fjall,
-//! an LSM-tree based embedded database.
+//! This module provides an implementation of the `StateStore` trait using
+//! fjall, an LSM-tree based embedded database.
 //!
 //! ## Three Keyspace Design
 //!
@@ -9,13 +9,11 @@
 //!
 //! 1. **`state-cursor`**: Chain position tracking (single key-value)
 //!
-//! 2. **`state-utxos`**: UTxO set storage
-//!    Key: `[tx_hash:32][index:4]` (36 bytes)
-//!    Value: `[era:2][cbor:...]`
+//! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
+//!    bytes) Value: `[era:2][cbor:...]`
 //!
-//! 3. **`state-entities`**: All entity types with namespace hash prefix
-//!    Key: `[ns_hash:8][entity_key:32]` (40 bytes)
-//!    Value: entity CBOR bytes
+//! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
+//!    `[ns_hash:8][entity_key:32]` (40 bytes) Value: entity CBOR bytes
 //!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors

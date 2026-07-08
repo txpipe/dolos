@@ -250,7 +250,9 @@ pub enum BrokenInvariant {
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
 
-    #[error("CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})")]
+    #[error(
+        "CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})"
+    )]
     EpochBoundaryIncomplete {
         epoch: Epoch,
         committed: Option<u32>,
@@ -529,7 +531,8 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// Returns the next work unit to execute, or `None` if no work is
     /// currently ready.
     ///
-    /// The returned work unit should be executed using `executor::execute_work_unit()`.
+    /// The returned work unit should be executed using
+    /// `executor::execute_work_unit()`.
     fn pop_work<D>(&mut self, domain: &D) -> Option<Self::WorkUnit<D>>
     where
         D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>;

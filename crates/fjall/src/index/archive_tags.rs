@@ -1,4 +1,5 @@
-//! Archive tag index operations for the `archive-tags` keyspace (chain-agnostic).
+//! Archive tag index operations for the `archive-tags` keyspace
+//! (chain-agnostic).
 //!
 //! This module handles key encoding, batch writes (apply/undo), read queries,
 //! and the `SlotIterator` for the `archive-tags` keyspace. Block tags are
@@ -34,7 +35,8 @@ fn build_block_tag_key(dimension: &str, tag_key: &[u8], slot: u64) -> [u8; BLOCK
     build_block_tag_key_hashed(dimension, tag_hash, slot)
 }
 
-/// Build a block tag key with pre-computed tag hash: `[dim_hash:8][tag_hash:8][slot:8]`
+/// Build a block tag key with pre-computed tag hash:
+/// `[dim_hash:8][tag_hash:8][slot:8]`
 fn build_block_tag_key_hashed(
     dimension: &str,
     tag_hash: u64,

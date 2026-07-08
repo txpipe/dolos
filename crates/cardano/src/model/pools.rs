@@ -247,8 +247,9 @@ impl dolos_core::EntityDelta for PoolRegistration {
             let is_currently_retired = entity.snapshot.unwrap_live().is_retired;
 
             if is_currently_retired {
-                // if the pool is currently retired, we need to assume this overrides the record as a new registration.
-                // Preserve blocks_minted accrued in the current epoch so we don't lose leader rewards.
+                // if the pool is currently retired, we need to assume this overrides the record
+                // as a new registration. Preserve blocks_minted accrued in the
+                // current epoch so we don't lose leader rewards.
                 let preserved_blocks = entity.snapshot.unwrap_live().blocks_minted;
                 entity.snapshot.replace(
                     PoolSnapshot {
@@ -499,8 +500,8 @@ impl dolos_core::EntityDelta for PoolTransition {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::*;
     use super::testing::any_pool_state;
+    use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use crate::pallas_extras::testing::any_multi_era_pool_registration;
     use proptest::prelude::*;
@@ -606,7 +607,10 @@ mod prop_tests {
                 vrf_keyhash: Hash::from([0u8; 32]),
                 pledge: 0,
                 cost: 0,
-                margin: RationalNumber { numerator: 0, denominator: 1 },
+                margin: RationalNumber {
+                    numerator: 0,
+                    denominator: 1,
+                },
                 reward_account: vec![],
                 pool_owners: vec![],
                 relays: vec![],
@@ -623,6 +627,11 @@ mod prop_tests {
         };
 
         // Block epoch 6 runs ahead of the pool's epoch-5 snapshot.
-        MintedBlocksInc { operator, count: 1, epoch: 6 }.apply(&mut Some(pool));
+        MintedBlocksInc {
+            operator,
+            count: 1,
+            epoch: 6,
+        }
+        .apply(&mut Some(pool));
     }
 }

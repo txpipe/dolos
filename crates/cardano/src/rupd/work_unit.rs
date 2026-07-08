@@ -121,7 +121,6 @@ impl RupdWorkUnit {
         }
         self.rewards = None;
     }
-
 }
 
 impl<D> WorkUnit<D> for RupdWorkUnit
@@ -193,11 +192,7 @@ where
 
         work.merge_shard::<D>(domain.state(), ranges)?;
 
-        info!(
-            epoch = work.current_epoch,
-            shard = shard_index,
-            "rupd"
-        );
+        info!(epoch = work.current_epoch, shard = shard_index, "rupd");
 
         Ok(())
     }

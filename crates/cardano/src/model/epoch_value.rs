@@ -134,9 +134,10 @@ where
         }
     }
 
-    /// Test-only raw constructor used by proptest strategies to populate every slot
-    /// independently. Must stay behind `cfg(test)` so production code keeps going through
-    /// the regular `new`/`with_live`/`schedule`/`transition` API.
+    /// Test-only raw constructor used by proptest strategies to populate every
+    /// slot independently. Must stay behind `cfg(test)` so production code
+    /// keeps going through the regular
+    /// `new`/`with_live`/`schedule`/`transition` API.
     #[cfg(test)]
     pub(crate) fn from_parts(
         epoch: Epoch,
@@ -328,11 +329,12 @@ pub(crate) mod testing {
     use crate::model::testing as root;
     use proptest::prelude::*;
 
-    /// Generate an `EpochValue<T>` where `live` is always populated (most deltas require
-    /// it) and the other slots are independently randomized.
+    /// Generate an `EpochValue<T>` where `live` is always populated (most
+    /// deltas require it) and the other slots are independently randomized.
     ///
-    /// Takes a `BoxedStrategy` because many proptest combinator types are not `Clone`,
-    /// which is required by the tuple-combinator composition used here.
+    /// Takes a `BoxedStrategy` because many proptest combinator types are not
+    /// `Clone`, which is required by the tuple-combinator composition used
+    /// here.
     pub fn any_epoch_value<T>(inner: BoxedStrategy<T>) -> impl Strategy<Value = EpochValue<T>>
     where
         T: Clone + std::fmt::Debug + 'static,
@@ -370,8 +372,9 @@ pub(crate) mod testing {
             })
     }
 
-    /// Variant of `any_epoch_value` that forces `next` to `None`. Required by deltas
-    /// whose `apply` calls `live_mut`, which asserts there is no scheduled next.
+    /// Variant of `any_epoch_value` that forces `next` to `None`. Required by
+    /// deltas whose `apply` calls `live_mut`, which asserts there is no
+    /// scheduled next.
     pub fn any_epoch_value_no_next<T>(
         inner: BoxedStrategy<T>,
     ) -> impl Strategy<Value = EpochValue<T>>

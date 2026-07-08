@@ -480,8 +480,9 @@ pub(crate) mod testing {
     use super::*;
     use proptest::prelude::*;
 
-    /// Kept intentionally simple — empty. Reversibility of `PParamsUpdate` doesn't
-    /// depend on the merge surface being exhaustive, only that merge is applied twice.
+    /// Kept intentionally simple — empty. Reversibility of `PParamsUpdate`
+    /// doesn't depend on the merge surface being exhaustive, only that
+    /// merge is applied twice.
     pub fn any_pparams_set() -> impl Strategy<Value = PParamsSet> {
         Just(PParamsSet::default())
     }

@@ -1,8 +1,8 @@
 //! State tag index operations for the `state-tags` keyspace (chain-agnostic).
 //!
-//! This module handles key encoding, batch writes (apply/undo), and read queries
-//! for the `state-tags` keyspace. These indexes map lookup keys (addresses, policies,
-//! assets) to sets of TxoRefs.
+//! This module handles key encoding, batch writes (apply/undo), and read
+//! queries for the `state-tags` keyspace. These indexes map lookup keys
+//! (addresses, policies, assets) to sets of TxoRefs.
 //!
 //! Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` with empty value.
 //! Queries use prefix scanning to find all TxoRefs for a given lookup key.
@@ -133,9 +133,9 @@ pub fn undo(
 ///
 /// The dimension string is passed directly (chain-agnostic).
 ///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
-/// MVCC (Multi-Version Concurrency Control).
+/// Uses the `Readable` trait to support both direct keyspace access and
+/// snapshot-based reads. Snapshot-based reads avoid potential deadlocks with
+/// concurrent writes by using MVCC (Multi-Version Concurrency Control).
 pub fn get_by_key<R: Readable>(
     readable: &R,
     keyspace: &Keyspace,

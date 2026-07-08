@@ -551,7 +551,8 @@ pub struct StorageConfig {
 }
 
 impl StorageConfig {
-    /// Resolve path with a default subdir for backends that don't specify a custom path.
+    /// Resolve path with a default subdir for backends that don't specify a
+    /// custom path.
     fn resolve_store_path_with_default(
         &self,
         config_path: Option<&PathBuf>,

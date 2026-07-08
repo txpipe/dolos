@@ -37,7 +37,8 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         let next_slot = next_largest_stable_slot(ctx);
         let next_nonce = next_nonce(ctx);
 
-        ctx.deltas.add_for_entity(NonceTransition::new(next_nonce, next_slot));
+        ctx.deltas
+            .add_for_entity(NonceTransition::new(next_nonce, next_slot));
 
         Ok(())
     }

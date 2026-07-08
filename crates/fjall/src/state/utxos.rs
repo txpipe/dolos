@@ -56,8 +56,9 @@ pub fn apply_delta(
 ///
 /// Returns a map of found UTxOs. Missing UTxOs are silently skipped.
 ///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+/// Uses the `Readable` trait to support both direct keyspace access and
+/// snapshot-based reads. Snapshot-based reads avoid potential deadlocks with
+/// concurrent writes.
 pub fn get_utxos<R: Readable>(
     readable: &R,
     keyspace: &Keyspace,
@@ -80,9 +81,9 @@ pub fn get_utxos<R: Readable>(
 
 /// Iterator over all UTxOs in the keyspace.
 ///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes by using
-/// MVCC (Multi-Version Concurrency Control).
+/// Uses the `Readable` trait to support both direct keyspace access and
+/// snapshot-based reads. Snapshot-based reads avoid potential deadlocks with
+/// concurrent writes by using MVCC (Multi-Version Concurrency Control).
 pub struct UtxosIterator {
     /// Collected UTxOs from scan
     utxos: Vec<(TxoRef, Arc<EraCbor>)>,

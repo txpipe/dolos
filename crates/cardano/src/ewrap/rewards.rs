@@ -122,7 +122,8 @@ impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
 
         let pending_before_drain = ctx.rewards.len();
 
-        // Log any remaining pending rewards before draining (spendable rewards for accounts not visited)
+        // Log any remaining pending rewards before draining (spendable rewards for
+        // accounts not visited)
         if pending_before_drain > 0 {
             let pending_spendable: u64 = ctx
                 .rewards

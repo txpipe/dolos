@@ -11,7 +11,8 @@ use tracing::{debug, info, warn};
 use crate::adapters::storage::MempoolBackend;
 use crate::prelude::*;
 
-// HACK: the tx era number differs from the block era number, we subtract 1 to make them match.
+// HACK: the tx era number differs from the block era number, we subtract 1 to
+// make them match.
 fn to_n2n_era(era: u16) -> u16 {
     era - 1
 }
@@ -102,8 +103,8 @@ impl Worker {
             // the list of available txs.
             tokio::time::sleep(Duration::from_secs(10)).await;
 
-            // we store the request again so that the next schedule knows we're still waiting
-            // for new transactions.
+            // we store the request again so that the next schedule knows we're still
+            // waiting for new transactions.
             self.unfulfilled_request = Some(request);
 
             Ok(WorkSchedule::Idle)

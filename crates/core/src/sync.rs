@@ -53,7 +53,8 @@ impl<D: Domain> SyncExt for D {
     fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
         let mut chain = self.write_chain();
 
-        // Drain first in case there's previous work that needs to be applied (eg: initialization)
+        // Drain first in case there's previous work that needs to be applied (eg:
+        // initialization)
         drain_pending_work::<D>(&mut *chain, self)?;
 
         let last = chain.receive_block(block)?;
@@ -146,13 +147,11 @@ pub(crate) fn drain_pending_work<D: Domain>(
 ///
 /// Sync lifecycle includes all phases:
 /// 1. `initialize()` - Shard-agnostic setup
-/// 2. For each shard `0..total_shards()`:
-///    a. `load()` - Load required data from storage
-///    b. `compute()` - Execute computation over loaded data
-///    c. `commit_wal()` - Persist to write-ahead log
-///    d. `commit_state()` - Apply changes to state store
-///    e. `commit_archive()` - Apply changes to archive store
-///    f. `commit_indexes()` - Apply changes to index stores
+/// 2. For each shard `0..total_shards()`: a. `load()` - Load required data from
+///    storage b. `compute()` - Execute computation over loaded data c.
+///    `commit_wal()` - Persist to write-ahead log d. `commit_state()` - Apply
+///    changes to state store e. `commit_archive()` - Apply changes to archive
+///    store f. `commit_indexes()` - Apply changes to index stores
 /// 3. `finalize()` - Shard-agnostic teardown
 /// 4. `notify_tip()` - Notify tip subscribers
 ///

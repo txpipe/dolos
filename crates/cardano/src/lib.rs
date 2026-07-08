@@ -112,9 +112,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::total_shards(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::total_shards(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::total_shards(w),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::total_shards(w)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::total_shards(w),
             Self::ForcedStop => 1,
         }
     }
@@ -136,9 +134,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::initialize(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::initialize(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::initialize(w, domain),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::initialize(w, domain)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::initialize(w, domain),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -150,29 +146,21 @@ where
             }
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
-            Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain, shard_index)
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain, shard_index)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(
-                w,
-                domain,
-                shard_index,
-            ),
             Self::ForcedStop => Ok(()),
         }
     }
 
     fn compute(&mut self, shard_index: u32) -> Result<(), DomainError> {
         match self {
-            Self::Genesis(w) => {
-                <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w, shard_index)
-            }
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w, shard_index),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::compute(w, shard_index)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -191,11 +179,9 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(
-                w,
-                domain,
-                shard_index,
-            ),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
+            }
             Self::ForcedStop => Ok(()),
         }
     }
@@ -215,11 +201,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
             }
             Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(
-                    w,
-                    domain,
-                    shard_index,
-                )
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
             }
             Self::ForcedStop => Err(DomainError::StopEpochReached),
         }
@@ -240,11 +222,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
             }
             Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(
-                    w,
-                    domain,
-                    shard_index,
-                )
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
             }
             Self::ForcedStop => Ok(()),
         }
@@ -265,11 +243,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
             }
             Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(
-                    w,
-                    domain,
-                    shard_index,
-                )
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
             }
             Self::ForcedStop => Ok(()),
         }
@@ -281,9 +255,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::finalize(w, domain),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::finalize(w, domain)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -294,9 +266,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
     }
@@ -319,8 +289,9 @@ pub struct CardanoLogic {
     config: CardanoConfig,
     work: Option<WorkBuffer>,
     pub(crate) cache: Cache,
-    /// Flag indicating the cache needs refresh after a work unit that modifies eras.
-    /// Set after Genesis or EStart work units are popped, cleared at next pop_work call.
+    /// Flag indicating the cache needs refresh after a work unit that modifies
+    /// eras. Set after Genesis or EStart work units are popped, cleared at
+    /// next pop_work call.
     needs_cache_refresh: bool,
 }
 

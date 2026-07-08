@@ -77,8 +77,9 @@ pub struct MintStatsUpdate {
 
     // undo
     pub(crate) was_new: bool,
-    /// `add_quantity` uses saturating math, so the pre-apply bytes can't be derived
-    /// from (post_bytes - quantity). We record them to restore exactly.
+    /// `add_quantity` uses saturating math, so the pre-apply bytes can't be
+    /// derived from (post_bytes - quantity). We record them to restore
+    /// exactly.
     pub(crate) prev_quantity_bytes: [u8; 16],
     pub(crate) prev_initial_slot: Option<u64>,
     pub(crate) prev_initial_tx: Option<Hash<32>>,
@@ -204,8 +205,8 @@ impl dolos_core::EntityDelta for MetadataTxUpdate {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::*;
     use super::testing::any_asset_state;
+    use super::*;
     use crate::model::testing::{self as root, assert_delta_roundtrip};
     use proptest::prelude::*;
 

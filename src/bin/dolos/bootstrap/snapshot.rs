@@ -171,8 +171,8 @@ fn fetch_snapshot_ranged(
     result
 }
 
-/// Stream a single HTTP response directly into the extractor. Used only when the
-/// endpoint does not support range requests.
+/// Stream a single HTTP response directly into the extractor. Used only when
+/// the endpoint does not support range requests.
 fn fetch_snapshot_streaming(
     root: &PathBuf,
     snapshot_url: String,

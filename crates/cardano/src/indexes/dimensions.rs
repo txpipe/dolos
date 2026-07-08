@@ -5,7 +5,8 @@
 
 /// UTxO filter index dimensions.
 ///
-/// These dimensions are used for querying the current UTxO set by various criteria.
+/// These dimensions are used for querying the current UTxO set by various
+/// criteria.
 pub mod utxo {
     use dolos_core::TagDimension;
 
@@ -27,7 +28,8 @@ pub mod utxo {
 
 /// Archive index dimensions.
 ///
-/// These dimensions are used for querying historical blocks by various criteria.
+/// These dimensions are used for querying historical blocks by various
+/// criteria.
 pub mod archive {
     use dolos_core::TagDimension;
 

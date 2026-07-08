@@ -111,7 +111,9 @@ fn apply_rejects_non_contiguous_block() {
 
     // First block: prev_hash=None, cursor=Origin → both sides None → skip.
     let (point_a, block_a) = make_conway_block_with_prev(1, None, 0);
-    domain.roll_forward(block_a).expect("first block should apply");
+    domain
+        .roll_forward(block_a)
+        .expect("first block should apply");
 
     // Second block: prev_hash doesn't match cursor's hash (hash_A).
     let (_, block_c) = make_conway_block_with_prev(2, Some(wrong_hash(99)), 1);
@@ -145,7 +147,9 @@ fn apply_rejects_slot_regression() {
 
     // First block at slot 10.
     let (point_a, block_a) = make_conway_block_with_prev(10, None, 0);
-    domain.roll_forward(block_a).expect("first block should apply");
+    domain
+        .roll_forward(block_a)
+        .expect("first block should apply");
 
     // Second block at slot 5 (regression) with correct prev_hash.
     let hash_a = point_a.hash().unwrap();
@@ -182,18 +186,30 @@ fn fork_simulation_applies_canonical_after_rollback() {
 
     // Orphan O': sibling that will be rolled back.
     let (point_o, block_o) = make_conway_block_with_prev(2, Some(hash_a), 1);
-    domain.roll_forward(block_o).expect("orphan O' should apply");
+    domain
+        .roll_forward(block_o)
+        .expect("orphan O' should apply");
 
     // Confirm cursor advanced to O'.
     let cursor_before = domain.state().read_cursor().unwrap();
-    assert_eq!(cursor_before, Some(point_o.clone()), "cursor should be at O'");
+    assert_eq!(
+        cursor_before,
+        Some(point_o.clone()),
+        "cursor should be at O'"
+    );
 
     // Rollback to the fork point A.
-    domain.rollback(&point_a).expect("rollback to A should succeed");
+    domain
+        .rollback(&point_a)
+        .expect("rollback to A should succeed");
 
     // Confirm cursor is restored to A.
     let cursor_after = domain.state().read_cursor().unwrap();
-    assert_eq!(cursor_after, Some(point_a), "cursor should be at A after rollback");
+    assert_eq!(
+        cursor_after,
+        Some(point_a),
+        "cursor should be at A after rollback"
+    );
 
     // Canonical sibling C: same parent (A), same slot (2), different block_number
     // → different hash than O'.
@@ -228,7 +244,11 @@ fn continuity_check_skipped_for_genesis() {
         .expect("first block after genesis must be accepted");
 
     let cursor = domain.state().read_cursor().unwrap();
-    assert_eq!(cursor, Some(point_a), "cursor should advance to first block");
+    assert_eq!(
+        cursor,
+        Some(point_a),
+        "cursor should advance to first block"
+    );
 }
 
 /// Same-slot blocks are allowed (Byron EBBs share the slot with the first
@@ -239,7 +259,9 @@ fn continuity_check_allows_same_slot_ebb() {
 
     // First block at slot 5.
     let (point_a, block_a) = make_conway_block_with_prev(5, None, 0);
-    domain.roll_forward(block_a).expect("first block should apply");
+    domain
+        .roll_forward(block_a)
+        .expect("first block should apply");
     let hash_a = point_a.hash().unwrap();
 
     // Second block at the same slot 5, with correct prev_hash.
@@ -250,7 +272,11 @@ fn continuity_check_allows_same_slot_ebb() {
         .expect("same-slot block with correct parent must be accepted");
 
     let cursor = domain.state().read_cursor().unwrap();
-    assert_eq!(cursor, Some(point_b), "cursor should advance to the same-slot block");
+    assert_eq!(
+        cursor,
+        Some(point_b),
+        "cursor should advance to the same-slot block"
+    );
 }
 
 /// A multi-block batch must validate internal chaining: each block's
@@ -285,7 +311,8 @@ fn batch_internal_continuity_validated() {
         .check_continuity(cursor.as_ref())
         .expect("contiguous batch should pass check_continuity");
 
-    // Now build a batch with a broken intra-batch link: B (prev=A) → D (prev=wrong).
+    // Now build a batch with a broken intra-batch link: B (prev=A) → D
+    // (prev=wrong).
     let (_, block_b_raw) = make_conway_block_with_prev(2, Some(hash_a), 1);
     let block_b = WorkBlock::new(OwnedMultiEraBlock::decode(block_b_raw).unwrap());
 

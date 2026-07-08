@@ -196,13 +196,16 @@ fn do_import(
 
     let cursor = define_starting_point(args, domain.state())?;
 
-    let mut iter =
-        pallas::interop::hardano::storage::immutable::read_blocks_from_point(immutable_path, cursor.clone())
-            .map_err(|err| miette::miette!(err.to_string()))
-            .context("reading immutable db tip")?;
+    let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
+        immutable_path,
+        cursor.clone(),
+    )
+    .map_err(|err| miette::miette!(err.to_string()))
+    .context("reading immutable db tip")?;
 
-    // unless we're starting from the origin of the chain, we need to skip the first result since
-    // the iterator will be standing in the last slot already processed, we don't want to import it twice.
+    // unless we're starting from the origin of the chain, we need to skip the first
+    // result since the iterator will be standing in the last slot already
+    // processed, we don't want to import it twice.
     if cursor != pallas::network::miniprotocols::Point::Origin {
         iter.next();
     }

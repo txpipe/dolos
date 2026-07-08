@@ -149,7 +149,10 @@ mod tests {
     use pallas::{
         codec::utils::{Bytes, KeepRaw},
         ledger::{
-            primitives::{conway::{Block, Header, HeaderBody, OperationalCert}, VrfCert},
+            primitives::{
+                conway::{Block, Header, HeaderBody, OperationalCert},
+                VrfCert,
+            },
             traverse::{ComputeHash, Era},
         },
     };
@@ -158,7 +161,10 @@ mod tests {
     /// Build a minimal Conway block with an explicit `prev_hash` and return
     /// its `(ChainPoint, RawBlock)`. The block hash is derived from the header
     /// so callers can chain blocks by passing the previous block's hash.
-    fn make_block_with_prev(slot: BlockSlot, prev_hash: Option<Hash<32>>) -> (ChainPoint, RawBlock) {
+    fn make_block_with_prev(
+        slot: BlockSlot,
+        prev_hash: Option<Hash<32>>,
+    ) -> (ChainPoint, RawBlock) {
         let header = KeepRaw::from(Header {
             header_body: HeaderBody {
                 slot,

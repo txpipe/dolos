@@ -38,7 +38,11 @@ enum CrashAfter {
 }
 
 /// Helper: feed blocks into a domain with partial work-unit execution.
-fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock], crash_after: CrashAfter) {
+fn feed_blocks_partial(
+    domain: &ToyDomain,
+    blocks: &[dolos_core::RawBlock],
+    crash_after: CrashAfter,
+) {
     let mut chain = domain.write_chain();
 
     for block in blocks {
@@ -51,7 +55,11 @@ fn feed_blocks_partial(domain: &ToyDomain, blocks: &[dolos_core::RawBlock], cras
     drain_partial(&mut chain, domain, crash_after);
 }
 
-fn drain_partial(chain: &mut dolos_cardano::CardanoLogic, domain: &ToyDomain, crash_after: CrashAfter) {
+fn drain_partial(
+    chain: &mut dolos_cardano::CardanoLogic,
+    domain: &ToyDomain,
+    crash_after: CrashAfter,
+) {
     while let Some(mut work) =
         <dolos_cardano::CardanoLogic as ChainLogic>::pop_work::<ToyDomain>(chain, domain)
     {
@@ -81,8 +89,7 @@ fn test_catchup_recovers_archive_and_indexes() {
     let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
 
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
-    let domain =
-        ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
+    let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
 
     // Record baseline cursors — all stores are in sync after initial bootstrap.
     let baseline_state = domain.state().read_cursor().unwrap();
@@ -103,8 +110,14 @@ fn test_catchup_recovers_archive_and_indexes() {
     // Archive and indexes should still be at the baseline.
     let archive_tip = domain.archive().get_tip().unwrap().map(|(s, _)| s);
     let index_cursor = domain.indexes().cursor().unwrap();
-    assert_eq!(archive_tip, baseline_archive, "archive should not have advanced");
-    assert_eq!(index_cursor, baseline_index, "indexes should not have advanced");
+    assert_eq!(
+        archive_tip, baseline_archive,
+        "archive should not have advanced"
+    );
+    assert_eq!(
+        index_cursor, baseline_index,
+        "indexes should not have advanced"
+    );
 
     // --- Run bootstrap (which calls catch_up_stores internally) ---
     domain.bootstrap().unwrap();
@@ -158,7 +171,10 @@ fn test_catchup_recovers_state_from_wal() {
     // WAL advanced; state stayed behind.
     let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
     let state_cursor = domain.state().read_cursor().unwrap();
-    assert_eq!(state_cursor, baseline_state, "state should not have advanced");
+    assert_eq!(
+        state_cursor, baseline_state,
+        "state should not have advanced"
+    );
     assert_ne!(
         Some(&wal_tip),
         baseline_state.as_ref(),

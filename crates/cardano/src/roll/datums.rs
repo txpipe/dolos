@@ -1,12 +1,14 @@
 //! Datum state tracking via entity-delta pattern.
 //!
-//! This module implements witness datum reference counting using the entity system.
-//! Datums are stored with a reference count that tracks how many UTxOs reference them.
-//! When a UTxO with a datum hash is produced, the refcount is incremented.
-//! When consumed, it's decremented. When refcount reaches zero, the datum is removed.
+//! This module implements witness datum reference counting using the entity
+//! system. Datums are stored with a reference count that tracks how many UTxOs
+//! reference them. When a UTxO with a datum hash is produced, the refcount is
+//! incremented. When consumed, it's decremented. When refcount reaches zero,
+//! the datum is removed.
 //!
-//! Only witness datums (those in the transaction witness set with `DatumOption::Hash`)
-//! are tracked. Inline datums (`DatumOption::Data`) are not reference counted.
+//! Only witness datums (those in the transaction witness set with
+//! `DatumOption::Hash`) are tracked. Inline datums (`DatumOption::Data`) are
+//! not reference counted.
 
 use std::collections::HashMap;
 
@@ -27,8 +29,10 @@ use crate::{DatumRefDecrement, DatumRefIncrement};
 ///
 /// For each transaction:
 /// 1. Collects witness datums from `tx.plutus_data()` into a temporary map
-/// 2. When processing outputs with `DatumOption::Hash`, emits `DatumRefIncrement`
-/// 3. When processing inputs with `DatumOption::Hash`, emits `DatumRefDecrement`
+/// 2. When processing outputs with `DatumOption::Hash`, emits
+///    `DatumRefIncrement`
+/// 3. When processing inputs with `DatumOption::Hash`, emits
+///    `DatumRefDecrement`
 #[derive(Default)]
 pub struct DatumVisitor {
     /// Witness datums collected from current transaction's plutus_data()

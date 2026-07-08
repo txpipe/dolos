@@ -8,9 +8,9 @@ use crate::roll::{WorkBatch, WorkBlock};
 
 /// Internal work unit marker used by the WorkBuffer state machine.
 ///
-/// These markers tell `CardanoLogic::pop_work` what kind of work unit to construct.
-/// The actual work unit instances are created in `pop_work` with the necessary
-/// context. Sharding is opaque to the buffer: each per-account leg
+/// These markers tell `CardanoLogic::pop_work` what kind of work unit to
+/// construct. The actual work unit instances are created in `pop_work` with the
+/// necessary context. Sharding is opaque to the buffer: each per-account leg
 /// (`Ewrap` / `Estart`) is emitted exactly once per boundary; the
 /// resulting work unit reports its shard count via `WorkUnit::total_shards`
 /// and runs its global teardown (Ewrap / Estart) inside its `finalize()`.
@@ -514,7 +514,10 @@ mod tests {
             .iter()
             .filter(|u| matches!(u, InternalWorkUnit::Estart(_)))
             .count();
-        assert_eq!(ewrap_count, 1, "expected exactly 1 Ewrap, got: {ewrap_count}");
+        assert_eq!(
+            ewrap_count, 1,
+            "expected exactly 1 Ewrap, got: {ewrap_count}"
+        );
         assert_eq!(
             estart_count, 1,
             "expected exactly 1 Estart, got: {estart_count}"

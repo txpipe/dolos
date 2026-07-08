@@ -5,64 +5,67 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  check:
-    name: Check Build
+  fmt:
+    name: cargo fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # rustfmt.toml enables `wrap_comments`, an unstable option that only the
+      # nightly rustfmt applies — stable silently ignores it. Run nightly here so
+      # the check actually enforces comment wrapping. Local devs: `cargo +nightly fmt`.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
-      - name: check
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace --all-targets
-
-      - name: lint
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets --all-features -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: check
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
       - uses: Swatinem/rust-cache@v2
 
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
-
       - name: Run unit tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace --all-targets
+        run: cargo test --workspace --all-targets
 
       - name: Run e2e smoke tests
         if: runner.os != 'Windows'
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --test smoke -- --ignored
+        run: cargo test --test smoke -- --ignored
 
       - name: Run e2e tests
         if: runner.os != 'Windows'
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --test sync --test snapshot -- --ignored
+        run: cargo test --test sync --test snapshot -- --ignored

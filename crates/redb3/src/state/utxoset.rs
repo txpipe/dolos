@@ -143,7 +143,8 @@ mod tests {
 
     use crate::state::StateStore;
 
-    // Define dimension constants locally for tests (matching dolos_cardano::indexes::dimensions)
+    // Define dimension constants locally for tests (matching
+    // dolos_cardano::indexes::dimensions)
     mod dimensions {
         pub const ADDRESS: &str = "address";
         pub const PAYMENT: &str = "payment";
@@ -168,8 +169,9 @@ mod tests {
     }
 
     /// Build an IndexDelta from a UtxoSetDelta for testing.
-    /// This is a simplified version that extracts address tags from UTxO outputs.
-    /// Handles both forward (produced/consumed) and rollback (recovered/undone) cases.
+    /// This is a simplified version that extracts address tags from UTxO
+    /// outputs. Handles both forward (produced/consumed) and rollback
+    /// (recovered/undone) cases.
     fn build_index_delta_from_utxo_delta(
         cursor: ChainPoint,
         utxo_delta: &UtxoSetDelta,
@@ -177,7 +179,8 @@ mod tests {
         let mut produced = Vec::new();
         let mut consumed = Vec::new();
 
-        // Handle forward operations: produced_utxo -> add to index, consumed_utxo -> remove from index
+        // Handle forward operations: produced_utxo -> add to index, consumed_utxo ->
+        // remove from index
         for (txo_ref, era_cbor) in utxo_delta.produced_utxo.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);
@@ -192,8 +195,9 @@ mod tests {
             }
         }
 
-        // Handle rollback operations: recovered_stxi -> restore to index (add), undone_utxo -> remove from index
-        // recovered_stxi: UTxOs that were previously consumed, now being restored
+        // Handle rollback operations: recovered_stxi -> restore to index (add),
+        // undone_utxo -> remove from index recovered_stxi: UTxOs that were
+        // previously consumed, now being restored
         for (txo_ref, era_cbor) in utxo_delta.recovered_stxi.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);

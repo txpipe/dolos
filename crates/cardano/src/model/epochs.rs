@@ -255,7 +255,8 @@ pub struct EpochState {
     #[n(13)]
     pub end: Option<EndStats>,
 
-    /// Epoch incentives computed during RUPD, used for pot calculations at epoch boundary.
+    /// Epoch incentives computed during RUPD, used for pot calculations at
+    /// epoch boundary.
     #[n(14)]
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
@@ -1292,8 +1293,8 @@ impl dolos_core::EntityDelta for EpochTransition {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
-        // save undo info (snapshot whole EpochValues so rotation + any era migration are
-        // both covered)
+        // save undo info (snapshot whole EpochValues so rotation + any era migration
+        // are both covered)
         self.prev_number = entity.number;
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());
@@ -1400,8 +1401,8 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
-        // save undo info (snapshot whole EpochValues so rotation + any era migration are
-        // both covered)
+        // save undo info (snapshot whole EpochValues so rotation + any era migration
+        // are both covered)
         self.prev_number = entity.number;
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());

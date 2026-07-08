@@ -143,7 +143,10 @@ impl WorkBatch {
     ///
     /// Must be called after [`sort_by_slot`](Self::sort_by_slot).
     pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ConsensusError> {
-        debug_assert!(self.is_sorted, "check_continuity must run after sort_by_slot");
+        debug_assert!(
+            self.is_sorted,
+            "check_continuity must run after sort_by_slot"
+        );
 
         let mut tip = cursor.cloned().unwrap_or(ChainPoint::Origin);
 

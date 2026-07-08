@@ -233,7 +233,8 @@ impl super::WorkContext {
                 .write_entity_typed::<EraSummary>(&transition.new_key, &transition.new_summary)?;
         }
 
-        // Write archive logs (accumulated during compute_global_deltas, much smaller than entities)
+        // Write archive logs (accumulated during compute_global_deltas, much smaller
+        // than entities)
         debug!(log_count = self.logs.len(), "writing archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));

@@ -387,7 +387,8 @@ impl<D: Domain> Session<D> {
                     }
                     localstate::ClientQueryRequest::ReAcquire(point) => {
                         self.handle_reacquire(point).await?;
-                        // After reacquire, we stay in acquired state but with new point
+                        // After reacquire, we stay in acquired state but with
+                        // new point
                     }
                     localstate::ClientQueryRequest::Release => {
                         self.handle_release().await?;

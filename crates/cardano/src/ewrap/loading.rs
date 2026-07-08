@@ -10,9 +10,7 @@
 
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
-use dolos_core::{
-    BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder,
-};
+use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder};
 use pallas::codec::minicbor;
 use pallas::ledger::primitives::StakeCredential;
 
@@ -27,8 +25,9 @@ use crate::{
 };
 
 impl BoundaryWork {
-    /// Construct an empty `BoundaryWork` with the small globals every phase needs
-    /// (ending_state, chain summary, active protocol, genesis, incentives).
+    /// Construct an empty `BoundaryWork` with the small globals every phase
+    /// needs (ending_state, chain summary, active protocol, genesis,
+    /// incentives).
     pub(crate) fn new_empty<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
@@ -176,10 +175,8 @@ impl BoundaryWork {
         // this shard's contribution (the map was created fresh for this shard
         // with just this shard's pending rewards).
         self.shard_applied_effective = self.rewards.applied_effective();
-        self.shard_applied_unspendable_to_treasury =
-            self.rewards.applied_unspendable_to_treasury();
-        self.shard_applied_unspendable_to_reserves =
-            self.rewards.applied_unspendable_to_reserves();
+        self.shard_applied_unspendable_to_treasury = self.rewards.applied_unspendable_to_treasury();
+        self.shard_applied_unspendable_to_reserves = self.rewards.applied_unspendable_to_reserves();
 
         self.add_delta(crate::EWrapProgress::new(
             self.shard_applied_effective,
@@ -351,8 +348,9 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// Process pending MIRs: check registration status and apply to registered accounts.
-    /// MIRs to unregistered accounts stay in their source pot (no transfer).
+    /// Process pending MIRs: check registration status and apply to registered
+    /// accounts. MIRs to unregistered accounts stay in their source pot (no
+    /// transfer).
     fn process_pending_mirs<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let pending_iter =
             state.iter_entities_typed::<PendingMirState>(PendingMirState::NS, None)?;

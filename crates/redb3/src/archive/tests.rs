@@ -246,11 +246,16 @@ fn test_prune_history_batched_converges() {
     let max_slots = 100;
     let max_prune = 150;
 
-    // First round: excess (500 - 0 - 100 = 400) exceeds the batch, so more work remains.
+    // First round: excess (500 - 0 - 100 = 400) exceeds the batch, so more work
+    // remains.
     let done = store.prune_history(max_slots, Some(max_prune)).unwrap();
     assert!(!done, "large backlog should not finish in one batch");
     let after_first = stored_slots(&store);
-    assert_eq!(after_first.first(), Some(&200), "batch must advance the start");
+    assert_eq!(
+        after_first.first(),
+        Some(&200),
+        "batch must advance the start"
+    );
     assert_eq!(
         store.get_tip().unwrap().map(|(s, _)| s),
         Some(500),
@@ -267,7 +272,11 @@ fn test_prune_history_batched_converges() {
     }
 
     // Converges to exactly the protected window: 500 - 400 = 100 = max_slots.
-    assert_eq!(stored_slots(&store), vec![400, 500], "only the window remains");
+    assert_eq!(
+        stored_slots(&store),
+        vec![400, 500],
+        "only the window remains"
+    );
 }
 
 #[test]
