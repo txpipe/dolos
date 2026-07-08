@@ -18,20 +18,21 @@ env:
 jobs:
   fmt:
     name: cargo fmt
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.91
+      # rustfmt.toml enables `wrap_comments`, an unstable option that only the
+      # nightly rustfmt applies — stable silently ignores it. Run nightly here so
+      # the check actually enforces comment wrapping. Local devs: `cargo +nightly fmt`.
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: cargo +nightly fmt --all -- --check
 
   clippy:
     name: cargo clippy
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,7 +47,6 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: clippy
     strategy:
       fail-fast: false
       matrix:
