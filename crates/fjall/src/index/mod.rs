@@ -227,6 +227,54 @@ impl IndexStore {
         tracing::info!("index store: graceful shutdown complete");
         Ok(())
     }
+
+    /// Copy all keyspaces into a fresh fjall database at `dest_path` and major-compact each one.
+    pub fn rebuild_canonical(&self, dest_path: impl AsRef<Path>) -> Result<(), Error> {
+        let snapshot = self.db.snapshot();
+
+        let fresh_db = Database::builder(dest_path.as_ref()).open()?;
+        let fresh_cursor =
+            fresh_db.keyspace(keyspace_names::CURSOR, KeyspaceCreateOptions::default)?;
+        let fresh_exact =
+            fresh_db.keyspace(keyspace_names::EXACT, KeyspaceCreateOptions::default)?;
+        let fresh_utxo_tags =
+            fresh_db.keyspace(keyspace_names::UTXO_TAGS, KeyspaceCreateOptions::default)?;
+        let fresh_block_tags =
+            fresh_db.keyspace(keyspace_names::BLOCK_TAGS, KeyspaceCreateOptions::default)?;
+
+        let mut batch = fresh_db.batch();
+        for guard in snapshot.iter(&self.cursor) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_cursor, k.as_ref(), v.as_ref());
+        }
+        for guard in snapshot.iter(&self.exact) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_exact, k.as_ref(), v.as_ref());
+        }
+        for guard in snapshot.iter(&self.utxo_tags) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_utxo_tags, k.as_ref(), v.as_ref());
+        }
+        for guard in snapshot.iter(&self.block_tags) {
+            let (k, v) = guard.into_inner()?;
+            batch.insert(&fresh_block_tags, k.as_ref(), v.as_ref());
+        }
+        batch.commit()?;
+
+        for ks in [
+            &fresh_cursor,
+            &fresh_exact,
+            &fresh_utxo_tags,
+            &fresh_block_tags,
+        ] {
+            ks.rotate_memtable_and_wait()?;
+            ks.major_compact()?;
+        }
+
+        fresh_db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
 }
 
 /// Writer for batched index operations.

@@ -121,7 +121,6 @@ impl RupdWorkUnit {
         }
         self.rewards = None;
     }
-
 }
 
 impl<D> WorkUnit<D> for RupdWorkUnit
@@ -193,11 +192,7 @@ where
 
         work.merge_shard::<D>(domain.state(), ranges)?;
 
-        info!(
-            epoch = work.current_epoch,
-            shard = shard_index,
-            "rupd"
-        );
+        info!(epoch = work.current_epoch, shard = shard_index, "rupd");
 
         Ok(())
     }
@@ -249,7 +244,8 @@ where
         for (credential, reward) in rewards.iter_pending() {
             let key = credential_to_key(credential);
 
-            let (as_leader, as_delegator) = match reward {
+            type PoolRewards = Vec<(PoolHash, u64)>;
+            let (mut as_leader, mut as_delegator): (PoolRewards, PoolRewards) = match reward {
                 Reward::MultiPool(r) => (
                     r.leader_rewards().collect(),
                     r.delegator_rewards().collect(),
@@ -263,6 +259,10 @@ where
                     }
                 }
             };
+
+            // HashMap iteration order varies; sort so CBOR encoding is stable across syncs.
+            as_leader.sort_unstable_by_key(|(pool, _)| *pool);
+            as_delegator.sort_unstable_by_key(|(pool, _)| *pool);
 
             let state = PendingRewardState {
                 credential: credential.clone(),
