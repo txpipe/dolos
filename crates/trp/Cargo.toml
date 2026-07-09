@@ -21,8 +21,7 @@ tracing.workspace = true
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 jsonrpsee = { version = "0.24.9", features = ["server"] }
-opentelemetry = "0.30.0"
-opentelemetry_sdk = "0.30.0"
+opentelemetry.workspace = true
 
 tx3-cardano = "0.23.0"
 tx3-resolver = "0.23.0"
