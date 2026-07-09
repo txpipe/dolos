@@ -1,6 +1,6 @@
 # Blaze Client Example
 
-This example demonstrates how to use the Blaze SDK to query UTXOs for a given address using a local Dolos instance.
+This example demonstrates how to use the Blaze SDK with a local Dolos instance (via the UTxORPC/U5C provider) to derive a wallet, read its balance, and build, sign, and submit a transaction.
 
 ## Prerequisites
 
