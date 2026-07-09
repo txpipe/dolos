@@ -1,0 +1,36 @@
+# cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
+#
+# Scoped to RustSec security advisories. CI runs `cargo deny check advisories`,
+# so the licenses/bans/sources sections are intentionally omitted for now; add
+# them in a follow-up if we want to gate those too.
+
+[advisories]
+version = 2
+
+# The gate blocks on active vulnerabilities and unsound advisories (both are
+# hard errors in cargo-deny v2 and cannot be reached in a released Dolos
+# without a fix). The two softer RustSec categories are downgraded so the
+# pipeline stays focused on exploitable issues:
+#
+#   yanked = "warn"        A yanked crate is a maintenance signal, not an
+#                          exploit. Some of ours (fjall, lsm-tree) are yanked
+#                          upstream storage-engine releases we can't trivially
+#                          move off, so blocking on yanked would make CI brittle
+#                          to upstream yanks. Still surfaced in the logs.
+#
+#   unmaintained = "none"  Unmaintained crates (e.g. bincode 1, paste) are an
+#                          informational signal, not a vulnerability, and we
+#                          depend on several deliberately. Tightening this to
+#                          "workspace" is a reasonable follow-up initiative.
+yanked = "warn"
+unmaintained = "none"
+
+# Advisory IDs to consciously accept. Keep this empty by default. Only add an
+# entry (with a one-line reason and, ideally, a tracking issue) for a
+# vulnerability/unsound advisory that is genuinely unreachable in Dolos and
+# cannot be resolved by a bump — e.g. a vulnerable crate pulled in only by dev
+# tooling or behind a disabled feature. Every entry is a standing risk
+# acceptance, so justify it.
+ignore = [
+    # "RUSTSEC-0000-0000", # reason — <issue link>
+]

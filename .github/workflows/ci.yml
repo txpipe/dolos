@@ -44,6 +44,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  deny:
+    name: cargo deny (advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # Fails the build on any RustSec advisory affecting the locked
+      # dependency tree. Config lives in deny.toml (advisories only). The
+      # action installs cargo-deny and caches the advisory database.
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
