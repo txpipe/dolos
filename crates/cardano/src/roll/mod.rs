@@ -534,7 +534,7 @@ impl<'a> DeltaBuilder<'a> {
 }
 
 #[instrument(name = "roll", skip_all)]
-pub fn compute_delta<D: Domain>(
+pub(crate) fn compute_delta<D: Domain>(
     genesis: Arc<Genesis>,
     cache: &Cache,
     state: &D::State,
