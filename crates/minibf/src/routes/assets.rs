@@ -513,9 +513,16 @@ pub async fn by_subject_addresses<D>(
 ) -> Result<Json<Vec<AssetAddressesInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
+
+    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(asset.as_slice());
+    if !domain.cardano_entity_exists::<AssetState>(entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
     let utxoset = domain
         .indexes()
         .utxos_by_asset(&asset)
@@ -792,6 +799,46 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_addresses_happy_path() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/addresses");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let addresses: Vec<AssetAddressesInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset addresses");
+        assert!(!addresses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_addresses_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}/addresses", invalid_asset());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_addresses_not_found() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}/addresses", missing_asset());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_addresses_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/addresses");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }
