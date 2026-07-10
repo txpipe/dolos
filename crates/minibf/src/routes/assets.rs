@@ -519,9 +519,9 @@ where
     let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
 
     let entity_key = pallas::crypto::hash::Hasher::<256>::hash(asset.as_slice());
-    domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    if !domain.cardano_entity_exists::<AssetState>(entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
 
     let utxoset = domain
         .indexes()
