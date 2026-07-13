@@ -5,7 +5,7 @@
 // The examples themselves only have to describe the filter they care about.
 
 import { CardanoSyncClient, CardanoWatchClient } from "@utxorpc/sdk";
-import { Core } from "@blaze-cardano/sdk";
+import { bech32 } from "bech32";
 import pc from "picocolors";
 
 // ---------------------------------------------------------------------------
@@ -66,22 +66,49 @@ export const DEFAULT_POLICY = "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cb
 // bytes <-> hex
 // ---------------------------------------------------------------------------
 
-export const toHex = (bytes: Uint8Array): string => Core.toHex(bytes);
-export const hexToBytes = (hex: string): Uint8Array =>
-  Core.fromHex(hex.replace(/^0x/, ""));
+export const toHex = (bytes: Uint8Array): string =>
+  Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+export const hexToBytes = (hex: string): Uint8Array => {
+  const clean = hex.replace(/^0x/, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+};
 
 // ---------------------------------------------------------------------------
-// addresses
+// addresses (bech32 <-> raw bytes)
 // ---------------------------------------------------------------------------
+// Cardano addresses are bech32-encoded payloads. The payload starts with a
+// header byte whose top nibble is the address type (0–7 = payment, 14–15 =
+// reward/stake) and whose bottom nibble is the network (0 = testnet, 1 =
+// mainnet). After the header: 28-byte payment credential, then optionally a
+// 28-byte stake credential.
+//
+// bech32 strings can be up to 103 chars on Cardano, so we pass a custom LIMIT
+// to the `bech32` library (whose BIP-173 default is 90).
+
+const BECH32_LIMIT = 150;
+
+// Determine the human-readable part (prefix) from raw address bytes.
+function hrpFromBytes(bytes: Uint8Array): string {
+  const header = bytes[0];
+  const type = header >> 4;
+  const isMainnet = (header & 0x0f) === 1;
+  const isReward = type >= 14;
+  return isReward
+    ? (isMainnet ? "stake" : "stake_test")
+    : (isMainnet ? "addr" : "addr_test");
+}
 
 // Accepts either a bech32 address (`addr...`) or raw address bytes as hex, and
 // returns the raw address bytes the SDK's watch filters expect.
-//
-// Gotcha: `Address.toBytes()` returns a hex STRING (a HexBlob), not a
-// Uint8Array — so it has to go back through `Core.fromHex` before the SDK.
 export function addrToBytes(input: string): Uint8Array {
-  if (input.startsWith("addr")) {
-    return Core.fromHex(Core.Address.fromBech32(input).toBytes());
+  if (input.startsWith("addr") || input.startsWith("stake")) {
+    const { words } = bech32.decode(input, BECH32_LIMIT);
+    return new Uint8Array(bech32.fromWords(words));
   }
   return hexToBytes(input);
 }
@@ -89,17 +116,19 @@ export function addrToBytes(input: string): Uint8Array {
 // The 28-byte payment credential of a bech32 address. Filtering on this matches
 // every address that shares the same payment key — base, enterprise, and every
 // stake-delegation variant — not just one exact address.
-export function paymentPartOf(bech32: string): Uint8Array {
-  const cred = Core.Address.fromBech32(bech32).getProps().paymentPart;
-  if (!cred) throw new Error(`address has no payment credential: ${bech32}`);
-  return Core.fromHex(cred.hash);
+export function paymentPartOf(bech32Addr: string): Uint8Array {
+  const { words } = bech32.decode(bech32Addr, BECH32_LIMIT);
+  const bytes = new Uint8Array(bech32.fromWords(words));
+  return bytes.slice(1, 29);
 }
 
 // Render raw address bytes (as they arrive on a decoded output) back to a
 // human-readable bech32 string, falling back to hex if it can't be parsed.
 export function renderAddr(bytes: Uint8Array): string {
   try {
-    return Core.Address.fromBytes(Core.HexBlob.fromBytes(bytes)).toBech32();
+    const hrp = hrpFromBytes(bytes);
+    const words = bech32.toWords(bytes);
+    return bech32.encode(hrp, words, BECH32_LIMIT);
   } catch {
     return toHex(bytes);
   }
@@ -123,7 +152,7 @@ function unwrapBigInt(wrapped?: ProtoBigInt): bigint {
   const n = wrapped?.bigInt;
   if (!n || n.case === undefined) return 0n;
   if (n.case === "int") return n.value;
-  const magnitude = n.value.length ? BigInt("0x" + Core.toHex(n.value)) : 0n;
+  const magnitude = n.value.length ? BigInt("0x" + toHex(n.value)) : 0n;
   return n.case === "bigNInt" ? -magnitude : magnitude;
 }
 

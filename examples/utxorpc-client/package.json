@@ -13,8 +13,8 @@
   },
   "license": "ISC",
   "dependencies": {
-    "@blaze-cardano/sdk": "^0.2.48",
     "@utxorpc/sdk": "^0.8.2",
+    "bech32": "^2.0.0",
     "picocolors": "^1.1.1"
   },
   "devDependencies": {
