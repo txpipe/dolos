@@ -1,0 +1,26 @@
+{
+  "name": "utxorpc-client",
+  "version": "1.0.0",
+  "description": "UTxORPC (U5C) client examples against a local Dolos instance — WatchTx streaming filters and payload decoding",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "watch:address": "tsx watch-tx/by-address.ts",
+    "watch:payment": "tsx watch-tx/by-payment-part.ts",
+    "watch:asset": "tsx watch-tx/by-asset.ts",
+    "watch:composed": "tsx watch-tx/composed.ts",
+    "watch:inspect": "tsx watch-tx/inspect.ts"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@utxorpc/sdk": "^0.8.2",
+    "bech32": "^2.0.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.0"
+  },
+  "overrides": {
+    "undici": "^6.27.0"
+  }
+}

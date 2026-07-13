@@ -1,0 +1,159 @@
+---
+title: UTxORPC
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+
+[UTxORPC](https://utxorpc.org) (U5C) is the primary programmatic interface Dolos exposes over gRPC. You can learn more about the endpoint in the [gRPC API reference](../apis/grpc).
+
+## What is the WatchTx service?
+
+**WatchTx** is a streaming endpoint that pushes transactions to you as they reach the tip of the chain. Instead of polling for new blocks and decoding them yourself, you open a single long-lived stream and Dolos does the work.
+
+The key feature is **server-side filtering**. Rather than receiving every transaction and discarding the ones you don't care about, you describe a *predicate* — "transactions touching this address", "transactions moving this asset", or a boolean composition of several such patterns — and Dolos evaluates it against each transaction before sending anything over the wire. Only matches arrive on the stream. This keeps the client cheap even on a busy chain, because the filtering work happens where the data already lives.
+
+Each event on the stream is one of three kinds:
+
+- **`apply`** — a transaction that newly appears in a block. This is the common case: a new block was added and the tx is now confirmed.
+- **`undo`** — a previously-seen transaction has been rolled back due to a chain fork. If you're maintaining a derived view (a database, a balance cache, a notification feed), `undo` events tell you what to reverse.
+- **`idle`** — a block was processed but no transaction matched the predicate. These heartbeats prove the stream is alive between hits, which matters on Cardano where blocks are ~20s apart.
+
+A stream can also start from an arbitrary point in the past — an **intersection point** — and replay forward, which is how the examples in this guide produce matches immediately instead of waiting at the live tip.
+
+## Walkthrough: the `utxorpc-client` example
+
+The `utxorpc-client` example in the Dolos repository walks through every WatchTx filtering pattern against a local Dolos instance. Each script opens a stream with a different predicate and prints a color-coded, multi-line breakdown of every matched transaction so you can see exactly what flowed through the filter.
+
+<Aside type="note">
+The full source for this walkthrough lives in [`examples/utxorpc-client`](https://github.com/txpipe/dolos/tree/main/examples/utxorpc-client) in the Dolos repository.
+</Aside>
+
+## Prerequisites
+
+A Dolos instance serving its UTxORPC gRPC endpoint at `http://localhost:50051` (override with the `URL` env var). Then:
+
+```bash
+cd examples/utxorpc-client
+npm install
+```
+
+## The example scripts
+
+| Script | Filters on | Run |
+| --- | --- | --- |
+| `watch:inspect` | nothing (firehose) — full payload decode | `npm run watch:inspect` |
+| `watch:address` | exact address (`hasAddress.exactAddress`) | `npm run watch:address` |
+| `watch:payment` | payment credential (`hasAddress.paymentPart`) | `npm run watch:payment` |
+| `watch:asset` | native-asset policy (`movesAsset`) | `npm run watch:asset` |
+| `watch:composed` | boolean composition of the above | `npm run watch:composed` |
+
+Every script ships with a **default filter value that is known to match**, so `npm run watch:*` produces output with no arguments. Override any of them with env vars (`ADDRESS`, `POLICY_ID`, `ASSET_NAME`, `NOISE`).
+
+### Step 1: Start with the firehose
+
+`watch:inspect` streams every transaction and prints a full breakdown — hash, fee, inputs (with their resolved outputs when available), outputs with ADA and native assets, and any mint/burn. It's the easiest way to discover a real address or policy id to feed the filtering examples.
+
+```bash
+npm run watch:inspect
+```
+
+```
+👀 inspecting ALL txs (firehose)
+
+────────────────────────────────────────────────────────────────────────
+Tx Match:  90ba6198…24d10d74
+  ⛓ fee  0.166909 ADA
+  📥 inputs (1):
+    6df44718063a…#0
+      ← addr1vxnr555xqtwpj6t…mcn384hj
+      🪙 2923.661777 ADA
+  📤 outputs (2):
+    addr1vxnr555xqtwpj6t…mcn384hj
+      🪙 2654.263292 ADA
+    addr1q826gwvvsrpud5x…ws06f4lv
+      🪙 269.231576 ADA
+```
+
+Copy an address or policy id out of the output to use with the filtering examples.
+
+### Step 2: Filter by address
+
+`watch:address` matches a tx if the exact address appears in any input or output.
+
+```bash
+ADDRESS=addr1qxasnapjg46en92... npm run watch:address
+```
+
+### Step 3: Filter by payment credential
+
+A Cardano address is a payment credential plus (usually) a staking credential. Filtering on just the payment part matches every address that shares the same payment key — base, enterprise, and every stake-delegation variant. Use this to follow "a wallet" rather than one address string.
+
+```bash
+ADDRESS=addr1qxasnapjg46en92... npm run watch:payment
+```
+
+### Step 4: Filter by native asset
+
+`watch:asset` matches any tx moving a given policy. Add `ASSET_NAME=<hex>` to pin a single asset.
+
+```bash
+POLICY_ID=0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa npm run watch:asset
+```
+
+### Step 5: Compose predicates
+
+`watch:composed` uses `watchTxByPredicate` to build `(touches ADDRESS OR moves POLICY_ID) AND NOT (touches NOISE)`, showing how the `anyOf` / `allOf` / `not` operators compose the single-pattern filters.
+
+```bash
+ADDRESS=addr1qxasnapjg46en92... POLICY_ID=0691b2fe... NOISE=addr1q... npm run watch:composed
+```
+
+## Output formatting
+
+All scripts render matched transactions through a shared `printTx` helper in `watch-tx/shared.ts`, so every example shows the same level of detail. The output is:
+
+- **Color-coded** via [`picocolors`](https://github.com/alexeyraspopov/picocolors) — tx hashes in bold cyan, addresses in magenta, ADA in yellow, native assets in blue, fees dimmed. Colors auto-disable when stdout isn't a TTY or `NO_COLOR` is set.
+- **Truncated** — long hashes, addresses, and policy ids are shortened to a readable window (e.g. `addr1qxasnapjg46en92…0s8nnsfx`).
+- **Paced** to one event per second so the stream stays readable.
+- **Heartbeated** — between matches you'll see dim `💤 idle @ slot N` lines, which are blocks with no match. They prove the stream is alive (Cardano blocks are ~20s apart on average).
+
+## Fixed replay point
+
+These examples target **mainnet** and, rather than waiting at the live tip, replay forward from a **fixed intersection point** (a real block defined as `FIXED_INTERSECT` in `watch-tx/shared.ts`). Combined with the baked-in default filter values — all observed at or after that block — every example produces matches within seconds.
+
+Control the start point with env vars:
+
+- `SLOT=<n> HASH=<hex> npm run watch:asset` — replay from a different block.
+- `NO_INTERSECT=1 npm run watch:asset` — stream live from the current tip instead.
+
+The fixed block must still be within the history your Dolos instance retains; if it has been pruned past it, set your own `SLOT`/`HASH` (or `NO_INTERSECT=1`).
+
+## How it works
+
+Each script follows the same shape: construct a `CardanoWatchClient`, open a stream with a filter and an optional intersection point, and hand it to the shared `runStream` driver.
+
+```typescript
+import { watchClient, addrToBytes, runStream, startPoint, c, printTx } from "./shared";
+
+const ADDRESS = process.env.ADDRESS ?? DEFAULT_ADDRESS;
+
+const address = addrToBytes(ADDRESS);
+console.log(`👀 watching txs that touch ${c.address(ADDRESS)}\n`);
+
+await runStream(
+  watchClient().watchTxForAddress(address, startPoint()),
+  printTx,
+);
+```
+
+The helpers in `watch-tx/shared.ts` handle:
+
+- **bech32 ↔ bytes conversion** for addresses and payment credentials.
+- **protobuf-wrapped integers** — `coin` and asset quantities arrive as a protobuf `BigInt` message with a oneof (`int` / `bigUInt` / `bigNInt`), not plain JS bigints.
+- **The intersection point** — centralized as `startPoint()`, overridable via `SLOT`/`HASH`/`NO_INTERSECT` env vars.
+- **Rendering** — the shared `printTx` function renders every matched tx the same way regardless of which filter produced it.
+
+<Aside type="note">
+Filtering happens <strong>server-side</strong> — Dolos evaluates the predicate against each tx and only streams matches, so the client stays cheap even on a busy chain.
+</Aside>
