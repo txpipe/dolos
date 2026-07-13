@@ -5,9 +5,25 @@ sidebar:
 ---
 import { Aside } from '@astrojs/starlight/components';
 
-[UTxORPC](https://utxorpc.org) (U5C) is the primary programmatic interface Dolos exposes over gRPC. The **WatchTx** endpoint is a server-side–filtered live stream of transactions as they reach the tip of the chain: you describe a predicate, Dolos evaluates it against every transaction, and only matches are streamed back. You can learn more about the endpoint in the [gRPC API reference](../apis/grpc).
+[UTxORPC](https://utxorpc.org) (U5C) is the primary programmatic interface Dolos exposes over gRPC. You can learn more about the endpoint in the [gRPC API reference](../apis/grpc).
 
-The `utxorpc-client` example in the Dolos repository walks through every WatchTx filtering pattern against a local Dolos instance. Each script prints a color-coded, multi-line breakdown of every matched transaction so you can see exactly what flowed through the filter.
+## What is the WatchTx service?
+
+**WatchTx** is a streaming endpoint that pushes transactions to you as they reach the tip of the chain. Instead of polling for new blocks and decoding them yourself, you open a single long-lived stream and Dolos does the work.
+
+The key feature is **server-side filtering**. Rather than receiving every transaction and discarding the ones you don't care about, you describe a *predicate* — "transactions touching this address", "transactions moving this asset", or a boolean composition of several such patterns — and Dolos evaluates it against each transaction before sending anything over the wire. Only matches arrive on the stream. This keeps the client cheap even on a busy chain, because the filtering work happens where the data already lives.
+
+Each event on the stream is one of three kinds:
+
+- **`apply`** — a transaction that newly appears in a block. This is the common case: a new block was added and the tx is now confirmed.
+- **`undo`** — a previously-seen transaction has been rolled back due to a chain fork. If you're maintaining a derived view (a database, a balance cache, a notification feed), `undo` events tell you what to reverse.
+- **`idle`** — a block was processed but no transaction matched the predicate. These heartbeats prove the stream is alive between hits, which matters on Cardano where blocks are ~20s apart.
+
+A stream can also start from an arbitrary point in the past — an **intersection point** — and replay forward, which is how the examples in this guide produce matches immediately instead of waiting at the live tip.
+
+## Walkthrough: the `utxorpc-client` example
+
+The `utxorpc-client` example in the Dolos repository walks through every WatchTx filtering pattern against a local Dolos instance. Each script opens a stream with a different predicate and prints a color-coded, multi-line breakdown of every matched transaction so you can see exactly what flowed through the filter.
 
 <Aside type="note">
 The full source for this walkthrough lives in [`examples/utxorpc-client`](https://github.com/txpipe/dolos/tree/main/examples/utxorpc-client) in the Dolos repository.
