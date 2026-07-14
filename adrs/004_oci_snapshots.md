@@ -122,6 +122,9 @@ State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_sch
   "epoch": 550,
   "compression": {"algo": "zstd", "level": 9},
   "stateShards": 16,
+  "history": [
+    {"epoch": 549, "descriptorDigest": "sha256:…"},
+    {"epoch": 548, "descriptorDigest": "sha256:…"} ],
   "layers": [
     {"kind": "blocks", "epoch": 0, "startSlot": 0, "endSlot": 21599,
      "diffId": "sha256:…", "records": 21600, "uncompressedSize": 43210000},
@@ -129,6 +132,8 @@ State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_sch
 ```
 
 `diffId` = sha256 of the uncompressed CBOR sequence. Determinism and signing are defined only over this document's sha256. Signatures are Ed25519 over the descriptor digest, pushed as OCI referrer artifacts (`application/vnd.dolos.snapshot.signature.v1`, cosign-compatible envelope where convenient). Restore verifies registry blob digests (transport integrity) and diffIds (canonical identity).
+
+`history` embeds the digest of every previously published descriptor, so the latest signed descriptor transitively attests the entire publication history (~80 bytes per epoch, ~50 KB after 600 epochs — negligible for a config blob). This makes attestation outlive blob retention: a snapshot whose blobs have long been garbage-collected can still be verified by anyone holding a copy, because the copy carries its own descriptor (the OCI config blob) — check that descriptor's digest against the `history` of the latest signed descriptor, then the layers against its diffIds. No external trusted storage of attestations is required.
 
 Note: a side-effect of anchoring identity on uncompressed content digests is that snapshots can be mirrored over any content-addressed transport (e.g. IPFS) — or re-compressed with a different algorithm — and still verify against the same signed descriptor. This is a property of the format, not a requirement of the protocol; the OCI registry remains the canonical distribution channel.
 
@@ -165,7 +170,7 @@ trusted_keys = ["ed25519:…"]  # mirrors mithril genesis_key style
 4. Determinism job: an independent runner that synced by any means runs `dolos snapshot digest` and alerts on descriptor mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.
 
-Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged state blobs are reclaimed by registry GC; epoch blobs remain referenced by later manifests.
+Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged state blobs are reclaimed by registry GC; epoch blobs remain referenced by later manifests. Trust evidence for reclaimed snapshots survives in the descriptor `history` of every later publish.
 
 ### Restore pipeline
 
