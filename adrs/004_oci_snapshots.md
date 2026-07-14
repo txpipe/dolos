@@ -24,6 +24,8 @@ The goal is a snapshot protocol and data format that:
 - Use an OCI repository as the storage backend, one repository per network, targeting any OCI Distribution v1.1 registry (GHCR initially). Tags: `epoch-E` per published epoch boundary, plus a moving `latest`.
 - Split chain history into epochs; each epoch produces immutable, content-addressed layers. Per epoch there are three content types, each its own layer: raw block data (`blocks`), computed archive index records (`indexes`) and epoch-boundary ledger logs (`logs`).
 - Keep the ledger state as a set of "tip" layers that are swapped as a whole on every publish: 16 uniform key-value shard layers, where the UTxO set is just another key-value namespace alongside the 14 entity namespaces.
+- No layer kind is mandatory for consumers: the descriptor declares what the snapshot contains, and the client selects which layers to fetch and which data to source elsewhere — block data especially, which may come from `blocks` layers, from a Mithril aggregator, or from relay replay. `sync.max_history`-driven partial fetches are one instance of this general rule, not a special mode.
+- Ship an optional per-snapshot `digests` layer that pins the sha256 of every Cardano immutable-DB file (`.chunk`/`.primary`/`.secondary` — Mithril Cardano DB v2's certification granularity) covered by the snapshot. It carries no restorable data; it makes externally sourced block data verifiable against the signed descriptor, and is the enabler for a future Mithril-sourced restore mode.
 - Serialize all layer content as deterministic CBOR sequences (RFC 8742 framing, RFC 8949 §4.2.1 deterministic encoding) of canonical logical records — never database files.
 - Ship index data pre-hashed: the xxh3-64 key-hashing scheme used by the index stores is promoted into the format specification, so index layers are exported by direct iteration and restored by direct append, with no recomputation on either side.
 - Anchor determinism and signing on a canonical descriptor (the OCI config blob, RFC 8785 canonical JSON) that lists the *uncompressed* digest of every layer plus the chain point. Independent parties reproduce and sign the descriptor's sha256; compression (pinned zstd) is transport only. Signatures are attached as OCI referrer artifacts.
@@ -39,6 +41,7 @@ The goal is a snapshot protocol and data format that:
 - **Pre-hashed index keys remove the most expensive pipeline stage.** The on-disk index stores keep only xxh3-64 hashes of tag keys, so logical keys are unrecoverable from disk. The initial design recomputed logical tags from raw blocks at publish time, but that requires resolving historical transaction inputs (the spent-output data lives in earlier blocks), an expensive lookup pipeline. Promoting the hash scheme into the spec eliminates recomputation on both sides, shrinks records from 30–60-byte logical keys to 8-byte hashes, and remains implementation-agnostic because xxh3-64 is a documented, widely implemented algorithm — unlike database pages, any implementation can produce and consume these records. Dimension names stay as logical strings (a small closed set), keeping layers inspectable. Shipping index layers at all is load-bearing: recomputing them at restore time is impossible without replaying the UTxO set.
 - **Epoch-boundary logs must be shipped, not derived.** Reward and stake logs (`LeaderRewardLog`, `MemberRewardLog`, `PoolDepositRefundLog`, `StakeLog`) are products of ledger computation; deriving them requires full state replay, which defeats the purpose of a snapshot.
 - **Determinism is anchored on uncompressed bytes.** zstd output is only stable for a pinned library version and parameters, so OCI blob digests (over compressed bytes) cannot be the cross-party identity. The descriptor lists uncompressed digests (analogous to OCI diffIDs) and is itself canonical JSON; its sha256 is the thing independent parties reproduce and sign. Compression parameters are pinned so blobs also dedupe across publishers in practice, but correctness never depends on it.
+- **Mithril v2 certifies exactly the objects the digests layer pins.** Mithril's Cardano DB v2 signs a merkle tree with one leaf per individual immutable file — sha256 over raw file bytes — so a pinned digest is checkable both against our signed descriptor and, via merkle proof, against a stake-based certificate. Pinning content digests (rather than referencing aggregator URLs) keeps verification self-contained: aggregator retention is operational policy, not a protocol guarantee, and if the aggregator disappears, trust in externally sourced blocks degrades from stake-certified to publisher-attested instead of restore breaking. Immutable files are byte-identical on every honest node, so the layer is as deterministic as everything else the descriptor covers.
 - **Uniform key-value state future-proofs the format.** Treating the UTxO set as namespace `utxos` means the format has one state record shape, and Dolos's planned internal refactor to fold UTxOs into the entity system (#1042) becomes invisible to the format. Sharding by the first nibble of the key balances well because keys are hash-derived (tx hashes, credentials), enables parallel fetch, and keeps every layer far from registry size limits as state grows.
 
 ## Limitations
@@ -48,6 +51,7 @@ The goal is a snapshot protocol and data format that:
 - **The index hash scheme becomes a compatibility surface.** Changing the xxh3-64 scheme, bucket semantics or dimension set requires a new media-type version. Old epochs can be backfilled by recomputing index layers from the (permanently available) blocks layers, so the migration path exists, but it is a real cost.
 - **Determinism depends on deterministic entity encoding.** Entity minicbor values are copied verbatim, so any map-ordering or shard-merge nondeterminism in ledger code would break cross-party digests. This requires a one-time audit and is permanently enforced by an independent-builds digest comparison in CI.
 - **Registry trust is not consensus trust.** Signatures prove that named parties attest to the descriptor; they do not provide Mithril-style stake-based certification. The two mechanisms remain complementary bootstrap options.
+- **Stake-level verification of block data depends on Mithril artifacts.** The digests layer pins content, but checking those digests against a stake-based certificate requires a Mithril aggregator (or a mirror of its digest route and certificate chain) for the merkle proofs. Without one — and on networks without Mithril, where the layer is simply absent — trust in block data rests on descriptor signatures alone.
 
 ## Performance Impact
 
@@ -86,6 +90,14 @@ The goal is a snapshot protocol and data format that:
    - Pros: slightly simpler descriptor.
    - Cons: single layers hit registry size limits as state grows and serialize downloads; special-casing UTxOs couples the format to a Dolos internal that is already slated to change (#1042). Rejected in favor of 16 uniform key-value shards.
 
+8. **Adopt Mithril's immutable-file format as the `blocks` layer** (chunk files stored verbatim as blobs, reusing Mithril's stake-based signatures directly)
+   - Pros: per-file diffIds would literally equal the stake-certified digests — signature reuse with zero re-derivation, and blob-level dedupe with any other chunk-file mirror.
+   - Cons: one layer per immutable file blows the manifest budget (~20k layer descriptors on mainnet vs ~600 epoch layers); grouping files into per-epoch archives restores the budget but destroys the byte-identity that made their signatures reusable; and `.primary`/`.secondary` are ouroboros-consensus internals — re-importing the implementation coupling this format exists to shed. Rejected as the primary format; the digests layer preserves the verification benefit, and per-file verbatim blobs remain viable for an optional mirror artifact.
+
+9. **Reference Mithril archives by URL from the manifest** (OCI foreign layers / the `urls` field)
+   - Pros: zero block hosting for the publisher.
+   - Cons: `urls` is deprecated in the OCI image spec and rejected or ignored by registries; aggregator URLs and retention are operational policy, not protocol guarantees; identity should bind to content, not location. Rejected in favor of pinning content digests and leaving the transport open — which the layer-optionality rule already permits.
+
 ## Implementation Details
 
 ### Layer formats
@@ -106,13 +118,16 @@ Content records per kind:
 | `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `IndexWriter::append_prehashed` |
 | `logs` (per epoch) | `[ns: tstr, log_key: bytes(40), value: bytes]`, value = stored EntityValue verbatim | `(ns, log_key)` | `ArchiveWriter::write_log` |
 | `state-{00..0f}` (tip, 16 shards) | `[ns: tstr, key: bytes, value: bytes]` | `(ns, key)`; shard = first nibble of `key[0]` | dispatch on ns: `utxos` → chunked `StateWriter::apply_utxoset`, else `write_entity` |
+| `digests` (tip, optional) | `[immutable_number, chunk: bytes(32), primary: bytes(32), secondary: bytes(32)]`, each sha256 over the raw file bytes | ascending `immutable_number` | none — verification metadata, not written to stores |
 
 State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_schema()` (key = 32-byte `EntityKey` verbatim, value = stored minicbor verbatim) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes]`). The chain point lives in the descriptor, not in a layer. Live-UTxO index dimensions (`utxo::*`) are not shipped; they are rebuilt at restore via `index_delta_from_utxo_delta`.
+
+The `digests` layer covers the immutable files fully contained in the snapshot's block range: `lastImmutable` is derived from the boundary slot and the chunk geometry observed in the chain — canonical, never dependent on aggregator state at publish time. Digest values equal Mithril Cardano DB v2's merkle leaves (hex-decoded), so any Mithril certificate whose beacon covers `lastImmutable` can verify them via the aggregator's digest route and a merkle proof. The certificate reference is deliberately *not* part of the descriptor: certificates are produced on the aggregator's cadence, so two independent publishers at the same boundary would reference different certificates — including one would break cross-publisher determinism, while the digest values themselves are byte-stable properties of the chain.
 
 ### OCI layout and descriptor
 
 - Repository per network (e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`); tags `epoch-E` (E = newly started epoch; layers cover epochs `0..E-1`) and `latest`.
-- `artifactType: application/vnd.dolos.snapshot.v1`; layer media types `application/vnd.dolos.snapshot.{blocks|indexes|logs|state}.v1+zstd`; informational annotations per layer (epoch, kind, diffid, slot window, shard).
+- `artifactType: application/vnd.dolos.snapshot.v1`; layer media types `application/vnd.dolos.snapshot.{blocks|indexes|logs|state|digests}.v1+zstd`; informational annotations per layer (epoch, kind, diffid, slot window, shard).
 - Config blob (`application/vnd.dolos.snapshot.descriptor.v1+json`), canonical JSON per RFC 8785:
 
 ```json
@@ -128,7 +143,8 @@ State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_sch
   "layers": [
     {"kind": "blocks", "epoch": 0, "startSlot": 0, "endSlot": 21599,
      "diffId": "sha256:…", "records": 21600, "uncompressedSize": 43210000},
-    {"kind": "state", "shard": 0, "diffId": "sha256:…", "records": 812345, "uncompressedSize": 402653184} ] }
+    {"kind": "state", "shard": 0, "diffId": "sha256:…", "records": 812345, "uncompressedSize": 402653184},
+    {"kind": "digests", "lastImmutable": 6187, "diffId": "sha256:…", "records": 6188, "uncompressedSize": 618800} ] }
 ```
 
 `diffId` = sha256 of the uncompressed CBOR sequence. Determinism and signing are defined only over this document's sha256. Signatures are Ed25519 over the descriptor digest, pushed as OCI referrer artifacts (`application/vnd.dolos.snapshot.signature.v1`, cosign-compatible envelope where convenient). Restore verifies registry blob digests (transport integrity) and diffIds (canonical identity).
@@ -168,7 +184,7 @@ trusted_keys = ["ed25519:…"]  # mirrors mithril genesis_key style
 
 1. Restore the publisher node from the previous OCI snapshot (self-hosting delta pull; first run via Mithril).
 2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — state lands exactly on the boundary.
-3. `dolos snapshot publish` — only the newly closed epoch's layers upload; fresh state shards + descriptor; tag `epoch-E`, move `latest`.
+3. `dolos snapshot publish` — only the newly closed epoch's layers upload; fresh state shards + descriptor; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
 4. Determinism job: an independent runner that synced by any means runs `dolos snapshot digest` and alerts on descriptor mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.
 
@@ -177,7 +193,7 @@ Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged s
 ### Restore pipeline
 
 1. Resolve tag → manifest → descriptor; verify digest, schema, network magic and signatures.
-2. Plan epoch range from `sync.max_history`; diff against the progress file (`<storage.path>/.snapshot-restore.json`, records descriptor digest + completed layer diffIds) for `--continue`. Preflight: sum the descriptor `uncompressedSize` of the planned layers and fail early if free space at `storage.path` is insufficient; derive download progress and time-remaining estimates from the compressed blob sizes of the layers that remain to be fetched — excluding layers already completed per the progress file or already present locally — so resumed and deduplicated restores report correct totals.
+2. Plan which layers to consume — no kind is mandatory: ledger-only nodes skip `blocks`/`indexes`/`logs`; a future Mithril-sourced mode fetches block data from an aggregator instead of `blocks` layers, verifying each immutable file against the `digests` layer before the usual decode→append import. Plan the epoch range from `sync.max_history`; diff against the progress file (`<storage.path>/.snapshot-restore.json`, records descriptor digest + completed layer diffIds) for `--continue`. Preflight: sum the descriptor `uncompressedSize` of the planned layers and fail early if free space at `storage.path` is insufficient; derive download progress and time-remaining estimates from the compressed blob sizes of the layers that remain to be fetched — excluding layers already completed per the progress file or already present locally — so resumed and deduplicated restores report correct totals.
 3. Open stores; `IndexStore::initialize_schema()`.
 4. Per epoch (checkpointed): fetch + verify `blocks`/`logs` → archive appends, commit; fetch `indexes` → pre-hashed appends, commit.
 5. State tip: fetch the 16 shards (parallelizable) → dispatch per namespace; `set_cursor(descriptor.point)` last so `has_existing_data()` only ever sees complete restores; commit.
@@ -187,8 +203,8 @@ Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged s
 ### Development phases
 
 1. **Format core** — `crates/snapshot` framing/spec/layer readers+writers; the three trait additions. Verified by roundtrip unit tests, golden-digest tests (fixed input → asserted sha256), write→read→write byte-identity property tests.
-2. **Local export/restore e2e** — `export.rs`/`restore.rs`, `publish --output-dir`, `bootstrap snapshot --source file://`. Verified by an e2e cloned from `tests/e2e/snapshot.rs`; cross-check restored stores against an `import_blocks`-built node; determinism test (two independently synced nodes → identical descriptor digests), which is where any entity-encoding nondeterminism surfaces; audit `crates/cardano/src/model/*` as needed.
+2. **Local export/restore e2e** — `export.rs`/`restore.rs` (including the `digests` layer writer), `publish --output-dir`, `bootstrap snapshot --source file://`. Verified by an e2e cloned from `tests/e2e/snapshot.rs`; cross-check restored stores against an `import_blocks`-built node; determinism test (two independently synced nodes → identical descriptor digests), which is where any entity-encoding nondeterminism surfaces; audit `crates/cardano/src/model/*` as needed.
 3. **OCI transport** — push with blob-skip, pull missing-only, tags. Verified against a local registry (`zot`/`registry:2`) spawned by the test; delta assertions (publish E then E+1 → only new blobs upload; pre-seeded restore fetches only missing); kill-and-`--continue` resume.
 4. **Publisher productization** — `digest`/`verify`/`inspect`, `stop_epoch`-driven flow, incremental detection, CI workflow. Verified by a two-runner determinism job on preview/preprod; scheduled preprod publishing before mainnet.
 5. **Signatures** — Ed25519 referrers, `trusted_keys`/`require_signatures`. Verified with generated keys plus tampered-layer/descriptor negative tests.
-6. **Transition** — deprecate the tarball path in docs (keep it working); per-network default `source`. Follow-ups: "refresh" mode for already-running nodes and mid-epoch state-only tip publishes.
+6. **Transition** — deprecate the tarball path in docs (keep it working); per-network default `source`. Follow-ups: "refresh" mode for already-running nodes; mid-epoch state-only tip publishes; a Mithril-sourced block restore mode (aggregator download verified against the `digests` layer, reusing the range-download/resume/import machinery from `bootstrap mithril`), which would let public-network snapshots omit `blocks` layers entirely.
