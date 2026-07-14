@@ -130,6 +130,8 @@ State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_sch
 
 `diffId` = sha256 of the uncompressed CBOR sequence. Determinism and signing are defined only over this document's sha256. Signatures are Ed25519 over the descriptor digest, pushed as OCI referrer artifacts (`application/vnd.dolos.snapshot.signature.v1`, cosign-compatible envelope where convenient). Restore verifies registry blob digests (transport integrity) and diffIds (canonical identity).
 
+Note: a side-effect of anchoring identity on uncompressed content digests is that snapshots can be mirrored over any content-addressed transport (e.g. IPFS) — or re-compressed with a different algorithm — and still verify against the same signed descriptor. This is a property of the format, not a requirement of the protocol; the OCI registry remains the canonical distribution channel.
+
 ### Code layout
 
 New crate `crates/snapshot` (`dolos-snapshot`): `spec.rs` (descriptor, canonical JSON), `frame.rs` (deterministic CBOR-seq primitives), `layers/{blocks,indexes,logs,state}.rs`, `export.rs` / `restore.rs` (generic over `dolos_core::Domain`), `digest.rs` (streaming sha256+zstd), `oci.rs` (feature `oci`, built on the `oci-client` crate). New deps: `zstd`, `serde_jcs`, `oci-client`.
@@ -168,7 +170,7 @@ Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged s
 ### Restore pipeline
 
 1. Resolve tag → manifest → descriptor; verify digest, schema, network magic and signatures.
-2. Plan epoch range from `sync.max_history`; diff against the progress file (`<storage.path>/.snapshot-restore.json`, records descriptor digest + completed layer diffIds) for `--continue`.
+2. Plan epoch range from `sync.max_history`; diff against the progress file (`<storage.path>/.snapshot-restore.json`, records descriptor digest + completed layer diffIds) for `--continue`. Preflight: sum the descriptor `uncompressedSize` of the planned layers and fail early if free space at `storage.path` is insufficient; derive download progress and time-remaining estimates from the manifest's compressed blob sizes.
 3. Open stores; `IndexStore::initialize_schema()`.
 4. Per epoch (checkpointed): fetch + verify `blocks`/`logs` → archive appends, commit; fetch `indexes` → pre-hashed appends, commit.
 5. State tip: fetch the 16 shards (parallelizable) → dispatch per namespace; `set_cursor(descriptor.point)` last so `has_existing_data()` only ever sees complete restores; commit.
