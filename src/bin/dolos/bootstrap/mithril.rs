@@ -2,7 +2,10 @@ use dolos_core::config::{MithrilConfig, RootConfig};
 use dolos_core::ImportExt;
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
-use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
+use mithril_client::cardano_database_client::{DownloadUnpackOptions, ImmutableFileRange};
+use mithril_client::{
+    AggregatorDiscoveryType, ClientBuilder, MessageBuilder, MithrilError, MithrilResult,
+};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
@@ -33,6 +36,14 @@ pub struct Args {
 
     #[arg(long)]
     start_from: Option<ChainPoint>,
+
+    /// Start downloading from this immutable file number (inclusive)
+    #[arg(long)]
+    download_start: Option<u64>,
+
+    /// Download up to this immutable file number (inclusive)
+    #[arg(long)]
+    download_end: Option<u64>,
 }
 
 impl Default for Args {
@@ -44,34 +55,93 @@ impl Default for Args {
             retain_snapshot: Default::default(),
             chunk_size: 500,
             start_from: None,
+            download_start: None,
+            download_end: None,
         }
     }
 }
 
 struct MithrilFeedback {
-    download_pb: indicatif::ProgressBar,
+    aggregate_pb: indicatif::ProgressBar,
     validate_pb: indicatif::ProgressBar,
+}
+
+impl MithrilFeedback {
+    fn new(feedback: &Feedback) -> Self {
+        let multi = feedback.multi_progress();
+
+        let aggregate_pb = multi.add(indicatif::ProgressBar::hidden());
+        aggregate_pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} files {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        aggregate_pb.set_message("downloading immutable files");
+
+        let validate_pb = multi.add(indicatif::ProgressBar::new_spinner());
+        validate_pb.set_style(
+            indicatif::ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .unwrap(),
+        );
+
+        Self {
+            aggregate_pb,
+            validate_pb,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
     async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
         match event {
-            mithril_client::feedback::MithrilEvent::SnapshotDownloadStarted { .. } => {
-                self.download_pb.set_message("snapshot download started")
-            }
-            mithril_client::feedback::MithrilEvent::SnapshotDownloadProgress {
-                downloaded_bytes,
-                size,
-                ..
-            } => {
-                self.download_pb.set_length(size);
-                self.download_pb.set_position(downloaded_bytes);
-                self.download_pb.set_message("downloading Mithril snapshot");
-            }
-            mithril_client::feedback::MithrilEvent::SnapshotDownloadCompleted { .. } => {
-                self.download_pb.set_message("snapshot download completed");
-            }
+            mithril_client::feedback::MithrilEvent::CardanoDatabase(db_event) => match db_event {
+                mithril_client::feedback::MithrilEventCardanoDatabase::Started {
+                    total_immutable_files,
+                    ..
+                } => {
+                    self.aggregate_pb
+                        .set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                    self.aggregate_pb.set_length(total_immutable_files);
+                    self.aggregate_pb.set_position(0);
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::ImmutableDownloadCompleted {
+                    ..
+                } => {
+                    self.aggregate_pb.inc(1);
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::Completed { .. } => {
+                    self.aggregate_pb.finish_with_message("download completed");
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadStarted {
+                    size,
+                    ..
+                } => {
+                    self.validate_pb.set_length(size);
+                    self.validate_pb.set_position(0);
+                    self.validate_pb.set_message("downloading digests");
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadProgress {
+                    downloaded_bytes,
+                    size,
+                    ..
+                } => {
+                    self.validate_pb.set_length(size);
+                    self.validate_pb.set_position(downloaded_bytes);
+                    self.validate_pb.set_message("downloading digests");
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadCompleted {
+                    ..
+                } => {
+                    self.validate_pb
+                        .finish_with_message("digests downloaded");
+                }
+                _ => {
+                    tracing::debug!("unhandled mithril event: {db_event:?}");
+                }
+            },
             mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
                 ..
             } => {
@@ -93,10 +163,50 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
                     .set_message("certificate fetched from cache");
             }
             x => {
-                self.validate_pb.set_message(format!("{x:?}"));
+                tracing::debug!("unhandled mithril event: {x:?}");
             }
         }
     }
+}
+
+/// Scan the immutable directory for the highest immutable file number present.
+fn highest_existing_immutable(immutable_dir: &Path) -> Option<u64> {
+    let entries = std::fs::read_dir(immutable_dir).ok()?;
+    let mut max: Option<u64> = None;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(num_str) = name.split('.').next().and_then(|s| s.parse::<u64>().ok()) {
+            max = Some(max.map_or(num_str, |m| m.max(num_str)));
+        }
+    }
+    max
+}
+
+/// Compute the immutable file range to download based on CLI args and existing
+/// files on disk. If immutables already exist locally and no explicit range is
+/// given, resume from the next missing file.
+fn compute_immutable_range(args: &Args, immutable_dir: &Path) -> ImmutableFileRange {
+    if let (Some(start), Some(end)) = (args.download_start, args.download_end) {
+        return ImmutableFileRange::Range(start, end);
+    }
+    if let Some(start) = args.download_start {
+        return ImmutableFileRange::From(start);
+    }
+    if let Some(end) = args.download_end {
+        return ImmutableFileRange::UpTo(end);
+    }
+
+    if let Some(highest) = highest_existing_immutable(immutable_dir) {
+        info!(
+            highest,
+            "resuming download from immutable file {}",
+            highest + 1
+        );
+        return ImmutableFileRange::From(highest + 1);
+    }
+
+    ImmutableFileRange::Full
 }
 
 async fn fetch_snapshot(
@@ -104,26 +214,27 @@ async fn fetch_snapshot(
     config: &MithrilConfig,
     feedback: &Feedback,
 ) -> MithrilResult<()> {
-    let feedback = MithrilFeedback {
-        download_pb: feedback.bytes_progress_bar(),
-        validate_pb: feedback.indeterminate_progress_bar(),
-    };
+    let feedback = MithrilFeedback::new(feedback);
 
-    let client = ClientBuilder::aggregator(&config.aggregator, &config.genesis_key)
+    let client = ClientBuilder::new(AggregatorDiscoveryType::Url(config.aggregator.clone()))
+        .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
+            config.genesis_key.clone(),
+        ))
         .add_feedback_receiver(Arc::new(feedback))
-        .set_ancillary_verification_key(config.ancillary_key.clone())
         .build()?;
 
-    let snapshots = client.cardano_database().list().await?;
+    let db_client = client.cardano_database_v2();
+
+    let snapshots = db_client.list().await?;
 
     let last_digest = snapshots
-        .first()
+        .iter()
+        .max_by_key(|s| s.beacon.immutable_file_number)
         .ok_or(MithrilError::msg("no snapshot available"))?
-        .digest
-        .as_ref();
+        .hash
+        .as_str();
 
-    let snapshot = client
-        .cardano_database()
+    let snapshot = db_client
         .get(last_digest)
         .await?
         .ok_or(MithrilError::msg("no snapshot available"))?;
@@ -134,26 +245,58 @@ async fn fetch_snapshot(
         .await?;
 
     let target_directory = Path::new(&args.download_dir);
+    let immutable_dir = target_directory.join("immutable");
 
-    client
-        .cardano_database()
-        .download_unpack(&snapshot, target_directory)
+    let immutable_range = compute_immutable_range(args, &immutable_dir);
+
+    let download_opts = DownloadUnpackOptions {
+        allow_override: true,
+        include_ancillary: false,
+        ..DownloadUnpackOptions::default()
+    };
+
+    db_client
+        .download_unpack(&snapshot, &immutable_range, target_directory, download_opts)
         .await?;
 
-    if let Err(e) = client.cardano_database().add_statistics(&snapshot).await {
+    let nb_files = immutable_range.length(snapshot.beacon.immutable_file_number);
+
+    if let Err(e) = db_client
+        .add_statistics(immutable_range == ImmutableFileRange::Full, false, nb_files)
+        .await
+    {
         warn!("failed incrementing snapshot download statistics: {:?}", e);
     }
 
     if !args.skip_validation {
+        let verified_digests = db_client
+            .download_and_verify_digests(&certificate, &snapshot)
+            .await?;
+
+        let merkle_proof = db_client
+            .verify_cardano_database(
+                &certificate,
+                &snapshot,
+                &immutable_range,
+                false,
+                target_directory,
+                &verified_digests,
+            )
+            .await
+            .map_err(|e| MithrilError::msg(format!("verification failed: {e:?}")))?;
+
+        let message = MessageBuilder::new()
+            .compute_cardano_database_message(&certificate, &merkle_proof)
+            .await?;
+
+        if !certificate.match_message(&message) {
+            return Err(MithrilError::msg(
+                "mithril certificate does not match the downloaded snapshot",
+            ));
+        }
+    } else {
         warn!("skipping validation, assuming snapshot is already validated");
-        return Ok(());
     }
-
-    let message = MessageBuilder::new()
-        .compute_snapshot_message(&certificate, target_directory)
-        .await?;
-
-    assert!(certificate.match_message(&message));
 
     Ok(())
 }

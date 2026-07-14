@@ -1,4 +1,5 @@
 pub use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::sync::Arc;
 
 pub struct ProgressReader<R> {
     inner: R,
@@ -20,10 +21,14 @@ impl<R: std::io::Read> std::io::Read for ProgressReader<R> {
 }
 
 pub struct Feedback {
-    multi: MultiProgress,
+    multi: Arc<MultiProgress>,
 }
 
 impl Feedback {
+    pub fn multi_progress(&self) -> Arc<MultiProgress> {
+        self.multi.clone()
+    }
+
     pub fn indeterminate_progress_bar(&self) -> ProgressBar {
         let pb = ProgressBar::new_spinner();
 
@@ -65,7 +70,7 @@ impl Feedback {
 
 impl Default for Feedback {
     fn default() -> Self {
-        let multi = MultiProgress::new();
+        let multi = Arc::new(MultiProgress::new());
 
         Self { multi }
     }
