@@ -123,8 +123,8 @@ State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_sch
   "compression": {"algo": "zstd", "level": 9},
   "stateShards": 16,
   "history": [
-    {"epoch": 549, "descriptorDigest": "sha256:…"},
-    {"epoch": 548, "descriptorDigest": "sha256:…"} ],
+    {"epoch": 548, "descriptorDigest": "sha256:…"},
+    {"epoch": 549, "descriptorDigest": "sha256:…"} ],
   "layers": [
     {"kind": "blocks", "epoch": 0, "startSlot": 0, "endSlot": 21599,
      "diffId": "sha256:…", "records": 21600, "uncompressedSize": 43210000},
@@ -135,7 +135,9 @@ State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_sch
 
 `history` embeds the digest of every previously published descriptor, so the latest signed descriptor transitively attests the entire publication history (~80 bytes per epoch, ~50 KB after 600 epochs — negligible for a config blob). This makes attestation outlive blob retention: a snapshot whose blobs have long been garbage-collected can still be verified by anyone holding a copy, because the copy carries its own descriptor (the OCI config blob) — check that descriptor's digest against the `history` of the latest signed descriptor, then the layers against its diffIds. No external trusted storage of attestations is required.
 
-Note: a side-effect of anchoring identity on uncompressed content digests is that snapshots can be mirrored over any content-addressed transport (e.g. IPFS) — or re-compressed with a different algorithm — and still verify against the same signed descriptor. This is a property of the format, not a requirement of the protocol; the OCI registry remains the canonical distribution channel.
+History invariant: `history` contains exactly one entry per published boundary epoch, contiguous from the network's first published epoch (pinned per network alongside the default repository) up to `epoch - 1`, in strictly ascending epoch order — no gaps, no duplicates. JCS canonicalizes object keys but preserves array order, so the ordering is normative. Verifiers reject descriptors that violate the invariant. This is a reproducibility requirement as much as a safety one: independent publishers converge on byte-identical descriptors only if the publication schedule and history encoding are canonical; an independent party reproduces the digest chain naturally by computing each boundary descriptor while replaying the chain. If the list ever outgrows the descriptor, or succinct append-only consistency proofs become a requirement, the designated evolution is an epoch-indexed Merkle Mountain Range commitment (`{root, size}`) — a schema-versioned change that can be built retroactively from the flat list.
+
+Note: a side-effect of anchoring identity on uncompressed content digests is that snapshot *content* can be mirrored over any content-addressed transport (e.g. IPFS) — or re-compressed with a different algorithm — and still be verified against the same signed descriptor via diffIds. Consumption is stricter than verification: the restore client expects the canonical zstd blobs referenced by the OCI manifest, so re-encoded mirrors serve archival and verification, not direct restore. This is a property of the format, not a requirement of the protocol; the OCI registry remains the canonical distribution channel.
 
 ### Code layout
 
@@ -175,7 +177,7 @@ Registry hygiene: keep a trailing window of `epoch-E` tags (e.g. 12); untagged s
 ### Restore pipeline
 
 1. Resolve tag → manifest → descriptor; verify digest, schema, network magic and signatures.
-2. Plan epoch range from `sync.max_history`; diff against the progress file (`<storage.path>/.snapshot-restore.json`, records descriptor digest + completed layer diffIds) for `--continue`. Preflight: sum the descriptor `uncompressedSize` of the planned layers and fail early if free space at `storage.path` is insufficient; derive download progress and time-remaining estimates from the manifest's compressed blob sizes.
+2. Plan epoch range from `sync.max_history`; diff against the progress file (`<storage.path>/.snapshot-restore.json`, records descriptor digest + completed layer diffIds) for `--continue`. Preflight: sum the descriptor `uncompressedSize` of the planned layers and fail early if free space at `storage.path` is insufficient; derive download progress and time-remaining estimates from the compressed blob sizes of the layers that remain to be fetched — excluding layers already completed per the progress file or already present locally — so resumed and deduplicated restores report correct totals.
 3. Open stores; `IndexStore::initialize_schema()`.
 4. Per epoch (checkpointed): fetch + verify `blocks`/`logs` → archive appends, commit; fetch `indexes` → pre-hashed appends, commit.
 5. State tip: fetch the 16 shards (parallelizable) → dispatch per namespace; `set_cursor(descriptor.point)` last so `has_existing_data()` only ever sees complete restores; commit.
