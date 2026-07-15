@@ -183,30 +183,60 @@ fn highest_existing_immutable(immutable_dir: &Path) -> Option<u64> {
     max
 }
 
-/// Compute the immutable file range to download based on CLI args and existing
-/// files on disk. If immutables already exist locally and no explicit range is
-/// given, resume from the next missing file.
-fn compute_immutable_range(args: &Args, immutable_dir: &Path) -> ImmutableFileRange {
-    if let (Some(start), Some(end)) = (args.download_start, args.download_end) {
-        return ImmutableFileRange::Range(start, end);
+/// Ranges of immutable files to download and to verify.
+struct DownloadPlan {
+    /// Range to download, if any. `None` when files on disk already cover the
+    /// snapshot.
+    download: Option<ImmutableFileRange>,
+    /// Range to verify against the certificate.
+    verify: ImmutableFileRange,
+}
+
+/// Build the explicit range requested via CLI args, if any.
+fn explicit_range(args: &Args) -> Option<ImmutableFileRange> {
+    match (args.download_start, args.download_end) {
+        (Some(start), Some(end)) => Some(ImmutableFileRange::Range(start, end)),
+        (Some(start), None) => Some(ImmutableFileRange::From(start)),
+        (None, Some(end)) => Some(ImmutableFileRange::UpTo(end)),
+        (None, None) => None,
     }
-    if let Some(start) = args.download_start {
-        return ImmutableFileRange::From(start);
-    }
-    if let Some(end) = args.download_end {
-        return ImmutableFileRange::UpTo(end);
+}
+
+/// Compute the download & verification plan based on CLI args, existing files
+/// on disk and the snapshot's last immutable file number.
+///
+/// When an explicit range is given, both download and verification are scoped
+/// to it. Otherwise the full range is verified; if immutables already exist
+/// locally, the download resumes from the highest file present. The highest
+/// file is re-fetched (not skipped) because an interrupted run may have left
+/// it truncated, and it's never verified until this run completes.
+fn plan_download(args: &Args, immutable_dir: &Path, last_immutable: u64) -> DownloadPlan {
+    if let Some(verify) = explicit_range(args) {
+        return DownloadPlan {
+            download: explicit_range(args),
+            verify,
+        };
     }
 
-    if let Some(highest) = highest_existing_immutable(immutable_dir) {
-        info!(
-            highest,
-            "resuming download from immutable file {}",
-            highest + 1
-        );
-        return ImmutableFileRange::From(highest + 1);
-    }
+    let download = match highest_existing_immutable(immutable_dir) {
+        Some(highest) if highest > last_immutable => {
+            info!(
+                highest,
+                last_immutable, "local immutable files already cover the snapshot"
+            );
+            None
+        }
+        Some(highest) => {
+            info!(highest, "resuming download from immutable file {highest}");
+            Some(ImmutableFileRange::From(highest))
+        }
+        None => Some(ImmutableFileRange::Full),
+    };
 
-    ImmutableFileRange::Full
+    DownloadPlan {
+        download,
+        verify: ImmutableFileRange::Full,
+    }
 }
 
 async fn fetch_snapshot(
@@ -247,25 +277,32 @@ async fn fetch_snapshot(
     let target_directory = Path::new(&args.download_dir);
     let immutable_dir = target_directory.join("immutable");
 
-    let immutable_range = compute_immutable_range(args, &immutable_dir);
+    let last_immutable = snapshot.beacon.immutable_file_number;
+    let plan = plan_download(args, &immutable_dir, last_immutable);
 
-    let download_opts = DownloadUnpackOptions {
-        allow_override: true,
-        include_ancillary: false,
-        ..DownloadUnpackOptions::default()
-    };
+    if let Some(immutable_range) = &plan.download {
+        let download_opts = DownloadUnpackOptions {
+            allow_override: true,
+            include_ancillary: false,
+            ..DownloadUnpackOptions::default()
+        };
 
-    db_client
-        .download_unpack(&snapshot, &immutable_range, target_directory, download_opts)
-        .await?;
+        db_client
+            .download_unpack(&snapshot, immutable_range, target_directory, download_opts)
+            .await?;
 
-    let nb_files = immutable_range.length(snapshot.beacon.immutable_file_number);
+        let nb_files = immutable_range.length(last_immutable);
 
-    if let Err(e) = db_client
-        .add_statistics(immutable_range == ImmutableFileRange::Full, false, nb_files)
-        .await
-    {
-        warn!("failed incrementing snapshot download statistics: {:?}", e);
+        if let Err(e) = db_client
+            .add_statistics(
+                *immutable_range == ImmutableFileRange::Full,
+                false,
+                nb_files,
+            )
+            .await
+        {
+            warn!("failed incrementing snapshot download statistics: {:?}", e);
+        }
     }
 
     if !args.skip_validation {
@@ -277,7 +314,7 @@ async fn fetch_snapshot(
             .verify_cardano_database(
                 &certificate,
                 &snapshot,
-                &immutable_range,
+                &plan.verify,
                 false,
                 target_directory,
                 &verified_digests,
@@ -446,4 +483,100 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     info!("bootstrap complete, run `dolos daemon` to start the node");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_with_range(start: Option<u64>, end: Option<u64>) -> Args {
+        Args {
+            download_start: start,
+            download_end: end,
+            ..Default::default()
+        }
+    }
+
+    fn touch_immutables(dir: &Path, numbers: impl IntoIterator<Item = u64>) {
+        for n in numbers {
+            for ext in ["chunk", "primary", "secondary"] {
+                std::fs::write(dir.join(format!("{n:05}.{ext}")), []).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn plan_uses_explicit_range_for_download_and_verify() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let plan = plan_download(&args_with_range(Some(5), Some(8)), dir.path(), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::Range(5, 8)));
+        assert_eq!(plan.verify, ImmutableFileRange::Range(5, 8));
+
+        let plan = plan_download(&args_with_range(Some(5), None), dir.path(), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::From(5)));
+        assert_eq!(plan.verify, ImmutableFileRange::From(5));
+
+        let plan = plan_download(&args_with_range(None, Some(8)), dir.path(), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::UpTo(8)));
+        assert_eq!(plan.verify, ImmutableFileRange::UpTo(8));
+    }
+
+    #[test]
+    fn plan_downloads_and_verifies_full_on_fresh_dir() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let plan = plan_download(&args_with_range(None, None), dir.path(), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::Full));
+        assert_eq!(plan.verify, ImmutableFileRange::Full);
+
+        // a missing dir behaves like a fresh one
+        let plan = plan_download(&args_with_range(None, None), &dir.path().join("nope"), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::Full));
+    }
+
+    #[test]
+    fn plan_resumes_from_highest_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        touch_immutables(dir.path(), 0..=4);
+
+        // the highest file is re-fetched (not skipped): an interrupted run may
+        // have left it truncated
+        let plan = plan_download(&args_with_range(None, None), dir.path(), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::From(4)));
+        assert_eq!(plan.verify, ImmutableFileRange::Full);
+    }
+
+    #[test]
+    fn plan_refetches_boundary_file_when_download_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        touch_immutables(dir.path(), 0..=10);
+
+        // highest == last must not produce an out-of-bounds range (From(11)
+        // would make the mithril client fail with "invalid immutable file
+        // range" when resuming after a crash during import)
+        let plan = plan_download(&args_with_range(None, None), dir.path(), 10);
+        assert_eq!(plan.download, Some(ImmutableFileRange::From(10)));
+        assert_eq!(plan.verify, ImmutableFileRange::Full);
+    }
+
+    #[test]
+    fn plan_skips_download_when_local_files_exceed_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        touch_immutables(dir.path(), 0..=11);
+
+        let plan = plan_download(&args_with_range(None, None), dir.path(), 10);
+        assert_eq!(plan.download, None);
+        assert_eq!(plan.verify, ImmutableFileRange::Full);
+    }
+
+    #[test]
+    fn highest_existing_ignores_non_numeric_files() {
+        let dir = tempfile::tempdir().unwrap();
+        touch_immutables(dir.path(), [0, 3]);
+        std::fs::write(dir.path().join("lock"), []).unwrap();
+        std::fs::write(dir.path().join("clean"), []).unwrap();
+
+        assert_eq!(highest_existing_immutable(dir.path()), Some(3));
+    }
 }

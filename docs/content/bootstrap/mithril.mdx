@@ -59,7 +59,7 @@ If you use the `dolos init` command, bootstrap is triggered automatically after 
 </Aside>
 
 <Aside type="note">
-The import step supports resuming from previous runs via the `--continue` flag. The download step also supports resuming: when `--continue` is set, only immutable files not already present in the download directory are fetched.
+The process supports resuming from previous runs (use the global `--continue` flag to allow bootstrap to proceed when Dolos storage already has data). The download step resumes automatically: if immutable files already exist in the download directory, only the missing ones are fetched.
 </Aside>
 
 In addition to the [global bootstrap flags](../bootstrap), the `mithril` subcommand accepts the following flags:
@@ -75,4 +75,4 @@ In addition to the [global bootstrap flags](../bootstrap), the `mithril` subcomm
 | `--download-start <N>` | Start downloading from this immutable file number (inclusive) | none |
 | `--download-end <N>` | Download up to this immutable file number (inclusive) | none |
 
-When `--download-start` and `--download-end` are not specified, the full range of immutable files is downloaded. If immutable files already exist in the download directory, the download resumes from the next missing file.
+When `--download-start` and `--download-end` are not specified, the full range of immutable files is downloaded and verified. If immutable files already exist in the download directory, the download resumes from the highest file present (which is re-fetched in case a previous run left it incomplete); certificate verification still covers the full set of immutable files. When an explicit range is given, verification is scoped to that range.
