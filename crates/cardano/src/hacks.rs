@@ -341,6 +341,10 @@ pub mod proposals {
                 "4aa45fe4266c114201733bbc641164b4d3eac51081afeee12ddc92235b58f45c#0" => {
                     Ratified(295)
                 }
+                // Parameter Change superseded at epoch 296
+                "7b8b1d6c22fc2ff8f1a1526a8027ad9df025dc9a7013b81ef51fb869bcc1af44#0" => {
+                    Canceled(296)
+                }
                 _ => match protocol {
                     0..=8 => RatifiedCurrentEpoch,
                     _ => Unknown,
@@ -561,12 +565,11 @@ pub mod proposals {
                 }
 
                 // Hard Fork to Protocol Version 11 — submitted epoch 637, all three
-                // governance bodies voting yes with zero no votes. Anticipated
-                // ratification at epoch 641, enactment at epoch 642.
-                // Uncomment when ratification is confirmed on-chain.
-                // "fdd468da5cc4ac8431dcd7e2b3211666c73bc229f85879469f67f1d9d51d344d#0" => {
-                //     Ratified(641)
-                // }
+                // governance bodies voting yes with zero no votes. Ratified at
+                // epoch 643, enactment at epoch 644.
+                "fdd468da5cc4ac8431dcd7e2b3211666c73bc229f85879469f67f1d9d51d344d#0" => {
+                    Ratified(643)
+                }
 
                 // Plutus V3 Cost Model Parameter Changes Prior to Chang#2
                 "b2a591ac219ce6dcca5847e0248015209c7cb0436aa6bd6863d0c1f152a60bc5#0" => {
@@ -743,6 +746,14 @@ pub mod proposals {
                 // Treasury Withdrawal enacted at epoch 641
                 "17e43ffe4b2e0df1787d54f21ac66643c74abb131a326272fceecbdbbdd0d3fc#0" => {
                     Ratified(640)
+                }
+                // Parameter Change enacted at epoch 643
+                "c75bb221606687aa858ec89c7a15c88e9c17054f2e045ae31ecc8a9687cd206e#0" => {
+                    Ratified(642)
+                }
+                // Treasury Withdrawal enacted at epoch 643
+                "4f6e5df9a6e14bd49e406e2bbb0d108b3be2be64b9569b930053a0c1eebe0d47#0" => {
+                    Ratified(642)
                 }
 
                 _ => match protocol {
