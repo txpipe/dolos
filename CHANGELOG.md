@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2026-07-16
+
+### 🚀 Features
+
+- *(bootstrap)* Migrate mithril client to v2 Cardano Database format (#1063)
+
+### 🐛 Bug Fixes
+
+- *(examples)* Update blaze-client deps to clear security advisories (#1054)
+- *(deps)* Bump vulnerable dependencies to clear security advisories (#1057)
+- *(cardano)* Adjust fn visibility to satisfy private interface lint (#1060)
+- *(deps)* Upgrade opentelemetry family to 0.32 (#1058)
+- *(minibf)* Return 404 for valid but non-existent asset in `/assets/{asset}/addresses` (#1055)
+- *(cardano)* Update gov proposal mappings and update skill (#1065)
+
+### 📚 Documentation
+
+- Add ADR for deterministic OCI snapshots (#1056)
+- *(examples)* Introduce UTxO RPC WatchTx examples (#1061)
+- Incorporate ADR 004 review feedback (#1062)
+
+### 🔧 Continuous Integration
+
+- Add cargo-deny advisories gate (#1059)
+
 ## [1.4.0] - 2026-07-08
 
 ### 🐛 Bug Fixes
@@ -32,6 +57,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Link high-stakes TODOs to tracking issues (#1043)
+
+### Release
+
+- V1.4.0
 
 ## [1.3.2] - 2026-06-23
 
