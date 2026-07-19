@@ -67,19 +67,32 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Returns whether the acquire succeeded. On failure, the protocol is
+    /// back in the idle state and the client is expected to acquire again.
     async fn handle_acquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling acquire request");
 
-        let chain_point = match point {
-            Some(p) => ChainPoint::from(p),
-            None => {
-                // None means acquire the latest point
-                self.tip_cursor()?
-            }
+        let Some(p) = point else {
+            // None means acquire the volatile tip, which always succeeds at
+            // the current cursor. The archive may still be catching up to the
+            // cursor while the node syncs, so it can't be used to validate
+            // the node's own tip.
+            let cursor = self
+                .domain
+                .state()
+                .read_cursor()
+                .map_err(Error::server)?
+                .unwrap_or(ChainPoint::Origin);
+
+            self.acquired_point = Some(cursor);
+            self.send_acquired().await?;
+            return Ok(true);
         };
+
+        let chain_point = ChainPoint::from(p);
 
         let exists = match &chain_point {
             ChainPoint::Origin => true,
@@ -103,12 +116,12 @@ impl<D: Domain> Session<D> {
         if exists {
             self.acquired_point = Some(chain_point);
             self.send_acquired().await?;
+            Ok(true)
         } else {
             self.send_failure(localstate::AcquireFailure::PointNotOnChain)
                 .await?;
+            Ok(false)
         }
-
-        Ok(())
     }
 
     /// Decode cardano-cli tagged query format.
@@ -348,10 +361,12 @@ impl<D: Domain> Session<D> {
         Ok(())
     }
 
+    /// Returns whether the re-acquire succeeded. On failure, the protocol is
+    /// back in the idle state, not the acquired state.
     async fn handle_reacquire(
         &mut self,
         point: Option<pallas::network::miniprotocols::Point>,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         debug!(?point, "handling reacquire request");
         self.handle_acquire(point).await
     }
@@ -370,7 +385,10 @@ impl<D: Domain> Session<D> {
                 .await
                 .map_err(Error::server)?
             {
-                self.handle_acquire(req.0).await?;
+                if !self.handle_acquire(req.0).await? {
+                    // failed acquire leaves the protocol idle
+                    continue;
+                }
             } else {
                 break;
             }
@@ -386,9 +404,10 @@ impl<D: Domain> Session<D> {
                         self.handle_query(query).await?;
                     }
                     localstate::ClientQueryRequest::ReAcquire(point) => {
-                        self.handle_reacquire(point).await?;
-                        // After reacquire, we stay in acquired state but with
-                        // new point
+                        if !self.handle_reacquire(point).await? {
+                            // failed reacquire leaves the protocol idle
+                            break;
+                        }
                     }
                     localstate::ClientQueryRequest::Release => {
                         self.handle_release().await?;
@@ -430,4 +449,95 @@ pub async fn handle_session<D: Domain, C: CancelToken>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio_util::sync::CancellationToken;
+
+    use dolos_testing::toy_domain::ToyDomain;
+
+    use pallas::network::facades::{NodeClient, NodeServer};
+    use pallas::network::miniprotocols::localstate::ClientError;
+    use pallas::network::miniprotocols::Point;
+
+    use crate::serve::CancelTokenImpl;
+
+    fn spawn_server(
+        domain: ToyDomain,
+        listener: tokio::net::UnixListener,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let connection = NodeServer::accept(&listener, 0).await.unwrap();
+
+            let NodeServer {
+                plexer, statequery, ..
+            } = connection;
+
+            let cancel = CancelTokenImpl(CancellationToken::new());
+
+            handle_session(domain, statequery, cancel).await.unwrap();
+
+            plexer.abort().await;
+        })
+    }
+
+    #[tokio::test]
+    async fn statequery_acquires_volatile_tip() {
+        let domain = ToyDomain::new(None, None);
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let socket = tempdir.path().join("node.socket");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        let server = spawn_server(domain, listener);
+
+        let mut client = NodeClient::connect(&socket, 0).await.unwrap();
+
+        client.statequery().acquire(None).await.unwrap();
+
+        client.statequery().send_release().await.unwrap();
+        client.statequery().send_done().await.unwrap();
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn statequery_recovers_from_failed_acquire() {
+        let domain = ToyDomain::new(None, None);
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let socket = tempdir.path().join("node.socket");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        let server = spawn_server(domain, listener);
+
+        let mut client = NodeClient::connect(&socket, 0).await.unwrap();
+
+        let bogus = Point::Specific(1, vec![0xab; 32]);
+
+        let failure = client.statequery().acquire(Some(bogus.clone())).await;
+        assert!(matches!(failure, Err(ClientError::AcquirePointNotFound)));
+
+        // the session must survive a failed acquire and accept a new one
+        client.statequery().acquire(None).await.unwrap();
+
+        // same for a failed re-acquire from the acquired state
+        client
+            .statequery()
+            .send_reacquire(Some(bogus))
+            .await
+            .unwrap();
+        let failure = client.statequery().recv_while_acquiring().await;
+        assert!(matches!(failure, Err(ClientError::AcquirePointNotFound)));
+
+        client.statequery().acquire(None).await.unwrap();
+
+        client.statequery().send_release().await.unwrap();
+        client.statequery().send_done().await.unwrap();
+
+        server.await.unwrap();
+    }
 }
