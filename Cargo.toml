@@ -207,8 +207,8 @@ readme = "README.md"
 authors = ["TxPipe <hello@txpipe.io>"]
 
 [workspace.dependencies]
-pallas = { version = "1.1.1", features = ["hardano", "phase2", "unstable"] }
-# pallas = { git = "https://github.com/txpipe/pallas.git", rev = "a7b5a86", features = ["hardano", "phase2", "unstable"] }
+# pallas = { version = "1.1.1", features = ["hardano", "phase2", "unstable"] }
+pallas = { git = "https://github.com/Javieracost/pallas.git", rev = "79dbeeba3a5d3894d06f87c2e894c21a8ec2619c", features = ["hardano", "phase2", "unstable"] }
 # pallas = { path = "../pallas/pallas", features = ["hardano", "phase2", "unstable"] }
 
 thiserror = "2.0.12"
