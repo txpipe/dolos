@@ -784,7 +784,7 @@ fn select_retiring_pools(
         })
         .collect();
 
-    retiring.sort_by(|a, b| Ord::cmp(&(a.0, a.1), &(b.0, b.1)));
+    retiring.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
 
     if matches!(pagination.order, crate::pagination::Order::Desc) {
         retiring.reverse();
