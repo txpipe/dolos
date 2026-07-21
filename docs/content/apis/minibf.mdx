@@ -60,7 +60,7 @@ print(json.dumps(api.block_latest().to_dict(), indent=2))
 ### Using a Tx Builder
 
 The endpoints required for most tx builders to work are supported. Libraries like Lucid, Lucid-evolution, Blaze, MeshJS, etc can be used by pointing their corresponding provider configuration to Dolos Mini-BF endpoint.
- 
+
 
 ## Configuration
 
@@ -76,7 +76,7 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
-- `token_registry_url`: optional token registry base URL used for off-chain asset metadata. 
+- `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
 
@@ -130,6 +130,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/epochs/{epoch}/blocks`                   | Get blocks in a specific epoch                           |
 | `/epochs/{epoch}/parameters`               | Get epoch parameters                                     |
 | `/genesis`                                 | Get genesis information                                  |
+| `/governance/dreps`                        | Get list of registered DReps                             |
 | `/governance/dreps/{drep_id}`              | Get DRep information                                     |
 | `/metadata/txs/labels/{label}`             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`        | Get CBOR metadata for transactions with a specific label |
