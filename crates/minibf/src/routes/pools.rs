@@ -15,6 +15,7 @@ use blockfrost_openapi::models::{
     pool_delegators_inner::PoolDelegatorsInner,
     pool_history_inner::PoolHistoryInner,
     pool_list_extended_inner::PoolListExtendedInner,
+    pool_list_retire_inner::PoolListRetireInner,
     PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{
@@ -766,6 +767,70 @@ where
     Ok(Json(out))
 }
 
+fn select_retiring_pools(
+    pools: impl IntoIterator<Item = PoolState>,
+    current_epoch: u64,
+    pagination: &Pagination,
+) -> Vec<(u64, PoolHash)> {
+    let mut retiring: Vec<(u64, BlockSlot, PoolHash)> = pools
+        .into_iter()
+        .filter_map(|pool| {
+            let retiring_epoch = pool.retiring_epoch?;
+            (retiring_epoch > current_epoch).then_some((
+                retiring_epoch,
+                pool.register_slot,
+                pool.operator,
+            ))
+        })
+        .collect();
+
+    retiring.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        retiring.reverse();
+    }
+
+    retiring
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
+        .collect()
+}
+
+pub async fn all_retiring<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolListRetireInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (current_epoch, _) = summary.slot_epoch(tip);
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(|item| item.map(|(_, pool)| pool))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let out = select_retiring_pools(pools, current_epoch, &pagination)
+        .into_iter()
+        .map(|(retiring_epoch, operator)| {
+            Ok(PoolListRetireInner {
+                pool_id: bech32_pool(operator)?,
+                epoch: retiring_epoch as i32,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 pub async fn by_id_metadata<D: Domain>(
     Path(id): Path<String>,
     State(domain): State<Facade<D>>,
@@ -952,9 +1017,10 @@ mod tests {
     use blockfrost_openapi::models::{
         pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
+        pool_list_retire_inner::PoolListRetireInner,
     };
     use dolos_cardano::cip151;
-    use dolos_cardano::model::{DRepDelegation, EpochValue, Stake};
+    use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use pallas::{
         codec::utils::Bytes,
@@ -1370,6 +1436,142 @@ mod tests {
     async fn pools_extended_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools/retiring").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let retiring: Vec<PoolListRetireInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool list retire");
+
+        assert!(
+            retiring.is_empty(),
+            "synthetic ledger registers pools but never schedules a future retirement, so the list is expected to be empty"
+        );
+    }
+
+    fn retiring_pool(
+        operator: [u8; 28],
+        register_slot: u64,
+        retiring_epoch: Option<u64>,
+    ) -> PoolState {
+        let params = PoolParams {
+            vrf_keyhash: Hash::from([0u8; 32]),
+            pledge: 0,
+            cost: 0,
+            margin: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: vec![0u8; 29],
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let snapshot = PoolSnapshot {
+            is_retired: false,
+            blocks_minted: 0,
+            params,
+            is_new: false,
+        };
+        PoolState {
+            operator: Hash::from(operator),
+            snapshot: EpochValue::with_live(3, snapshot),
+            blocks_minted_total: 0,
+            register_slot,
+            retiring_epoch,
+            deposit: 0,
+        }
+    }
+
+    #[test]
+    fn select_retiring_pools_filters_and_orders() {
+        let pools = vec![
+            // scheduled in the past/current: excluded
+            retiring_pool([1u8; 28], 10, Some(5)),
+            retiring_pool([2u8; 28], 20, Some(10)),
+            // not retiring: excluded
+            retiring_pool([3u8; 28], 30, None),
+            // future retirements: included
+            retiring_pool([4u8; 28], 40, Some(12)),
+            retiring_pool([5u8; 28], 50, Some(11)),
+            // same epoch as above, later register_slot -> stable tie-break
+            retiring_pool([6u8; 28], 60, Some(11)),
+        ];
+
+        let pagination = Pagination::default();
+        let selected = select_retiring_pools(pools.clone(), 10, &pagination);
+
+        assert_eq!(
+            selected,
+            vec![
+                (11, Hash::from([5u8; 28])),
+                (11, Hash::from([6u8; 28])),
+                (12, Hash::from([4u8; 28])),
+            ]
+        );
+
+        // Descending order reverses the listing.
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let selected_desc = select_retiring_pools(pools, 10, &desc);
+        assert_eq!(
+            selected_desc,
+            vec![
+                (12, Hash::from([4u8; 28])),
+                (11, Hash::from([6u8; 28])),
+                (11, Hash::from([5u8; 28])),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_retiring_pools_paginates() {
+        let pools = vec![
+            retiring_pool([1u8; 28], 10, Some(11)),
+            retiring_pool([2u8; 28], 20, Some(12)),
+            retiring_pool([3u8; 28], 30, Some(13)),
+        ];
+
+        let params = PaginationParameters {
+            count: Some("1".to_string()),
+            page: Some("2".to_string()),
+            order: None,
+            from: None,
+            to: None,
+        };
+        let pagination = Pagination::try_from(params).expect("valid pagination");
+
+        let selected = select_retiring_pools(pools, 10, &pagination);
+        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_bad_request() {
+        let app = TestApp::new();
+        assert_status(
+            &app,
+            "/pools/retiring?count=invalid",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools/retiring", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[test]
