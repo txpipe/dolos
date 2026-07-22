@@ -22,7 +22,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Deref,
     time::Duration,
 };
@@ -1969,6 +1969,7 @@ pub struct BlockModelBuilder<'a> {
     previous: Option<MultiEraBlock<'a>>,
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
+    deps: HashMap<TxHash, MultiEraTx<'a>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -1981,7 +1982,31 @@ impl<'a> BlockModelBuilder<'a> {
             next: None,
             tip: None,
             chain: None,
+            deps: HashMap::new(),
         })
+    }
+
+    pub fn required_input_deps(&self) -> Vec<TxHash> {
+        let mut seen_tx_hashes = HashSet::new();
+
+        self.block
+            .txs()
+            .iter()
+            .flat_map(|tx| tx.consumes())
+            .map(|input| *input.hash())
+            .filter(|hash| seen_tx_hashes.insert(*hash))
+            .collect()
+    }
+
+    pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
+        let era = try_into_or_500!(cbor.0);
+
+        let tx = MultiEraTx::decode_for_era(era, &cbor.1)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        self.deps.insert(key, tx);
+
+        Ok(())
     }
 
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
@@ -2275,21 +2300,58 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
 
     fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
         let block = &self.block;
-        let addresses = block
-            .txs()
-            .iter()
-            .flat_map(|tx| {
-                tx.produces()
-                    .iter()
-                    .map(|(_, output)| BlockContentAddressesInner {
-                        address: output.address().unwrap().to_string(),
-                        transactions: vec![BlockContentAddressesInnerTransactionsInner {
-                            tx_hash: tx.hash().to_string(),
-                        }],
-                    })
-                    .collect::<Vec<_>>()
+
+        // BTreeMap keeps entries sorted alphabetically by address, matching
+        // Blockfrost. Tx hashes are appended in block order and deduped per
+        // address by collecting each tx's touched addresses into a set first.
+        let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        // Phase-2-failed txs are deliberately NOT skipped here, diverging
+        // from Blockfrost: their collateral inputs and collateral-return
+        // outputs move funds, so those addresses are affected in ledger
+        // terms - considered a bug in BF, not behavior worth reproducing
+        for tx in block.txs() {
+            let mut touched = BTreeSet::new();
+
+            for (_, output) in tx.produces() {
+                let address = output
+                    .address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                touched.insert(address.to_string());
+            }
+
+            for input in tx.consumes() {
+                let as_output = self
+                    .deps
+                    .get(input.hash())
+                    .and_then(|dep| dep.output_at(input.index() as usize));
+
+                if let Some(output) = as_output {
+                    let address = output
+                        .address()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    touched.insert(address.to_string());
+                }
+            }
+
+            let tx_hash = tx.hash().to_string();
+
+            for address in touched {
+                by_address.entry(address).or_default().push(tx_hash.clone());
+            }
+        }
+
+        let addresses = by_address
+            .into_iter()
+            .map(|(address, tx_hashes)| BlockContentAddressesInner {
+                address,
+                transactions: tx_hashes
+                    .into_iter()
+                    .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
+                    .collect(),
             })
-            .sorted_by(|x, y| x.address.cmp(&y.address))
             .collect();
 
         Ok(addresses)
