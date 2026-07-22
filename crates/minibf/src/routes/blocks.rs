@@ -786,6 +786,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocks_latest_txs_cbor_paginated() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app
+            .get_bytes("/blocks/latest/txs/cbor?count=1&page=2")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse paginated latest txs cbor");
+
+        let expected: Vec<String> = block.tx_hashes.iter().skip(1).take(1).cloned().collect();
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        assert_eq!(hashes, expected);
+    }
+
+    #[tokio::test]
     async fn blocks_latest_txs_cbor_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         assert_status(
