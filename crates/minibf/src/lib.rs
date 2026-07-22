@@ -366,6 +366,10 @@ where
         .route("/blocks/latest", get(routes::blocks::latest::<D>))
         .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
         .route(
+            "/blocks/latest/txs/cbor",
+            get(routes::blocks::latest_txs_cbor::<D>),
+        )
+        .route(
             "/blocks/{hash_or_number}",
             get(routes::blocks::by_hash_or_number::<D>),
         )
@@ -380,6 +384,10 @@ where
         .route(
             "/blocks/{hash_or_number}/txs",
             get(routes::blocks::by_hash_or_number_txs::<D>),
+        )
+        .route(
+            "/blocks/{hash_or_number}/txs/cbor",
+            get(routes::blocks::by_hash_or_number_txs_cbor::<D>),
         )
         .route(
             "/blocks/{hash_or_number}/addresses",
