@@ -3,7 +3,7 @@ use blockfrost_openapi::models::{
     dreps_inner_metadata_error::Code as MetadataError, DrepsInnerMetadata, DrepsInnerMetadataError,
 };
 use pallas::{crypto::hash::Hasher, ledger::primitives::conway::Anchor};
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
 fn hash_mismatch_error(
     url: &str,
@@ -39,6 +39,29 @@ fn connection_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::limited(3))
+                .user_agent("dolos")
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+fn errored(
+    mut out: DrepsInnerMetadata,
+    error: DrepsInnerMetadataError,
+) -> Option<DrepsInnerMetadata> {
+    out.error = Some(Box::new(error));
+    Some(out)
+}
+
 pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMetadata> {
     let anchor = anchor?;
 
@@ -50,49 +73,35 @@ pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMet
         error: None,
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .user_agent("dolos")
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return Some(out),
+    let Some(client) = http_client() else {
+        return Some(out);
     };
 
     let response = match client.get(&anchor.url).send().await {
         Ok(response) => response,
-        Err(_) => {
-            out.error = Some(Box::new(connection_error(&anchor.url)));
-            return Some(out);
-        }
+        Err(_) => return errored(out, connection_error(&anchor.url)),
     };
 
     if response.status() != StatusCode::OK {
-        out.error = Some(Box::new(http_response_error(
-            &anchor.url,
-            response.status(),
-        )));
-        return Some(out);
+        return errored(out, http_response_error(&anchor.url, response.status()));
     }
 
     let body = match response.bytes().await {
         Ok(body) => body,
-        Err(_) => {
-            out.error = Some(Box::new(connection_error(&anchor.url)));
-            return Some(out);
-        }
+        Err(_) => return errored(out, connection_error(&anchor.url)),
     };
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
 
     if actual_hash.as_ref() != anchor.content_hash.as_slice() {
-        out.error = Some(Box::new(hash_mismatch_error(
-            &anchor.url,
-            anchor.content_hash.as_slice(),
-            actual_hash.as_ref(),
-        )));
-        return Some(out);
+        return errored(
+            out,
+            hash_mismatch_error(
+                &anchor.url,
+                anchor.content_hash.as_slice(),
+                actual_hash.as_ref(),
+            ),
+        );
     }
 
     out.json_metadata = serde_json::from_slice(body.as_ref()).ok();

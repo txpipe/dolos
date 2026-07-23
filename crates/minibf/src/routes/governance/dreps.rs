@@ -5,10 +5,50 @@ use dolos_cardano::{model::DRepState, pallas_extras, ChainSummary, PParamsSet};
 use dolos_core::BlockSlot;
 use pallas::ledger::primitives::{conway::DRep, Epoch};
 
-pub fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusCode> {
+pub const DREP_ALWAYS_ABSTAIN: &str = "drep_always_abstain";
+pub const DREP_ALWAYS_NO_CONFIDENCE: &str = "drep_always_no_confidence";
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedDRep {
+    pub drep_id: String,
+    pub encoded: Vec<u8>,
+    pub is_legacy: bool,
+    pub is_special: bool,
+}
+
+impl ParsedDRep {
+    fn special(drep_id: &str, key: u8) -> Self {
+        Self {
+            drep_id: drep_id.to_string(),
+            encoded: vec![key],
+            is_legacy: false,
+            is_special: true,
+        }
+    }
+
+    fn cip129(drep_id: &str, encoded: Vec<u8>) -> Self {
+        Self {
+            drep_id: drep_id.to_string(),
+            encoded,
+            is_legacy: false,
+            is_special: false,
+        }
+    }
+
+    fn legacy(drep_id: String, hash: Vec<u8>, prefix: u8) -> Self {
+        Self {
+            drep_id,
+            encoded: [vec![prefix], hash].concat(),
+            is_legacy: true,
+            is_special: false,
+        }
+    }
+}
+
+pub fn parse_drep_id(drep_id: &str) -> Result<ParsedDRep, StatusCode> {
     match drep_id {
-        "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
-        "drep_always_no_confidence" => Ok((drep_id.to_string(), vec![1], false, true)),
+        DREP_ALWAYS_ABSTAIN => Ok(ParsedDRep::special(drep_id, 0)),
+        DREP_ALWAYS_NO_CONFIDENCE => Ok(ParsedDRep::special(drep_id, 1)),
         drep_id => {
             let (hrp, payload) = bech32::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -21,27 +61,22 @@ pub fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), Sta
                         return Err(StatusCode::BAD_REQUEST);
                     }
 
-                    Ok((drep_id.to_string(), payload, false, false))
+                    Ok(ParsedDRep::cip129(drep_id, payload))
                 }
-                ("drep", 28) => Ok((
+                ("drep", 28) => Ok(ParsedDRep::legacy(
                     drep_id.to_string(),
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
+                    payload,
+                    pallas_extras::DREP_KEY_PREFIX,
                 )),
-                ("drep_vkh", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
+                ("drep_vkh", 28) => Ok(ParsedDRep::legacy(
+                    bech32(DREP_HRP, &payload).map_err(|_| StatusCode::BAD_REQUEST)?,
+                    payload,
+                    pallas_extras::DREP_KEY_PREFIX,
                 )),
-                ("drep_script", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
-                    true,
-                    false,
+                ("drep_script", 28) => Ok(ParsedDRep::legacy(
+                    bech32(DREP_HRP, &payload).map_err(|_| StatusCode::BAD_REQUEST)?,
+                    payload,
+                    pallas_extras::DREP_SCRIPT_PREFIX,
                 )),
                 _ => Err(StatusCode::BAD_REQUEST),
             }
@@ -61,7 +96,7 @@ pub struct DrepModelBuilder<'a> {
 
 impl<'a> DrepModelBuilder<'a> {
     fn is_special_case(&self) -> bool {
-        ["drep_always_abstain", "drep_always_no_confidence"].contains(&self.drep_id.as_str())
+        [DREP_ALWAYS_ABSTAIN, DREP_ALWAYS_NO_CONFIDENCE].contains(&self.drep_id.as_str())
     }
 
     fn first_active_epoch(&self) -> Option<Epoch> {
@@ -119,15 +154,10 @@ impl<'a> DrepModelBuilder<'a> {
             return false;
         }
 
-        let Some(state) = self.state.as_ref() else {
-            return false;
-        };
-
-        match (state.registered_at, state.unregistered_at) {
-            (Some(registered), Some(unregistered)) => unregistered > registered,
-            (Some(_), None) => false,
-            _ => false,
-        }
+        self.state
+            .as_ref()
+            .map(|x| x.is_unregistered())
+            .unwrap_or(false)
     }
 
     fn is_drep_active(&self) -> bool {
@@ -209,8 +239,8 @@ pub fn drep_list_item(
             [vec![pallas_extras::DREP_SCRIPT_PREFIX], hash.to_vec()].concat(),
             true,
         ),
-        DRep::Abstain => ("drep_always_abstain".to_string(), vec![0], false),
-        DRep::NoConfidence => ("drep_always_no_confidence".to_string(), vec![1], false),
+        DRep::Abstain => (DREP_ALWAYS_ABSTAIN.to_string(), vec![0], false),
+        DRep::NoConfidence => (DREP_ALWAYS_NO_CONFIDENCE.to_string(), vec![1], false),
     };
 
     let builder = DrepModelBuilder {
@@ -239,18 +269,13 @@ mod tests {
     #[test]
     fn parse_drep_id_special_cases() {
         assert_eq!(
-            parse_drep_id("drep_always_abstain"),
-            Ok(("drep_always_abstain".to_string(), vec![0], false, true))
+            parse_drep_id(DREP_ALWAYS_ABSTAIN),
+            Ok(ParsedDRep::special(DREP_ALWAYS_ABSTAIN, 0))
         );
 
         assert_eq!(
-            parse_drep_id("drep_always_no_confidence"),
-            Ok((
-                "drep_always_no_confidence".to_string(),
-                vec![1],
-                false,
-                true
-            ))
+            parse_drep_id(DREP_ALWAYS_NO_CONFIDENCE),
+            Ok(ParsedDRep::special(DREP_ALWAYS_NO_CONFIDENCE, 1))
         );
     }
 
@@ -261,11 +286,10 @@ mod tests {
 
         assert_eq!(
             parse_drep_id(&drep_id),
-            Ok((
+            Ok(ParsedDRep::legacy(
                 drep_id.clone(),
-                [vec![pallas_extras::DREP_KEY_PREFIX], hash].concat(),
-                true,
-                false,
+                hash,
+                pallas_extras::DREP_KEY_PREFIX,
             ))
         );
     }
@@ -277,21 +301,19 @@ mod tests {
 
         assert_eq!(
             parse_drep_id(&encode_id("drep_vkh", &hash)),
-            Ok((
+            Ok(ParsedDRep::legacy(
                 cip105.clone(),
-                [vec![pallas_extras::DREP_KEY_PREFIX], hash.clone()].concat(),
-                true,
-                false,
+                hash.clone(),
+                pallas_extras::DREP_KEY_PREFIX,
             ))
         );
 
         assert_eq!(
             parse_drep_id(&encode_id("drep_script", &hash)),
-            Ok((
+            Ok(ParsedDRep::legacy(
                 cip105,
-                [vec![pallas_extras::DREP_SCRIPT_PREFIX], hash].concat(),
-                true,
-                false,
+                hash,
+                pallas_extras::DREP_SCRIPT_PREFIX,
             ))
         );
     }
