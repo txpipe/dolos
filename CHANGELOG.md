@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 🚀 Features
+
+- *(minibf)* Add `/governance/dreps` endpoint
+
 ## [1.5.0] - 2026-07-16
 
 ### 🚀 Features

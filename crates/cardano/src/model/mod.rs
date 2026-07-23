@@ -200,6 +200,7 @@ pub enum CardanoDelta {
     DRepUnRegistration(Box<DRepUnRegistration>),
     DRepActivity(Box<DRepActivity>),
     DRepExpiration(Box<DRepExpiration>),
+    DRepUpdate(Box<DRepUpdate>),
     WithdrawalInc(Box<WithdrawalInc>),
     VoteDelegation(Box<VoteDelegation>),
     PParamsUpdate(Box<PParamsUpdate>),
@@ -281,6 +282,7 @@ delta_from!(DRepRegistration);
 delta_from!(DRepUnRegistration);
 delta_from!(DRepActivity);
 delta_from!(DRepExpiration);
+delta_from!(DRepUpdate);
 delta_from!(WithdrawalInc);
 delta_from!(VoteDelegation);
 delta_from!(PParamsUpdate);
@@ -337,6 +339,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepActivity(x) => x.key(),
             Self::DRepUnRegistration(x) => x.key(),
             Self::DRepExpiration(x) => x.key(),
+            Self::DRepUpdate(x) => x.key(),
             Self::WithdrawalInc(x) => x.key(),
             Self::VoteDelegation(x) => x.key(),
             Self::PParamsUpdate(x) => x.key(),
@@ -387,6 +390,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepActivity(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DRepExpiration(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::WithdrawalInc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteDelegation(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PParamsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -437,6 +441,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::DRepUnRegistration(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepActivity(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DRepExpiration(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::WithdrawalInc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteDelegation(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PParamsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),

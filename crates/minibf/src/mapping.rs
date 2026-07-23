@@ -79,7 +79,7 @@ pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 
     round_f64::<DECIMALS>(res)
 }
 
-const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
+pub const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");

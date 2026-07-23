@@ -43,6 +43,9 @@ pub struct DRepState {
 
     #[n(6)]
     pub identifier: DRep,
+
+    #[n(7)]
+    pub anchor: Option<Anchor>,
 }
 
 impl DRepState {
@@ -55,6 +58,7 @@ impl DRepState {
             expired: false,
             deposit: 0,
             identifier,
+            anchor: None,
         }
     }
 
@@ -91,6 +95,7 @@ pub(crate) mod testing {
             unregistered_at in prop::option::of((root::any_slot(), root::any_tx_order())),
             expired in any::<bool>(),
             deposit in root::any_lovelace(),
+            anchor in prop::option::of(root::any_anchor()),
         ) -> DRepState {
             DRepState {
                 identifier,
@@ -100,6 +105,7 @@ pub(crate) mod testing {
                 unregistered_at,
                 expired,
                 deposit,
+                anchor,
             }
         }
     }
@@ -120,6 +126,7 @@ pub struct DRepRegistration {
     pub(crate) prev_registered_at: Option<(BlockSlot, TxOrder)>,
     pub(crate) prev_voting_power: u64,
     pub(crate) prev_deposit: u64,
+    pub(crate) prev_anchor: Option<Anchor>,
 }
 
 impl DRepRegistration {
@@ -140,6 +147,7 @@ impl DRepRegistration {
             prev_registered_at: None,
             prev_voting_power: 0,
             prev_deposit: 0,
+            prev_anchor: None,
         }
     }
 }
@@ -160,11 +168,13 @@ impl dolos_core::EntityDelta for DRepRegistration {
         self.prev_registered_at = entity.registered_at;
         self.prev_voting_power = entity.voting_power;
         self.prev_deposit = entity.deposit;
+        self.prev_anchor = entity.anchor.clone();
 
         // apply changes
         entity.registered_at = Some((self.slot, self.txorder));
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
+        entity.anchor = self.anchor.clone();
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
@@ -176,6 +186,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.registered_at = self.prev_registered_at;
         entity.voting_power = self.prev_voting_power;
         entity.deposit = self.prev_deposit;
+        entity.anchor = self.prev_anchor.clone();
     }
 }
 
@@ -232,6 +243,55 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
         state.voting_power = self.prev_voting_power.unwrap_or(0);
         state.unregistered_at = self.prev_unregistered_at;
         state.deposit = self.prev_deposit.unwrap_or(0);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepUpdate {
+    pub(crate) drep: DRep,
+    pub(crate) anchor: Option<Anchor>,
+
+    // undo
+    pub(crate) prev_anchor: Option<Anchor>,
+    pub(crate) was_new: bool,
+}
+
+impl DRepUpdate {
+    pub fn new(drep: DRep, anchor: Option<Anchor>) -> Self {
+        Self {
+            drep,
+            anchor,
+            prev_anchor: None,
+            was_new: false,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepUpdate {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        self.was_new = entity.is_none();
+
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
+        // save undo info
+        self.prev_anchor = entity.anchor.clone();
+
+        // apply changes
+        entity.anchor = self.anchor.clone();
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        if self.was_new {
+            *entity = None;
+        } else if let Some(state) = entity {
+            state.anchor = self.prev_anchor.clone();
+        }
     }
 }
 
@@ -366,6 +426,15 @@ mod prop_tests {
         }
     }
 
+    prop_compose! {
+        fn any_drep_update()(
+            drep in root::any_drep(),
+            anchor in prop::option::of(root::any_anchor()),
+        ) -> DRepUpdate {
+            DRepUpdate::new(drep, anchor)
+        }
+    }
+
     proptest! {
         #[test]
         fn drep_registration_roundtrip(
@@ -397,6 +466,14 @@ mod prop_tests {
             delta in any_drep_expiration(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn drep_update_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
         }
     }
 }
