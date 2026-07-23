@@ -128,6 +128,7 @@ pub struct DRepRegistration {
     pub(crate) prev_registered_at: Option<(BlockSlot, TxOrder)>,
     pub(crate) prev_voting_power: u64,
     pub(crate) prev_deposit: u64,
+    pub(crate) prev_anchor: Option<Anchor>,
 }
 
 impl DRepRegistration {
@@ -148,6 +149,7 @@ impl DRepRegistration {
             prev_registered_at: None,
             prev_voting_power: 0,
             prev_deposit: 0,
+            prev_anchor: None,
         }
     }
 }
@@ -168,11 +170,13 @@ impl dolos_core::EntityDelta for DRepRegistration {
         self.prev_registered_at = entity.registered_at;
         self.prev_voting_power = entity.voting_power;
         self.prev_deposit = entity.deposit;
+        self.prev_anchor = entity.anchor.clone();
 
         // apply changes
         entity.registered_at = Some((self.slot, self.txorder));
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
+        entity.anchor = self.anchor.clone();
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
@@ -184,6 +188,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.registered_at = self.prev_registered_at;
         entity.voting_power = self.prev_voting_power;
         entity.deposit = self.prev_deposit;
+        entity.anchor = self.prev_anchor.clone();
     }
 }
 
@@ -487,5 +492,6 @@ mod prop_tests {
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
+
     }
 }
