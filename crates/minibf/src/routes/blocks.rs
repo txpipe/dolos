@@ -420,6 +420,9 @@ where
     let deps = builder.required_input_deps();
     let deps = domain.get_tx_batch(deps).await?;
 
+    // deps missing from the archive (possible on nodes without full history)
+    // are skipped, omitting their addresses from the response — the same
+    // graceful degradation as /txs/{hash}/utxos
     for (key, cbor) in deps.iter() {
         if let Some(cbor) = cbor {
             builder.load_dep(*key, cbor)?;
