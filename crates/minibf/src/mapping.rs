@@ -2325,7 +2325,7 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
                 let as_output = self
                     .deps
                     .get(input.hash())
-                    .and_then(|dep| dep.output_at(input.index() as usize));
+                    .and_then(|dep| dep.produces_at(input.index() as usize));
 
                 if let Some(output) = as_output {
                     let address = output

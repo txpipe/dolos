@@ -693,6 +693,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_past_the_end_page() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+
+        let path = format!("/blocks/{}/addresses?count=100&page=99", block.block_hash);
+        let addresses = get_addresses(&app, &path).await;
+
+        assert!(
+            addresses.is_empty(),
+            "past-the-end page must be an empty 200"
+        );
+    }
+
+    /// Exercises the `produces_at` edge for input-side address resolution.
+    /// Invalid script txs don't produce their regular outputs, but they can
+    /// produce a collateral return at the next output index. When a later tx
+    /// spends that collateral return, block-address mapping must resolve the
+    /// collateral-return address from the dependency tx CBOR.
+    #[test]
+    fn block_addresses_resolves_spent_collateral_return_address() {
+        use dolos_core::EraCbor;
+        use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+        use pallas::ledger::traverse::{Era, MultiEraBlock, MultiEraTx};
+
+        // Invalid Conway tx with no regular outputs and one collateral-return
+        // output at index 0.
+        let dep_tx_cbor = hex::decode(
+            "84a600d9010281825820010101010101010101010101010101010101010101010101010101010101010100018002070dd901028182582002020202020202020202020202020202020202020202020202020202020202020010a200581d607393621349f3555f70c975392c84879ba400d08d14ab3d572d7ece80011a0016e360111a0007a120a0f4f6",
+        )
+        .expect("invalid dep tx fixture hex");
+        let collateral_return_index = 0usize;
+
+        let dep_tx =
+            MultiEraTx::decode_for_era(Era::Conway, &dep_tx_cbor).expect("failed to decode dep tx");
+        assert!(
+            dep_tx.output_at(collateral_return_index).is_none(),
+            "regular outputs do not include collateral return index"
+        );
+        let collateral_return_address = dep_tx
+            .produces_at(collateral_return_index)
+            .expect("collateral return must be produced at index 0")
+            .address()
+            .expect("collateral return must have an address")
+            .to_string();
+
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+        let raw = blocks.first().expect("missing synthetic block");
+
+        let block = MultiEraBlock::decode(raw).expect("failed to decode block");
+        let txs = block.txs();
+        let spender = txs.get(1).expect("fixture needs a second tx");
+        let consumed = spender.consumes();
+        let input = consumed.first().expect("spender must consume");
+        assert_eq!(input.index() as usize, collateral_return_index);
+
+        let mut builder = BlockModelBuilder::new(raw).expect("failed to build block model");
+        let dep_cbor = EraCbor(Era::Conway.into(), dep_tx_cbor);
+        builder
+            .load_dep(*input.hash(), &dep_cbor)
+            .expect("failed to load dep");
+        let addresses: Vec<BlockContentAddressesInner> =
+            builder.into_model().expect("failed to map block addresses");
+
+        let entry = addresses
+            .iter()
+            .find(|entry| entry.address == collateral_return_address)
+            .expect("collateral-return address missing from response");
+
+        assert!(
+            entry
+                .transactions
+                .iter()
+                .any(|tx| tx.tx_hash == spender.hash().to_string()),
+            "spender tx must be attributed to the consumed collateral-return address"
+        );
+    }
+
+    #[tokio::test]
     async fn blocks_by_hash_or_number_addresses_bad_request() {
         let app = TestApp::new();
         let path = format!("/blocks/{}/addresses", invalid_block());
