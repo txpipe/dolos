@@ -7,8 +7,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::DrepsInner;
-use dolos_cardano::model::DRepState;
-use dolos_core::{ArchiveStore as _, Domain};
+use dolos_cardano::{model::DRepState, ChainSummary, PParamsSet};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
 use dreps::{drep_list_item, parse_drep_id, DrepModelBuilder};
 use futures::future::join_all;
 use metadata::fetch_drep_metadata;
@@ -19,6 +19,22 @@ use crate::{
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
+
+fn chain_context<D: Domain>(
+    domain: &Facade<D>,
+) -> Result<(ChainSummary, BlockSlot, PParamsSet), StatusCode> {
+    let chain = domain.get_chain_summary()?;
+
+    let (tip, _) = domain
+        .archive()
+        .get_tip()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let pparams = domain.get_current_effective_pparams()?;
+
+    Ok((chain, tip, pparams))
+}
 
 pub async fn all_dreps<D: Domain>(
     Query(params): Query<PaginationParameters>,
@@ -51,15 +67,7 @@ where
         dreps.reverse();
     }
 
-    let chain = domain.get_chain_summary()?;
-
-    let (tip, _) = domain
-        .archive()
-        .get_tip()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let pparams = domain.get_current_effective_pparams()?;
+    let (chain, tip, pparams) = chain_context(&domain)?;
 
     let states: Vec<_> = dreps
         .into_iter()
@@ -95,35 +103,24 @@ pub async fn drep_by_id<D: Domain>(
 where
     Option<DRepState>: From<D::Entity>,
 {
-    let (drep, drep_bytes, is_legacy, is_special_case) =
-        parse_drep_id(&drep).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = parse_drep_id(&drep)?;
 
-    let drep_state = if is_special_case {
-        None
+    let drep_state = if parsed.is_special {
+        domain.read_cardano_entity::<DRepState>(parsed.encoded.clone())?
     } else {
         Some(
             domain
-                .read_cardano_entity::<DRepState>(drep_bytes.clone())?
+                .read_cardano_entity::<DRepState>(parsed.encoded.clone())?
                 .ok_or(StatusCode::NOT_FOUND)?,
         )
     };
 
-    let chain = domain
-        .get_chain_summary()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let (tip, _) = domain
-        .archive()
-        .get_tip()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let pparams = domain.get_current_effective_pparams()?;
+    let (chain, tip, pparams) = chain_context(&domain)?;
 
     let model = DrepModelBuilder {
-        drep_id: drep,
-        drep_id_encoded: drep_bytes,
-        is_legacy,
+        drep_id: parsed.drep_id,
+        drep_id_encoded: parsed.encoded,
+        is_legacy: parsed.is_legacy,
         state: drep_state,
         pparams,
         chain: &chain,
