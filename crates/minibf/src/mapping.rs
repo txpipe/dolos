@@ -1999,9 +1999,9 @@ impl<'a> BlockModelBuilder<'a> {
     }
 
     pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
-        let era = try_into_or_500!(cbor.0);
+        let era = try_into_or_500!(cbor.era());
 
-        let tx = MultiEraTx::decode_for_era(era, &cbor.1)
+        let tx = MultiEraTx::decode_for_era(era, cbor.cbor())
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         self.deps.insert(key, tx);
