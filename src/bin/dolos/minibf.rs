@@ -34,7 +34,9 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("invalid minibf path")?;
 
-    let app = dolos_minibf::build_router(minibf.clone(), domain);
+    let app = dolos_minibf::build_router(minibf.clone(), domain)
+        .into_diagnostic()
+        .context("building minibf router")?;
 
     let request = Request::builder()
         .method("GET")
