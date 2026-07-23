@@ -9,14 +9,10 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    drep_metadata_error::{Code as MetadataErrorCode, DrepMetadataError},
-    pool::Pool,
-    pool_calidus_key::PoolCalidusKey,
-    pool_delegators_inner::PoolDelegatorsInner,
-    pool_history_inner::PoolHistoryInner,
-    pool_list_extended_inner::PoolListExtendedInner,
-    pool_list_retire_inner::PoolListRetireInner,
-    PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
+    dreps_inner_metadata_error::Code, pool::Pool, pool_calidus_key::PoolCalidusKey,
+    pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
+    pool_list_extended_inner::PoolListExtendedInner, pool_list_retire_inner::PoolListRetireInner,
+    DrepsInnerMetadataError, PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{
     cip151,
@@ -531,7 +527,7 @@ fn build_pool_metadata_response(
     operator: impl AsRef<[u8]>,
     onchain: Option<&pallas::ledger::primitives::PoolMetadata>,
     offchain: Option<crate::mapping::PoolOffchainMetadata>,
-    error: Option<DrepMetadataError>,
+    error: Option<DrepsInnerMetadataError>,
 ) -> Result<PoolMetadataResponse, StatusCode> {
     let operator = operator.as_ref();
 
@@ -552,9 +548,13 @@ fn build_pool_metadata_response(
     }))
 }
 
-fn hash_mismatch_error(url: &str, expected_hash: &[u8], actual_hash: &[u8]) -> DrepMetadataError {
-    DrepMetadataError::new(
-        MetadataErrorCode::HashMismatch,
+fn hash_mismatch_error(
+    url: &str,
+    expected_hash: &[u8],
+    actual_hash: &[u8],
+) -> blockfrost_openapi::models::DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HashMismatch,
         format!(
             "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
             hex::encode(expected_hash),
@@ -563,11 +563,11 @@ fn hash_mismatch_error(url: &str, expected_hash: &[u8], actual_hash: &[u8]) -> D
     )
 }
 
-fn http_response_error(url: &str, status: StatusCode) -> DrepMetadataError {
+fn http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
     let reason = status.canonical_reason().unwrap_or("Unknown");
 
-    DrepMetadataError::new(
-        MetadataErrorCode::HttpResponseError,
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
         format!(
             "Error Offchain Pool: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
             status.as_u16(),
@@ -575,9 +575,9 @@ fn http_response_error(url: &str, status: StatusCode) -> DrepMetadataError {
     )
 }
 
-fn connection_error(url: &str) -> DrepMetadataError {
-    DrepMetadataError::new(
-        MetadataErrorCode::ConnectionError,
+fn connection_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::ConnectionError,
         format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
     )
 }
@@ -602,7 +602,7 @@ async fn fetch_pool_metadata_with_error(
     pool: &PoolState,
 ) -> (
     Option<crate::mapping::PoolOffchainMetadata>,
-    Option<DrepMetadataError>,
+    Option<DrepsInnerMetadataError>,
 ) {
     let Some(metadata) = pool
         .snapshot
@@ -1651,7 +1651,7 @@ mod tests {
         };
 
         let error = response.error.expect("expected error");
-        assert_eq!(error.code, MetadataErrorCode::HashMismatch);
+        assert_eq!(error.code, Code::HashMismatch);
         assert!(error
             .message
             .contains("Hash mismatch when fetching metadata"));
@@ -1662,7 +1662,7 @@ mod tests {
         let error =
             http_response_error("https://blockfrost.io/fakemetadata", StatusCode::NOT_FOUND);
 
-        assert_eq!(error.code, MetadataErrorCode::HttpResponseError);
+        assert_eq!(error.code, Code::HttpResponseError);
         assert_eq!(
             error.message,
             "Error Offchain Pool: HTTP Response error from https://blockfrost.io/fakemetadata resulted in HTTP status code : 404 \"Not Found\""
@@ -1674,7 +1674,7 @@ mod tests {
         let error =
             connection_error("http://localhost:23009/p/pool_clai_registration_metadata.json");
 
-        assert_eq!(error.code, MetadataErrorCode::ConnectionError);
+        assert_eq!(error.code, Code::ConnectionError);
         assert_eq!(
             error.message,
             "Error Offchain Pool: Connection failure error when fetching metadata from http://localhost:23009/p/pool_clai_registration_metadata.json."
