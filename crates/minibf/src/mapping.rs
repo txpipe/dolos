@@ -22,8 +22,9 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::Deref,
+    sync::Arc,
     time::Duration,
 };
 
@@ -283,6 +284,54 @@ pub fn list_assets<'a>(
     assets.sort_by_key(|a| a.unit.clone());
 
     std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub struct AssetAggregate {
+    pub quantity: u128,
+    pub oldest: Option<(u64, usize, TxoIdx)>,
+    pub newest: Option<(u64, usize, TxoIdx)>,
+}
+
+/// Aggregates asset quantities per unit over a set of utxos, tracking the
+/// chain position of the oldest and newest utxo holding each asset —
+/// Blockfrost orders account assets by these. The BTreeMap keeps units
+/// sorted, providing the tie-break order for assets sharing a position.
+pub fn aggregate_account_assets(
+    utxos: &HashMap<TxoRef, Arc<EraCbor>>,
+    block_deps: &HashMap<TxHash, BlockRefMeta>,
+) -> Result<BTreeMap<String, AssetAggregate>, StatusCode> {
+    let mut by_unit: BTreeMap<String, AssetAggregate> = BTreeMap::new();
+
+    for (txo_ref, cbor) in utxos.iter() {
+        let output = MultiEraOutput::try_from(cbor.as_ref())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let position = block_deps
+            .get(&txo_ref.0)
+            .map(|meta| (meta.slot, meta.tx_index, txo_ref.1));
+
+        for ma in output.value().assets() {
+            for asset in ma.assets() {
+                let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
+                let quantity = asset.output_coin().unwrap_or_default() as u128;
+
+                let agg = by_unit.entry(unit).or_insert(AssetAggregate {
+                    quantity: 0,
+                    oldest: None,
+                    newest: None,
+                });
+
+                agg.quantity += quantity;
+
+                if let Some(position) = position {
+                    agg.oldest = Some(agg.oldest.map_or(position, |x| x.min(position)));
+                    agg.newest = Some(agg.newest.map_or(position, |x| x.max(position)));
+                }
+            }
+        }
+    }
+
+    Ok(by_unit)
 }
 
 pub enum AddressKind {
