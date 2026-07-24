@@ -335,6 +335,10 @@ where
             get(routes::accounts::by_stake_addresses::<D>),
         )
         .route(
+            "/accounts/{stake_address}/addresses/assets",
+            get(routes::accounts::by_stake_addresses_assets::<D>),
+        )
+        .route(
             "/accounts/{stake_address}/utxos",
             get(routes::accounts::by_stake_utxos::<D>),
         )
