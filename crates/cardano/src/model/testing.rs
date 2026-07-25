@@ -10,7 +10,7 @@
 use dolos_core::EntityDelta;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::{
-    conway::{Anchor, DRep, RationalNumber},
+    conway::{Anchor, DRep, GovActionId, RationalNumber, Vote, Voter},
     Epoch, StakeCredential,
 };
 use proptest::prelude::*;
@@ -140,5 +140,28 @@ prop_compose! {
 prop_compose! {
     pub fn any_rational()(num in 1u64..100u64, den in 1u64..100u64) -> RationalNumber {
         RationalNumber { numerator: num, denominator: den }
+    }
+}
+
+pub fn any_vote() -> impl Strategy<Value = Vote> {
+    prop_oneof![Just(Vote::Yes), Just(Vote::No), Just(Vote::Abstain)]
+}
+
+pub fn any_voter() -> impl Strategy<Value = Voter> {
+    prop_oneof![
+        any_hash_28().prop_map(Voter::ConstitutionalCommitteeKey),
+        any_hash_28().prop_map(Voter::ConstitutionalCommitteeScript),
+        any_hash_28().prop_map(Voter::DRepKey),
+        any_hash_28().prop_map(Voter::DRepScript),
+        any_hash_28().prop_map(Voter::StakePoolKey),
+    ]
+}
+
+prop_compose! {
+    pub fn any_gov_action_id()(
+        transaction_id in any_hash_32(),
+        action_index in 0u32..16u32,
+    ) -> GovActionId {
+        GovActionId { transaction_id, action_index }
     }
 }

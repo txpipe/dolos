@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use dolos_core::{ChainError, Genesis};
+use dolos_core::{ChainError, Genesis, TxoRef};
 use pallas::{
     codec::utils::Bytes,
     ledger::{
         primitives::{
-            conway::{GovAction, ProtocolParamUpdate},
+            conway::{GovAction, GovActionId, ProtocolParamUpdate},
             Epoch, ExUnitPrices, RationalNumber,
         },
         traverse::{MultiEraBlock, MultiEraTx, MultiEraUpdate},
@@ -14,7 +14,8 @@ use pallas::{
 
 use super::WorkDeltas;
 use crate::{
-    pallas_extras, roll::BlockVisitor, NewProposal, PParamValue, PParamsSet, ProposalAction,
+    owned::OwnedMultiEraOutput, pallas_extras, roll::BlockVisitor, GovPurpose, NewProposalV2,
+    PParamValue, PParamsSet, ProposalAction, VoteCast,
 };
 
 macro_rules! map_conway_pparam {
@@ -247,12 +248,63 @@ fn pre_conway_to_pparamset(update: &MultiEraUpdate) -> PParamsSet {
     set
 }
 
+/// Maps a Conway governance action to its dolos representation plus the
+/// lineage data the action declares: the parent (previous governance action
+/// id of the same purpose) and the purpose tree it belongs to.
+/// TreasuryWithdrawals and Info have no lineage.
+fn parse_gov_action(
+    action: &GovAction,
+) -> (ProposalAction, Option<GovActionId>, Option<GovPurpose>) {
+    match action {
+        GovAction::ParameterChange(parent, update, _) => (
+            ProposalAction::ParamChange(conway_to_pparamset(update)),
+            parent.clone(),
+            Some(GovPurpose::PParamUpdate),
+        ),
+        GovAction::HardForkInitiation(parent, version) => (
+            ProposalAction::HardFork(*version),
+            parent.clone(),
+            Some(GovPurpose::HardFork),
+        ),
+        GovAction::TreasuryWithdrawals(withdrawals, _) => {
+            (parse_treasury_withdrawals(withdrawals), None, None)
+        }
+        GovAction::NoConfidence(parent) => (
+            ProposalAction::NoConfidence,
+            parent.clone(),
+            Some(GovPurpose::Committee),
+        ),
+        GovAction::UpdateCommittee(parent, to_remove, to_add, threshold) => (
+            ProposalAction::UpdateCommittee {
+                to_remove: to_remove.iter().cloned().collect(),
+                to_add: to_add
+                    .iter()
+                    .map(|(cred, epoch)| (cred.clone(), *epoch))
+                    .collect(),
+                threshold: threshold.clone(),
+            },
+            parent.clone(),
+            Some(GovPurpose::Committee),
+        ),
+        GovAction::NewConstitution(parent, constitution) => (
+            ProposalAction::NewConstitution {
+                anchor: constitution.anchor.clone(),
+                guardrail_script: constitution.guardrail_script,
+            },
+            parent.clone(),
+            Some(GovPurpose::Constitution),
+        ),
+        GovAction::Information => (ProposalAction::Info, None, None),
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ProposalVisitor {
     validity_period: Option<u64>,
     current_epoch: Option<Epoch>,
     network_magic: Option<u32>,
     protocol: Option<u16>,
+    pending_votes: Vec<VoteCast>,
 }
 
 impl BlockVisitor for ProposalVisitor {
@@ -274,6 +326,42 @@ impl BlockVisitor for ProposalVisitor {
         Ok(())
     }
 
+    fn visit_tx(
+        &mut self,
+        _: &mut WorkDeltas,
+        block: &MultiEraBlock,
+        tx: &MultiEraTx,
+        _: &HashMap<TxoRef, OwnedMultiEraOutput>,
+    ) -> Result<(), ChainError> {
+        let MultiEraTx::Conway(conway_tx) = tx else {
+            return Ok(());
+        };
+
+        // Phase-2-invalid transactions contribute nothing to governance
+        // state: CERTS / GOV only run for valid transactions.
+        if !tx.is_valid() {
+            return Ok(());
+        }
+
+        let Some(voting_procedures) = &conway_tx.transaction_body.voting_procedures else {
+            return Ok(());
+        };
+
+        for (voter, votes) in voting_procedures.iter() {
+            for (gov_action_id, procedure) in votes.iter() {
+                self.pending_votes.push(VoteCast::new(
+                    gov_action_id.transaction_id,
+                    gov_action_id.action_index,
+                    voter.clone(),
+                    procedure.vote.clone(),
+                    block.slot(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     fn visit_update(
         &mut self,
         deltas: &mut WorkDeltas,
@@ -283,7 +371,7 @@ impl BlockVisitor for ProposalVisitor {
     ) -> Result<(), ChainError> {
         let action = pre_conway_to_pparamset(update);
 
-        deltas.add_for_entity(NewProposal::new(
+        deltas.add_for_entity(NewProposalV2::new(
             block.slot(),
             tx.map(|tx| tx.hash()).unwrap_or_else(|| block.hash()),
             0,
@@ -294,6 +382,10 @@ impl BlockVisitor for ProposalVisitor {
             self.current_epoch.expect("value set in root"),
             self.network_magic.expect("value set in root"),
             self.protocol.expect("value set in root"),
+            // pre-Conway updates carry no Conway lineage or anchor
+            None,
+            None,
+            None,
         ));
 
         Ok(())
@@ -311,22 +403,12 @@ impl BlockVisitor for ProposalVisitor {
             return Ok(());
         };
 
-        let action = match &proposal.gov_action {
-            GovAction::ParameterChange(_, x, _) => {
-                ProposalAction::ParamChange(conway_to_pparamset(x))
-            }
-            GovAction::HardForkInitiation(_, version) => ProposalAction::HardFork(*version),
-            GovAction::TreasuryWithdrawals(x, _) => parse_treasury_withdrawals(x),
-            GovAction::Information => ProposalAction::Other,
-            GovAction::NoConfidence(..) => ProposalAction::Other,
-            GovAction::UpdateCommittee(..) => ProposalAction::Other,
-            GovAction::NewConstitution(..) => ProposalAction::Other,
-        };
+        let (action, parent, purpose) = parse_gov_action(&proposal.gov_action);
 
         let reward_account = pallas_extras::parse_reward_account(&proposal.reward_account)
             .ok_or(ChainError::InvalidProposalParams)?;
 
-        deltas.add_for_entity(NewProposal::new(
+        deltas.add_for_entity(NewProposalV2::new(
             block.slot(),
             tx.hash(),
             idx as u32,
@@ -337,7 +419,22 @@ impl BlockVisitor for ProposalVisitor {
             self.current_epoch.expect("value set in root"),
             self.network_magic.expect("value set in root"),
             self.protocol.expect("value set in root"),
+            parent,
+            purpose,
+            Some(proposal.anchor.clone()),
         ));
+
+        Ok(())
+    }
+
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
+        // Votes buffered during `visit_tx` are emitted at block flush so a
+        // vote targeting a proposal submitted in the same block (legal in
+        // Conway, even within the same tx) lands *after* that proposal's
+        // `NewProposalV2` in the per-entity delta ordering.
+        for vote in self.pending_votes.drain(..) {
+            deltas.add_for_entity(vote);
+        }
 
         Ok(())
     }
