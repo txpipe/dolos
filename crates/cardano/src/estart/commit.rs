@@ -17,7 +17,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
-    PoolState, ProposalState,
+    GovState, PoolState, ProposalState, GOV_STATE_KEY,
 };
 
 /// Era transition data collected from state.
@@ -110,6 +110,41 @@ impl super::WorkContext {
                 trace!(ns = E::NS, key = %entity_id, "no deltas for entity");
             }
         }
+
+        Ok(())
+    }
+
+    /// Apply any queued deltas for the governance singleton.
+    ///
+    /// Unlike `stream_and_apply_namespace`, this handles the entity being
+    /// absent: the `GovGenesisInit` delta emitted at the Conway era boundary
+    /// *creates* the singleton, so streaming existing records would silently
+    /// drop it.
+    fn apply_gov_state_deltas<D: Domain>(
+        &mut self,
+        state: &D::State,
+        writer: &<D::State as StateStore>::Writer,
+    ) -> Result<(), ChainError> {
+        let entity_key = EntityKey::from(GOV_STATE_KEY);
+
+        let to_apply = self
+            .deltas
+            .entities
+            .remove(&NsKey::from((GovState::NS, entity_key.clone())));
+
+        let Some(to_apply) = to_apply else {
+            return Ok(());
+        };
+
+        let mut entity: Option<CardanoEntity> = state
+            .read_entity_typed::<GovState>(GovState::NS, &entity_key)?
+            .map(Into::into);
+
+        for mut delta in to_apply {
+            delta.apply(&mut entity);
+        }
+
+        writer.save_entity_typed(GovState::NS, &entity_key, entity.as_ref())?;
 
         Ok(())
     }
@@ -224,6 +259,10 @@ impl super::WorkContext {
 
         debug!("streaming epoch entities");
         self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+
+        // Governance singleton — targeted apply (the entity may not exist
+        // yet; the Conway-boundary `GovGenesisInit` creates it).
+        self.apply_gov_state_deltas::<D>(state, &writer)?;
 
         // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {

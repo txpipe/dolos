@@ -14,10 +14,10 @@ use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore, TxoRef};
 
 use crate::{
     estart::{BoundaryVisitor as _, WorkContext},
-    load_era_summary,
+    gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
-    AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, PoolState,
-    ProposalState,
+    AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, GovGenesisInit,
+    PoolState, ProposalState,
 };
 
 impl WorkContext {
@@ -66,6 +66,18 @@ impl WorkContext {
         // Closing global delta — emitted once per epoch boundary, after
         // all per-entity transitions have been queued.
         super::reset::emit_epoch_transition(self);
+
+        // Entering Conway (the Chang hard fork) seeds the governance
+        // singleton with the genesis constitution + committee — the initial
+        // enact-state every later governance action evolves from. Stores
+        // already past the boundary never see this event (documented
+        // in-place upgrade gap; a fresh sync captures it).
+        if let Some(transition) = self.ended_state().pparams.era_transition() {
+            if transition.entering_conway() {
+                let (constitution, committee) = gov_from_conway_genesis(&self.genesis.conway)?;
+                self.add_delta(GovGenesisInit::new(constitution, committee));
+            }
+        }
 
         Ok(())
     }

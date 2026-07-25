@@ -76,6 +76,13 @@ impl EraTransition {
     pub fn entering_allegra(&self) -> bool {
         self.prev_version == 2 && self.new_version == 3
     }
+
+    /// Check if this boundary is transitioning into Conway (the Chang hard
+    /// fork). At this boundary, the governance singleton is seeded from the
+    /// Conway genesis (initial constitution + committee).
+    pub fn entering_conway(&self) -> bool {
+        self.prev_version < 9 && self.new_version >= 9
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]

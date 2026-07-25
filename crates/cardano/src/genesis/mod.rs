@@ -4,9 +4,9 @@ use dolos_core::{
 };
 
 use crate::{
-    indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EndStats,
-    EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
-    CURRENT_EPOCH_KEY,
+    gov_from_conway_genesis, indexes::index_delta_from_utxo_delta, pots::Pots,
+    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraSummary,
+    GovState, Lovelace, Nonces, PParamsSet, RollingStats, CURRENT_EPOCH_KEY, GOV_STATE_KEY,
 };
 
 mod staking;
@@ -124,6 +124,29 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     Ok(())
 }
 
+/// Seed the governance singleton for networks that force-start at Conway
+/// (protocol >= 9) — e.g. devnets. Chains that reach Conway by crossing the
+/// Chang hard fork seed it at that era boundary instead (`GovGenesisInit`).
+pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+    if genesis.force_protocol.is_none_or(|protocol| protocol < 9) {
+        return Ok(());
+    }
+
+    let (constitution, committee) = gov_from_conway_genesis(&genesis.conway)?;
+
+    let gov = GovState {
+        constitution: Some(constitution),
+        committee: Some(committee),
+        ..Default::default()
+    };
+
+    let writer = state.start_writer()?;
+    writer.write_entity_typed(&EntityKey::from(GOV_STATE_KEY), &gov)?;
+    writer.commit()?;
+
+    Ok(())
+}
+
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
     indexes: &D::Indexes,
@@ -162,6 +185,8 @@ pub fn execute<D: Domain>(
     let epoch = bootstrap_epoch::<D>(state, genesis)?;
 
     bootstrap_eras::<D>(state, &epoch)?;
+
+    bootstrap_gov::<D>(state, genesis)?;
 
     bootstrap_utxos::<D>(state, indexes, genesis, config)?;
 

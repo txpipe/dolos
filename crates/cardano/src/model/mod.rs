@@ -35,6 +35,7 @@ pub mod dreps;
 pub mod epoch_value;
 pub mod epochs;
 pub mod eras;
+pub mod gov;
 pub mod logs;
 pub mod pending;
 pub mod pools;
@@ -51,6 +52,7 @@ pub use dreps::*;
 pub use epoch_value::*;
 pub use epochs::*;
 pub use eras::*;
+pub use gov::*;
 pub use logs::*;
 pub use pending::*;
 pub use pools::*;
@@ -75,6 +77,7 @@ pub enum CardanoEntity {
     DatumState(Box<DatumState>),
     PendingRewardState(Box<PendingRewardState>),
     PendingMirState(Box<PendingMirState>),
+    GovState(Box<GovState>),
 }
 
 macro_rules! variant_boilerplate {
@@ -110,6 +113,7 @@ variant_boilerplate!(StakeLog);
 variant_boilerplate!(DatumState);
 variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
+variant_boilerplate!(GovState);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -130,6 +134,7 @@ impl dolos_core::Entity for CardanoEntity {
             DatumState::NS => DatumState::decode_entity(ns, value).map(Into::into),
             PendingRewardState::NS => PendingRewardState::decode_entity(ns, value).map(Into::into),
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
+            GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -150,6 +155,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::DatumState(x) => DatumState::encode_entity(x),
             Self::PendingRewardState(x) => PendingRewardState::encode_entity(x),
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
+            Self::GovState(x) => GovState::encode_entity(x),
         }
     }
 }
@@ -170,6 +176,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);
+    schema.insert(GovState::NS, NamespaceType::KeyValue);
     schema
 }
 
@@ -233,6 +240,12 @@ pub enum CardanoDelta {
     DRepAnchorUpdate(Box<DRepAnchorUpdate>),
     NewProposalV2(Box<NewProposalV2>),
     VoteCast(Box<VoteCast>),
+    DRepExpiryUpdate(Box<DRepExpiryUpdate>),
+    DRepDormancyRelease(Box<DRepDormancyRelease>),
+    GovGenesisInit(Box<GovGenesisInit>),
+    CommitteeAuth(Box<CommitteeAuth>),
+    CommitteeResign(Box<CommitteeResign>),
+    GovDormancyReset(Box<GovDormancyReset>),
 }
 
 impl CardanoDelta {
@@ -321,6 +334,12 @@ delta_from!(EpochWrapUpV3);
 delta_from!(DRepAnchorUpdate);
 delta_from!(NewProposalV2);
 delta_from!(VoteCast);
+delta_from!(DRepExpiryUpdate);
+delta_from!(DRepDormancyRelease);
+delta_from!(GovGenesisInit);
+delta_from!(CommitteeAuth);
+delta_from!(CommitteeResign);
+delta_from!(GovDormancyReset);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -351,6 +370,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NewProposal(x) => x.key(),
             Self::NewProposalV2(x) => x.key(),
             Self::VoteCast(x) => x.key(),
+            Self::DRepExpiryUpdate(x) => x.key(),
+            Self::DRepDormancyRelease(x) => x.key(),
+            Self::GovGenesisInit(x) => x.key(),
+            Self::CommitteeAuth(x) => x.key(),
+            Self::CommitteeResign(x) => x.key(),
+            Self::GovDormancyReset(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -404,6 +429,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NewProposal(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NewProposalV2(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::VoteCast(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepExpiryUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::DRepDormancyRelease(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovGenesisInit(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::CommitteeAuth(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::CommitteeResign(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovDormancyReset(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -457,6 +488,12 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::NewProposal(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NewProposalV2(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::VoteCast(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepExpiryUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::DRepDormancyRelease(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovGenesisInit(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::CommitteeAuth(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::CommitteeResign(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovDormancyReset(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),

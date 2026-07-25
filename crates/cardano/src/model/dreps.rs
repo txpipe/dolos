@@ -1,7 +1,10 @@
 use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
-    ledger::primitives::conway::{Anchor, DRep},
+    ledger::primitives::{
+        conway::{Anchor, DRep},
+        Epoch,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -19,6 +22,64 @@ pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
     };
 
     EntityKey::from(bytes)
+}
+
+/// Epoch-based DRep expiry, stored exactly as the Haskell ledger stores
+/// `drepExpiry`: **without** dormant-epoch credit. The actual expiry is
+/// `current + GovState::num_dormant_epochs`; the counter is folded into the
+/// stored value whenever a proposal ends a dormant stretch
+/// ([`DRepDormancyRelease`]).
+///
+/// The `(updated_in, prev)` pair makes the value snapshot-safe: epoch
+/// boundary tallies read the value as of the end of the previous epoch even
+/// if activity during the closing epoch refreshed it. `prev` holds the value
+/// that was in effect before the first write of epoch `updated_in`, which is
+/// sufficient because reads never look further back than one epoch.
+#[derive(Debug, Encode, Decode, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DRepExpiry {
+    /// Expiry epoch (inclusive), without dormancy credit.
+    #[n(0)]
+    pub current: Epoch,
+
+    /// The epoch during which `current` was last written.
+    #[n(1)]
+    pub updated_in: Epoch,
+
+    /// The value in effect at the end of every epoch before `updated_in`.
+    #[n(2)]
+    pub prev: Option<Epoch>,
+}
+
+impl DRepExpiry {
+    pub fn new(value: Epoch, epoch: Epoch) -> Self {
+        Self {
+            current: value,
+            updated_in: epoch,
+            prev: None,
+        }
+    }
+
+    /// Write `value` during `epoch`, rotating the previous value out when
+    /// this is the first write of the epoch.
+    pub fn set(&mut self, value: Epoch, epoch: Epoch) {
+        if self.updated_in != epoch {
+            self.prev = Some(self.current);
+            self.updated_in = epoch;
+        }
+
+        self.current = value;
+    }
+
+    /// The value as of the end of `epoch`. `None` means the value did not
+    /// exist yet (reads older than the retained window also land here, but
+    /// boundary tallies only ever look one epoch back).
+    pub fn as_of(&self, epoch: Epoch) -> Option<Epoch> {
+        if self.updated_in <= epoch {
+            Some(self.current)
+        } else {
+            self.prev
+        }
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
@@ -48,6 +109,13 @@ pub struct DRepState {
     // `None`. Index 7 must not be reused for anything else.
     #[n(7)]
     pub anchor: Option<Anchor>,
+
+    // Backward-compatible addition: absent in pre-existing rows, decodes as
+    // `None` (those rows keep the legacy slot-arithmetic expiry heuristic
+    // until activity repopulates the field). Index 8 must not be reused for
+    // anything else.
+    #[n(8)]
+    pub expiry: Option<DRepExpiry>,
 }
 
 impl DRepState {
@@ -61,6 +129,7 @@ impl DRepState {
             deposit: 0,
             identifier,
             anchor: None,
+            expiry: None,
         }
     }
 
@@ -89,6 +158,16 @@ pub(crate) mod testing {
     use proptest::prelude::*;
 
     prop_compose! {
+        pub fn any_drep_expiry()(
+            current in root::any_epoch(),
+            updated_in in root::any_epoch(),
+            prev in prop::option::of(root::any_epoch()),
+        ) -> DRepExpiry {
+            DRepExpiry { current, updated_in, prev }
+        }
+    }
+
+    prop_compose! {
         pub fn any_drep_state()(
             identifier in root::any_drep(),
             registered_at in prop::option::of((root::any_slot(), root::any_tx_order())),
@@ -98,6 +177,7 @@ pub(crate) mod testing {
             expired in any::<bool>(),
             deposit in root::any_lovelace(),
             anchor in prop::option::of(root::any_anchor()),
+            expiry in prop::option::of(any_drep_expiry()),
         ) -> DRepState {
             DRepState {
                 identifier,
@@ -108,6 +188,7 @@ pub(crate) mod testing {
                 expired,
                 deposit,
                 anchor,
+                expiry,
             }
         }
     }
@@ -384,6 +465,175 @@ impl dolos_core::EntityDelta for DRepExpiration {
     }
 }
 
+/// Refresh a DRep's stored expiry epoch.
+///
+/// Emitted for `RegDRepCert` and `UpdateDRepCert` (`only_if_registered =
+/// false`) and for every DRep vote (`only_if_registered = true`, mirroring
+/// the Haskell `Map.adjust`, which only touches registered DReps). The
+/// visitor computes the value — `current_epoch + drepActivity −
+/// numDormantEpochs`, with the PV9 bootstrap exception on registration — so
+/// the delta carries concrete data and replays exactly.
+///
+/// Also clears the `expired` flag: expiry in the ledger is implicit, so any
+/// refresh makes the DRep active again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepExpiryUpdate {
+    pub(crate) drep: DRep,
+    pub(crate) expiry: Epoch,
+    pub(crate) epoch: Epoch,
+    pub(crate) only_if_registered: bool,
+
+    // undo
+    pub(crate) applied: bool,
+    pub(crate) was_new: bool,
+    pub(crate) prev_expiry: Option<DRepExpiry>,
+    pub(crate) prev_expired: bool,
+}
+
+impl DRepExpiryUpdate {
+    pub fn new(drep: DRep, expiry: Epoch, epoch: Epoch, only_if_registered: bool) -> Self {
+        Self {
+            drep,
+            expiry,
+            epoch,
+            only_if_registered,
+            applied: false,
+            was_new: false,
+            prev_expiry: None,
+            prev_expired: false,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepExpiryUpdate {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        if self.only_if_registered {
+            let registered = entity
+                .as_ref()
+                .is_some_and(|state| state.registered_at.is_some() && !state.is_unregistered());
+
+            if !registered {
+                self.applied = false;
+                self.was_new = false;
+                return;
+            }
+        }
+
+        self.was_new = entity.is_none();
+
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
+        // save undo info
+        self.prev_expiry = entity.expiry;
+        self.prev_expired = entity.expired;
+
+        // apply changes
+        match entity.expiry.as_mut() {
+            Some(expiry) => expiry.set(self.expiry, self.epoch),
+            None => entity.expiry = Some(DRepExpiry::new(self.expiry, self.epoch)),
+        }
+
+        entity.expired = false;
+        self.applied = true;
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        if !self.applied {
+            return;
+        }
+
+        if self.was_new {
+            *entity = None;
+        } else if let Some(state) = entity {
+            state.expiry = self.prev_expiry;
+            state.expired = self.prev_expired;
+        }
+    }
+}
+
+/// Fold the dormant-epoch counter into one DRep's stored expiry
+/// (research §3.3.1). Emitted as a per-DRep fan-out — together with a
+/// single [`crate::GovDormancyReset`] — when a transaction carries the
+/// first proposal after a dormant stretch.
+///
+/// Long-expired DReps (`current + dormant < epoch`) are not resurrected:
+/// their stored value stays untouched, exactly as in the Haskell
+/// `updateDormantDRepExpiry`. Rows without the epoch-based expiry field
+/// (pre-upgrade) are skipped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepDormancyRelease {
+    pub(crate) drep_id: EntityKey,
+    pub(crate) dormant_epochs: u64,
+    pub(crate) epoch: Epoch,
+
+    // undo
+    pub(crate) applied: bool,
+    pub(crate) prev_expiry: Option<DRepExpiry>,
+}
+
+impl DRepDormancyRelease {
+    pub fn new(drep_id: EntityKey, dormant_epochs: u64, epoch: Epoch) -> Self {
+        Self {
+            drep_id,
+            dormant_epochs,
+            epoch,
+            applied: false,
+            prev_expiry: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepDormancyRelease {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, self.drep_id.clone()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        self.applied = false;
+
+        let Some(state) = entity.as_mut() else {
+            return;
+        };
+
+        if state.is_unregistered() {
+            return;
+        }
+
+        let Some(expiry) = state.expiry.as_mut() else {
+            return;
+        };
+
+        let actual = expiry.current + self.dormant_epochs;
+
+        if actual < self.epoch {
+            // long-expired: don't resurrect
+            return;
+        }
+
+        self.prev_expiry = Some(*expiry);
+        expiry.set(actual, self.epoch);
+        self.applied = true;
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        if !self.applied {
+            return;
+        }
+
+        if let Some(state) = entity {
+            state.expiry = self.prev_expiry;
+        }
+    }
+}
+
 #[cfg(test)]
 mod prop_tests {
     use super::testing::any_drep_state;
@@ -439,6 +689,27 @@ mod prop_tests {
         }
     }
 
+    prop_compose! {
+        fn any_drep_expiry_update()(
+            drep in root::any_drep(),
+            expiry in root::any_epoch(),
+            epoch in root::any_epoch(),
+            only_if_registered in any::<bool>(),
+        ) -> DRepExpiryUpdate {
+            DRepExpiryUpdate::new(drep, expiry, epoch, only_if_registered)
+        }
+    }
+
+    prop_compose! {
+        fn any_drep_dormancy_release()(
+            drep in root::any_drep(),
+            dormant_epochs in 1u64..32u64,
+            epoch in root::any_epoch(),
+        ) -> DRepDormancyRelease {
+            DRepDormancyRelease::new(drep_to_entity_key(&drep), dormant_epochs, epoch)
+        }
+    }
+
     proptest! {
         #[test]
         fn drep_registration_roundtrip(
@@ -487,5 +758,245 @@ mod prop_tests {
         ) {
             assert_delta_roundtrip(Some(entity), delta);
         }
+
+        #[test]
+        fn drep_expiry_update_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_expiry_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn drep_expiry_update_serde_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_expiry_update(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn drep_dormancy_release_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_dormancy_release(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn drep_dormancy_release_serde_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_dormancy_release(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+    }
+}
+
+#[cfg(test)]
+mod expiry_tests {
+    use super::*;
+    use dolos_core::EntityDelta as _;
+
+    #[test]
+    fn expiry_set_rotates_once_per_epoch() {
+        let mut expiry = DRepExpiry::new(120, 100);
+
+        // second write in the same epoch keeps the pre-epoch value out of prev
+        expiry.set(121, 100);
+        assert_eq!(expiry.as_of(100), Some(121));
+        assert_eq!(expiry.as_of(99), None);
+
+        // first write of a later epoch rotates
+        expiry.set(125, 105);
+        assert_eq!(expiry.as_of(105), Some(125));
+        assert_eq!(expiry.as_of(104), Some(121));
+
+        // another write in the same epoch overwrites without rotating
+        expiry.set(126, 105);
+        assert_eq!(expiry.as_of(105), Some(126));
+        assert_eq!(expiry.as_of(104), Some(121));
+    }
+
+    #[test]
+    fn vote_refresh_skips_unregistered_dreps() {
+        let drep = DRep::Key([1u8; 28].into());
+
+        // absent entity: a vote refresh must not create one
+        let mut entity: Option<DRepState> = None;
+        let mut delta = DRepExpiryUpdate::new(drep.clone(), 130, 110, true);
+        delta.apply(&mut entity);
+        assert!(entity.is_none());
+        delta.undo(&mut entity);
+        assert!(entity.is_none());
+
+        // unregistered entity: same
+        let mut state = DRepState::new(drep.clone());
+        state.registered_at = Some((100, 0));
+        state.unregistered_at = Some((200, 0));
+        let mut entity = Some(state.clone());
+        let mut delta = DRepExpiryUpdate::new(drep.clone(), 130, 110, true);
+        delta.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().expiry, None);
+
+        // cert-driven refresh applies regardless
+        let mut delta = DRepExpiryUpdate::new(drep.clone(), 130, 110, false);
+        delta.apply(&mut entity);
+        assert_eq!(
+            entity.as_ref().unwrap().expiry,
+            Some(DRepExpiry::new(130, 110))
+        );
+        delta.undo(&mut entity);
+        assert_eq!(entity.unwrap().expiry, None);
+    }
+
+    #[test]
+    fn expiry_refresh_clears_expired_flag() {
+        let drep = DRep::Key([1u8; 28].into());
+
+        let mut state = DRepState::new(drep.clone());
+        state.registered_at = Some((100, 0));
+        state.expired = true;
+        state.expiry = Some(DRepExpiry::new(105, 85));
+
+        let mut entity = Some(state);
+
+        let mut delta = DRepExpiryUpdate::new(drep, 130, 110, true);
+        delta.apply(&mut entity);
+
+        let applied = entity.as_ref().unwrap();
+        assert!(!applied.expired);
+        assert_eq!(applied.expiry.unwrap().current, 130);
+        assert_eq!(applied.expiry.unwrap().as_of(109), Some(105));
+
+        delta.undo(&mut entity);
+        let restored = entity.unwrap();
+        assert!(restored.expired);
+        assert_eq!(restored.expiry, Some(DRepExpiry::new(105, 85)));
+    }
+
+    #[test]
+    fn dormancy_release_folds_but_never_resurrects() {
+        let drep = DRep::Key([1u8; 28].into());
+        let key = drep_to_entity_key(&drep);
+
+        // active drep: counter folds into the stored value
+        let mut state = DRepState::new(drep.clone());
+        state.registered_at = Some((100, 0));
+        state.expiry = Some(DRepExpiry::new(118, 98));
+        let mut entity = Some(state);
+
+        let mut delta = DRepDormancyRelease::new(key.clone(), 5, 120);
+        delta.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().expiry.unwrap().current, 123);
+        assert_eq!(
+            entity.as_ref().unwrap().expiry.unwrap().as_of(119),
+            Some(118)
+        );
+
+        delta.undo(&mut entity);
+        assert_eq!(
+            entity.as_ref().unwrap().expiry,
+            Some(DRepExpiry::new(118, 98))
+        );
+
+        // long-expired drep: untouched
+        let mut state = DRepState::new(drep.clone());
+        state.registered_at = Some((100, 0));
+        state.expiry = Some(DRepExpiry::new(110, 98));
+        let mut entity = Some(state.clone());
+
+        let mut delta = DRepDormancyRelease::new(key.clone(), 5, 120);
+        delta.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().expiry, state.expiry);
+
+        // legacy row without the field: skipped
+        let mut state = DRepState::new(drep);
+        state.registered_at = Some((100, 0));
+        let mut entity = Some(state);
+        let mut delta = DRepDormancyRelease::new(key, 5, 120);
+        delta.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().expiry, None);
+    }
+}
+
+#[cfg(test)]
+mod compat_tests {
+    use super::*;
+
+    /// Replica of the on-disk `DRepState` shape before the phase-3 expiry
+    /// addition (indexes 0..=7). Encoding this and decoding it as the
+    /// current `DRepState` proves that pre-existing rows keep decoding,
+    /// with the new field empty.
+    #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
+    struct LegacyDRepState {
+        #[n(0)]
+        registered_at: Option<(BlockSlot, TxOrder)>,
+
+        #[n(1)]
+        voting_power: u64,
+
+        #[n(2)]
+        last_active_slot: Option<u64>,
+
+        #[n(3)]
+        unregistered_at: Option<(BlockSlot, TxOrder)>,
+
+        #[n(4)]
+        expired: bool,
+
+        #[n(5)]
+        deposit: u64,
+
+        #[n(6)]
+        identifier: DRep,
+
+        #[n(7)]
+        anchor: Option<Anchor>,
+    }
+
+    #[test]
+    fn legacy_rows_decode_with_expiry_empty() {
+        let legacy = LegacyDRepState {
+            registered_at: Some((1234, 2)),
+            voting_power: 500_000_000,
+            last_active_slot: Some(5678),
+            unregistered_at: None,
+            expired: false,
+            deposit: 500_000_000,
+            identifier: DRep::Key([7u8; 28].into()),
+            anchor: Some(Anchor {
+                url: "https://example.com".to_string(),
+                content_hash: [9u8; 32].into(),
+            }),
+        };
+
+        let bytes = minicbor::to_vec(&legacy).unwrap();
+        let decoded: DRepState = minicbor::decode(&bytes).unwrap();
+
+        assert_eq!(decoded.registered_at, legacy.registered_at);
+        assert_eq!(decoded.voting_power, legacy.voting_power);
+        assert_eq!(decoded.last_active_slot, legacy.last_active_slot);
+        assert_eq!(decoded.unregistered_at, legacy.unregistered_at);
+        assert_eq!(decoded.expired, legacy.expired);
+        assert_eq!(decoded.deposit, legacy.deposit);
+        assert_eq!(decoded.identifier, legacy.identifier);
+        assert_eq!(decoded.anchor, legacy.anchor);
+        assert_eq!(decoded.expiry, None);
+    }
+
+    #[test]
+    fn new_rows_roundtrip() {
+        let mut state = DRepState::new(DRep::Script([3u8; 28].into()));
+        state.registered_at = Some((100, 1));
+        state.expiry = Some(DRepExpiry {
+            current: 520,
+            updated_in: 500,
+            prev: Some(510),
+        });
+
+        let bytes = minicbor::to_vec(&state).unwrap();
+        let decoded: DRepState = minicbor::decode(&bytes).unwrap();
+        assert_eq!(decoded, state);
     }
 }
