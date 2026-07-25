@@ -11,6 +11,7 @@ use pallas::ledger::{
 
 use super::WorkDeltas;
 use crate::{
+    drep_to_entity_key,
     owned::OwnedMultiEraOutput,
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
@@ -36,13 +37,38 @@ fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
 /// case — the key set of the dreps namespace for the dormancy-release
 /// fan-out.
 ///
-/// Built once per batch by `compute_delta`; the evolving counter is copied
-/// back after each block so a release in block `n` is visible to block
-/// `n + 1` of the same batch.
+/// Built once per batch by `compute_delta`; the whole context is threaded
+/// through the batch's builders so a release (or a registration seen) in
+/// block `n` is visible to block `n + 1` of the same batch.
 #[derive(Clone, Default)]
 pub struct DormancyContext {
     pub dormant_epochs: u64,
     pub drep_keys: Arc<Vec<EntityKey>>,
+
+    /// Keys of DReps registered (in valid txs) after the batch-start
+    /// snapshot was taken, while the counter was still non-zero. The
+    /// Haskell `updateDormantDRepExpiry` maps over the live DRep map,
+    /// which includes these; the snapshot alone would miss them.
+    pub batch_registrations: Vec<EntityKey>,
+}
+
+impl DormancyContext {
+    /// Keys targeted by a dormancy-release fan-out: the batch-start
+    /// snapshot plus the registrations seen since, deduplicated (a DRep
+    /// re-registering within the batch appears in both).
+    fn release_targets(&self) -> Vec<EntityKey> {
+        let mut targets: Vec<EntityKey> = self
+            .drep_keys
+            .iter()
+            .chain(self.batch_registrations.iter())
+            .cloned()
+            .collect();
+
+        targets.sort();
+        targets.dedup();
+
+        targets
+    }
 }
 
 /// Visitor for the GOVCERT-scoped state effects: DRep registration
@@ -64,9 +90,10 @@ impl DRepStateVisitor {
         }
     }
 
-    /// The dormant-epoch counter after the blocks visited so far.
-    pub fn dormant_epochs(&self) -> u64 {
-        self.dormancy.dormant_epochs
+    /// The dormancy context as evolved by the blocks visited so far —
+    /// `compute_delta` threads it into the next block's builder.
+    pub fn take_dormancy(&mut self) -> DormancyContext {
+        std::mem::take(&mut self.dormancy)
     }
 
     /// `currentEpoch + drepActivity − numDormantEpochs` — the refresh value
@@ -128,9 +155,9 @@ impl BlockVisitor for DRepStateVisitor {
         // votes of the same tx already see the reset counter. Phase-2-invalid
         // transactions contribute nothing.
         if tx.is_valid() && self.dormancy.dormant_epochs > 0 && !tx.gov_proposals().is_empty() {
-            for key in self.dormancy.drep_keys.iter() {
+            for key in self.dormancy.release_targets() {
                 deltas.add_for_entity(DRepDormancyRelease::new(
-                    key.clone(),
+                    key,
                     self.dormancy.dormant_epochs,
                     self.current_epoch,
                 ));
@@ -139,6 +166,7 @@ impl BlockVisitor for DRepStateVisitor {
             deltas.add_for_entity(GovDormancyReset::new());
 
             self.dormancy.dormant_epochs = 0;
+            self.dormancy.batch_registrations = Vec::new();
         }
 
         let Some(voting_procedures) = &conway_tx.transaction_body.voting_procedures else {
@@ -222,6 +250,17 @@ impl BlockVisitor for DRepStateVisitor {
                                 false,
                             ));
                         }
+
+                        // While a dormant stretch is open, a registration
+                        // creates a row the batch-start snapshot doesn't
+                        // have — remember it so a release later in the
+                        // batch still reaches it (Haskell folds over the
+                        // live DRep map, which includes it).
+                        if self.dormancy.dormant_epochs > 0 {
+                            self.dormancy
+                                .batch_registrations
+                                .push(drep_to_entity_key(&drep));
+                        }
                     }
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
@@ -252,5 +291,26 @@ impl BlockVisitor for DRepStateVisitor {
         deltas.add_for_entity(DRepActivity::new(drep.clone(), block.slot()));
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn release_targets_union_snapshot_and_batch_registrations() {
+        let key = |b: u8| EntityKey::from([b; 32].as_slice());
+
+        let dormancy = DormancyContext {
+            dormant_epochs: 3,
+            drep_keys: Arc::new(vec![key(1), key(2)]),
+            // key(2) re-registered within the batch: must not be released twice
+            batch_registrations: vec![key(2), key(3), key(3)],
+        };
+
+        let targets = dormancy.release_targets();
+
+        assert_eq!(targets, vec![key(1), key(2), key(3)]);
     }
 }

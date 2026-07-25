@@ -135,3 +135,29 @@ pub(crate) mod testing {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transition(prev: u16, new: u16) -> EraTransition {
+        EraTransition {
+            prev_version: EraProtocol::from(prev),
+            new_version: EraProtocol::from(new),
+        }
+    }
+
+    #[test]
+    fn entering_conway_detects_chang_boundary() {
+        // the Chang hard fork proper
+        assert!(transition(8, 9).entering_conway());
+
+        // a jump over protocol 9 still enters Conway
+        assert!(transition(8, 10).entering_conway());
+
+        // intra-Conway bumps and earlier boundaries don't re-seed
+        assert!(!transition(9, 10).entering_conway());
+        assert!(!transition(7, 8).entering_conway());
+        assert!(!transition(2, 3).entering_conway());
+    }
+}

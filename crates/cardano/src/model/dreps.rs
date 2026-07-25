@@ -527,6 +527,10 @@ impl dolos_core::EntityDelta for DRepExpiryUpdate {
 
         self.was_new = entity.is_none();
 
+        // Cert-driven updates (`only_if_registered = false`) are always
+        // queued after the same tx's `DRepRegistration`, which creates the
+        // entity; creation here is defensive only — a row born this way
+        // would carry no `registered_at`.
         let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
 
         // save undo info

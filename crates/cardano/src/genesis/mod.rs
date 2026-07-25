@@ -203,3 +203,45 @@ pub fn execute<D: Domain>(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::{Domain as _, StateStore as _};
+    use dolos_testing::toy_domain::ToyDomain;
+    use std::sync::Arc;
+
+    use crate::{FixedNamespace as _, GovState, GOV_STATE_KEY};
+
+    use super::*;
+
+    fn read_gov(domain: &ToyDomain) -> Option<GovState> {
+        domain
+            .state()
+            .read_entity_typed::<GovState>(GovState::NS, &EntityKey::from(GOV_STATE_KEY))
+            .unwrap()
+    }
+
+    #[test]
+    fn bootstrap_seeds_gov_singleton_for_forced_conway() {
+        // the devnet genesis force-starts at protocol 9
+        let domain = ToyDomain::new(None, None);
+
+        let (constitution, committee) = gov_from_conway_genesis(&domain.genesis().conway).unwrap();
+
+        let gov = read_gov(&domain).expect("gov singleton seeded at bootstrap");
+
+        assert_eq!(gov.constitution, Some(constitution));
+        assert_eq!(gov.committee, Some(committee));
+        assert_eq!(gov.num_dormant_epochs, 0);
+    }
+
+    #[test]
+    fn bootstrap_skips_gov_singleton_before_conway() {
+        let mut genesis = crate::include::devnet::load();
+        genesis.force_protocol = Some(8);
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+
+        assert_eq!(read_gov(&domain), None);
+    }
+}

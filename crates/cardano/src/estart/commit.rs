@@ -297,3 +297,86 @@ impl super::WorkContext {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::{Domain as _, StateStore as _};
+    use dolos_testing::toy_domain::ToyDomain;
+
+    use crate::{gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit};
+
+    use super::*;
+
+    fn empty_context(domain: &ToyDomain) -> super::super::WorkContext {
+        super::super::WorkContext {
+            ended_state: Default::default(),
+            active_protocol: EraProtocol::from(9),
+            chain_summary: ChainSummary::default(),
+            genesis: domain.genesis(),
+            avvm_reclamation: 0,
+            deltas: Default::default(),
+            logs: Default::default(),
+        }
+    }
+
+    fn read_gov(domain: &ToyDomain) -> Option<GovState> {
+        domain
+            .state()
+            .read_entity_typed::<GovState>(GovState::NS, &EntityKey::from(GOV_STATE_KEY))
+            .unwrap()
+    }
+
+    /// The targeted gov commit path must create the singleton when it does
+    /// not exist yet — `stream_and_apply_namespace` would silently drop the
+    /// `GovGenesisInit` emitted at the Conway boundary.
+    #[test]
+    fn gov_deltas_create_absent_singleton() {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        // the devnet bootstrap seeds the entity; delete it to simulate a
+        // store reaching the Chang boundary without one
+        let writer = state.start_writer().unwrap();
+        writer
+            .delete_entity(GovState::NS, &EntityKey::from(GOV_STATE_KEY))
+            .unwrap();
+        writer.commit().unwrap();
+        assert_eq!(read_gov(&domain), None);
+
+        let (constitution, committee) = gov_from_conway_genesis(&domain.genesis().conway).unwrap();
+
+        let mut ctx = empty_context(&domain);
+        ctx.add_delta(GovGenesisInit::new(constitution.clone(), committee.clone()));
+
+        let writer = state.start_writer().unwrap();
+        ctx.apply_gov_state_deltas::<ToyDomain>(state, &writer)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let gov = read_gov(&domain).expect("singleton created by delta");
+        assert_eq!(gov.constitution, Some(constitution));
+        assert_eq!(gov.committee, Some(committee));
+
+        // the queue entry was drained — no double apply possible
+        assert!(ctx.deltas.entities.is_empty());
+    }
+
+    /// With no queued gov deltas the pass is a no-op that leaves the
+    /// existing entity untouched.
+    #[test]
+    fn gov_apply_without_deltas_is_noop() {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        let before = read_gov(&domain).expect("devnet bootstrap seeds the entity");
+
+        let mut ctx = empty_context(&domain);
+
+        let writer = state.start_writer().unwrap();
+        ctx.apply_gov_state_deltas::<ToyDomain>(state, &writer)
+            .unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(read_gov(&domain), Some(before));
+    }
+}

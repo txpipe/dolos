@@ -234,11 +234,12 @@ impl<'a> DeltaBuilder<'a> {
         }
     }
 
-    /// The dormant-epoch counter after this block's deltas — a dormancy
-    /// release inside the block zeroes it. `compute_delta` threads the
-    /// value into the next block's builder.
-    pub fn dormant_epochs(&self) -> u64 {
-        self.drep_state.dormant_epochs()
+    /// The dormancy context after this block's deltas — a release inside
+    /// the block zeroes the counter; registrations seen while the counter
+    /// was non-zero extend the fan-out key set. `compute_delta` threads
+    /// the context into the next block's builder.
+    pub fn take_dormancy(&mut self) -> DormancyContext {
+        self.drep_state.take_dormancy()
     }
 
     pub fn crawl(&mut self) -> Result<(), ChainError> {
@@ -567,20 +568,23 @@ pub(crate) fn compute_delta<D: Domain>(
 
     // Governance dormancy context for the DRep visitor: the dormant-epoch
     // counter and — only when it's non-zero, which is rare — the dreps key
-    // set for the release fan-out. The counter evolves across blocks of the
-    // batch (a release zeroes it), so it's copied back after each crawl.
+    // set for the release fan-out. The context evolves across blocks of
+    // the batch (a release zeroes the counter, registrations extend the
+    // key set), so it's taken back after each crawl.
     let mut dormancy = DormancyContext {
         dormant_epochs: state
             .read_entity_typed::<GovState>(GovState::NS, &EntityKey::from(GOV_STATE_KEY))?
             .map(|gov| gov.num_dormant_epochs)
             .unwrap_or_default(),
         drep_keys: Default::default(),
+        batch_registrations: Default::default(),
     };
 
     if dormancy.dormant_epochs > 0 {
         let mut keys = Vec::new();
 
-        for record in state.iter_entities_typed::<DRepState>(DRepState::NS, None)? {
+        // raw iteration: only the keys matter, skip the CBOR decode
+        for record in state.iter_entities(DRepState::NS, EntityKey::full_range())? {
             let (key, _) = record?;
             keys.push(key);
         }
@@ -597,12 +601,12 @@ pub(crate) fn compute_delta<D: Domain>(
             epoch_start,
             block,
             &batch.utxos_decoded,
-            dormancy.clone(),
+            std::mem::take(&mut dormancy),
         );
 
         builder.crawl()?;
 
-        dormancy.dormant_epochs = builder.dormant_epochs();
+        dormancy = builder.take_dormancy();
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
         // this into the entity system. (#1042)
