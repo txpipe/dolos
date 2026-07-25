@@ -133,6 +133,10 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
                 delegator: delegator.clone(),
                 drep: drep.clone(),
             }),
+            ConwayCert::StakeVoteDeleg(delegator, _, drep) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
             _ => None,
         },
         _ => None,
