@@ -1,7 +1,28 @@
-use dolos_core::{ChainError, EntityValue, Namespace, NamespaceType, NsKey, StateSchema};
+use dolos_core::{
+    ChainError, Entity, EntityKey, EntityValue, Namespace, NamespaceType, NsKey, StateSchema,
+};
 
 pub trait FixedNamespace {
     const NS: &'static str;
+}
+
+/// A namespace that holds exactly one row at a fixed key.
+///
+/// Singletons don't fit the population-shaped machinery (namespace
+/// streams, key ranges): readers address the row directly
+/// (`crate::read_singleton`) and boundary commits apply deltas through
+/// `WorkDeltas::apply_singleton`, which — unlike the streams — handles
+/// the row not existing yet.
+pub trait SingletonEntity: Entity + FixedNamespace {
+    const KEY: &'static [u8];
+
+    fn singleton_key() -> EntityKey {
+        EntityKey::from(Self::KEY)
+    }
+
+    fn ns_key() -> NsKey {
+        NsKey::from((Self::NS, Self::singleton_key()))
+    }
 }
 
 macro_rules! entity_boilerplate {

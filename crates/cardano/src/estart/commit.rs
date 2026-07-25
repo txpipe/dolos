@@ -17,7 +17,7 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
-    GovState, PoolState, ProposalState, GOV_STATE_KEY,
+    GovState, PoolState, ProposalState,
 };
 
 /// Era transition data collected from state.
@@ -114,41 +114,6 @@ impl super::WorkContext {
         Ok(())
     }
 
-    /// Apply any queued deltas for the governance singleton.
-    ///
-    /// Unlike `stream_and_apply_namespace`, this handles the entity being
-    /// absent: the `GovGenesisInit` delta emitted at the Conway era boundary
-    /// *creates* the singleton, so streaming existing records would silently
-    /// drop it.
-    fn apply_gov_state_deltas<D: Domain>(
-        &mut self,
-        state: &D::State,
-        writer: &<D::State as StateStore>::Writer,
-    ) -> Result<(), ChainError> {
-        let entity_key = EntityKey::from(GOV_STATE_KEY);
-
-        let to_apply = self
-            .deltas
-            .entities
-            .remove(&NsKey::from((GovState::NS, entity_key.clone())));
-
-        let Some(to_apply) = to_apply else {
-            return Ok(());
-        };
-
-        let mut entity: Option<CardanoEntity> = state
-            .read_entity_typed::<GovState>(GovState::NS, &entity_key)?
-            .map(Into::into);
-
-        for mut delta in to_apply {
-            delta.apply(&mut entity);
-        }
-
-        writer.save_entity_typed(GovState::NS, &entity_key, entity.as_ref())?;
-
-        Ok(())
-    }
-
     /// Commit a single per-shard run: stream-and-apply per-account snapshot
     /// transitions for the shard's key ranges, then commit the
     /// `EStartProgress` delta against `EpochState`. Archive logs
@@ -177,8 +142,9 @@ impl super::WorkContext {
             self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
         }
 
-        // EpochState gets the EStartProgress delta (single entity).
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+        // EpochState gets the EStartProgress delta.
+        self.deltas
+            .apply_singleton::<EpochState, _>(state, &writer)?;
 
         // Archive logs — share the start-of-epoch temporal key across shards.
         let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
@@ -257,12 +223,13 @@ impl super::WorkContext {
         debug!("streaming proposal entities");
         self.stream_and_apply_namespace::<D, ProposalState>(state, &writer, None)?;
 
-        debug!("streaming epoch entities");
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+        debug!("applying singleton deltas");
+        self.deltas
+            .apply_singleton::<EpochState, _>(state, &writer)?;
 
-        // Governance singleton — targeted apply (the entity may not exist
-        // yet; the Conway-boundary `GovGenesisInit` creates it).
-        self.apply_gov_state_deltas::<D>(state, &writer)?;
+        // The governance row may not exist yet — the Conway-boundary
+        // `GovGenesisInit` creates it, which the singleton path handles.
+        self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
         // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {
@@ -303,7 +270,9 @@ mod tests {
     use dolos_core::{Domain as _, StateStore as _};
     use dolos_testing::toy_domain::ToyDomain;
 
-    use crate::{gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit};
+    use crate::{
+        gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit, SingletonEntity as _,
+    };
 
     use super::*;
 
@@ -322,12 +291,12 @@ mod tests {
     fn read_gov(domain: &ToyDomain) -> Option<GovState> {
         domain
             .state()
-            .read_entity_typed::<GovState>(GovState::NS, &EntityKey::from(GOV_STATE_KEY))
+            .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
             .unwrap()
     }
 
-    /// The targeted gov commit path must create the singleton when it does
-    /// not exist yet — `stream_and_apply_namespace` would silently drop the
+    /// The singleton apply path must create the entity when it does not
+    /// exist yet — `stream_and_apply_namespace` would silently drop the
     /// `GovGenesisInit` emitted at the Conway boundary.
     #[test]
     fn gov_deltas_create_absent_singleton() {
@@ -338,7 +307,7 @@ mod tests {
         // store reaching the Chang boundary without one
         let writer = state.start_writer().unwrap();
         writer
-            .delete_entity(GovState::NS, &EntityKey::from(GOV_STATE_KEY))
+            .delete_entity(GovState::NS, &GovState::singleton_key())
             .unwrap();
         writer.commit().unwrap();
         assert_eq!(read_gov(&domain), None);
@@ -349,7 +318,8 @@ mod tests {
         ctx.add_delta(GovGenesisInit::new(constitution.clone(), committee.clone()));
 
         let writer = state.start_writer().unwrap();
-        ctx.apply_gov_state_deltas::<ToyDomain>(state, &writer)
+        ctx.deltas
+            .apply_singleton::<GovState, _>(state, &writer)
             .unwrap();
         writer.commit().unwrap();
 
@@ -373,7 +343,8 @@ mod tests {
         let mut ctx = empty_context(&domain);
 
         let writer = state.start_writer().unwrap();
-        ctx.apply_gov_state_deltas::<ToyDomain>(state, &writer)
+        ctx.deltas
+            .apply_singleton::<GovState, _>(state, &writer)
             .unwrap();
         writer.commit().unwrap();
 

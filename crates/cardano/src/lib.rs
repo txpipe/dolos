@@ -6,9 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EntityKey,
-    EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore,
-    TipEvent, WorkUnit,
+    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor,
+    Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent,
+    WorkUnit,
 };
 
 use crate::{
@@ -575,11 +575,17 @@ pub fn load_effective_pparams<D: Domain>(state: &D::State) -> Result<PParamsSet,
 }
 
 pub fn load_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainError> {
-    let epoch = state
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(CURRENT_EPOCH_KEY))?
-        .ok_or(ChainError::NoActiveEpoch)?;
+    read_singleton::<D, EpochState>(state)?.ok_or(ChainError::NoActiveEpoch)
+}
 
-    Ok(epoch)
+/// Read a singleton entity directly at its fixed key.
+///
+/// `None` is a legitimate state for singletons born mid-chain — e.g.
+/// `GovState` on a store that hasn't crossed the Conway boundary.
+pub fn read_singleton<D: Domain, E: SingletonEntity>(
+    state: &D::State,
+) -> Result<Option<E>, ChainError> {
+    Ok(state.read_entity_typed::<E>(E::NS, &E::singleton_key())?)
 }
 
 #[cfg(test)]

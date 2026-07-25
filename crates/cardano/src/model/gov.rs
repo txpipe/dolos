@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use dolos_core::{BlockSlot, EntityKey, NsKey};
+use dolos_core::{BlockSlot, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -25,7 +25,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::FixedNamespace as _;
+use super::SingletonEntity;
 
 /// Key of the single `GovState` entity inside the `"gov"` namespace.
 pub const GOV_STATE_KEY: &[u8] = b"0";
@@ -123,9 +123,18 @@ pub struct GovState {
 
 entity_boilerplate!(GovState, "gov");
 
+impl SingletonEntity for GovState {
+    const KEY: &'static [u8] = GOV_STATE_KEY;
+}
+
 impl GovState {
-    pub fn ns_key() -> NsKey {
-        NsKey::from((Self::NS, EntityKey::from(GOV_STATE_KEY)))
+    /// Seed the enact-state from the Conway genesis (the initial
+    /// constitution and committee). Shared by the two birth paths —
+    /// `bootstrap_gov` for networks that force-start in Conway and
+    /// `GovGenesisInit` at the Chang boundary — so they can't drift.
+    pub fn seed_genesis(&mut self, constitution: Constitution, committee: Committee) {
+        self.constitution = Some(constitution);
+        self.committee = Some(committee);
     }
 
     /// Effective authorization of `cold` as of the latest event.
@@ -252,8 +261,7 @@ impl dolos_core::EntityDelta for GovGenesisInit {
 
         let state = entity.get_or_insert_with(GovState::default);
 
-        state.constitution = Some(self.constitution.clone());
-        state.committee = Some(self.committee.clone());
+        state.seed_genesis(self.constitution.clone(), self.committee.clone());
     }
 
     fn undo(&self, entity: &mut Option<GovState>) {
