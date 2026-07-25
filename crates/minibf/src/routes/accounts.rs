@@ -977,13 +977,17 @@ where
 
         let addresses = account_addresses_in_tx(domain, account, tx).await?;
 
+        let tx_hash = hex::encode(tx.hash().as_slice());
+        let block_height = block.number() as i32;
+        let block_time = chain.slot_time(block.slot()) as i32;
+
         for address in addresses {
             matches.push(AccountTransactionsContentInner {
                 address,
-                tx_hash: hex::encode(tx.hash().as_slice()),
+                tx_hash: tx_hash.clone(),
                 tx_index: idx as i32,
-                block_height: block.number() as i32,
-                block_time: chain.slot_time(block.slot()) as i32,
+                block_height,
+                block_time,
             });
         }
     }
