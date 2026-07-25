@@ -349,6 +349,14 @@ impl TableRow for ProposalState {
             }
             ProposalAction::TreasuryWithdrawal(x) => format!("TreasuryWithdrawal({:?})", x.len()),
             ProposalAction::Other => "Other".to_string(),
+            ProposalAction::NoConfidence => "NoConfidence".to_string(),
+            ProposalAction::UpdateCommittee {
+                to_remove, to_add, ..
+            } => {
+                format!("UpdateCommittee(-{}, +{})", to_remove.len(), to_add.len())
+            }
+            ProposalAction::NewConstitution { .. } => "NewConstitution".to_string(),
+            ProposalAction::Info => "Info".to_string(),
         };
 
         vec![

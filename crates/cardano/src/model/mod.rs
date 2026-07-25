@@ -231,6 +231,8 @@ pub enum CardanoDelta {
     EpochTransitionV2(Box<EpochTransitionV2>),
     EpochWrapUpV3(Box<EpochWrapUpV3>),
     DRepAnchorUpdate(Box<DRepAnchorUpdate>),
+    NewProposalV2(Box<NewProposalV2>),
+    VoteCast(Box<VoteCast>),
 }
 
 impl CardanoDelta {
@@ -317,6 +319,8 @@ delta_from!(RupdProgress);
 delta_from!(EpochTransitionV2);
 delta_from!(EpochWrapUpV3);
 delta_from!(DRepAnchorUpdate);
+delta_from!(NewProposalV2);
+delta_from!(VoteCast);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -345,6 +349,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PParamsUpdate(x) => x.key(),
             Self::NoncesUpdate(x) => x.key(),
             Self::NewProposal(x) => x.key(),
+            Self::NewProposalV2(x) => x.key(),
+            Self::VoteCast(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -396,6 +402,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PParamsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NoncesUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NewProposal(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::NewProposalV2(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::VoteCast(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -447,6 +455,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::PParamsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NoncesUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NewProposal(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::NewProposalV2(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::VoteCast(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),
