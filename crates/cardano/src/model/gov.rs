@@ -6,12 +6,18 @@
 //! the four per-purpose previous-governance-action roots, and the
 //! dormant-epoch counter (`vsNumDormantEpochs`).
 //!
-//! A single entity lives in the namespace under [`GOV_STATE_KEY`], seeded
-//! from the Conway genesis at the era boundary that enters protocol 9
-//! (or at bootstrap for networks that force-start in Conway). Stores
-//! upgraded in place past that boundary simply have no entity until an
-//! event creates one — the documented "governance history absent" gap for
-//! in-place upgrades; complete state comes from a fresh sync.
+//! A single entity lives in the namespace under [`GOV_STATE_KEY`]. Its
+//! existence is an invariant: every store carries the row regardless of
+//! era — created inactive at genesis bootstrap (or by the CARDANO-006
+//! startup migration on stores bootstrapped before the invariant) and
+//! activated with the Conway genesis enact-state at the era boundary
+//! that enters protocol 9 (or directly at bootstrap for networks that
+//! force-start in Conway). `active_since` distinguishes the phases.
+//!
+//! Stores upgraded in place past the Chang boundary get the row from the
+//! migration, but their enact-state fields stay unset — the committee
+//! certs and enactments since the boundary were never recorded; complete
+//! governance content comes from a fresh sync.
 
 use std::collections::BTreeMap;
 
@@ -29,6 +35,11 @@ use super::SingletonEntity;
 
 /// Key of the single `GovState` entity inside the `"gov"` namespace.
 pub const GOV_STATE_KEY: &[u8] = b"0";
+
+/// Expect message for delta apply/undo on the governance singleton — its
+/// existence is an invariant, so a miss means a corrupt store.
+const GOV_MUST_EXIST: &str =
+    "gov singleton must exist: seeded at bootstrap or by the CARDANO-006 migration";
 
 /// The enacted constitution: metadata anchor plus the optional guardrails
 /// script hash.
@@ -91,14 +102,14 @@ pub struct GovRoots {
 
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovState {
-    /// The enacted constitution. `None` only when the entity was created
-    /// lazily by a committee certificate on a store that never crossed the
-    /// Conway boundary with this code (in-place upgrade gap).
+    /// The enacted constitution. `None` before governance activates
+    /// (`active_since` unset) — or on a migrated store whose enact-state
+    /// is unknown (in-place upgrade gap; fresh sync recovers it).
     #[n(0)]
     pub constitution: Option<Constitution>,
 
-    /// The enacted committee. `None` means the no-confidence state — or the
-    /// same in-place upgrade gap as `constitution`.
+    /// The enacted committee. `None` means the no-confidence state — or,
+    /// as with `constitution`, pre-activation / the migration gap.
     #[n(1)]
     pub committee: Option<Committee>,
 
@@ -119,6 +130,15 @@ pub struct GovState {
     #[n(4)]
     #[cbor(default)]
     pub num_dormant_epochs: u64,
+
+    /// Epoch since which governance is active — the chain entered Conway.
+    /// `None` means governance hasn't activated yet (pre-Conway). Set to 0
+    /// for networks that force-start in Conway, to the Chang-boundary
+    /// epoch otherwise, and derived from the era summary by the startup
+    /// migration (which leaves the enact-state fields unset).
+    #[n(5)]
+    #[cbor(default)]
+    pub active_since: Option<Epoch>,
 }
 
 entity_boilerplate!(GovState, "gov");
@@ -128,13 +148,19 @@ impl SingletonEntity for GovState {
 }
 
 impl GovState {
-    /// Seed the enact-state from the Conway genesis (the initial
-    /// constitution and committee). Shared by the two birth paths —
-    /// `bootstrap_gov` for networks that force-start in Conway and
-    /// `GovGenesisInit` at the Chang boundary — so they can't drift.
-    pub fn seed_genesis(&mut self, constitution: Constitution, committee: Committee) {
+    /// Activate governance with the Conway genesis enact-state (the
+    /// initial constitution and committee). Shared by the two activation
+    /// paths — `bootstrap_gov` for networks that force-start in Conway
+    /// and `GovGenesisInit` at the Chang boundary — so they can't drift.
+    pub fn seed_genesis(
+        &mut self,
+        constitution: Constitution,
+        committee: Committee,
+        active_since: Epoch,
+    ) {
         self.constitution = Some(constitution);
         self.committee = Some(committee);
+        self.active_since = Some(active_since);
     }
 
     /// Effective authorization of `cold` as of the latest event.
@@ -226,25 +252,32 @@ pub fn gov_from_conway_genesis(
 
 // --- Deltas ---
 
-/// Seed the governance singleton with the Conway genesis constitution and
-/// committee. Emitted once, at the era boundary that enters protocol 9
-/// (Chang); networks that force-start in Conway seed the entity directly at
-/// bootstrap instead.
+/// Activate the governance singleton with the Conway genesis constitution
+/// and committee, effective from `epoch`. Emitted once, at the era boundary
+/// that enters protocol 9 (Chang); networks that force-start in Conway
+/// activate the entity directly at bootstrap instead. Undo restores the
+/// inactive row — never removes it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovGenesisInit {
     pub(crate) constitution: Constitution,
     pub(crate) committee: Committee,
+    pub(crate) epoch: Epoch,
 
     // undo
-    pub(crate) prev: Option<GovState>,
+    pub(crate) prev_constitution: Option<Constitution>,
+    pub(crate) prev_committee: Option<Committee>,
+    pub(crate) prev_active_since: Option<Epoch>,
 }
 
 impl GovGenesisInit {
-    pub fn new(constitution: Constitution, committee: Committee) -> Self {
+    pub fn new(constitution: Constitution, committee: Committee, epoch: Epoch) -> Self {
         Self {
             constitution,
             committee,
-            prev: None,
+            epoch,
+            prev_constitution: None,
+            prev_committee: None,
+            prev_active_since: None,
         }
     }
 }
@@ -257,15 +290,25 @@ impl dolos_core::EntityDelta for GovGenesisInit {
     }
 
     fn apply(&mut self, entity: &mut Option<GovState>) {
-        self.prev = entity.clone();
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
 
-        let state = entity.get_or_insert_with(GovState::default);
+        self.prev_constitution = state.constitution.clone();
+        self.prev_committee = state.committee.clone();
+        self.prev_active_since = state.active_since;
 
-        state.seed_genesis(self.constitution.clone(), self.committee.clone());
+        state.seed_genesis(
+            self.constitution.clone(),
+            self.committee.clone(),
+            self.epoch,
+        );
     }
 
     fn undo(&self, entity: &mut Option<GovState>) {
-        *entity = self.prev.clone();
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.constitution = self.prev_constitution.clone();
+        state.committee = self.prev_committee.clone();
+        state.active_since = self.prev_active_since;
     }
 }
 
@@ -279,7 +322,6 @@ pub struct CommitteeAuth {
     pub(crate) slot: BlockSlot,
 
     // undo
-    pub(crate) was_new: bool,
     pub(crate) created_entry: bool,
 }
 
@@ -289,7 +331,6 @@ impl CommitteeAuth {
             cold,
             hot,
             slot,
-            was_new: false,
             created_entry: false,
         }
     }
@@ -305,7 +346,6 @@ pub struct CommitteeResign {
     pub(crate) slot: BlockSlot,
 
     // undo
-    pub(crate) was_new: bool,
     pub(crate) created_entry: bool,
 }
 
@@ -315,21 +355,20 @@ impl CommitteeResign {
             cold,
             anchor,
             slot,
-            was_new: false,
             created_entry: false,
         }
     }
 }
 
+/// Append an authorization event to `cold`'s history. Returns whether the
+/// history entry itself was created (undo state for `pop_auth`).
 fn push_auth(
     entity: &mut Option<GovState>,
     cold: &StakeCredential,
     slot: BlockSlot,
     auth: CommitteeAuthorization,
-) -> (bool, bool) {
-    let was_new = entity.is_none();
-
-    let state = entity.get_or_insert_with(GovState::default);
+) -> bool {
+    let state = entity.as_mut().expect(GOV_MUST_EXIST);
 
     let created_entry = !state.committee_auths.contains_key(cold);
 
@@ -339,18 +378,11 @@ fn push_auth(
         .or_default()
         .push((slot, auth));
 
-    (was_new, created_entry)
+    created_entry
 }
 
-fn pop_auth(entity: &mut Option<GovState>, cold: &StakeCredential, was_new: bool, created: bool) {
-    if was_new {
-        *entity = None;
-        return;
-    }
-
-    let Some(state) = entity.as_mut() else {
-        return;
-    };
+fn pop_auth(entity: &mut Option<GovState>, cold: &StakeCredential, created: bool) {
+    let state = entity.as_mut().expect(GOV_MUST_EXIST);
 
     if let Some(history) = state.committee_auths.get_mut(cold) {
         history.pop();
@@ -369,19 +401,16 @@ impl dolos_core::EntityDelta for CommitteeAuth {
     }
 
     fn apply(&mut self, entity: &mut Option<GovState>) {
-        let (was_new, created_entry) = push_auth(
+        self.created_entry = push_auth(
             entity,
             &self.cold,
             self.slot,
             CommitteeAuthorization::HotCredential(self.hot.clone()),
         );
-
-        self.was_new = was_new;
-        self.created_entry = created_entry;
     }
 
     fn undo(&self, entity: &mut Option<GovState>) {
-        pop_auth(entity, &self.cold, self.was_new, self.created_entry);
+        pop_auth(entity, &self.cold, self.created_entry);
     }
 }
 
@@ -393,19 +422,16 @@ impl dolos_core::EntityDelta for CommitteeResign {
     }
 
     fn apply(&mut self, entity: &mut Option<GovState>) {
-        let (was_new, created_entry) = push_auth(
+        self.created_entry = push_auth(
             entity,
             &self.cold,
             self.slot,
             CommitteeAuthorization::Resigned(self.anchor.clone()),
         );
-
-        self.was_new = was_new;
-        self.created_entry = created_entry;
     }
 
     fn undo(&self, entity: &mut Option<GovState>) {
-        pop_auth(entity, &self.cold, self.was_new, self.created_entry);
+        pop_auth(entity, &self.cold, self.created_entry);
     }
 }
 
@@ -415,16 +441,12 @@ impl dolos_core::EntityDelta for CommitteeResign {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GovDormancyReset {
     // undo
-    pub(crate) was_new: bool,
     pub(crate) prev: u64,
 }
 
 impl GovDormancyReset {
     pub fn new() -> Self {
-        Self {
-            was_new: false,
-            prev: 0,
-        }
+        Self { prev: 0 }
     }
 }
 
@@ -442,20 +464,16 @@ impl dolos_core::EntityDelta for GovDormancyReset {
     }
 
     fn apply(&mut self, entity: &mut Option<GovState>) {
-        self.was_new = entity.is_none();
-
-        let state = entity.get_or_insert_with(GovState::default);
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
 
         self.prev = state.num_dormant_epochs;
         state.num_dormant_epochs = 0;
     }
 
     fn undo(&self, entity: &mut Option<GovState>) {
-        if self.was_new {
-            *entity = None;
-        } else if let Some(state) = entity {
-            state.num_dormant_epochs = self.prev;
-        }
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.num_dormant_epochs = self.prev;
     }
 }
 
@@ -520,6 +538,7 @@ pub(crate) mod testing {
             ),
             prev_gov_action_ids in any_gov_roots(),
             num_dormant_epochs in 0u64..32u64,
+            active_since in prop::option::of(root::any_epoch()),
         ) -> GovState {
             GovState {
                 constitution,
@@ -527,6 +546,7 @@ pub(crate) mod testing {
                 committee_auths,
                 prev_gov_action_ids,
                 num_dormant_epochs,
+                active_since,
             }
         }
     }
@@ -576,6 +596,7 @@ mod tests {
                 ..Default::default()
             },
             num_dormant_epochs: 3,
+            active_since: Some(507),
         };
 
         let bytes = minicbor::to_vec(&state).unwrap();
@@ -658,8 +679,9 @@ mod prop_tests {
         fn any_genesis_init()(
             constitution in any_constitution(),
             committee in any_committee(),
+            epoch in root::any_epoch(),
         ) -> GovGenesisInit {
-            GovGenesisInit::new(constitution, committee)
+            GovGenesisInit::new(constitution, committee, epoch)
         }
     }
 
@@ -693,7 +715,7 @@ mod prop_tests {
 
         #[test]
         fn genesis_init_roundtrip(
-            entity in prop::option::of(any_gov_state()),
+            entity in any_gov_state().prop_map(Some),
             delta in any_genesis_init(),
         ) {
             assert_delta_roundtrip(entity, delta);
@@ -701,7 +723,7 @@ mod prop_tests {
 
         #[test]
         fn committee_auth_roundtrip(
-            entity in prop::option::of(any_gov_state()),
+            entity in any_gov_state().prop_map(Some),
             delta in any_committee_auth(),
         ) {
             assert_delta_roundtrip(entity, delta);
@@ -709,7 +731,7 @@ mod prop_tests {
 
         #[test]
         fn committee_auth_serde_roundtrip(
-            entity in prop::option::of(any_gov_state()),
+            entity in any_gov_state().prop_map(Some),
             delta in any_committee_auth(),
         ) {
             root::assert_delta_serde_roundtrip(entity, delta);
@@ -717,7 +739,7 @@ mod prop_tests {
 
         #[test]
         fn committee_resign_roundtrip(
-            entity in prop::option::of(any_gov_state()),
+            entity in any_gov_state().prop_map(Some),
             delta in any_committee_resign(),
         ) {
             assert_delta_roundtrip(entity, delta);
@@ -725,7 +747,7 @@ mod prop_tests {
 
         #[test]
         fn committee_resign_serde_roundtrip(
-            entity in prop::option::of(any_gov_state()),
+            entity in any_gov_state().prop_map(Some),
             delta in any_committee_resign(),
         ) {
             root::assert_delta_serde_roundtrip(entity, delta);
@@ -733,9 +755,24 @@ mod prop_tests {
 
         #[test]
         fn dormancy_reset_roundtrip(
-            entity in prop::option::of(any_gov_state()),
+            entity in any_gov_state().prop_map(Some),
         ) {
             assert_delta_roundtrip(entity, GovDormancyReset::new());
+        }
+
+        #[test]
+        fn dormancy_reset_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, GovDormancyReset::new());
+        }
+
+        #[test]
+        fn genesis_init_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_genesis_init(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
         }
     }
 
@@ -746,7 +783,7 @@ mod prop_tests {
         let cold = StakeCredential::ScriptHash([1u8; 28].into());
         let hot = StakeCredential::AddrKeyhash([2u8; 28].into());
 
-        let mut entity: Option<GovState> = None;
+        let mut entity: Option<GovState> = Some(GovState::default());
 
         let mut auth = CommitteeAuth::new(cold.clone(), hot.clone(), 100);
         let mut resign = CommitteeResign::new(cold.clone(), None, 200);
@@ -766,6 +803,7 @@ mod prop_tests {
         resign.undo(&mut entity);
         auth.undo(&mut entity);
 
-        assert!(entity.is_none());
+        // undo restores the pristine row — never removes it
+        assert_eq!(entity, Some(GovState::default()));
     }
 }

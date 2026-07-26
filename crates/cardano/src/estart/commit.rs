@@ -227,8 +227,8 @@ impl super::WorkContext {
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
 
-        // The governance row may not exist yet — the Conway-boundary
-        // `GovGenesisInit` creates it, which the singleton path handles.
+        // Gov isn't streamed by namespace; its boundary deltas (e.g. the
+        // Conway-boundary `GovGenesisInit`) go through the singleton path.
         self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
         // Write era transition if needed (only 2 entities)
@@ -295,27 +295,30 @@ mod tests {
             .unwrap()
     }
 
-    /// The singleton apply path must create the entity when it does not
-    /// exist yet — `stream_and_apply_namespace` would silently drop the
-    /// `GovGenesisInit` emitted at the Conway boundary.
+    /// `GovGenesisInit` applied through the singleton path activates the
+    /// existing (inactive) row with the genesis enact-state.
     #[test]
-    fn gov_deltas_create_absent_singleton() {
+    fn gov_genesis_init_activates_existing_singleton() {
         let domain = ToyDomain::new(None, None);
         let state = domain.state();
 
-        // the devnet bootstrap seeds the entity; delete it to simulate a
-        // store reaching the Chang boundary without one
+        // the devnet bootstrap activates the row; reset it to the
+        // inactive state a chain crossing Chang would carry
         let writer = state.start_writer().unwrap();
         writer
-            .delete_entity(GovState::NS, &GovState::singleton_key())
+            .write_entity_typed(&GovState::singleton_key(), &GovState::default())
             .unwrap();
         writer.commit().unwrap();
-        assert_eq!(read_gov(&domain), None);
+        assert_eq!(read_gov(&domain), Some(GovState::default()));
 
         let (constitution, committee) = gov_from_conway_genesis(&domain.genesis().conway).unwrap();
 
         let mut ctx = empty_context(&domain);
-        ctx.add_delta(GovGenesisInit::new(constitution.clone(), committee.clone()));
+        ctx.add_delta(GovGenesisInit::new(
+            constitution.clone(),
+            committee.clone(),
+            507,
+        ));
 
         let writer = state.start_writer().unwrap();
         ctx.deltas
@@ -323,9 +326,10 @@ mod tests {
             .unwrap();
         writer.commit().unwrap();
 
-        let gov = read_gov(&domain).expect("singleton created by delta");
+        let gov = read_gov(&domain).expect("singleton exists");
         assert_eq!(gov.constitution, Some(constitution));
         assert_eq!(gov.committee, Some(committee));
+        assert_eq!(gov.active_since, Some(507));
 
         // the queue entry was drained — no double apply possible
         assert!(ctx.deltas.entities.is_empty());

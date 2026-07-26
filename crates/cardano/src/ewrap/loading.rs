@@ -16,12 +16,12 @@ use pallas::ledger::primitives::StakeCredential;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_era_summary, pallas_extras, read_singleton,
+    load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
     rupd::credential_to_key,
-    AccountState, DRepState, EraProtocol, FixedNamespace as _, GovState, PendingMirState,
-    PendingRewardState, PoolState, ProposalState,
+    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
+    PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -37,9 +37,7 @@ impl BoundaryWork {
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
         let incentives = ending_state.incentives.clone().unwrap_or_default();
 
-        let num_dormant_epochs = read_singleton::<D, GovState>(state)?
-            .map(|gov| gov.num_dormant_epochs)
-            .unwrap_or_default();
+        let num_dormant_epochs = load_gov::<D>(state)?.num_dormant_epochs;
 
         Ok(BoundaryWork {
             ending_state,

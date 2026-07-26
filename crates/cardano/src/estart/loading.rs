@@ -67,15 +67,20 @@ impl WorkContext {
         // all per-entity transitions have been queued.
         super::reset::emit_epoch_transition(self);
 
-        // Entering Conway (the Chang hard fork) seeds the governance
+        // Entering Conway (the Chang hard fork) activates the governance
         // singleton with the genesis constitution + committee — the initial
-        // enact-state every later governance action evolves from. Stores
-        // already past the boundary never see this event (documented
-        // in-place upgrade gap; a fresh sync captures it).
+        // enact-state every later governance action evolves from. The row
+        // itself exists on every store (bootstrap / migration invariant);
+        // stores upgraded in place past the boundary never see this event,
+        // so their enact-state stays unset until a fresh sync.
         if let Some(transition) = self.ended_state().pparams.era_transition() {
             if transition.entering_conway() {
                 let (constitution, committee) = gov_from_conway_genesis(&self.genesis.conway)?;
-                self.add_delta(GovGenesisInit::new(constitution, committee));
+                self.add_delta(GovGenesisInit::new(
+                    constitution,
+                    committee,
+                    self.starting_epoch_no(),
+                ));
             }
         }
 

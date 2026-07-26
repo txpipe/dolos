@@ -41,6 +41,7 @@ pub mod utxoset;
 pub mod estart;
 pub mod ewrap;
 pub mod genesis;
+mod migrate;
 pub mod roll;
 pub mod rupd;
 mod work;
@@ -321,6 +322,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<Self, ChainError> {
         info!("initializing");
 
+        // One-time self-heal migrations. Must run before anything reads
+        // governance state and before WAL catch-up replays deltas that
+        // expect the singleton to exist.
+        migrate::ensure_gov_singleton::<D>(state)?;
+
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
@@ -578,10 +584,15 @@ pub fn load_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainError>
     read_singleton::<D, EpochState>(state)?.ok_or(ChainError::NoActiveEpoch)
 }
 
-/// Read a singleton entity directly at its fixed key.
-///
-/// `None` is a legitimate state for singletons born mid-chain — e.g.
-/// `GovState` on a store that hasn't crossed the Conway boundary.
+/// Load the governance singleton, whose existence is an invariant
+/// (seeded at bootstrap or by the CARDANO-006 startup migration).
+pub fn load_gov<D: Domain>(state: &D::State) -> Result<GovState, ChainError> {
+    read_singleton::<D, GovState>(state)?.ok_or(ChainError::MissingGovState)
+}
+
+/// Read a singleton entity directly at its fixed key. `None` means the
+/// row was never created — for the known singletons that's a broken or
+/// pre-migration store, which the `load_*` wrappers turn into errors.
 pub fn read_singleton<D: Domain, E: SingletonEntity>(
     state: &D::State,
 ) -> Result<Option<E>, ChainError> {

@@ -124,18 +124,18 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
     Ok(())
 }
 
-/// Seed the governance singleton for networks that force-start at Conway
-/// (protocol >= 9) — e.g. devnets. Chains that reach Conway by crossing the
-/// Chang hard fork seed it at that era boundary instead (`GovGenesisInit`).
+/// Create the governance singleton. Its existence is an invariant that
+/// starts here: every store carries the row regardless of era. Networks
+/// that force-start at Conway (protocol >= 9, e.g. devnets) get it
+/// activated with the genesis enact-state; everyone else gets the
+/// inactive row, activated later at the Chang boundary (`GovGenesisInit`).
 pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
-    if genesis.force_protocol.is_none_or(|protocol| protocol < 9) {
-        return Ok(());
-    }
-
-    let (constitution, committee) = gov_from_conway_genesis(&genesis.conway)?;
-
     let mut gov = GovState::default();
-    gov.seed_genesis(constitution, committee);
+
+    if genesis.force_protocol.is_some_and(|protocol| protocol >= 9) {
+        let (constitution, committee) = gov_from_conway_genesis(&genesis.conway)?;
+        gov.seed_genesis(constitution, committee, 0);
+    }
 
     let writer = state.start_writer()?;
     writer.write_entity_typed(&GovState::singleton_key(), &gov)?;
@@ -230,15 +230,19 @@ mod tests {
         assert_eq!(gov.constitution, Some(constitution));
         assert_eq!(gov.committee, Some(committee));
         assert_eq!(gov.num_dormant_epochs, 0);
+        assert_eq!(gov.active_since, Some(0));
     }
 
     #[test]
-    fn bootstrap_skips_gov_singleton_before_conway() {
+    fn bootstrap_seeds_inactive_gov_singleton_before_conway() {
         let mut genesis = crate::include::devnet::load();
         genesis.force_protocol = Some(8);
 
         let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
 
-        assert_eq!(read_gov(&domain), None);
+        // the row exists on every store — governance just isn't active yet
+        let gov = read_gov(&domain).expect("gov singleton exists pre-Conway");
+        assert_eq!(gov, GovState::default());
+        assert_eq!(gov.active_since, None);
     }
 }

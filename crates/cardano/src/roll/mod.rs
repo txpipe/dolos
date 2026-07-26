@@ -17,9 +17,8 @@ use pallas::{
 use tracing::{debug, instrument};
 
 use crate::{
-    load_effective_pparams, owned::OwnedMultiEraOutput, read_singleton,
-    roll::proposals::ProposalVisitor, utxoset, Cache, DRepState, FixedNamespace as _, GovState,
-    PParamsSet,
+    load_effective_pparams, load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor,
+    utxoset, Cache, DRepState, FixedNamespace as _, PParamsSet,
 };
 
 // Sub-modules
@@ -573,9 +572,7 @@ pub(crate) fn compute_delta<D: Domain>(
     // the batch (a release zeroes the counter, registrations extend the
     // key set), so it's taken back after each crawl.
     let mut dormancy = DormancyContext {
-        dormant_epochs: read_singleton::<D, GovState>(state)?
-            .map(|gov| gov.num_dormant_epochs)
-            .unwrap_or_default(),
+        dormant_epochs: load_gov::<D>(state)?.num_dormant_epochs,
         drep_keys: Default::default(),
         batch_registrations: Default::default(),
     };
