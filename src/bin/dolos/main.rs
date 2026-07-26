@@ -76,6 +76,10 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // reqwest 0.13 (via mithril-client) uses `rustls-no-provider`: it reads the
+    // process-default provider and panics if none is installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args = Cli::parse();
 
     let config = crate::common::load_config(&args.config)

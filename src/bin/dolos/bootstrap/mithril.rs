@@ -489,6 +489,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 mod tests {
     use super::*;
 
+    const PREVIEW_GENESIS_KEY: &str = "5b3132372c37332c3132342c3136312c362c3133372c3133312c3231332c3230372c3131372c3139382c38352c3137362c3139392c3136322c3234312c36382c3132332c3131392c3134352c31332c3233322c3234332c34392c3232392c322c3234392c3230352c3230352c33392c3233352c34345d";
+
     fn args_with_range(start: Option<u64>, end: Option<u64>) -> Args {
         Args {
             download_start: start,
@@ -578,5 +580,20 @@ mod tests {
         std::fs::write(dir.path().join("clean"), []).unwrap();
 
         assert_eq!(highest_existing_immutable(dir.path()), Some(3));
+    }
+
+    #[test]
+    fn mithril_client_builds_with_crypto_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = ClientBuilder::new(AggregatorDiscoveryType::Url(
+            "https://aggregator.example.com".into(),
+        ))
+        .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
+            PREVIEW_GENESIS_KEY.into(),
+        ))
+        .build();
+
+        assert!(client.is_ok());
     }
 }
