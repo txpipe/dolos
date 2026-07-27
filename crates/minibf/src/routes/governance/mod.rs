@@ -80,9 +80,7 @@ where
     for item in domain.iter_cardano_entities::<DRepState>(None)? {
         let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let appeared_at = state
-            .first_seen_at
-            .unwrap_or((u64::MAX, usize::MAX));
+        let appeared_at = state.first_seen_at.unwrap_or((u64::MAX, usize::MAX));
 
         dreps.push((appeared_at, key, state));
     }
