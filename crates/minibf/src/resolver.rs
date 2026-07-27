@@ -214,7 +214,7 @@ mod tests {
         synthetic::{build_synthetic_blocks, SyntheticBlockConfig, SyntheticVectors},
         toy_domain::ToyDomain,
     };
-    use pallas::ledger::traverse::Era;
+    use pallas::ledger::traverse::{Era, MultiEraBlock};
 
     use crate::test_support::TestDomainBuilder;
 
@@ -327,29 +327,43 @@ mod tests {
 
     #[tokio::test]
     async fn eviction_keeps_the_current_batch_resolvable() {
-        let (domain, vectors) = facade();
+        let (domain, _) = facade();
 
-        let tx = MultiEraTx::decode_for_era(Era::Conway, &vectors.tx_cbor).expect("decodable tx");
+        let (blocks, _, _) = build_synthetic_blocks(synthetic_cfg());
+        let raw = blocks.first().expect("at least one synthetic block");
+        let block = MultiEraBlock::decode(raw).expect("decodable block");
+
+        let txs = block.txs();
+        let (first, second) = (&txs[0], &txs[1]);
+
+        let first_inputs = first.consumes();
+        let second_inputs = second.consumes();
+
+        assert_ne!(
+            first_inputs[0].hash(),
+            second_inputs[0].hash(),
+            "the two txs must depend on different source txs"
+        );
 
         // a cache too small to hold anything alongside the current batch
         let mut cache = InputCache::with_capacity(1);
 
         {
-            let _resolver = cache.prepare(&domain, [&tx]).await.expect("prepare");
+            let _resolver = cache.prepare(&domain, [first]).await.expect("prepare");
         }
 
-        let first = cache.fetches();
-        assert_eq!(first, 1);
+        assert_eq!(cache.fetches(), 1);
 
         {
-            let mut resolver = cache.prepare(&domain, [&tx]).await.expect("prepare");
-
-            let inputs = tx.consumes();
-            let input = inputs.first().expect("synthetic tx consumes an input");
+            // this batch needs a dependency the full cache does not hold, so
+            // the cache is cleared and the batch fetched again
+            let mut resolver = cache.prepare(&domain, [second]).await.expect("prepare");
 
             // whatever eviction did, every input of the prepared batch is
-            // still answerable without panicking on an unprepared hash
-            resolver.resolve(input).expect("resolve failed");
+            // still answerable without hitting the unprepared path
+            resolver.resolve(&second_inputs[0]).expect("resolve failed");
         }
+
+        assert_eq!(cache.fetches(), 2, "the evicting batch is fetched again");
     }
 }
