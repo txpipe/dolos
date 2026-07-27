@@ -33,6 +33,7 @@ use blockfrost_openapi::models::{
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
+    block_content_txs_cbor_inner::BlockContentTxsCborInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
@@ -2264,6 +2265,25 @@ impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
             .map(|tx| tx.hash().to_string())
             //.sorted()
             //.map(|tx| BlockContentAddressesInnerTransactionsInner { tx_hash: tx })
+            .collect();
+
+        Ok(txs)
+    }
+}
+
+impl<'a> IntoModel<Vec<BlockContentTxsCborInner>> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<BlockContentTxsCborInner>, StatusCode> {
+        let block = &self.block;
+
+        let txs = block
+            .txs()
+            .iter()
+            .map(|tx| BlockContentTxsCborInner {
+                tx_hash: tx.hash().to_string(),
+                cbor: hex::encode(tx.encode()),
+            })
             .collect();
 
         Ok(txs)
