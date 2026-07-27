@@ -362,6 +362,10 @@ where
             "/addresses/{address}/transactions",
             get(routes::addresses::transactions::<D>),
         )
+        .route(
+            "/addresses/{address}/total",
+            get(routes::addresses::total::<D>),
+        )
         .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
         .route("/blocks/latest", get(routes::blocks::latest::<D>))
         .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))

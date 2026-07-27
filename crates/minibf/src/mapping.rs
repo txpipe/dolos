@@ -211,44 +211,60 @@ where
     }
 }
 
-pub fn aggregate_assets<'a>(
-    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
-) -> Vec<TxContentOutputAmountInner> {
-    let mut lovelace = 0;
-    let mut by_asset: HashMap<String, u64> = HashMap::new();
+#[derive(Default)]
+pub struct AssetTotals {
+    lovelace: u128,
+    by_asset: HashMap<String, u128>,
+}
 
-    for txout in txouts {
+impl AssetTotals {
+    pub fn add_output(&mut self, txout: &MultiEraOutput) {
         let value = txout.value();
 
         // Add lovelace amount
-        lovelace += value.coin();
+        self.lovelace += value.coin() as u128;
 
         // Add other assets
         for ma in value.assets() {
             for asset in ma.assets() {
                 let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
-                let amount = asset.output_coin().unwrap_or_default();
-                *by_asset.entry(unit).or_insert(0) += amount;
+                let amount = asset.output_coin().unwrap_or_default() as u128;
+                *self.by_asset.entry(unit).or_insert(0) += amount;
             }
         }
     }
 
-    let lovelace = TxContentOutputAmountInner {
-        unit: "lovelace".to_string(),
-        quantity: lovelace.to_string(),
-    };
+    pub fn into_amounts(self) -> Vec<TxContentOutputAmountInner> {
+        let lovelace = TxContentOutputAmountInner {
+            unit: "lovelace".to_string(),
+            quantity: self.lovelace.to_string(),
+        };
 
-    let mut assets: Vec<_> = by_asset
-        .into_iter()
-        .map(|(unit, quantity)| TxContentOutputAmountInner {
-            unit,
-            quantity: quantity.to_string(),
-        })
-        .collect();
+        let mut assets: Vec<_> = self
+            .by_asset
+            .into_iter()
+            .map(|(unit, quantity)| TxContentOutputAmountInner {
+                unit,
+                quantity: quantity.to_string(),
+            })
+            .collect();
 
-    assets.sort_by_key(|a| a.unit.clone());
+        assets.sort_by_key(|a| a.unit.clone());
 
-    std::iter::once(lovelace).chain(assets).collect()
+        std::iter::once(lovelace).chain(assets).collect()
+    }
+}
+
+pub fn aggregate_assets<'a>(
+    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
+) -> Vec<TxContentOutputAmountInner> {
+    let mut totals = AssetTotals::default();
+
+    for txout in txouts {
+        totals.add_output(txout);
+    }
+
+    totals.into_amounts()
 }
 
 pub fn list_assets<'a>(
