@@ -7,6 +7,7 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     address_content::AddressContent,
+    address_content_total::AddressContentTotal,
     address_transactions_content_inner::AddressTransactionsContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
     tx_content_output_amount_inner::TxContentOutputAmountInner,
@@ -26,7 +27,7 @@ use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, StateStore as _, TxoRef}
 
 use crate::{
     error::Error,
-    mapping::{aggregate_assets, AddressKind, AddressModelBuilder, IntoModel},
+    mapping::{aggregate_assets, AddressKind, AddressModelBuilder, AssetTotals, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -424,6 +425,67 @@ where
     Ok(false)
 }
 
+async fn sum_block_txs<D>(
+    domain: &Facade<D>,
+    address: &VKeyOrAddress,
+    block: &[u8],
+    received: &mut AssetTotals,
+    sent: &mut AssetTotals,
+    tx_count: &mut usize,
+) -> Result<(), StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    for tx in block.txs() {
+        let mut matched = false;
+
+        for (_, output) in tx.produces() {
+            let candidate = output
+                .address()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if address_matches(address, &candidate) {
+                received.add_output(&output);
+                matched = true;
+            }
+        }
+
+        for input in tx.consumes() {
+            if let Some(EraCbor(era, cbor)) = domain
+                .query()
+                .tx_cbor(input.hash().as_slice().to_vec())
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                let parsed = MultiEraTx::decode_for_era(
+                    era.try_into()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                    &cbor,
+                )
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                if let Some(output) = parsed.produces_at(input.index() as usize) {
+                    let candidate = output
+                        .address()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    if address_matches(address, &candidate) {
+                        sent.add_output(&output);
+                        matched = true;
+                    }
+                }
+            }
+        }
+
+        if matched {
+            *tx_count += 1;
+        }
+    }
+
+    Ok(())
+}
+
 async fn find_txs<D>(
     domain: &Facade<D>,
     address: &VKeyOrAddress,
@@ -578,6 +640,59 @@ where
     Ok(Json(transactions))
 }
 
+pub async fn total<D>(
+    Path(address): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<AddressContentTotal>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let end_slot = domain.get_tip_slot()?;
+
+    let (stream, parsed) =
+        blocks_for_address_stream(&domain, &address, 0, end_slot, SlotOrder::Asc)?;
+
+    let mut received = AssetTotals::default();
+    let mut sent = AssetTotals::default();
+    let mut tx_count: usize = 0;
+
+    let mut stream = Box::pin(stream);
+    while let Some(res) = stream.next().await {
+        let (_slot, block) = res.map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let Some(block) = block else {
+            continue;
+        };
+
+        sum_block_txs(
+            &domain,
+            &parsed,
+            &block,
+            &mut received,
+            &mut sent,
+            &mut tx_count,
+        )
+        .await
+        .map_err(Error::Code)?;
+    }
+
+    if tx_count == 0 {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let model = AddressContentTotal {
+        address,
+        received_sum: received.into_amounts(),
+        sent_sum: sent.into_amounts(),
+        tx_count: tx_count as i32,
+    };
+
+    Ok(Json(model))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +801,113 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn assert_total_sums(app: &TestApp, item: &AddressContentTotal) {
+        let block_count = app.vectors().blocks.len();
+
+        assert_eq!(item.tx_count, block_count as i32);
+
+        assert_eq!(item.received_sum[0].unit, "lovelace");
+        assert_eq!(
+            item.received_sum[0].quantity,
+            (block_count as u64 * dolos_testing::MIN_UTXO_AMOUNT).to_string()
+        );
+
+        let asset = item
+            .received_sum
+            .iter()
+            .find(|x| x.unit == app.vectors().asset_unit)
+            .expect("expected synthetic asset in received_sum");
+        assert_eq!(asset.quantity, block_count.to_string());
+
+        // the synthetic address never spends, but lovelace must still be
+        // present (and first) with a zero quantity
+        assert_eq!(
+            item.sent_sum,
+            vec![TxContentOutputAmountInner {
+                unit: "lovelace".to_string(),
+                quantity: "0".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn addresses_total_happy_path() {
+        let app = TestApp::new();
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/total");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: AddressContentTotal =
+            serde_json::from_slice(&bytes).expect("failed to parse address total");
+
+        assert_eq!(item.address, address);
+        assert_total_sums(&app, &item);
+    }
+
+    #[tokio::test]
+    async fn addresses_total_payment_credential_happy_path() {
+        let app = TestApp::new();
+        let address = Address::from_bech32(app.vectors().address.as_str())
+            .expect("invalid synthetic test address");
+
+        let Address::Shelley(shelley) = address else {
+            panic!("expected shelley test address")
+        };
+
+        let payment = shelley.payment().to_vec();
+
+        let payment_cred = bech32::encode::<bech32::Bech32>(
+            bech32::Hrp::parse("addr_vkh").expect("invalid hrp"),
+            &payment,
+        )
+        .expect("failed to encode payment credential");
+
+        let path = format!("/addresses/{payment_cred}/total");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: AddressContentTotal =
+            serde_json::from_slice(&bytes).expect("failed to parse address total");
+
+        assert_eq!(item.address, payment_cred);
+        assert_total_sums(&app, &item);
+    }
+
+    #[tokio::test]
+    async fn addresses_total_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}/total", invalid_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_total_not_found() {
+        let app = TestApp::new();
+        let path = format!("/addresses/{}/total", missing_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn addresses_total_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let address = app.vectors().address.as_str();
+        let path = format!("/addresses/{address}/total");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
