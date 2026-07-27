@@ -28,7 +28,7 @@ fn http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError
     DrepsInnerMetadataError::new(
         MetadataError::HttpResponseError,
         format!(
-            "Error Offchain Drep: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
+            "Error Offchain DRep: HTTP response error from {url} resulted in HTTP status code: {} \"{reason}\"",
             status.as_u16(),
         ),
     )
