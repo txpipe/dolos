@@ -382,6 +382,11 @@ where
     let by_unit = mapping::aggregate_account_assets(&utxos, &block_deps)?;
 
     let mut entries: Vec<(String, mapping::AssetAggregate)> = by_unit.into_iter().collect();
+
+    // mirrors the Blockfrost ordering: asc by the oldest utxo holding the
+    // asset, desc by the newest (deliberately not reverses of each other).
+    // ties resolve unit-ascending: entries iterate out of the BTreeMap in
+    // unit order and sort_by is stable, so equal positions keep it
     match pagination.order {
         Order::Asc => entries.sort_by(|x, y| x.1.oldest.cmp(&y.1.oldest)),
         Order::Desc => entries.sort_by(|x, y| y.1.newest.cmp(&x.1.newest)),
