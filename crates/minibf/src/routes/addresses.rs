@@ -6,8 +6,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    address_content::AddressContent,
-    address_content_total::AddressContentTotal,
+    address_content::AddressContent, address_content_total::AddressContentTotal,
     address_transactions_content_inner::AddressTransactionsContentInner,
     address_utxo_content_inner::AddressUtxoContentInner,
     tx_content_output_amount_inner::TxContentOutputAmountInner,
