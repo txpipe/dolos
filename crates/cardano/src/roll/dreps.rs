@@ -8,8 +8,9 @@ use pallas::ledger::{
 
 use super::WorkDeltas;
 use crate::{
-    owned::OwnedMultiEraOutput, pallas_extras::stake_cred_to_drep, roll::BlockVisitor,
-    DRepActivity, DRepAnchorUpdate, DRepRegistration, DRepUnRegistration,
+    owned::OwnedMultiEraOutput, pallas_extras, pallas_extras::stake_cred_to_drep,
+    roll::BlockVisitor, DRepActivity, DRepAnchorUpdate, DRepRegistration, DRepSeen,
+    DRepUnRegistration,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -64,9 +65,15 @@ impl BlockVisitor for DRepStateVisitor {
         order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
+        if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
+            deltas.add_for_entity(DRepSeen::new(cert.drep, block.slot(), *order));
+        }
+
         let Some(drep) = cert_drep(cert) else {
             return Ok(());
         };
+
+        deltas.add_for_entity(DRepSeen::new(drep.clone(), block.slot(), *order));
 
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {

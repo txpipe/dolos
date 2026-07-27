@@ -5,6 +5,8 @@ use blockfrost_openapi::models::{
 use pallas::{crypto::hash::Hasher, ledger::primitives::conway::Anchor};
 use std::{sync::OnceLock, time::Duration};
 
+const MAX_METADATA_BYTES: usize = 1024 * 1024;
+
 fn hash_mismatch_error(
     url: &str,
     expected_hash: &[u8],
@@ -39,6 +41,15 @@ fn connection_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn size_exceeded_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        MetadataError::SizeExceeded,
+        format!(
+            "Error Offchain Drep: Metadata from {url} exceeds the maximum allowed size of {MAX_METADATA_BYTES} bytes."
+        ),
+    )
+}
+
 fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
 
@@ -47,7 +58,7 @@ fn http_client() -> Option<&'static reqwest::Client> {
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .redirect(reqwest::redirect::Policy::limited(3))
-                .user_agent("dolos")
+                .user_agent("Dolos MiniBF")
                 .build()
                 .ok()
         })
@@ -74,10 +85,10 @@ pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMet
     };
 
     let Some(client) = http_client() else {
-        return Some(out);
+        return errored(out, connection_error(&anchor.url));
     };
 
-    let response = match client.get(&anchor.url).send().await {
+    let mut response = match client.get(&anchor.url).send().await {
         Ok(response) => response,
         Err(_) => return errored(out, connection_error(&anchor.url)),
     };
@@ -86,12 +97,30 @@ pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMet
         return errored(out, http_response_error(&anchor.url, response.status()));
     }
 
-    let body = match response.bytes().await {
-        Ok(body) => body,
-        Err(_) => return errored(out, connection_error(&anchor.url)),
-    };
+    if response
+        .content_length()
+        .is_some_and(|len| len > MAX_METADATA_BYTES as u64)
+    {
+        return errored(out, size_exceeded_error(&anchor.url));
+    }
 
-    let actual_hash = Hasher::<256>::hash(body.as_ref());
+    let mut body = Vec::new();
+
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > MAX_METADATA_BYTES {
+                    return errored(out, size_exceeded_error(&anchor.url));
+                }
+
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return errored(out, connection_error(&anchor.url)),
+        }
+    }
+
+    let actual_hash = Hasher::<256>::hash(&body);
 
     if actual_hash.as_ref() != anchor.content_hash.as_slice() {
         return errored(
@@ -104,8 +133,8 @@ pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMet
         );
     }
 
-    out.json_metadata = serde_json::from_slice(body.as_ref()).ok();
-    out.bytes = Some(format!("\\x{}", hex::encode(body.as_ref())));
+    out.json_metadata = serde_json::from_slice(&body).ok();
+    out.bytes = Some(format!("\\x{}", hex::encode(&body)));
 
     Some(out)
 }

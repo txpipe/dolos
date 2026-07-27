@@ -48,6 +48,11 @@ pub struct DRepState {
     // `None`. Index 7 must not be reused for anything else.
     #[n(7)]
     pub anchor: Option<Anchor>,
+
+    /// First on-chain reference by any certificate, vote delegations included.
+    /// Mirrors db-sync's `drep_hash` insertion order.
+    #[n(8)]
+    pub first_seen_at: Option<(BlockSlot, TxOrder)>,
 }
 
 impl DRepState {
@@ -61,6 +66,7 @@ impl DRepState {
             deposit: 0,
             identifier,
             anchor: None,
+            first_seen_at: None,
         }
     }
 
@@ -98,6 +104,7 @@ pub(crate) mod testing {
             expired in any::<bool>(),
             deposit in root::any_lovelace(),
             anchor in prop::option::of(root::any_anchor()),
+            first_seen_at in prop::option::of((root::any_slot(), root::any_tx_order())),
         ) -> DRepState {
             DRepState {
                 identifier,
@@ -108,6 +115,7 @@ pub(crate) mod testing {
                 expired,
                 deposit,
                 anchor,
+                first_seen_at,
             }
         }
     }
@@ -176,7 +184,12 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.registered_at = Some((self.slot, self.txorder));
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
-        entity.anchor = self.anchor.clone();
+
+        // Keep the last anchor we saw: a registration without one does not
+        // clear the metadata, it just doesn't supersede it.
+        if self.anchor.is_some() {
+            entity.anchor = self.anchor.clone();
+        }
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
@@ -245,6 +258,61 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
         state.voting_power = self.prev_voting_power.unwrap_or(0);
         state.unregistered_at = self.prev_unregistered_at;
         state.deposit = self.prev_deposit.unwrap_or(0);
+    }
+}
+
+/// Records the first on-chain appearance of a DRep, creating the entity if it
+/// doesn't exist yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepSeen {
+    pub(crate) drep: DRep,
+    pub(crate) slot: BlockSlot,
+    pub(crate) txorder: TxOrder,
+
+    // undo
+    pub(crate) prev_first_seen_at: Option<(BlockSlot, TxOrder)>,
+    pub(crate) was_new: bool,
+}
+
+impl DRepSeen {
+    pub fn new(drep: DRep, slot: BlockSlot, txorder: TxOrder) -> Self {
+        Self {
+            drep,
+            slot,
+            txorder,
+            prev_first_seen_at: None,
+            was_new: false,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepSeen {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        self.was_new = entity.is_none();
+
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
+        // save undo info
+        self.prev_first_seen_at = entity.first_seen_at;
+
+        // only the earliest sighting counts
+        if entity.first_seen_at.is_none() {
+            entity.first_seen_at = Some((self.slot, self.txorder));
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        if self.was_new {
+            *entity = None;
+        } else if let Some(state) = entity {
+            state.first_seen_at = self.prev_first_seen_at;
+        }
     }
 }
 
@@ -444,6 +512,16 @@ mod prop_tests {
         }
     }
 
+    prop_compose! {
+        fn any_drep_seen()(
+            drep in root::any_drep(),
+            slot in root::any_slot(),
+            txorder in root::any_tx_order(),
+        ) -> DRepSeen {
+            DRepSeen::new(drep, slot, txorder)
+        }
+    }
+
     proptest! {
         #[test]
         fn drep_registration_roundtrip(
@@ -493,5 +571,27 @@ mod prop_tests {
             assert_delta_roundtrip(Some(entity), delta);
         }
 
+        #[test]
+        fn drep_seen_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_seen(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+    }
+
+    #[test]
+    fn drep_seen_keeps_earliest_sighting() {
+        use dolos_core::EntityDelta as _;
+
+        let drep = DRep::Key([1u8; 28].into());
+        let mut entity = None;
+
+        DRepSeen::new(drep.clone(), 100, 3).apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 3)));
+
+        // a later sighting must not move the first appearance
+        DRepSeen::new(drep, 200, 1).apply(&mut entity);
+        assert_eq!(entity.unwrap().first_seen_at, Some((100, 3)));
     }
 }

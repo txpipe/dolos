@@ -1,4 +1,4 @@
-use crate::mapping::{bech32, IntoModel, DREP_HRP};
+use crate::mapping::{bech32, bech32_drep, IntoModel, DREP_HRP};
 use axum::http::StatusCode;
 use blockfrost_openapi::models::{Drep, DrepsInner};
 use dolos_cardano::{model::DRepState, pallas_extras, ChainSummary, PParamsSet};
@@ -89,6 +89,7 @@ pub struct DrepModelBuilder<'a> {
     pub drep_id_encoded: Vec<u8>,
     pub is_legacy: bool,
     pub state: Option<DRepState>,
+    pub delegated_stake: u64,
     pub pparams: PParamsSet,
     pub chain: &'a ChainSummary,
     pub tip: BlockSlot,
@@ -144,8 +145,10 @@ impl<'a> DrepModelBuilder<'a> {
         let expiring_epoch = last_active_epoch.map(|x| x + inactivity_period);
         let (current_epoch, _) = self.chain.slot_epoch(self.tip);
 
+        // Blockfrost expires a DRep once `current - last_active > drep_activity`,
+        // so the epoch where the two are exactly equal is still active.
         expiring_epoch
-            .map(|expiration| expiration <= current_epoch)
+            .map(|expiration| expiration < current_epoch)
             .unwrap_or(false)
     }
 
@@ -175,10 +178,7 @@ impl<'a> DrepModelBuilder<'a> {
     }
 
     fn amount(&self) -> String {
-        self.state
-            .as_ref()
-            .map(|x| x.voting_power.to_string())
-            .unwrap_or_default()
+        self.delegated_stake.to_string()
     }
 }
 
@@ -224,30 +224,26 @@ impl<'a> IntoModel<DrepsInner> for DrepModelBuilder<'a> {
 
 pub fn drep_list_item(
     state: DRepState,
+    delegated_stake: u64,
     pparams: PParamsSet,
     chain: &ChainSummary,
     tip: BlockSlot,
 ) -> Result<DrepsInner, StatusCode> {
-    let (drep_id, drep_id_encoded, is_legacy) = match &state.identifier {
-        DRep::Key(hash) => (
-            bech32(DREP_HRP, hash)?,
-            [vec![pallas_extras::DREP_KEY_PREFIX], hash.to_vec()].concat(),
-            true,
-        ),
-        DRep::Script(hash) => (
-            bech32(DREP_HRP, hash)?,
-            [vec![pallas_extras::DREP_SCRIPT_PREFIX], hash.to_vec()].concat(),
-            true,
-        ),
-        DRep::Abstain => (DREP_ALWAYS_ABSTAIN.to_string(), vec![0], false),
-        DRep::NoConfidence => (DREP_ALWAYS_NO_CONFIDENCE.to_string(), vec![1], false),
+    let drep_id = bech32_drep(&state.identifier)?;
+
+    let drep_id_encoded = match &state.identifier {
+        DRep::Key(hash) => [vec![pallas_extras::DREP_KEY_PREFIX], hash.to_vec()].concat(),
+        DRep::Script(hash) => [vec![pallas_extras::DREP_SCRIPT_PREFIX], hash.to_vec()].concat(),
+        DRep::Abstain => vec![0],
+        DRep::NoConfidence => vec![1],
     };
 
     let builder = DrepModelBuilder {
         drep_id,
         drep_id_encoded,
-        is_legacy,
+        is_legacy: false,
         state: Some(state),
+        delegated_stake,
         pparams,
         chain,
         tip,

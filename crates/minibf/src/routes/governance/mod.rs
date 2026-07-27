@@ -7,11 +7,15 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::DrepsInner;
-use dolos_cardano::{model::DRepState, ChainSummary, PParamsSet};
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain};
+use dolos_cardano::{
+    model::{drep_to_entity_key, AccountState, DRepDelegation, DRepState},
+    ChainSummary, PParamsSet,
+};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey};
 use dreps::{drep_list_item, parse_drep_id, DrepModelBuilder};
 use futures::future::join_all;
 use metadata::fetch_drep_metadata;
+use std::collections::HashMap;
 
 use crate::{
     error::Error,
@@ -19,6 +23,31 @@ use crate::{
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
+
+/// Stake delegated to each DRep, keyed the same way DRep entities are.
+fn drep_stake_map<D: Domain>(domain: &Facade<D>) -> Result<HashMap<EntityKey, u64>, StatusCode>
+where
+    Option<AccountState>: From<D::Entity>,
+{
+    let mut out: HashMap<EntityKey, u64> = HashMap::new();
+
+    for item in domain
+        .iter_cardano_entities::<AccountState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        let (_, account) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let Some(DRepDelegation::Delegated(drep)) = account.drep.set() else {
+            continue;
+        };
+
+        let stake = account.stake.set().map(|x| x.total()).unwrap_or_default();
+
+        *out.entry(drep_to_entity_key(drep)).or_default() += stake;
+    }
+
+    Ok(out)
+}
 
 fn chain_context<D: Domain>(
     domain: &Facade<D>,
@@ -42,6 +71,7 @@ pub async fn all_dreps<D: Domain>(
 ) -> Result<Json<Vec<DrepsInner>>, Error>
 where
     Option<DRepState>: From<D::Entity>,
+    Option<AccountState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
 
@@ -50,11 +80,7 @@ where
     for item in domain.iter_cardano_entities::<DRepState>(None)? {
         let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // Blockfrost orders this list by first on-chain appearance.
-        let appeared_at = state
-            .registered_at
-            .or_else(|| state.last_active_slot.map(|slot| (slot, 0)))
-            .unwrap_or_default();
+        let appeared_at = state.first_seen_at.unwrap_or_default();
 
         dreps.push((appeared_at, key, state));
     }
@@ -68,17 +94,18 @@ where
     }
 
     let (chain, tip, pparams) = chain_context(&domain)?;
+    let stake = drep_stake_map(&domain)?;
 
     let states: Vec<_> = dreps
         .into_iter()
         .skip(pagination.from())
         .take(pagination.count)
-        .map(|(_, _, state)| state)
+        .map(|(_, key, state)| (key, state))
         .collect();
 
     let metadata_futures: Vec<_> = states
         .iter()
-        .map(|state| fetch_drep_metadata(state.anchor.clone()))
+        .map(|(_, state)| fetch_drep_metadata(state.anchor.clone()))
         .collect();
 
     let metadatas = join_all(metadata_futures).await;
@@ -86,8 +113,9 @@ where
     let page = states
         .into_iter()
         .zip(metadatas)
-        .map(|(state, metadata)| {
-            let mut model = drep_list_item(state, pparams.clone(), &chain, tip)?;
+        .map(|((key, state), metadata)| {
+            let delegated = stake.get(&key).copied().unwrap_or_default();
+            let mut model = drep_list_item(state, delegated, pparams.clone(), &chain, tip)?;
             model.metadata = metadata.map(Box::new);
             Ok(model)
         })
@@ -102,6 +130,7 @@ pub async fn drep_by_id<D: Domain>(
 ) -> Result<Json<blockfrost_openapi::models::drep::Drep>, StatusCode>
 where
     Option<DRepState>: From<D::Entity>,
+    Option<AccountState>: From<D::Entity>,
 {
     let parsed = parse_drep_id(&drep)?;
 
@@ -117,11 +146,17 @@ where
 
     let (chain, tip, pparams) = chain_context(&domain)?;
 
+    let delegated_stake = drep_stake_map(&domain)?
+        .get(&EntityKey::from(parsed.encoded.clone()))
+        .copied()
+        .unwrap_or_default();
+
     let model = DrepModelBuilder {
         drep_id: parsed.drep_id,
         drep_id_encoded: parsed.encoded,
         is_legacy: parsed.is_legacy,
         state: drep_state,
+        delegated_stake,
         pparams,
         chain: &chain,
         tip,
@@ -222,7 +257,7 @@ mod tests {
         let expected = DrepModel {
             drep_id,
             hex: hex::encode(&payload),
-            amount: "7777".to_string(),
+            amount: "0".to_string(),
             active: true,
             active_epoch: Some(2),
             has_script: false,
@@ -244,7 +279,7 @@ mod tests {
             let expected = DrepModel {
                 drep_id: id.to_string(),
                 hex: "".to_string(),
-                amount: "".to_string(),
+                amount: "0".to_string(),
                 active: true,
                 active_epoch: None,
                 has_script: false,
@@ -309,14 +344,15 @@ mod tests {
 
         let models = get_dreps_list(&app, "/governance/dreps").await;
 
-        let expected_hash = vector_drep_hash(&app);
+        let drep_id = app.vectors().drep_id.clone();
+        let (_, payload) = bech32::decode(&drep_id).expect("invalid vector drep id");
 
         assert_eq!(
             models,
             vec![DrepsInner {
-                drep_id: encode_id("drep", &expected_hash),
-                hex: hex::encode(&expected_hash),
-                amount: "7777".to_string(),
+                drep_id,
+                hex: hex::encode(&payload),
+                amount: "0".to_string(),
                 has_script: false,
                 retired: false,
                 expired: false,
