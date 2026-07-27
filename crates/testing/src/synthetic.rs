@@ -26,7 +26,7 @@ use pallas::{
                 Certificate, DatumOption, PlutusData, PostAlonzoTransactionOutput, ScriptRef,
                 TransactionBody, TransactionOutput, Value, WitnessSet,
             },
-            AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Set, StakeCredential,
+            AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
         },
         traverse::ComputeHash,
@@ -51,6 +51,7 @@ pub struct SyntheticBlockConfig {
     pub mint_amount: i64,
     pub seed_amount: u64,
     pub pool_id: String,
+    pub pool_relays: Vec<Relay>,
     pub drep_keyhash: [u8; 28],
     pub drep_deposit: u64,
 }
@@ -105,6 +106,7 @@ impl Default for SyntheticBlockConfig {
             seed_amount: crate::MIN_UTXO_AMOUNT,
             pool_id: "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
                 .to_string(),
+            pool_relays: vec![],
             drep_keyhash: [7u8; 28],
             drep_deposit: 1000,
         }
@@ -335,6 +337,7 @@ pub fn build_synthetic_blocks(
                 cfg.mint_amount,
                 stake_cred.clone(),
                 pool_keyhash,
+                cfg.pool_relays.clone(),
                 cfg.drep_keyhash,
                 cfg.drep_deposit,
                 withdrawal_amount,
@@ -546,6 +549,7 @@ fn sample_transaction(
     mint_amount: i64,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
+    pool_relays: Vec<Relay>,
     drep_keyhash: [u8; 28],
     drep_deposit: u64,
     withdrawal_amount: Option<u64>,
@@ -604,7 +608,7 @@ fn sample_transaction(
         },
         reward_account: Bytes::from(reward_account.to_vec()),
         pool_owners: Set::from(vec![pool_owner]),
-        relays: vec![],
+        relays: pool_relays,
         pool_metadata,
     };
 
