@@ -253,9 +253,15 @@ push = false
 publish = false
 tag-name = "v{{version}}"
 pre-release-commit-message = "release: v{{version}}"
+# `--workdir .` is required: without it git-cliff derives the repo root from the
+# git common dir, which points outside the worktree when this repo is checked out
+# as a submodule. It then scopes commits to a bogus path and emits an empty
+# changelog.
 pre-release-hook = [
     "git",
     "cliff",
+    "--workdir",
+    ".",
     "-o",
     "CHANGELOG.md",
     "--tag",
