@@ -22,12 +22,13 @@ use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     pallas_extras, ChainSummary,
 };
-use dolos_core::{BlockBody, BlockSlot, Domain, EraCbor, StateStore as _, TxoRef};
+use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
     mapping::{aggregate_assets, AddressKind, AddressModelBuilder, AssetTotals, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
+    resolver::{InputCache, InputResolver},
     Facade,
 };
 
@@ -378,14 +379,11 @@ fn address_matches(address: &VKeyOrAddress, candidate: &Address) -> bool {
     }
 }
 
-async fn has_address<D>(
-    domain: &Facade<D>,
+fn has_address(
+    resolver: &mut InputResolver<'_>,
     address: &VKeyOrAddress,
     tx: &MultiEraTx<'_>,
-) -> Result<bool, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
+) -> Result<bool, StatusCode> {
     for (_, output) in tx.produces() {
         let candidate = output
             .address()
@@ -397,26 +395,13 @@ where
     }
 
     for input in tx.consumes() {
-        if let Some(EraCbor(era, cbor)) = domain
-            .query()
-            .tx_cbor(input.hash().as_slice().to_vec())
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        {
-            let parsed = MultiEraTx::decode_for_era(
-                era.try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                &cbor,
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if let Some(output) = parsed.produces_at(input.index() as usize) {
-                let candidate = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Some(output) = resolver.resolve(&input)? {
+            let candidate = output
+                .address()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                if address_matches(address, &candidate) {
-                    return Ok(true);
-                }
+            if address_matches(address, &candidate) {
+                return Ok(true);
             }
         }
     }
@@ -426,6 +411,7 @@ where
 
 async fn sum_block_txs<D>(
     domain: &Facade<D>,
+    cache: &mut InputCache,
     address: &VKeyOrAddress,
     block: &[u8],
     received: &mut AssetTotals,
@@ -437,7 +423,11 @@ where
 {
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    for tx in block.txs() {
+    let txs = block.txs();
+
+    let mut resolver = cache.prepare(domain, txs.iter()).await?;
+
+    for tx in txs.iter() {
         let mut matched = false;
 
         for (_, output) in tx.produces() {
@@ -452,27 +442,14 @@ where
         }
 
         for input in tx.consumes() {
-            if let Some(EraCbor(era, cbor)) = domain
-                .query()
-                .tx_cbor(input.hash().as_slice().to_vec())
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            {
-                let parsed = MultiEraTx::decode_for_era(
-                    era.try_into()
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                    &cbor,
-                )
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-                if let Some(output) = parsed.produces_at(input.index() as usize) {
-                    let candidate = output
-                        .address()
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if let Some(output) = resolver.resolve(&input)? {
+                let candidate = output
+                    .address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-                    if address_matches(address, &candidate) {
-                        sent.add_output(&output);
-                        matched = true;
-                    }
+                if address_matches(address, &candidate) {
+                    sent.add_output(&output);
+                    matched = true;
                 }
             }
         }
@@ -487,6 +464,7 @@ where
 
 async fn find_txs<D>(
     domain: &Facade<D>,
+    cache: &mut InputCache,
     address: &VKeyOrAddress,
     chain: &ChainSummary,
     pagination: &Pagination,
@@ -497,10 +475,22 @@ where
 {
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let txs = block.txs();
+
+    // only the txs that will actually be scanned contribute dependencies
+    let scanned = txs
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
+        .map(|(_, tx)| tx);
+
+    let mut resolver = cache.prepare(domain, scanned).await?;
+
     let mut matches = vec![];
 
-    for (idx, tx) in block.txs().iter().enumerate() {
-        if !pagination.should_skip(block.number(), idx) && has_address(domain, address, tx).await? {
+    for (idx, tx) in txs.iter().enumerate() {
+        if !pagination.should_skip(block.number(), idx) && has_address(&mut resolver, address, tx)?
+        {
             let model = AddressTransactionsContentInner {
                 tx_hash: hex::encode(tx.hash().as_slice()),
                 tx_index: idx as i32,
@@ -544,6 +534,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut matches = Vec::new();
+    let mut cache = InputCache::default();
 
     let mut stream = Box::pin(stream);
     while let Some(res) = stream.next().await {
@@ -556,7 +547,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &address, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut cache, &address, &chain, &pagination, &block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -607,6 +598,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut matches = Vec::new();
+    let mut cache = InputCache::default();
 
     let mut stream = Box::pin(stream);
     while let Some(res) = stream.next().await {
@@ -619,7 +611,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &address, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut cache, &address, &chain, &pagination, &block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -654,6 +646,7 @@ where
     let mut received = AssetTotals::default();
     let mut sent = AssetTotals::default();
     let mut tx_count: usize = 0;
+    let mut cache = InputCache::default();
 
     let mut stream = Box::pin(stream);
     while let Some(res) = stream.next().await {
@@ -668,6 +661,7 @@ where
 
         sum_block_txs(
             &domain,
+            &mut cache,
             &parsed,
             &block,
             &mut received,
