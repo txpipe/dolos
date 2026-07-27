@@ -1603,8 +1603,8 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
             alonzo::Relay::MultiHostName(dns) => TxContentPoolCertsInnerRelaysInner {
                 ipv4: None,
                 ipv6: None,
-                dns: Some(dns.to_string()),
-                dns_srv: None,
+                dns: None,
+                dns_srv: Some(dns.to_string()),
                 port: Default::default(),
             },
         };
