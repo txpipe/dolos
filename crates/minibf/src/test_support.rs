@@ -29,8 +29,19 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
-        let genesis = Arc::new(dolos_cardano::include::preview::load());
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_synthetic_and_protocol(cfg, None)
+    }
+
+    pub fn new_with_synthetic_and_protocol(
+        mut cfg: SyntheticBlockConfig,
+        force_protocol: Option<usize>,
+    ) -> Self {
+        let mut genesis = dolos_cardano::include::preview::load();
+        if let Some(protocol) = force_protocol {
+            genesis.force_protocol = Some(protocol);
+        }
+        let genesis = Arc::new(genesis);
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
                 genesis.clone(),
@@ -105,6 +116,19 @@ impl TestApp {
 
     pub fn new_with_cfg(cfg: SyntheticBlockConfig) -> Self {
         Self::new_with_cfg_and_fault(cfg, None)
+    }
+
+    /// Customize the app beyond what the `new_*` constructors cover (e.g.
+    /// forcing the bootstrap protocol version). Defaults match [`Self::new`].
+    pub fn builder() -> TestAppBuilder {
+        TestAppBuilder {
+            cfg: SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            force_protocol: None,
+        }
     }
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
@@ -188,5 +212,46 @@ impl TestApp {
 
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
+    }
+}
+
+pub struct TestAppBuilder {
+    cfg: SyntheticBlockConfig,
+    force_protocol: Option<usize>,
+}
+
+impl TestAppBuilder {
+    pub fn with_cfg(mut self, cfg: SyntheticBlockConfig) -> Self {
+        self.cfg = cfg;
+        self
+    }
+
+    pub fn with_protocol(mut self, protocol: usize) -> Self {
+        self.force_protocol = Some(protocol);
+        self
+    }
+
+    pub fn build(self) -> TestApp {
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic_and_protocol(self.cfg, self.force_protocol)
+                .finish();
+
+        let domain = dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None);
+
+        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+
+        let facade = Facade {
+            inner: domain.clone(),
+            config: cfg,
+            cache: crate::cache::CacheService::default(),
+        };
+
+        let router = build_router_with_facade(facade);
+
+        TestApp {
+            router,
+            _domain: domain,
+            vectors,
+        }
     }
 }
