@@ -185,11 +185,8 @@ impl dolos_core::EntityDelta for DRepRegistration {
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
 
-        // Keep the last anchor we saw: a registration without one does not
-        // clear the metadata, it just doesn't supersede it.
-        if self.anchor.is_some() {
-            entity.anchor = self.anchor.clone();
-        }
+        // Registration anchor replaces the previous one (including clearing it).
+        entity.anchor = self.anchor.clone();
     }
 
     fn undo(&self, entity: &mut Option<DRepState>) {
