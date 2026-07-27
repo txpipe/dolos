@@ -200,7 +200,6 @@ pub enum CardanoDelta {
     DRepUnRegistration(Box<DRepUnRegistration>),
     DRepActivity(Box<DRepActivity>),
     DRepExpiration(Box<DRepExpiration>),
-    DRepSeen(Box<DRepSeen>),
     WithdrawalInc(Box<WithdrawalInc>),
     VoteDelegation(Box<VoteDelegation>),
     PParamsUpdate(Box<PParamsUpdate>),
@@ -234,6 +233,7 @@ pub enum CardanoDelta {
     DRepAnchorUpdate(Box<DRepAnchorUpdate>),
     NewProposalV2(Box<NewProposalV2>),
     VoteCast(Box<VoteCast>),
+    DRepSeen(Box<DRepSeen>),
 }
 
 impl CardanoDelta {

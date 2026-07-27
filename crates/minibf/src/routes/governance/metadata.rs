@@ -50,6 +50,17 @@ fn size_exceeded_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn blocked_url_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        MetadataError::ConnectionError,
+        format!("Error Offchain Drep: Refused to fetch metadata from {url}, only http and https URLs are allowed."),
+    )
+}
+
+fn is_fetchable(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|x| matches!(x.scheme(), "http" | "https"))
+}
+
 fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
 
@@ -87,6 +98,10 @@ pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMet
     let Some(client) = http_client() else {
         return errored(out, connection_error(&anchor.url));
     };
+
+    if !is_fetchable(&anchor.url) {
+        return errored(out, blocked_url_error(&anchor.url));
+    }
 
     let mut response = match client.get(&anchor.url).send().await {
         Ok(response) => response,
@@ -137,4 +152,22 @@ pub async fn fetch_drep_metadata(anchor: Option<Anchor>) -> Option<DrepsInnerMet
     out.bytes = Some(format!("\\x{}", hex::encode(&body)));
 
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_http_schemes() {
+        assert!(!is_fetchable("file:///etc/passwd"));
+        assert!(!is_fetchable("ftp://example.com/x"));
+        assert!(!is_fetchable("not a url"));
+    }
+
+    #[test]
+    fn accepts_http_urls() {
+        assert!(is_fetchable("https://example.com/meta.json"));
+        assert!(is_fetchable("http://example.com/meta.json"));
+    }
 }

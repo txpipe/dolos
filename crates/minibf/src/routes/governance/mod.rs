@@ -25,7 +25,13 @@ use crate::{
 };
 
 /// Stake delegated to each DRep, keyed the same way DRep entities are.
-fn drep_stake_map<D: Domain>(domain: &Facade<D>) -> Result<HashMap<EntityKey, u64>, StatusCode>
+///
+/// `only` narrows the fold to a single DRep so the by-id route doesn't
+/// materialize the whole map just to read one entry.
+fn drep_stake_map<D: Domain>(
+    domain: &Facade<D>,
+    only: Option<&EntityKey>,
+) -> Result<HashMap<EntityKey, u64>, StatusCode>
 where
     Option<AccountState>: From<D::Entity>,
 {
@@ -41,9 +47,15 @@ where
             continue;
         };
 
+        let key = drep_to_entity_key(drep);
+
+        if only.is_some_and(|target| target != &key) {
+            continue;
+        }
+
         let stake = account.stake.set().map(|x| x.total()).unwrap_or_default();
 
-        *out.entry(drep_to_entity_key(drep)).or_default() += stake;
+        *out.entry(key).or_default() += stake;
     }
 
     Ok(out)
@@ -94,7 +106,7 @@ where
     }
 
     let (chain, tip, pparams) = chain_context(&domain)?;
-    let stake = drep_stake_map(&domain)?;
+    let stake = drep_stake_map(&domain, None)?;
 
     let states: Vec<_> = dreps
         .into_iter()
@@ -146,8 +158,9 @@ where
 
     let (chain, tip, pparams) = chain_context(&domain)?;
 
-    let delegated_stake = drep_stake_map(&domain)?
-        .get(&EntityKey::from(parsed.encoded.clone()))
+    let drep_key = EntityKey::from(parsed.encoded.clone());
+    let delegated_stake = drep_stake_map(&domain, Some(&drep_key))?
+        .get(&drep_key)
         .copied()
         .unwrap_or_default();
 
