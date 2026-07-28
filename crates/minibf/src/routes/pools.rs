@@ -659,6 +659,46 @@ async fn fetch_pool_metadata_with_error(
     }
 }
 
+pub async fn all<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let mut pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|x| {
+            let (_, state) = match x {
+                Ok(item) => item,
+                Err(_) => return Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+            };
+            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
+                return None;
+            }
+            Some(Ok((state.register_slot, state.operator)))
+        })
+        .collect::<Result<Vec<(BlockSlot, PoolHash)>, StatusCode>>()?;
+
+    pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    let out = pools
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(_, operator)| bech32_pool(operator))
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 pub async fn all_extended<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -1465,6 +1505,69 @@ mod tests {
     async fn pools_extended_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+
+        let pool_id = app.vectors().pool_id.as_str();
+        assert!(
+            pools.iter().any(|candidate| candidate == pool_id),
+            "expected pool {pool_id} in list, got {pools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_matches_extended_ids() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?page=1&count=100").await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?page=1&count=100").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
+
+        assert_eq!(pools, extended_ids);
+    }
+
+    #[tokio::test]
+    async fn pools_empty_out_of_range_page() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?page=694269").await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/pools?count=invalid", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
