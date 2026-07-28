@@ -10,19 +10,19 @@
 //! dependency tx referenced by N inputs is paid for N times. This module keeps
 //! that work to once per distinct dependency hash:
 //!
-//! - [`InputCache`] owns the fetched bytes for the whole request. Its
-//!   [`prepare`](InputCache::prepare) batches the distinct dependency hashes of
+//! - [`InputDeps`] owns the fetched bytes for the whole request. Its
+//!   [`prepare`](InputDeps::prepare) batches the distinct dependency hashes of
 //!   a block's txs into a single round of deduped fetches (via
 //!   [`Facade::get_tx_batch`]) and only asks for hashes it does not already
 //!   hold, so a dependency shared across blocks is fetched once per request.
-//!   Misses (genesis or pruned txs) are cached too, so they are not retried.
+//!   Misses (genesis or pruned txs) are recorded too, so they are not retried.
 //! - [`InputResolver`] borrows those bytes and memoizes the decoding, handing
 //!   out transient [`MultiEraOutput`] borrows tied to `&mut self` — the same
 //!   ownership constraint `TxModelBuilder` manages for the `/txs/{hash}/*`
 //!   endpoints.
 //!
-//! The cache is request-scoped and bounded: it is pure memoization, so when it
-//! would grow past [`MAX_CACHED_DEPS`] entries it is cleared and the entries
+//! The store is request-scoped and bounded: it is pure memoization, so when it
+//! would grow past [`MAX_INPUT_DEPS`] entries it is cleared and the entries
 //! still needed are fetched again. That caps memory on a full-history scan of a
 //! high-activity address.
 
@@ -36,27 +36,27 @@ use dolos_core::{Domain, EraCbor, TxHash};
 
 use crate::{Facade, TxMap};
 
-/// Maximum number of dependency txs held by an [`InputCache`] at once.
+/// Maximum number of dependency txs held by an [`InputDeps`] at once.
 ///
-/// Reaching it clears the cache: entries are pure memoization, so eviction only
+/// Reaching it clears the store: entries are pure memoization, so eviction only
 /// ever costs a re-fetch.
-pub const MAX_CACHED_DEPS: usize = 4096;
+pub const MAX_INPUT_DEPS: usize = 4096;
 
 /// Request-scoped, bounded store of the dependency txs consumed by the blocks
 /// being scanned.
-pub struct InputCache {
+pub struct InputDeps {
     txs: TxMap,
     cap: usize,
     fetches: usize,
 }
 
-impl Default for InputCache {
+impl Default for InputDeps {
     fn default() -> Self {
-        Self::with_capacity(MAX_CACHED_DEPS)
+        Self::with_capacity(MAX_INPUT_DEPS)
     }
 }
 
-impl InputCache {
+impl InputDeps {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             txs: TxMap::new(),
@@ -67,16 +67,16 @@ impl InputCache {
 
     /// Number of dependency txs fetched from the domain so far.
     ///
-    /// One per distinct hash that was not already cached — the dedup this
+    /// One per distinct hash that was not already held — the dedup this
     /// module exists for is observable through this counter.
     pub fn fetches(&self) -> usize {
         self.fetches
     }
 
     /// Fetch whatever is missing to resolve the inputs of `txs`, then hand out
-    /// a resolver over the cached bytes.
+    /// a resolver over the bytes it holds.
     ///
-    /// The resolver borrows the cache, so it must be dropped before the next
+    /// The resolver borrows the store, so it must be dropped before the next
     /// block is prepared; the fetched bytes survive it.
     pub async fn prepare<'a, 'b, 'tx, D>(
         &'a mut self,
@@ -106,7 +106,7 @@ impl InputCache {
             .copied()
             .collect();
 
-        // the cache is pure memoization: dropping it all is always safe, as
+        // the store is pure memoization: dropping it all is always safe, as
         // long as everything this batch needs is fetched again right after.
         if !missing.is_empty() && self.txs.len() + missing.len() > self.cap {
             self.txs.clear();
@@ -121,7 +121,7 @@ impl InputCache {
 
         tracing::debug!(
             deps = required_len,
-            cached = self.txs.len(),
+            held = self.txs.len(),
             fetches = self.fetches(),
             "prepared input dependencies"
         );
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn caches_misses() {
+    fn records_misses() {
         let vectors = vectors();
 
         let tx = MultiEraTx::decode_for_era(Era::Conway, &vectors.tx_cbor).expect("decodable tx");
@@ -304,7 +304,7 @@ mod tests {
 
         let tx = MultiEraTx::decode_for_era(Era::Conway, &vectors.tx_cbor).expect("decodable tx");
 
-        let mut cache = InputCache::default();
+        let mut deps = InputDeps::default();
 
         // three txs consuming the same dependency: one fetch, not three
         let scanned = [&tx, &tx, &tx];
@@ -312,17 +312,17 @@ mod tests {
         assert_eq!(inputs, 3);
 
         {
-            let _resolver = cache.prepare(&domain, scanned).await.expect("prepare");
+            let _resolver = deps.prepare(&domain, scanned).await.expect("prepare");
         }
 
-        assert_eq!(cache.fetches(), 1, "one fetch per distinct dependency hash");
+        assert_eq!(deps.fetches(), 1, "one fetch per distinct dependency hash");
 
-        // a later block consuming an already-cached dependency: no new fetch
+        // a later block consuming an already-held dependency: no new fetch
         {
-            let _resolver = cache.prepare(&domain, [&tx]).await.expect("prepare");
+            let _resolver = deps.prepare(&domain, [&tx]).await.expect("prepare");
         }
 
-        assert_eq!(cache.fetches(), 1, "cached dependencies are not refetched");
+        assert_eq!(deps.fetches(), 1, "held dependencies are not refetched");
     }
 
     #[tokio::test]
@@ -345,25 +345,25 @@ mod tests {
             "the two txs must depend on different source txs"
         );
 
-        // a cache too small to hold anything alongside the current batch
-        let mut cache = InputCache::with_capacity(1);
+        // a store too small to hold anything alongside the current batch
+        let mut deps = InputDeps::with_capacity(1);
 
         {
-            let _resolver = cache.prepare(&domain, [first]).await.expect("prepare");
+            let _resolver = deps.prepare(&domain, [first]).await.expect("prepare");
         }
 
-        assert_eq!(cache.fetches(), 1);
+        assert_eq!(deps.fetches(), 1);
 
         {
-            // this batch needs a dependency the full cache does not hold, so
-            // the cache is cleared and the batch fetched again
-            let mut resolver = cache.prepare(&domain, [second]).await.expect("prepare");
+            // this batch needs a dependency the full store does not hold, so
+            // the store is cleared and the batch fetched again
+            let mut resolver = deps.prepare(&domain, [second]).await.expect("prepare");
 
             // whatever eviction did, every input of the prepared batch is
             // still answerable without hitting the unprepared path
             resolver.resolve(&second_inputs[0]).expect("resolve failed");
         }
 
-        assert_eq!(cache.fetches(), 2, "the evicting batch is fetched again");
+        assert_eq!(deps.fetches(), 2, "the evicting batch is fetched again");
     }
 }

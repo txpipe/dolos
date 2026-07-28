@@ -26,9 +26,9 @@ use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
+    inputs::{InputDeps, InputResolver},
     mapping::{aggregate_assets, AddressKind, AddressModelBuilder, AssetTotals, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
-    resolver::{InputCache, InputResolver},
     Facade,
 };
 
@@ -411,7 +411,7 @@ fn has_address(
 
 async fn sum_block_txs<D>(
     domain: &Facade<D>,
-    cache: &mut InputCache,
+    deps: &mut InputDeps,
     address: &VKeyOrAddress,
     block: &[u8],
     received: &mut AssetTotals,
@@ -425,7 +425,7 @@ where
 
     let txs = block.txs();
 
-    let mut resolver = cache.prepare(domain, txs.iter()).await?;
+    let mut resolver = deps.prepare(domain, txs.iter()).await?;
 
     for tx in txs.iter() {
         let mut matched = false;
@@ -464,7 +464,7 @@ where
 
 async fn find_txs<D>(
     domain: &Facade<D>,
-    cache: &mut InputCache,
+    deps: &mut InputDeps,
     address: &VKeyOrAddress,
     chain: &ChainSummary,
     pagination: &Pagination,
@@ -484,7 +484,7 @@ where
         .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
         .map(|(_, tx)| tx);
 
-    let mut resolver = cache.prepare(domain, scanned).await?;
+    let mut resolver = deps.prepare(domain, scanned).await?;
 
     let mut matches = vec![];
 
@@ -534,7 +534,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut matches = Vec::new();
-    let mut cache = InputCache::default();
+    let mut deps = InputDeps::default();
 
     let mut stream = Box::pin(stream);
     while let Some(res) = stream.next().await {
@@ -547,7 +547,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut cache, &address, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &address, &chain, &pagination, &block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -598,7 +598,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut matches = Vec::new();
-    let mut cache = InputCache::default();
+    let mut deps = InputDeps::default();
 
     let mut stream = Box::pin(stream);
     while let Some(res) = stream.next().await {
@@ -611,7 +611,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut cache, &address, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &address, &chain, &pagination, &block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
@@ -646,7 +646,7 @@ where
     let mut received = AssetTotals::default();
     let mut sent = AssetTotals::default();
     let mut tx_count: usize = 0;
-    let mut cache = InputCache::default();
+    let mut deps = InputDeps::default();
 
     let mut stream = Box::pin(stream);
     while let Some(res) = stream.next().await {
@@ -661,7 +661,7 @@ where
 
         sum_block_txs(
             &domain,
-            &mut cache,
+            &mut deps,
             &parsed,
             &block,
             &mut received,

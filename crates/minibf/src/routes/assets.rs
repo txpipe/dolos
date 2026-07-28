@@ -34,9 +34,9 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
+    inputs::{InputDeps, InputResolver},
     mapping::{asset_fingerprint, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
-    resolver::{InputCache, InputResolver},
     Facade,
 };
 
@@ -637,7 +637,7 @@ fn tx_has_subject(
 
 async fn find_txs<D>(
     domain: &Facade<D>,
-    cache: &mut InputCache,
+    deps: &mut InputDeps,
     subject: &[u8],
     chain: &ChainSummary,
     pagination: &Pagination,
@@ -657,7 +657,7 @@ where
         .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
         .map(|(_, tx)| tx);
 
-    let mut resolver = cache.prepare(domain, scanned).await?;
+    let mut resolver = deps.prepare(domain, scanned).await?;
 
     let mut matches = vec![];
 
@@ -709,7 +709,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut matches = Vec::new();
-    let mut cache = InputCache::default();
+    let mut deps = InputDeps::default();
     let mut stream = Box::pin(stream);
 
     while let Some(res) = stream.next().await {
@@ -719,7 +719,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &mut cache, &subject, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &subject, &chain, &pagination, &block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
