@@ -659,6 +659,26 @@ async fn fetch_pool_metadata_with_error(
     }
 }
 
+fn select_pools(
+    pools: impl IntoIterator<Item = (BlockSlot, PoolHash)>,
+    pagination: &Pagination,
+) -> Vec<PoolHash> {
+    let mut pools: Vec<(BlockSlot, PoolHash)> = pools.into_iter().collect();
+
+    pools.sort_unstable_by_key(|(slot, operator)| (*slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    pools
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(_, operator)| operator)
+        .collect()
+}
+
 pub async fn all<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -668,7 +688,7 @@ where
 {
     let pagination = Pagination::try_from(params)?;
 
-    let mut pools = domain
+    let pools = domain
         .iter_cardano_entities::<PoolState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .filter_map(|x| {
@@ -683,17 +703,9 @@ where
         })
         .collect::<Result<Vec<(BlockSlot, PoolHash)>, StatusCode>>()?;
 
-    pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
-
-    if matches!(pagination.order, crate::pagination::Order::Desc) {
-        pools.reverse();
-    }
-
-    let out = pools
+    let out = select_pools(pools, &pagination)
         .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|(_, operator)| bech32_pool(operator))
+        .map(bech32_pool)
         .collect::<Result<Vec<_>, StatusCode>>()?;
 
     Ok(Json(out))
@@ -740,7 +752,7 @@ where
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let pools = domain
+    let mut pools = domain
         .iter_cardano_entities::<PoolState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .flat_map(|x| {
@@ -750,11 +762,18 @@ where
             if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
                 return None;
             }
-            Some(Ok((state.register_slot, (key, state))))
+            Some(Ok(((state.register_slot, state.operator), (key, state))))
         })
-        .collect::<Result<Vec<(BlockSlot, (EntityKey, PoolState))>, StatusCode>>()?
+        .collect::<Result<Vec<((BlockSlot, PoolHash), (EntityKey, PoolState))>, StatusCode>>()?;
+
+    pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    let pools = pools
         .into_iter()
-        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
         .map(|(_, x)| x)
         .skip(pagination.skip())
         .take(pagination.count)
@@ -1548,6 +1567,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pools_order_desc_reverses_asc() {
+        let app = TestApp::new();
+        let (asc_status, asc_bytes) = app.get_bytes("/pools?order=asc&count=100").await;
+        let (desc_status, desc_bytes) = app.get_bytes("/pools?order=desc&count=100").await;
+
+        assert_eq!(asc_status, StatusCode::OK);
+        assert_eq!(desc_status, StatusCode::OK);
+
+        let asc: Vec<String> =
+            serde_json::from_slice(&asc_bytes).expect("failed to parse asc pool list");
+        let mut desc: Vec<String> =
+            serde_json::from_slice(&desc_bytes).expect("failed to parse desc pool list");
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_matches_extended_ids_desc() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?order=desc&count=100").await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?order=desc&count=100").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
+
+        assert_eq!(pools, extended_ids);
+    }
+
+    #[tokio::test]
     async fn pools_empty_out_of_range_page() {
         let app = TestApp::new();
         let (status, bytes) = app.get_bytes("/pools?page=694269").await;
@@ -1623,6 +1679,54 @@ mod tests {
             retiring_epoch,
             deposit: 0,
         }
+    }
+
+    #[test]
+    fn select_pools_orders_and_paginates() {
+        let pools = vec![
+            (30, Hash::from([3u8; 28])),
+            (10, Hash::from([1u8; 28])),
+            (20, Hash::from([2u8; 28])),
+            // same register slot as [2u8; 28]: stable tie-break on operator
+            (20, Hash::from([9u8; 28])),
+        ];
+
+        let asc = select_pools(pools.clone(), &Pagination::default());
+        assert_eq!(
+            asc,
+            vec![
+                Hash::from([1u8; 28]),
+                Hash::from([2u8; 28]),
+                Hash::from([9u8; 28]),
+                Hash::from([3u8; 28]),
+            ]
+        );
+
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let ordered_desc = select_pools(pools.clone(), &desc);
+        assert_eq!(
+            ordered_desc,
+            vec![
+                Hash::from([3u8; 28]),
+                Hash::from([9u8; 28]),
+                Hash::from([2u8; 28]),
+                Hash::from([1u8; 28]),
+            ]
+        );
+
+        let paged = Pagination {
+            count: 2,
+            page: 2,
+            ..Pagination::default()
+        };
+        let second_page = select_pools(pools, &paged);
+        assert_eq!(
+            second_page,
+            vec![Hash::from([9u8; 28]), Hash::from([3u8; 28])]
+        );
     }
 
     #[test]
