@@ -832,6 +832,85 @@ fn build_submit_tx_cbor(
     minicbor::to_vec(tx).expect("failed to encode submit tx")
 }
 
+/// A phase-2-invalid (`success: false`) Conway tx. It has no regular outputs;
+/// the only output it produces is the collateral return. Collateral returns
+/// are indexed after the regular outputs, so here it sits at index 0. Use it
+/// to inject phase-2-invalid txs into scenarios that exercise collateral
+/// handling.
+pub fn build_phase2_invalid_tx_cbor(
+    input: TxoRef,
+    collateral: TxoRef,
+    collateral_return_address: impl Into<crate::TestAddress>,
+    collateral_return_amount: u64,
+) -> Vec<u8> {
+    let input = TransactionInput {
+        transaction_id: input.0,
+        index: input.1.into(),
+    };
+
+    let collateral = TransactionInput {
+        transaction_id: collateral.0,
+        index: collateral.1.into(),
+    };
+
+    let collateral_return = PostAlonzoTransactionOutput {
+        address: Bytes::from(collateral_return_address.into().to_bytes()),
+        value: Value::Coin(collateral_return_amount),
+        datum_option: None,
+        script_ref: None,
+    };
+
+    let body = TransactionBody {
+        inputs: Set::from(vec![input]),
+        outputs: vec![],
+        fee: 200_000,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: Some(NonEmptySet::try_from(vec![collateral]).expect("non-empty collateral")),
+        required_signers: None,
+        network_id: None,
+        collateral_return: Some(TransactionOutput::PostAlonzo(KeepRaw::from(
+            collateral_return,
+        ))),
+        total_collateral: Some(500_000),
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let body_cbor = minicbor::to_vec(&body).expect("failed to encode phase-2-invalid tx body");
+    let body_keep = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+        .expect("failed to decode phase-2-invalid tx body")
+        .to_owned();
+
+    let witness_set = WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: None,
+        redeemer: None,
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    };
+
+    let tx = pallas::ledger::primitives::conway::Tx {
+        transaction_body: body_keep,
+        transaction_witness_set: KeepRaw::from(witness_set),
+        success: false,
+        auxiliary_data: Nullable::Null,
+    };
+
+    minicbor::to_vec(tx).expect("failed to encode phase-2-invalid tx")
+}
+
 #[cfg(test)]
 mod tests {
 
