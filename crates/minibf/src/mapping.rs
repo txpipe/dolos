@@ -1600,8 +1600,14 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
                     }
                 }),
                 ipv6: ipv6.map(|ipv6| {
-                    if let Ok(slice) = <[u8; 16]>::try_from(ipv6.as_slice()) {
-                        std::net::Ipv6Addr::from(slice).to_string()
+                    if let Ok(mut bytes) = <[u8; 16]>::try_from(ipv6.as_slice()) {
+                        // cardano-ledger serializes relay IPv6 addresses as
+                        // four 32-bit words in little-endian order; swap each
+                        // word back to network order (same as dbsync).
+                        for word in bytes.chunks_exact_mut(4) {
+                            word.reverse();
+                        }
+                        std::net::Ipv6Addr::from(bytes).to_string()
                     } else {
                         Default::default()
                     }

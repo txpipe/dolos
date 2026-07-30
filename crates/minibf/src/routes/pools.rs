@@ -1751,6 +1751,27 @@ mod tests {
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
+    #[test]
+    fn relay_ipv6_words_swapped_to_network_order() {
+        // On-chain bytes of a real preview relay (pool1drrylt...): the ledger
+        // serializes relay IPv6 as four little-endian 32-bit words, so the
+        // mapped address must match what dbsync/Blockfrost display.
+        let onchain: [u8; 16] = [
+            0x61, 0x08, 0x01, 0x20, 0x80, 0x2b, 0x00, 0x40, 0xff, 0x3e, 0x16, 0x02, 0x09, 0x90,
+            0x05, 0xfe,
+        ];
+
+        let relay = Relay::SingleHostAddr(Some(3001), None, Some(Bytes::from(onchain.to_vec())));
+        let model = relay.into_model().expect("relay model");
+
+        assert_eq!(
+            model.ipv6.as_deref(),
+            Some("2001:861:4000:2b80:216:3eff:fe05:9009")
+        );
+        assert_eq!(model.ipv4, None);
+        assert_eq!(model.port, 3001);
+    }
+
     #[tokio::test]
     async fn pools_relays_happy_path() {
         let app = TestApp::new_with_cfg(SyntheticBlockConfig {
