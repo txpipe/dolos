@@ -596,8 +596,8 @@ fn a_malformed_record_is_reported_not_counted() {
 
 /// A descriptor's media type has to be the one *this* profile defines for that
 /// kind. `validate_structure` can only establish that the name is well formed
-/// and does not squat the reserved vendor; whether it belongs to the profile the
-/// inscription claims needs the profile in hand, which is `check_profile`.
+/// and does not squat the reserved vendor; whether it belongs to the profile
+/// the inscription claims needs the profile in hand, which is `check_profile`.
 #[test]
 fn a_layer_media_type_that_is_not_the_profiles_is_refused() {
     let temp = tempfile::tempdir().unwrap();

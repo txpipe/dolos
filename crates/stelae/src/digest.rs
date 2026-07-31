@@ -478,10 +478,11 @@ mod tests {
     }
 
     /// A blob is content-addressed, but its producer chose both its bytes and
-    /// the digest naming it — so nothing about a well-formed file bounds what it
-    /// expands to. `read_blob` stops at the ceiling instead of allocating
-    /// whatever the stream asks for, and stops *during* decompression: the
-    /// buffer never grows past the limit even though the blob is far larger.
+    /// the digest naming it — so nothing about a well-formed file bounds what
+    /// it expands to. `read_blob` stops at the ceiling instead of
+    /// allocating whatever the stream asks for, and stops *during*
+    /// decompression: the buffer never grows past the limit even though the
+    /// blob is far larger.
     #[test]
     fn read_blob_refuses_to_expand_past_its_ceiling() {
         // Compresses to a few hundred bytes; expands to 8 MiB.
