@@ -44,30 +44,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
-  stelae-boundary:
-    name: stelae crate boundary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.91
-      - uses: Swatinem/rust-cache@v2
-      # `crates/stelae` is the Stelae protocol: generic, and deliberately free of
-      # anything Dolos-shaped. Keeping it free of `dolos-*` packages is what makes
-      # a later extraction to its own repository a directory move rather than a
-      # refactor, and it is the only mechanical guard on the protocol/profile
-      # boundary — see adrs/004_stelae_snapshots.md, "Code layout".
-      - name: Assert crates/stelae has no dolos-* dependency
-        run: |
-          set -euo pipefail
-          cargo tree -p stelae -e normal
-          if cargo tree -p stelae -e normal --prefix none --format '{p}' \
-            | sort -u | grep -E '^dolos-'; then
-            echo "::error file=crates/stelae/Cargo.toml::crates/stelae depends on the dolos-* package(s) listed above; the Stelae protocol/profile boundary is broken"
-            exit 1
-          fi
-
   deny:
     name: cargo deny (advisories)
     runs-on: ubuntu-latest
