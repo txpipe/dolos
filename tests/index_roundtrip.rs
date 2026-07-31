@@ -554,8 +554,12 @@ fn measure_one_epoch_iteration_cost() {
                     tx_hashes.push(hash32(0x02, slot, tx));
 
                     for t in 0..COST_TAGS_PER_TX {
-                        let dimension =
-                            archive_dimensions::ALL[(t as usize) % archive_dimensions::ALL.len()];
+                        // Offset by tx so the whole dimension set gets seeded:
+                        // 10 tags from a fixed starting point would cover only
+                        // 10 of the 12 dimensions, leaving METADATA — the
+                        // verbatim-key path — out of the measurement entirely.
+                        let dimension = archive_dimensions::ALL
+                            [((tx + t) as usize) % archive_dimensions::ALL.len()];
 
                         let key = if dimension == archive_dimensions::METADATA {
                             (t % 8).to_be_bytes().to_vec()

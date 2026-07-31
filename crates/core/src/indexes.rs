@@ -195,8 +195,29 @@ impl ExactKind {
         }
     }
 
-    pub fn parse(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    /// The exact byte length of a stored key of this kind.
+    ///
+    /// Exact keys are fixed-width per kind: a 32-byte hash for
+    /// [`ExactKind::BlockHash`] and [`ExactKind::TxHash`], an 8-byte big-endian
+    /// number for [`ExactKind::BlockNumber`]. Writers validate against this so
+    /// a wrong-width key from an external source cannot land as a permanently
+    /// unreadable entry.
+    pub const fn key_len(&self) -> usize {
+        match self {
+            Self::BlockHash | Self::TxHash => 32,
+            Self::BlockNumber => 8,
+        }
+    }
+}
+
+impl std::str::FromStr for ExactKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+            .ok_or_else(|| format!("unknown exact kind: {s}"))
     }
 }
 
@@ -249,27 +270,17 @@ impl From<ExactRecord> for IndexRecord {
 
 /// Iterator used by backends that do not implement
 /// [`IndexStore::iter_archive_tags`].
-pub struct EmptyTagIter;
-
-impl Iterator for EmptyTagIter {
-    type Item = Result<TagRecord, IndexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
+///
+/// Never constructed — those backends return [`IndexError::Unsupported`], so
+/// the alias only exists to satisfy the associated type.
+pub type EmptyTagIter = std::iter::Empty<Result<TagRecord, IndexError>>;
 
 /// Iterator used by backends that do not implement
 /// [`IndexStore::iter_exact_records`].
-pub struct EmptyExactIter;
-
-impl Iterator for EmptyExactIter {
-    type Item = Result<ExactRecord, IndexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
+///
+/// Never constructed — those backends return [`IndexError::Unsupported`], so
+/// the alias only exists to satisfy the associated type.
+pub type EmptyExactIter = std::iter::Empty<Result<ExactRecord, IndexError>>;
 
 /// Writer for batched index operations.
 ///
@@ -299,7 +310,11 @@ pub trait IndexWriter: Send + Sync + 'static {
     /// none to recover — see [`KeyHash`]).
     ///
     /// Records must arrive sorted, since the backing stores are append
-    /// oriented. The cursor is *not* touched: a restore owns cursor placement.
+    /// oriented. The cursor is *not* touched: a restore owns cursor placement,
+    /// and places it with an otherwise-empty delta once the records are in:
+    /// `writer.apply(&IndexDelta { cursor, ..Default::default() })`. A restore
+    /// that skips this leaves `cursor()` at `None` and bootstrap will treat the
+    /// store as never indexed.
     ///
     /// Backends that do not implement this return
     /// [`IndexError::Unsupported`].
@@ -374,6 +389,11 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
     /// Returns an iterator over slots that contain data tagged with the given
     /// dimension and key. The iterator is lazy and supports bidirectional
     /// iteration for efficient pagination.
+    ///
+    /// Both `start` and `end` are **inclusive** — unlike the record traversal
+    /// methods below, which take a half-open [`Range`]. Reusing one `(start,
+    /// end)` pair across both conventions drops or double-counts the record at
+    /// `end`.
     fn slots_by_tag(
         &self,
         dimension: TagDimension,
@@ -386,6 +406,9 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
 
     /// Iterate every archive tag record whose slot falls in `slots`.
     ///
+    /// `slots` is **half-open** (`start..end`), unlike
+    /// [`IndexStore::slots_by_tag`], whose bounds are both inclusive.
+    ///
     /// `dimensions` is the closed list of dimensions to traverse. It has to be
     /// supplied by the caller: stores keep a hash of the dimension name, not
     /// the name, so the set of dimensions is not discoverable from disk.
@@ -397,7 +420,15 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
     /// iteration (snapshot layers) make that order their content, so an
     /// unordered iterator is a wrong one.
     ///
-    /// The iterator must be lazy in the size of the store.
+    /// **Errors are terminal.** A malformed on-disk entry or a read failure is
+    /// yielded as `Err` and the iterator is fused from then on: it never
+    /// resumes past a fault, so a consumer that collects into
+    /// `Result<Vec<_>, _>` cannot receive a silently truncated record set.
+    ///
+    /// The iterator must be lazy in the size of the store. Each call opens its
+    /// own point-in-time view: records from separate calls (or from
+    /// [`IndexStore::iter_exact_records`]) are only mutually consistent if the
+    /// store is quiescent across the calls.
     ///
     /// Backends that do not implement this return
     /// [`IndexError::Unsupported`].
@@ -409,8 +440,14 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
 
     /// Iterate every exact-match record whose slot falls in `slots`.
     ///
+    /// `slots` is **half-open** (`start..end`), unlike
+    /// [`IndexStore::slots_by_tag`], whose bounds are both inclusive.
+    ///
     /// **Order is part of the contract**: records come out sorted by
     /// `(kind, key)`, kinds in ascending [`ExactKind::as_str`] order.
+    ///
+    /// **Errors are terminal** — same policy as
+    /// [`IndexStore::iter_archive_tags`].
     ///
     /// Note that the slot is the stored *value* of an exact entry, not part of
     /// its key, so a slot-bounded traversal is a scan of every exact entry in
@@ -450,10 +487,22 @@ mod tests {
     #[test]
     fn exact_kind_roundtrips_through_name() {
         for kind in ExactKind::ALL {
-            assert_eq!(ExactKind::parse(kind.as_str()), Some(kind));
+            assert_eq!(kind.as_str().parse::<ExactKind>(), Ok(kind));
         }
 
-        assert_eq!(ExactKind::parse("nope"), None);
+        assert!("nope".parse::<ExactKind>().is_err());
+    }
+
+    /// Pins the literal strings: they are hashed into on-disk keys, so a
+    /// rename that looks cosmetic (e.g. `block_num` -> `block_number`) orphans
+    /// every existing entry of that kind. Every other test compares `as_str`
+    /// against itself and would survive such a rename — this one exists to
+    /// fail it.
+    #[test]
+    fn exact_kind_names_are_storage_format() {
+        assert_eq!(ExactKind::BlockHash.as_str(), "block_hash");
+        assert_eq!(ExactKind::BlockNumber.as_str(), "block_num");
+        assert_eq!(ExactKind::TxHash.as_str(), "tx_hash");
     }
 
     #[test]

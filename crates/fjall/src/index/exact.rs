@@ -160,12 +160,33 @@ pub fn undo(
 /// The write mirror of [`ExactRecordIterator`]. Exact keys are stored verbatim,
 /// so this is the same encoding `apply` performs — only the kind arrives as a
 /// value instead of being implied by the call site.
+///
+/// `dim_hash` is `hash_dimension(dim_prefix::EXACT, record.kind.as_str())`,
+/// passed in rather than computed here: records arrive grouped by kind, so the
+/// caller hashes each kind once per group instead of once per record.
+///
+/// The key length is validated against [`ExactKind::key_len`]: the read paths
+/// build fixed-width keys per kind, so a wrong-width key (possible only from an
+/// external source — the delta path is type-enforced) would land as a
+/// permanently unreadable entry that re-exports as if it were valid.
 pub fn insert_prehashed(
     batch: &mut OwnedWriteBatch,
     exact_keyspace: &Keyspace,
     record: &ExactRecord,
+    dim_hash: [u8; DIM_HASH_SIZE],
 ) -> Result<(), Error> {
-    let key = build_exact_key(record.kind.as_str(), &record.key);
+    let expected = record.kind.key_len();
+    if record.key.len() != expected {
+        return Err(Error::Codec(format!(
+            "exact record of kind {} has a {}-byte key, expected {expected}",
+            record.kind,
+            record.key.len(),
+        )));
+    }
+
+    let mut key = Vec::with_capacity(DIM_HASH_SIZE + record.key.len());
+    key.extend_from_slice(&dim_hash);
+    key.extend_from_slice(&record.key);
     batch.insert(exact_keyspace, key, encode_slot_value(record.slot));
     Ok(())
 }
@@ -245,12 +266,20 @@ pub fn get_by_tx_hash<R: Readable>(
 /// tag scan still dominates a per-epoch slice, simply because there are more
 /// tag records than exact ones — but this one has no seekable structure to
 /// exploit even in principle.
+///
+/// ## Lifetime and errors
+///
+/// Same contract as `TagRecordIterator`: the held MVCC snapshot pins fjall's
+/// GC watermark for the iterator's lifetime, and errors — read failures or
+/// malformed entries — are terminal (the iterator fuses rather than resuming
+/// past a fault).
 pub struct ExactRecordIterator {
     snapshot: Snapshot,
     keyspace: Keyspace,
-    kinds: std::vec::IntoIter<ExactKind>,
+    kinds: std::array::IntoIter<ExactKind, 3>,
     current: Option<(ExactKind, fjall::Iter)>,
     slots: Range<BlockSlot>,
+    done: bool,
 }
 
 impl ExactRecordIterator {
@@ -261,8 +290,11 @@ impl ExactRecordIterator {
         Self {
             snapshot,
             keyspace: keyspace.clone(),
-            kinds: ExactKind::ALL.to_vec().into_iter(),
+            kinds: ExactKind::ALL.into_iter(),
             current: None,
+            // An empty range matches nothing: skip the prefix scans entirely
+            // instead of decoding every entry to filter everything out.
+            done: slots.is_empty(),
             slots,
         }
     }
@@ -281,6 +313,10 @@ impl Iterator for ExactRecordIterator {
     type Item = Result<ExactRecord, IndexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
         loop {
             let Some((kind, iter)) = self.current.as_mut() else {
                 self.open_next()?;
@@ -296,12 +332,23 @@ impl Iterator for ExactRecordIterator {
 
             let (key, value) = match guard.into_inner() {
                 Ok(pair) => pair,
-                Err(e) => return Some(Err(Error::Fjall(e).into())),
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(Error::Fjall(e).into()));
+                }
             };
 
             if key.len() <= DIM_HASH_SIZE || value.len() < SLOT_SIZE {
-                // Skip malformed entries, continue to next
-                continue;
+                // A malformed entry cannot come from this module's write path:
+                // it is corruption, and this stream becomes a signed layer —
+                // error out (terminally) rather than skip.
+                self.done = true;
+                return Some(Err(IndexError::CodecError(format!(
+                    "malformed exact index entry of kind {kind}: \
+                     key {} bytes, value {} bytes",
+                    key.len(),
+                    value.len(),
+                ))));
             }
 
             let slot = decode_slot_value(&value);
@@ -318,6 +365,8 @@ impl Iterator for ExactRecordIterator {
         }
     }
 }
+
+impl std::iter::FusedIterator for ExactRecordIterator {}
 
 #[cfg(test)]
 mod tests {

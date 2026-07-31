@@ -175,14 +175,22 @@ fn remove_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot:
 /// It is deliberately *not* routed through [`insert_tag`] — that function
 /// hashes (and special-cases `metadata`) because it starts from a logical key,
 /// which a restore does not have.
+///
+/// `dim_hash` is `hash_dimension(dim_prefix::BLOCK, record.dimension())`,
+/// passed in rather than computed here: records arrive grouped by dimension,
+/// so the caller hashes each dimension once per group instead of once per
+/// record.
 pub fn insert_prehashed(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
     record: &TagRecord,
-) -> Result<(), Error> {
-    let hash = u64::from_be_bytes(record.key_hash);
-    insert_block_tag_hashed(batch, keyspace, record.dimension(), hash, record.slot);
-    Ok(())
+    dim_hash: [u8; DIM_HASH_SIZE],
+) {
+    let mut key = [0u8; BLOCK_TAG_KEY_SIZE];
+    key[..DIM_HASH_SIZE].copy_from_slice(&dim_hash);
+    key[DIM_HASH_SIZE..DIM_HASH_SIZE + HASH_KEY_SIZE].copy_from_slice(&record.key_hash);
+    key[DIM_HASH_SIZE + HASH_KEY_SIZE..].copy_from_slice(&record.slot.to_be_bytes());
+    batch.insert(keyspace, key, []);
 }
 
 /// Apply archive tag indexes for a single block delta
@@ -354,14 +362,29 @@ impl DoubleEndedIterator for SlotIterator {
 ///
 /// `slot` is the *last* key component, so a slot range is not a seekable
 /// prefix: each dimension is scanned in full and filtered. This is the cost
-/// centre of a per-epoch slice. Memory stays O(1) — matching is done per entry
-/// and only the key is loaded.
+/// centre of a per-epoch slice. Memory stays O(1) — entries are matched one at
+/// a time (tag values are empty, so each entry is just its 24-byte key).
+///
+/// ## Lifetime
+///
+/// The iterator holds an MVCC snapshot for as long as it lives, which pins
+/// fjall's GC watermark: superseded versions written while it is alive are
+/// retained until it drops. Drain or drop it promptly on a live store.
+///
+/// ## Errors
+///
+/// Errors are terminal: after yielding an `Err` — a read failure or a
+/// malformed entry — the iterator is fused and yields `None` forever. The
+/// record set feeds a signed snapshot layer, so resuming past a fault (or
+/// silently skipping a bad entry) would let a corrupt store produce a
+/// clean-looking, truncated layer.
 pub struct TagRecordIterator {
     snapshot: Snapshot,
     keyspace: Keyspace,
     dimensions: std::vec::IntoIter<TagDimension>,
     current: Option<(TagDimension, fjall::Iter)>,
     slots: Range<BlockSlot>,
+    done: bool,
 }
 
 impl TagRecordIterator {
@@ -385,6 +408,9 @@ impl TagRecordIterator {
             keyspace: keyspace.clone(),
             dimensions: dimensions.into_iter(),
             current: None,
+            // An empty range matches nothing: skip the prefix scans entirely
+            // instead of walking every dimension to filter everything out.
+            done: slots.is_empty(),
             slots,
         }
     }
@@ -403,6 +429,10 @@ impl Iterator for TagRecordIterator {
     type Item = Result<TagRecord, IndexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
         loop {
             let Some((dimension, iter)) = self.current.as_mut() else {
                 self.open_next()?;
@@ -418,12 +448,22 @@ impl Iterator for TagRecordIterator {
 
             let key = match guard.key() {
                 Ok(key) => key,
-                Err(e) => return Some(Err(Error::Fjall(e).into())),
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(Error::Fjall(e).into()));
+                }
             };
 
             if key.len() < BLOCK_TAG_KEY_SIZE {
-                // Skip malformed keys (too short), continue to next
-                continue;
+                // A short key cannot come from this module's write path: it is
+                // corruption, and this stream becomes a signed layer — error
+                // out (terminally) rather than skip.
+                self.done = true;
+                return Some(Err(IndexError::CodecError(format!(
+                    "malformed archive tag key in dimension {dimension}: \
+                     {} bytes, expected {BLOCK_TAG_KEY_SIZE}",
+                    key.len(),
+                ))));
             }
 
             let slot = decode_block_tag_slot(&key);
@@ -440,6 +480,8 @@ impl Iterator for TagRecordIterator {
         }
     }
 }
+
+impl std::iter::FusedIterator for TagRecordIterator {}
 
 #[cfg(test)]
 mod tests {

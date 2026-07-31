@@ -1,4 +1,4 @@
-use std::{collections::HashMap, marker::PhantomData, ops::Range, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, ops::Range};
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -212,22 +212,18 @@ pub enum StateError {
 }
 
 /// A single entry of the UTxO set, as yielded by [`StateStore::iter_utxos`].
-pub type UtxoEntry = (TxoRef, Arc<EraCbor>);
+///
+/// The value is owned, not `Arc`-wrapped: the streaming consumers this exists
+/// for (snapshot export, index rebuild) serialize and drop each entry, so
+/// shared ownership would be a per-item allocation nobody uses. A caller that
+/// wants a [`UtxoMap`] wraps the values itself.
+pub type UtxoEntry = (TxoRef, EraCbor);
 
 /// Iterator used by backends that do not implement [`StateStore::iter_utxos`].
 ///
-/// It never yields: those backends return
-/// [`StateError::Unsupported`] from the constructor, so the type only exists to
-/// satisfy the associated type.
-pub struct EmptyUtxoIter;
-
-impl Iterator for EmptyUtxoIter {
-    type Item = Result<UtxoEntry, StateError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
+/// Never constructed — those backends return [`StateError::Unsupported`], so
+/// the alias only exists to satisfy the associated type.
+pub type EmptyUtxoIter = std::iter::Empty<Result<UtxoEntry, StateError>>;
 
 pub struct EntityIterTyped<S: StateStore, E: Entity> {
     inner: S::EntityIter,
@@ -431,7 +427,13 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     /// The iterator must be lazy: neither construction nor iteration may
     /// buffer the set, since callers (snapshot export, live-UTxO index
     /// rebuild) run against a mainnet-sized set that does not fit a memory
-    /// budget.
+    /// budget. Construction reads nothing; the first read failure surfaces
+    /// from `next()`.
+    ///
+    /// **Errors are terminal.** A malformed on-disk entry or a read failure is
+    /// yielded as `Err` and the iterator is fused from then on: it never
+    /// resumes past a fault, so a consumer cannot receive a silently truncated
+    /// UTxO set.
     ///
     /// Backends that do not implement this return
     /// [`StateError::Unsupported`].

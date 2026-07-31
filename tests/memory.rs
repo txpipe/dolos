@@ -1,3 +1,4 @@
+use serial_test::serial;
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
 use std::sync::Arc;
@@ -7,6 +8,11 @@ use dolos_core::{
     StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoSetDelta,
 };
 
+// Every test in this binary reads the same process-global allocator counters,
+// so they must not run concurrently: a sibling test allocating (or freeing)
+// inside another test's measurement window shifts that window's numbers —
+// enough to fail a threshold spuriously, or to drive a live-bytes delta
+// negative and make its assertion vacuous. Hence #[serial] on every test.
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
@@ -60,6 +66,7 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
 }
 
 #[test]
+#[serial]
 fn test_fjall_lazy_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallStateConfig {
@@ -79,6 +86,7 @@ fn test_fjall_lazy_iter() {
 }
 
 #[test]
+#[serial]
 fn test_redb3_lazy_iter() {
     let mut schema = StateSchema::default();
     schema.insert(NS, NamespaceType::KeyValue);
@@ -188,6 +196,7 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
 }
 
 #[test]
+#[serial]
 fn test_fjall_shard_range_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallStateConfig {
@@ -305,6 +314,7 @@ fn assert_lazy_utxo_iter<S: CoreStateStore>(store: &S) {
 }
 
 #[test]
+#[serial]
 fn test_fjall_lazy_utxo_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallStateConfig {
@@ -327,6 +337,7 @@ fn test_fjall_lazy_utxo_iter() {
 }
 
 #[test]
+#[serial]
 fn test_redb3_shard_range_iter() {
     let mut schema = StateSchema::default();
     schema.insert(NS, NamespaceType::KeyValue);

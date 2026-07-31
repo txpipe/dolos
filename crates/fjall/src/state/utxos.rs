@@ -89,8 +89,17 @@ pub fn get_utxos<R: Readable>(
 /// This matters: the callers this exists for (snapshot export, live-UTxO index
 /// rebuild) run against a mainnet UTxO set of several GB, which buffering would
 /// pull into memory whole.
+///
+/// The held `SnapshotNonce` pins fjall's GC watermark for the iterator's
+/// lifetime: superseded versions written while it is alive are retained until
+/// it drops. Drain or drop it promptly on a live store.
+///
+/// Errors are terminal: after yielding an `Err` — a read failure or a
+/// malformed entry — the iterator is fused and yields `None` forever, so a
+/// consumer cannot receive a silently truncated UTxO set.
 pub struct UtxosIterator {
     inner: fjall::Iter,
+    done: bool,
 }
 
 impl UtxosIterator {
@@ -100,11 +109,13 @@ impl UtxosIterator {
     /// Snapshot-based reads avoid potential deadlocks with concurrent writes by
     /// using MVCC (Multi-Version Concurrency Control).
     ///
-    /// Returns immediately without reading any data.
-    pub fn new<R: Readable>(readable: &R, keyspace: &Keyspace) -> Result<Self, Error> {
-        Ok(Self {
+    /// Returns immediately without reading any data; the first read failure
+    /// surfaces from `next()`.
+    pub fn new<R: Readable>(readable: &R, keyspace: &Keyspace) -> Self {
+        Self {
             inner: readable.iter(keyspace),
-        })
+            done: false,
+        }
     }
 }
 
@@ -112,22 +123,46 @@ impl Iterator for UtxosIterator {
     type Item = Result<UtxoEntry, StateError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        for guard in self.inner.by_ref() {
-            // fjall's Guard::into_inner() gives us both key and value
-            match guard.into_inner() {
-                Ok((key_bytes, value_bytes)) => {
-                    if key_bytes.len() == TXO_REF_SIZE {
-                        if let Some((era, cbor)) = decode_utxo_value(&value_bytes) {
-                            let txo_ref = decode_txo_ref(&key_bytes);
-                            return Some(Ok((txo_ref, Arc::new(EraCbor(era, cbor)))));
-                        }
-                    }
-                    // Skip malformed entries, continue to next
-                }
-                Err(e) => return Some(Err(Error::Fjall(e).into())),
-            }
+        if self.done {
+            return None;
         }
 
-        None
+        match self.inner.next() {
+            Some(guard) => match guard.into_inner() {
+                Ok((key_bytes, value_bytes)) => {
+                    if key_bytes.len() != TXO_REF_SIZE {
+                        // A wrong-width key cannot come from this module's
+                        // write path: it is corruption, and this stream feeds
+                        // a signed snapshot layer — error out (terminally)
+                        // rather than skip.
+                        self.done = true;
+                        return Some(Err(StateError::InternalStoreError(format!(
+                            "malformed utxo entry: key is {} bytes, expected {TXO_REF_SIZE}",
+                            key_bytes.len(),
+                        ))));
+                    }
+
+                    let Some((era, cbor)) = decode_utxo_value(&value_bytes) else {
+                        self.done = true;
+                        return Some(Err(StateError::InternalStoreError(
+                            "malformed utxo entry: undecodable value".into(),
+                        )));
+                    };
+
+                    let txo_ref = decode_txo_ref(&key_bytes);
+                    Some(Ok((txo_ref, EraCbor(era, cbor))))
+                }
+                Err(e) => {
+                    self.done = true;
+                    Some(Err(Error::Fjall(e).into()))
+                }
+            },
+            None => {
+                self.done = true;
+                None
+            }
+        }
     }
 }
+
+impl std::iter::FusedIterator for UtxosIterator {}

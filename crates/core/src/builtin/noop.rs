@@ -32,8 +32,12 @@ impl IndexWriter for NoOpIndexWriter {
         Ok(())
     }
 
+    /// A restore against a store that discards every record must fail, not
+    /// report success: `Ok` here would let a snapshot restore complete
+    /// "cleanly" having written nothing. See
+    /// [`NoOpIndexStore::iter_archive_tags`] for the read-side twin.
     fn append_prehashed(&self, _records: &[IndexRecord]) -> Result<(), IndexError> {
-        Ok(())
+        Err(IndexError::Unsupported("append_prehashed"))
     }
 
     fn commit(self) -> Result<(), IndexError> {
@@ -120,19 +124,24 @@ impl IndexStore for NoOpIndexStore {
         Ok(EmptySlotIter)
     }
 
-    /// A store that keeps no indexes has no tag records: an empty iteration is
-    /// the honest answer, not an error.
+    /// This errors rather than yielding the (arguably honest) empty
+    /// iteration: the callers of this seam publish the iterated records as a
+    /// signed snapshot layer, and a well-formed *empty* layer from an
+    /// index-less node is indistinguishable from a genuinely tag-free epoch.
+    /// The established convention for noop backends is to fail loudly at this
+    /// kind of boundary (see `data stats` / `data export`), and redb3 answers
+    /// the same methods with `Unsupported`.
     fn iter_archive_tags(
         &self,
         _dimensions: &[TagDimension],
         _slots: Range<BlockSlot>,
     ) -> Result<Self::TagIter, IndexError> {
-        Ok(EmptyTagIter)
+        Err(IndexError::Unsupported("iter_archive_tags"))
     }
 
     /// See [`NoOpIndexStore::iter_archive_tags`].
     fn iter_exact_records(&self, _slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
-        Ok(EmptyExactIter)
+        Err(IndexError::Unsupported("iter_exact_records"))
     }
 }
 

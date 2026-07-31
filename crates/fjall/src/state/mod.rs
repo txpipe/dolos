@@ -333,6 +333,6 @@ impl CoreStateStore for StateStore {
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
-        utxos::UtxosIterator::new(&snapshot, &self.utxos).map_err(StateError::from)
+        Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
     }
 }

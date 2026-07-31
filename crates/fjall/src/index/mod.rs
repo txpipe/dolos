@@ -37,8 +37,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallIndexConfig, BlockSlot, ChainPoint, IndexDelta, IndexError, IndexRecord,
-    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
+    config::FjallIndexConfig, BlockSlot, ChainPoint, ExactKind, IndexDelta, IndexError,
+    IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension,
+    UtxoSet,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -49,6 +50,7 @@ pub mod archive_tags;
 pub mod exact;
 pub mod state_tags;
 
+use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::Error;
 
 // Re-export the iterator types
@@ -286,14 +288,44 @@ impl CoreIndexWriter for IndexStoreWriter {
     fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
+        // Records arrive sorted, hence grouped by dimension/kind: cache the
+        // dimension hash across each group instead of recomputing the xxh3 of
+        // the same constant string once per record.
+        let mut tag_dim: Option<(&str, [u8; DIM_HASH_SIZE])> = None;
+        let mut exact_dim: Option<(ExactKind, [u8; DIM_HASH_SIZE])> = None;
+
         for record in records {
             match record {
                 IndexRecord::Tag(tag) => {
-                    archive_tags::insert_prehashed(&mut batch, &self.store.block_tags, tag)
-                        .map_err(IndexError::from)?;
+                    let dimension = tag.dimension();
+
+                    let dim_hash = match tag_dim {
+                        Some((cached, hash)) if cached == dimension => hash,
+                        _ => {
+                            let hash = hash_dimension(dim_prefix::BLOCK, dimension);
+                            tag_dim = Some((dimension, hash));
+                            hash
+                        }
+                    };
+
+                    archive_tags::insert_prehashed(
+                        &mut batch,
+                        &self.store.block_tags,
+                        tag,
+                        dim_hash,
+                    );
                 }
                 IndexRecord::Exact(exact) => {
-                    exact::insert_prehashed(&mut batch, &self.store.exact, exact)
+                    let dim_hash = match exact_dim {
+                        Some((cached, hash)) if cached == exact.kind => hash,
+                        _ => {
+                            let hash = hash_dimension(dim_prefix::EXACT, exact.kind.as_str());
+                            exact_dim = Some((exact.kind, hash));
+                            hash
+                        }
+                    };
+
+                    exact::insert_prehashed(&mut batch, &self.store.exact, exact, dim_hash)
                         .map_err(IndexError::from)?;
                 }
             }
