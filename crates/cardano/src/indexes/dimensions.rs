@@ -68,4 +68,40 @@ pub mod archive {
 
     /// Transaction metadata labels
     pub const METADATA: TagDimension = "metadata";
+
+    /// Every archive dimension.
+    ///
+    /// Index stores keep a hash of the dimension name rather than the name, so
+    /// the set is not discoverable from disk: any bulk traversal of archive
+    /// tags (`IndexStore::iter_archive_tags`) has to be driven by this list.
+    /// A dimension added above and not here is a dimension that silently stops
+    /// being exported.
+    pub const ALL: [TagDimension; 12] = [
+        ADDRESS,
+        PAYMENT,
+        STAKE,
+        ASSET,
+        POLICY,
+        DATUM,
+        SCRIPT,
+        SPENT_TXO,
+        ACCOUNT_CERTS,
+        POOL_CERTS,
+        ACCOUNT_WITHDRAWALS,
+        METADATA,
+    ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_all_has_no_duplicates() {
+        let mut seen = archive::ALL.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+
+        assert_eq!(seen.len(), archive::ALL.len());
+    }
 }

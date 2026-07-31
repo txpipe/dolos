@@ -14,8 +14,13 @@
 //!
 //! The `dim_hash` is computed as `xxh3("block:" + dimension)`.
 
-use dolos_core::{ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, Tag};
-use fjall::{Keyspace, OwnedWriteBatch, Readable};
+use std::borrow::Cow;
+use std::ops::Range;
+
+use dolos_core::{
+    ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, KeyHash, Tag, TagDimension, TagRecord,
+};
+use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
 use crate::keys::{
     decode_slot, dim_prefix, hash_dimension, hash_key, DIM_HASH_SIZE, HASH_KEY_SIZE, SLOT_SIZE,
@@ -67,6 +72,14 @@ fn decode_block_tag_slot(key: &[u8]) -> u64 {
     debug_assert!(key.len() >= BLOCK_TAG_KEY_SIZE);
     let start = key.len() - SLOT_SIZE;
     decode_slot(&key[start..])
+}
+
+/// Decode the stored tag key hash from a block tag key (bytes 8..16)
+fn decode_block_tag_key_hash(key: &[u8]) -> KeyHash {
+    debug_assert!(key.len() >= BLOCK_TAG_KEY_SIZE);
+    let mut hash = [0u8; HASH_KEY_SIZE];
+    hash.copy_from_slice(&key[DIM_HASH_SIZE..DIM_HASH_SIZE + HASH_KEY_SIZE]);
+    hash
 }
 
 // ============================================================================
@@ -153,6 +166,23 @@ fn remove_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot:
     }
 
     remove_block_tag(batch, keyspace, tag.dimension, &tag.key, slot);
+}
+
+/// Insert a tag entry from a record that already carries its stored key hash.
+///
+/// This is the write mirror of [`TagRecordIterator`]: the 8 hash bytes go in
+/// verbatim, so a record read out of one store lands byte-identical in another.
+/// It is deliberately *not* routed through [`insert_tag`] — that function
+/// hashes (and special-cases `metadata`) because it starts from a logical key,
+/// which a restore does not have.
+pub fn insert_prehashed(
+    batch: &mut OwnedWriteBatch,
+    keyspace: &Keyspace,
+    record: &TagRecord,
+) -> Result<(), Error> {
+    let hash = u64::from_be_bytes(record.key_hash);
+    insert_block_tag_hashed(batch, keyspace, record.dimension(), hash, record.slot);
+    Ok(())
 }
 
 /// Apply archive tag indexes for a single block delta
@@ -298,6 +328,119 @@ impl DoubleEndedIterator for SlotIterator {
     }
 }
 
+// ============================================================================
+// TagRecordIterator
+// ============================================================================
+
+/// Lazy iterator over archive tag records, one dimension prefix at a time.
+///
+/// ## Why it is driven by a dimension list
+///
+/// The stored key is `[dim_hash:8][tag_hash:8][slot:8]` where
+/// `dim_hash = xxh3("block:" + dimension)`. The dimension *string* is nowhere
+/// on disk, so a blind scan of the keyspace could not label the records it
+/// produced. Traversal therefore takes the known dimension list and seeks one
+/// prefix at a time, which supplies the dimension as a side effect.
+///
+/// ## Ordering
+///
+/// On-disk order is by `dim_hash`, which is unrelated to the dimension string's
+/// order. The contract is `(dimension, key_hash, slot)`, so the dimension list
+/// is sorted (and deduplicated) up front and walked in that order; within one
+/// prefix, fjall's lexicographic order over `[tag_hash][slot]` is already the
+/// rest of the contract, both being big-endian.
+///
+/// ## Cost
+///
+/// `slot` is the *last* key component, so a slot range is not a seekable
+/// prefix: each dimension is scanned in full and filtered. This is the cost
+/// centre of a per-epoch slice. Memory stays O(1) — matching is done per entry
+/// and only the key is loaded.
+pub struct TagRecordIterator {
+    snapshot: Snapshot,
+    keyspace: Keyspace,
+    dimensions: std::vec::IntoIter<TagDimension>,
+    current: Option<(TagDimension, fjall::Iter)>,
+    slots: Range<BlockSlot>,
+}
+
+impl TagRecordIterator {
+    /// Create a new iterator over the tag records of the given dimensions.
+    ///
+    /// Returns immediately without reading any data.
+    pub fn new(
+        snapshot: Snapshot,
+        keyspace: &Keyspace,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Self {
+        // Sorting here rather than trusting the caller makes the ordering
+        // contract unconditional; the list is a dozen entries at most.
+        let mut dimensions = dimensions.to_vec();
+        dimensions.sort_unstable();
+        dimensions.dedup();
+
+        Self {
+            snapshot,
+            keyspace: keyspace.clone(),
+            dimensions: dimensions.into_iter(),
+            current: None,
+            slots,
+        }
+    }
+
+    /// Open a prefix scan for the next dimension, if any is left.
+    fn open_next(&mut self) -> Option<()> {
+        let dimension = self.dimensions.next()?;
+        let prefix = hash_dimension(dim_prefix::BLOCK, dimension);
+        let iter = self.snapshot.prefix(&self.keyspace, prefix);
+        self.current = Some((dimension, iter));
+        Some(())
+    }
+}
+
+impl Iterator for TagRecordIterator {
+    type Item = Result<TagRecord, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let Some((dimension, iter)) = self.current.as_mut() else {
+                self.open_next()?;
+                continue;
+            };
+
+            let dimension = *dimension;
+
+            let Some(guard) = iter.next() else {
+                self.current = None;
+                continue;
+            };
+
+            let key = match guard.key() {
+                Ok(key) => key,
+                Err(e) => return Some(Err(Error::Fjall(e).into())),
+            };
+
+            if key.len() < BLOCK_TAG_KEY_SIZE {
+                // Skip malformed keys (too short), continue to next
+                continue;
+            }
+
+            let slot = decode_block_tag_slot(&key);
+
+            if !self.slots.contains(&slot) {
+                continue;
+            }
+
+            return Some(Ok(TagRecord {
+                dimension: Cow::Borrowed(dimension),
+                key_hash: decode_block_tag_key_hash(&key),
+                slot,
+            }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +497,50 @@ mod tests {
 
         // Key should be valid size
         assert_eq!(key.len(), BLOCK_TAG_KEY_SIZE);
+    }
+
+    /// The key hash a record carries has to rebuild the exact key it came from,
+    /// otherwise an export/restore round trip silently loses entries.
+    #[test]
+    fn test_prehashed_key_matches_written_key() {
+        let slot = 42u64;
+        let written = build_block_tag_key("address", b"some_address_bytes", slot);
+
+        let record = TagRecord::new("address", decode_block_tag_key_hash(&written), slot);
+        let rebuilt = build_block_tag_key_hashed(
+            record.dimension(),
+            u64::from_be_bytes(record.key_hash),
+            record.slot,
+        );
+
+        assert_eq!(written, rebuilt);
+    }
+
+    /// `metadata` is the one dimension whose stored key bytes are not a hash:
+    /// the logical key is already a u64 label and `insert_tag` writes it
+    /// verbatim. A record must carry those bytes through unchanged rather than
+    /// re-deriving them.
+    #[test]
+    fn test_prehashed_key_carries_metadata_label_verbatim() {
+        let label = 674u64;
+        let slot = 42u64;
+        let written = build_block_tag_key_hashed("metadata", label, slot);
+
+        let stored = decode_block_tag_key_hash(&written);
+        assert_eq!(u64::from_be_bytes(stored), label);
+        assert_ne!(
+            u64::from_be_bytes(stored),
+            hash_key(&label.to_be_bytes()),
+            "the metadata label is stored raw, not hashed"
+        );
+
+        let record = TagRecord::new("metadata", stored, slot);
+        let rebuilt = build_block_tag_key_hashed(
+            record.dimension(),
+            u64::from_be_bytes(record.key_hash),
+            record.slot,
+        );
+
+        assert_eq!(written, rebuilt);
     }
 }

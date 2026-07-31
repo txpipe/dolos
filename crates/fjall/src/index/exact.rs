@@ -17,8 +17,10 @@
 //!
 //! The `dim_hash` is computed as `xxh3("exact:" + dimension)`.
 
-use dolos_core::{ArchiveIndexDelta, BlockSlot, IndexDelta};
-use fjall::{Keyspace, OwnedWriteBatch, Readable};
+use std::ops::Range;
+
+use dolos_core::{ArchiveIndexDelta, BlockSlot, ExactKind, ExactRecord, IndexDelta, IndexError};
+use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
 use crate::keys::{decode_slot, dim_prefix, encode_slot, hash_dimension, DIM_HASH_SIZE, SLOT_SIZE};
 use crate::Error;
@@ -26,15 +28,19 @@ use crate::Error;
 // ============================================================================
 // Internal Dimension Names
 // ============================================================================
+//
+// These are derived from `ExactKind` rather than spelled out, so the names
+// hashed into on-disk keys and the names carried by exported records cannot
+// drift apart.
 
 /// Internal dimension name for block hash lookups
-const DIM_BLOCK_HASH: &str = "block_hash";
+const DIM_BLOCK_HASH: &str = ExactKind::BlockHash.as_str();
 
 /// Internal dimension name for block number lookups
-const DIM_BLOCK_NUM: &str = "block_num";
+const DIM_BLOCK_NUM: &str = ExactKind::BlockNumber.as_str();
 
 /// Internal dimension name for transaction hash lookups
-const DIM_TX_HASH: &str = "tx_hash";
+const DIM_TX_HASH: &str = ExactKind::TxHash.as_str();
 
 // ============================================================================
 // Key Encoding
@@ -149,6 +155,21 @@ pub fn undo(
     Ok(())
 }
 
+/// Insert an exact entry from an already-decoded record.
+///
+/// The write mirror of [`ExactRecordIterator`]. Exact keys are stored verbatim,
+/// so this is the same encoding `apply` performs — only the kind arrives as a
+/// value instead of being implied by the call site.
+pub fn insert_prehashed(
+    batch: &mut OwnedWriteBatch,
+    exact_keyspace: &Keyspace,
+    record: &ExactRecord,
+) -> Result<(), Error> {
+    let key = build_exact_key(record.kind.as_str(), &record.key);
+    batch.insert(exact_keyspace, key, encode_slot_value(record.slot));
+    Ok(())
+}
+
 // ============================================================================
 // Queries
 // ============================================================================
@@ -198,6 +219,103 @@ pub fn get_by_tx_hash<R: Readable>(
             Ok(Some(slot))
         }
         None => Ok(None),
+    }
+}
+
+// ============================================================================
+// ExactRecordIterator
+// ============================================================================
+
+/// Lazy iterator over exact-match records, one kind prefix at a time.
+///
+/// ## Why it is driven by the kind list
+///
+/// Same reason as the tag iterator: the stored key is
+/// `[dim_hash:8][key_data:var]` with `dim_hash = xxh3("exact:" + kind)`, so the
+/// kind name is not on disk. `ExactKind::ALL` is the closed list, already in
+/// ascending name order, which makes the `(kind, key)` contract fall out of
+/// walking it in order — within a prefix, fjall's lexicographic order over
+/// `key_data` is the rest of it.
+///
+/// ## Cost
+///
+/// The slot of an exact entry is its *value*, not part of its key, so a
+/// slot-bounded traversal cannot seek at all: every exact entry in the store is
+/// visited and its value read, however narrow the range. In absolute terms the
+/// tag scan still dominates a per-epoch slice, simply because there are more
+/// tag records than exact ones — but this one has no seekable structure to
+/// exploit even in principle.
+pub struct ExactRecordIterator {
+    snapshot: Snapshot,
+    keyspace: Keyspace,
+    kinds: std::vec::IntoIter<ExactKind>,
+    current: Option<(ExactKind, fjall::Iter)>,
+    slots: Range<BlockSlot>,
+}
+
+impl ExactRecordIterator {
+    /// Create a new iterator over every exact record in the slot range.
+    ///
+    /// Returns immediately without reading any data.
+    pub fn new(snapshot: Snapshot, keyspace: &Keyspace, slots: Range<BlockSlot>) -> Self {
+        Self {
+            snapshot,
+            keyspace: keyspace.clone(),
+            kinds: ExactKind::ALL.to_vec().into_iter(),
+            current: None,
+            slots,
+        }
+    }
+
+    /// Open a prefix scan for the next kind, if any is left.
+    fn open_next(&mut self) -> Option<()> {
+        let kind = self.kinds.next()?;
+        let prefix = hash_dimension(dim_prefix::EXACT, kind.as_str());
+        let iter = self.snapshot.prefix(&self.keyspace, prefix);
+        self.current = Some((kind, iter));
+        Some(())
+    }
+}
+
+impl Iterator for ExactRecordIterator {
+    type Item = Result<ExactRecord, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let Some((kind, iter)) = self.current.as_mut() else {
+                self.open_next()?;
+                continue;
+            };
+
+            let kind = *kind;
+
+            let Some(guard) = iter.next() else {
+                self.current = None;
+                continue;
+            };
+
+            let (key, value) = match guard.into_inner() {
+                Ok(pair) => pair,
+                Err(e) => return Some(Err(Error::Fjall(e).into())),
+            };
+
+            if key.len() <= DIM_HASH_SIZE || value.len() < SLOT_SIZE {
+                // Skip malformed entries, continue to next
+                continue;
+            }
+
+            let slot = decode_slot_value(&value);
+
+            if !self.slots.contains(&slot) {
+                continue;
+            }
+
+            return Some(Ok(ExactRecord {
+                kind,
+                key: key[DIM_HASH_SIZE..].to_vec(),
+                slot,
+            }));
+        }
     }
 }
 
@@ -260,5 +378,23 @@ mod tests {
         // Any dimension string should work (chain-agnostic)
         let key = build_exact_key("custom_lookup", &[0x11; 20]);
         assert_eq!(key.len(), DIM_HASH_SIZE + 20);
+    }
+
+    /// A record written by `insert_prehashed` has to land on the exact key the
+    /// delta path would have written, otherwise a restored store answers
+    /// lookups differently from the one it was exported from.
+    #[test]
+    fn test_prehashed_key_matches_delta_key() {
+        let block_hash = [0xcd; 32];
+        let from_delta = build_exact_key(DIM_BLOCK_HASH, &block_hash);
+        let record = ExactRecord::new(ExactKind::BlockHash, block_hash, 42);
+        let from_record = build_exact_key(record.kind.as_str(), &record.key);
+        assert_eq!(from_delta, from_record);
+
+        let number = 12345678u64;
+        let from_delta = build_exact_key_blocknum(number);
+        let record = ExactRecord::new(ExactKind::BlockNumber, number.to_be_bytes(), 42);
+        let from_record = build_exact_key(record.kind.as_str(), &record.key);
+        assert_eq!(from_delta.as_slice(), from_record.as_slice());
     }
 }

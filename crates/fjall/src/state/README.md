@@ -130,6 +130,22 @@ for result in iter {
 }
 ```
 
+### Full UTxO-Set Iteration
+
+```rust
+// Stream the whole UTxO set (snapshot export, live-UTxO index rebuild)
+let iter = store.iter_utxos()?;
+for result in iter {
+    let (txo_ref, era_cbor) = result?;
+    // Process UTxO
+}
+```
+
+Lazy in the same sense `iter_entities` is: construction reads nothing and
+entries are decoded one at a time. Callers stream a mainnet-sized set through
+it, so buffering would not be a slower implementation but an unusable one —
+`tests/memory.rs` asserts both the construction and the iteration bound.
+
 ### Batched Writes
 
 ```rust

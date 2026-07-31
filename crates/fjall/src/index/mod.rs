@@ -32,11 +32,12 @@
 //! All multi-byte integers are big-endian encoded for correct lexicographic
 //! ordering.
 
+use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallIndexConfig, BlockSlot, ChainPoint, IndexDelta, IndexError,
+    config::FjallIndexConfig, BlockSlot, ChainPoint, IndexDelta, IndexError, IndexRecord,
     IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension, UtxoSet,
 };
 use fjall::{
@@ -50,8 +51,9 @@ pub mod state_tags;
 
 use crate::Error;
 
-// Re-export the iterator type
-pub use archive_tags::SlotIterator as SlotIter;
+// Re-export the iterator types
+pub use archive_tags::{SlotIterator as SlotIter, TagRecordIterator as TagIter};
+pub use exact::ExactRecordIterator as ExactIter;
 
 /// Default cache size in MB
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
@@ -281,6 +283,25 @@ impl CoreIndexWriter for IndexStoreWriter {
         Ok(())
     }
 
+    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
+        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
+
+        for record in records {
+            match record {
+                IndexRecord::Tag(tag) => {
+                    archive_tags::insert_prehashed(&mut batch, &self.store.block_tags, tag)
+                        .map_err(IndexError::from)?;
+                }
+                IndexRecord::Exact(exact) => {
+                    exact::insert_prehashed(&mut batch, &self.store.exact, exact)
+                        .map_err(IndexError::from)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn commit(self) -> Result<(), IndexError> {
         let batch = self
             .batch
@@ -305,6 +326,8 @@ impl CoreIndexWriter for IndexStoreWriter {
 impl CoreIndexStore for IndexStore {
     type Writer = IndexStoreWriter;
     type SlotIter = SlotIter;
+    type TagIter = TagIter;
+    type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         let batch = self.db.batch();
@@ -394,5 +417,24 @@ impl CoreIndexStore for IndexStore {
         // Pass dimension string directly - chain-agnostic
         SlotIter::new(&snapshot, &self.block_tags, dimension, key, start, end)
             .map_err(IndexError::from)
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        // One snapshot for the whole traversal: every dimension prefix is read
+        // from the same MVCC view, so the record set is consistent even under
+        // concurrent writes.
+        let snapshot = self.db.snapshot();
+
+        Ok(TagIter::new(snapshot, &self.block_tags, dimensions, slots))
+    }
+
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
+        let snapshot = self.db.snapshot();
+
+        Ok(ExactIter::new(snapshot, &self.exact, slots))
     }
 }

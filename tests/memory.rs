@@ -1,9 +1,10 @@
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
+use std::sync::Arc;
 
 use dolos_core::{
-    config::FjallStateConfig, EntityKey, NamespaceType, StateSchema, StateStore as CoreStateStore,
-    StateWriter as CoreStateWriter,
+    config::FjallStateConfig, EntityKey, EraCbor, NamespaceType, StateSchema,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoSetDelta,
 };
 
 #[global_allocator]
@@ -203,6 +204,126 @@ fn test_fjall_shard_range_iter() {
         dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
 
     assert_shard_range_iter(&store);
+}
+
+// ---------------------------------------------------------------------------
+// Full UTxO-set iteration.
+//
+// Snapshot export and the live-UTxO index rebuild both stream the whole UTxO
+// set, which on mainnet is several GB. `iter_utxos` therefore has to be lazy in
+// the same sense `iter_entities` is: constructing it reads nothing, and running
+// it to the end never holds more than a bounded working set. An eager
+// implementation is not a slower one, it is one that cannot be used at all.
+// ---------------------------------------------------------------------------
+
+const UTXO_COUNT: u64 = 50_000;
+const UTXO_SIZE: usize = 300;
+const UTXO_BATCH_SIZE: u64 = 10_000;
+
+fn seed_utxos<S: CoreStateStore>(store: &S) {
+    let cbor = vec![0xABu8; UTXO_SIZE];
+
+    let mut written = 0u64;
+    while written < UTXO_COUNT {
+        let batch_end = std::cmp::min(written + UTXO_BATCH_SIZE, UTXO_COUNT);
+
+        let mut delta = UtxoSetDelta::default();
+        for i in written..batch_end {
+            let mut hash = [0u8; 32];
+            hash[..8].copy_from_slice(&i.to_be_bytes());
+            let txo = TxoRef(hash.into(), 0);
+            delta
+                .produced_utxo
+                .insert(txo, Arc::new(EraCbor(6, cbor.clone())));
+        }
+
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.apply_utxoset(&delta).expect("apply_utxoset failed");
+        writer.commit().expect("commit failed");
+
+        written = batch_end;
+    }
+}
+
+fn assert_lazy_utxo_iter<S: CoreStateStore>(store: &S) {
+    seed_utxos(store);
+
+    let threshold = 10 * 1024 * 1024; // 10 MB
+    let total_bytes = UTXO_COUNT as usize * UTXO_SIZE;
+    assert!(
+        total_bytes > threshold,
+        "the seeded set must exceed the threshold, otherwise a buffering \
+         implementation would pass the construction check"
+    );
+
+    let reg = Region::new(GLOBAL);
+
+    let iter = store.iter_utxos().expect("iter_utxos failed");
+
+    let construction_delta = reg.change().bytes_allocated;
+    assert!(
+        construction_delta < threshold,
+        "iter_utxos construction should allocate O(1) memory (lazy). \
+         Allocated {} bytes but threshold is {} bytes.",
+        construction_delta,
+        threshold,
+    );
+
+    // Now sample *across* full iteration. Cumulative allocation is the wrong
+    // measure here — even a perfectly lazy iterator allocates one value per
+    // item over a full pass — so what we bound is the live footprint
+    // (allocated minus deallocated) at points along the way. A backend that
+    // buffers the set on first `next()` passes the construction check and
+    // fails this one.
+    let iteration_reg = Region::new(GLOBAL);
+    let mut count = 0usize;
+    let mut peak_live = 0i64;
+
+    for item in iter {
+        let (_txo, _value) = item.expect("utxo iteration failed");
+        count += 1;
+
+        if count.is_multiple_of(1_000) {
+            let stats = iteration_reg.change();
+            let live = stats.bytes_allocated as i64 - stats.bytes_deallocated as i64;
+            peak_live = peak_live.max(live);
+        }
+    }
+
+    assert!(
+        peak_live < threshold as i64,
+        "iter_utxos full iteration should hold O(1) memory. \
+         Peaked at {} live bytes but threshold is {} bytes.",
+        peak_live,
+        threshold,
+    );
+
+    assert_eq!(
+        count, UTXO_COUNT as usize,
+        "iterator should yield every utxo"
+    );
+}
+
+#[test]
+fn test_fjall_lazy_utxo_iter() {
+    let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
+    let config = FjallStateConfig {
+        path: None,
+        // A small block cache on purpose: cached blocks are live heap, and the
+        // point of the measurement is the iterator's footprint, not the
+        // engine's cache budget.
+        cache: Some(1),
+        max_history: None,
+        max_journal_size: None,
+        flush_on_commit: Some(false),
+        l0_threshold: None,
+        worker_threads: Some(1),
+        memtable_size_mb: None,
+    };
+    let store =
+        dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
+
+    assert_lazy_utxo_iter(&store);
 }
 
 #[test]

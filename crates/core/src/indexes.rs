@@ -10,6 +10,8 @@
 //! keys. Chain-specific code (e.g., Cardano) defines the dimensions and
 //! provides extension traits for convenient access.
 
+use std::{borrow::Cow, ops::Range};
+
 use thiserror::Error;
 
 use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
@@ -104,6 +106,169 @@ pub enum IndexError {
 
     #[error("dimension not found: {0}")]
     DimensionNotFound(String),
+
+    /// The operation is part of the trait but the concrete backend does not
+    /// implement it.
+    ///
+    /// Used by backends outside the live set (see the record iteration and
+    /// pre-hashed append below) so that a caller reaching for an unimplemented
+    /// capability gets an error it can handle instead of a panic.
+    #[error("{0} is not supported on this storage backend")]
+    Unsupported(&'static str),
+}
+
+// ============================================================================
+// Pre-hashed archive index records
+// ============================================================================
+
+/// Size of the hashed portion of an archive tag key.
+pub const KEY_HASH_SIZE: usize = 8;
+
+/// The stored, fixed-width form of a tag key.
+///
+/// For every dimension but `metadata` this is `xxh3_64(logical key)` in
+/// big-endian byte order. `metadata` is an exception: its logical key is
+/// already a `u64` label and the store keeps that label verbatim (big-endian)
+/// rather than hashing it. Consumers must treat these bytes as opaque and copy
+/// them through unchanged — recomputing a hash from the logical key is not a
+/// valid way to reconstruct them for every dimension.
+pub type KeyHash = [u8; KEY_HASH_SIZE];
+
+/// One archive tag entry, carrying the stored key hash instead of the logical
+/// key.
+///
+/// The logical key is not recoverable from the index store — only its hash is
+/// kept on disk — so this is the most a reader can produce and the least a
+/// writer needs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TagRecord {
+    /// The logical dimension name. Borrowed when read from a store (the
+    /// dimension list drives the traversal), owned when decoded from an
+    /// external source.
+    pub dimension: Cow<'static, str>,
+
+    /// The stored key hash. See [`KeyHash`] for the `metadata` caveat.
+    pub key_hash: KeyHash,
+
+    pub slot: BlockSlot,
+}
+
+impl TagRecord {
+    pub fn new(dimension: TagDimension, key_hash: KeyHash, slot: BlockSlot) -> Self {
+        Self {
+            dimension: Cow::Borrowed(dimension),
+            key_hash,
+            slot,
+        }
+    }
+
+    pub fn dimension(&self) -> &str {
+        self.dimension.as_ref()
+    }
+}
+
+/// The kinds of exact-match archive lookup an index store keeps.
+///
+/// This is a closed set: the store hashes the kind name into the key, so it
+/// cannot be recovered from disk and traversal has to be driven by the known
+/// list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExactKind {
+    BlockHash,
+    BlockNumber,
+    TxHash,
+}
+
+impl ExactKind {
+    /// Every kind, in ascending [`ExactKind::as_str`] order.
+    pub const ALL: [ExactKind; 3] = [Self::BlockHash, Self::BlockNumber, Self::TxHash];
+
+    /// The stored dimension name for this kind.
+    ///
+    /// These strings are hashed into on-disk keys — changing one is a storage
+    /// migration, not a rename.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::BlockHash => "block_hash",
+            Self::BlockNumber => "block_num",
+            Self::TxHash => "tx_hash",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
+impl std::fmt::Display for ExactKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One exact-match archive entry.
+///
+/// Unlike tags, exact keys are stored verbatim (a 32-byte hash, or an 8-byte
+/// big-endian block number), so the record is lossless.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExactRecord {
+    pub kind: ExactKind,
+    pub key: Vec<u8>,
+    pub slot: BlockSlot,
+}
+
+impl ExactRecord {
+    pub fn new(kind: ExactKind, key: impl Into<Vec<u8>>, slot: BlockSlot) -> Self {
+        Self {
+            kind,
+            key: key.into(),
+            slot,
+        }
+    }
+}
+
+/// Either archive record, as consumed by
+/// [`IndexWriter::append_prehashed`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IndexRecord {
+    Tag(TagRecord),
+    Exact(ExactRecord),
+}
+
+impl From<TagRecord> for IndexRecord {
+    fn from(value: TagRecord) -> Self {
+        Self::Tag(value)
+    }
+}
+
+impl From<ExactRecord> for IndexRecord {
+    fn from(value: ExactRecord) -> Self {
+        Self::Exact(value)
+    }
+}
+
+/// Iterator used by backends that do not implement
+/// [`IndexStore::iter_archive_tags`].
+pub struct EmptyTagIter;
+
+impl Iterator for EmptyTagIter {
+    type Item = Result<TagRecord, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
+/// Iterator used by backends that do not implement
+/// [`IndexStore::iter_exact_records`].
+pub struct EmptyExactIter;
+
+impl Iterator for EmptyExactIter {
+    type Item = Result<ExactRecord, IndexError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
 }
 
 /// Writer for batched index operations.
@@ -126,6 +291,20 @@ pub trait IndexWriter: Send + Sync + 'static {
     /// - Archive index entries are removed
     fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError>;
 
+    /// Append archive records that already carry their stored key form.
+    ///
+    /// This is the write mirror of [`IndexStore::iter_archive_tags`] and
+    /// [`IndexStore::iter_exact_records`]: records that came out of one store
+    /// go into another byte-for-byte, with no logical key in between (there is
+    /// none to recover — see [`KeyHash`]).
+    ///
+    /// Records must arrive sorted, since the backing stores are append
+    /// oriented. The cursor is *not* touched: a restore owns cursor placement.
+    ///
+    /// Backends that do not implement this return
+    /// [`IndexError::Unsupported`].
+    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError>;
+
     /// Commit the batched operations.
     fn commit(self) -> Result<(), IndexError>;
 }
@@ -146,6 +325,12 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
 
     /// Iterator type for sparse slot queries.
     type SlotIter: Iterator<Item = Result<BlockSlot, IndexError>> + DoubleEndedIterator;
+
+    /// Iterator type for archive tag record traversal.
+    type TagIter: Iterator<Item = Result<TagRecord, IndexError>>;
+
+    /// Iterator type for exact-match record traversal.
+    type ExactIter: Iterator<Item = Result<ExactRecord, IndexError>>;
 
     /// Start a new writer for batched operations.
     fn start_writer(&self) -> Result<Self::Writer, IndexError>;
@@ -196,4 +381,90 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
         start: BlockSlot,
         end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError>;
+
+    // ============ Record Traversal (Bulk Export) ============
+
+    /// Iterate every archive tag record whose slot falls in `slots`.
+    ///
+    /// `dimensions` is the closed list of dimensions to traverse. It has to be
+    /// supplied by the caller: stores keep a hash of the dimension name, not
+    /// the name, so the set of dimensions is not discoverable from disk.
+    /// Duplicates are ignored.
+    ///
+    /// **Order is part of the contract.** Records come out sorted by
+    /// `(dimension, key_hash, slot)` — `dimension` compared as a string,
+    /// independently of the order `dimensions` was given in. Consumers of this
+    /// iteration (snapshot layers) make that order their content, so an
+    /// unordered iterator is a wrong one.
+    ///
+    /// The iterator must be lazy in the size of the store.
+    ///
+    /// Backends that do not implement this return
+    /// [`IndexError::Unsupported`].
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError>;
+
+    /// Iterate every exact-match record whose slot falls in `slots`.
+    ///
+    /// **Order is part of the contract**: records come out sorted by
+    /// `(kind, key)`, kinds in ascending [`ExactKind::as_str`] order.
+    ///
+    /// Note that the slot is the stored *value* of an exact entry, not part of
+    /// its key, so a slot-bounded traversal is a scan of every exact entry in
+    /// the store rather than a seek. The iterator is still lazy in memory.
+    ///
+    /// Backends that do not implement this return
+    /// [`IndexError::Unsupported`].
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_kind_all_is_sorted_by_name() {
+        let names: Vec<&str> = ExactKind::ALL.iter().map(|k| k.as_str()).collect();
+
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+
+        assert_eq!(
+            names, sorted,
+            "ExactKind::ALL must be in ascending name order: the exact record \
+             contract sorts by (kind, key) and the traversal walks ALL in order"
+        );
+    }
+
+    #[test]
+    fn exact_kind_ord_matches_name_ord() {
+        for pair in ExactKind::ALL.windows(2) {
+            assert!(pair[0] < pair[1]);
+            assert!(pair[0].as_str() < pair[1].as_str());
+        }
+    }
+
+    #[test]
+    fn exact_kind_roundtrips_through_name() {
+        for kind in ExactKind::ALL {
+            assert_eq!(ExactKind::parse(kind.as_str()), Some(kind));
+        }
+
+        assert_eq!(ExactKind::parse("nope"), None);
+    }
+
+    #[test]
+    fn tag_record_ord_is_dimension_then_hash_then_slot() {
+        let a = TagRecord::new("address", [0xff; 8], 10);
+        let b = TagRecord::new("asset", [0x00; 8], 0);
+        let c = TagRecord::new("asset", [0x00; 8], 1);
+        let d = TagRecord::new("asset", [0x01; 8], 0);
+
+        assert!(a < b, "dimension dominates");
+        assert!(b < c, "slot breaks ties within a key hash");
+        assert!(c < d, "key hash dominates slot");
+    }
 }

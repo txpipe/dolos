@@ -8,7 +8,10 @@ use std::ops::Range;
 
 use crate::{
     archive::{ArchiveError, ArchiveStore, ArchiveWriter, LogKey},
-    indexes::{IndexDelta, IndexError, IndexStore, IndexWriter, TagDimension},
+    indexes::{
+        EmptyExactIter, EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore, IndexWriter,
+        TagDimension,
+    },
     BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, UtxoSet,
 };
 
@@ -26,6 +29,10 @@ impl IndexWriter for NoOpIndexWriter {
     }
 
     fn undo(&self, _delta: &IndexDelta) -> Result<(), IndexError> {
+        Ok(())
+    }
+
+    fn append_prehashed(&self, _records: &[IndexRecord]) -> Result<(), IndexError> {
         Ok(())
     }
 
@@ -68,6 +75,8 @@ impl DoubleEndedIterator for EmptySlotIter {
 impl IndexStore for NoOpIndexStore {
     type Writer = NoOpIndexWriter;
     type SlotIter = EmptySlotIter;
+    type TagIter = EmptyTagIter;
+    type ExactIter = EmptyExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         Ok(NoOpIndexWriter)
@@ -109,6 +118,21 @@ impl IndexStore for NoOpIndexStore {
         _end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
         Ok(EmptySlotIter)
+    }
+
+    /// A store that keeps no indexes has no tag records: an empty iteration is
+    /// the honest answer, not an error.
+    fn iter_archive_tags(
+        &self,
+        _dimensions: &[TagDimension],
+        _slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        Ok(EmptyTagIter)
+    }
+
+    /// See [`NoOpIndexStore::iter_archive_tags`].
+    fn iter_exact_records(&self, _slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
+        Ok(EmptyExactIter)
     }
 }
 

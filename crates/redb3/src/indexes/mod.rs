@@ -11,9 +11,9 @@ use std::{
 };
 
 use dolos_core::{
-    config::RedbIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint, IndexDelta, IndexError,
-    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef,
-    UtxoSet,
+    config::RedbIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint, EmptyExactIter,
+    EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef, UtxoSet,
 };
 use redb::{
     Database, Durability, MultimapTableDefinition, ReadTransaction, ReadableDatabase,
@@ -746,6 +746,16 @@ impl CoreIndexWriter for IndexStoreWriter {
         Ok(())
     }
 
+    /// Not implemented on this backend.
+    ///
+    /// Pre-hashed append exists for the snapshot restore path, which runs
+    /// against the live index backend (fjall). This store is not part of that
+    /// path, so it carries the trait method without an implementation rather
+    /// than a second copy of the encoding to keep in step.
+    fn append_prehashed(&self, _records: &[IndexRecord]) -> Result<(), IndexError> {
+        Err(IndexError::Unsupported("append_prehashed"))
+    }
+
     fn commit(self) -> Result<(), IndexError> {
         self.wx.commit().map_err(map_db_error)?;
         Ok(())
@@ -777,6 +787,8 @@ impl DoubleEndedIterator for SlotIter {
 impl CoreIndexStore for IndexStore {
     type Writer = IndexStoreWriter;
     type SlotIter = SlotIter;
+    type TagIter = EmptyTagIter;
+    type ExactIter = EmptyExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         let mut wx = self.db.begin_write().map_err(map_db_error)?;
@@ -888,5 +900,27 @@ impl CoreIndexStore for IndexStore {
         };
 
         Ok(SlotIter { _rx: rx, range })
+    }
+
+    /// Not implemented on this backend.
+    ///
+    /// Bulk record traversal exists for the snapshot export path, which runs
+    /// against the live index backend (fjall). Implementing it here would mean
+    /// a per-dimension table walk with no consumer.
+    fn iter_archive_tags(
+        &self,
+        _dimensions: &[TagDimension],
+        _slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        Err(IndexError::Unsupported("iter_archive_tags"))
+    }
+
+    /// Not implemented on this backend. See
+    /// [`IndexStore::iter_archive_tags`](CoreIndexStore::iter_archive_tags).
+    fn iter_exact_records(
+        &self,
+        _slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::ExactIter, IndexError> {
+        Err(IndexError::Unsupported("iter_exact_records"))
     }
 }
