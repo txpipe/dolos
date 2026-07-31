@@ -13,8 +13,20 @@
 //! certainly never holds more than N at once. It also means a reader that
 //! allocated and freed one record per iteration would be caught here, not
 //! excused by its tidiness.
+//!
+//! ## Why these tests take a lock
+//!
+//! A `Region` reads a *process-wide* counter, and the test harness runs tests
+//! in parallel by default — so a second test's setup, which is tens of
+//! megabytes here, lands inside the first test's measurement and swamps a
+//! 64 KiB budget. It is a race, so it passes on the machine you tried it on and
+//! fails on the one you did not (this one surfaced on Windows CI). Every test
+//! in this file therefore holds [`SERIAL`] for its whole body, setup included.
 
-use std::alloc::System;
+use std::{
+    alloc::System,
+    sync::{Mutex, MutexGuard},
+};
 
 use serde_json::json;
 use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
@@ -27,6 +39,19 @@ use stelae::{
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+
+/// Held by every test in this file, so that only one is allocating at a time.
+/// A new test that forgets to take it will not fail here — it will make some
+/// *other* test flaky, which is the failure worth spending a comment on.
+static SERIAL: Mutex<()> = Mutex::new(());
+
+fn exclusive() -> MutexGuard<'static, ()> {
+    // A poisoned lock means another test in this file panicked. That is its
+    // failure to report; this one still wants an uncontended allocator.
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 const PROFILE_NAME: &str = "dev.example.bulk";
 const COMPRESSION_LEVEL: i32 = 3;
@@ -116,6 +141,8 @@ fn sequence() -> Vec<u8> {
 /// small change of the walk.
 #[test]
 fn framing_a_large_sequence_costs_one_window() {
+    let _serial = exclusive();
+
     let sequence = sequence();
 
     let window = 64 * 1024;
@@ -160,6 +187,8 @@ fn framing_a_large_sequence_costs_one_window() {
 /// layer.
 #[test]
 fn streaming_a_layer_does_not_scale_with_its_size() {
+    let _serial = exclusive();
+
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
