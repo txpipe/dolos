@@ -1,0 +1,22 @@
+[package]
+name = "stelae"
+description = "Stelae: a deterministic, content-addressed snapshot protocol"
+version.workspace = true
+edition.workspace = true
+
+# This crate is the Stelae protocol. It must never depend on a `dolos-*` package:
+# the boundary is asserted in CI with `cargo tree -p stelae -e normal`, so that
+# extracting the protocol later is a directory move rather than a refactor.
+# See adrs/004_stelae_snapshots.md, "Code layout".
+[dependencies]
+hex.workspace = true
+minicbor.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20.0"

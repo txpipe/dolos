@@ -190,6 +190,7 @@ members = [
     "crates/cardano",
     "crates/core",
     "crates/fjall",
+    "crates/stelae",
     "crates/testing",
     "crates/minibf",
     "crates/redb3",
@@ -247,6 +248,14 @@ opentelemetry = "0.32.0"
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 tracing-opentelemetry = "0.33"
+
+# Stelae (crates/stelae). `minicbor` is pinned to the 0.26 line that Pallas
+# already pulls in, so the protocol crate adds no new CBOR implementation to the
+# tree and encodes against the same codec the Dolos profile will use.
+minicbor = { version = "0.26", features = ["std"] }
+serde_jcs = "0.2.0"
+sha2 = "0.10.9"
+zstd = "0.13.3"
 
 [workspace.metadata.release]
 push = false
