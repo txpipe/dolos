@@ -36,7 +36,8 @@
 //!   profile and validates the answer against the normative naming rules.
 //! - It never deserializes `position`, `parameters` or a layer's `scope` into a
 //!   typed value. They are opaque: canonicalized and hashed, never interpreted.
-//! - It has no `dolos-*` dependency, asserted in CI.
+//! - It has no `dolos-*` dependency, so extracting it later is a directory move
+//!   rather than a refactor.
 
 pub mod digest;
 pub mod dir;
@@ -182,6 +183,12 @@ pub enum Error {
 
     #[error("layer {kind:?} disagrees with its descriptor: {reason}")]
     LayerMismatch { kind: String, reason: String },
+
+    /// A blob expanded past the ceiling its caller set. Raised while
+    /// decompressing, before the bytes are held, so a hostile compression ratio
+    /// costs a bounded allocation rather than the process.
+    #[error("blob decompresses past the {limit}-byte ceiling set for it")]
+    DecompressedTooLarge { limit: u64 },
 
     #[error("inscription.json is not in canonical form; its bytes must be exactly the RFC 8785 encoding of its content")]
     NonCanonicalInscription,

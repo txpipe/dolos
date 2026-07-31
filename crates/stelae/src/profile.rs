@@ -76,7 +76,21 @@ pub fn checked_layer_media_type(profile: &dyn Profile, kind: &str) -> Result<Str
     }
 
     let media_type = profile.layer_media_type(kind)?;
-    MediaType::parse(&media_type)?;
+    let parsed = MediaType::parse(&media_type)?;
+
+    // Parsing establishes that the profile's answer is well formed; this
+    // establishes that it is an answer to the question asked. Without it a
+    // descriptor can carry a `kind` and a `mediaType` whose embedded kind
+    // disagree — the exact ambiguity the naming rules exist to remove.
+    if parsed.kind != kind {
+        return Err(Error::InvalidMediaType {
+            value: media_type,
+            reason: format!(
+                "names layer kind {:?}, but was asked for {kind:?}",
+                parsed.kind
+            ),
+        });
+    }
 
     Ok(media_type)
 }
@@ -444,6 +458,20 @@ mod tests {
         // A kind the profile does not declare never reaches the profile at all.
         let err = checked_layer_media_type(&good, "blocks").unwrap_err();
         assert!(matches!(err, Error::UnknownLayerKind { .. }), "{err:?}");
+    }
+
+    /// A well-formed name for the *wrong* kind is still a wrong answer: the
+    /// descriptor it would produce carries a `kind` and a `mediaType` that
+    /// disagree, which is the ambiguity the naming rules exist to remove.
+    #[test]
+    fn checked_media_type_refuses_a_name_for_another_kind() {
+        let mislabelled = Fake {
+            media_type: "application/vnd.example.stele.blocks.v1+zstd",
+            tag: "note-1",
+        };
+
+        let err = checked_layer_media_type(&mislabelled, "notes").unwrap_err();
+        assert!(matches!(err, Error::InvalidMediaType { .. }), "{err:?}");
     }
 
     #[test]

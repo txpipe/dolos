@@ -17,12 +17,15 @@
 //! 5. A stele of a *different* profile, or a profile major version above the
 //!    one implemented, is refused cleanly.
 
+use std::io::Write as _;
+
 use serde_json::json;
 
 use stelae::{
+    digest::read_blob,
     dir::{LayerSpec, SteleDir},
     frame::{encode, CanonicalCbor},
-    Compression, Error, Inscription, Profile,
+    Compression, Error, Inscription, LayerDescriptor, LayerWriter, Profile,
 };
 
 const PROFILE_NAME: &str = "dev.example.toy";
@@ -538,6 +541,97 @@ fn a_descriptor_that_disagrees_with_its_layer_is_refused() {
     absent.diff_id = stelae::Digest::from_bytes([0xab; 32]);
     let err = stele.read_layer(&index, &ToyProfile, &absent).unwrap_err();
     assert!(matches!(err, Error::LayerNotFound { .. }), "{err:?}");
+}
+
+/// A malformed record is not a record.
+///
+/// `SeqReader` reports the first bad one and then ends, so *counting* the
+/// iterator's items tallies the failure itself as a record and discards the
+/// error with it. A publisher who sets `records` to match that inflated number
+/// would hand back a corrupt layer as `Ok`, in the one place whose documented
+/// job is to check everything the descriptor claims.
+#[test]
+fn a_malformed_record_is_reported_not_counted() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let descriptor = inscription.layers[0].clone();
+
+    // Take the layer's bytes back out and append the head of a CBOR text string
+    // that never arrives — a byte the framing must refuse.
+    let blob_digest = stele
+        .blob_index()
+        .unwrap()
+        .blob_for(&descriptor.diff_id)
+        .unwrap();
+
+    let (mut content, _) = read_blob(
+        std::fs::File::open(stele.blob_path(&blob_digest)).unwrap(),
+        descriptor.uncompressed_size,
+    )
+    .unwrap();
+
+    content.push(0x62);
+
+    // Store it as a blob in its own right, under a descriptor claiming exactly
+    // what `count()` would have said: the real records, plus the failure.
+    let mut writer = LayerWriter::new(Vec::new(), COMPRESSION_LEVEL).unwrap();
+    writer.write_all(&content).unwrap();
+    let (blob, digests) = writer.finish().unwrap();
+    std::fs::write(stele.blob_path(&digests.blob_digest), &blob).unwrap();
+
+    let corrupt = LayerDescriptor {
+        diff_id: digests.diff_id,
+        uncompressed_size: digests.uncompressed_size,
+        records: descriptor.records + 1,
+        ..descriptor
+    };
+
+    let index = stele.blob_index().unwrap();
+    let err = stele.read_layer(&index, &ToyProfile, &corrupt).unwrap_err();
+
+    assert!(matches!(err, Error::TruncatedCbor { .. }), "{err:?}");
+}
+
+/// A descriptor's media type has to be the one *this* profile defines for that
+/// kind. `validate_structure` can only establish that the name is well formed
+/// and does not squat the reserved vendor; whether it belongs to the profile the
+/// inscription claims needs the profile in hand, which is `check_profile`.
+#[test]
+fn a_layer_media_type_that_is_not_the_profiles_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let with_media_type = |media_type: &str| {
+        let mut tampered = inscription.clone();
+        tampered.layers[0].media_type = media_type.to_owned();
+        tampered
+    };
+
+    // Another vendor's name, and this vendor's name for a different kind. Both
+    // are well formed, so structural validation passes them.
+    for media_type in [
+        "application/vnd.other.stele.notes.v1+zstd",
+        INDEX_MEDIA_TYPE,
+    ] {
+        let tampered = with_media_type(media_type);
+        tampered.validate().unwrap();
+
+        let err = tampered.check_profile(&ToyProfile).unwrap_err();
+        assert!(matches!(err, Error::InvalidMediaType { .. }), "{err:?}");
+    }
+
+    // Version and codec are transport detail the profile may move within one
+    // major, so they are not frozen here — only the vendor and the kind are.
+    for media_type in [
+        "application/vnd.example.stele.notes.v2+zstd",
+        "application/vnd.example.stele.notes.v1+cbor",
+    ] {
+        with_media_type(media_type)
+            .check_profile(&ToyProfile)
+            .unwrap();
+    }
 }
 
 /// A profile that hands back a name it does not own is stopped at the boundary,

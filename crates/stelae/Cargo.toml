@@ -4,9 +4,9 @@ description = "Stelae: a deterministic, content-addressed snapshot protocol"
 version.workspace = true
 edition.workspace = true
 
-# This crate is the Stelae protocol. It must never depend on a `dolos-*` package:
-# the boundary is asserted in CI with `cargo tree -p stelae -e normal`, so that
-# extracting the protocol later is a directory move rather than a refactor.
+# This crate is the Stelae protocol. It must never depend on a `dolos-*`
+# package, so that extracting it later is a directory move rather than a
+# refactor. `cargo tree -p stelae -e normal` shows the boundary holding.
 # See adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
 hex.workspace = true

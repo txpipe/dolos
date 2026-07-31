@@ -195,8 +195,12 @@ pub fn digest_reader<R: Read>(mut source: R) -> Result<(Digest, u64), Error> {
 
 /// Read a compressed layer blob, computing both digests without holding the
 /// uncompressed content.
+///
+/// Deliberately unbounded: the decompressed bytes go to [`std::io::sink`], so a
+/// blob with a hostile compression ratio costs time here but never memory.
+/// Callers that keep the content want [`read_blob`], which requires a ceiling.
 pub fn scan_blob<R: Read>(source: R) -> Result<LayerDigests, Error> {
-    digest_blob(source, &mut std::io::sink())
+    digest_blob(source, &mut std::io::sink(), None)
 }
 
 /// Read a compressed layer blob, returning its uncompressed bytes and both
@@ -204,13 +208,27 @@ pub fn scan_blob<R: Read>(source: R) -> Result<LayerDigests, Error> {
 ///
 /// The uncompressed content is buffered, so this is for callers that intend to
 /// walk the records anyway. Verification-only callers want [`scan_blob`].
-pub fn read_blob<R: Read>(source: R) -> Result<(Vec<u8>, LayerDigests), Error> {
+///
+/// `max_uncompressed` bounds what is buffered, and is not optional. Content
+/// addressing does not help here: whoever produced the blob also chose the
+/// digest it is named by, so nothing about a well-formed, correctly named file
+/// bounds what it expands to. A caller reading a layer passes the size its
+/// descriptor claims — it is going to refuse a disagreement anyway, and
+/// refusing it during decompression rather than after costs nothing.
+pub fn read_blob<R: Read>(
+    source: R,
+    max_uncompressed: u64,
+) -> Result<(Vec<u8>, LayerDigests), Error> {
     let mut content = Vec::new();
-    let digests = digest_blob(source, &mut content)?;
+    let digests = digest_blob(source, &mut content, Some(max_uncompressed))?;
     Ok((content, digests))
 }
 
-fn digest_blob<R: Read, W: Write>(source: R, sink: &mut W) -> Result<LayerDigests, Error> {
+fn digest_blob<R: Read, W: Write>(
+    source: R,
+    sink: &mut W,
+    max_uncompressed: Option<u64>,
+) -> Result<LayerDigests, Error> {
     let mut tap = Tap::new(source);
     let mut uncompressed_size = 0u64;
     let mut hasher = Sha256::new();
@@ -224,9 +242,19 @@ fn digest_blob<R: Read, W: Write>(source: R, sink: &mut W) -> Result<LayerDigest
             if read == 0 {
                 break;
             }
+
+            uncompressed_size += read as u64;
+
+            // Checked before the write, so the ceiling bounds what the sink is
+            // ever asked to hold rather than overshooting it by a buffer.
+            if let Some(limit) = max_uncompressed {
+                if uncompressed_size > limit {
+                    return Err(Error::DecompressedTooLarge { limit });
+                }
+            }
+
             hasher.update(&buffer[..read]);
             sink.write_all(&buffer[..read])?;
-            uncompressed_size += read as u64;
         }
     }
 
@@ -361,7 +389,8 @@ mod tests {
         let content = sample_sequence();
         let (blob, written) = write_layer(&content, 9);
 
-        let (read_content, read_digests) = read_blob(blob.as_slice()).unwrap();
+        let (read_content, read_digests) =
+            read_blob(blob.as_slice(), content.len() as u64).unwrap();
         assert_eq!(read_content, content);
         assert_eq!(read_digests, written);
 
@@ -406,7 +435,7 @@ mod tests {
         // And every one of them decompresses back to the same bytes.
         for level in [1, 9, 19] {
             let (blob, _) = write_layer(&content, level);
-            let (round_tripped, _) = read_blob(blob.as_slice()).unwrap();
+            let (round_tripped, _) = read_blob(blob.as_slice(), content.len() as u64).unwrap();
             assert_eq!(round_tripped, content);
         }
     }
@@ -417,7 +446,7 @@ mod tests {
         assert_eq!(digests.diff_id, Digest::compute([]));
         assert_eq!(digests.uncompressed_size, 0);
 
-        let (content, read) = read_blob(blob.as_slice()).unwrap();
+        let (content, read) = read_blob(blob.as_slice(), 0).unwrap();
         assert!(content.is_empty());
         assert_eq!(read, digests);
     }
@@ -446,6 +475,34 @@ mod tests {
         if let Ok(read) = scan_blob(flipped.as_slice()) {
             assert_ne!(read.diff_id, digests.diff_id, "corrupted blob");
         }
+    }
+
+    /// A blob is content-addressed, but its producer chose both its bytes and
+    /// the digest naming it — so nothing about a well-formed file bounds what it
+    /// expands to. `read_blob` stops at the ceiling instead of allocating
+    /// whatever the stream asks for, and stops *during* decompression: the
+    /// buffer never grows past the limit even though the blob is far larger.
+    #[test]
+    fn read_blob_refuses_to_expand_past_its_ceiling() {
+        // Compresses to a few hundred bytes; expands to 8 MiB.
+        let content = vec![0u8; 8 * 1024 * 1024];
+        let (blob, digests) = write_layer(&content, 9);
+        assert!(blob.len() < content.len() / 1000, "needs a real ratio");
+
+        let err = read_blob(blob.as_slice(), 64 * 1024).unwrap_err();
+        assert!(
+            matches!(err, Error::DecompressedTooLarge { limit: 65536 }),
+            "{err:?}"
+        );
+
+        // Exactly at the ceiling is fine; one byte under is not.
+        let (at_limit, _) = read_blob(blob.as_slice(), digests.uncompressed_size).unwrap();
+        assert_eq!(at_limit.len(), content.len());
+
+        assert!(read_blob(blob.as_slice(), digests.uncompressed_size - 1).is_err());
+
+        // `scan_blob` holds nothing, so it stays unbounded on the same blob.
+        assert_eq!(scan_blob(blob.as_slice()).unwrap(), digests);
     }
 
     /// The blob digest and the compressed size cover the whole file, which is

@@ -28,7 +28,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    profile::{validate_profile_name, MediaType, Profile},
+    profile::{checked_layer_media_type, validate_profile_name, MediaType, Profile},
     Digest, Error, MAX_SAFE_INTEGER, SCHEMA_VERSION,
 };
 
@@ -188,9 +188,10 @@ impl Inscription {
 
     /// Refuse an inscription this profile implementation cannot read.
     ///
-    /// Two ways it fails, both clean refusals rather than a partial restore:
-    /// the inscription belongs to a different profile, or it needs a
-    /// profile major version above the one implemented here.
+    /// Three ways it fails, all clean refusals rather than a partial restore:
+    /// the inscription belongs to a different profile, it needs a profile major
+    /// version above the one implemented here, or one of its layers is not a
+    /// layer this profile defines.
     pub fn check_profile(&self, profile: &dyn Profile) -> Result<(), Error> {
         if self.profile.name != profile.name() {
             return Err(Error::UnknownProfile {
@@ -208,10 +209,31 @@ impl Inscription {
         }
 
         for layer in &self.layers {
-            if !profile.kinds().contains(&layer.kind.as_str()) {
-                return Err(Error::UnknownLayerKind {
-                    profile: profile.name().to_owned(),
-                    kind: layer.kind.clone(),
+            // Refuses a kind the profile does not define, and pins the
+            // profile's own answer to the naming rules before it is used as the
+            // yardstick.
+            let defined = checked_layer_media_type(profile, &layer.kind)?;
+            let expected = MediaType::parse(&defined)?;
+            let found = MediaType::parse(&layer.media_type)?;
+
+            // Compared on vendor and kind, not on the whole string. Those two
+            // are what make a descriptor unambiguously this profile's layer;
+            // the version and codec are transport detail a profile may move
+            // within one major, and freezing them here would refuse an
+            // inscription this implementation can otherwise read.
+            //
+            // `validate_structure` already established that `layer.media_type`
+            // parses and does not squat the reserved vendor. What it cannot
+            // know, without a profile in hand, is whether the name belongs to
+            // the profile the inscription claims — that is this check.
+            if found.vendor != expected.vendor || found.kind != expected.kind {
+                return Err(Error::InvalidMediaType {
+                    value: layer.media_type.clone(),
+                    reason: format!(
+                        "profile {:?} names layer kind {:?} {defined:?}",
+                        profile.name(),
+                        layer.kind,
+                    ),
                 });
             }
         }

@@ -33,7 +33,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    fs, io,
     io::Write,
     path::{Path, PathBuf},
 };
@@ -344,7 +344,24 @@ impl SteleDir {
                     index.insert(digests.diff_id, digests.blob_digest);
                 }
                 // Content-addressed and intact, but not a compressed layer.
-                Err(Error::Io(_)) => continue,
+                //
+                // Only the kinds zstd raises for input it cannot decode count
+                // as "not a layer": the bindings map every libzstd error code
+                // to `Other`, and a frame that ends early surfaces as
+                // `UnexpectedEof`. A `PermissionDenied` or a device error is a
+                // real failure, and skipping on it would drop a blob that does
+                // exist from the index — resurfacing later as a `LayerNotFound`
+                // that points at the wrong problem.
+                Err(Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::InvalidData
+                            | io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::Other
+                    ) =>
+                {
+                    continue
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -373,7 +390,12 @@ impl SteleDir {
                 })?;
 
         let path = self.blob_path(&blob_digest);
-        let (content, digests) = read_blob(fs::File::open(&path)?)?;
+
+        // The descriptor's claim doubles as the ceiling on decompression. A
+        // blob that expands past it is refused mid-stream instead of being
+        // buffered whole and rejected by the size check below — same verdict,
+        // bounded cost.
+        let (content, digests) = read_blob(fs::File::open(&path)?, descriptor.uncompressed_size)?;
 
         if digests.diff_id != descriptor.diff_id {
             return Err(Error::DigestMismatch {
@@ -420,7 +442,17 @@ impl SteleDir {
             });
         }
 
-        let records = 1 + SeqReader::new(&content[header_len..]).count() as u64;
+        // Counted by iterating rather than with `count()`: `SeqReader` reports a
+        // malformed record as one `Err` item and then ends, so counting items
+        // would tally the failure as a record and drop the error with it. A
+        // descriptor written to match that inflated number would then read back
+        // clean.
+        let mut records = 1u64;
+
+        for record in SeqReader::new(&content[header_len..]) {
+            record?;
+            records += 1;
+        }
 
         if records != descriptor.records {
             return Err(Error::LayerMismatch {
