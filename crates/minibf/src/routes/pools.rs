@@ -237,7 +237,7 @@ where
     Ok(metrics)
 }
 
-fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     if pool_id.starts_with("pool1") {
         let (_, operator) = bech32::decode(pool_id).map_err(|_| Error::InvalidPoolId)?;
         return Ok(operator);
