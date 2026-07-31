@@ -19,4 +19,9 @@ thiserror.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+# The peak-allocation test instruments the global allocator, the same idiom the
+# root package's tests/memory.rs uses for store iteration. A dev-dependency, so
+# it does not appear in `cargo tree -p stelae -e normal` and the boundary check
+# above is unaffected.
+stats_alloc = "0.1"
 tempfile = "3.20.0"

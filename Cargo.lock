@@ -5284,6 +5284,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "stats_alloc",
  "tempfile",
  "thiserror 2.0.18",
  "zstd",

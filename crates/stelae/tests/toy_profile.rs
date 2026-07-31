@@ -23,8 +23,8 @@ use serde_json::json;
 
 use stelae::{
     digest::read_blob,
-    dir::{LayerSpec, SteleDir},
-    frame::{encode, CanonicalCbor},
+    dir::{BlobIndex, LayerSpec, SteleDir},
+    frame::{encode, CanonicalCbor, Limits},
     Compression, Error, Inscription, LayerDescriptor, LayerWriter, Profile,
 };
 
@@ -131,6 +131,68 @@ fn index_scopes() -> (CanonicalCbor, serde_json::Value) {
     .unwrap();
 
     (header, json!({"chapter": 3}))
+}
+
+/// Read a layer both ways and insist the two paths agree.
+///
+/// Everything a consumer can observe is compared: the header, the records, the
+/// digests, and — where they fail — the failure. The two readers exist because
+/// one of them can afford to hold a layer and the other cannot; nothing else
+/// about them is allowed to differ, because a layer that restores through one
+/// and not the other is a determinism bug in the format itself.
+fn read_both_ways(
+    stele: &SteleDir,
+    index: &BlobIndex,
+    descriptor: &LayerDescriptor,
+) -> Result<Vec<Vec<u8>>, Error> {
+    let buffered = stele.read_layer(index, &ToyProfile, descriptor);
+
+    // A window far below one record, so the streaming path is exercised at its
+    // refill boundaries rather than swallowing the layer in one read.
+    let limits = Limits {
+        window: 8,
+        ..Limits::default()
+    };
+
+    let streamed = (|| {
+        let mut reader = stele.stream_layer(index, &ToyProfile, descriptor, limits)?;
+
+        let mut records = Vec::new();
+        while let Some(record) = reader.next_record() {
+            records.push(record?.to_vec());
+        }
+
+        let digests = reader.finish()?;
+
+        Ok::<_, Error>((records, digests))
+    })();
+
+    match (buffered, streamed) {
+        (Ok(layer), Ok((records, digests))) => {
+            assert_eq!(layer.digests(), &digests, "digests");
+
+            let buffered_records: Vec<Vec<u8>> = layer
+                .records()
+                .map(|r| r.unwrap().to_vec())
+                .collect::<Vec<_>>();
+
+            assert_eq!(buffered_records, records, "records");
+
+            Ok(records)
+        }
+        (Err(buffered), Err(streamed)) => {
+            assert_eq!(
+                std::mem::discriminant(&buffered),
+                std::mem::discriminant(&streamed),
+                "both paths must refuse for the same reason: \
+                 buffered {buffered:?}, streaming {streamed:?}"
+            );
+
+            Err(buffered)
+        }
+        (Ok(_), Err(streamed)) => panic!("the streaming path alone refused it: {streamed:?}"),
+        (Err(buffered), Ok(_)) => panic!("the buffered path alone refused it: {buffered:?}"),
+    }
 }
 
 /// Write a complete stele of the toy profile into `root`.
@@ -248,6 +310,88 @@ fn writes_a_stele_and_reads_it_back() {
         .unwrap();
     assert_eq!(index_layer.header().kind, "index");
     assert_eq!(index_layer.records().count(), NOTES.len());
+
+    // And both layers read back identically without ever being held.
+    for descriptor in &read.layers {
+        read_both_ways(&stele, &index, descriptor).unwrap();
+    }
+}
+
+/// The streaming reader is the one a restore uses, so the profile's records
+/// have to survive it unchanged — through a window smaller than any of them,
+/// which is the case that has to work for a 400 MB layer to be readable at all.
+#[test]
+fn a_layer_streams_back_record_for_record() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let index = stele.blob_index().unwrap();
+
+    let notes_descriptor = inscription.layers_of_kind("notes").next().unwrap();
+
+    let mut reader = stele
+        .stream_layer(
+            &index,
+            &ToyProfile,
+            notes_descriptor,
+            Limits {
+                window: 4,
+                ..Limits::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(reader.header().profile, PROFILE_NAME);
+    assert_eq!(reader.header().kind, "notes");
+    assert_eq!(reader.header().scope, notes_scopes().0);
+
+    let mut notes = NOTES.iter();
+    while let Some(record) = reader.next_record() {
+        let expected = notes.next().expect("no more records were written");
+        assert_eq!(record.unwrap(), note_record(expected).as_bytes());
+    }
+    assert!(notes.next().is_none(), "every record came back");
+
+    // Only now is the layer proven. Everything above was read on the strength
+    // of the descriptor, which is the contract this reader makes explicit.
+    let digests = reader.finish().unwrap();
+    assert_eq!(digests.diff_id, notes_descriptor.diff_id);
+    assert_eq!(
+        digests.uncompressed_size,
+        notes_descriptor.uncompressed_size
+    );
+}
+
+/// `finish` is the confirmation, and it does not depend on the caller having
+/// been diligent: a reader dropped after one record proves nothing, and a
+/// reader finished without consuming anything still reads the whole layer,
+/// because the identity digest covers every byte either way.
+#[test]
+fn finish_confirms_the_layer_whether_or_not_the_records_were_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let index = stele.blob_index().unwrap();
+    let descriptor = &inscription.layers[0];
+
+    // Not a single content record consumed.
+    let untouched = stele
+        .stream_layer(&index, &ToyProfile, descriptor, Limits::default())
+        .unwrap()
+        .finish()
+        .unwrap();
+
+    assert_eq!(untouched.diff_id, descriptor.diff_id);
+
+    // One record consumed, then finished. Same verdict, same digests.
+    let mut reader = stele
+        .stream_layer(&index, &ToyProfile, descriptor, Limits::default())
+        .unwrap();
+    reader.next_record().unwrap().unwrap();
+
+    assert_eq!(reader.finish().unwrap(), untouched);
 }
 
 /// Done criterion 2, and the property the whole protocol rests on: the same
@@ -507,7 +651,7 @@ fn tampering_is_caught_on_read() {
 }
 
 /// A descriptor that lies about its layer is refused even when the blob itself
-/// is intact.
+/// is intact — and refused identically whether the layer is held or streamed.
 #[test]
 fn a_descriptor_that_disagrees_with_its_layer_is_refused() {
     let temp = tempfile::tempdir().unwrap();
@@ -518,38 +662,42 @@ fn a_descriptor_that_disagrees_with_its_layer_is_refused() {
 
     let mut wrong_size = inscription.layers[0].clone();
     wrong_size.uncompressed_size += 1;
-    let err = stele
-        .read_layer(&index, &ToyProfile, &wrong_size)
-        .unwrap_err();
+    let err = read_both_ways(&stele, &index, &wrong_size).unwrap_err();
     assert!(matches!(err, Error::LayerMismatch { .. }), "{err:?}");
 
     let mut wrong_count = inscription.layers[0].clone();
     wrong_count.records += 1;
-    let err = stele
-        .read_layer(&index, &ToyProfile, &wrong_count)
-        .unwrap_err();
+    let err = read_both_ways(&stele, &index, &wrong_count).unwrap_err();
     assert!(matches!(err, Error::LayerMismatch { .. }), "{err:?}");
 
     let mut wrong_kind = inscription.layers[0].clone();
     wrong_kind.kind = "index".to_owned();
-    let err = stele
-        .read_layer(&index, &ToyProfile, &wrong_kind)
-        .unwrap_err();
+    let err = read_both_ways(&stele, &index, &wrong_kind).unwrap_err();
     assert!(matches!(err, Error::LayerMismatch { .. }), "{err:?}");
 
     let mut absent = inscription.layers[0].clone();
     absent.diff_id = stelae::Digest::from_bytes([0xab; 32]);
-    let err = stele.read_layer(&index, &ToyProfile, &absent).unwrap_err();
+    let err = read_both_ways(&stele, &index, &absent).unwrap_err();
     assert!(matches!(err, Error::LayerNotFound { .. }), "{err:?}");
+
+    // A descriptor claiming *less* than the layer holds is refused during
+    // decompression rather than after it, on both paths: the claim is the
+    // ceiling, and a blob that expands past its own descriptor is not read to
+    // the end just to be told so.
+    let mut too_small = inscription.layers[0].clone();
+    too_small.uncompressed_size -= 1;
+    let err = read_both_ways(&stele, &index, &too_small).unwrap_err();
+    assert!(matches!(err, Error::DecompressedTooLarge { .. }), "{err:?}");
 }
 
 /// A malformed record is not a record.
 ///
-/// `SeqReader` reports the first bad one and then ends, so *counting* the
-/// iterator's items tallies the failure itself as a record and discards the
-/// error with it. A publisher who sets `records` to match that inflated number
-/// would hand back a corrupt layer as `Ok`, in the one place whose documented
-/// job is to check everything the descriptor claims.
+/// Both readers report the first bad one and then end, so *counting* their
+/// items tallies the failure itself as a record and discards the error with it.
+/// A publisher who sets `records` to match that inflated number would hand back
+/// a corrupt layer as `Ok`, in the one place whose documented job is to check
+/// everything the descriptor claims. This is the guarantee a refill loop is
+/// most likely to lose, which is why it is checked on both paths.
 #[test]
 fn a_malformed_record_is_reported_not_counted() {
     let temp = tempfile::tempdir().unwrap();
@@ -589,9 +737,28 @@ fn a_malformed_record_is_reported_not_counted() {
     };
 
     let index = stele.blob_index().unwrap();
-    let err = stele.read_layer(&index, &ToyProfile, &corrupt).unwrap_err();
+    let err = read_both_ways(&stele, &index, &corrupt).unwrap_err();
 
     assert!(matches!(err, Error::TruncatedCbor { .. }), "{err:?}");
+
+    // And a caller that ignores the bad record does not get a confirmation out
+    // of `finish` instead. This layer is the awkward case: the malformed byte
+    // is the *last* one, so every byte still reached the hasher and the digest
+    // and size the descriptor claims both hold. Only the record count and the
+    // reader's own memory of having failed stand between a corrupt layer and an
+    // `Ok`.
+    let mut reader = stele
+        .stream_layer(&index, &ToyProfile, &corrupt, Limits::default())
+        .unwrap();
+
+    while let Some(record) = reader.next_record() {
+        if record.is_err() {
+            break;
+        }
+    }
+
+    let err = reader.finish().unwrap_err();
+    assert!(matches!(err, Error::LayerMismatch { .. }), "{err:?}");
 }
 
 /// A descriptor's media type has to be the one *this* profile defines for that

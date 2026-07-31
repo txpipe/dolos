@@ -23,6 +23,8 @@
 //!   §4.2.1 profile) and the protocol-owned layer header record.
 //! - [`digest`] — the streaming sha256 + zstd pipeline that yields a layer's
 //!   identity digest (`diffId`) and its transport digest in one pass.
+//! - [`layer`] — reading a layer as a stream: records out of a bounded window,
+//!   both digests on the way past, confirmation at the end.
 //! - [`inscription`] — the inscription schema, its RFC 8785 canonicalization,
 //!   its digest, and the `history` attestation invariant.
 //! - [`profile`] — the [`Profile`] trait plus the protocol's media-type,
@@ -43,13 +45,15 @@ pub mod digest;
 pub mod dir;
 pub mod frame;
 pub mod inscription;
+pub mod layer;
 pub mod profile;
 
 pub use digest::{Digest, LayerDigests, LayerWriter};
-pub use frame::{CanonicalCbor, LayerHeader, SeqReader, SeqWriter};
+pub use frame::{CanonicalCbor, LayerHeader, Limits, Measure, RecordReader, SeqReader, SeqWriter};
 pub use inscription::{
     canonical_json, Compression, HistoryEntry, Inscription, LayerDescriptor, ProfileRef,
 };
+pub use layer::LayerReader;
 pub use profile::{MediaType, Profile};
 
 /// Artifact type of a stele manifest. Generic tooling discovers stelae of every
@@ -116,6 +120,19 @@ pub enum Error {
 
     #[error("cbor nesting deeper than the protocol limit of {limit}")]
     CborTooDeep { limit: usize },
+
+    /// A record whose length prefixes claim more than the ceiling its reader
+    /// was given. Raised from the prefix, before anything is allocated to hold
+    /// the record, so a corrupt or hostile length costs a comparison.
+    #[error(
+        "record at offset {offset} needs at least {required} bytes, past the \
+         {limit}-byte ceiling set for a single record"
+    )]
+    RecordTooLarge {
+        offset: usize,
+        required: u64,
+        limit: usize,
+    },
 
     #[error("expected exactly one cbor data item, found {trailing} trailing byte(s)")]
     TrailingCbor { trailing: usize },
