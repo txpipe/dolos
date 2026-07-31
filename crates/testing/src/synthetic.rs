@@ -8,7 +8,7 @@ use dolos_core::{
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::MemberRewardLog;
+use dolos_cardano::model::{AccountStakeLog, MemberRewardLog};
 use dolos_cardano::rupd::credential_to_key;
 use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
@@ -499,6 +499,56 @@ pub fn seed_reward_logs<D: Domain>(
         writer
             .write_log_typed(&log_key, &log)
             .map_err(ChainError::from)?;
+    }
+
+    writer.commit().map_err(ChainError::from)?;
+    Ok(())
+}
+
+/// Seed per-account `AccountStakeLog` entries for the given epochs.
+///
+/// Writes one row for `stake_address` and one for a fixed synthetic script
+/// credential, both delegated to `pool_id` — two distinct keys so pagination
+/// over the epoch's stake distribution is testable. A third credential is
+/// seeded with zero stake, which endpoints must exclude (Blockfrost's
+/// epoch_stake has no zero-amount rows).
+pub fn seed_account_stake_logs<D: Domain>(
+    domain: &D,
+    stake_address: &str,
+    pool_id: &str,
+    epochs: &[u64],
+) -> Result<(), ChainError> {
+    let address = Address::from_bech32(stake_address)?;
+    let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
+        .ok_or(ChainError::InvalidPoolParams)?;
+    let pool_keyhash =
+        pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
+
+    let extra_cred = StakeCredential::ScriptHash(Hash::from([0xAA; 28]));
+    let zero_cred = StakeCredential::ScriptHash(Hash::from([0xBB; 28]));
+
+    let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
+    let writer = domain.archive().start_writer()?;
+
+    for epoch in epochs {
+        let slot = summary.epoch_start(*epoch);
+
+        let entries = [
+            (&stake_cred, 7_000_000u64),
+            (&extra_cred, 3_000_000),
+            (&zero_cred, 0),
+        ];
+
+        for (credential, amount) in entries {
+            let log_key: LogKey = (TemporalKey::from(slot), credential_to_key(credential)).into();
+            let log = AccountStakeLog {
+                amount,
+                pool_id: pool_keyhash.as_ref().to_vec(),
+            };
+            writer
+                .write_log_typed(&log_key, &log)
+                .map_err(ChainError::from)?;
+        }
     }
 
     writer.commit().map_err(ChainError::from)?;
