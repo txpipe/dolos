@@ -191,10 +191,6 @@ fn slots_for_tag(
         .expect("slot iteration failed")
 }
 
-// ---------------------------------------------------------------------------
-// Round trip
-// ---------------------------------------------------------------------------
-
 #[test]
 fn epoch_slice_round_trips_through_append_prehashed() {
     let source_dir = tempfile::tempdir().expect("failed to create tempdir");
@@ -226,8 +222,6 @@ fn epoch_slice_round_trips_through_append_prehashed() {
         .append_prehashed(&records)
         .expect("append_prehashed failed");
     writer.commit().expect("commit failed");
-
-    // --- tags -------------------------------------------------------------
 
     let mut checked_metadata = false;
 
@@ -268,8 +262,6 @@ fn epoch_slice_round_trips_through_append_prehashed() {
             "dimension {dimension} leaked records from outside the exported epoch"
         );
     }
-
-    // --- exact lookups ----------------------------------------------------
 
     for (hash, number, slot) in &seeded.blocks {
         let inside = exported.contains(slot);
@@ -323,8 +315,6 @@ fn epoch_slice_round_trips_through_append_prehashed() {
         }
     }
 
-    // --- the records themselves -------------------------------------------
-    //
     // Re-exporting the restored store must yield byte-identical records:
     // anything else means the write path re-derived something instead of
     // copying it.
@@ -337,10 +327,6 @@ fn epoch_slice_round_trips_through_append_prehashed() {
     let source_exacts = collect_exacts(&source, exported);
     assert_eq!(source_exacts, reexported_exacts);
 }
-
-// ---------------------------------------------------------------------------
-// Order
-// ---------------------------------------------------------------------------
 
 #[test]
 fn tag_records_are_sorted_by_dimension_key_hash_slot() {
@@ -429,10 +415,6 @@ fn exact_records_are_sorted_by_kind_and_key() {
     assert_eq!(records.len(), expected);
 }
 
-// ---------------------------------------------------------------------------
-// The stored key form
-// ---------------------------------------------------------------------------
-
 /// ADR-004 specifies index layer tag records as
 /// `[0, dimension, key_hash = xxh3_64(key), slot]`. That description holds for
 /// every dimension the store keeps *except* `metadata`, whose logical key is
@@ -485,10 +467,6 @@ fn tag_key_hashes_are_xxh3_except_for_metadata_labels() {
         xxh3_64(&label.to_be_bytes()).to_be_bytes()
     );
 }
-
-// ---------------------------------------------------------------------------
-// Cost
-// ---------------------------------------------------------------------------
 
 /// Mainnet-shaped epoch: ~5 days at 20s/slot.
 const COST_BLOCKS_PER_EPOCH: u64 = 21_600;
@@ -554,10 +532,8 @@ fn measure_one_epoch_iteration_cost() {
                     tx_hashes.push(hash32(0x02, slot, tx));
 
                     for t in 0..COST_TAGS_PER_TX {
-                        // Offset by tx so the whole dimension set gets seeded:
-                        // 10 tags from a fixed starting point would cover only
-                        // 10 of the 12 dimensions, leaving METADATA — the
-                        // verbatim-key path — out of the measurement entirely.
+                        // Offset by tx so all 12 dimensions get seeded; a fixed
+                        // starting point would leave METADATA unmeasured.
                         let dimension = archive_dimensions::ALL
                             [((tx + t) as usize) % archive_dimensions::ALL.len()];
 

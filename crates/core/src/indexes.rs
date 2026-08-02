@@ -117,10 +117,6 @@ pub enum IndexError {
     Unsupported(&'static str),
 }
 
-// ============================================================================
-// Pre-hashed archive index records
-// ============================================================================
-
 /// Size of the hashed portion of an archive tag key.
 pub const KEY_HASH_SIZE: usize = 8;
 

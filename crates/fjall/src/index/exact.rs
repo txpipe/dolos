@@ -243,10 +243,6 @@ pub fn get_by_tx_hash<R: Readable>(
     }
 }
 
-// ============================================================================
-// ExactRecordIterator
-// ============================================================================
-
 /// Lazy iterator over exact-match records, one kind prefix at a time.
 ///
 /// ## Why it is driven by the kind list
@@ -292,8 +288,7 @@ impl ExactRecordIterator {
             keyspace: keyspace.clone(),
             kinds: ExactKind::ALL.into_iter(),
             current: None,
-            // An empty range matches nothing: skip the prefix scans entirely
-            // instead of decoding every entry to filter everything out.
+            // An empty range matches nothing; skip the prefix scans entirely.
             done: slots.is_empty(),
             slots,
         }
@@ -339,9 +334,6 @@ impl Iterator for ExactRecordIterator {
             };
 
             if key.len() <= DIM_HASH_SIZE || value.len() < SLOT_SIZE {
-                // A malformed entry cannot come from this module's write path:
-                // it is corruption, and this stream becomes a signed layer —
-                // error out (terminally) rather than skip.
                 self.done = true;
                 return Some(Err(IndexError::CodecError(format!(
                     "malformed exact index entry of kind {kind}: \

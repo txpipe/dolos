@@ -288,9 +288,8 @@ impl CoreIndexWriter for IndexStoreWriter {
     fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        // Records arrive sorted, hence grouped by dimension/kind: cache the
-        // dimension hash across each group instead of recomputing the xxh3 of
-        // the same constant string once per record.
+        // Records arrive sorted, hence grouped by dimension/kind: hash each
+        // group's dimension once instead of once per record.
         let mut tag_dim: Option<(&str, [u8; DIM_HASH_SIZE])> = None;
         let mut exact_dim: Option<(ExactKind, [u8; DIM_HASH_SIZE])> = None;
 

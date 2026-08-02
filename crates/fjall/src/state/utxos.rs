@@ -131,10 +131,6 @@ impl Iterator for UtxosIterator {
             Some(guard) => match guard.into_inner() {
                 Ok((key_bytes, value_bytes)) => {
                     if key_bytes.len() != TXO_REF_SIZE {
-                        // A wrong-width key cannot come from this module's
-                        // write path: it is corruption, and this stream feeds
-                        // a signed snapshot layer — error out (terminally)
-                        // rather than skip.
                         self.done = true;
                         return Some(Err(StateError::InternalStoreError(format!(
                             "malformed utxo entry: key is {} bytes, expected {TXO_REF_SIZE}",

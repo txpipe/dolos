@@ -336,10 +336,6 @@ impl DoubleEndedIterator for SlotIterator {
     }
 }
 
-// ============================================================================
-// TagRecordIterator
-// ============================================================================
-
 /// Lazy iterator over archive tag records, one dimension prefix at a time.
 ///
 /// ## Why it is driven by a dimension list
@@ -408,8 +404,7 @@ impl TagRecordIterator {
             keyspace: keyspace.clone(),
             dimensions: dimensions.into_iter(),
             current: None,
-            // An empty range matches nothing: skip the prefix scans entirely
-            // instead of walking every dimension to filter everything out.
+            // An empty range matches nothing; skip the prefix scans entirely.
             done: slots.is_empty(),
             slots,
         }
@@ -455,9 +450,6 @@ impl Iterator for TagRecordIterator {
             };
 
             if key.len() < BLOCK_TAG_KEY_SIZE {
-                // A short key cannot come from this module's write path: it is
-                // corruption, and this stream becomes a signed layer — error
-                // out (terminally) rather than skip.
                 self.done = true;
                 return Some(Err(IndexError::CodecError(format!(
                     "malformed archive tag key in dimension {dimension}: \

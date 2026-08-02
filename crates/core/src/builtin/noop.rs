@@ -124,13 +124,11 @@ impl IndexStore for NoOpIndexStore {
         Ok(EmptySlotIter)
     }
 
-    /// This errors rather than yielding the (arguably honest) empty
-    /// iteration: the callers of this seam publish the iterated records as a
-    /// signed snapshot layer, and a well-formed *empty* layer from an
-    /// index-less node is indistinguishable from a genuinely tag-free epoch.
-    /// The established convention for noop backends is to fail loudly at this
-    /// kind of boundary (see `data stats` / `data export`), and redb3 answers
-    /// the same methods with `Unsupported`.
+    /// Errors rather than yielding an empty iteration: this seam's callers
+    /// publish the iterated records as a signed snapshot layer, and a
+    /// well-formed *empty* layer from an index-less node is indistinguishable
+    /// from a genuinely tag-free epoch. Matches redb3 and the loud-failure
+    /// precedent of `data stats` / `data export` on noop backends.
     fn iter_archive_tags(
         &self,
         _dimensions: &[TagDimension],

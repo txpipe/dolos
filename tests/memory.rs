@@ -8,11 +8,9 @@ use dolos_core::{
     StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoSetDelta,
 };
 
-// Every test in this binary reads the same process-global allocator counters,
-// so they must not run concurrently: a sibling test allocating (or freeing)
-// inside another test's measurement window shifts that window's numbers —
-// enough to fail a threshold spuriously, or to drive a live-bytes delta
-// negative and make its assertion vacuous. Hence #[serial] on every test.
+// The counters are process-global, so every test is #[serial]: a concurrent
+// sibling allocating or freeing inside a measurement window skews it enough to
+// fail a threshold spuriously or make a live-bytes assertion vacuous.
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
@@ -215,15 +213,11 @@ fn test_fjall_shard_range_iter() {
     assert_shard_range_iter(&store);
 }
 
-// ---------------------------------------------------------------------------
-// Full UTxO-set iteration.
-//
 // Snapshot export and the live-UTxO index rebuild both stream the whole UTxO
 // set, which on mainnet is several GB. `iter_utxos` therefore has to be lazy in
 // the same sense `iter_entities` is: constructing it reads nothing, and running
 // it to the end never holds more than a bounded working set. An eager
 // implementation is not a slower one, it is one that cannot be used at all.
-// ---------------------------------------------------------------------------
 
 const UTXO_COUNT: u64 = 50_000;
 const UTXO_SIZE: usize = 300;
