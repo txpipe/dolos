@@ -550,8 +550,14 @@ mod prop_tests {
         #[test]
         fn pool_registration_roundtrip(
             entity in prop::option::of(any_pool_state()),
-            delta in any_pool_registration(),
+            mut delta in any_pool_registration(),
         ) {
+            // For existing pools `apply` schedules or replaces the snapshot,
+            // both of which assert alignment under `strict`, so the delta
+            // carries the pool's epoch.
+            if let Some(entity) = &entity {
+                delta.epoch = entity.snapshot.epoch().expect("any_pool_state fills a concrete epoch");
+            }
             assert_delta_roundtrip(entity, delta);
         }
 
@@ -585,8 +591,12 @@ mod prop_tests {
         #[test]
         fn pool_transition_roundtrip(
             entity in any_pool_state(),
-            delta in any_pool_transition(),
+            mut delta in any_pool_transition(),
         ) {
+            // `transition` asserts `next_epoch` is exactly one past the
+            // snapshot's epoch under `strict`.
+            delta.next_epoch =
+                entity.snapshot.epoch().expect("any_pool_state fills a concrete epoch") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
     }
