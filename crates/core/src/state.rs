@@ -3,7 +3,7 @@ use std::{collections::HashMap, marker::PhantomData, ops::Range};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{ChainError, ChainPoint, Domain, TxoRef, UtxoMap, UtxoSetDelta};
+use crate::{ChainError, ChainPoint, Domain, EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
 
 pub const KEY_SIZE: usize = 32;
 
@@ -200,7 +200,30 @@ pub enum StateError {
 
     #[error("entity decoding error")]
     EntityDecodingError(String),
+
+    /// The operation is part of the trait but the concrete backend does not
+    /// implement it.
+    ///
+    /// Used by backends outside the live set (see `iter_utxos`) so that a
+    /// caller reaching for an unimplemented capability gets an error it can
+    /// handle instead of a panic.
+    #[error("{0} is not supported on this storage backend")]
+    Unsupported(&'static str),
 }
+
+/// A single entry of the UTxO set, as yielded by [`StateStore::iter_utxos`].
+///
+/// The value is owned, not `Arc`-wrapped: the streaming consumers this exists
+/// for (snapshot export, index rebuild) serialize and drop each entry, so
+/// shared ownership would be a per-item allocation nobody uses. A caller that
+/// wants a [`UtxoMap`] wraps the values itself.
+pub type UtxoEntry = (TxoRef, EraCbor);
+
+/// Iterator used by backends that do not implement [`StateStore::iter_utxos`].
+///
+/// Never constructed — those backends return [`StateError::Unsupported`], so
+/// the alias only exists to satisfy the associated type.
+pub type EmptyUtxoIter = std::iter::Empty<Result<UtxoEntry, StateError>>;
 
 pub struct EntityIterTyped<S: StateStore, E: Entity> {
     inner: S::EntityIter,
@@ -316,6 +339,7 @@ pub trait StateWriter: Sized + Send + Sync {
 pub trait StateStore: Sized + Send + Sync + Clone {
     type EntityIter: Iterator<Item = Result<(EntityKey, EntityValue), StateError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, StateError>>;
+    type UtxoIter: Iterator<Item = Result<UtxoEntry, StateError>>;
     type Writer: StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError>;
@@ -397,6 +421,23 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     // TODO: generalize UTxO Set into generic entity system (#1042)
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
+
+    /// Iterate the whole UTxO set.
+    ///
+    /// The iterator must be lazy: neither construction nor iteration may
+    /// buffer the set, since callers (snapshot export, live-UTxO index
+    /// rebuild) run against a mainnet-sized set that does not fit a memory
+    /// budget. Construction reads nothing; the first read failure surfaces
+    /// from `next()`.
+    ///
+    /// **Errors are terminal.** A malformed on-disk entry or a read failure is
+    /// yielded as `Err` and the iterator is fused from then on: it never
+    /// resumes past a fault, so a consumer cannot receive a silently truncated
+    /// UTxO set.
+    ///
+    /// Backends that do not implement this return
+    /// [`StateError::Unsupported`].
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError>;
 }
 
 pub fn load_entity_chunk<D: Domain>(

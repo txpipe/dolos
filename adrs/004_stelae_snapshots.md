@@ -145,10 +145,12 @@ Content records per kind (Dolos profile):
 | Kind | Record | Order | Restore write path |
 |---|---|---|---|
 | `blocks` (per epoch) | `[slot, hash: bytes(32), body: bytes]`, body = raw wire CBOR verbatim | ascending slot, stream order for same-slot (Byron EBB) | `ArchiveWriter::apply` |
-| `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `IndexWriter::append_prehashed` |
+| `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE — except dimension `metadata`, see below; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `IndexWriter::append_prehashed` |
 | `logs` (per epoch) | `[ns: tstr, log_key: bytes(40), value: bytes]`, value = stored EntityValue verbatim | `(ns, log_key)` | `ArchiveWriter::write_log` |
 | `state` (tip, 16 shards, `scope.shard` = 0..15) | `[ns: tstr, key: bytes, value: bytes]` | `(ns, key)`; shard = first nibble of `key[0]` | dispatch on ns: `utxos` → chunked `StateWriter::apply_utxoset`, else `write_entity` |
 | `digests` (tip, optional) | `[immutable_number, chunk: bytes(32), primary: bytes(32), secondary: bytes(32)]`, each sha256 over the raw file bytes | ascending `immutable_number` | none — verification metadata, not written to stores |
+
+One exception to the tag hashing rule is normative for `indexes` v1: records in dimension `metadata` carry the logical u64 metadata label **verbatim** (big-endian) in `key_hash`, never hashed. The index stores keep metadata labels as raw labels rather than hashes, and the layer ships the stored form — that is the whole point of the pre-hashed design. `parameters.indexKeyHash` therefore describes every dimension *except* `metadata`. A publisher that hashes metadata labels produces structurally valid records that restore cleanly but can never be matched by a metadata query; conformance tooling must check this dimension specifically (#1149 tracks whether a future media-type version unifies the rule).
 
 State namespaces: the 14 entity namespaces from `dolos_cardano::model::build_schema()` (key = 32-byte `EntityKey` verbatim, value = stored minicbor verbatim) plus `utxos` (key = `tx_hash(32) ‖ output_index(4, BE)`, value = CBOR `[era: uint, body: bytes]`). The chain point lives in the inscription's `position`, not in a layer. Live-UTxO index dimensions (`utxo::*`) are not shipped; they are rebuilt at restore via `index_delta_from_utxo_delta`.
 

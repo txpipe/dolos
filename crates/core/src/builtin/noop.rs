@@ -8,7 +8,10 @@ use std::ops::Range;
 
 use crate::{
     archive::{ArchiveError, ArchiveStore, ArchiveWriter, LogKey},
-    indexes::{IndexDelta, IndexError, IndexStore, IndexWriter, TagDimension},
+    indexes::{
+        EmptyExactIter, EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore, IndexWriter,
+        TagDimension,
+    },
     BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, UtxoSet,
 };
 
@@ -27,6 +30,14 @@ impl IndexWriter for NoOpIndexWriter {
 
     fn undo(&self, _delta: &IndexDelta) -> Result<(), IndexError> {
         Ok(())
+    }
+
+    /// A restore against a store that discards every record must fail, not
+    /// report success: `Ok` here would let a snapshot restore complete
+    /// "cleanly" having written nothing. See
+    /// [`NoOpIndexStore::iter_archive_tags`] for the read-side twin.
+    fn append_prehashed(&self, _records: &[IndexRecord]) -> Result<(), IndexError> {
+        Err(IndexError::Unsupported("append_prehashed"))
     }
 
     fn commit(self) -> Result<(), IndexError> {
@@ -68,6 +79,8 @@ impl DoubleEndedIterator for EmptySlotIter {
 impl IndexStore for NoOpIndexStore {
     type Writer = NoOpIndexWriter;
     type SlotIter = EmptySlotIter;
+    type TagIter = EmptyTagIter;
+    type ExactIter = EmptyExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         Ok(NoOpIndexWriter)
@@ -109,6 +122,24 @@ impl IndexStore for NoOpIndexStore {
         _end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
         Ok(EmptySlotIter)
+    }
+
+    /// Errors rather than yielding an empty iteration: this seam's callers
+    /// publish the iterated records as a signed snapshot layer, and a
+    /// well-formed *empty* layer from an index-less node is indistinguishable
+    /// from a genuinely tag-free epoch. Matches redb3 and the loud-failure
+    /// precedent of `data stats` / `data export` on noop backends.
+    fn iter_archive_tags(
+        &self,
+        _dimensions: &[TagDimension],
+        _slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        Err(IndexError::Unsupported("iter_archive_tags"))
+    }
+
+    /// See [`NoOpIndexStore::iter_archive_tags`].
+    fn iter_exact_records(&self, _slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
+        Err(IndexError::Unsupported("iter_exact_records"))
     }
 }
 

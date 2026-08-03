@@ -118,6 +118,7 @@ hex = { workspace = true }
 pallas = { workspace = true }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
+serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
 
 [build-dependencies]

@@ -24,11 +24,12 @@ use dolos_core::{
         MempoolStoreConfig, RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, IndexDelta, IndexError,
-    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry, LogValue, MempoolError,
-    MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxHash, TxStatus,
-    TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, ExactRecord, IndexDelta,
+    IndexError, IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter,
+    LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock,
+    StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
+    TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoMap, UtxoSet, UtxoSetDelta,
+    WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -467,9 +468,25 @@ impl Iterator for StateEntityValueIterBackend {
     }
 }
 
+pub enum StateUtxoIterBackend {
+    Redb(<dolos_redb3::state::StateStore as CoreStateStore>::UtxoIter),
+    Fjall(<dolos_fjall::StateStore as CoreStateStore>::UtxoIter),
+}
+
+impl Iterator for StateUtxoIterBackend {
+    type Item = Result<UtxoEntry, StateError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+        }
+    }
+}
+
 impl CoreStateStore for StateStoreBackend {
     type EntityIter = StateEntityIterBackend;
     type EntityValueIter = StateEntityValueIterBackend;
+    type UtxoIter = StateUtxoIterBackend;
     type Writer = StateWriterBackend;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
@@ -531,6 +548,13 @@ impl CoreStateStore for StateStoreBackend {
         match self {
             Self::Redb(s) => s.get_utxos(refs),
             Self::Fjall(s) => s.get_utxos(refs),
+        }
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        match self {
+            Self::Redb(s) => s.iter_utxos().map(StateUtxoIterBackend::Redb),
+            Self::Fjall(s) => s.iter_utxos().map(StateUtxoIterBackend::Fjall),
         }
     }
 }
@@ -880,6 +904,14 @@ impl CoreIndexWriter for IndexWriterBackend {
         }
     }
 
+    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
+        match self {
+            Self::Redb(w) => w.append_prehashed(records),
+            Self::Fjall(w) => w.append_prehashed(records),
+            Self::NoOp(w) => w.append_prehashed(records),
+        }
+    }
+
     fn commit(self) -> Result<(), IndexError> {
         match self {
             Self::Redb(w) => (*w).commit(),
@@ -916,9 +948,45 @@ impl DoubleEndedIterator for IndexSlotIterBackend {
     }
 }
 
+pub enum IndexTagIterBackend {
+    Redb(<dolos_redb3::indexes::IndexStore as CoreIndexStore>::TagIter),
+    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::TagIter),
+    NoOp(<NoOpIndexStore as CoreIndexStore>::TagIter),
+}
+
+impl Iterator for IndexTagIterBackend {
+    type Item = Result<TagRecord, IndexError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
+pub enum IndexExactIterBackend {
+    Redb(<dolos_redb3::indexes::IndexStore as CoreIndexStore>::ExactIter),
+    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::ExactIter),
+    NoOp(<NoOpIndexStore as CoreIndexStore>::ExactIter),
+}
+
+impl Iterator for IndexExactIterBackend {
+    type Item = Result<ExactRecord, IndexError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
 impl CoreIndexStore for IndexStoreBackend {
     type Writer = IndexWriterBackend;
     type SlotIter = IndexSlotIterBackend;
+    type TagIter = IndexTagIterBackend;
+    type ExactIter = IndexExactIterBackend;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         match self {
@@ -1006,6 +1074,34 @@ impl CoreIndexStore for IndexStoreBackend {
             Self::NoOp(s) => s
                 .slots_by_tag(dimension, key, start, end)
                 .map(IndexSlotIterBackend::NoOp),
+        }
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        match self {
+            Self::Redb(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::Redb),
+            Self::Fjall(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::Fjall),
+            Self::NoOp(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::NoOp),
+        }
+    }
+
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
+        match self {
+            Self::Redb(s) => s.iter_exact_records(slots).map(IndexExactIterBackend::Redb),
+            Self::Fjall(s) => s
+                .iter_exact_records(slots)
+                .map(IndexExactIterBackend::Fjall),
+            Self::NoOp(s) => s.iter_exact_records(slots).map(IndexExactIterBackend::NoOp),
         }
     }
 }

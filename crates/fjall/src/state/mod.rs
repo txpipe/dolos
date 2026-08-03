@@ -265,6 +265,7 @@ impl CoreStateWriter for StateWriter {
 impl CoreStateStore for StateStore {
     type EntityIter = entities::EntityIterator;
     type EntityValueIter = entities::EmptyEntityValueIterator;
+    type UtxoIter = utxos::UtxosIterator;
     type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
@@ -327,5 +328,11 @@ impl CoreStateStore for StateStore {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         utxos::get_utxos(&snapshot, &self.utxos, &refs).map_err(StateError::from)
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
     }
 }
