@@ -62,6 +62,48 @@ fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
     Ok(())
 }
 
+/// Refuse a state backend outside the live set (state -> fjall).
+///
+/// The non-live backends sync and serve queries fine but cannot serve
+/// snapshot export: `StateStore::iter_utxos` returns `Unsupported` on them.
+/// Refusing here — where the backend is chosen — turns what would otherwise
+/// be a `dolos snapshot publish` failure at the end of an epoch-long run into
+/// an immediate, actionable configuration error.
+#[allow(deprecated)]
+fn check_state_backend(config: &StateStoreConfig) -> Result<(), Error> {
+    let selected = match config {
+        StateStoreConfig::Fjall(_) => return Ok(()),
+        StateStoreConfig::Redb(_) => "redb",
+        StateStoreConfig::InMemory => "in_memory",
+    };
+
+    Err(Error::StorageError(format!(
+        "state backend `{selected}` cannot serve snapshot export \
+         (`StateStore::iter_utxos`); the live state backend is `fjall`"
+    )))
+}
+
+/// Refuse an index backend outside the live set (index -> fjall).
+///
+/// Same rationale as [`check_state_backend`]: the non-live backends cannot
+/// serve snapshot export (`IndexStore::iter_archive_tags` and
+/// `IndexWriter::append_prehashed` return `Unsupported` on them).
+#[allow(deprecated)]
+fn check_index_backend(config: &IndexStoreConfig) -> Result<(), Error> {
+    let selected = match config {
+        IndexStoreConfig::Fjall(_) => return Ok(()),
+        IndexStoreConfig::Redb(_) => "redb",
+        IndexStoreConfig::InMemory => "in_memory",
+        IndexStoreConfig::NoOp => "no_op",
+    };
+
+    Err(Error::StorageError(format!(
+        "index backend `{selected}` cannot serve snapshot export \
+         (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`); \
+         the live index backend is `fjall`"
+    )))
+}
+
 /// Ensure directory exists for a store path.
 fn ensure_store_path(path: &Path) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
@@ -90,12 +132,14 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
+    check_index_backend(&config.storage.index)?;
     let path = config.storage.index_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    check_state_backend(&config.storage.state)?;
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -367,6 +411,7 @@ impl StateStoreBackend {
     ///
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
+    #[allow(deprecated)]
     pub fn open(
         path: impl AsRef<Path>,
         schema: StateSchema,
@@ -863,6 +908,7 @@ impl IndexStoreBackend {
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
     /// For `NoOp`, the path is ignored.
+    #[allow(deprecated)]
     pub fn open(path: impl AsRef<Path>, config: &IndexStoreConfig) -> Result<Self, IndexError> {
         match config {
             IndexStoreConfig::Redb(cfg) => Self::open_redb(path, cfg),
@@ -1232,6 +1278,68 @@ impl MempoolStore for MempoolBackend {
         match self {
             Self::Ephemeral(s) => MempoolStreamBackend::Ephemeral(s.subscribe()),
             Self::Redb(s) => MempoolStreamBackend::Redb(s.subscribe()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+
+    fn refusal(result: Result<(), Error>) -> String {
+        match result {
+            Err(Error::StorageError(message)) => message,
+            other => panic!("expected a storage refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_backends_pass_validation() {
+        check_state_backend(&StateStoreConfig::Fjall(FjallStateConfig::default())).unwrap();
+        check_index_backend(&IndexStoreConfig::Fjall(FjallIndexConfig::default())).unwrap();
+    }
+
+    #[test]
+    fn non_live_state_backends_are_refused() {
+        let cases = [
+            (StateStoreConfig::Redb(RedbStateConfig::default()), "redb"),
+            (StateStoreConfig::InMemory, "in_memory"),
+        ];
+
+        for (config, name) in cases {
+            let message = refusal(check_state_backend(&config));
+            assert!(message.contains(name), "refusal must name `{name}`");
+            assert!(
+                message.contains("iter_utxos"),
+                "refusal must name the feature it cannot serve"
+            );
+            assert!(
+                message.contains("fjall"),
+                "refusal must name the live backend"
+            );
+        }
+    }
+
+    #[test]
+    fn non_live_index_backends_are_refused() {
+        let cases = [
+            (IndexStoreConfig::Redb(RedbIndexConfig::default()), "redb"),
+            (IndexStoreConfig::InMemory, "in_memory"),
+            (IndexStoreConfig::NoOp, "no_op"),
+        ];
+
+        for (config, name) in cases {
+            let message = refusal(check_index_backend(&config));
+            assert!(message.contains(name), "refusal must name `{name}`");
+            assert!(
+                message.contains("iter_archive_tags") && message.contains("append_prehashed"),
+                "refusal must name the features it cannot serve"
+            );
+            assert!(
+                message.contains("fjall"),
+                "refusal must name the live backend"
+            );
         }
     }
 }

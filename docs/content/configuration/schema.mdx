@@ -134,10 +134,10 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `redb`, `fjall`, or `in_memory` (defaults to `fjall`).
+- `backend`: `fjall` (defaults to `fjall`). The deprecated `redb` and `in_memory` values still parse but are refused at startup: those backends cannot serve snapshot export (`StateStore::iter_utxos`).
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
-- `cache`: size (MB) of the state cache (Redb/Fjall only).
-- `max_history`: maximum number of slots to keep before pruning (Redb/Fjall only).
+- `cache`: size (MB) of the state cache.
+- `max_history`: maximum number of slots to keep before pruning.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
 ### `storage.archive` section
@@ -167,9 +167,9 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | worker_threads   | integer | 8       |
 | memtable_size_mb | integer | 128     |
 
-- `backend`: `redb`, `fjall`, `in_memory`, or `no_op` (defaults to `fjall`).
+- `backend`: `fjall` (defaults to `fjall`). The deprecated `redb`, `in_memory`, and `no_op` values still parse but are refused at startup: those backends cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`).
 - `path`: optional override for the index path (defaults to `<storage.path>/index`).
-- `cache`: size (MB) of the index cache (Redb/Fjall only).
+- `cache`: size (MB) of the index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
 ### `storage.mempool` section

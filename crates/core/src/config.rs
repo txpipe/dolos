@@ -274,12 +274,24 @@ impl FjallStateConfig {
 }
 
 /// State store configuration.
+///
+/// The live state backend is `fjall`. The other variants are kept only so
+/// existing configuration files still deserialize; they cannot serve snapshot
+/// export ([`StateStore::iter_utxos`](crate::state::StateStore::iter_utxos)
+/// returns `Unsupported`) and are refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
+#[allow(deprecated)]
 pub enum StateStoreConfig {
+    #[deprecated(
+        note = "the live state backend is `fjall`; `redb` state cannot serve snapshot export (`StateStore::iter_utxos`)"
+    )]
     Redb(RedbStateConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
+    #[deprecated(
+        note = "the live state backend is `fjall`; `in_memory` state cannot serve snapshot export (`StateStore::iter_utxos`)"
+    )]
     InMemory,
     Fjall(FjallStateConfig),
 }
@@ -290,6 +302,7 @@ impl Default for StateStoreConfig {
     }
 }
 
+#[allow(deprecated)]
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
@@ -439,15 +452,31 @@ impl FjallIndexConfig {
 }
 
 /// Index store configuration.
+///
+/// The live index backend is `fjall`. The other variants are kept only so
+/// existing configuration files still deserialize; they cannot serve snapshot
+/// export ([`IndexStore::iter_archive_tags`](crate::indexes::IndexStore::iter_archive_tags)
+/// and [`IndexWriter::append_prehashed`](crate::indexes::IndexWriter::append_prehashed)
+/// return `Unsupported`) and are refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
+#[allow(deprecated)]
 pub enum IndexStoreConfig {
+    #[deprecated(
+        note = "the live index backend is `fjall`; `redb` indexes cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`)"
+    )]
     Redb(RedbIndexConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
+    #[deprecated(
+        note = "the live index backend is `fjall`; `in_memory` indexes cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`)"
+    )]
     InMemory,
     Fjall(FjallIndexConfig),
     /// No-op backend that discards all writes and returns empty results.
+    #[deprecated(
+        note = "the live index backend is `fjall`; `no_op` indexes cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`)"
+    )]
     NoOp,
 }
 
@@ -457,6 +486,7 @@ impl Default for IndexStoreConfig {
     }
 }
 
+#[allow(deprecated)]
 impl IndexStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
@@ -578,6 +608,7 @@ impl StorageConfig {
 
     /// Get the resolved path for the state store.
     /// Returns `None` for in-memory backends.
+    #[allow(deprecated)]
     pub fn state_path(&self) -> Option<PathBuf> {
         match &self.state {
             StateStoreConfig::InMemory => None,
@@ -603,6 +634,7 @@ impl StorageConfig {
 
     /// Get the resolved path for the index store.
     /// Returns `None` for in-memory or no-op backends.
+    #[allow(deprecated)]
     pub fn index_path(&self) -> Option<PathBuf> {
         match &self.index {
             IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
