@@ -62,45 +62,38 @@ fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuse a state backend outside the live set (state -> fjall).
+/// Refuse a deprecated state backend at the point where the backend is
+/// chosen, so a stale configuration fails immediately with an actionable
+/// error instead of surfacing later at runtime.
 ///
-/// The non-live backends sync and serve queries fine but cannot serve
-/// snapshot export: `StateStore::iter_utxos` returns `Unsupported` on them.
-/// Refusing here — where the backend is chosen — turns what would otherwise
-/// be a `dolos snapshot publish` failure at the end of an epoch-long run into
-/// an immediate, actionable configuration error.
+/// `in_memory` is deliberately not refused: it is ephemeral by design, and a
+/// builtin reimplementation is planned to back it.
 #[allow(deprecated)]
 fn check_state_backend(config: &StateStoreConfig) -> Result<(), Error> {
     let selected = match config {
-        StateStoreConfig::Fjall(_) => return Ok(()),
+        StateStoreConfig::Fjall(_) | StateStoreConfig::InMemory => return Ok(()),
         StateStoreConfig::Redb(_) => "redb",
-        StateStoreConfig::InMemory => "in_memory",
     };
 
     Err(Error::StorageError(format!(
-        "state backend `{selected}` cannot serve snapshot export \
-         (`StateStore::iter_utxos`); the live state backend is `fjall`"
+        "state backend `{selected}` is deprecated; the supported state backend is `fjall`"
     )))
 }
 
-/// Refuse an index backend outside the live set (index -> fjall).
-///
-/// Same rationale as [`check_state_backend`]: the non-live backends cannot
-/// serve snapshot export (`IndexStore::iter_archive_tags` and
-/// `IndexWriter::append_prehashed` return `Unsupported` on them).
+/// Refuse a deprecated index backend, same rationale as
+/// [`check_state_backend`]. `in_memory` is spared pending its builtin
+/// reimplementation, and `no_op` is an explicit opt-out of the index layer.
 #[allow(deprecated)]
 fn check_index_backend(config: &IndexStoreConfig) -> Result<(), Error> {
     let selected = match config {
-        IndexStoreConfig::Fjall(_) => return Ok(()),
+        IndexStoreConfig::Fjall(_) | IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => {
+            return Ok(())
+        }
         IndexStoreConfig::Redb(_) => "redb",
-        IndexStoreConfig::InMemory => "in_memory",
-        IndexStoreConfig::NoOp => "no_op",
     };
 
     Err(Error::StorageError(format!(
-        "index backend `{selected}` cannot serve snapshot export \
-         (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`); \
-         the live index backend is `fjall`"
+        "index backend `{selected}` is deprecated; the supported index backend is `fjall`"
     )))
 }
 
@@ -1295,51 +1288,51 @@ mod tests {
     }
 
     #[test]
-    fn live_backends_pass_validation() {
+    fn accepted_backends_pass_validation() {
         check_state_backend(&StateStoreConfig::Fjall(FjallStateConfig::default())).unwrap();
         check_index_backend(&IndexStoreConfig::Fjall(FjallIndexConfig::default())).unwrap();
+
+        // in_memory stays accepted: ephemeral by design, and a builtin
+        // reimplementation is planned to back it.
+        check_state_backend(&StateStoreConfig::InMemory).unwrap();
+        check_index_backend(&IndexStoreConfig::InMemory).unwrap();
+
+        // no_op stays accepted too: it is an explicit opt-out of the index
+        // layer.
+        check_index_backend(&IndexStoreConfig::NoOp).unwrap();
     }
 
     #[test]
-    fn non_live_state_backends_are_refused() {
-        let cases = [
-            (StateStoreConfig::Redb(RedbStateConfig::default()), "redb"),
-            (StateStoreConfig::InMemory, "in_memory"),
-        ];
+    fn deprecated_state_backends_are_refused() {
+        let message = refusal(check_state_backend(&StateStoreConfig::Redb(
+            RedbStateConfig::default(),
+        )));
 
-        for (config, name) in cases {
-            let message = refusal(check_state_backend(&config));
-            assert!(message.contains(name), "refusal must name `{name}`");
-            assert!(
-                message.contains("iter_utxos"),
-                "refusal must name the feature it cannot serve"
-            );
-            assert!(
-                message.contains("fjall"),
-                "refusal must name the live backend"
-            );
-        }
+        assert!(message.contains("redb"), "refusal must name the backend");
+        assert!(
+            message.contains("deprecated"),
+            "refusal must say the backend is deprecated"
+        );
+        assert!(
+            message.contains("fjall"),
+            "refusal must name the supported backend"
+        );
     }
 
     #[test]
-    fn non_live_index_backends_are_refused() {
-        let cases = [
-            (IndexStoreConfig::Redb(RedbIndexConfig::default()), "redb"),
-            (IndexStoreConfig::InMemory, "in_memory"),
-            (IndexStoreConfig::NoOp, "no_op"),
-        ];
+    fn deprecated_index_backends_are_refused() {
+        let message = refusal(check_index_backend(&IndexStoreConfig::Redb(
+            RedbIndexConfig::default(),
+        )));
 
-        for (config, name) in cases {
-            let message = refusal(check_index_backend(&config));
-            assert!(message.contains(name), "refusal must name `{name}`");
-            assert!(
-                message.contains("iter_archive_tags") && message.contains("append_prehashed"),
-                "refusal must name the features it cannot serve"
-            );
-            assert!(
-                message.contains("fjall"),
-                "refusal must name the live backend"
-            );
-        }
+        assert!(message.contains("redb"), "refusal must name the backend");
+        assert!(
+            message.contains("deprecated"),
+            "refusal must say the backend is deprecated"
+        );
+        assert!(
+            message.contains("fjall"),
+            "refusal must name the supported backend"
+        );
     }
 }

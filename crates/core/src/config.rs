@@ -275,23 +275,17 @@ impl FjallStateConfig {
 
 /// State store configuration.
 ///
-/// The live state backend is `fjall`. The other variants are kept only so
-/// existing configuration files still deserialize; they cannot serve snapshot
-/// export ([`StateStore::iter_utxos`](crate::state::StateStore::iter_utxos)
-/// returns `Unsupported`) and are refused when the node opens its stores.
+/// The supported persistent state backend is `fjall`. The `redb` variant is
+/// deprecated in its favor: it is kept only so existing configuration files
+/// still deserialize, and is refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 #[allow(deprecated)]
 pub enum StateStoreConfig {
-    #[deprecated(
-        note = "the live state backend is `fjall`; `redb` state cannot serve snapshot export (`StateStore::iter_utxos`)"
-    )]
+    #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
     Redb(RedbStateConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
-    #[deprecated(
-        note = "the live state backend is `fjall`; `in_memory` state cannot serve snapshot export (`StateStore::iter_utxos`)"
-    )]
     InMemory,
     Fjall(FjallStateConfig),
 }
@@ -453,30 +447,21 @@ impl FjallIndexConfig {
 
 /// Index store configuration.
 ///
-/// The live index backend is `fjall`. The other variants are kept only so
-/// existing configuration files still deserialize; they cannot serve snapshot
-/// export ([`IndexStore::iter_archive_tags`](crate::indexes::IndexStore::iter_archive_tags)
-/// and [`IndexWriter::append_prehashed`](crate::indexes::IndexWriter::append_prehashed)
-/// return `Unsupported`) and are refused when the node opens its stores.
+/// The supported persistent index backend is `fjall`. The `redb` variant is
+/// deprecated in its favor: it is kept only so existing configuration files
+/// still deserialize, and is refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 #[allow(deprecated)]
 pub enum IndexStoreConfig {
-    #[deprecated(
-        note = "the live index backend is `fjall`; `redb` indexes cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`)"
-    )]
+    #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
     Redb(RedbIndexConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
-    #[deprecated(
-        note = "the live index backend is `fjall`; `in_memory` indexes cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`)"
-    )]
     InMemory,
     Fjall(FjallIndexConfig),
-    /// No-op backend that discards all writes and returns empty results.
-    #[deprecated(
-        note = "the live index backend is `fjall`; `no_op` indexes cannot serve snapshot export (`IndexStore::iter_archive_tags`, `IndexWriter::append_prehashed`)"
-    )]
+    /// No-op backend that discards all writes and returns empty results: an
+    /// explicit opt-out of the index layer.
     NoOp,
 }
 
