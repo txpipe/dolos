@@ -11,6 +11,7 @@ dolos-fjall = { path = "../fjall" }
 dolos-cardano = { path = "../cardano", features=["include-genesis"] }
 rand = "0.9.1"
 hex = "0.4.3"
+tempfile = "3.20.0"
 bech32 = "0.9.1"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

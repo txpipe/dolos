@@ -1623,6 +1623,7 @@ dependencies = [
  "itertools 0.14.0",
  "pallas",
  "rand 0.9.3",
+ "tempfile",
  "tokio",
  "tokio-stream",
 ]

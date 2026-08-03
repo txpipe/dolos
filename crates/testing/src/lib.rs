@@ -24,6 +24,7 @@ pub mod blocks;
 pub mod faults;
 pub mod synthetic;
 
+pub mod fjall_domain;
 pub mod toy_domain;
 
 pub mod harness;

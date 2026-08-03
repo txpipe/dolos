@@ -29,6 +29,14 @@ pub struct Mempool {
     pending: Arc<RwLock<Vec<MempoolTx>>>,
 }
 
+impl Default for Mempool {
+    fn default() -> Self {
+        Self {
+            pending: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+}
+
 pub struct EmptyMempoolStream;
 
 impl futures_core::Stream for EmptyMempoolStream {
@@ -249,6 +257,15 @@ impl ToyDomain {
 pub struct TipSubscription {
     replay: Vec<(ChainPoint, RawBlock)>,
     receiver: tokio::sync::broadcast::Receiver<TipEvent>,
+}
+
+impl TipSubscription {
+    pub fn new(
+        replay: Vec<(ChainPoint, RawBlock)>,
+        receiver: tokio::sync::broadcast::Receiver<TipEvent>,
+    ) -> Self {
+        Self { replay, receiver }
+    }
 }
 
 impl dolos_core::TipSubscription for TipSubscription {
