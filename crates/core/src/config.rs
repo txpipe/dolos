@@ -274,9 +274,15 @@ impl FjallStateConfig {
 }
 
 /// State store configuration.
+///
+/// The supported persistent state backend is `fjall`. The `redb` variant is
+/// deprecated in its favor: it is kept only so existing configuration files
+/// still deserialize, and is refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
+#[allow(deprecated)]
 pub enum StateStoreConfig {
+    #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
     Redb(RedbStateConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
@@ -290,6 +296,7 @@ impl Default for StateStoreConfig {
     }
 }
 
+#[allow(deprecated)]
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
@@ -439,15 +446,22 @@ impl FjallIndexConfig {
 }
 
 /// Index store configuration.
+///
+/// The supported persistent index backend is `fjall`. The `redb` variant is
+/// deprecated in its favor: it is kept only so existing configuration files
+/// still deserialize, and is refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
+#[allow(deprecated)]
 pub enum IndexStoreConfig {
+    #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
     Redb(RedbIndexConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
     InMemory,
     Fjall(FjallIndexConfig),
-    /// No-op backend that discards all writes and returns empty results.
+    /// No-op backend that discards all writes and returns empty results: an
+    /// explicit opt-out of the index layer.
     NoOp,
 }
 
@@ -457,6 +471,7 @@ impl Default for IndexStoreConfig {
     }
 }
 
+#[allow(deprecated)]
 impl IndexStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
@@ -578,6 +593,7 @@ impl StorageConfig {
 
     /// Get the resolved path for the state store.
     /// Returns `None` for in-memory backends.
+    #[allow(deprecated)]
     pub fn state_path(&self) -> Option<PathBuf> {
         match &self.state {
             StateStoreConfig::InMemory => None,
@@ -603,6 +619,7 @@ impl StorageConfig {
 
     /// Get the resolved path for the index store.
     /// Returns `None` for in-memory or no-op backends.
+    #[allow(deprecated)]
     pub fn index_path(&self) -> Option<PathBuf> {
         match &self.index {
             IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,

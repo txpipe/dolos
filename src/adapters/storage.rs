@@ -62,6 +62,41 @@ fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
     Ok(())
 }
 
+/// Refuse a deprecated state backend at the point where the backend is
+/// chosen, so a stale configuration fails immediately with an actionable
+/// error instead of surfacing later at runtime.
+///
+/// `in_memory` is deliberately not refused: it is ephemeral by design, and a
+/// builtin reimplementation is planned to back it.
+#[allow(deprecated)]
+fn check_state_backend(config: &StateStoreConfig) -> Result<(), Error> {
+    let selected = match config {
+        StateStoreConfig::Fjall(_) | StateStoreConfig::InMemory => return Ok(()),
+        StateStoreConfig::Redb(_) => "redb",
+    };
+
+    Err(Error::StorageError(format!(
+        "state backend `{selected}` is deprecated; the supported state backend is `fjall`"
+    )))
+}
+
+/// Refuse a deprecated index backend, same rationale as
+/// [`check_state_backend`]. `in_memory` is spared pending its builtin
+/// reimplementation, and `no_op` is an explicit opt-out of the index layer.
+#[allow(deprecated)]
+fn check_index_backend(config: &IndexStoreConfig) -> Result<(), Error> {
+    let selected = match config {
+        IndexStoreConfig::Fjall(_) | IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => {
+            return Ok(())
+        }
+        IndexStoreConfig::Redb(_) => "redb",
+    };
+
+    Err(Error::StorageError(format!(
+        "index backend `{selected}` is deprecated; the supported index backend is `fjall`"
+    )))
+}
+
 /// Ensure directory exists for a store path.
 fn ensure_store_path(path: &Path) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
@@ -90,12 +125,14 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
+    check_index_backend(&config.storage.index)?;
     let path = config.storage.index_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    check_state_backend(&config.storage.state)?;
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -367,6 +404,7 @@ impl StateStoreBackend {
     ///
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
+    #[allow(deprecated)]
     pub fn open(
         path: impl AsRef<Path>,
         schema: StateSchema,
@@ -863,6 +901,7 @@ impl IndexStoreBackend {
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
     /// For `NoOp`, the path is ignored.
+    #[allow(deprecated)]
     pub fn open(path: impl AsRef<Path>, config: &IndexStoreConfig) -> Result<Self, IndexError> {
         match config {
             IndexStoreConfig::Redb(cfg) => Self::open_redb(path, cfg),
@@ -1233,5 +1272,67 @@ impl MempoolStore for MempoolBackend {
             Self::Ephemeral(s) => MempoolStreamBackend::Ephemeral(s.subscribe()),
             Self::Redb(s) => MempoolStreamBackend::Redb(s.subscribe()),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+
+    fn refusal(result: Result<(), Error>) -> String {
+        match result {
+            Err(Error::StorageError(message)) => message,
+            other => panic!("expected a storage refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepted_backends_pass_validation() {
+        check_state_backend(&StateStoreConfig::Fjall(FjallStateConfig::default())).unwrap();
+        check_index_backend(&IndexStoreConfig::Fjall(FjallIndexConfig::default())).unwrap();
+
+        // in_memory stays accepted: ephemeral by design, and a builtin
+        // reimplementation is planned to back it.
+        check_state_backend(&StateStoreConfig::InMemory).unwrap();
+        check_index_backend(&IndexStoreConfig::InMemory).unwrap();
+
+        // no_op stays accepted too: it is an explicit opt-out of the index
+        // layer.
+        check_index_backend(&IndexStoreConfig::NoOp).unwrap();
+    }
+
+    #[test]
+    fn deprecated_state_backends_are_refused() {
+        let message = refusal(check_state_backend(&StateStoreConfig::Redb(
+            RedbStateConfig::default(),
+        )));
+
+        assert!(message.contains("redb"), "refusal must name the backend");
+        assert!(
+            message.contains("deprecated"),
+            "refusal must say the backend is deprecated"
+        );
+        assert!(
+            message.contains("fjall"),
+            "refusal must name the supported backend"
+        );
+    }
+
+    #[test]
+    fn deprecated_index_backends_are_refused() {
+        let message = refusal(check_index_backend(&IndexStoreConfig::Redb(
+            RedbIndexConfig::default(),
+        )));
+
+        assert!(message.contains("redb"), "refusal must name the backend");
+        assert!(
+            message.contains("deprecated"),
+            "refusal must say the backend is deprecated"
+        );
+        assert!(
+            message.contains("fjall"),
+            "refusal must name the supported backend"
+        );
     }
 }
