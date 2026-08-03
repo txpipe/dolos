@@ -403,11 +403,14 @@ pub(crate) mod testing {
                 (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
         ) -> EpochState {
+            // ESTART rotates rolling/pparams in lockstep with the epoch
+            // number, so a healthy entity has all three aligned. The `strict`
+            // feature asserts this; rebase the independently drawn values.
             EpochState {
                 number,
                 initial_pots,
-                rolling,
-                pparams,
+                rolling: crate::model::epoch_value::testing::rebase(rolling, number),
+                pparams: crate::model::epoch_value::testing::rebase(pparams, number),
                 largest_stable_slot,
                 previous_nonce_tail,
                 nonces,
@@ -1519,11 +1522,13 @@ mod prop_tests {
             end in prop::option::of(any_end_stats()),
             incentives in prop::option::of(any_epoch_incentives()),
         ) -> EpochState {
+            // Same lockstep rebase as `any_epoch_state`: `strict` asserts the
+            // epoch values sit at the entity's current epoch.
             EpochState {
                 number,
                 initial_pots,
-                rolling,
-                pparams,
+                rolling: crate::model::epoch_value::testing::rebase(rolling, number),
+                pparams: crate::model::epoch_value::testing::rebase(pparams, number),
                 largest_stable_slot,
                 previous_nonce_tail,
                 nonces,
@@ -1729,8 +1734,12 @@ mod prop_tests {
         #[test]
         fn epoch_stats_update_roundtrip(
             entity in any_epoch_state_no_rolling_next(),
-            delta in any_epoch_stats_update(),
+            mut delta in any_epoch_stats_update(),
         ) {
+            // `apply` mutates `rolling` through `live_mut`, which asserts
+            // alignment under `strict`, so the delta carries the entity's
+            // epoch.
+            delta.epoch = entity.rolling.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1791,6 +1800,9 @@ mod prop_tests {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.
             delta.new_pots = entity.initial_pots.clone();
+            // `transition` asserts `new_epoch` is exactly one past the
+            // entity's epoch under `strict`.
+            delta.new_epoch = entity.rolling.epoch().expect("generated at epoch position") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1802,6 +1814,7 @@ mod prop_tests {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.
             delta.new_pots = entity.initial_pots.clone();
+            delta.new_epoch = entity.rolling.epoch().expect("generated at epoch position") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
 

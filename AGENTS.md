@@ -313,8 +313,21 @@ All agents working on this repository must verify their modifications by running
 
 3. **Testing**: Run tests to verify functionality
    ```bash
-   cargo test --workspace --all-features
+   cargo test --workspace --all-targets
+   cargo test --workspace --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
    ```
+
+   The first command is what CI runs on every platform. The second adds the
+   feature-gated code the default run never exercises — most importantly the
+   `strict` feature, dolos-cardano's epoch-coherence assertions. The three
+   service crates are excluded from the all-features run because their test
+   fixtures import synthetic chains that jump from a fresh genesis domain
+   straight to epoch 2, which trips those assertions inside the fixture itself
+   (the `EpochState` entity is still at epoch 0 when an epoch-2 block rolls);
+   they keep full coverage under the first command. Remove the exclusions once
+   the fixtures build epoch-coherent domains. CI (`.github/workflows/ci.yml`)
+   runs both commands, so a verification that passes locally cannot drift from
+   what the repository keeps green.
 
 ### Code Quality Standards
 
