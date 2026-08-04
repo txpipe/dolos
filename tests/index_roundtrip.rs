@@ -24,7 +24,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use dolos_cardano::indexes::archive_dimensions;
+use dolos_cardano::indexes::{archive_dimensions, CardanoIndexExt};
 use dolos_core::{
     builtin::MemoryIndexStore, config::FjallIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint,
     ExactKind, ExactRecord, IndexDelta, IndexRecord, IndexStore as CoreIndexStore,
@@ -258,6 +258,17 @@ fn collect_tags<S: CoreIndexStore>(
         .expect("tag iteration failed")
 }
 
+/// Every dimension's tag records, the way an export call site asks for them:
+/// through the wrapper, so `archive_dimensions::ALL` is named in one place
+/// rather than at each call.
+fn collect_all_tags<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<TagRecord> {
+    store
+        .iter_all_archive_tags(slots)
+        .expect("iter_all_archive_tags failed")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("tag iteration failed")
+}
+
 fn collect_exacts<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<ExactRecord> {
     store
         .iter_exact_records(slots)
@@ -285,7 +296,7 @@ fn export_slice<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<In
     let mut records: Vec<IndexRecord> = Vec::new();
 
     records.extend(
-        collect_tags(store, &archive_dimensions::ALL, slots.clone())
+        collect_all_tags(store, slots.clone())
             .into_iter()
             .map(IndexRecord::from),
     );
@@ -426,7 +437,7 @@ fn tag_records_are_sorted_by_dimension_key_hash_slot<B: Backend>() {
     let seeded = seed(&store);
 
     let slots = epoch_slots(EPOCHS[0]);
-    let records = collect_tags(&store, &archive_dimensions::ALL, slots.clone());
+    let records = collect_all_tags(&store, slots.clone());
 
     assert!(!records.is_empty());
 
@@ -520,7 +531,7 @@ fn tag_key_hashes_are_xxh3_except_for_metadata_labels<B: Backend>() {
     let seeded = seed(&store);
 
     let slots = epoch_slots(EPOCHS[0]);
-    let records = collect_tags(&store, &archive_dimensions::ALL, slots.clone());
+    let records = collect_all_tags(&store, slots.clone());
 
     let mut checked_hashed = 0;
     let mut checked_labels = 0;
@@ -572,7 +583,7 @@ fn undo_removes_exactly_what_apply_added<B: Backend>() {
     }
 
     let kept = epoch_slots(EPOCHS[0]);
-    let before_tags = collect_tags(&store, &archive_dimensions::ALL, kept.clone());
+    let before_tags = collect_all_tags(&store, kept.clone());
     let before_exacts = collect_exacts(&store, kept.clone());
 
     for delta in second {
@@ -583,7 +594,7 @@ fn undo_removes_exactly_what_apply_added<B: Backend>() {
 
     let rolled_back = epoch_slots(EPOCHS[1]);
     assert!(
-        !collect_tags(&store, &archive_dimensions::ALL, rolled_back.clone()).is_empty(),
+        !collect_all_tags(&store, rolled_back.clone()).is_empty(),
         "the delta about to be undone should have landed first"
     );
 
@@ -594,7 +605,7 @@ fn undo_removes_exactly_what_apply_added<B: Backend>() {
     }
 
     assert!(
-        collect_tags(&store, &archive_dimensions::ALL, rolled_back.clone()).is_empty(),
+        collect_all_tags(&store, rolled_back.clone()).is_empty(),
         "undo left archive tags behind"
     );
     assert!(
@@ -604,7 +615,7 @@ fn undo_removes_exactly_what_apply_added<B: Backend>() {
 
     assert_eq!(
         before_tags,
-        collect_tags(&store, &archive_dimensions::ALL, kept.clone()),
+        collect_all_tags(&store, kept.clone()),
         "undo removed tags it never added"
     );
     assert_eq!(
@@ -632,8 +643,8 @@ fn backends_agree_on_exported_records() {
     let slots = epoch_slots(EPOCHS[0]);
 
     assert_eq!(
-        collect_tags(&fjall, &archive_dimensions::ALL, slots.clone()),
-        collect_tags(&memory, &archive_dimensions::ALL, slots.clone()),
+        collect_all_tags(&fjall, slots.clone()),
+        collect_all_tags(&memory, slots.clone()),
         "backends disagree on the archive tag records the same deltas produce"
     );
 
@@ -812,7 +823,7 @@ fn measure_one_epoch_iteration_cost() {
     let slots = epoch_slots(target_epoch);
 
     let started = Instant::now();
-    let tags = collect_tags(&store, &archive_dimensions::ALL, slots.clone());
+    let tags = collect_all_tags(&store, slots.clone());
     let tag_elapsed = started.elapsed();
 
     let started = Instant::now();
