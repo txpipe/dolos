@@ -99,8 +99,14 @@ pub mod archive {
         /// Stake-account withdrawals by reward account bytes
         ACCOUNT_WITHDRAWALS = "account_withdrawals";
 
-        /// Transaction metadata labels
-        METADATA = "metadata";
+        /// Transaction metadata labels.
+        ///
+        /// Sourced from core rather than spelled again: it stays a
+        /// dimension-list entry like any other, but the string itself has one
+        /// definition, because this is the dimension whose logical key the
+        /// stores keep verbatim instead of hashing (see
+        /// [`dolos_core::key_hash`]).
+        METADATA = dolos_core::VERBATIM_KEY_DIMENSION;
     }
 }
 
