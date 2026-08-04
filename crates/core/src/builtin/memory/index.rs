@@ -32,12 +32,28 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::indexes::{
     key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexDelta, IndexError, IndexRecord,
-    IndexStore, IndexWriter, KeyHash, TagDimension, TagRecord,
+    IndexStore, IndexWriter, KeyHash, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
 };
 use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
 
 /// A stored archive tag: the traversal contract's sort key, used as the key.
 type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
+
+/// An exact key, zero-padded to the widest kind — the same inline shape
+/// [`ExactRecord`] carries, so a record goes in and comes back out without a
+/// heap allocation on either side.
+type ExactKey = [u8; MAX_EXACT_KEY_LEN];
+
+/// Pad a fixed-width key into the map's key type.
+///
+/// The width itself is [`ExactRecord::new`]'s to check; by the time a key
+/// reaches here it is either a record's own or built from a typed delta.
+fn exact_key(key: &[u8]) -> ExactKey {
+    let mut buf = [0u8; MAX_EXACT_KEY_LEN];
+    let len = key.len().min(MAX_EXACT_KEY_LEN);
+    buf[..len].copy_from_slice(&key[..len]);
+    buf
+}
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default, Clone)]
@@ -48,7 +64,9 @@ struct Tables {
     /// store, and the set is mutable rather than append-only.
     utxo_tags: BTreeMap<(TagDimension, Vec<u8>), HashSet<TxoRef>>,
     archive_tags: BTreeSet<ArchiveTag>,
-    exact: BTreeMap<(ExactKind, Vec<u8>), BlockSlot>,
+    /// Keyed on the record's own inline key rather than a `Vec`, so
+    /// `iter_exact_records` copies rather than allocates per record.
+    exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit. See the
@@ -59,8 +77,8 @@ enum Op {
     RemoveUtxoTag(TagDimension, Vec<u8>, TxoRef),
     InsertArchiveTag(ArchiveTag),
     RemoveArchiveTag(ArchiveTag),
-    InsertExact(ExactKind, Vec<u8>, BlockSlot),
-    RemoveExact(ExactKind, Vec<u8>),
+    InsertExact(ExactKind, ExactKey, BlockSlot),
+    RemoveExact(ExactKind, ExactKey),
 }
 
 fn poisoned() -> IndexError {
@@ -102,18 +120,20 @@ impl MemoryIndexWriter {
         })
     }
 
-    fn exact_keys_of(block: &ArchiveIndexDelta) -> impl Iterator<Item = (ExactKind, Vec<u8>)> + '_ {
+    fn exact_keys_of(
+        block: &ArchiveIndexDelta,
+    ) -> impl Iterator<Item = (ExactKind, ExactKey)> + '_ {
         let hash = (!block.block_hash.is_empty())
-            .then(|| (ExactKind::BlockHash, block.block_hash.clone()));
+            .then(|| (ExactKind::BlockHash, exact_key(&block.block_hash)));
 
         let number = block
             .block_number
-            .map(|n| (ExactKind::BlockNumber, n.to_be_bytes().to_vec()));
+            .map(|n| (ExactKind::BlockNumber, exact_key(&n.to_be_bytes())));
 
         let txs = block
             .tx_hashes
             .iter()
-            .map(|hash| (ExactKind::TxHash, hash.clone()));
+            .map(|hash| (ExactKind::TxHash, exact_key(hash)));
 
         hash.into_iter().chain(number).chain(txs)
     }
@@ -210,21 +230,13 @@ impl IndexWriter for MemoryIndexWriter {
                     tag.key_hash,
                     tag.slot,
                 ))),
-                IndexRecord::Exact(exact) => {
-                    // A wrong-width key can only come from an external source —
-                    // the delta path is type-enforced — and would land as an
-                    // entry no lookup could ever reach.
-                    let expected = exact.kind.key_len();
-                    if exact.key.len() != expected {
-                        return Err(IndexError::CodecError(format!(
-                            "exact record of kind {} has a {}-byte key, expected {expected}",
-                            exact.kind,
-                            exact.key.len(),
-                        )));
-                    }
-
-                    ops.push(Op::InsertExact(exact.kind, exact.key, exact.slot));
-                }
+                // The width is already checked: `ExactRecord` cannot be
+                // constructed with a key that does not match its kind.
+                IndexRecord::Exact(exact) => ops.push(Op::InsertExact(
+                    exact.kind,
+                    exact_key(exact.key()),
+                    exact.slot,
+                )),
             }
         }
 
@@ -382,7 +394,7 @@ impl IndexStore for MemoryIndexStore {
         let tables = self.tables.read().map_err(|_| poisoned())?;
         Ok(tables
             .exact
-            .get(&(ExactKind::BlockHash, hash.to_vec()))
+            .get(&(ExactKind::BlockHash, exact_key(hash)))
             .copied())
     }
 
@@ -390,7 +402,7 @@ impl IndexStore for MemoryIndexStore {
         let tables = self.tables.read().map_err(|_| poisoned())?;
         Ok(tables
             .exact
-            .get(&(ExactKind::BlockNumber, number.to_be_bytes().to_vec()))
+            .get(&(ExactKind::BlockNumber, exact_key(&number.to_be_bytes())))
             .copied())
     }
 
@@ -398,7 +410,7 @@ impl IndexStore for MemoryIndexStore {
         let tables = self.tables.read().map_err(|_| poisoned())?;
         Ok(tables
             .exact
-            .get(&(ExactKind::TxHash, hash.to_vec()))
+            .get(&(ExactKind::TxHash, exact_key(hash)))
             .copied())
     }
 
@@ -470,8 +482,8 @@ impl IndexStore for MemoryIndexStore {
             .exact
             .iter()
             .filter(|(_, slot)| slots.contains(slot))
-            .map(|((kind, key), slot)| ExactRecord::new(*kind, key.clone(), *slot))
-            .collect();
+            .map(|((kind, key), slot)| ExactRecord::new(*kind, &key[..kind.key_len()], *slot))
+            .collect::<Result<_, _>>()?;
 
         Ok(MemoryExactIter(records.into_iter()))
     }
