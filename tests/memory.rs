@@ -3,9 +3,12 @@ use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
 use std::alloc::System;
 use std::sync::Arc;
 
+use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    config::FjallStateConfig, EntityKey, EraCbor, NamespaceType, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoSetDelta,
+    config::{FjallIndexConfig, FjallStateConfig},
+    ArchiveIndexDelta, ChainPoint, EntityKey, EraCbor, IndexDelta, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, NamespaceType, StateSchema, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter, Tag, TagRecord, TxoRef, UtxoSetDelta,
 };
 
 // The counters are process-global, so every test is #[serial]: a concurrent
@@ -328,6 +331,153 @@ fn test_fjall_lazy_utxo_iter() {
         dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
 
     assert_lazy_utxo_iter(&store);
+}
+
+// Archive tag traversal is the export half of the snapshot index seam: a
+// publisher slices one epoch out of a store holding years of them, and the slot
+// is the *last* key component, so the scan visits every entry of every
+// dimension however narrow the range. Constructing the iterator must therefore
+// read nothing, and running it must hold one record at a time. An
+// implementation that collects its dimension scan is not a slower one, it is
+// one a mainnet-sized store cannot use at all.
+
+const TAG_BLOCK_COUNT: u64 = 15_000;
+const TAGS_PER_BLOCK: u64 = 20;
+const TAG_RECORD_COUNT: u64 = TAG_BLOCK_COUNT * TAGS_PER_BLOCK;
+const TAG_BLOCKS_PER_BATCH: u64 = 500;
+
+fn seed_archive_tags<S: CoreIndexStore>(store: &S) {
+    let mut block = 0u64;
+
+    while block < TAG_BLOCK_COUNT {
+        let batch_end = std::cmp::min(block + TAG_BLOCKS_PER_BATCH, TAG_BLOCK_COUNT);
+        let mut archive = Vec::new();
+
+        for b in block..batch_end {
+            let slot = b * 20;
+
+            let tags = (0..TAGS_PER_BLOCK)
+                .map(|t| {
+                    // Spread across the dimension list so the scan really does
+                    // walk more than one prefix.
+                    let dimension =
+                        archive_dimensions::ALL[((b + t) as usize) % archive_dimensions::ALL.len()];
+
+                    let key = if dimension == archive_dimensions::METADATA {
+                        (t % 8).to_be_bytes().to_vec()
+                    } else {
+                        let mut key = vec![0x03u8; 32];
+                        key[..8].copy_from_slice(&slot.to_be_bytes());
+                        key[8..16].copy_from_slice(&t.to_be_bytes());
+                        key
+                    };
+
+                    Tag::new(dimension, key)
+                })
+                .collect();
+
+            archive.push(ArchiveIndexDelta {
+                slot,
+                block_hash: vec![0x01; 32],
+                block_number: Some(b),
+                tx_hashes: Vec::new(),
+                tags,
+            });
+        }
+
+        let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
+        let delta = IndexDelta {
+            cursor,
+            utxo: Default::default(),
+            archive,
+        };
+
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.apply(&delta).expect("apply failed");
+        writer.commit().expect("commit failed");
+
+        block = batch_end;
+    }
+}
+
+fn assert_lazy_archive_tag_iter<S: CoreIndexStore>(store: &S) {
+    seed_archive_tags(store);
+
+    let threshold = 10 * 1024 * 1024; // 10 MB
+    let buffered_bytes = TAG_RECORD_COUNT as usize * std::mem::size_of::<TagRecord>();
+    assert!(
+        buffered_bytes > threshold,
+        "the seeded set must exceed the threshold ({buffered_bytes} bytes of records \
+         against a {threshold} byte budget), otherwise a buffering implementation \
+         would pass the construction check"
+    );
+
+    let reg = Region::new(GLOBAL);
+
+    let iter = store
+        .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
+        .expect("iter_archive_tags failed");
+
+    let construction_delta = reg.change().bytes_allocated;
+    assert!(
+        construction_delta < threshold,
+        "iter_archive_tags construction should allocate O(1) memory (lazy). \
+         Allocated {} bytes but threshold is {} bytes.",
+        construction_delta,
+        threshold,
+    );
+
+    // Sample the live footprint across a full pass, the same way the UTxO
+    // iteration check does: cumulative allocation is the wrong measure, since
+    // even a perfectly lazy iterator allocates per item over a whole pass.
+    let iteration_reg = Region::new(GLOBAL);
+    let mut count = 0usize;
+    let mut peak_live = 0i64;
+
+    for record in iter {
+        record.expect("tag iteration failed");
+        count += 1;
+
+        if count.is_multiple_of(1_000) {
+            let stats = iteration_reg.change();
+            let live = stats.bytes_allocated as i64 - stats.bytes_deallocated as i64;
+            peak_live = peak_live.max(live);
+        }
+    }
+
+    assert!(
+        peak_live < threshold as i64,
+        "iter_archive_tags full iteration should hold O(1) memory. \
+         Peaked at {} live bytes but threshold is {} bytes.",
+        peak_live,
+        threshold,
+    );
+
+    assert_eq!(
+        count, TAG_RECORD_COUNT as usize,
+        "iterator should yield every seeded tag record"
+    );
+}
+
+#[test]
+#[serial]
+fn test_fjall_lazy_archive_tag_iter() {
+    let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
+    let config = FjallIndexConfig {
+        path: None,
+        // Small on purpose: cached blocks are live heap, and the measurement is
+        // the iterator's footprint, not the engine's cache budget.
+        cache: Some(1),
+        max_journal_size: None,
+        flush_on_commit: Some(false),
+        l0_threshold: None,
+        worker_threads: Some(1),
+        memtable_size_mb: None,
+    };
+    let store = dolos_fjall::IndexStore::open(tmpdir.path(), &config)
+        .expect("failed to open fjall index store");
+
+    assert_lazy_archive_tag_iter(&store);
 }
 
 #[test]

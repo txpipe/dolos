@@ -49,6 +49,7 @@ use fjall::{
 
 pub mod archive_tags;
 pub mod exact;
+pub mod scan;
 pub mod state_tags;
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
