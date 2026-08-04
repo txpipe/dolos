@@ -22,6 +22,7 @@ use dolos_core::{
 };
 use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
+use crate::index::scan::{DimensionScan, ScanTarget};
 use crate::keys::{
     decode_slot, dim_prefix, hash_dimension, hash_key, DIM_HASH_SIZE, HASH_KEY_SIZE, SLOT_SIZE,
 };
@@ -369,18 +370,51 @@ impl DoubleEndedIterator for SlotIterator {
 ///
 /// ## Errors
 ///
-/// Errors are terminal: after yielding an `Err` — a read failure or a
-/// malformed entry — the iterator is fused and yields `None` forever. The
-/// record set feeds a signed snapshot layer, so resuming past a fault (or
-/// silently skipping a bad entry) would let a corrupt store produce a
-/// clean-looking, truncated layer.
-pub struct TagRecordIterator {
-    snapshot: Snapshot,
-    keyspace: Keyspace,
-    dimensions: std::vec::IntoIter<TagDimension>,
-    current: Option<(TagDimension, fjall::Iter)>,
-    slots: Range<BlockSlot>,
-    done: bool,
+/// Terminal, per the policy in [`crate::index::scan`] — the one place it is
+/// defined.
+pub struct TagRecordIterator(DimensionScan<TagScan, std::vec::IntoIter<TagDimension>>);
+
+/// The archive-tag half of the shared prefix walk.
+pub struct TagScan;
+
+impl ScanTarget for TagScan {
+    type Label = TagDimension;
+    type Record = TagRecord;
+
+    fn prefix(dimension: TagDimension) -> [u8; DIM_HASH_SIZE] {
+        hash_dimension(dim_prefix::BLOCK, dimension)
+    }
+
+    /// Only the key is read: the value of a tag entry is empty, and
+    /// [`fjall::Guard::key`] can skip loading a value the tree may have
+    /// separated out.
+    fn decode(
+        dimension: TagDimension,
+        guard: fjall::Guard,
+        slots: &Range<BlockSlot>,
+    ) -> Result<Option<TagRecord>, IndexError> {
+        let key = guard.key().map_err(Error::Fjall)?;
+
+        if key.len() < BLOCK_TAG_KEY_SIZE {
+            return Err(IndexError::CodecError(format!(
+                "malformed archive tag key in dimension {dimension}: \
+                 {} bytes, expected {BLOCK_TAG_KEY_SIZE}",
+                key.len(),
+            )));
+        }
+
+        let slot = decode_block_tag_slot(&key);
+
+        if !slots.contains(&slot) {
+            return Ok(None);
+        }
+
+        Ok(Some(TagRecord {
+            dimension: Cow::Borrowed(dimension),
+            key_hash: decode_block_tag_key_hash(&key),
+            slot,
+        }))
+    }
 }
 
 impl TagRecordIterator {
@@ -399,24 +433,12 @@ impl TagRecordIterator {
         dimensions.sort_unstable();
         dimensions.dedup();
 
-        Self {
+        Self(DimensionScan::new(
             snapshot,
-            keyspace: keyspace.clone(),
-            dimensions: dimensions.into_iter(),
-            current: None,
-            // An empty range matches nothing; skip the prefix scans entirely.
-            done: slots.is_empty(),
+            keyspace,
+            dimensions.into_iter(),
             slots,
-        }
-    }
-
-    /// Open a prefix scan for the next dimension, if any is left.
-    fn open_next(&mut self) -> Option<()> {
-        let dimension = self.dimensions.next()?;
-        let prefix = hash_dimension(dim_prefix::BLOCK, dimension);
-        let iter = self.snapshot.prefix(&self.keyspace, prefix);
-        self.current = Some((dimension, iter));
-        Some(())
+        ))
     }
 }
 
@@ -424,52 +446,7 @@ impl Iterator for TagRecordIterator {
     type Item = Result<TagRecord, IndexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-
-        loop {
-            let Some((dimension, iter)) = self.current.as_mut() else {
-                self.open_next()?;
-                continue;
-            };
-
-            let dimension = *dimension;
-
-            let Some(guard) = iter.next() else {
-                self.current = None;
-                continue;
-            };
-
-            let key = match guard.key() {
-                Ok(key) => key,
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(Error::Fjall(e).into()));
-                }
-            };
-
-            if key.len() < BLOCK_TAG_KEY_SIZE {
-                self.done = true;
-                return Some(Err(IndexError::CodecError(format!(
-                    "malformed archive tag key in dimension {dimension}: \
-                     {} bytes, expected {BLOCK_TAG_KEY_SIZE}",
-                    key.len(),
-                ))));
-            }
-
-            let slot = decode_block_tag_slot(&key);
-
-            if !self.slots.contains(&slot) {
-                continue;
-            }
-
-            return Some(Ok(TagRecord {
-                dimension: Cow::Borrowed(dimension),
-                key_hash: decode_block_tag_key_hash(&key),
-                slot,
-            }));
-        }
+        self.0.next()
     }
 }
 

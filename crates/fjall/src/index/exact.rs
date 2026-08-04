@@ -22,6 +22,7 @@ use std::ops::Range;
 use dolos_core::{ArchiveIndexDelta, BlockSlot, ExactKind, ExactRecord, IndexDelta, IndexError};
 use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
+use crate::index::scan::{DimensionScan, ScanTarget};
 use crate::keys::{decode_slot, dim_prefix, encode_slot, hash_dimension, DIM_HASH_SIZE, SLOT_SIZE};
 use crate::Error;
 
@@ -266,16 +267,51 @@ pub fn get_by_tx_hash<R: Readable>(
 /// ## Lifetime and errors
 ///
 /// Same contract as `TagRecordIterator`: the held MVCC snapshot pins fjall's
-/// GC watermark for the iterator's lifetime, and errors — read failures or
-/// malformed entries — are terminal (the iterator fuses rather than resuming
-/// past a fault).
-pub struct ExactRecordIterator {
-    snapshot: Snapshot,
-    keyspace: Keyspace,
-    kinds: std::array::IntoIter<ExactKind, 3>,
-    current: Option<(ExactKind, fjall::Iter)>,
-    slots: Range<BlockSlot>,
-    done: bool,
+/// GC watermark for the iterator's lifetime, and errors are terminal per the
+/// policy in [`crate::index::scan`].
+pub struct ExactRecordIterator(DimensionScan<ExactScan, std::array::IntoIter<ExactKind, 3>>);
+
+/// The exact-match half of the shared prefix walk.
+pub struct ExactScan;
+
+impl ScanTarget for ExactScan {
+    type Label = ExactKind;
+    type Record = ExactRecord;
+
+    fn prefix(kind: ExactKind) -> [u8; DIM_HASH_SIZE] {
+        hash_dimension(dim_prefix::EXACT, kind.as_str())
+    }
+
+    /// Both halves are read: an exact entry keeps its slot in the *value*, so
+    /// unlike the tag scan there is no way to range-filter from the key alone.
+    fn decode(
+        kind: ExactKind,
+        guard: fjall::Guard,
+        slots: &Range<BlockSlot>,
+    ) -> Result<Option<ExactRecord>, IndexError> {
+        let (key, value) = guard.into_inner().map_err(Error::Fjall)?;
+
+        if key.len() <= DIM_HASH_SIZE || value.len() < SLOT_SIZE {
+            return Err(IndexError::CodecError(format!(
+                "malformed exact index entry of kind {kind}: \
+                 key {} bytes, value {} bytes",
+                key.len(),
+                value.len(),
+            )));
+        }
+
+        let slot = decode_slot_value(&value);
+
+        if !slots.contains(&slot) {
+            return Ok(None);
+        }
+
+        Ok(Some(ExactRecord {
+            kind,
+            key: key[DIM_HASH_SIZE..].to_vec(),
+            slot,
+        }))
+    }
 }
 
 impl ExactRecordIterator {
@@ -283,24 +319,12 @@ impl ExactRecordIterator {
     ///
     /// Returns immediately without reading any data.
     pub fn new(snapshot: Snapshot, keyspace: &Keyspace, slots: Range<BlockSlot>) -> Self {
-        Self {
+        Self(DimensionScan::new(
             snapshot,
-            keyspace: keyspace.clone(),
-            kinds: ExactKind::ALL.into_iter(),
-            current: None,
-            // An empty range matches nothing; skip the prefix scans entirely.
-            done: slots.is_empty(),
+            keyspace,
+            ExactKind::ALL.into_iter(),
             slots,
-        }
-    }
-
-    /// Open a prefix scan for the next kind, if any is left.
-    fn open_next(&mut self) -> Option<()> {
-        let kind = self.kinds.next()?;
-        let prefix = hash_dimension(dim_prefix::EXACT, kind.as_str());
-        let iter = self.snapshot.prefix(&self.keyspace, prefix);
-        self.current = Some((kind, iter));
-        Some(())
+        ))
     }
 }
 
@@ -308,53 +332,7 @@ impl Iterator for ExactRecordIterator {
     type Item = Result<ExactRecord, IndexError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-
-        loop {
-            let Some((kind, iter)) = self.current.as_mut() else {
-                self.open_next()?;
-                continue;
-            };
-
-            let kind = *kind;
-
-            let Some(guard) = iter.next() else {
-                self.current = None;
-                continue;
-            };
-
-            let (key, value) = match guard.into_inner() {
-                Ok(pair) => pair,
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(Error::Fjall(e).into()));
-                }
-            };
-
-            if key.len() <= DIM_HASH_SIZE || value.len() < SLOT_SIZE {
-                self.done = true;
-                return Some(Err(IndexError::CodecError(format!(
-                    "malformed exact index entry of kind {kind}: \
-                     key {} bytes, value {} bytes",
-                    key.len(),
-                    value.len(),
-                ))));
-            }
-
-            let slot = decode_slot_value(&value);
-
-            if !self.slots.contains(&slot) {
-                continue;
-            }
-
-            return Some(Ok(ExactRecord {
-                kind,
-                key: key[DIM_HASH_SIZE..].to_vec(),
-                slot,
-            }));
-        }
+        self.0.next()
     }
 }
 
