@@ -378,8 +378,13 @@ impl CoreIndexStore for IndexStore {
         Ok(())
     }
 
+    /// Whole-store copy is not implemented here (#1036).
+    ///
+    /// Refusing rather than panicking is the convention the trait's newer
+    /// methods already use: a caller reaching for a capability this backend
+    /// does not carry gets an error it can handle.
     fn copy(&self, _target: &Self) -> Result<(), IndexError> {
-        todo!("copy not implemented for fjall index store (#1036)")
+        Err(IndexError::Unsupported("copy"))
     }
 
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
