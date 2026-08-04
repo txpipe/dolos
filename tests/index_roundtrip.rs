@@ -32,14 +32,12 @@ use dolos_core::{
 };
 
 const EPOCH_LEN: BlockSlot = 432_000;
-const BLOCKS_PER_EPOCH: u64 = 40;
-const TXS_PER_BLOCK: u64 = 3;
 
 /// Epochs seeded into the source store. The traversal is asserted against the
 /// first; the second exists so a per-epoch slice has something to leave out.
 const EPOCHS: [u64; 2] = [1, 2];
 
-/// The dimensions the seed writes tags for. A strict subset of
+/// The dimensions the conformance seed writes tags for. A strict subset of
 /// `archive_dimensions::ALL` on purpose: traversal must cope with dimensions
 /// that hold nothing.
 const SEEDED_DIMENSIONS: [TagDimension; 4] = [
@@ -52,6 +50,200 @@ const SEEDED_DIMENSIONS: [TagDimension; 4] = [
 /// Transaction metadata labels. `metadata` keys are u64 labels, and the store
 /// keeps the label verbatim rather than hashing it.
 const METADATA_LABELS: [u64; 3] = [674, 721, 1990];
+
+/// The shape of a seed: how many blocks of what, over how many epochs.
+///
+/// The conformance suite and the cost measurement want the same deltas at very
+/// different scales, so they differ in this struct rather than in two copies of
+/// the loop that builds them. That also means the counts a traversal has to
+/// reproduce come back from [`seed_deltas`] instead of being recomputed at the
+/// assertion.
+struct SeedSpec {
+    /// First epoch to seed; `epochs` consecutive epochs follow.
+    first_epoch: u64,
+    epochs: u64,
+    blocks_per_epoch: u64,
+    txs_per_block: u64,
+    /// Archive tags per block, dealt round-robin over `dimensions`.
+    tags_per_block: u64,
+    dimensions: &'static [TagDimension],
+    /// How many distinct logical keys a dimension's tags are drawn from. Low
+    /// makes several slots share one key hash, which is what gives
+    /// `slots_by_tag` more than one answer.
+    keys_per_dimension: u64,
+    /// Blocks per committed delta, so a delta never holds a whole epoch.
+    blocks_per_batch: u64,
+}
+
+impl SeedSpec {
+    /// How many times one block writes the same dimension.
+    fn occurrences(&self) -> u64 {
+        self.tags_per_block.div_ceil(self.dimensions.len() as u64)
+    }
+
+    /// A spec has to be able to give every tag of a block a distinct key within
+    /// its dimension, or the store collapses the duplicates and the counts stop
+    /// describing what is in it.
+    fn check(&self) {
+        let occurrences = self.occurrences();
+
+        assert!(
+            self.keys_per_dimension >= occurrences,
+            "a block writes each dimension {occurrences} times but only \
+             {} keys are available",
+            self.keys_per_dimension,
+        );
+
+        if self.dimensions.contains(&archive_dimensions::METADATA) {
+            assert!(
+                occurrences <= METADATA_LABELS.len() as u64,
+                "metadata keys are drawn from {} labels, too few for the \
+                 {occurrences} tags a block writes for that dimension",
+                METADATA_LABELS.len(),
+            );
+        }
+    }
+}
+
+/// What a seed wrote.
+///
+/// Every epoch a spec describes has the same shape, so the per-epoch counts are
+/// exactly what a one-epoch slice has to yield. [`seed_deltas`] checks that
+/// sameness rather than assuming it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SeedCounts {
+    epochs: u64,
+    tags_per_epoch: u64,
+    exacts_per_epoch: u64,
+}
+
+impl SeedCounts {
+    fn tags(&self) -> u64 {
+        self.epochs * self.tags_per_epoch
+    }
+
+    fn exacts(&self) -> u64 {
+        self.epochs * self.exacts_per_epoch
+    }
+}
+
+/// The tag one block writes at index `t`.
+///
+/// Dimensions are dealt round-robin by `block + t`. When `tags_per_block`
+/// exceeds the dimension count a block writes some dimension more than once, so
+/// the key is indexed by *which* occurrence this is rather than by `t`: two
+/// tags of the same dimension in the same block must not land on the same key,
+/// or they collapse into one entry in the store while both are still counted.
+///
+/// With `tags_per_block == dimensions.len()` there is exactly one occurrence,
+/// and the key index is simply `block % keys_per_dimension`.
+fn seed_tag(spec: &SeedSpec, block: u64, t: u64) -> Tag {
+    let width = spec.dimensions.len() as u64;
+    let dimension = spec.dimensions[((block + t) % width) as usize];
+
+    let occurrence = t / width;
+    let occurrences = spec.occurrences();
+
+    // The occurrences of one block are *consecutive* key indices starting at a
+    // multiple of `occurrences`, so the wrap never lands inside a block. It
+    // matters for `metadata`: its label is `key_index % 3`, so two occurrences
+    // straddling the wrap would draw the same label, write the same tag twice,
+    // and collapse into one entry that the count still expects twice.
+    let key_index = (block % (spec.keys_per_dimension / occurrences)) * occurrences + occurrence;
+
+    let key = if dimension == archive_dimensions::METADATA {
+        let label = METADATA_LABELS[(key_index % METADATA_LABELS.len() as u64) as usize];
+        label.to_be_bytes().to_vec()
+    } else {
+        hash32(0x03, dimension.len() as u64, key_index)
+    };
+
+    Tag::new(dimension, key)
+}
+
+/// Build every delta a spec describes and hand each to `sink`, in order.
+///
+/// Deltas are streamed rather than returned so the cost measurement can seed
+/// millions of records without holding them; callers that want them all keep
+/// them in the sink (see [`Seeded::absorb`]).
+fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(IndexDelta)) -> SeedCounts {
+    spec.check();
+
+    let mut counts = SeedCounts {
+        epochs: spec.epochs,
+        ..Default::default()
+    };
+
+    for epoch in spec.first_epoch..(spec.first_epoch + spec.epochs) {
+        let mut tags_this_epoch = 0;
+        let mut exacts_this_epoch = 0;
+        let mut block = 0;
+
+        while block < spec.blocks_per_epoch {
+            let batch_end = std::cmp::min(block + spec.blocks_per_batch, spec.blocks_per_epoch);
+            let mut archive = Vec::new();
+
+            for b in block..batch_end {
+                let slot = epoch * EPOCH_LEN + b * (EPOCH_LEN / spec.blocks_per_epoch);
+
+                let tx_hashes: Vec<Vec<u8>> = (0..spec.txs_per_block)
+                    .map(|tx| hash32(0x02, slot, tx))
+                    .collect();
+
+                let tags: Vec<Tag> = (0..spec.tags_per_block)
+                    .map(|t| seed_tag(spec, b, t))
+                    .collect();
+
+                tags_this_epoch += tags.len() as u64;
+                // A block hash and a block number, plus one entry per tx.
+                exacts_this_epoch += 2 + tx_hashes.len() as u64;
+
+                archive.push(ArchiveIndexDelta {
+                    slot,
+                    block_hash: hash32(0x01, epoch, b),
+                    block_number: Some(epoch * 1_000_000 + b),
+                    tx_hashes,
+                    tags,
+                });
+            }
+
+            let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
+            sink(IndexDelta {
+                cursor,
+                utxo: Default::default(),
+                archive,
+            });
+
+            block = batch_end;
+        }
+
+        if epoch == spec.first_epoch {
+            counts.tags_per_epoch = tags_this_epoch;
+            counts.exacts_per_epoch = exacts_this_epoch;
+        } else {
+            assert_eq!(
+                (tags_this_epoch, exacts_this_epoch),
+                (counts.tags_per_epoch, counts.exacts_per_epoch),
+                "every epoch a spec describes must have the same shape, \
+                 otherwise the per-epoch counts do not describe a slice"
+            );
+        }
+    }
+
+    counts
+}
+
+/// The conformance suite's seed: small, with several slots per key hash.
+const CONFORMANCE: SeedSpec = SeedSpec {
+    first_epoch: EPOCHS[0],
+    epochs: EPOCHS.len() as u64,
+    blocks_per_epoch: 40,
+    txs_per_block: 3,
+    tags_per_block: SEEDED_DIMENSIONS.len() as u64,
+    dimensions: &SEEDED_DIMENSIONS,
+    keys_per_dimension: 5,
+    blocks_per_batch: 40,
+};
 
 /// One index backend under test.
 ///
@@ -75,14 +267,13 @@ impl Backend for Fjall {
     fn open() -> (Self::Store, Self::Guard) {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
 
+        // Only the fields this suite cares about; the rest are the backend's
+        // own defaults rather than a re-listing of them that can go stale.
         let config = FjallIndexConfig {
-            path: None,
             cache: Some(16),
-            max_journal_size: None,
             flush_on_commit: Some(false),
-            l0_threshold: None,
             worker_threads: Some(1),
-            memtable_size_mb: None,
+            ..Default::default()
         };
 
         let store = dolos_fjall::IndexStore::open(dir.path(), &config)
@@ -171,77 +362,62 @@ impl Seeded {
     ) -> impl Iterator<Item = &'a (TagDimension, Vec<u8>, BlockSlot)> + 'a {
         self.tags.iter().filter(|(_, _, slot)| slots.contains(slot))
     }
+
+    /// Record the logical form of everything a delta writes.
+    ///
+    /// The seeder streams deltas rather than describing what it wrote in a
+    /// second structure, so this reads it back off them — one definition of
+    /// what a delta contains instead of two that can disagree.
+    fn absorb(&mut self, delta: &IndexDelta) {
+        for block in &delta.archive {
+            self.blocks.push((
+                block.block_hash.clone(),
+                block.block_number.unwrap(),
+                block.slot,
+            ));
+
+            for hash in &block.tx_hashes {
+                self.txs.push((hash.clone(), block.slot));
+            }
+
+            for tag in &block.tags {
+                self.tags.push((tag.dimension, tag.key.clone(), block.slot));
+            }
+        }
+    }
 }
 
-/// The deltas the seed applies, built independently of any store so two
+/// The conformance seed's deltas, built independently of any store so two
 /// backends can be handed byte-identical input.
-fn seed_deltas() -> (Vec<IndexDelta>, Seeded) {
+fn conformance_deltas() -> (Vec<IndexDelta>, Seeded) {
     let mut seeded = Seeded::default();
     let mut deltas = Vec::new();
 
-    for epoch in EPOCHS {
-        let mut archive = Vec::new();
-
-        for block in 0..BLOCKS_PER_EPOCH {
-            let slot = epoch * EPOCH_LEN + block * 20;
-            let block_hash = hash32(0x01, epoch, block);
-            let block_number = epoch * 1_000 + block;
-
-            let mut tx_hashes = Vec::new();
-            for tx in 0..TXS_PER_BLOCK {
-                let tx_hash = hash32(0x02, epoch * 1_000 + block, tx);
-                seeded.txs.push((tx_hash.clone(), slot));
-                tx_hashes.push(tx_hash);
-            }
-
-            let mut tags = Vec::new();
-            for dimension in SEEDED_DIMENSIONS {
-                let key = if dimension == archive_dimensions::METADATA {
-                    let label = METADATA_LABELS[(block % METADATA_LABELS.len() as u64) as usize];
-                    label.to_be_bytes().to_vec()
-                } else {
-                    // A handful of distinct keys per dimension, so several
-                    // slots land under the same key hash.
-                    hash32(0x03, dimension.len() as u64, block % 5)
-                };
-
-                seeded.tags.push((dimension, key.clone(), slot));
-                tags.push(Tag::new(dimension, key));
-            }
-
-            seeded.blocks.push((block_hash.clone(), block_number, slot));
-
-            archive.push(ArchiveIndexDelta {
-                slot,
-                block_hash,
-                block_number: Some(block_number),
-                tx_hashes,
-                tags,
-            });
-        }
-
-        let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-        deltas.push(IndexDelta {
-            cursor,
-            utxo: Default::default(),
-            archive,
-        });
-    }
+    seed_deltas(&CONFORMANCE, &mut |delta| {
+        seeded.absorb(&delta);
+        deltas.push(delta);
+    });
 
     (deltas, seeded)
+}
+
+/// Apply one delta through the regular write path.
+fn apply<S: CoreIndexStore>(store: &S, delta: &IndexDelta) {
+    let writer = store.start_writer().expect("start_writer failed");
+    writer.apply(delta).expect("apply failed");
+    writer.commit().expect("commit failed");
 }
 
 /// Populate a store through the regular delta path, the same one the sync
 /// pipeline uses. Nothing here knows about pre-hashed records: the export side
 /// has to cope with whatever normal indexing produced.
 fn seed<S: CoreIndexStore>(store: &S) -> Seeded {
-    let (deltas, seeded) = seed_deltas();
+    let mut seeded = Seeded::default();
 
-    for delta in &deltas {
-        let writer = store.start_writer().expect("start_writer failed");
-        writer.apply(delta).expect("apply failed");
-        writer.commit().expect("commit failed");
-    }
+    seed_deltas(&CONFORMANCE, &mut |delta| {
+        seeded.absorb(&delta);
+        apply(store, &delta);
+    });
 
     seeded
 }
@@ -574,14 +750,12 @@ fn tag_key_hashes_are_xxh3_except_for_metadata_labels<B: Backend>() {
 fn undo_removes_exactly_what_apply_added<B: Backend>() {
     let (store, _guard) = B::open();
 
-    let (deltas, _) = seed_deltas();
+    let (deltas, _) = conformance_deltas();
     let (first, second) = deltas.split_at(1);
 
     // The first epoch stays; the second is applied and then rolled back.
     for delta in first {
-        let writer = store.start_writer().expect("start_writer failed");
-        writer.apply(delta).expect("apply failed");
-        writer.commit().expect("commit failed");
+        apply(&store, delta);
     }
 
     let kept = epoch_slots(EPOCHS[0]);
@@ -589,9 +763,7 @@ fn undo_removes_exactly_what_apply_added<B: Backend>() {
     let before_exacts = collect_exacts(&store, kept.clone());
 
     for delta in second {
-        let writer = store.start_writer().expect("start_writer failed");
-        writer.apply(delta).expect("apply failed");
-        writer.commit().expect("commit failed");
+        apply(&store, delta);
     }
 
     let rolled_back = epoch_slots(EPOCHS[1]);
@@ -729,12 +901,6 @@ fn records_cross_between_backends() {
     }
 }
 
-/// Mainnet-shaped epoch: ~5 days at 20s/slot.
-const COST_BLOCKS_PER_EPOCH: u64 = 21_600;
-/// Transactions per block.
-const COST_TXS_PER_BLOCK: u64 = 3;
-/// Archive tags per transaction, across the dimension set.
-const COST_TAGS_PER_TX: u64 = 10;
 /// Epochs of history to seed behind the one being sliced. Override with
 /// `DOLOS_INDEX_COST_EPOCHS` to check how the cost scales with store depth.
 const COST_EPOCHS_DEFAULT: u64 = 8;
@@ -745,6 +911,24 @@ fn cost_epochs() -> u64 {
         .and_then(|v| v.parse().ok())
         .unwrap_or(COST_EPOCHS_DEFAULT)
         .max(1)
+}
+
+/// The cost measurement's seed: mainnet-shaped epochs (~5 days at 20s/slot),
+/// every dimension populated, keys spread widely enough that the store is not
+/// artificially shallow.
+fn cost_spec(epochs: u64) -> SeedSpec {
+    SeedSpec {
+        first_epoch: 0,
+        epochs,
+        blocks_per_epoch: 21_600,
+        txs_per_block: 3,
+        // 3 txs x 10 tags each, the shape a busy block indexes to.
+        tags_per_block: 30,
+        dimensions: &archive_dimensions::ALL,
+        keys_per_dimension: 4_096,
+        // Commit in chunks so a delta never holds a whole epoch.
+        blocks_per_batch: 500,
+    }
 }
 
 /// Measure the cost of slicing one epoch out of a populated index store.
@@ -772,63 +956,13 @@ fn measure_one_epoch_iteration_cost() {
     let (store, _guard) = Fjall::open();
 
     let epochs = cost_epochs();
-    let tags_per_epoch = COST_BLOCKS_PER_EPOCH * COST_TXS_PER_BLOCK * COST_TAGS_PER_TX;
-    let exacts_per_epoch = COST_BLOCKS_PER_EPOCH * (2 + COST_TXS_PER_BLOCK);
+    let spec = cost_spec(epochs);
 
     let started = Instant::now();
 
-    for epoch in 0..epochs {
-        // Commit in block-sized batches so the delta never holds an epoch.
-        for chunk_start in (0..COST_BLOCKS_PER_EPOCH).step_by(500) {
-            let chunk_end = std::cmp::min(chunk_start + 500, COST_BLOCKS_PER_EPOCH);
-            let mut archive = Vec::new();
-
-            for block in chunk_start..chunk_end {
-                let slot = epoch * EPOCH_LEN + block * 20;
-
-                let mut tx_hashes = Vec::new();
-                let mut tags = Vec::new();
-
-                for tx in 0..COST_TXS_PER_BLOCK {
-                    tx_hashes.push(hash32(0x02, slot, tx));
-
-                    for t in 0..COST_TAGS_PER_TX {
-                        // Offset by tx so all 12 dimensions get seeded; a fixed
-                        // starting point would leave METADATA unmeasured.
-                        let dimension = archive_dimensions::ALL
-                            [((tx + t) as usize) % archive_dimensions::ALL.len()];
-
-                        let key = if dimension == archive_dimensions::METADATA {
-                            (t % 8).to_be_bytes().to_vec()
-                        } else {
-                            hash32(0x03, slot.wrapping_mul(31).wrapping_add(tx), t)
-                        };
-
-                        tags.push(Tag::new(dimension, key));
-                    }
-                }
-
-                archive.push(ArchiveIndexDelta {
-                    slot,
-                    block_hash: hash32(0x01, slot, 0),
-                    block_number: Some(epoch * 1_000_000 + block),
-                    tx_hashes,
-                    tags,
-                });
-            }
-
-            let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-            let delta = IndexDelta {
-                cursor,
-                utxo: Default::default(),
-                archive,
-            };
-
-            let writer = store.start_writer().expect("start_writer failed");
-            writer.apply(&delta).expect("apply failed");
-            writer.commit().expect("commit failed");
-        }
-    }
+    // Streamed, not collected: at this scale the deltas do not fit beside the
+    // store they are being written into.
+    let written = seed_deltas(&spec, &mut |delta| apply(&store, &delta));
 
     let seeding = started.elapsed();
 
@@ -844,8 +978,8 @@ fn measure_one_epoch_iteration_cost() {
     let exacts = collect_exacts(&store, slots.clone());
     let exact_elapsed = started.elapsed();
 
-    let total_tags = tags_per_epoch * epochs;
-    let total_exacts = exacts_per_epoch * epochs;
+    let total_tags = written.tags();
+    let total_exacts = written.exacts();
 
     println!("--- one-epoch index iteration cost ---");
     println!(
@@ -871,6 +1005,6 @@ fn measure_one_epoch_iteration_cost() {
         tag_elapsed + exact_elapsed
     );
 
-    assert_eq!(tags.len() as u64, tags_per_epoch);
-    assert_eq!(exacts.len() as u64, exacts_per_epoch);
+    assert_eq!(tags.len() as u64, written.tags_per_epoch);
+    assert_eq!(exacts.len() as u64, written.exacts_per_epoch);
 }
