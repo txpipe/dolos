@@ -130,6 +130,32 @@ pub const KEY_HASH_SIZE: usize = 8;
 /// valid way to reconstruct them for every dimension.
 pub type KeyHash = [u8; KEY_HASH_SIZE];
 
+/// The one dimension whose logical key is kept verbatim instead of hashed.
+///
+/// Its keys are already `u64` labels, so hashing them would only lose the
+/// label. See [`KeyHash`].
+pub const VERBATIM_KEY_DIMENSION: TagDimension = "metadata";
+
+/// The stored key form of a logical tag key: the rule [`KeyHash`] describes,
+/// as code.
+///
+/// Every backend has to agree on these bytes exactly. A record crossing from
+/// one store to another carries the stored form and nothing else — the logical
+/// key is not recoverable — so a backend that derived it differently would not
+/// fail to restore, it would restore records its own queries then miss.
+///
+/// `None` means the key is not a valid one for the dimension, which today can
+/// only be a [`VERBATIM_KEY_DIMENSION`] key that is not eight bytes wide. The
+/// stores decline such a tag rather than storing something they could never
+/// look up again.
+pub fn key_hash(dimension: &str, key: &[u8]) -> Option<KeyHash> {
+    if dimension == VERBATIM_KEY_DIMENSION {
+        return key.try_into().ok();
+    }
+
+    Some(xxhash_rust::xxh3::xxh3_64(key).to_be_bytes())
+}
+
 /// One archive tag entry, carrying the stored key hash instead of the logical
 /// key.
 ///

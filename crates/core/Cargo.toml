@@ -9,6 +9,7 @@ thiserror.workspace = true
 trait-variant.workspace = true
 itertools.workspace = true
 tracing.workspace = true
+xxhash-rust.workspace = true
 opentelemetry.workspace = true
 tracing-opentelemetry.workspace = true
 futures-core.workspace = true
