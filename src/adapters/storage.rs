@@ -975,7 +975,10 @@ impl CoreIndexWriter for IndexWriterBackend {
         }
     }
 
-    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
         match self {
             Self::Redb(w) => w.append_prehashed(records),
             Self::Fjall(w) => w.append_prehashed(records),
@@ -1386,7 +1389,7 @@ mod tests {
         indexes
             .start_writer()
             .expect("start_writer failed")
-            .append_prehashed(&[])
+            .append_prehashed([])
             .expect("append_prehashed must be supported");
     }
 

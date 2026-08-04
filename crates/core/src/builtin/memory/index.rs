@@ -197,13 +197,16 @@ impl IndexWriter for MemoryIndexWriter {
         Ok(())
     }
 
-    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
 
         for record in records {
             match record {
                 IndexRecord::Tag(tag) => ops.push(Op::InsertArchiveTag((
-                    tag.dimension.clone(),
+                    tag.dimension,
                     tag.key_hash,
                     tag.slot,
                 ))),
@@ -220,7 +223,7 @@ impl IndexWriter for MemoryIndexWriter {
                         )));
                     }
 
-                    ops.push(Op::InsertExact(exact.kind, exact.key.clone(), exact.slot));
+                    ops.push(Op::InsertExact(exact.kind, exact.key, exact.slot));
                 }
             }
         }

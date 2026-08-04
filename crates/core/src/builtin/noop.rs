@@ -36,7 +36,10 @@ impl IndexWriter for NoOpIndexWriter {
     /// report success: `Ok` here would let a snapshot restore complete
     /// "cleanly" having written nothing. See
     /// [`NoOpIndexStore::iter_archive_tags`] for the read-side twin.
-    fn append_prehashed(&self, _records: &[IndexRecord]) -> Result<(), IndexError> {
+    fn append_prehashed(
+        &self,
+        _records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
         Err(IndexError::Unsupported("append_prehashed"))
     }
 
