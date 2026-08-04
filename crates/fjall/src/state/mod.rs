@@ -313,15 +313,18 @@ impl CoreStateStore for StateStore {
             .map_err(StateError::from)
     }
 
+    /// Multi-value namespaces have no encoding in this store: its entity
+    /// keyspace is one value per key, with no multimap to walk (#1036).
+    ///
+    /// Refusing is the convention the trait's newer methods already use, and
+    /// what the builtin memory store answers. A panic here would take down a
+    /// caller that has an error path anyway.
     fn iter_entity_values(
         &self,
         _ns: Namespace,
         _key: impl AsRef<[u8]>,
     ) -> Result<Self::EntityValueIter, StateError> {
-        // Multimap not supported - panic if called
-        unimplemented!(
-            "iter_entity_values is not supported in fjall state store (no multimap support) (#1036)"
-        )
+        Err(StateError::Unsupported("iter_entity_values"))
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
