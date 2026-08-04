@@ -38,9 +38,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallIndexConfig, BlockSlot, ChainPoint, ExactKind, IndexDelta, IndexError,
+    config::FjallIndexConfig, key_hash, BlockSlot, ChainPoint, ExactKind, IndexDelta, IndexError,
     IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension,
-    UtxoSet,
+    UtxoSet, KEY_HASH_SIZE,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -430,28 +430,23 @@ impl CoreIndexStore for IndexStore {
         start: BlockSlot,
         end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
+        // The stored key form is the write path's, not this method's: the same
+        // `key_hash` an insert used, so a query cannot look under bytes an
+        // insert would not have written. `None` is a key with no valid stored
+        // form — today only a `metadata` label that is not eight bytes wide —
+        // which is a malformed query rather than an empty result.
+        let Some(hash) = key_hash(dimension, key) else {
+            return Err(IndexError::CodecError(format!(
+                "{dimension} key must be {KEY_HASH_SIZE} bytes, got {}",
+                key.len(),
+            )));
+        };
+
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
 
-        // For metadata, key is already the u64 encoded as bytes
-        if dimension == "metadata" {
-            let metadata =
-                u64::from_be_bytes(key.try_into().map_err(|_| {
-                    IndexError::CodecError("metadata key must be 8 bytes".to_string())
-                })?);
-            return SlotIter::from_hash(
-                &snapshot,
-                &self.block_tags,
-                dimension,
-                metadata,
-                start,
-                end,
-            )
-            .map_err(IndexError::from);
-        }
-
         // Pass dimension string directly - chain-agnostic
-        SlotIter::new(&snapshot, &self.block_tags, dimension, key, start, end)
+        SlotIter::new(&snapshot, &self.block_tags, dimension, hash, start, end)
             .map_err(IndexError::from)
     }
 

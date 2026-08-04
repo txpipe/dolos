@@ -8,23 +8,27 @@
 //! ## Key Format
 //!
 //! ```text
-//! Key:   [dim_hash:8][xxh3(tag_key):8][slot:8]
+//! Key:   [dim_hash:8][key_hash:8][slot:8]
 //! Value: (empty)
 //! ```
 //!
-//! The `dim_hash` is computed as `xxh3("block:" + dimension)`.
+//! The `dim_hash` is computed as `xxh3("block:" + dimension)`. The `key_hash`
+//! is [`dolos_core::key_hash`] — this module does not decide it, because two
+//! backends that decided it differently would exchange records neither could
+//! then look up.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, KeyHash, Tag, TagDimension, TagRecord,
+    key_hash, ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, KeyHash, Tag, TagDimension,
+    TagRecord,
 };
 use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
 use crate::index::scan::{DimensionScan, ScanTarget};
 use crate::keys::{
-    decode_slot, dim_prefix, hash_dimension, hash_key, DIM_HASH_SIZE, HASH_KEY_SIZE, SLOT_SIZE,
+    decode_slot, dim_prefix, hash_dimension, DIM_HASH_SIZE, HASH_KEY_SIZE, SLOT_SIZE,
 };
 use crate::Error;
 
@@ -32,39 +36,42 @@ use crate::Error;
 // Key Encoding
 // ============================================================================
 
-/// Fixed size of block tag key: dim_hash(8) + tag_hash(8) + slot(8) = 24 bytes
+/// Fixed size of block tag key: dim_hash(8) + key_hash(8) + slot(8) = 24 bytes
 const BLOCK_TAG_KEY_SIZE: usize = DIM_HASH_SIZE + HASH_KEY_SIZE + SLOT_SIZE;
 
-/// Build a block tag key: `[dim_hash:8][xxh3(tag_key):8][slot:8]`
-fn build_block_tag_key(dimension: &str, tag_key: &[u8], slot: u64) -> [u8; BLOCK_TAG_KEY_SIZE] {
-    let tag_hash = hash_key(tag_key);
-    build_block_tag_key_hashed(dimension, tag_hash, slot)
-}
-
-/// Build a block tag key with pre-computed tag hash:
-/// `[dim_hash:8][tag_hash:8][slot:8]`
-fn build_block_tag_key_hashed(
-    dimension: &str,
-    tag_hash: u64,
+/// Build a block tag key from an already-hashed dimension:
+/// `[dim_hash:8][key_hash:8][slot:8]`
+///
+/// The one place this layout is written. Callers that hold the dimension
+/// *string* go through [`build_block_tag_key`]; callers restoring a batch of
+/// records hash the dimension once per group and come here directly.
+fn build_block_tag_key_for_dim(
+    dim_hash: [u8; DIM_HASH_SIZE],
+    key_hash: KeyHash,
     slot: u64,
 ) -> [u8; BLOCK_TAG_KEY_SIZE] {
-    let dim_hash = hash_dimension(dim_prefix::BLOCK, dimension);
     let mut key = [0u8; BLOCK_TAG_KEY_SIZE];
     key[..DIM_HASH_SIZE].copy_from_slice(&dim_hash);
-    key[DIM_HASH_SIZE..DIM_HASH_SIZE + HASH_KEY_SIZE].copy_from_slice(&tag_hash.to_be_bytes());
+    key[DIM_HASH_SIZE..DIM_HASH_SIZE + HASH_KEY_SIZE].copy_from_slice(&key_hash);
     key[DIM_HASH_SIZE + HASH_KEY_SIZE..].copy_from_slice(&slot.to_be_bytes());
     key
 }
 
-/// Build prefix for block tag queries: `[dim_hash:8][tag_hash:8]`
-fn build_block_tag_prefix_hashed(
+/// Build a block tag key: `[dim_hash:8][key_hash:8][slot:8]`
+fn build_block_tag_key(dimension: &str, key_hash: KeyHash, slot: u64) -> [u8; BLOCK_TAG_KEY_SIZE] {
+    let dim_hash = hash_dimension(dim_prefix::BLOCK, dimension);
+    build_block_tag_key_for_dim(dim_hash, key_hash, slot)
+}
+
+/// Build prefix for block tag queries: `[dim_hash:8][key_hash:8]`
+fn build_block_tag_prefix(
     dimension: &str,
-    tag_hash: u64,
+    key_hash: KeyHash,
 ) -> [u8; DIM_HASH_SIZE + HASH_KEY_SIZE] {
     let dim_hash = hash_dimension(dim_prefix::BLOCK, dimension);
     let mut prefix = [0u8; DIM_HASH_SIZE + HASH_KEY_SIZE];
     prefix[..DIM_HASH_SIZE].copy_from_slice(&dim_hash);
-    prefix[DIM_HASH_SIZE..].copy_from_slice(&tag_hash.to_be_bytes());
+    prefix[DIM_HASH_SIZE..].copy_from_slice(&key_hash);
     prefix
 }
 
@@ -87,86 +94,34 @@ fn decode_block_tag_key_hash(key: &[u8]) -> KeyHash {
 // Operations
 // ============================================================================
 
-/// Insert a block tag entry (multimap style)
-fn insert_block_tag(
-    batch: &mut OwnedWriteBatch,
-    keyspace: &Keyspace,
-    dimension: &str,
-    data: &[u8],
-    slot: BlockSlot,
-) {
-    let key = build_block_tag_key(dimension, data, slot);
-    batch.insert(keyspace, key, []);
-}
-
-/// Insert a block tag entry with pre-hashed key
-fn insert_block_tag_hashed(
-    batch: &mut OwnedWriteBatch,
-    keyspace: &Keyspace,
-    dimension: &str,
-    hash: u64,
-    slot: BlockSlot,
-) {
-    let key = build_block_tag_key_hashed(dimension, hash, slot);
-    batch.insert(keyspace, key, []);
-}
-
-/// Remove a block tag entry (multimap style)
-fn remove_block_tag(
-    batch: &mut OwnedWriteBatch,
-    keyspace: &Keyspace,
-    dimension: &str,
-    data: &[u8],
-    slot: BlockSlot,
-) {
-    let key = build_block_tag_key(dimension, data, slot);
-    batch.remove(keyspace, key);
-}
-
-/// Remove a block tag entry with pre-hashed key
-fn remove_block_tag_hashed(
-    batch: &mut OwnedWriteBatch,
-    keyspace: &Keyspace,
-    dimension: &str,
-    hash: u64,
-    slot: BlockSlot,
-) {
-    let key = build_block_tag_key_hashed(dimension, hash, slot);
-    batch.remove(keyspace, key);
-}
-
 /// Insert a tag into the archive-tags keyspace.
 ///
-/// For "metadata" dimension, the key is already the u64 hash value (8 bytes).
-/// For all other dimensions, the key is hashed internally.
+/// The stored key form comes from [`dolos_core::key_hash`], which is also
+/// where the `metadata` exception lives — this module knows only that a tag key
+/// has a stored form, not how it is derived.
+///
+/// A key with no valid stored form is dropped rather than stored: `key_hash`
+/// declines it precisely because nothing could look it up again.
 fn insert_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot: BlockSlot) {
-    // Metadata is special - the key is already the u64 hash value
-    if tag.dimension == "metadata" {
-        if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
-            let hash = u64::from_be_bytes(hash_bytes);
-            insert_block_tag_hashed(batch, keyspace, tag.dimension, hash, slot);
-        }
+    let Some(hash) = key_hash(tag.dimension, &tag.key) else {
         return;
-    }
+    };
 
-    insert_block_tag(batch, keyspace, tag.dimension, &tag.key, slot);
+    let key = build_block_tag_key(tag.dimension, hash, slot);
+    batch.insert(keyspace, key, []);
 }
 
 /// Remove a tag from the archive-tags keyspace.
 ///
-/// For "metadata" dimension, the key is already the u64 hash value (8 bytes).
-/// For all other dimensions, the key is hashed internally.
+/// The exact inverse of [`insert_tag`], including which keys it declines: a tag
+/// that was never stored has nothing to remove.
 fn remove_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot: BlockSlot) {
-    // Metadata is special - the key is already the u64 hash value
-    if tag.dimension == "metadata" {
-        if let Ok(hash_bytes) = tag.key.as_slice().try_into() {
-            let hash = u64::from_be_bytes(hash_bytes);
-            remove_block_tag_hashed(batch, keyspace, tag.dimension, hash, slot);
-        }
+    let Some(hash) = key_hash(tag.dimension, &tag.key) else {
         return;
-    }
+    };
 
-    remove_block_tag(batch, keyspace, tag.dimension, &tag.key, slot);
+    let key = build_block_tag_key(tag.dimension, hash, slot);
+    batch.remove(keyspace, key);
 }
 
 /// Insert a tag entry from a record that already carries its stored key hash.
@@ -174,8 +129,8 @@ fn remove_tag(batch: &mut OwnedWriteBatch, keyspace: &Keyspace, tag: &Tag, slot:
 /// This is the write mirror of [`TagRecordIterator`]: the 8 hash bytes go in
 /// verbatim, so a record read out of one store lands byte-identical in another.
 /// It is deliberately *not* routed through [`insert_tag`] — that function
-/// hashes (and special-cases `metadata`) because it starts from a logical key,
-/// which a restore does not have.
+/// derives the stored form from a logical key, which a restore does not have
+/// and cannot recover.
 ///
 /// `dim_hash` is `hash_dimension(dim_prefix::BLOCK, record.dimension())`,
 /// passed in rather than computed here: records arrive grouped by dimension,
@@ -187,10 +142,7 @@ pub fn insert_prehashed(
     record: &TagRecord,
     dim_hash: [u8; DIM_HASH_SIZE],
 ) {
-    let mut key = [0u8; BLOCK_TAG_KEY_SIZE];
-    key[..DIM_HASH_SIZE].copy_from_slice(&dim_hash);
-    key[DIM_HASH_SIZE..DIM_HASH_SIZE + HASH_KEY_SIZE].copy_from_slice(&record.key_hash);
-    key[DIM_HASH_SIZE + HASH_KEY_SIZE..].copy_from_slice(&record.slot.to_be_bytes());
+    let key = build_block_tag_key_for_dim(dim_hash, record.key_hash, record.slot);
     batch.insert(keyspace, key, []);
 }
 
@@ -260,31 +212,19 @@ pub struct SlotIterator {
 impl SlotIterator {
     /// Create a new slot iterator from an archive-tags keyspace prefix scan.
     ///
-    /// The dimension string is passed directly (chain-agnostic).
+    /// The dimension string is passed directly (chain-agnostic), and the key
+    /// arrives already in its stored form: the caller derives it with
+    /// [`dolos_core::key_hash`], the same function the write path uses, so a
+    /// query cannot look under bytes an insert would not have written.
     pub fn new<R: Readable>(
         readable: &R,
         keyspace: &Keyspace,
         dimension: &str,
-        data: &[u8],
+        key_hash: KeyHash,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<Self, Error> {
-        let hash = hash_key(data);
-        Self::from_hash(readable, keyspace, dimension, hash, start_slot, end_slot)
-    }
-
-    /// Create from a pre-computed hash (for metadata labels).
-    ///
-    /// The dimension string is passed directly (chain-agnostic).
-    pub fn from_hash<R: Readable>(
-        readable: &R,
-        keyspace: &Keyspace,
-        dimension: &str,
-        hash: u64,
-        start_slot: BlockSlot,
-        end_slot: BlockSlot,
-    ) -> Result<Self, Error> {
-        let prefix = build_block_tag_prefix_hashed(dimension, hash);
+        let prefix = build_block_tag_prefix(dimension, key_hash);
         let mut slots = Vec::new();
 
         // Using Readable::prefix() enables snapshot-based iteration
@@ -456,11 +396,17 @@ impl std::iter::FusedIterator for TagRecordIterator {}
 mod tests {
     use super::*;
 
+    /// The stored form of a logical key, for tests that start from one.
+    /// Production code never unwraps this — see [`insert_tag`].
+    fn stored(dimension: &str, key: &[u8]) -> KeyHash {
+        key_hash(dimension, key).expect("test keys are valid for their dimension")
+    }
+
     #[test]
     fn test_block_tag_key_roundtrip() {
         let tag_key = b"some_address_bytes";
         let slot = 141868807u64;
-        let key = build_block_tag_key("address", tag_key, slot);
+        let key = build_block_tag_key("address", stored("address", tag_key), slot);
 
         assert_eq!(key.len(), BLOCK_TAG_KEY_SIZE);
 
@@ -470,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_block_tag_ordering() {
-        let tag_key = b"test_address";
+        let tag_key = stored("address", b"test_address");
         let key1 = build_block_tag_key("address", tag_key, 100);
         let key2 = build_block_tag_key("address", tag_key, 200);
         let key3 = build_block_tag_key("address", tag_key, 50);
@@ -482,10 +428,9 @@ mod tests {
 
     #[test]
     fn test_block_tag_prefix() {
-        let tag_key = b"test_address";
+        let tag_key = stored("address", b"test_address");
         let key = build_block_tag_key("address", tag_key, 12345);
-        let tag_hash = hash_key(tag_key);
-        let prefix = build_block_tag_prefix_hashed("address", tag_hash);
+        let prefix = build_block_tag_prefix("address", tag_key);
 
         // Key should start with prefix
         assert!(key.starts_with(&prefix));
@@ -495,7 +440,7 @@ mod tests {
     fn test_utxo_block_separation() {
         // UTxO and block tags with same dimension name should have different prefixes
         let utxo_dim_hash = hash_dimension(dim_prefix::UTXO, "address");
-        let block_key = build_block_tag_key("address", b"addr", 0);
+        let block_key = build_block_tag_key("address", stored("address", b"addr"), 0);
 
         // dim_hash for utxo vs block should be different
         assert_ne!(&utxo_dim_hash, &block_key[..DIM_HASH_SIZE]);
@@ -504,7 +449,11 @@ mod tests {
     #[test]
     fn test_any_dimension_works() {
         // Any dimension string should work (chain-agnostic)
-        let key = build_block_tag_key("another_dimension", b"data", 12345);
+        let key = build_block_tag_key(
+            "another_dimension",
+            stored("another_dimension", b"data"),
+            12345,
+        );
 
         // Key should be valid size
         assert_eq!(key.len(), BLOCK_TAG_KEY_SIZE);
@@ -515,43 +464,51 @@ mod tests {
     #[test]
     fn test_prehashed_key_matches_written_key() {
         let slot = 42u64;
-        let written = build_block_tag_key("address", b"some_address_bytes", slot);
+        let written =
+            build_block_tag_key("address", stored("address", b"some_address_bytes"), slot);
 
         let record = TagRecord::new("address", decode_block_tag_key_hash(&written), slot);
-        let rebuilt = build_block_tag_key_hashed(
-            record.dimension(),
-            u64::from_be_bytes(record.key_hash),
-            record.slot,
-        );
+        let rebuilt = build_block_tag_key(record.dimension(), record.key_hash, record.slot);
 
         assert_eq!(written, rebuilt);
     }
 
     /// `metadata` is the one dimension whose stored key bytes are not a hash:
-    /// the logical key is already a u64 label and `insert_tag` writes it
-    /// verbatim. A record must carry those bytes through unchanged rather than
+    /// the logical key is already a u64 label and the store keeps it verbatim.
+    /// A record must carry those bytes through unchanged rather than
     /// re-deriving them.
+    ///
+    /// This module no longer decides that — [`dolos_core::key_hash`] does — so
+    /// what is pinned here is that the decision reaches the on-disk key.
     #[test]
     fn test_prehashed_key_carries_metadata_label_verbatim() {
         let label = 674u64;
         let slot = 42u64;
-        let written = build_block_tag_key_hashed("metadata", label, slot);
+        let stored_label = stored("metadata", &label.to_be_bytes());
+        let written = build_block_tag_key("metadata", stored_label, slot);
 
-        let stored = decode_block_tag_key_hash(&written);
-        assert_eq!(u64::from_be_bytes(stored), label);
+        assert_eq!(u64::from_be_bytes(stored_label), label);
         assert_ne!(
-            u64::from_be_bytes(stored),
-            hash_key(&label.to_be_bytes()),
+            stored_label,
+            xxhash_rust::xxh3::xxh3_64(&label.to_be_bytes()).to_be_bytes(),
             "the metadata label is stored raw, not hashed"
         );
 
-        let record = TagRecord::new("metadata", stored, slot);
-        let rebuilt = build_block_tag_key_hashed(
-            record.dimension(),
-            u64::from_be_bytes(record.key_hash),
-            record.slot,
-        );
+        let record = TagRecord::new("metadata", decode_block_tag_key_hash(&written), slot);
+        let rebuilt = build_block_tag_key(record.dimension(), record.key_hash, record.slot);
 
         assert_eq!(written, rebuilt);
+    }
+
+    /// A `metadata` key that is not eight bytes has no stored form: it would
+    /// land under bytes no query could reconstruct. Both write paths drop it
+    /// rather than store it.
+    #[test]
+    fn test_malformed_metadata_key_has_no_stored_form() {
+        assert!(key_hash("metadata", b"seven!!").is_none());
+        assert!(key_hash("metadata", &674u64.to_be_bytes()).is_some());
+
+        // Every other dimension takes a key of any width.
+        assert!(key_hash("address", b"seven!!").is_some());
     }
 }

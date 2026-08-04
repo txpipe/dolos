@@ -11,9 +11,9 @@ use std::{
 };
 
 use dolos_core::{
-    config::RedbIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint, EmptyExactIter,
+    config::RedbIndexConfig, key_hash, ArchiveIndexDelta, BlockSlot, ChainPoint, EmptyExactIter,
     EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef, UtxoSet,
+    IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef, UtxoSet, KEY_HASH_SIZE,
 };
 use redb::{
     Database, Durability, MultimapTableDefinition, ReadTransaction, ReadableDatabase,
@@ -69,7 +69,10 @@ pub mod archive_dimensions {
     pub const ACCOUNT_CERTS: &str = "account_certs";
     pub const POOL_CERTS: &str = "pool_certs";
     pub const ACCOUNT_WITHDRAWALS: &str = "account_withdrawals";
-    pub const METADATA: &str = "metadata";
+    /// Sourced from core: this is the one dimension whose logical key is kept
+    /// verbatim instead of hashed, and that fact belongs to the stored-key
+    /// rule rather than to this backend.
+    pub const METADATA: &str = dolos_core::VERBATIM_KEY_DIMENSION;
     pub const SCRIPT: &str = "script";
 }
 
@@ -440,23 +443,36 @@ fn undo_archive_delta(wx: &WriteTransaction, block: &ArchiveIndexDelta) -> Resul
     Ok(())
 }
 
+/// The stored form of a tag key, as the `u64` this backend's bucketed keys
+/// take.
+///
+/// The derivation is [`dolos_core::key_hash`]'s, not this module's — including
+/// the `metadata` exception, whose logical key is already a `u64` label and is
+/// kept verbatim rather than hashed. A backend that decided those bytes for
+/// itself could disagree with another and neither would fail: records would
+/// cross, restore cleanly, and then miss every logical-key query about
+/// themselves.
+///
+/// `None` from `key_hash` is a key with no valid stored form — today only a
+/// `metadata` label that is not eight bytes wide. This backend refuses it,
+/// which is the behaviour these call sites already had.
+fn stored_tag_key(tag: &Tag) -> Result<u64, Error> {
+    let hash = key_hash(tag.dimension, &tag.key).ok_or_else(|| {
+        Error::ArchiveError(format!(
+            "{} key must be {KEY_HASH_SIZE} bytes",
+            tag.dimension
+        ))
+    })?;
+
+    Ok(u64::from_be_bytes(hash))
+}
+
 /// Insert a single archive tag.
 fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Result<(), Error> {
     use archive::indexes::*;
-    use xxhash_rust::xxh3::xxh3_64;
 
     let key_builder = archive::indexes::key_builder();
-    let bucketed_key =
-        if tag.dimension == archive_dimensions::METADATA {
-            let metadata =
-                u64::from_be_bytes(tag.key.as_slice().try_into().map_err(|_| {
-                    Error::ArchiveError("metadata key must be 8 bytes".to_string())
-                })?);
-            key_builder.bucketed_key(metadata, slot)
-        } else {
-            let key = xxh3_64(&tag.key);
-            key_builder.bucketed_key(key, slot)
-        };
+    let bucketed_key = key_builder.bucketed_key(stored_tag_key(tag)?, slot);
 
     match tag.dimension {
         archive_dimensions::ADDRESS => {
@@ -516,20 +532,9 @@ fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
 /// Remove a single archive tag.
 fn remove_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Result<(), Error> {
     use archive::indexes::*;
-    use xxhash_rust::xxh3::xxh3_64;
 
     let key_builder = archive::indexes::key_builder();
-    let bucketed_key =
-        if tag.dimension == archive_dimensions::METADATA {
-            let metadata =
-                u64::from_be_bytes(tag.key.as_slice().try_into().map_err(|_| {
-                    Error::ArchiveError("metadata key must be 8 bytes".to_string())
-                })?);
-            key_builder.bucketed_key(metadata, slot)
-        } else {
-            let key = xxh3_64(&tag.key);
-            key_builder.bucketed_key(key, slot)
-        };
+    let bucketed_key = key_builder.bucketed_key(stored_tag_key(tag)?, slot);
 
     match tag.dimension {
         archive_dimensions::ADDRESS => {
@@ -888,9 +893,13 @@ impl CoreIndexStore for IndexStore {
                 archive::indexes::Indexes::iter_by_account_withdrawals(&rx, key, start, end)?
             }
             archive_dimensions::METADATA => {
-                // Metadata is keyed by u64, need to parse the bytes
-                let metadata = u64::from_be_bytes(key.try_into().map_err(|_| {
-                    IndexError::CodecError("metadata key must be 8 bytes".to_string())
+                // The label is stored verbatim rather than hashed, and
+                // `key_hash` is where that exception lives.
+                let metadata = u64::from_be_bytes(key_hash(dimension, key).ok_or_else(|| {
+                    IndexError::CodecError(format!(
+                        "{dimension} key must be {KEY_HASH_SIZE} bytes, got {}",
+                        key.len()
+                    ))
                 })?);
                 archive::indexes::Indexes::iter_by_metadata(&rx, &metadata, start, end)?
             }
