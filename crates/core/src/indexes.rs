@@ -338,9 +338,25 @@ pub trait IndexWriter: Send + Sync + 'static {
     /// that skips this leaves `cursor()` at `None` and bootstrap will treat the
     /// store as never indexed.
     ///
+    /// ## Chunking
+    ///
+    /// The argument is an iterator so a restore can pipe its wire decoder
+    /// straight in, rather than materializing a slice beside the write batch's
+    /// own encoded copy. It is consumed lazily and fully; a backend never
+    /// collects it.
+    ///
+    /// This call is *not* the batch boundary — the writer accumulates until
+    /// [`IndexWriter::commit`], so an unbounded iterator builds an unbounded
+    /// batch. Chunking is the caller's: feed one writer a run of records,
+    /// commit it, start the next. The sort order has to hold across the whole
+    /// restore, not merely within a chunk.
+    ///
     /// Backends that do not implement this return
     /// [`IndexError::Unsupported`].
-    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError>;
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError>;
 
     /// Commit the batched operations.
     fn commit(self) -> Result<(), IndexError>;

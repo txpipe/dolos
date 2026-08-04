@@ -299,7 +299,9 @@ fn export_slice<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<In
     records
 }
 
-fn restore<S: CoreIndexStore>(store: &S, records: &[IndexRecord]) {
+/// Restore in one batch, the way a driver would restore one chunk: the writer
+/// takes the records as an iterator and accumulates them until `commit`.
+fn restore<S: CoreIndexStore>(store: &S, records: impl IntoIterator<Item = IndexRecord>) {
     let writer = store.start_writer().expect("start_writer failed");
     writer
         .append_prehashed(records)
@@ -318,7 +320,7 @@ fn epoch_slice_round_trips_through_append_prehashed<B: Backend>() {
     assert!(!records.is_empty(), "the epoch slice should not be empty");
 
     let (target, _target_guard) = B::open();
-    restore(&target, &records);
+    restore(&target, records);
 
     let mut checked_metadata = false;
 
@@ -654,8 +656,20 @@ fn records_cross_between_backends() {
     let seeded = seed(&fjall);
     let slots = epoch_slots(EPOCHS[0]);
 
-    // fjall -> memory
-    restore(&memory, &export_slice(&fjall, slots.clone()));
+    // fjall -> memory, streamed rather than collected: the writer takes an
+    // iterator so a restore driver can pipe a decoder straight into it, and
+    // nothing about that path may depend on the records sitting in a slice.
+    restore(
+        &memory,
+        collect_tags(&fjall, &archive_dimensions::ALL, slots.clone())
+            .into_iter()
+            .map(IndexRecord::from)
+            .chain(
+                collect_exacts(&fjall, slots.clone())
+                    .into_iter()
+                    .map(IndexRecord::from),
+            ),
+    );
 
     for (dimension, key, _) in seeded.tags_in(&slots) {
         let from_fjall = slots_for_tag(&fjall, dimension, key, &slots);
@@ -670,7 +684,7 @@ fn records_cross_between_backends() {
 
     // and back again, into a store that has never seen a delta
     let (restored_fjall, _guard) = Fjall::open();
-    restore(&restored_fjall, &export_slice(&memory, slots.clone()));
+    restore(&restored_fjall, export_slice(&memory, slots.clone()));
 
     for (dimension, key, _) in seeded.tags_in(&slots) {
         assert_eq!(

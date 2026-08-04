@@ -752,7 +752,10 @@ impl CoreIndexWriter for IndexStoreWriter {
     /// against the live index backend (fjall). This store is not part of that
     /// path, so it carries the trait method without an implementation rather
     /// than a second copy of the encoding to keep in step.
-    fn append_prehashed(&self, _records: &[IndexRecord]) -> Result<(), IndexError> {
+    fn append_prehashed(
+        &self,
+        _records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
         Err(IndexError::Unsupported("append_prehashed"))
     }
 

@@ -32,6 +32,7 @@
 //! All multi-byte integers are big-endian encoded for correct lexicographic
 //! ordering.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -285,24 +286,27 @@ impl CoreIndexWriter for IndexStoreWriter {
         Ok(())
     }
 
-    fn append_prehashed(&self, records: &[IndexRecord]) -> Result<(), IndexError> {
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
         // Records arrive sorted, hence grouped by dimension/kind: hash each
-        // group's dimension once instead of once per record.
-        let mut tag_dim: Option<(&str, [u8; DIM_HASH_SIZE])> = None;
+        // group's dimension once instead of once per record. The cached
+        // dimension is owned because a record no longer outlives its own
+        // iteration step — the clone is one per group, not one per record.
+        let mut tag_dim: Option<(Cow<'static, str>, [u8; DIM_HASH_SIZE])> = None;
         let mut exact_dim: Option<(ExactKind, [u8; DIM_HASH_SIZE])> = None;
 
         for record in records {
             match record {
                 IndexRecord::Tag(tag) => {
-                    let dimension = tag.dimension();
-
-                    let dim_hash = match tag_dim {
-                        Some((cached, hash)) if cached == dimension => hash,
+                    let dim_hash = match &tag_dim {
+                        Some((cached, hash)) if cached == &tag.dimension => *hash,
                         _ => {
-                            let hash = hash_dimension(dim_prefix::BLOCK, dimension);
-                            tag_dim = Some((dimension, hash));
+                            let hash = hash_dimension(dim_prefix::BLOCK, tag.dimension());
+                            tag_dim = Some((tag.dimension.clone(), hash));
                             hash
                         }
                     };
@@ -310,7 +314,7 @@ impl CoreIndexWriter for IndexStoreWriter {
                     archive_tags::insert_prehashed(
                         &mut batch,
                         &self.store.block_tags,
-                        tag,
+                        &tag,
                         dim_hash,
                     );
                 }
@@ -324,7 +328,7 @@ impl CoreIndexWriter for IndexStoreWriter {
                         }
                     };
 
-                    exact::insert_prehashed(&mut batch, &self.store.exact, exact, dim_hash)
+                    exact::insert_prehashed(&mut batch, &self.store.exact, &exact, dim_hash)
                         .map_err(IndexError::from)?;
                 }
             }
