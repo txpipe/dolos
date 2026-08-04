@@ -1,4 +1,4 @@
-//! Export/restore coverage for the pre-hashed archive index seam.
+//! Export/restore conformance for the pre-hashed archive index seam.
 //!
 //! `IndexStore::iter_archive_tags` / `iter_exact_records` and
 //! `IndexWriter::append_prehashed` are the two halves of one thing: a snapshot
@@ -15,16 +15,20 @@
 //!    sequences, so an iterator that yields the right records in the wrong
 //!    order is wrong, not slow.
 //!
-//! Both are asserted against fjall, the live index backend.
+//! The suite is written once against the [`IndexStore`] trait and run against
+//! every live backend: fjall, the persistent one, and the builtin memory store.
+//! One suite defining the semantics is the point — a backend that passed its
+//! own private tests could still disagree with its peers, and records really do
+//! cross between backends (see [`records_cross_between_backends`]).
 
 use std::collections::BTreeSet;
 use std::ops::Range;
 
 use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    config::FjallIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint, ExactKind, ExactRecord,
-    IndexDelta, IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, Tag,
-    TagDimension, TagRecord,
+    builtin::MemoryIndexStore, config::FjallIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint,
+    ExactKind, ExactRecord, IndexDelta, IndexRecord, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, Tag, TagDimension, TagRecord,
 };
 
 const EPOCH_LEN: BlockSlot = 432_000;
@@ -49,22 +53,95 @@ const SEEDED_DIMENSIONS: [TagDimension; 4] = [
 /// keeps the label verbatim rather than hashing it.
 const METADATA_LABELS: [u64; 3] = [674, 721, 1990];
 
-fn epoch_slots(epoch: u64) -> Range<BlockSlot> {
-    (epoch * EPOCH_LEN)..((epoch + 1) * EPOCH_LEN)
+/// One index backend under test.
+///
+/// The guard carries whatever the backend needs kept alive for the store to
+/// stay usable — a temp directory for the on-disk one, nothing for the
+/// in-memory one.
+trait Backend {
+    type Store: CoreIndexStore;
+    type Guard;
+
+    /// A fresh, empty store.
+    fn open() -> (Self::Store, Self::Guard);
 }
 
-fn open_store(tmpdir: &tempfile::TempDir) -> dolos_fjall::IndexStore {
-    let config = FjallIndexConfig {
-        path: None,
-        cache: Some(16),
-        max_journal_size: None,
-        flush_on_commit: Some(false),
-        l0_threshold: None,
-        worker_threads: Some(1),
-        memtable_size_mb: None,
-    };
+struct Fjall;
 
-    dolos_fjall::IndexStore::open(tmpdir.path(), &config).expect("failed to open fjall index store")
+impl Backend for Fjall {
+    type Store = dolos_fjall::IndexStore;
+    type Guard = tempfile::TempDir;
+
+    fn open() -> (Self::Store, Self::Guard) {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+
+        let config = FjallIndexConfig {
+            path: None,
+            cache: Some(16),
+            max_journal_size: None,
+            flush_on_commit: Some(false),
+            l0_threshold: None,
+            worker_threads: Some(1),
+            memtable_size_mb: None,
+        };
+
+        let store = dolos_fjall::IndexStore::open(dir.path(), &config)
+            .expect("failed to open fjall index store");
+
+        (store, dir)
+    }
+}
+
+struct Memory;
+
+impl Backend for Memory {
+    type Store = MemoryIndexStore;
+    type Guard = ();
+
+    fn open() -> (Self::Store, Self::Guard) {
+        (MemoryIndexStore::new(), ())
+    }
+}
+
+/// Declare the whole suite for one backend. Adding a backend is one line.
+macro_rules! conformance_suite {
+    ($module:ident, $backend:ty) => {
+        mod $module {
+            use super::*;
+
+            #[test]
+            fn epoch_slice_round_trips_through_append_prehashed() {
+                super::epoch_slice_round_trips_through_append_prehashed::<$backend>();
+            }
+
+            #[test]
+            fn tag_records_are_sorted_by_dimension_key_hash_slot() {
+                super::tag_records_are_sorted_by_dimension_key_hash_slot::<$backend>();
+            }
+
+            #[test]
+            fn exact_records_are_sorted_by_kind_and_key() {
+                super::exact_records_are_sorted_by_kind_and_key::<$backend>();
+            }
+
+            #[test]
+            fn tag_key_hashes_are_xxh3_except_for_metadata_labels() {
+                super::tag_key_hashes_are_xxh3_except_for_metadata_labels::<$backend>();
+            }
+
+            #[test]
+            fn undo_removes_exactly_what_apply_added() {
+                super::undo_removes_exactly_what_apply_added::<$backend>();
+            }
+        }
+    };
+}
+
+conformance_suite!(fjall, Fjall);
+conformance_suite!(memory, Memory);
+
+fn epoch_slots(epoch: u64) -> Range<BlockSlot> {
+    (epoch * EPOCH_LEN)..((epoch + 1) * EPOCH_LEN)
 }
 
 fn hash32(tag: u8, a: u64, b: u64) -> Vec<u8> {
@@ -96,11 +173,11 @@ impl Seeded {
     }
 }
 
-/// Populate a store through the regular delta path, the same one the sync
-/// pipeline uses. Nothing here knows about pre-hashed records: the export side
-/// has to cope with whatever normal indexing produced.
-fn seed(store: &dolos_fjall::IndexStore) -> Seeded {
+/// The deltas the seed applies, built independently of any store so two
+/// backends can be handed byte-identical input.
+fn seed_deltas() -> (Vec<IndexDelta>, Seeded) {
     let mut seeded = Seeded::default();
+    let mut deltas = Vec::new();
 
     for epoch in EPOCHS {
         let mut archive = Vec::new();
@@ -144,22 +221,33 @@ fn seed(store: &dolos_fjall::IndexStore) -> Seeded {
         }
 
         let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-        let delta = IndexDelta {
+        deltas.push(IndexDelta {
             cursor,
             utxo: Default::default(),
             archive,
-        };
+        });
+    }
 
+    (deltas, seeded)
+}
+
+/// Populate a store through the regular delta path, the same one the sync
+/// pipeline uses. Nothing here knows about pre-hashed records: the export side
+/// has to cope with whatever normal indexing produced.
+fn seed<S: CoreIndexStore>(store: &S) -> Seeded {
+    let (deltas, seeded) = seed_deltas();
+
+    for delta in &deltas {
         let writer = store.start_writer().expect("start_writer failed");
-        writer.apply(&delta).expect("apply failed");
+        writer.apply(delta).expect("apply failed");
         writer.commit().expect("commit failed");
     }
 
     seeded
 }
 
-fn collect_tags(
-    store: &dolos_fjall::IndexStore,
+fn collect_tags<S: CoreIndexStore>(
+    store: &S,
     dimensions: &[TagDimension],
     slots: Range<BlockSlot>,
 ) -> Vec<TagRecord> {
@@ -170,7 +258,7 @@ fn collect_tags(
         .expect("tag iteration failed")
 }
 
-fn collect_exacts(store: &dolos_fjall::IndexStore, slots: Range<BlockSlot>) -> Vec<ExactRecord> {
+fn collect_exacts<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<ExactRecord> {
     store
         .iter_exact_records(slots)
         .expect("iter_exact_records failed")
@@ -178,8 +266,8 @@ fn collect_exacts(store: &dolos_fjall::IndexStore, slots: Range<BlockSlot>) -> V
         .expect("exact iteration failed")
 }
 
-fn slots_for_tag(
-    store: &dolos_fjall::IndexStore,
+fn slots_for_tag<S: CoreIndexStore>(
+    store: &S,
     dimension: TagDimension,
     key: &[u8],
     slots: &Range<BlockSlot>,
@@ -191,37 +279,46 @@ fn slots_for_tag(
         .expect("slot iteration failed")
 }
 
-#[test]
-fn epoch_slice_round_trips_through_append_prehashed() {
-    let source_dir = tempfile::tempdir().expect("failed to create tempdir");
-    let source = open_store(&source_dir);
+/// The epoch slice a publisher would export: every tag and exact record whose
+/// slot falls in the epoch, in traversal order.
+fn export_slice<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<IndexRecord> {
+    let mut records: Vec<IndexRecord> = Vec::new();
+
+    records.extend(
+        collect_tags(store, &archive_dimensions::ALL, slots.clone())
+            .into_iter()
+            .map(IndexRecord::from),
+    );
+
+    records.extend(
+        collect_exacts(store, slots)
+            .into_iter()
+            .map(IndexRecord::from),
+    );
+
+    records
+}
+
+fn restore<S: CoreIndexStore>(store: &S, records: &[IndexRecord]) {
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .append_prehashed(records)
+        .expect("append_prehashed failed");
+    writer.commit().expect("commit failed");
+}
+
+fn epoch_slice_round_trips_through_append_prehashed<B: Backend>() {
+    let (source, _source_guard) = B::open();
     let seeded = seed(&source);
 
     let exported = epoch_slots(EPOCHS[0]);
     let excluded = epoch_slots(EPOCHS[1]);
 
-    let mut records: Vec<IndexRecord> = Vec::new();
-    records.extend(
-        collect_tags(&source, &archive_dimensions::ALL, exported.clone())
-            .into_iter()
-            .map(IndexRecord::from),
-    );
-    records.extend(
-        collect_exacts(&source, exported.clone())
-            .into_iter()
-            .map(IndexRecord::from),
-    );
-
+    let records = export_slice(&source, exported.clone());
     assert!(!records.is_empty(), "the epoch slice should not be empty");
 
-    let target_dir = tempfile::tempdir().expect("failed to create tempdir");
-    let target = open_store(&target_dir);
-
-    let writer = target.start_writer().expect("start_writer failed");
-    writer
-        .append_prehashed(&records)
-        .expect("append_prehashed failed");
-    writer.commit().expect("commit failed");
+    let (target, _target_guard) = B::open();
+    restore(&target, &records);
 
     let mut checked_metadata = false;
 
@@ -318,20 +415,14 @@ fn epoch_slice_round_trips_through_append_prehashed() {
     // Re-exporting the restored store must yield byte-identical records:
     // anything else means the write path re-derived something instead of
     // copying it.
-
-    let reexported_tags = collect_tags(&target, &archive_dimensions::ALL, exported.clone());
-    let source_tags = collect_tags(&source, &archive_dimensions::ALL, exported.clone());
-    assert_eq!(source_tags, reexported_tags);
-
-    let reexported_exacts = collect_exacts(&target, exported.clone());
-    let source_exacts = collect_exacts(&source, exported);
-    assert_eq!(source_exacts, reexported_exacts);
+    assert_eq!(
+        export_slice(&source, exported.clone()),
+        export_slice(&target, exported)
+    );
 }
 
-#[test]
-fn tag_records_are_sorted_by_dimension_key_hash_slot() {
-    let dir = tempfile::tempdir().expect("failed to create tempdir");
-    let store = open_store(&dir);
+fn tag_records_are_sorted_by_dimension_key_hash_slot<B: Backend>() {
+    let (store, _guard) = B::open();
     let seeded = seed(&store);
 
     let slots = epoch_slots(EPOCHS[0]);
@@ -378,10 +469,8 @@ fn tag_records_are_sorted_by_dimension_key_hash_slot() {
     assert_eq!(records, collect_tags(&store, &repeated, slots));
 }
 
-#[test]
-fn exact_records_are_sorted_by_kind_and_key() {
-    let dir = tempfile::tempdir().expect("failed to create tempdir");
-    let store = open_store(&dir);
+fn exact_records_are_sorted_by_kind_and_key<B: Backend>() {
+    let (store, _guard) = B::open();
     let seeded = seed(&store);
 
     let slots = epoch_slots(EPOCHS[0]);
@@ -424,12 +513,10 @@ fn exact_records_are_sorted_by_kind_and_key() {
 /// cross-implementation promise depends on which one a reader implements: a
 /// third-party publisher that hashes metadata labels produces records this
 /// store cannot use, and vice versa.
-#[test]
-fn tag_key_hashes_are_xxh3_except_for_metadata_labels() {
+fn tag_key_hashes_are_xxh3_except_for_metadata_labels<B: Backend>() {
     use xxhash_rust::xxh3::xxh3_64;
 
-    let dir = tempfile::tempdir().expect("failed to create tempdir");
-    let store = open_store(&dir);
+    let (store, _guard) = B::open();
     let seeded = seed(&store);
 
     let slots = epoch_slots(EPOCHS[0]);
@@ -468,6 +555,155 @@ fn tag_key_hashes_are_xxh3_except_for_metadata_labels() {
     );
 }
 
+/// A rollback has to leave the store where it started. The archive keyspaces
+/// are append-oriented, so an undo that missed an entry would be invisible
+/// until a later query returned a slot from a block that no longer exists.
+fn undo_removes_exactly_what_apply_added<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let (deltas, _) = seed_deltas();
+    let (first, second) = deltas.split_at(1);
+
+    // The first epoch stays; the second is applied and then rolled back.
+    for delta in first {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.apply(delta).expect("apply failed");
+        writer.commit().expect("commit failed");
+    }
+
+    let kept = epoch_slots(EPOCHS[0]);
+    let before_tags = collect_tags(&store, &archive_dimensions::ALL, kept.clone());
+    let before_exacts = collect_exacts(&store, kept.clone());
+
+    for delta in second {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.apply(delta).expect("apply failed");
+        writer.commit().expect("commit failed");
+    }
+
+    let rolled_back = epoch_slots(EPOCHS[1]);
+    assert!(
+        !collect_tags(&store, &archive_dimensions::ALL, rolled_back.clone()).is_empty(),
+        "the delta about to be undone should have landed first"
+    );
+
+    for delta in second.iter().rev() {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.undo(delta).expect("undo failed");
+        writer.commit().expect("commit failed");
+    }
+
+    assert!(
+        collect_tags(&store, &archive_dimensions::ALL, rolled_back.clone()).is_empty(),
+        "undo left archive tags behind"
+    );
+    assert!(
+        collect_exacts(&store, rolled_back).is_empty(),
+        "undo left exact records behind"
+    );
+
+    assert_eq!(
+        before_tags,
+        collect_tags(&store, &archive_dimensions::ALL, kept.clone()),
+        "undo removed tags it never added"
+    );
+    assert_eq!(
+        before_exacts,
+        collect_exacts(&store, kept),
+        "undo removed exact records it never added"
+    );
+}
+
+/// The backends have to agree on the *stored* key form, not merely each be
+/// self-consistent.
+///
+/// A record carries the stored form and nothing else — the logical key is not
+/// recoverable — so a backend that hashed differently would still restore
+/// "successfully" and then miss every logical-key query about the restored
+/// records. Nothing inside one backend's own suite can catch that.
+#[test]
+fn backends_agree_on_exported_records() {
+    let (fjall, _guard) = Fjall::open();
+    let (memory, _) = Memory::open();
+
+    seed(&fjall);
+    seed(&memory);
+
+    let slots = epoch_slots(EPOCHS[0]);
+
+    assert_eq!(
+        collect_tags(&fjall, &archive_dimensions::ALL, slots.clone()),
+        collect_tags(&memory, &archive_dimensions::ALL, slots.clone()),
+        "backends disagree on the archive tag records the same deltas produce"
+    );
+
+    assert_eq!(
+        collect_exacts(&fjall, slots.clone()),
+        collect_exacts(&memory, slots),
+        "backends disagree on the exact records the same deltas produce"
+    );
+}
+
+/// The seam's whole purpose: records exported from one backend restore into
+/// another and answer the same questions there.
+#[test]
+fn records_cross_between_backends() {
+    let (fjall, _guard) = Fjall::open();
+    let (memory, _) = Memory::open();
+
+    let seeded = seed(&fjall);
+    let slots = epoch_slots(EPOCHS[0]);
+
+    // fjall -> memory
+    restore(&memory, &export_slice(&fjall, slots.clone()));
+
+    for (dimension, key, _) in seeded.tags_in(&slots) {
+        let from_fjall = slots_for_tag(&fjall, dimension, key, &slots);
+        let from_memory = slots_for_tag(&memory, dimension, key, &slots);
+
+        assert!(!from_fjall.is_empty());
+        assert_eq!(
+            from_fjall, from_memory,
+            "memory store restored from fjall disagrees on dimension {dimension}"
+        );
+    }
+
+    // and back again, into a store that has never seen a delta
+    let (restored_fjall, _guard) = Fjall::open();
+    restore(&restored_fjall, &export_slice(&memory, slots.clone()));
+
+    for (dimension, key, _) in seeded.tags_in(&slots) {
+        assert_eq!(
+            slots_for_tag(&fjall, dimension, key, &slots),
+            slots_for_tag(&restored_fjall, dimension, key, &slots),
+            "fjall store restored from memory disagrees on dimension {dimension}"
+        );
+    }
+
+    // Only the exported epoch crossed, so that is the range the two stores have
+    // to agree on — and outside it the restored store must stay empty rather
+    // than have picked something up along the way.
+    for (hash, number, slot) in &seeded.blocks {
+        let (expected_hash, expected_number) = if slots.contains(slot) {
+            (
+                fjall.slot_by_block_hash(hash).unwrap(),
+                fjall.slot_by_block_number(*number).unwrap(),
+            )
+        } else {
+            (None, None)
+        };
+
+        assert_eq!(
+            restored_fjall.slot_by_block_hash(hash).unwrap(),
+            expected_hash
+        );
+        assert_eq!(
+            restored_fjall.slot_by_block_number(*number).unwrap(),
+            expected_number
+        );
+    }
+}
+
 /// Mainnet-shaped epoch: ~5 days at 20s/slot.
 const COST_BLOCKS_PER_EPOCH: u64 = 21_600;
 /// Transactions per block.
@@ -488,7 +724,8 @@ fn cost_epochs() -> u64 {
 
 /// Measure the cost of slicing one epoch out of a populated index store.
 ///
-/// Not an assertion — a number. Neither traversal can seek to an epoch:
+/// Not an assertion — a number, and specific to fjall, the backend a publisher
+/// actually runs against. Neither traversal can seek to an epoch:
 ///
 /// - tag keys are `[dim_hash][key_hash][slot]`, so slot is the *last* component
 ///   and each dimension prefix is scanned in full;
@@ -507,8 +744,7 @@ fn cost_epochs() -> u64 {
 fn measure_one_epoch_iteration_cost() {
     use std::time::Instant;
 
-    let dir = tempfile::tempdir().expect("failed to create tempdir");
-    let store = open_store(&dir);
+    let (store, _guard) = Fjall::open();
 
     let epochs = cost_epochs();
     let tags_per_epoch = COST_BLOCKS_PER_EPOCH * COST_TXS_PER_BLOCK * COST_TAGS_PER_TX;

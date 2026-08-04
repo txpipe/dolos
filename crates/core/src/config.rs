@@ -284,7 +284,9 @@ impl FjallStateConfig {
 pub enum StateStoreConfig {
     #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
     Redb(RedbStateConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
+    /// Builtin in-memory backend: serves the whole state contract, ephemeral
+    /// by design and sized for devnets, tooling and tests rather than for a
+    /// node following a public network.
     #[serde(rename = "in_memory")]
     InMemory,
     Fjall(FjallStateConfig),
@@ -456,7 +458,9 @@ impl FjallIndexConfig {
 pub enum IndexStoreConfig {
     #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
     Redb(RedbIndexConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
+    /// Builtin in-memory backend: serves the whole index contract, ephemeral
+    /// by design and sized for devnets, tooling and tests rather than for a
+    /// node following a public network.
     #[serde(rename = "in_memory")]
     InMemory,
     Fjall(FjallIndexConfig),

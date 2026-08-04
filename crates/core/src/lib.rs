@@ -188,7 +188,11 @@ impl From<TxoRef> for Vec<u8> {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
+/// Ordered by `(tx_hash, index)`, which is what every backend's UTxO key
+/// encodes: fjall's `[tx_hash:32][index:4]` big-endian bytes sort this way, so
+/// a store keyed on the ref directly iterates in the same order as one keyed on
+/// the encoded form.
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Serialize, Deserialize)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
 
 impl From<(TxHash, TxoIdx)> for TxoRef {

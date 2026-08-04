@@ -1511,6 +1511,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "trait-variant",
+ "xxhash-rust",
 ]
 
 [[package]]

@@ -23,14 +23,14 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     // Stats command only works with redb backends
     let state = match &stores.state {
         StateStoreBackend::Redb(s) => s,
-        StateStoreBackend::Fjall(_) => {
+        StateStoreBackend::Fjall(_) | StateStoreBackend::Memory(_) => {
             bail!("stats command is only available for redb state backend")
         }
     };
 
     let indexes = match &stores.indexes {
         IndexStoreBackend::Redb(s) => s,
-        IndexStoreBackend::Fjall(_) => {
+        IndexStoreBackend::Fjall(_) | IndexStoreBackend::Memory(_) => {
             bail!("stats command is only available for redb index backend")
         }
         IndexStoreBackend::NoOp(_) => {

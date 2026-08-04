@@ -1,7 +1,8 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
-    config::{CardanoConfig, FjallIndexConfig, FjallStateConfig, StorageConfig, SyncConfig},
+    builtin::{MemoryIndexStore, MemoryStateStore},
+    config::{CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
     BootstrapExt, LogKey, TemporalKey, *,
 };
@@ -9,8 +10,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
-    let store =
-        dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap();
+    let store = MemoryStateStore::new();
 
     let everyone = TestAddress::everyone();
     let utxos_per_address = 2..4;
@@ -127,42 +127,27 @@ impl dolos_core::MempoolStore for Mempool {
     }
 }
 
-/// Minimal `Domain` implementation bound to the live storage set: state and
-/// indexes on fjall, archive on redb. Fjall stores need a filesystem path, so
-/// each domain holds a temp directory that lives as long as the domain does.
+/// Minimal `Domain` implementation bound to the builtin memory stores for
+/// state and indexes, with the archive on redb.
+///
+/// Memory stores rather than the on-disk ones because a suite builds hundreds
+/// of these: the state and index stores serve the same contract either way —
+/// including the snapshot export seam, which is why this harness cannot go back
+/// to the redb in-memory store it used before — but these ones need no
+/// filesystem, no compaction threads and no cache, so building a domain costs
+/// about what allocating a map costs.
 #[derive(Clone)]
 pub struct ToyDomain {
     wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
-    state: dolos_fjall::StateStore,
+    state: MemoryStateStore,
     archive: dolos_redb3::archive::ArchiveStore,
-    indexes: dolos_fjall::IndexStore,
+    indexes: MemoryIndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     sync_config: SyncConfig,
     genesis: Arc<dolos_core::Genesis>,
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
-    /// Keeps the fjall databases' directory alive for the domain's lifetime.
-    _dir: Arc<tempfile::TempDir>,
-}
-
-/// Small store footprint for test domains: one compaction worker and a tiny
-/// cache, so suites that build hundreds of domains don't pay the live
-/// defaults' thread and memory cost.
-fn test_state_config() -> FjallStateConfig {
-    FjallStateConfig {
-        cache: Some(16),
-        worker_threads: Some(1),
-        ..Default::default()
-    }
-}
-
-fn test_index_config() -> FjallIndexConfig {
-    FjallIndexConfig {
-        cache: Some(16),
-        worker_threads: Some(1),
-        ..Default::default()
-    }
 }
 
 impl ToyDomain {
@@ -191,10 +176,7 @@ impl ToyDomain {
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
     ) -> Self {
-        let dir = tempfile::tempdir().expect("failed to create temp dir for fjall stores");
-
-        let state =
-            dolos_fjall::StateStore::open(dir.path().join("state"), &test_state_config()).unwrap();
+        let state = MemoryStateStore::new();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
@@ -202,8 +184,7 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let indexes =
-            dolos_fjall::IndexStore::open(dir.path().join("index"), &test_index_config()).unwrap();
+        let indexes = MemoryIndexStore::new();
 
         let chain =
             dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
@@ -223,7 +204,6 @@ impl ToyDomain {
             sync_config: SyncConfig::default(),
             genesis: genesis.clone(),
             tip_broadcast,
-            _dir: Arc::new(dir),
         };
 
         // Apply genesis state using the work unit pattern.
@@ -313,11 +293,11 @@ impl dolos_core::Domain for ToyDomain {
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
     type Archive = dolos_redb3::archive::ArchiveStore;
-    type State = dolos_fjall::StateStore;
+    type State = MemoryStateStore;
     type Chain = dolos_cardano::CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
-    type Indexes = dolos_fjall::IndexStore;
+    type Indexes = MemoryIndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &StorageConfig {
