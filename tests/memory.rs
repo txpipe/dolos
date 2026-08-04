@@ -17,6 +17,14 @@ use dolos_core::{
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 
+/// Budget for an "allocates O(1)" check.
+///
+/// Every laziness assertion in this file is the same shape — a `Region` around
+/// the construction or the pass, compared against this — so it has one value.
+/// Loose on purpose: what it separates is O(1) from O(store), not one constant
+/// factor from another.
+const LAZY_BUDGET: usize = 10 * 1024 * 1024;
+
 const ENTITY_COUNT: u64 = 50_000;
 const ENTITY_SIZE: usize = 300;
 const NS: &str = "accounts";
@@ -50,7 +58,7 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
     let stats = reg.change();
     let heap_delta = stats.bytes_allocated;
 
-    let threshold = 10 * 1024 * 1024; // 10 MB
+    let threshold = LAZY_BUDGET;
     assert!(
         heap_delta < threshold,
         "iter_entities should allocate O(1) memory (lazy). \
@@ -71,14 +79,10 @@ fn assert_lazy_iter<S: CoreStateStore>(store: &S) {
 fn test_fjall_lazy_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallStateConfig {
-        path: None,
         cache: Some(64),
-        max_history: None,
-        max_journal_size: None,
         flush_on_commit: Some(false),
-        l0_threshold: None,
         worker_threads: Some(1),
-        memtable_size_mb: None,
+        ..Default::default()
     };
     let store =
         dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
@@ -157,7 +161,7 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
     let construction_stats = reg.change();
     let construction_delta = construction_stats.bytes_allocated;
 
-    let threshold = 10 * 1024 * 1024; // 10 MB
+    let threshold = LAZY_BUDGET;
     assert!(
         construction_delta < threshold,
         "shard-range iter_entities construction should allocate O(1) memory. \
@@ -201,14 +205,10 @@ fn assert_shard_range_iter<S: CoreStateStore>(store: &S) {
 fn test_fjall_shard_range_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallStateConfig {
-        path: None,
         cache: Some(64),
-        max_history: None,
-        max_journal_size: None,
         flush_on_commit: Some(false),
-        l0_threshold: None,
         worker_threads: Some(1),
-        memtable_size_mb: None,
+        ..Default::default()
     };
     let store =
         dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
@@ -254,7 +254,7 @@ fn seed_utxos<S: CoreStateStore>(store: &S) {
 fn assert_lazy_utxo_iter<S: CoreStateStore>(store: &S) {
     seed_utxos(store);
 
-    let threshold = 10 * 1024 * 1024; // 10 MB
+    let threshold = LAZY_BUDGET;
     let total_bytes = UTXO_COUNT as usize * UTXO_SIZE;
     assert!(
         total_bytes > threshold,
@@ -315,17 +315,13 @@ fn assert_lazy_utxo_iter<S: CoreStateStore>(store: &S) {
 fn test_fjall_lazy_utxo_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallStateConfig {
-        path: None,
         // A small block cache on purpose: cached blocks are live heap, and the
         // point of the measurement is the iterator's footprint, not the
         // engine's cache budget.
         cache: Some(1),
-        max_history: None,
-        max_journal_size: None,
         flush_on_commit: Some(false),
-        l0_threshold: None,
         worker_threads: Some(1),
-        memtable_size_mb: None,
+        ..Default::default()
     };
     let store =
         dolos_fjall::StateStore::open(tmpdir.path(), &config).expect("failed to open fjall store");
@@ -403,7 +399,7 @@ fn seed_archive_tags<S: CoreIndexStore>(store: &S) {
 fn assert_lazy_archive_tag_iter<S: CoreIndexStore>(store: &S) {
     seed_archive_tags(store);
 
-    let threshold = 10 * 1024 * 1024; // 10 MB
+    let threshold = LAZY_BUDGET;
     let buffered_bytes = TAG_RECORD_COUNT as usize * std::mem::size_of::<TagRecord>();
     assert!(
         buffered_bytes > threshold,
@@ -464,15 +460,12 @@ fn assert_lazy_archive_tag_iter<S: CoreIndexStore>(store: &S) {
 fn test_fjall_lazy_archive_tag_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let config = FjallIndexConfig {
-        path: None,
         // Small on purpose: cached blocks are live heap, and the measurement is
         // the iterator's footprint, not the engine's cache budget.
         cache: Some(1),
-        max_journal_size: None,
         flush_on_commit: Some(false),
-        l0_threshold: None,
         worker_threads: Some(1),
-        memtable_size_mb: None,
+        ..Default::default()
     };
     let store = dolos_fjall::IndexStore::open(tmpdir.path(), &config)
         .expect("failed to open fjall index store");
