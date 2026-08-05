@@ -44,15 +44,22 @@ type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
 /// heap allocation on either side.
 type ExactKey = [u8; MAX_EXACT_KEY_LEN];
 
-/// Pad a fixed-width key into the map's key type.
+/// A key's stored form, or `None` unless it is exactly the width its kind
+/// requires.
 ///
-/// The width itself is [`ExactRecord::new`]'s to check; by the time a key
-/// reaches here it is either a record's own or built from a typed delta.
-fn exact_key(key: &[u8]) -> ExactKey {
+/// Refusing rather than padding or truncating to fit: a key adjusted to fit
+/// aliases with the key it was adjusted into, so a 33-byte block hash and the
+/// 32-byte hash that is its prefix would answer each other's lookups.
+/// `ArchiveIndexDelta` holds its hashes as `Vec<u8>`, so nothing upstream
+/// enforces the width.
+fn exact_key(kind: ExactKind, key: &[u8]) -> Option<ExactKey> {
+    if key.len() != kind.key_len() {
+        return None;
+    }
+
     let mut buf = [0u8; MAX_EXACT_KEY_LEN];
-    let len = key.len().min(MAX_EXACT_KEY_LEN);
-    buf[..len].copy_from_slice(&key[..len]);
-    buf
+    buf[..key.len()].copy_from_slice(key);
+    Some(buf)
 }
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
@@ -120,22 +127,47 @@ impl MemoryIndexWriter {
         })
     }
 
+    /// The exact entries a block delta writes.
+    ///
+    /// Every key is width-checked here, because the delta path is *not*
+    /// type-enforced: `ArchiveIndexDelta` holds its block and transaction
+    /// hashes as `Vec<u8>`. A wrong-width hash is a malformed block, and
+    /// refusing the batch beats dropping the entry — a block whose hash did not
+    /// land is a block no hash lookup can reach, and an index that quietly
+    /// omits it looks complete.
     fn exact_keys_of(
         block: &ArchiveIndexDelta,
-    ) -> impl Iterator<Item = (ExactKind, ExactKey)> + '_ {
+    ) -> impl Iterator<Item = Result<(ExactKind, ExactKey), IndexError>> + '_ {
         let hash = (!block.block_hash.is_empty())
-            .then(|| (ExactKind::BlockHash, exact_key(&block.block_hash)));
+            .then_some((ExactKind::BlockHash, block.block_hash.as_slice()));
 
-        let number = block
-            .block_number
-            .map(|n| (ExactKind::BlockNumber, exact_key(&n.to_be_bytes())));
+        let number = block.block_number.map(|n| (ExactKind::BlockNumber, n));
 
         let txs = block
             .tx_hashes
             .iter()
-            .map(|hash| (ExactKind::TxHash, exact_key(hash)));
+            .map(|hash| (ExactKind::TxHash, hash.as_slice()));
 
-        hash.into_iter().chain(number).chain(txs)
+        let hashes = hash.into_iter().chain(txs).map(|(kind, key)| {
+            exact_key(kind, key).map(|key| (kind, key)).ok_or_else(|| {
+                IndexError::CodecError(format!(
+                    "exact entry of kind {kind} has a {}-byte key, expected {}",
+                    key.len(),
+                    kind.key_len(),
+                ))
+            })
+        });
+
+        // A block number is type-enforced eight bytes, so it cannot be
+        // malformed the way a hash can.
+        let number = number.map(|(kind, n)| {
+            Ok((
+                kind,
+                exact_key(kind, &n.to_be_bytes()).expect("a u64 is the block-number key width"),
+            ))
+        });
+
+        hashes.chain(number)
     }
 }
 
@@ -164,7 +196,8 @@ impl IndexWriter for MemoryIndexWriter {
         }
 
         for block in &delta.archive {
-            for (kind, key) in Self::exact_keys_of(block) {
+            for entry in Self::exact_keys_of(block) {
+                let (kind, key) = entry?;
                 ops.push(Op::InsertExact(kind, key, block.slot));
             }
 
@@ -205,7 +238,8 @@ impl IndexWriter for MemoryIndexWriter {
         }
 
         for block in delta.archive.iter().rev() {
-            for (kind, key) in Self::exact_keys_of(block) {
+            for entry in Self::exact_keys_of(block) {
+                let (kind, key) = entry?;
                 ops.push(Op::RemoveExact(kind, key));
             }
 
@@ -234,7 +268,7 @@ impl IndexWriter for MemoryIndexWriter {
                 // constructed with a key that does not match its kind.
                 IndexRecord::Exact(exact) => ops.push(Op::InsertExact(
                     exact.kind,
-                    exact_key(exact.key()),
+                    exact_key(exact.kind, exact.key()).expect("a record's key is its kind's width"),
                     exact.slot,
                 )),
             }
@@ -391,27 +425,34 @@ impl IndexStore for MemoryIndexStore {
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+        // A key that could not have been stored cannot be found, so a
+        // wrong-width query is a miss rather than an error.
+        let Some(key) = exact_key(ExactKind::BlockHash, hash) else {
+            return Ok(None);
+        };
+
         let tables = self.tables.read().map_err(|_| poisoned())?;
-        Ok(tables
-            .exact
-            .get(&(ExactKind::BlockHash, exact_key(hash)))
-            .copied())
+        Ok(tables.exact.get(&(ExactKind::BlockHash, key)).copied())
     }
 
     fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
+        // A block number is type-enforced eight bytes, so this cannot fail.
+        let key = exact_key(ExactKind::BlockNumber, &number.to_be_bytes())
+            .expect("a u64 is the block-number key width");
+
         let tables = self.tables.read().map_err(|_| poisoned())?;
-        Ok(tables
-            .exact
-            .get(&(ExactKind::BlockNumber, exact_key(&number.to_be_bytes())))
-            .copied())
+        Ok(tables.exact.get(&(ExactKind::BlockNumber, key)).copied())
     }
 
     fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+        // A key that could not have been stored cannot be found, so a
+        // wrong-width query is a miss rather than an error.
+        let Some(key) = exact_key(ExactKind::TxHash, hash) else {
+            return Ok(None);
+        };
+
         let tables = self.tables.read().map_err(|_| poisoned())?;
-        Ok(tables
-            .exact
-            .get(&(ExactKind::TxHash, exact_key(hash)))
-            .copied())
+        Ok(tables.exact.get(&(ExactKind::TxHash, key)).copied())
     }
 
     fn slots_by_tag(

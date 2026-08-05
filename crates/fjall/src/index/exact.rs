@@ -36,14 +36,8 @@ use crate::Error;
 // hashed into on-disk keys and the names carried by exported records cannot
 // drift apart.
 
-/// Internal dimension name for block hash lookups
-const DIM_BLOCK_HASH: &str = ExactKind::BlockHash.as_str();
-
 /// Internal dimension name for block number lookups
 const DIM_BLOCK_NUM: &str = ExactKind::BlockNumber.as_str();
-
-/// Internal dimension name for transaction hash lookups
-const DIM_TX_HASH: &str = ExactKind::TxHash.as_str();
 
 // ============================================================================
 // Key Encoding
@@ -68,17 +62,20 @@ impl ExactKeyBuf {
     }
 }
 
-/// Build an exact lookup key: `[dim_hash:8][key_data:var]`
+/// Build an exact lookup key: `[dim_hash:8][key_data:kind width]`
 ///
-/// `None` for key data wider than any kind stores. No such entry can exist, so
-/// a query for one is a miss; the callers that build keys from a record are
-/// already width-checked by [`ExactRecord::new`].
-fn build_exact_key(dimension: &str, key_data: &[u8]) -> Option<ExactKeyBuf> {
-    if key_data.len() > MAX_EXACT_KEY_LEN {
+/// `None` unless the key is exactly [`ExactKind::key_len`] wide. Nothing else
+/// can be stored, so nothing else can be found — and the width has to be
+/// checked here rather than padded or truncated to fit, because a key adjusted
+/// to fit aliases with the key it was adjusted into. `ArchiveIndexDelta` holds
+/// its hashes as `Vec<u8>`, so this is the width's only enforcement on the
+/// delta path.
+fn build_exact_key(kind: ExactKind, key_data: &[u8]) -> Option<ExactKeyBuf> {
+    if key_data.len() != kind.key_len() {
         return None;
     }
 
-    let dim_hash = hash_dimension(dim_prefix::EXACT, dimension);
+    let dim_hash = hash_dimension(dim_prefix::EXACT, kind.as_str());
     let mut buf = [0u8; EXACT_KEY_BUF];
     buf[..DIM_HASH_SIZE].copy_from_slice(&dim_hash);
     buf[DIM_HASH_SIZE..DIM_HASH_SIZE + key_data.len()].copy_from_slice(key_data);
@@ -89,13 +86,18 @@ fn build_exact_key(dimension: &str, key_data: &[u8]) -> Option<ExactKeyBuf> {
     })
 }
 
-/// [`build_exact_key`] for the delta paths, where an over-wide key is a
+/// [`build_exact_key`] for the delta paths, where a wrong-width key is a
 /// malformed block rather than a lookup that cannot match.
-fn exact_key_or_codec_error(dimension: &str, key_data: &[u8]) -> Result<ExactKeyBuf, Error> {
-    build_exact_key(dimension, key_data).ok_or_else(|| {
+///
+/// Refusing the batch rather than dropping the entry: a block whose hash did
+/// not land is a block no hash lookup can reach, and an index that quietly
+/// omits it looks complete.
+fn exact_key_or_codec_error(kind: ExactKind, key_data: &[u8]) -> Result<ExactKeyBuf, Error> {
+    build_exact_key(kind, key_data).ok_or_else(|| {
         Error::Codec(format!(
-            "{dimension} key is {} bytes, wider than the {MAX_EXACT_KEY_LEN} an exact key can hold",
+            "exact entry of kind {kind} has a {}-byte key, expected {}",
             key_data.len(),
+            kind.key_len(),
         ))
     })
 }
@@ -133,7 +135,7 @@ fn apply_block(
 
     // Exact lookup: block hash -> slot
     if !block.block_hash.is_empty() {
-        let key = exact_key_or_codec_error(DIM_BLOCK_HASH, &block.block_hash)?;
+        let key = exact_key_or_codec_error(ExactKind::BlockHash, &block.block_hash)?;
         batch.insert(exact_keyspace, key.as_slice(), encode_slot_value(slot));
     }
 
@@ -145,7 +147,7 @@ fn apply_block(
 
     // Exact lookup: tx hashes -> slot
     for tx_hash in &block.tx_hashes {
-        let key = exact_key_or_codec_error(DIM_TX_HASH, tx_hash.as_slice())?;
+        let key = exact_key_or_codec_error(ExactKind::TxHash, tx_hash.as_slice())?;
         batch.insert(exact_keyspace, key.as_slice(), encode_slot_value(slot));
     }
 
@@ -159,7 +161,7 @@ fn undo_block(
     block: &ArchiveIndexDelta,
 ) -> Result<(), Error> {
     if !block.block_hash.is_empty() {
-        let key = exact_key_or_codec_error(DIM_BLOCK_HASH, &block.block_hash)?;
+        let key = exact_key_or_codec_error(ExactKind::BlockHash, &block.block_hash)?;
         batch.remove(exact_keyspace, key.as_slice());
     }
 
@@ -169,7 +171,7 @@ fn undo_block(
     }
 
     for tx_hash in &block.tx_hashes {
-        let key = exact_key_or_codec_error(DIM_TX_HASH, tx_hash.as_slice())?;
+        let key = exact_key_or_codec_error(ExactKind::TxHash, tx_hash.as_slice())?;
         batch.remove(exact_keyspace, key.as_slice());
     }
 
@@ -242,7 +244,7 @@ pub fn get_by_block_hash<R: Readable>(
     exact_keyspace: &Keyspace,
     block_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
-    let Some(key) = build_exact_key(DIM_BLOCK_HASH, block_hash) else {
+    let Some(key) = build_exact_key(ExactKind::BlockHash, block_hash) else {
         return Ok(None);
     };
     match readable
@@ -279,7 +281,7 @@ pub fn get_by_tx_hash<R: Readable>(
     exact_keyspace: &Keyspace,
     tx_hash: &[u8],
 ) -> Result<Option<BlockSlot>, Error> {
-    let Some(key) = build_exact_key(DIM_TX_HASH, tx_hash) else {
+    let Some(key) = build_exact_key(ExactKind::TxHash, tx_hash) else {
         return Ok(None);
     };
     match readable
@@ -391,11 +393,11 @@ impl std::iter::FusedIterator for ExactRecordIterator {}
 mod tests {
     use super::*;
 
-    /// The key bytes for a dimension and key data, for tests that know the
-    /// data fits.
-    fn key_bytes(dimension: &str, key_data: &[u8]) -> Vec<u8> {
-        build_exact_key(dimension, key_data)
-            .expect("test keys fit the inline buffer")
+    /// The key bytes for a kind and key data, for tests that use well-formed
+    /// widths.
+    fn key_bytes(kind: ExactKind, key_data: &[u8]) -> Vec<u8> {
+        build_exact_key(kind, key_data)
+            .expect("test keys are the width their kind requires")
             .as_slice()
             .to_vec()
     }
@@ -403,7 +405,7 @@ mod tests {
     #[test]
     fn test_exact_key_block_hash() {
         let block_hash = [0xcd; 32];
-        let key = key_bytes(DIM_BLOCK_HASH, &block_hash);
+        let key = key_bytes(ExactKind::BlockHash, &block_hash);
 
         // First 8 bytes are dim_hash, rest is key_data
         assert_eq!(key.len(), DIM_HASH_SIZE + 32);
@@ -413,18 +415,28 @@ mod tests {
     #[test]
     fn test_exact_key_tx_hash() {
         let tx_hash = [0xab; 32];
-        let key = key_bytes(DIM_TX_HASH, &tx_hash);
+        let key = key_bytes(ExactKind::TxHash, &tx_hash);
 
         assert_eq!(key.len(), DIM_HASH_SIZE + 32);
         assert_eq!(&key[DIM_HASH_SIZE..], &tx_hash);
     }
 
-    /// Nothing in this keyspace is wider than the widest kind, so a key that
-    /// is cannot match an entry — the lookup misses rather than erroring.
+    /// Only a key of exactly its kind's width has a stored form.
+    ///
+    /// Padding or truncating to fit would be worse than refusing: an adjusted
+    /// key aliases with the key it was adjusted into, so a 33-byte block hash
+    /// and the 32-byte hash that is its prefix would answer each other's
+    /// lookups.
     #[test]
-    fn test_exact_key_wider_than_any_kind_has_no_key() {
-        assert!(build_exact_key(DIM_BLOCK_HASH, &[0u8; MAX_EXACT_KEY_LEN]).is_some());
-        assert!(build_exact_key(DIM_BLOCK_HASH, &[0u8; MAX_EXACT_KEY_LEN + 1]).is_none());
+    fn test_only_the_kind_width_has_a_key() {
+        for kind in ExactKind::ALL {
+            let width = kind.key_len();
+
+            assert!(build_exact_key(kind, &vec![0u8; width]).is_some());
+            assert!(build_exact_key(kind, &vec![0u8; width - 1]).is_none());
+            assert!(build_exact_key(kind, &vec![0u8; width + 1]).is_none());
+            assert!(build_exact_key(kind, &[]).is_none());
+        }
     }
 
     #[test]
@@ -451,18 +463,11 @@ mod tests {
     fn test_dimension_separation() {
         // Ensure keys from different dimensions don't overlap
         let hash = [0xab; 32];
-        let block_key = key_bytes(DIM_BLOCK_HASH, &hash);
-        let tx_key = key_bytes(DIM_TX_HASH, &hash);
+        let block_key = key_bytes(ExactKind::BlockHash, &hash);
+        let tx_key = key_bytes(ExactKind::TxHash, &hash);
 
         // First 8 bytes (dim_hash) should be different
         assert_ne!(&block_key[..DIM_HASH_SIZE], &tx_key[..DIM_HASH_SIZE]);
-    }
-
-    #[test]
-    fn test_any_dimension_works() {
-        // Any dimension string should work (chain-agnostic)
-        let key = key_bytes("custom_lookup", &[0x11; 20]);
-        assert_eq!(key.len(), DIM_HASH_SIZE + 20);
     }
 
     /// A record written by `insert_prehashed` has to land on the exact key the
@@ -471,15 +476,15 @@ mod tests {
     #[test]
     fn test_prehashed_key_matches_delta_key() {
         let block_hash = [0xcd; 32];
-        let from_delta = key_bytes(DIM_BLOCK_HASH, &block_hash);
+        let from_delta = key_bytes(ExactKind::BlockHash, &block_hash);
         let record = ExactRecord::new(ExactKind::BlockHash, &block_hash, 42).unwrap();
-        let from_record = key_bytes(record.kind.as_str(), record.key());
+        let from_record = key_bytes(record.kind, record.key());
         assert_eq!(from_delta, from_record);
 
         let number = 12345678u64;
         let from_delta = build_exact_key_blocknum(number);
         let record = ExactRecord::new(ExactKind::BlockNumber, &number.to_be_bytes(), 42).unwrap();
-        let from_record = key_bytes(record.kind.as_str(), record.key());
+        let from_record = key_bytes(record.kind, record.key());
         assert_eq!(from_delta.as_slice(), from_record.as_slice());
     }
 }

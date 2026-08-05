@@ -324,6 +324,16 @@ macro_rules! conformance_suite {
             fn undo_removes_exactly_what_apply_added() {
                 super::undo_removes_exactly_what_apply_added::<$backend>();
             }
+
+            #[test]
+            fn malformed_exact_keys_are_refused() {
+                super::malformed_exact_keys_are_refused::<$backend>();
+            }
+
+            #[test]
+            fn malformed_exact_queries_miss() {
+                super::malformed_exact_queries_miss::<$backend>();
+            }
         }
     };
 }
@@ -1007,4 +1017,124 @@ fn measure_one_epoch_iteration_cost() {
 
     assert_eq!(tags.len() as u64, written.tags_per_epoch);
     assert_eq!(exacts.len() as u64, written.exacts_per_epoch);
+}
+
+/// `ArchiveIndexDelta` carries its block and transaction hashes as `Vec<u8>`,
+/// so nothing upstream enforces their width — a malformed hash reaches storage
+/// as a plain byte slice.
+///
+/// Neither backend may adjust it to fit. Padding or truncating makes a key
+/// alias with the key it was adjusted into, so a 33-byte block hash and the
+/// 32-byte hash that is its prefix would answer each other's lookups: a
+/// perfectly well-formed query returning a different block's slot.
+fn malformed_exact_keys_are_refused<B: Backend>() {
+    let widths = [
+        ("short", 31usize),
+        ("over-wide", 33),
+        ("empty", 0),
+        ("block-number-width", 8),
+    ];
+
+    for (label, width) in widths {
+        let (store, _guard) = B::open();
+
+        let delta = IndexDelta {
+            cursor: ChainPoint::Slot(100),
+            utxo: Default::default(),
+            archive: vec![ArchiveIndexDelta {
+                slot: 100,
+                block_hash: vec![0xAB; width],
+                block_number: Some(1),
+                tx_hashes: vec![vec![0xCD; 32]],
+                tags: Vec::new(),
+            }],
+        };
+
+        let writer = store.start_writer().expect("start_writer failed");
+        let applied = writer.apply(&delta);
+
+        if width == 0 {
+            // An empty hash is "no block hash", not a malformed one — the
+            // delta path has always treated it as absent.
+            assert!(applied.is_ok(), "an empty block hash should be skipped");
+            continue;
+        }
+
+        assert!(
+            applied.is_err(),
+            "a {label} ({width}-byte) block hash should be refused, not stored"
+        );
+
+        // And the well-formed hash it could have been confused with finds
+        // nothing, because nothing was stored.
+        writer.commit().expect("commit failed");
+        assert_eq!(
+            store.slot_by_block_hash(&[0xAB; 32]).unwrap(),
+            None,
+            "a {label} block hash leaked into the 32-byte keyspace"
+        );
+    }
+
+    // The same for transaction hashes.
+    for (label, width) in [("short", 31usize), ("over-wide", 33)] {
+        let (store, _guard) = B::open();
+
+        let delta = IndexDelta {
+            cursor: ChainPoint::Slot(100),
+            utxo: Default::default(),
+            archive: vec![ArchiveIndexDelta {
+                slot: 100,
+                block_hash: vec![0x01; 32],
+                block_number: Some(1),
+                tx_hashes: vec![vec![0xEF; width]],
+                tags: Vec::new(),
+            }],
+        };
+
+        let writer = store.start_writer().expect("start_writer failed");
+        assert!(
+            writer.apply(&delta).is_err(),
+            "a {label} ({width}-byte) tx hash should be refused, not stored"
+        );
+        writer.commit().expect("commit failed");
+
+        assert_eq!(
+            store.slot_by_tx_hash(&[0xEF; 32]).unwrap(),
+            None,
+            "a {label} tx hash leaked into the 32-byte keyspace"
+        );
+    }
+}
+
+/// A wrong-width lookup is a miss, not an error and not a neighbour's answer.
+fn malformed_exact_queries_miss<B: Backend>() {
+    let (store, _guard) = B::open();
+    seed(&store);
+
+    let (hash, _, slot) = seeded_block();
+    assert_eq!(store.slot_by_block_hash(&hash).unwrap(), Some(slot));
+
+    for truncated in [&hash[..31], &hash[..8], &hash[..0]] {
+        assert_eq!(
+            store.slot_by_block_hash(truncated).unwrap(),
+            None,
+            "a {}-byte prefix of a stored hash must not find it",
+            truncated.len()
+        );
+    }
+
+    let mut extended = hash.clone();
+    extended.push(0x00);
+    assert_eq!(store.slot_by_block_hash(&extended).unwrap(), None);
+}
+
+/// The first block the conformance seed wrote, for tests that need a hash the
+/// store actually holds.
+fn seeded_block() -> (Vec<u8>, u64, BlockSlot) {
+    let (_, seeded) = conformance_deltas();
+    seeded
+        .blocks
+        .first()
+        .expect("the seed writes blocks")
+        .clone()
 }
