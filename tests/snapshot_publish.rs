@@ -18,6 +18,17 @@ use dolos_core::{
 use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
 use stelae::dir::SteleDir;
 
+/// A path as a TOML string *value*, quotes and escapes included.
+///
+/// Interpolated rather than quoted by hand, because a Windows temp path is
+/// `C:\Users\RUNNER~1\...` and `\U` inside a TOML basic string opens an
+/// eight-digit unicode escape — so a hand-quoted path parses on Unix and is a
+/// syntax error on Windows. `toml::Value`'s own `Display` is the escaping rule,
+/// and using it means this fixture cannot be wrong about it.
+fn toml_string(path: &std::path::Path) -> String {
+    toml::Value::String(path.display().to_string()).to_string()
+}
+
 /// A node directory holding preview genesis, a `dolos.toml` and, once
 /// [`sync`] has run, a populated set of live stores.
 struct Node {
@@ -30,6 +41,8 @@ impl Node {
         let root = tempfile::tempdir().unwrap();
         dolos_cardano::include::preview::save(root.path()).unwrap();
 
+        let genesis = |name: &str| toml_string(&root.path().join(name));
+
         // Storage backends are left at their defaults, which is the point: this
         // test is meant to run against whatever a real node runs against.
         let toml = format!(
@@ -39,13 +52,13 @@ impl Node {
 
             [storage]
             version = "v3"
-            path = "{data}"
+            path = {data}
 
             [genesis]
-            byron_path = "{root}/byron.json"
-            shelley_path = "{root}/shelley.json"
-            alonzo_path = "{root}/alonzo.json"
-            conway_path = "{root}/conway.json"
+            byron_path = {byron}
+            shelley_path = {shelley}
+            alonzo_path = {alonzo}
+            conway_path = {conway}
             force_protocol = 6
 
             [chain]
@@ -53,8 +66,11 @@ impl Node {
             magic = 2
             is_testnet = true
             "#,
-            data = root.path().join("data").display(),
-            root = root.path().display(),
+            data = toml_string(&root.path().join("data")),
+            byron = genesis("byron.json"),
+            shelley = genesis("shelley.json"),
+            alonzo = genesis("alonzo.json"),
+            conway = genesis("conway.json"),
         );
 
         std::fs::write(root.path().join("dolos.toml"), &toml).unwrap();
@@ -239,4 +255,22 @@ fn an_epoch_range_selects_the_layers_it_names() {
             out.display()
         );
     }
+}
+
+/// The Windows regression, checked on every platform.
+///
+/// A backslash is a legal filename character on Unix too, so this builds the
+/// path a Windows runner actually hands a temp directory and asserts the
+/// fixture's own rendering of it still parses. Hand-quoting produced
+/// `"C:\Users\..."`, whose `\U` is an unterminated unicode escape — a config
+/// that parsed on two of the three CI platforms and was a syntax error on the
+/// third.
+#[test]
+fn a_windows_shaped_path_survives_the_config() {
+    let path = std::path::PathBuf::from(r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpvPKFCW");
+
+    let document = format!("path = {}", toml_string(&path));
+    let parsed: toml::Value = toml::from_str(&document).unwrap();
+
+    assert_eq!(parsed["path"].as_str().unwrap(), path.display().to_string());
 }
