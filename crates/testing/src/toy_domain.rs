@@ -127,22 +127,124 @@ impl dolos_core::MempoolStore for Mempool {
     }
 }
 
-/// Minimal `Domain` implementation bound to the builtin memory stores for
-/// state and indexes, with the archive on redb.
+/// The state and index backends a [`ToyDomain`] is bound to.
 ///
-/// Memory stores rather than the on-disk ones because a suite builds hundreds
-/// of these: the state and index stores serve the same contract either way —
-/// including the snapshot export seam, which is why this harness cannot go back
-/// to the redb in-memory store it used before — but these ones need no
-/// filesystem, no compaction threads and no cache, so building a domain costs
-/// about what allocating a map costs.
+/// A binding, not a variant: there is one harness domain, and this is the axis
+/// along which it is pointed at a backend. The two implementations below are
+/// the two the node actually ships (see `adrs`/storage config), so a suite
+/// running on either is running on a live configuration rather than on a
+/// test-only store.
+///
+/// The pair is one trait rather than two parameters because they are always
+/// chosen together, and because [`FjallStores`] has to keep a temporary
+/// directory alive for both.
+pub trait ToyStores: Clone + Send + Sync + 'static {
+    type State: StateStore;
+    type Indexes: dolos_core::IndexStore;
+
+    /// Open a fresh, empty pair.
+    fn open() -> Self;
+
+    fn state(&self) -> &Self::State;
+    fn indexes(&self) -> &Self::Indexes;
+}
+
+/// The builtin in-memory stores: the default, and what almost every suite
+/// wants.
+///
+/// They serve the same contract as the on-disk ones — including the snapshot
+/// export seam, which is why this harness cannot go back to the redb in-memory
+/// store it used before — but need no filesystem, no compaction threads and no
+/// cache, so building a domain costs about what allocating a map costs. A suite
+/// builds hundreds of these.
 #[derive(Clone)]
-pub struct ToyDomain {
+pub struct MemoryStores {
+    state: MemoryStateStore,
+    indexes: MemoryIndexStore,
+}
+
+impl ToyStores for MemoryStores {
+    type State = MemoryStateStore;
+    type Indexes = MemoryIndexStore;
+
+    fn open() -> Self {
+        Self {
+            state: MemoryStateStore::new(),
+            indexes: MemoryIndexStore::new(),
+        }
+    }
+
+    fn state(&self) -> &Self::State {
+        &self.state
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
+    }
+}
+
+/// The persistent stores the node runs on, in a temporary directory.
+///
+/// Slower to build by orders of magnitude, so this is for the tests whose
+/// subject *is* the backend — above all the snapshot export's determinism
+/// check, which only means anything if two different backends are asked the
+/// same question.
+///
+/// The directory is held by the value and removed when the last clone drops,
+/// which is why it is an `Arc` and not a field the caller has to keep alive.
+#[derive(Clone)]
+pub struct FjallStores {
+    state: dolos_fjall::StateStore,
+    indexes: dolos_fjall::IndexStore,
+    _dir: Arc<tempfile::TempDir>,
+}
+
+impl ToyStores for FjallStores {
+    type State = dolos_fjall::StateStore;
+    type Indexes = dolos_fjall::IndexStore;
+
+    fn open() -> Self {
+        let dir = tempfile::tempdir().expect("temp dir for the fjall stores");
+
+        let state = dolos_fjall::StateStore::open(
+            dir.path().join("state"),
+            &dolos_core::config::FjallStateConfig::default(),
+        )
+        .expect("opening the fjall state store");
+
+        let indexes = dolos_fjall::IndexStore::open(
+            dir.path().join("indexes"),
+            &dolos_core::config::FjallIndexConfig::default(),
+        )
+        .expect("opening the fjall index store");
+
+        Self {
+            state,
+            indexes,
+            _dir: Arc::new(dir),
+        }
+    }
+
+    fn state(&self) -> &Self::State {
+        &self.state
+    }
+
+    fn indexes(&self) -> &Self::Indexes {
+        &self.indexes
+    }
+}
+
+/// Minimal `Domain` implementation, with the archive on redb and the state and
+/// index stores chosen by [`ToyStores`].
+///
+/// Defaults to [`MemoryStores`], so `ToyDomain` unqualified is the cheap
+/// in-memory harness every existing suite already binds.
+#[derive(Clone)]
+pub struct ToyDomain<B: ToyStores = MemoryStores> {
     wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
-    state: MemoryStateStore,
+    stores: B,
     archive: dolos_redb3::archive::ArchiveStore,
-    indexes: MemoryIndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     sync_config: SyncConfig,
@@ -150,7 +252,7 @@ pub struct ToyDomain {
     tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
 
-impl ToyDomain {
+impl ToyDomain<MemoryStores> {
     /// Create a new MockDomain with the provided state implementation
     pub fn new(initial_delta: Option<UtxoSetDelta>, storage_config: Option<StorageConfig>) -> Self {
         let genesis = Arc::new(dolos_cardano::include::devnet::load());
@@ -176,7 +278,24 @@ impl ToyDomain {
         initial_delta: Option<UtxoSetDelta>,
         storage_config: Option<StorageConfig>,
     ) -> Self {
-        let state = MemoryStateStore::new();
+        Self::with_backend(genesis, config, initial_delta, storage_config)
+    }
+}
+
+impl<B: ToyStores> ToyDomain<B> {
+    /// The general constructor: the backend is named by the caller.
+    ///
+    /// `ToyDomain::new` and friends are this with [`MemoryStores`] filled in.
+    /// Rust does not apply a type parameter's default to a generic impl, so the
+    /// convenience names live on the memory binding and this one is the shape a
+    /// caller reaches for when it wants a different backend.
+    pub fn with_backend(
+        genesis: Arc<dolos_core::Genesis>,
+        config: CardanoConfig,
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+    ) -> Self {
+        let stores = B::open();
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
@@ -184,19 +303,19 @@ impl ToyDomain {
             dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
                 .unwrap();
 
-        let indexes = MemoryIndexStore::new();
-
-        let chain =
-            dolos_cardano::CardanoLogic::initialize::<Self>(config.clone(), &state, &genesis)
-                .unwrap();
+        let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
+            config.clone(),
+            stores.state(),
+            &genesis,
+        )
+        .unwrap();
 
         // Create the domain first (genesis work unit needs it for execution)
         let domain = Self {
-            state,
+            stores,
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
             chain: Arc::new(RwLock::new(chain)),
             archive,
-            indexes,
             mempool: Mempool {
                 pending: Arc::new(RwLock::new(Vec::new())),
             },
@@ -219,14 +338,14 @@ impl ToyDomain {
         // needs_cache_refresh flag in CardanoLogic::pop_work.
         {
             let mut chain = domain.chain.write().expect("chain lock poisoned");
-            chain.refresh_cache::<Self>(&domain.state).unwrap();
+            chain.refresh_cache::<Self>(domain.stores.state()).unwrap();
         }
 
         domain.bootstrap().unwrap();
 
         // Ensure the current epoch state is available as an archive log entry.
-        let chain = dolos_cardano::eras::load_era_summary::<Self>(&domain.state).unwrap();
-        let epoch = dolos_cardano::load_epoch::<Self>(&domain.state).unwrap();
+        let chain = dolos_cardano::eras::load_era_summary::<Self>(domain.stores.state()).unwrap();
+        let epoch = dolos_cardano::load_epoch::<Self>(domain.stores.state()).unwrap();
         let epoch_start = chain.epoch_start(epoch.number);
         let log_key = LogKey::from(TemporalKey::from(epoch_start));
         let writer = domain.archive.start_writer().unwrap();
@@ -234,13 +353,14 @@ impl ToyDomain {
         writer.commit().unwrap();
 
         if let Some(delta) = initial_delta {
-            let writer = domain.state.start_writer().unwrap();
-            let index_writer = domain.indexes.start_writer().unwrap();
+            let writer = domain.stores.state().start_writer().unwrap();
+            let index_writer = domain.stores.indexes().start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
 
             // Build index delta from UTxO delta using Cardano-specific helper
             let cursor = domain
-                .state
+                .stores
+                .state()
                 .read_cursor()
                 .unwrap()
                 .unwrap_or(ChainPoint::Origin);
@@ -288,16 +408,16 @@ impl dolos_core::TipSubscription for TipSubscription {
     }
 }
 
-impl dolos_core::Domain for ToyDomain {
+impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
     type Archive = dolos_redb3::archive::ArchiveStore;
-    type State = MemoryStateStore;
+    type State = B::State;
     type Chain = dolos_cardano::CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
-    type Indexes = MemoryIndexStore;
+    type Indexes = B::Indexes;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &StorageConfig {
@@ -325,7 +445,7 @@ impl dolos_core::Domain for ToyDomain {
     }
 
     fn state(&self) -> &Self::State {
-        &self.state
+        self.stores.state()
     }
 
     fn archive(&self) -> &Self::Archive {
@@ -333,7 +453,7 @@ impl dolos_core::Domain for ToyDomain {
     }
 
     fn indexes(&self) -> &Self::Indexes {
-        &self.indexes
+        self.stores.indexes()
     }
 
     fn mempool(&self) -> &Self::Mempool {
@@ -362,7 +482,7 @@ impl dolos_core::Domain for ToyDomain {
     }
 }
 
-impl pallas::interop::utxorpc::LedgerContext for ToyDomain {
+impl<B: ToyStores> pallas::interop::utxorpc::LedgerContext for ToyDomain<B> {
     fn get_utxos(
         &self,
         _refs: &[pallas::interop::utxorpc::TxoRef],

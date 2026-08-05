@@ -46,8 +46,7 @@ use stelae::{
     Digest, Profile,
 };
 
-pub const NETWORK_MAGIC: u64 = 764824073;
-pub const NETWORK_NAME: &str = "mainnet";
+pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;
 
 /// The stele's sequence, which for this profile is the epoch.
 pub const EPOCH: u64 = 7;
@@ -66,7 +65,7 @@ pub const METADATA_LABEL: u64 = 674;
 pub const SHARDS: [u8; 2] = [0, 1];
 
 pub fn network() -> Network {
-    Network::new(NETWORK_MAGIC, NETWORK_NAME)
+    Network::for_magic(NETWORK_MAGIC)
 }
 
 pub fn epoch_scope() -> EpochScope {

@@ -12,13 +12,16 @@
 //!
 //! ## What is here, and what is deliberately not
 //!
-//! Everything in this crate is a *description* of the format: pure functions
-//! over records already in hand. There is no export, no restore, no store
-//! iteration and no CLI — those are orchestration and land on top of this. The
-//! split exists so that the byte shapes, the ordering rules and the vocabulary
-//! are frozen by golden digests *before* anything drives a store through them,
-//! because a codec that drifts silently republishes a different identity under
-//! the same name.
+//! Most of this crate is a *description* of the format: pure functions over
+//! records already in hand. The byte shapes, the ordering rules and the
+//! vocabulary were frozen by golden digests *before* anything drove a store
+//! through them, because a codec that drifts silently republishes a different
+//! identity under the same name.
+//!
+//! [`export`] is the one exception, and it is deliberately the whole of it: the
+//! driver that walks a live store set and hands records to the protocol. There
+//! is still no restore, and no CLI — the command lives in the `dolos` binary
+//! and is a thin call into [`export::export`].
 //!
 //! ## The rules this crate keeps
 //!
@@ -40,7 +43,11 @@
 //! - [`layers`] — one codec per layer kind, each with `encode`, `decode` and an
 //!   `OrderCheck` that enforces the kind's ordering contract.
 //! - [`namespaces`] — the closed set of state namespaces.
+//! - [`export`] — the one thing here that is *not* a pure function over records
+//!   in hand: the driver that walks a live store set and hands its records to
+//!   the protocol in the order above.
 
+pub mod export;
 pub mod layers;
 pub mod namespaces;
 
@@ -116,6 +123,24 @@ pub enum Error {
     /// refusal keeps one validation site instead of two that can disagree.
     #[error("index store error: {0}")]
     Index(#[from] dolos_core::IndexError),
+
+    #[error("archive store error: {0}")]
+    Archive(#[from] dolos_core::ArchiveError),
+
+    #[error("state store error: {0}")]
+    State(#[from] dolos_core::StateError),
+
+    #[error("chain error: {0}")]
+    Chain(#[from] dolos_core::ChainError),
+
+    /// A block the archive holds and this profile cannot read the header of.
+    /// The `blocks` codec takes the hash as an input, so deriving it is the
+    /// export driver's job and a failure to is export's error, not the codec's.
+    #[error("the block at slot {slot} does not decode: {reason}")]
+    UndecodableBlock {
+        slot: dolos_core::BlockSlot,
+        reason: String,
+    },
 
     #[error("malformed {kind} record: {reason}")]
     MalformedRecord { kind: &'static str, reason: String },
@@ -200,22 +225,57 @@ impl Profile for DolosProfile {
     }
 }
 
+/// Network magic of the Cardano mainnet.
+pub const MAINNET_MAGIC: u64 = 764824073;
+
+/// Network magic of the preprod testnet.
+pub const PREPROD_MAGIC: u64 = 1;
+
+/// Network magic of the preview testnet.
+pub const PREVIEW_MAGIC: u64 = 2;
+
 /// The network a stele belongs to, as `position.network` records it.
 ///
 /// The magic is the identity a restoring node checks against its own
 /// configuration; the name is for humans reading the inscription.
+///
+/// ## Why the name is not an input
+///
+/// It rides inside the canonical JSON, so it is inside the stele's identity. A
+/// name read from configuration would let two publishers on one chain produce
+/// two different digests over a spelling — which is precisely the divergence
+/// the protocol exists to make impossible. [`Network::for_magic`] is therefore
+/// the only way to build one, the table below is the only place the strings are
+/// written, and a golden freezes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
-    pub magic: u64,
-    pub name: String,
+    magic: u64,
+    name: String,
 }
 
 impl Network {
-    pub fn new(magic: u64, name: impl Into<String>) -> Self {
-        Self {
-            magic,
-            name: name.into(),
-        }
+    /// The network a magic names.
+    ///
+    /// A magic with no name of its own renders as `testnet-{magic}`, so a
+    /// devnet or a private network is publishable without a registry entry and
+    /// without two publishers having to agree on anything but the magic.
+    pub fn for_magic(magic: u64) -> Self {
+        let name = match magic {
+            MAINNET_MAGIC => "mainnet".to_owned(),
+            PREPROD_MAGIC => "preprod".to_owned(),
+            PREVIEW_MAGIC => "preview".to_owned(),
+            other => format!("testnet-{other}"),
+        };
+
+        Self { magic, name }
+    }
+
+    pub fn magic(&self) -> u64 {
+        self.magic
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -235,7 +295,7 @@ pub fn position(
         .ok_or_else(|| Error::UnanchoredPoint(point.to_string()))?;
 
     Ok(json!({
-        "network": {"magic": network.magic, "name": network.name},
+        "network": {"magic": network.magic(), "name": network.name()},
         "point": {"slot": point.slot(), "hash": hex::encode(hash)},
         "epoch": epoch,
     }))
@@ -447,9 +507,28 @@ mod tests {
         stelae::profile::validate_profile_name(PROFILE_NAME).unwrap();
     }
 
+    /// The table is inside the stele's identity, so the strings are pinned as
+    /// literals here and again in the export golden.
+    #[test]
+    fn a_network_is_named_by_its_magic_alone() {
+        for (magic, name) in [
+            (MAINNET_MAGIC, "mainnet"),
+            (PREPROD_MAGIC, "preprod"),
+            (PREVIEW_MAGIC, "preview"),
+            (0, "testnet-0"),
+            (42, "testnet-42"),
+            (4, "testnet-4"),
+        ] {
+            let network = Network::for_magic(magic);
+
+            assert_eq!(network.magic(), magic);
+            assert_eq!(network.name(), name, "magic {magic}");
+        }
+    }
+
     #[test]
     fn position_needs_an_anchored_point() {
-        let network = Network::new(764824073, "mainnet");
+        let network = Network::for_magic(MAINNET_MAGIC);
         let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
 
         let built = position(&network, &point, 550).unwrap();

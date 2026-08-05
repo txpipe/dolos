@@ -1,0 +1,187 @@
+use std::path::PathBuf;
+
+use clap::Parser;
+use dolos_core::config::RootConfig;
+use dolos_snapshot::export;
+use miette::{Context as _, IntoDiagnostic as _};
+
+#[derive(Debug, Parser)]
+pub struct Args {
+    /// directory to write the stele into; must not already hold one
+    #[arg(long)]
+    output_dir: PathBuf,
+
+    /// epochs to write layers for, e.g. `500..520`, `500..=520`, `500..`,
+    /// `..520` or `500`; defaults to every epoch below the cursor
+    #[arg(long, value_name = "RANGE")]
+    epochs: Option<EpochRange>,
+
+    /// report what would be written and exit
+    #[arg(long, action)]
+    dry_run: bool,
+}
+
+/// An epoch selection, in Rust's own range spellings.
+///
+/// Spelled the way a reader already knows how to read: `..` excludes its end,
+/// `..=` includes it. Both are accepted because a publisher naming "epochs 500
+/// through 519" and one naming "up to and including 519" are both natural, and
+/// silently picking one of the two meanings is how an operator publishes an
+/// epoch short.
+#[derive(Debug, Clone, Copy)]
+struct EpochRange {
+    first: Option<u64>,
+    last: Option<u64>,
+}
+
+impl std::str::FromStr for EpochRange {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let bad = |why: &str| format!("{raw:?} is not an epoch range: {why}");
+
+        let parse = |part: &str| -> Result<Option<u64>, String> {
+            match part.trim() {
+                "" => Ok(None),
+                value => value
+                    .parse::<u64>()
+                    .map(Some)
+                    .map_err(|e| bad(&format!("{value:?}: {e}"))),
+            }
+        };
+
+        // `..=` first: `..` is a prefix of it, so testing in the other order
+        // would read `500..=520` as a range ending at `=520`.
+        let (raw, inclusive) = match raw.split_once("..=") {
+            Some(_) => (raw.replacen("..=", "..", 1), true),
+            None => (raw.to_owned(), false),
+        };
+
+        let Some((start, end)) = raw.split_once("..") else {
+            // A bare number: exactly that epoch.
+            let only = parse(&raw)?.ok_or_else(|| bad("it is empty"))?;
+
+            return Ok(Self {
+                first: Some(only),
+                last: Some(only),
+            });
+        };
+
+        let first = parse(start)?;
+        let end = parse(end)?;
+
+        let last = match (end, inclusive) {
+            (Some(end), false) => Some(
+                end.checked_sub(1)
+                    .ok_or_else(|| bad("an exclusive end of 0 selects nothing"))?,
+            ),
+            (None, true) => return Err(bad("`..=` needs an end")),
+            (end, _) => end,
+        };
+
+        if let (Some(first), Some(last)) = (first, last) {
+            if first > last {
+                return Err(bad("it starts after it ends"));
+            }
+        }
+
+        Ok(Self { first, last })
+    }
+}
+
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    let stores = crate::common::open_data_stores(config)
+        .into_diagnostic()
+        .context("opening the data stores")?;
+
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+
+    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()))
+        .into_diagnostic()
+        .context("planning the publish")?;
+
+    let plan = match args.epochs {
+        Some(range) => plan.restrict_epochs(range.first, range.last),
+        None => plan,
+    };
+
+    let tag = plan.tag().into_diagnostic()?;
+
+    println!(
+        "network:  {} ({})",
+        plan.network.name(),
+        plan.network.magic()
+    );
+    println!("cursor:   {}", plan.cursor);
+    println!("sequence: {} (tag {tag})", plan.sequence);
+
+    match (plan.epochs.first(), plan.epochs.last()) {
+        (Some(first), Some(last)) => println!(
+            "epochs:   {}..={} ({} of them, slots {}..={})",
+            first.epoch,
+            last.epoch,
+            plan.epochs.len(),
+            first.start_slot,
+            last.end_slot,
+        ),
+        // The state tip alone is a legitimate publish; say so rather than
+        // printing an empty range and looking like a mistake.
+        _ => println!("epochs:   none selected; the state tip only"),
+    }
+
+    if args.dry_run {
+        println!("dry run: nothing written to {}", args.output_dir.display());
+        return Ok(());
+    }
+
+    let inscription = export::publish(
+        &args.output_dir,
+        &plan,
+        &stores.archive,
+        &stores.state,
+        &stores.indexes,
+        None,
+    )
+    .into_diagnostic()
+    .context("exporting the stele")?;
+
+    let digest = inscription.digest().into_diagnostic()?;
+
+    println!("wrote {}", args.output_dir.display());
+    println!("layers:   {}", inscription.layers.len());
+    println!(
+        "size:     {} uncompressed bytes",
+        inscription.uncompressed_size()
+    );
+    println!("identity: {digest}");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &str) -> (Option<u64>, Option<u64>) {
+        let range: EpochRange = raw.parse().unwrap();
+        (range.first, range.last)
+    }
+
+    #[test]
+    fn epoch_ranges_read_the_way_rust_ranges_do() {
+        assert_eq!(parse("500..520"), (Some(500), Some(519)));
+        assert_eq!(parse("500..=520"), (Some(500), Some(520)));
+        assert_eq!(parse("500.."), (Some(500), None));
+        assert_eq!(parse("..520"), (None, Some(519)));
+        assert_eq!(parse("..=520"), (None, Some(520)));
+        assert_eq!(parse(".."), (None, None));
+        assert_eq!(parse("500"), (Some(500), Some(500)));
+    }
+
+    #[test]
+    fn a_nonsensical_range_is_refused() {
+        for raw in ["520..500", "..0", "abc", "", "500..abc", "500..=", "-1"] {
+            assert!(raw.parse::<EpochRange>().is_err(), "{raw:?}");
+        }
+    }
+}
