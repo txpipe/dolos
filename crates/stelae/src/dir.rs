@@ -40,8 +40,9 @@ use std::{
 
 use crate::{
     digest::{digest_reader, read_blob, scan_blob, LayerDigests, LayerWriter},
-    frame::{CanonicalCbor, LayerHeader, SeqReader, SeqWriter},
+    frame::{CanonicalCbor, LayerHeader, Limits, SeqReader, SeqWriter},
     inscription::LayerDescriptor,
+    layer::{check_header, check_identity, check_record_count, LayerReader},
     profile::{checked_layer_media_type, Profile},
     Digest, Error, Inscription,
 };
@@ -369,18 +370,8 @@ impl SteleDir {
         Ok(BlobIndex(index))
     }
 
-    /// Read one layer, verifying it against its descriptor and its own header.
-    ///
-    /// Everything the descriptor claims is checked: the identity digest, the
-    /// uncompressed size, the record count, and that the header record inside
-    /// the blob names the same profile and kind. A layer that disagrees with
-    /// the document that points at it is refused.
-    pub fn read_layer(
-        &self,
-        index: &BlobIndex,
-        profile: &dyn Profile,
-        descriptor: &LayerDescriptor,
-    ) -> Result<Layer, Error> {
+    /// Locate the blob holding a layer, or say which layer is missing.
+    fn blob_of(&self, index: &BlobIndex, descriptor: &LayerDescriptor) -> Result<PathBuf, Error> {
         let blob_digest =
             index
                 .blob_for(&descriptor.diff_id)
@@ -389,7 +380,28 @@ impl SteleDir {
                     diff_id: descriptor.diff_id.to_string(),
                 })?;
 
-        let path = self.blob_path(&blob_digest);
+        Ok(self.blob_path(&blob_digest))
+    }
+
+    /// Read one layer, verifying it against its descriptor and its own header.
+    ///
+    /// Everything the descriptor claims is checked: the identity digest, the
+    /// uncompressed size, the record count, and that the header record inside
+    /// the blob names the same profile and kind. A layer that disagrees with
+    /// the document that points at it is refused.
+    ///
+    /// The layer is held whole, which is what makes this a fixture: the
+    /// descriptor's `uncompressedSize` is allocated outright, and on a Dolos
+    /// state shard that is 402 MB. Callers that only need to walk the records
+    /// want [`SteleDir::stream_layer`], which checks exactly the same claims
+    /// out of a bounded window.
+    pub fn read_layer(
+        &self,
+        index: &BlobIndex,
+        profile: &dyn Profile,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Layer, Error> {
+        let path = self.blob_of(index, descriptor)?;
 
         // The descriptor's claim doubles as the ceiling on decompression. A
         // blob that expands past it is refused mid-stream instead of being
@@ -397,23 +409,7 @@ impl SteleDir {
         // bounded cost.
         let (content, digests) = read_blob(fs::File::open(&path)?, descriptor.uncompressed_size)?;
 
-        if digests.diff_id != descriptor.diff_id {
-            return Err(Error::DigestMismatch {
-                subject: format!("layer {:?}", descriptor.kind),
-                expected: descriptor.diff_id.to_string(),
-                actual: digests.diff_id.to_string(),
-            });
-        }
-
-        if digests.uncompressed_size != descriptor.uncompressed_size {
-            return Err(Error::LayerMismatch {
-                kind: descriptor.kind.clone(),
-                reason: format!(
-                    "descriptor claims {} uncompressed bytes, blob holds {}",
-                    descriptor.uncompressed_size, digests.uncompressed_size
-                ),
-            });
-        }
+        check_identity(&digests, descriptor)?;
 
         let header_len = match SeqReader::new(&content).next() {
             Some(Ok(record)) => record.len(),
@@ -428,19 +424,7 @@ impl SteleDir {
 
         let header = LayerHeader::decode(&content[..header_len])?;
 
-        if header.profile != profile.name() {
-            return Err(Error::UnknownProfile {
-                found: header.profile,
-                expected: profile.name().to_owned(),
-            });
-        }
-
-        if header.kind != descriptor.kind {
-            return Err(Error::LayerMismatch {
-                kind: descriptor.kind.clone(),
-                reason: format!("header record names kind {:?}", header.kind),
-            });
-        }
+        check_header(&header, profile, descriptor)?;
 
         // Counted by iterating rather than with `count()`: `SeqReader` reports a
         // malformed record as one `Err` item and then ends, so counting items
@@ -454,15 +438,7 @@ impl SteleDir {
             records += 1;
         }
 
-        if records != descriptor.records {
-            return Err(Error::LayerMismatch {
-                kind: descriptor.kind.clone(),
-                reason: format!(
-                    "descriptor claims {} records, blob holds {records}",
-                    descriptor.records
-                ),
-            });
-        }
+        check_record_count(records, descriptor)?;
 
         Ok(Layer {
             header,
@@ -470,5 +446,26 @@ impl SteleDir {
             header_len,
             digests,
         })
+    }
+
+    /// Stream one layer's records without holding it.
+    ///
+    /// The same verification as [`SteleDir::read_layer`] — the checks are one
+    /// implementation, called from both — but spread across the read: the
+    /// header on construction, the decompression ceiling as the stream
+    /// advances, and the identity digest, size and record count in
+    /// [`LayerReader::finish`]. Records are therefore consumable *before* the
+    /// layer is proven; see the [`crate::layer`] module documentation for the
+    /// discipline that requires of a consumer.
+    pub fn stream_layer(
+        &self,
+        index: &BlobIndex,
+        profile: &dyn Profile,
+        descriptor: &LayerDescriptor,
+        limits: Limits,
+    ) -> Result<LayerReader<fs::File>, Error> {
+        let path = self.blob_of(index, descriptor)?;
+
+        LayerReader::new(fs::File::open(&path)?, profile, descriptor, limits)
     }
 }

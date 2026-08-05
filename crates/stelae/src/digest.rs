@@ -275,14 +275,18 @@ fn digest_blob<R: Read, W: Write>(
 }
 
 /// Hashes and counts every byte that passes through, in either direction.
-struct Tap<T> {
+///
+/// Shared with [`crate::layer`], which puts the same tap under a streaming read
+/// so that the buffered and streaming paths compute the blob digest from
+/// identical bytes rather than from two similar-looking loops.
+pub(crate) struct Tap<T> {
     inner: T,
     hasher: Sha256,
     bytes: u64,
 }
 
 impl<T> Tap<T> {
-    fn new(inner: T) -> Self {
+    pub(crate) fn new(inner: T) -> Self {
         Self {
             inner,
             hasher: Sha256::new(),
@@ -290,7 +294,7 @@ impl<T> Tap<T> {
         }
     }
 
-    fn finish(self) -> (T, Digest, u64) {
+    pub(crate) fn finish(self) -> (T, Digest, u64) {
         (
             self.inner,
             Digest(self.hasher.finalize().into()),
