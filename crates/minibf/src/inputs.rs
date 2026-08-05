@@ -23,8 +23,8 @@
 //!
 //! The store is request-scoped and bounded: it is pure memoization, so when it
 //! would grow past [`MAX_INPUT_DEPS`] entries it is cleared and the entries
-//! still needed are fetched again. That caps memory on a full-history scan of a
-//! high-activity address.
+//! still needed are fetched again. That caps what a full-history scan of a
+//! high-activity address carries between blocks.
 
 use std::collections::HashMap;
 
@@ -36,10 +36,15 @@ use dolos_core::{Domain, EraCbor, TxHash};
 
 use crate::{Facade, TxMap};
 
-/// Maximum number of dependency txs held by an [`InputDeps`] at once.
+/// How many dependency txs an [`InputDeps`] carries from one prepared batch to
+/// the next.
 ///
 /// Reaching it clears the store: entries are pure memoization, so eviction only
-/// ever costs a re-fetch.
+/// ever costs a re-fetch. It bounds what is *carried over*, not the store's
+/// peak — a resolver has to answer every input of the batch it was handed, so
+/// the current batch is always held whole, however large it is. A batch is one
+/// block's distinct dependency hashes, which the protocol's block size keeps
+/// well under this number.
 pub const MAX_INPUT_DEPS: usize = 4096;
 
 /// Request-scoped, bounded store of the dependency txs consumed by the blocks
@@ -89,12 +94,7 @@ impl InputDeps {
     {
         let required: Vec<TxHash> = txs
             .into_iter()
-            .flat_map(|tx| {
-                tx.consumes()
-                    .iter()
-                    .map(|input| *input.hash())
-                    .collect::<Vec<_>>()
-            })
+            .flat_map(|tx| tx.consumes().into_iter().map(|input| *input.hash()))
             .unique()
             .collect();
 
@@ -155,6 +155,9 @@ impl<'a> InputResolver<'a> {
     /// The output `input` consumes, or `None` when the source tx is not
     /// available (genesis or pruned) or has no output at that index.
     ///
+    /// Fails if `input` belongs to a tx that was never handed to
+    /// [`prepare`](InputDeps::prepare).
+    ///
     /// The borrow is transient: it ends before the next call.
     pub fn resolve(
         &mut self,
@@ -185,12 +188,14 @@ impl<'a> InputResolver<'a> {
                 }
                 // known miss: the source tx is not in the archive
                 Some(None) => None,
-                // not prepared: treated as a miss, but it means a caller
-                // resolved inputs of a tx it never handed to `prepare`
+                // `prepare` records a miss for every hash it asks for, so an
+                // absent entry is never a pruned or genesis tx: it means a
+                // caller resolved inputs of a tx it never handed to `prepare`.
+                // Answering `None` would silently drop the output from the
+                // caller's totals, so refuse the request instead.
                 None => {
-                    debug_assert!(false, "resolving an input that was never prepared");
-                    tracing::warn!(%hash, "dependency tx was not prepared, treating as missing");
-                    None
+                    tracing::error!(%hash, "resolving an input that was never prepared");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 }
             };
 
