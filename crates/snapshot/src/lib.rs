@@ -18,10 +18,10 @@
 //! through them, because a codec that drifts silently republishes a different
 //! identity under the same name.
 //!
-//! [`export`] is the one exception, and it is deliberately the whole of it: the
-//! driver that walks a live store set and hands records to the protocol. There
-//! is still no restore, and no CLI — the command lives in the `dolos` binary
-//! and is a thin call into [`export::export`].
+//! [`export`] and [`restore`] are the exceptions, and they are deliberately the
+//! whole of it: the two drivers that move records between a live store set and
+//! the protocol. Neither carries a CLI — the commands live in the `dolos`
+//! binary and are thin calls into [`export::export`] and [`restore::restore`].
 //!
 //! ## The rules this crate keeps
 //!
@@ -43,13 +43,15 @@
 //! - [`layers`] — one codec per layer kind, each with `encode`, `decode` and an
 //!   `OrderCheck` that enforces the kind's ordering contract.
 //! - [`namespaces`] — the closed set of state namespaces.
-//! - [`export`] — the one thing here that is *not* a pure function over records
-//!   in hand: the driver that walks a live store set and hands its records to
-//!   the protocol in the order above.
+//! - [`export`] — the driver that walks a live store set and hands its records
+//!   to the protocol in the order above.
+//! - [`restore`] — its inverse: the driver that reads a stele back into an
+//!   empty store set, in the order ADR-004 specifies.
 
 pub mod export;
 pub mod layers;
 pub mod namespaces;
+pub mod restore;
 
 use dolos_core::ChainPoint;
 use serde_json::json;
@@ -164,6 +166,22 @@ pub enum Error {
     /// hash. A cursor that has only a slot cannot anchor one.
     #[error("a stele's position needs a block hash, but the chain point is {0}")]
     UnanchoredPoint(String),
+
+    /// A field of the inscription this profile owns — `position` or a layer's
+    /// `scope` — is not the shape this profile writes. Raised while reading a
+    /// stele, never while writing one.
+    #[error("the inscription's {field} is not the shape this profile writes: {reason}")]
+    MalformedInscription { field: String, reason: String },
+
+    /// The stele describes a different chain than the node reading it. The
+    /// first thing a restore checks, and the one refusal that has to happen
+    /// before any store is touched.
+    #[error("this stele is for network magic {found}, but this node is configured for {expected}")]
+    NetworkMismatch { expected: u64, found: u64 },
+
+    /// The stele is well-formed but does not carry enough to rebuild a node.
+    #[error("this stele cannot restore a node: {0}")]
+    IncompleteStele(String),
 }
 
 impl Error {
@@ -177,6 +195,16 @@ impl Error {
     pub(crate) fn out_of_order(kind: &'static str, reason: impl Into<String>) -> Self {
         Self::OutOfOrder {
             kind,
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn malformed_inscription(
+        field: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::MalformedInscription {
+            field: field.into(),
             reason: reason.into(),
         }
     }
@@ -299,6 +327,80 @@ pub fn position(
         "point": {"slot": point.slot(), "hash": hex::encode(hash)},
         "epoch": epoch,
     }))
+}
+
+/// Where a stele stands, as [`position`] records it.
+///
+/// The read side of the same shape, kept beside the write side so the two
+/// cannot drift: `position_round_trips` holds them against each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Position {
+    pub network: Network,
+    /// The chain point the stele was cut at. Always anchored — a `position`
+    /// that names only a slot is refused on both sides.
+    pub point: ChainPoint,
+    /// The epoch the point stands in, which is the last one the layers cover.
+    pub epoch: u64,
+}
+
+/// Read a `position` back.
+///
+/// Fails closed on every field, including on a `network.name` that is not the
+/// one [`Network::for_magic`] derives: the name rides inside the stele's
+/// identity, so a stele naming its own network differently was built against a
+/// table this implementation does not share, and nothing downstream would ever
+/// notice.
+pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
+    let field = |path: &str, at: &serde_json::Value| -> Result<serde_json::Value, Error> {
+        at.get(path)
+            .cloned()
+            .ok_or_else(|| Error::malformed_inscription(format!("position.{path}"), "missing"))
+    };
+
+    let uint = |path: &str, at: &serde_json::Value| -> Result<u64, Error> {
+        field(path, at)?
+            .as_u64()
+            .ok_or_else(|| Error::malformed_inscription(format!("position.{path}"), "not a u64"))
+    };
+
+    let text = |path: &str, at: &serde_json::Value| -> Result<String, Error> {
+        field(path, at)?
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::malformed_inscription(format!("position.{path}"), "not a string"))
+    };
+
+    let network_value = field("network", value)?;
+    let network = Network::for_magic(uint("magic", &network_value)?);
+    let name = text("name", &network_value)?;
+
+    if name != network.name() {
+        return Err(Error::malformed_inscription(
+            "position.network.name",
+            format!(
+                "magic {} names {:?} here, but the stele says {name:?}",
+                network.magic(),
+                network.name(),
+            ),
+        ));
+    }
+
+    let point_value = field("point", value)?;
+    let slot = uint("slot", &point_value)?;
+    let hash = text("hash", &point_value)?;
+
+    let hash: [u8; 32] = hex::decode(&hash)
+        .ok()
+        .and_then(|raw| raw.try_into().ok())
+        .ok_or_else(|| {
+            Error::malformed_inscription("position.point.hash", "not 32 hex-encoded bytes")
+        })?;
+
+    Ok(Position {
+        network,
+        point: ChainPoint::Specific(slot, hash.into()),
+        epoch: uint("epoch", value)?,
+    })
 }
 
 /// Build the profile's `parameters`: what a reader needs in order to interpret
@@ -542,6 +644,90 @@ mod tests {
             let err = position(&network, &unanchored, 550).unwrap_err();
             assert!(matches!(err, Error::UnanchoredPoint(_)), "{err:?}");
         }
+    }
+
+    /// The write side and the read side of `position` are one shape, so they
+    /// are held against each other rather than each against a literal.
+    #[test]
+    fn position_round_trips() {
+        for magic in [MAINNET_MAGIC, PREPROD_MAGIC, PREVIEW_MAGIC, 42] {
+            let network = Network::for_magic(magic);
+            let point = ChainPoint::Specific(133660800, BlockHash::from([0xab; 32]));
+
+            let read = read_position(&position(&network, &point, 550).unwrap()).unwrap();
+
+            assert_eq!(
+                read,
+                Position {
+                    network,
+                    point,
+                    epoch: 550
+                }
+            );
+        }
+    }
+
+    /// The name is inside the stele's identity, so a stele that spells its own
+    /// network differently was built against a table this implementation does
+    /// not share.
+    #[test]
+    fn a_position_naming_its_network_differently_is_refused() {
+        let mut written = position(
+            &Network::for_magic(MAINNET_MAGIC),
+            &ChainPoint::Specific(1, BlockHash::from([0xab; 32])),
+            0,
+        )
+        .unwrap();
+
+        written["network"]["name"] = json!("mainnet-2");
+
+        let err = read_position(&written).unwrap_err();
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_malformed_position_is_refused_field_by_field() {
+        let good = position(
+            &Network::for_magic(PREVIEW_MAGIC),
+            &ChainPoint::Specific(7, BlockHash::from([0xab; 32])),
+            0,
+        )
+        .unwrap();
+
+        read_position(&good).unwrap();
+
+        for pointer in [
+            "/network",
+            "/network/magic",
+            "/point",
+            "/point/hash",
+            "/epoch",
+        ] {
+            let mut broken = good.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+
+            broken
+                .pointer_mut(if parent.is_empty() { "" } else { parent })
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+
+            let err = read_position(&broken).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedInscription { .. }),
+                "{pointer}: {err:?}"
+            );
+        }
+
+        // A hash of the wrong width would otherwise become a plausible,
+        // unreachable chain point: `BlockHash` converts from a slice by
+        // padding.
+        let mut short = good;
+        short["point"]["hash"] = json!("ab".repeat(31));
+
+        let err = read_position(&short).unwrap_err();
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
     /// The two parameters are claims about code elsewhere in this workspace, so

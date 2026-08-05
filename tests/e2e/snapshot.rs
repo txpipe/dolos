@@ -8,10 +8,12 @@ mod common;
 
 use common::*;
 
-fn snapshot_roundtrip(scenario: &Scenario) {
-    println!("e2e snapshot roundtrip start: {}", scenario.name);
-
-    // Phase 1: Sync some blocks
+/// Sync from the relay for a minute and return what the node ended up holding.
+///
+/// Shared by the tarball roundtrip and the stele one so both start from the
+/// same node: two roundtrips that disagreed about what they were restoring
+/// would compare nothing.
+fn sync_and_summarize(scenario: &Scenario) -> dolos::cli::DataSummary {
     reset_and_bootstrap(scenario);
 
     let mut cmd = prepare_scenario_process(scenario);
@@ -61,6 +63,67 @@ fn snapshot_roundtrip(scenario: &Scenario) {
         original_summary.wal.tip_slot,
     );
 
+    original_summary
+}
+
+fn assert_summaries_match(original: &dolos::cli::DataSummary, restored: &dolos::cli::DataSummary) {
+    println!(
+        "restored summary: state={:?}, archive={:?}, indexes={:?}, wal={:?}",
+        restored.state.tip_slot,
+        restored.archive.tip_slot,
+        restored.indexes.tip_slot,
+        restored.wal.tip_slot,
+    );
+
+    assert_eq!(
+        original.state.tip_slot, restored.state.tip_slot,
+        "state tip_slot mismatch"
+    );
+    assert_eq!(
+        original.archive.tip_slot, restored.archive.tip_slot,
+        "archive tip_slot mismatch"
+    );
+    assert_eq!(
+        original.indexes.tip_slot, restored.indexes.tip_slot,
+        "indexes tip_slot mismatch"
+    );
+    assert_eq!(
+        original.wal.tip_slot, restored.wal.tip_slot,
+        "wal tip_slot mismatch"
+    );
+}
+
+/// The last thing either roundtrip checks: a restored node is a node the daemon
+/// will start on.
+fn assert_daemon_starts(scenario: &Scenario) {
+    let mut cmd = prepare_scenario_process(scenario);
+    let handle = cmd
+        .args(["daemon"])
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn restored daemon");
+
+    let mut guard = ProcessGuard::new(handle);
+    std::thread::sleep(Duration::from_secs(10));
+
+    assert!(
+        guard
+            .try_wait()
+            .expect("failed to query restored daemon status")
+            .is_none(),
+        "restored daemon exited prematurely"
+    );
+
+    shutdown_gracefully(&mut guard);
+}
+
+fn snapshot_roundtrip(scenario: &Scenario) {
+    println!("e2e snapshot roundtrip start: {}", scenario.name);
+
+    // Phase 1: Sync some blocks
+    let original_summary = sync_and_summarize(scenario);
+
     // Phase 2: Export snapshot
     let dir = scenario_path(scenario);
     let snapshot_path = dir.join("snapshot.tar.gz");
@@ -108,61 +171,94 @@ fn snapshot_roundtrip(scenario: &Scenario) {
     );
 
     // Phase 4: Verify cursors match
-    let restored_summary = fetch_summary(scenario);
-
-    println!(
-        "restored summary: state={:?}, archive={:?}, indexes={:?}, wal={:?}",
-        restored_summary.state.tip_slot,
-        restored_summary.archive.tip_slot,
-        restored_summary.indexes.tip_slot,
-        restored_summary.wal.tip_slot,
-    );
-
-    assert_eq!(
-        original_summary.state.tip_slot, restored_summary.state.tip_slot,
-        "state tip_slot mismatch"
-    );
-    assert_eq!(
-        original_summary.archive.tip_slot, restored_summary.archive.tip_slot,
-        "archive tip_slot mismatch"
-    );
-    assert_eq!(
-        original_summary.indexes.tip_slot, restored_summary.indexes.tip_slot,
-        "indexes tip_slot mismatch"
-    );
-    assert_eq!(
-        original_summary.wal.tip_slot, restored_summary.wal.tip_slot,
-        "wal tip_slot mismatch"
-    );
+    assert_summaries_match(&original_summary, &fetch_summary(scenario));
 
     // Phase 5: Verify daemon starts from restored data
-    let mut cmd = prepare_scenario_process(scenario);
-    let handle = cmd
-        .args(["daemon"])
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("failed to spawn restored daemon");
-
-    let mut guard = ProcessGuard::new(handle);
-    std::thread::sleep(Duration::from_secs(10));
-
-    assert!(
-        guard
-            .try_wait()
-            .expect("failed to query restored daemon status")
-            .is_none(),
-        "restored daemon exited prematurely"
-    );
-
-    shutdown_gracefully(&mut guard);
+    assert_daemon_starts(scenario);
 
     // Cleanup
     let _ = std::fs::remove_file(&snapshot_path);
+}
+
+/// The stele roundtrip: publish to a directory, wipe, restore from it.
+///
+/// The same five phases as the tarball roundtrip above, against the format that
+/// replaces it. What is different is what crosses between them: a directory of
+/// deterministic CBOR layers and one canonical document, rather than a gzip tar
+/// of the storage engines' own files — so this is also the check that the
+/// format survives a real preview ledger, which no in-process fixture reaches.
+///
+/// The wipe is `--force` on the restore command itself rather than a separate
+/// bootstrap: a stele carries the genesis-derived state in its own layers, so
+/// restoring onto a genesis-applied node would be writing over data the stele
+/// already has, and the operator's one-command flow is the one worth testing.
+fn stele_roundtrip(scenario: &Scenario) {
+    println!("e2e stele roundtrip start: {}", scenario.name);
+
+    // Phase 1: Sync some blocks
+    let original_summary = sync_and_summarize(scenario);
+
+    // Phase 2: Publish a stele
+    let stele_path = scenario_path(scenario).join("stele");
+
+    // `publish` refuses a directory that already holds one, which is the right
+    // behaviour and the wrong one for a test that may have run before.
+    let _ = std::fs::remove_dir_all(&stele_path);
+
+    let mut cmd = prepare_scenario_process(scenario);
+    let publish = cmd
+        .args(["snapshot", "publish", "--output-dir"])
+        .arg(&stele_path)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("failed to run snapshot publish");
+
+    assert!(
+        publish.status.success(),
+        "snapshot publish failed: {}",
+        String::from_utf8_lossy(&publish.stderr)
+    );
+
+    assert!(
+        stele_path.join("inscription.json").is_file(),
+        "publish wrote no inscription"
+    );
+
+    // Phase 3: Wipe data and restore from the stele
+    let mut cmd = prepare_scenario_process(scenario);
+    let restore = cmd
+        .args(["bootstrap", "snapshot", "--force", "--source"])
+        .arg(format!("file://{}", stele_path.display()))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .output()
+        .expect("failed to run bootstrap snapshot --source");
+
+    assert!(
+        restore.status.success(),
+        "bootstrap snapshot --source failed: {}",
+        String::from_utf8_lossy(&restore.stderr)
+    );
+
+    // Phase 4: Verify cursors match
+    assert_summaries_match(&original_summary, &fetch_summary(scenario));
+
+    // Phase 5: Verify daemon starts from restored data
+    assert_daemon_starts(scenario);
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&stele_path);
 }
 
 #[test]
 #[ignore]
 fn snapshot_roundtrip_for_preview_full_explicit() {
     snapshot_roundtrip(&SCENARIOS[0]);
+}
+
+#[test]
+#[ignore]
+fn stele_roundtrip_for_preview_full_explicit() {
+    stele_roundtrip(&SCENARIOS[0]);
 }

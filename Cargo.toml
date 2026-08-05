@@ -261,6 +261,12 @@ serde_jcs = "0.2.0"
 sha2 = "0.10.9"
 zstd = "0.13.3"
 
+# The restore path's disk preflight, and nothing else. `default-features =
+# false` drops the file-locking half of the crate, leaving the free-space
+# query, which is a `statvfs`/`GetDiskFreeSpaceExW` call over `rustix` and
+# `windows-sys` — both already in this tree.
+fs4 = { version = "1.1.0", default-features = false }
+
 [workspace.metadata.release]
 push = false
 publish = false

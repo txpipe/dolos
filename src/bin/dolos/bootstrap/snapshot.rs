@@ -22,6 +22,15 @@ pub struct Args {
     /// Path to a local snapshot tar.gz file to import instead of downloading.
     #[arg(long)]
     pub file: Option<PathBuf>,
+
+    /// Where to restore from, as a URL. Today only `file://DIR`, naming a
+    /// stele directory written by `dolos snapshot publish --output-dir`.
+    ///
+    /// Parsed by clap rather than by `run`, so an unusable source is refused
+    /// before `--force` has cleared anything: the flags that decide what to do
+    /// with existing data are handled a layer above this command.
+    #[arg(long)]
+    pub source: Option<Source>,
 }
 
 impl Args {
@@ -46,7 +55,51 @@ impl Args {
             variant,
             point: "latest".to_string(),
             file: None,
+            source: None,
         })
+    }
+}
+
+/// Where a `--source` points.
+///
+/// The scheme is what selects a restore path, which is why this is parsed
+/// rather than sniffed: a directory that happens to look like a stele and a URL
+/// that says it is one are different claims, and only the second is the
+/// operator's.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A stele directory on this filesystem.
+    Dir(PathBuf),
+}
+
+impl std::str::FromStr for Source {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        // `file:///abs/path` is the spelled-out form and leaves a leading slash
+        // behind, which is the absolute path. `file://relative/path` is the one
+        // an operator actually types, and leaves a relative one. Both work, and
+        // neither is guessed at: what follows the scheme is the path.
+        if let Some(path) = raw.strip_prefix("file://") {
+            if path.is_empty() {
+                return Err(format!("{raw:?} names no directory"));
+            }
+
+            return Ok(Self::Dir(PathBuf::from(path)));
+        }
+
+        if raw.starts_with("oci://") {
+            return Err(
+                "registry sources are not implemented yet; publish to a directory with \
+                 `dolos snapshot publish --output-dir` and restore from it with \
+                 `--source file://DIR`"
+                    .to_owned(),
+            );
+        }
+
+        Err(format!(
+            "{raw:?} is not a snapshot source; the only scheme implemented today is `file://DIR`"
+        ))
     }
 }
 
@@ -215,7 +268,70 @@ fn fetch_snapshot_streaming(
     Ok(())
 }
 
+/// Restore a stele directory into this node's stores.
+///
+/// Everything below this is `dolos_snapshot::restore`, which is generic over
+/// the store traits; what only this function knows is the node — its magic,
+/// which comes from genesis and never from a file an operator can edit, and its
+/// `sync.max_history`, which is what bounds how much chain history a restore
+/// bothers to fetch.
+fn restore_stele(config: &RootConfig, dir: &std::path::Path) -> miette::Result<()> {
+    let root = crate::common::ensure_storage_path(config)
+        .into_diagnostic()
+        .context("creating the storage directory")?;
+
+    let stores = crate::common::open_data_stores(config)
+        .into_diagnostic()
+        .context("opening the data stores")?;
+
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+
+    let (plan, summary) = dolos_snapshot::restore::restore_dir(
+        dir,
+        u64::from(genesis.network_magic()),
+        config.sync.max_history,
+        &root,
+        &stores.archive,
+        &stores.state,
+        &stores.indexes,
+    )
+    .into_diagnostic()
+    .context("restoring the stele")?;
+
+    println!(
+        "network:  {} ({})",
+        plan.position.network.name(),
+        plan.position.network.magic()
+    );
+    println!("cursor:   {}", plan.position.point);
+    println!("sequence: {}", plan.sequence);
+
+    if plan.skipped_epochs > 0 {
+        println!(
+            "epochs:   {} restored, {} skipped by sync.max_history",
+            plan.epochs.len(),
+            plan.skipped_epochs,
+        );
+    } else {
+        println!("epochs:   {}", plan.epochs.len());
+    }
+
+    println!(
+        "restored: {} blocks, {} logs, {} index records, {} entities, {} utxos",
+        summary.blocks, summary.logs, summary.index_records, summary.entities, summary.utxos,
+    );
+
+    Ok(())
+}
+
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+    // The tarball path is unchanged and stays the default: `--source` is what
+    // opts into a stele, and until the registry transport lands there is
+    // nothing to make it the default of.
+    if let Some(Source::Dir(dir)) = &args.source {
+        return restore_stele(config, dir);
+    }
+
     if let Some(path) = &args.file {
         import_local_snapshot(config, path)?;
     } else {
@@ -223,4 +339,34 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_source_names_a_directory() {
+        for (raw, expected) in [
+            ("file:///var/lib/dolos/stele", "/var/lib/dolos/stele"),
+            ("file://stele", "stele"),
+            ("file://./stele", "./stele"),
+        ] {
+            let Source::Dir(dir) = raw.parse::<Source>().unwrap();
+            assert_eq!(dir, PathBuf::from(expected), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_unimplemented_or_unknown_scheme_is_refused() {
+        for raw in [
+            "oci://ghcr.io/txpipe/dolos-snapshots/mainnet",
+            "https://example.invalid/snapshot",
+            "/var/lib/dolos/stele",
+            "file://",
+            "",
+        ] {
+            assert!(raw.parse::<Source>().is_err(), "{raw:?}");
+        }
+    }
 }

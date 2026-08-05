@@ -21,8 +21,7 @@
 //!    measured rather than asserted.
 
 mod common;
-
-use std::sync::Arc;
+mod node;
 
 use common::read_both_ways;
 use dolos_cardano::{
@@ -31,7 +30,6 @@ use dolos_cardano::{
 };
 use dolos_core::{
     builtin::{MemoryIndexStore, MemoryStateStore},
-    import::ImportExt as _,
     ArchiveStore, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord, IndexRecord, IndexStore,
     LogKey, StateStore, StateWriter as _, TagRecord, TemporalKey,
 };
@@ -40,11 +38,9 @@ use dolos_snapshot::{
     layers::{blocks, indexes, logs, state},
     DolosProfile, Network, BLOCKS, INDEXES, LOGS, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
 };
-use dolos_testing::{
-    synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
-    toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
-};
-use stelae::{dir::SteleDir, inscription::Inscription};
+use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
+use node::{export_to, harness, plan_for};
+use stelae::dir::SteleDir;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
@@ -159,73 +155,6 @@ fn an_unnamed_network_renders_from_its_magic() {
 
     assert_eq!(position["network"]["magic"], 42);
     assert_eq!(position["network"]["name"], "testnet-42");
-}
-
-// --------------------------------------------------------------------------
-// The harness fixture, for everything that needs real records
-// --------------------------------------------------------------------------
-
-/// Preview genesis, synthetic blocks and seeded logs, all inside epoch zero.
-///
-/// **Epoch-coherent on purpose.** The blocks stay in the epoch genesis stamped,
-/// so the ledger's `EpochValue`s and the chain agree throughout. The service
-/// crates' fixtures jump from genesis straight to epoch two, which leaves the
-/// two disagreeing and trips the `strict` coherence assertions in
-/// `dolos-cardano`; CI excludes those crates from the all-features run for that
-/// reason. An export has to run on a coherent ledger to mean anything, so this
-/// fixture stays inside one epoch rather than joining the exclusion list.
-///
-/// The cost is that a harness stele covers a single epoch. That is not where
-/// multi-epoch geometry is checked in any case: it is arithmetic over a
-/// `ChainSummary`, and it is pinned by the three-epoch skeleton golden above
-/// and by `Plan`'s own unit tests. What the fixture is for is *records* — a
-/// real UTxO set, real archive tags and exact records, real logs — and one
-/// epoch holds all of those.
-fn harness<B: ToyStores>() -> ToyDomain<B> {
-    let genesis = Arc::new(dolos_cardano::include::preview::load());
-
-    let cfg = SyntheticBlockConfig {
-        block_count: 5,
-        txs_per_block: 3,
-        slot: 100,
-        ..Default::default()
-    };
-
-    let (blocks, vectors, chain_config) = build_synthetic_blocks(cfg);
-
-    let domain: ToyDomain<B> = ToyDomain::with_backend(genesis, chain_config, None, None);
-    domain.import_blocks(blocks).unwrap();
-
-    let summary = dolos_cardano::eras::load_era_summary::<ToyDomain<B>>(domain.state()).unwrap();
-    let tip = domain.state().read_cursor().unwrap().unwrap();
-    let (epoch, _) = summary.slot_epoch(tip.slot());
-
-    assert_eq!(epoch, 0, "the fixture left the epoch it was built for");
-
-    // What makes the `logs` layer non-empty, which done criterion 2 asks for by
-    // name: an all-empty layer set would prove nothing about ordering.
-    seed_epoch_logs(&domain, &[epoch]).unwrap();
-    seed_reward_logs(&domain, &vectors.stake_address, &vectors.pool_id, &[epoch]).unwrap();
-
-    domain
-}
-
-fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
-    export::plan(domain.state(), domain.genesis().network_magic() as u64).unwrap()
-}
-
-fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
-    let stele = SteleDir::create(root).unwrap();
-
-    export::export(
-        &stele,
-        &plan_for(domain),
-        domain.archive(),
-        domain.state(),
-        domain.indexes(),
-        None,
-    )
-    .unwrap()
 }
 
 // --------------------------------------------------------------------------
