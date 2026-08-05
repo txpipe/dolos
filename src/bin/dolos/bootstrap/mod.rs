@@ -10,12 +10,14 @@ mod mithril;
 mod ranged;
 mod relay;
 mod snapshot;
+mod stelae;
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Command {
     Relay(relay::Args),
     Mithril(mithril::Args),
     Snapshot(snapshot::Args),
+    Stelae(stelae::Args),
 }
 
 impl Command {
@@ -24,8 +26,12 @@ impl Command {
             "which bootstrap method would you like to use?",
             vec![
                 ListOption::new(0, "Dolos snapshot (a few mins, trust me bro)"),
-                ListOption::new(1, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
-                ListOption::new(2, "Relay chain-sync (several days, trust your relay)"),
+                ListOption::new(
+                    1,
+                    "Stelae snapshot (a few mins, from a stele you can verify)",
+                ),
+                ListOption::new(2, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
+                ListOption::new(3, "Relay chain-sync (several days, trust your relay)"),
             ],
         )
         .prompt()
@@ -33,8 +39,9 @@ impl Command {
 
         match cmd.index {
             0 => Ok(Command::Snapshot(snapshot::Args::inquire()?)),
-            1 => Ok(Command::Mithril(mithril::Args::default())),
-            2 => Ok(Command::Relay(relay::Args::default())),
+            1 => Ok(Command::Stelae(stelae::Args::inquire()?)),
+            2 => Ok(Command::Mithril(mithril::Args::default())),
+            3 => Ok(Command::Relay(relay::Args::default())),
             _ => unreachable!(),
         }
     }
@@ -91,26 +98,43 @@ fn clear_storage(config: &RootConfig) -> miette::Result<()> {
     Ok(())
 }
 
-/// Checks existing data in storage and decides how to proceed based on flags.
-/// Returns `Ok(true)` if bootstrap should continue, `Ok(false)` if it should be
-/// skipped.
-fn handle_existing_data(config: &RootConfig, args: &Args) -> miette::Result<bool> {
+/// What to do about data already in storage.
+///
+/// Deciding is separated from doing because only one of the outcomes is
+/// destructive, and it must not happen until the run is fully known. An
+/// interactive bootstrap asks which method to use — and, for a stele, where the
+/// stele is — *after* the flags are parsed, so a `--force` that cleared first
+/// would take a working node away on a typo, a cancel, or a machine with no
+/// terminal, and hand back nothing in its place.
+enum Existing {
+    /// Data is there and `--skip-if-data` says to leave it alone.
+    Skip,
+    /// Go ahead, but clear storage first.
+    Clear,
+    /// Go ahead as things are.
+    Proceed,
+}
+
+/// Read what is in storage and decide, without touching any of it.
+///
+/// The refusals happen here — a skip, and the bail for existing data with no
+/// flag saying what to do about it — so neither is a question asked of an
+/// operator whose answer is then thrown away.
+fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Existing> {
     if args.r#continue {
-        return Ok(true);
+        return Ok(Existing::Proceed);
     }
 
     if !has_existing_data(config)? {
-        return Ok(true);
+        return Ok(Existing::Proceed);
     }
 
     if args.skip_if_data {
-        info!("existing data detected, skipping bootstrap");
-        return Ok(false);
+        return Ok(Existing::Skip);
     }
 
     if args.force {
-        clear_storage(config)?;
-        return Ok(true);
+        return Ok(Existing::Clear);
     }
 
     bail!("existing data detected in storage. Use --force to clear and re-bootstrap, --skip-if-data to skip, or --continue to resume");
@@ -121,6 +145,9 @@ fn dispatch(config: &RootConfig, command: &Command, feedback: &Feedback) -> miet
         Command::Relay(args) => relay::run(config, args, feedback),
         Command::Mithril(args) => mithril::run(config, args, feedback),
         Command::Snapshot(args) => snapshot::run(config, args, feedback),
+        // No `feedback`: a stele restore has no progress reporting yet, which
+        // is a stated gap rather than an oversight — see the follow-up plan.
+        Command::Stelae(args) => stelae::run(config, args),
     }
 }
 
@@ -173,7 +200,10 @@ fn setup_tracing(config: &RootConfig, verbose: bool) -> miette::Result<()> {
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     setup_tracing(config, args.verbose)?;
 
-    if !handle_existing_data(config, args)? {
+    let existing = inspect_existing_data(config, args)?;
+
+    if matches!(existing, Existing::Skip) {
+        info!("existing data detected, skipping bootstrap");
         return Ok(());
     }
 
@@ -181,6 +211,13 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Some(x) => x,
         None => Command::inquire()?,
     };
+
+    // The first destructive step, and deliberately the last one before the run:
+    // everything that could still refuse — the flags, the prompts, the source a
+    // stele restore was given — has already had its say.
+    if matches!(existing, Existing::Clear) {
+        clear_storage(config)?;
+    }
 
     dispatch(config, &command, feedback)?;
 
