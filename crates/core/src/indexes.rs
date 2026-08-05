@@ -221,9 +221,9 @@ impl ExactKind {
     ///
     /// Exact keys are fixed-width per kind: a 32-byte hash for
     /// [`ExactKind::BlockHash`] and [`ExactKind::TxHash`], an 8-byte big-endian
-    /// number for [`ExactKind::BlockNumber`]. Writers validate against this so
-    /// a wrong-width key from an external source cannot land as a permanently
-    /// unreadable entry.
+    /// number for [`ExactKind::BlockNumber`]. [`ExactRecord::new`] validates
+    /// against this, so a wrong-width key from an external source cannot become
+    /// a record at all, let alone a permanently unreadable entry.
     pub const fn key_len(&self) -> usize {
         match self {
             Self::BlockHash | Self::TxHash => 32,
@@ -231,6 +231,14 @@ impl ExactKind {
         }
     }
 }
+
+/// The widest [`ExactKind::key_len`], and so the inline width of
+/// [`ExactRecord`]'s key.
+///
+/// Pinned by `max_exact_key_len_covers_every_kind` rather than derived: a
+/// `const fn` maximum over [`ExactKind::ALL`] is not expressible today, and a
+/// kind wider than this would silently truncate.
+pub const MAX_EXACT_KEY_LEN: usize = 32;
 
 impl std::str::FromStr for ExactKind {
     type Err = String;
@@ -253,20 +261,65 @@ impl std::fmt::Display for ExactKind {
 ///
 /// Unlike tags, exact keys are stored verbatim (a 32-byte hash, or an 8-byte
 /// big-endian block number), so the record is lossless.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The key is held inline rather than in a `Vec`: it is fixed-width per kind
+/// ([`ExactKind::key_len`]) and never wider than [`MAX_EXACT_KEY_LEN`], so a
+/// heap allocation per record would buy nothing and a bulk export makes one
+/// record per entry in the store.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExactRecord {
     pub kind: ExactKind,
-    pub key: Vec<u8>,
+    /// Zero-padded to [`MAX_EXACT_KEY_LEN`]; [`ExactRecord::key`] trims it.
+    ///
+    /// Private so [`ExactRecord::new`] is the only way in, which is what makes
+    /// the width invariant hold. Ordering is unaffected by the padding: within
+    /// a kind every key is the same width, so the tail is identical.
+    key: [u8; MAX_EXACT_KEY_LEN],
     pub slot: BlockSlot,
 }
 
 impl ExactRecord {
-    pub fn new(kind: ExactKind, key: impl Into<Vec<u8>>, slot: BlockSlot) -> Self {
-        Self {
-            kind,
-            key: key.into(),
-            slot,
+    /// Build a record, checking the key against its kind's width.
+    ///
+    /// This is the single width-validation site. A wrong-width key can only
+    /// come from an external source — the delta path is type-enforced — and
+    /// would otherwise land as an entry no lookup could ever reach, which
+    /// re-exports as if it were valid.
+    pub fn new(kind: ExactKind, key: &[u8], slot: BlockSlot) -> Result<Self, IndexError> {
+        let expected = kind.key_len();
+
+        if key.len() != expected {
+            return Err(IndexError::CodecError(format!(
+                "exact record of kind {kind} has a {}-byte key, expected {expected}",
+                key.len(),
+            )));
         }
+
+        let mut buf = [0u8; MAX_EXACT_KEY_LEN];
+        buf[..expected].copy_from_slice(key);
+
+        Ok(Self {
+            kind,
+            key: buf,
+            slot,
+        })
+    }
+
+    /// The stored key, trimmed to its kind's width.
+    pub fn key(&self) -> &[u8] {
+        &self.key[..self.kind.key_len()]
+    }
+}
+
+/// Prints the key trimmed rather than zero-padded — the padding is an artifact
+/// of the inline buffer, and these records are compared in test output.
+impl std::fmt::Debug for ExactRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExactRecord")
+            .field("kind", &self.kind)
+            .field("key", &self.key())
+            .field("slot", &self.slot)
+            .finish()
     }
 }
 
@@ -541,6 +594,48 @@ mod tests {
         assert_eq!(ExactKind::BlockHash.as_str(), "block_hash");
         assert_eq!(ExactKind::BlockNumber.as_str(), "block_num");
         assert_eq!(ExactKind::TxHash.as_str(), "tx_hash");
+    }
+
+    #[test]
+    fn max_exact_key_len_covers_every_kind() {
+        for kind in ExactKind::ALL {
+            assert!(
+                kind.key_len() <= MAX_EXACT_KEY_LEN,
+                "{kind} needs {} bytes, wider than the inline buffer",
+                kind.key_len()
+            );
+        }
+
+        assert!(
+            ExactKind::ALL
+                .iter()
+                .any(|k| k.key_len() == MAX_EXACT_KEY_LEN),
+            "MAX_EXACT_KEY_LEN should be the widest kind, not merely an upper bound"
+        );
+    }
+
+    #[test]
+    fn exact_record_rejects_a_wrong_width_key() {
+        assert!(ExactRecord::new(ExactKind::BlockHash, &[0u8; 32], 1).is_ok());
+        assert!(ExactRecord::new(ExactKind::BlockHash, &[0u8; 8], 1).is_err());
+        assert!(ExactRecord::new(ExactKind::BlockNumber, &[0u8; 8], 1).is_ok());
+        assert!(ExactRecord::new(ExactKind::BlockNumber, &[0u8; 32], 1).is_err());
+        assert!(ExactRecord::new(ExactKind::TxHash, &[], 1).is_err());
+    }
+
+    /// The inline key is zero-padded, so ordering could in principle differ
+    /// from ordering the trimmed keys. It does not: within a kind every key is
+    /// the same width, and the record's ordering is `(kind, key)` before the
+    /// padding is ever reached.
+    #[test]
+    fn exact_record_ord_is_kind_then_key() {
+        let low = ExactRecord::new(ExactKind::BlockNumber, &1u64.to_be_bytes(), 9).unwrap();
+        let high = ExactRecord::new(ExactKind::BlockNumber, &2u64.to_be_bytes(), 0).unwrap();
+        let other_kind = ExactRecord::new(ExactKind::TxHash, &[0u8; 32], 0).unwrap();
+
+        assert!(low < high, "key dominates slot");
+        assert!(high < other_kind, "kind dominates key");
+        assert_eq!(low.key(), &1u64.to_be_bytes());
     }
 
     #[test]

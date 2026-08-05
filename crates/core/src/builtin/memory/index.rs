@@ -32,12 +32,35 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::indexes::{
     key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexDelta, IndexError, IndexRecord,
-    IndexStore, IndexWriter, KeyHash, TagDimension, TagRecord,
+    IndexStore, IndexWriter, KeyHash, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
 };
 use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
 
 /// A stored archive tag: the traversal contract's sort key, used as the key.
 type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
+
+/// An exact key, zero-padded to the widest kind — the same inline shape
+/// [`ExactRecord`] carries, so a record goes in and comes back out without a
+/// heap allocation on either side.
+type ExactKey = [u8; MAX_EXACT_KEY_LEN];
+
+/// A key's stored form, or `None` unless it is exactly the width its kind
+/// requires.
+///
+/// Refusing rather than padding or truncating to fit: a key adjusted to fit
+/// aliases with the key it was adjusted into, so a 33-byte block hash and the
+/// 32-byte hash that is its prefix would answer each other's lookups.
+/// `ArchiveIndexDelta` holds its hashes as `Vec<u8>`, so nothing upstream
+/// enforces the width.
+fn exact_key(kind: ExactKind, key: &[u8]) -> Option<ExactKey> {
+    if key.len() != kind.key_len() {
+        return None;
+    }
+
+    let mut buf = [0u8; MAX_EXACT_KEY_LEN];
+    buf[..key.len()].copy_from_slice(key);
+    Some(buf)
+}
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default, Clone)]
@@ -48,7 +71,9 @@ struct Tables {
     /// store, and the set is mutable rather than append-only.
     utxo_tags: BTreeMap<(TagDimension, Vec<u8>), HashSet<TxoRef>>,
     archive_tags: BTreeSet<ArchiveTag>,
-    exact: BTreeMap<(ExactKind, Vec<u8>), BlockSlot>,
+    /// Keyed on the record's own inline key rather than a `Vec`, so
+    /// `iter_exact_records` copies rather than allocates per record.
+    exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit. See the
@@ -59,8 +84,8 @@ enum Op {
     RemoveUtxoTag(TagDimension, Vec<u8>, TxoRef),
     InsertArchiveTag(ArchiveTag),
     RemoveArchiveTag(ArchiveTag),
-    InsertExact(ExactKind, Vec<u8>, BlockSlot),
-    RemoveExact(ExactKind, Vec<u8>),
+    InsertExact(ExactKind, ExactKey, BlockSlot),
+    RemoveExact(ExactKind, ExactKey),
 }
 
 fn poisoned() -> IndexError {
@@ -102,20 +127,47 @@ impl MemoryIndexWriter {
         })
     }
 
-    fn exact_keys_of(block: &ArchiveIndexDelta) -> impl Iterator<Item = (ExactKind, Vec<u8>)> + '_ {
+    /// The exact entries a block delta writes.
+    ///
+    /// Every key is width-checked here, because the delta path is *not*
+    /// type-enforced: `ArchiveIndexDelta` holds its block and transaction
+    /// hashes as `Vec<u8>`. A wrong-width hash is a malformed block, and
+    /// refusing the batch beats dropping the entry — a block whose hash did not
+    /// land is a block no hash lookup can reach, and an index that quietly
+    /// omits it looks complete.
+    fn exact_keys_of(
+        block: &ArchiveIndexDelta,
+    ) -> impl Iterator<Item = Result<(ExactKind, ExactKey), IndexError>> + '_ {
         let hash = (!block.block_hash.is_empty())
-            .then(|| (ExactKind::BlockHash, block.block_hash.clone()));
+            .then_some((ExactKind::BlockHash, block.block_hash.as_slice()));
 
-        let number = block
-            .block_number
-            .map(|n| (ExactKind::BlockNumber, n.to_be_bytes().to_vec()));
+        let number = block.block_number.map(|n| (ExactKind::BlockNumber, n));
 
         let txs = block
             .tx_hashes
             .iter()
-            .map(|hash| (ExactKind::TxHash, hash.clone()));
+            .map(|hash| (ExactKind::TxHash, hash.as_slice()));
 
-        hash.into_iter().chain(number).chain(txs)
+        let hashes = hash.into_iter().chain(txs).map(|(kind, key)| {
+            exact_key(kind, key).map(|key| (kind, key)).ok_or_else(|| {
+                IndexError::CodecError(format!(
+                    "exact entry of kind {kind} has a {}-byte key, expected {}",
+                    key.len(),
+                    kind.key_len(),
+                ))
+            })
+        });
+
+        // A block number is type-enforced eight bytes, so it cannot be
+        // malformed the way a hash can.
+        let number = number.map(|(kind, n)| {
+            Ok((
+                kind,
+                exact_key(kind, &n.to_be_bytes()).expect("a u64 is the block-number key width"),
+            ))
+        });
+
+        hashes.chain(number)
     }
 }
 
@@ -144,7 +196,8 @@ impl IndexWriter for MemoryIndexWriter {
         }
 
         for block in &delta.archive {
-            for (kind, key) in Self::exact_keys_of(block) {
+            for entry in Self::exact_keys_of(block) {
+                let (kind, key) = entry?;
                 ops.push(Op::InsertExact(kind, key, block.slot));
             }
 
@@ -185,7 +238,8 @@ impl IndexWriter for MemoryIndexWriter {
         }
 
         for block in delta.archive.iter().rev() {
-            for (kind, key) in Self::exact_keys_of(block) {
+            for entry in Self::exact_keys_of(block) {
+                let (kind, key) = entry?;
                 ops.push(Op::RemoveExact(kind, key));
             }
 
@@ -210,21 +264,13 @@ impl IndexWriter for MemoryIndexWriter {
                     tag.key_hash,
                     tag.slot,
                 ))),
-                IndexRecord::Exact(exact) => {
-                    // A wrong-width key can only come from an external source —
-                    // the delta path is type-enforced — and would land as an
-                    // entry no lookup could ever reach.
-                    let expected = exact.kind.key_len();
-                    if exact.key.len() != expected {
-                        return Err(IndexError::CodecError(format!(
-                            "exact record of kind {} has a {}-byte key, expected {expected}",
-                            exact.kind,
-                            exact.key.len(),
-                        )));
-                    }
-
-                    ops.push(Op::InsertExact(exact.kind, exact.key, exact.slot));
-                }
+                // The width is already checked: `ExactRecord` cannot be
+                // constructed with a key that does not match its kind.
+                IndexRecord::Exact(exact) => ops.push(Op::InsertExact(
+                    exact.kind,
+                    exact_key(exact.kind, exact.key()).expect("a record's key is its kind's width"),
+                    exact.slot,
+                )),
             }
         }
 
@@ -379,27 +425,34 @@ impl IndexStore for MemoryIndexStore {
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+        // A key that could not have been stored cannot be found, so a
+        // wrong-width query is a miss rather than an error.
+        let Some(key) = exact_key(ExactKind::BlockHash, hash) else {
+            return Ok(None);
+        };
+
         let tables = self.tables.read().map_err(|_| poisoned())?;
-        Ok(tables
-            .exact
-            .get(&(ExactKind::BlockHash, hash.to_vec()))
-            .copied())
+        Ok(tables.exact.get(&(ExactKind::BlockHash, key)).copied())
     }
 
     fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
+        // A block number is type-enforced eight bytes, so this cannot fail.
+        let key = exact_key(ExactKind::BlockNumber, &number.to_be_bytes())
+            .expect("a u64 is the block-number key width");
+
         let tables = self.tables.read().map_err(|_| poisoned())?;
-        Ok(tables
-            .exact
-            .get(&(ExactKind::BlockNumber, number.to_be_bytes().to_vec()))
-            .copied())
+        Ok(tables.exact.get(&(ExactKind::BlockNumber, key)).copied())
     }
 
     fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+        // A key that could not have been stored cannot be found, so a
+        // wrong-width query is a miss rather than an error.
+        let Some(key) = exact_key(ExactKind::TxHash, hash) else {
+            return Ok(None);
+        };
+
         let tables = self.tables.read().map_err(|_| poisoned())?;
-        Ok(tables
-            .exact
-            .get(&(ExactKind::TxHash, hash.to_vec()))
-            .copied())
+        Ok(tables.exact.get(&(ExactKind::TxHash, key)).copied())
     }
 
     fn slots_by_tag(
@@ -470,8 +523,8 @@ impl IndexStore for MemoryIndexStore {
             .exact
             .iter()
             .filter(|(_, slot)| slots.contains(slot))
-            .map(|((kind, key), slot)| ExactRecord::new(*kind, key.clone(), *slot))
-            .collect();
+            .map(|((kind, key), slot)| ExactRecord::new(*kind, &key[..kind.key_len()], *slot))
+            .collect::<Result<_, _>>()?;
 
         Ok(MemoryExactIter(records.into_iter()))
     }

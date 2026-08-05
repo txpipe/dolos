@@ -329,8 +329,7 @@ impl CoreIndexWriter for IndexStoreWriter {
                         }
                     };
 
-                    exact::insert_prehashed(&mut batch, &self.store.exact, &exact, dim_hash)
-                        .map_err(IndexError::from)?;
+                    exact::insert_prehashed(&mut batch, &self.store.exact, &exact, dim_hash);
                 }
             }
         }
