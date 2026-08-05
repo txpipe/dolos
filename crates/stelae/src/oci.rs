@@ -215,9 +215,6 @@ impl Registry {
         repository: impl Into<String>,
         options: Options,
     ) -> Result<Self, Error> {
-        let registry = registry.into();
-        let repository = repository.into();
-
         let protocol = if options.insecure {
             ClientProtocol::Http
         } else {
@@ -231,8 +228,11 @@ impl Registry {
 
         // The tag is never read: `Reference` is the client's way of naming a
         // repository, and every manifest operation below builds its own.
-        let reference =
-            Reference::with_tag(registry.clone(), repository, crate::MOVING_TAG.to_owned());
+        let reference = Reference::with_tag(
+            registry.into(),
+            repository.into(),
+            crate::MOVING_TAG.to_owned(),
+        );
 
         let auth = match std::env::var(TOKEN_ENV) {
             Ok(token) if !token.is_empty() => RegistryAuth::Bearer(token),
@@ -993,16 +993,29 @@ impl<W: Write + Unpin> tokio::io::AsyncWrite for Blocking<'_, W> {
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
-        this.written += buf.len() as u64;
+        // Counted on what was *written*, never on what was offered. A `Write`
+        // may accept less than it was given, and the caller then offers the
+        // remainder — so counting the offer would tally those bytes twice and
+        // trip a ceiling the blob never reached.
+        let room = usize::try_from(this.limit - this.written).unwrap_or(usize::MAX);
 
-        if this.written > this.limit {
+        if room == 0 && !buf.is_empty() {
             return Poll::Ready(Err(std::io::Error::other(format!(
                 "blob {} is larger than the {} bytes its descriptor claims",
                 this.digest, this.limit,
             ))));
         }
 
-        Poll::Ready(this.inner.write(buf))
+        // Truncated to the room left, so the ceiling is exact rather than "one
+        // buffer past": the byte that exceeds it is refused on the next call,
+        // with nothing over-written in between.
+        match this.inner.write(&buf[..buf.len().min(room)]) {
+            Ok(written) => {
+                this.written += written as u64;
+                Poll::Ready(Ok(written))
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
