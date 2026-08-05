@@ -32,7 +32,7 @@ use stelae::{
     dir::SteleDir,
     frame::Limits,
     inscription::{HistoryEntry, Inscription},
-    Digest,
+    Digest, SteleReader, SteleWriter,
 };
 
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
@@ -117,7 +117,7 @@ fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
         })
         .collect();
 
-    let digest = stele.write_inscription(&inscription).unwrap();
+    let digest = stele.seal(&DolosProfile, &inscription).unwrap();
 
     (inscription, digest)
 }

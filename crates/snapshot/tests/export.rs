@@ -40,7 +40,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, plan_for};
-use stelae::dir::SteleDir;
+use stelae::{dir::SteleDir, SteleReader};
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =

@@ -43,7 +43,7 @@ use stelae::{
     dir::{BlobIndex, SteleDir, WrittenLayer},
     frame::{CanonicalCbor, LayerHeader, Limits},
     inscription::LayerDescriptor,
-    Digest, Profile,
+    Digest, Profile, SteleReader, SteleWriter,
 };
 
 pub const NETWORK_MAGIC: u64 = dolos_snapshot::MAINNET_MAGIC;

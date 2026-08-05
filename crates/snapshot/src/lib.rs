@@ -470,7 +470,7 @@ pub trait Scope {
     fn shape(&self) -> &'static str;
 
     /// Both encodings plus the kind, ready for
-    /// [`stelae::dir::SteleDir::write_layer`].
+    /// [`stelae::transport::SteleWriter::layer_sink`].
     ///
     /// Refuses a kind that does not take this scope shape: a state layer
     /// carrying an epoch scope would be structurally valid CBOR and permanently

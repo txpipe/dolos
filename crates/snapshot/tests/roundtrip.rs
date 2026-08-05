@@ -19,7 +19,7 @@ use dolos_snapshot::{
 use stelae::{
     dir::SteleDir,
     frame::{self, CanonicalCbor},
-    Profile,
+    Profile, SteleReader, SteleWriter,
 };
 
 /// Write one layer, read it back both ways, and decode what comes out.

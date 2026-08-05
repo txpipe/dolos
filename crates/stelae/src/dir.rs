@@ -30,6 +30,13 @@
 //! once and indexed by the `diffId` it yields. That is a full verification pass
 //! over the stele, which is the right cost for a fixture and the wrong one for
 //! a registry — where the manifest supplies the map for free.
+//!
+//! ## Where the seam moved to
+//!
+//! [`LayerSpec`], [`WrittenLayer`] and [`BlobIndex`] are re-exports: they are
+//! the vocabulary of [`crate::transport`], which this module was the first and
+//! for a while the only implementation of. They keep their old paths so that
+//! `stelae::dir::BlobIndex` still resolves.
 
 use std::{
     collections::BTreeMap,
@@ -38,12 +45,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub use crate::transport::{BlobIndex, LayerSpec, WrittenLayer};
+
 use crate::{
     digest::{digest_reader, read_blob, scan_blob, LayerDigests, LayerWriter},
     frame::{CanonicalCbor, LayerHeader, Limits, SeqReader, SeqWriter},
     inscription::LayerDescriptor,
     layer::{check_header, check_identity, check_record_count, LayerReader},
     profile::{checked_layer_media_type, Profile},
+    transport::{RecordSink, SteleReader, SteleWriter},
     Digest, Error, Inscription,
 };
 
@@ -52,63 +62,6 @@ pub const INSCRIPTION_FILE: &str = "inscription.json";
 
 /// Directory holding content-addressed blobs, in OCI image-layout shape.
 pub const BLOBS_DIR: &str = "blobs";
-
-/// What a profile has to say about a layer it is asking the protocol to write.
-///
-/// Both scopes are the profile's and stay opaque: `header_scope` rides in the
-/// layer's own header record so a detached blob is still interpretable, and
-/// `scope` rides in the inscription so a client can plan without fetching
-/// anything. They are different encodings of the same profile-owned idea, and
-/// the protocol carries both without reading either.
-#[derive(Debug, Clone)]
-pub struct LayerSpec {
-    pub kind: String,
-    pub header_scope: CanonicalCbor,
-    pub scope: serde_json::Value,
-}
-
-impl LayerSpec {
-    pub fn new(
-        kind: impl Into<String>,
-        header_scope: CanonicalCbor,
-        scope: serde_json::Value,
-    ) -> Self {
-        Self {
-            kind: kind.into(),
-            header_scope,
-            scope,
-        }
-    }
-}
-
-/// A written layer: the descriptor to put in the inscription, plus the
-/// transport facts that do not belong there.
-#[derive(Debug, Clone)]
-pub struct WrittenLayer {
-    pub descriptor: LayerDescriptor,
-    pub digests: LayerDigests,
-}
-
-/// Map from a layer's identity (`diffId`) to the blob that holds it.
-///
-/// In a registry this comes from the manifest. Here it is recovered by
-/// [`SteleDir::blob_index`].
-#[derive(Debug, Clone, Default)]
-pub struct BlobIndex(BTreeMap<Digest, Digest>);
-
-impl BlobIndex {
-    pub fn blob_for(&self, diff_id: &Digest) -> Option<Digest> {
-        self.0.get(diff_id).copied()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
 
 /// A layer read back from disk, verified against its descriptor.
 pub struct Layer {
@@ -154,18 +107,13 @@ impl Layer {
     }
 }
 
-/// A layer being written, one record at a time.
+/// A layer of a stele directory being written, one record at a time.
 ///
-/// The mirror of [`LayerReader`] on the write side, and push-style for the same
-/// reason a reader is pull-style: the party that owns the records owns the
-/// errors of producing them. A profile streaming out of a fallible store
-/// iterator keeps its own error type on its own side of the boundary, and the
-/// protocol only ever sees a [`CanonicalCbor`] it was handed.
-///
-/// Nothing is buffered. Records are framed, hashed and compressed on the way
-/// past — [`LayerWriter`] was always a one-pass writer — so a layer of any size
-/// costs the compressor's window and one record, whatever the profile is
-/// publishing.
+/// The directory's implementation of [`RecordSink`], and the mirror of
+/// [`LayerReader`] on the write side. Nothing is buffered: records are framed,
+/// hashed and compressed on the way past — [`LayerWriter`] was always a
+/// one-pass writer — so a layer of any size costs the compressor's window and
+/// one record, whatever the profile is publishing.
 ///
 /// A sink owns its staging file rather than borrowing the directory, so several
 /// can be open at once; the counter in [`SteleDir::layer_sink`] keeps their
@@ -176,8 +124,8 @@ impl Layer {
 /// A layer's name is the digest of its own compressed bytes, so it cannot be
 /// known before the last record is written. Until then the layer is a staging
 /// file, invisible to [`SteleDir::blob_index`], and a sink dropped without
-/// [`LayerSink::finish`] takes it with it — an export that fails halfway leaves
-/// no partial layer behind. Only `finish` puts a blob in the stele.
+/// [`RecordSink::finish`] takes it with it — an export that fails halfway
+/// leaves no partial layer behind. Only `finish` puts a blob in the stele.
 pub struct LayerSink {
     /// Declared before `staging` on purpose: fields drop in declaration order,
     /// so the file handle is closed before the file it names is unlinked. On
@@ -191,19 +139,12 @@ pub struct LayerSink {
     scope: serde_json::Value,
 }
 
-impl LayerSink {
-    /// Append one of the profile's records.
-    ///
-    /// The header record is already written; everything a caller adds is
-    /// content. [`CanonicalCbor`] is the proof that the record is in
-    /// deterministic form, so nothing is re-checked here.
-    pub fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), Error> {
+impl RecordSink for LayerSink {
+    fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), Error> {
         self.sequence.write_record(record)
     }
 
-    /// Records written so far, header record included — the number that ends up
-    /// in the descriptor.
-    pub fn records(&self) -> u64 {
+    fn records(&self) -> u64 {
         self.sequence.count()
     }
 
@@ -214,7 +155,7 @@ impl LayerSink {
     /// happens. A failure anywhere in here leaves the stele exactly as it was:
     /// the staging file is removed on the way out, the same as for a sink that
     /// was simply dropped.
-    pub fn finish(self) -> Result<WrittenLayer, Error> {
+    fn finish(self) -> Result<WrittenLayer, Error> {
         let Self {
             sequence,
             mut staging,
@@ -342,25 +283,21 @@ impl SteleDir {
     pub fn blob_path(&self, digest: &Digest) -> PathBuf {
         blob_path(&self.root, digest)
     }
+}
+
+impl SteleWriter for SteleDir {
+    type Sink = LayerSink;
 
     /// Open a layer and stream records into it.
     ///
-    /// This is the write side's mirror of [`SteleDir::stream_layer`]: the
-    /// producer holds one record at a time and the layer never exists in
-    /// memory. The header record is written here, before the handle is
-    /// returned, so a sink is always a well-formed layer in progress; the media
-    /// type comes from the profile and is validated against the naming rules
-    /// first, so a profile that claims a name it does not own is refused before
-    /// anything is created on disk.
-    ///
-    /// The handle owns everything it needs — its staging path and the root it
-    /// will land in, not a borrow of this `SteleDir` — so a producer can hold
-    /// many open at once and route each record to one of them. That is the
-    /// shape the Dolos profile's sixteen state shards need: one pass over the
-    /// store, sixteen layers being written.
+    /// The header record is written here, before the handle is returned, so a
+    /// sink is always a well-formed layer in progress; the media type comes
+    /// from the profile and is validated against the naming rules first, so a
+    /// profile that claims a name it does not own is refused before anything is
+    /// created on disk.
     ///
     /// See [`LayerSink`] for what a sink that is never finished leaves behind.
-    pub fn layer_sink(
+    fn layer_sink(
         &self,
         profile: &dyn Profile,
         spec: &LayerSpec,
@@ -401,42 +338,12 @@ impl SteleDir {
         Ok(sink)
     }
 
-    /// Frame, compress and store one layer.
-    ///
-    /// The records are the profile's; the header record is the protocol's and
-    /// is written first. The media type comes from the profile and is
-    /// validated against the naming rules on the way through — the protocol
-    /// does not build it.
-    ///
-    /// A convenience over [`SteleDir::layer_sink`] and nothing more: staging,
-    /// digest-naming, the rename and the descriptor are that one
-    /// implementation, so the buffered and streaming write paths cannot drift
-    /// apart the way two of them would. It is the right call for a layer a
-    /// caller already holds — every record has to be materialized somewhere
-    /// that outlives the call, which is exactly what the sink exists to avoid
-    /// at profile sizes.
-    pub fn write_layer<'a, I>(
-        &self,
-        profile: &dyn Profile,
-        spec: &LayerSpec,
-        level: i32,
-        records: I,
-    ) -> Result<WrittenLayer, Error>
-    where
-        I: IntoIterator<Item = &'a CanonicalCbor>,
-    {
-        let mut sink = self.layer_sink(profile, spec, level)?;
-
-        for record in records {
-            sink.write_record(record)?;
-        }
-
-        sink.finish()
-    }
-
     /// Write the inscription in canonical form and return its digest — the
     /// stele's identity.
-    pub fn write_inscription(&self, inscription: &Inscription) -> Result<Digest, Error> {
+    ///
+    /// A directory names nothing, so the profile goes unused here: there are no
+    /// tags to render and the file has one name the layout fixes.
+    fn seal(&self, _profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
         let canonical = inscription.canonicalize()?;
 
         let mut file = fs::File::create(self.root.join(INSCRIPTION_FILE))?;
@@ -445,6 +352,10 @@ impl SteleDir {
 
         Ok(Digest::compute(&canonical))
     }
+}
+
+impl SteleReader for SteleDir {
+    type Blob = fs::File;
 
     /// Read and verify the inscription.
     ///
@@ -452,7 +363,7 @@ impl SteleDir {
     /// the same content: the file is what a verifier hashes, so a re-indented
     /// copy carries a digest nobody else computes and is rejected rather than
     /// silently repaired.
-    pub fn read_inscription(&self) -> Result<Inscription, Error> {
+    fn read_inscription(&self) -> Result<Inscription, Error> {
         let raw = fs::read(self.root.join(INSCRIPTION_FILE))?;
         let inscription = Inscription::parse(&raw)?;
 
@@ -478,7 +389,7 @@ impl SteleDir {
     ///
     /// Costs one raw pass plus one decompressing pass per blob. That is the
     /// fixture's price for having no manifest; see the module documentation.
-    pub fn blob_index(&self) -> Result<BlobIndex, Error> {
+    fn blob_index(&self) -> Result<BlobIndex, Error> {
         let mut index = BTreeMap::new();
         let dir = self.root.join(BLOBS_DIR).join(Digest::ALGORITHM);
 
@@ -537,9 +448,32 @@ impl SteleDir {
             }
         }
 
-        Ok(BlobIndex(index))
+        Ok(index.into_iter().collect())
     }
 
+    /// Stream one layer's records without holding it.
+    ///
+    /// The same verification as [`SteleDir::read_layer`] — the checks are one
+    /// implementation, called from both — but spread across the read: the
+    /// header on construction, the decompression ceiling as the stream
+    /// advances, and the identity digest, size and record count in
+    /// [`LayerReader::finish`]. Records are therefore consumable *before* the
+    /// layer is proven; see the [`crate::layer`] module documentation for the
+    /// discipline that requires of a consumer.
+    fn stream_layer(
+        &self,
+        index: &BlobIndex,
+        profile: &dyn Profile,
+        descriptor: &LayerDescriptor,
+        limits: Limits,
+    ) -> Result<LayerReader<fs::File>, Error> {
+        let path = self.blob_of(index, descriptor)?;
+
+        LayerReader::new(fs::File::open(&path)?, profile, descriptor, limits)
+    }
+}
+
+impl SteleDir {
     /// Locate the blob holding a layer, or say which layer is missing.
     fn blob_of(&self, index: &BlobIndex, descriptor: &LayerDescriptor) -> Result<PathBuf, Error> {
         let blob_digest =
@@ -616,26 +550,5 @@ impl SteleDir {
             header_len,
             digests,
         })
-    }
-
-    /// Stream one layer's records without holding it.
-    ///
-    /// The same verification as [`SteleDir::read_layer`] — the checks are one
-    /// implementation, called from both — but spread across the read: the
-    /// header on construction, the decompression ceiling as the stream
-    /// advances, and the identity digest, size and record count in
-    /// [`LayerReader::finish`]. Records are therefore consumable *before* the
-    /// layer is proven; see the [`crate::layer`] module documentation for the
-    /// discipline that requires of a consumer.
-    pub fn stream_layer(
-        &self,
-        index: &BlobIndex,
-        profile: &dyn Profile,
-        descriptor: &LayerDescriptor,
-        limits: Limits,
-    ) -> Result<LayerReader<fs::File>, Error> {
-        let path = self.blob_of(index, descriptor)?;
-
-        LayerReader::new(fs::File::open(&path)?, profile, descriptor, limits)
     }
 }

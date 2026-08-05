@@ -27,7 +27,8 @@ use stelae::{
     digest::read_blob,
     dir::{BlobIndex, LayerSpec, SteleDir, WrittenLayer},
     frame::{encode, CanonicalCbor, Limits},
-    Compression, Error, Inscription, LayerDescriptor, LayerWriter, Profile,
+    Compression, Error, Inscription, LayerDescriptor, LayerWriter, Profile, RecordSink,
+    SteleReader, SteleWriter,
 };
 
 const PROFILE_NAME: &str = "dev.example.toy";
@@ -266,7 +267,7 @@ fn write_stele(root: &std::path::Path) -> (Inscription, stelae::Digest) {
 
     inscription.layers = vec![written_notes.descriptor, written_index.descriptor];
 
-    let digest = stele.write_inscription(&inscription).unwrap();
+    let digest = stele.seal(&ToyProfile, &inscription).unwrap();
 
     (inscription, digest)
 }
@@ -762,7 +763,7 @@ fn opaque_fields_are_carried_not_interpreted() {
         },
     );
     inscription.layers = vec![written.descriptor];
-    stele.write_inscription(&inscription).unwrap();
+    stele.seal(&ToyProfile, &inscription).unwrap();
 
     let read = SteleDir::open(temp.path())
         .unwrap()

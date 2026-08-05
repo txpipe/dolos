@@ -4,6 +4,23 @@ description = "Stelae: a deterministic, content-addressed snapshot protocol"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# OCI registry transport (`src/oci.rs`). Default-off, so a build that does not
+# publish or restore over a registry keeps the dependency tree it had: the
+# protocol's format, framing and digests need no HTTP client and no async
+# runtime, and the two are a large part of this tree when they are pulled in.
+#
+# The boundary check does not relax for a feature: `cargo tree -p stelae -e
+# normal --all-features` must still match nothing `^dolos(-|$)`.
+oci = [
+    "dep:bytes",
+    "dep:futures-util",
+    "dep:http",
+    "dep:oci-client",
+    "dep:tempfile",
+    "dep:tokio",
+]
+
 # This crate is the Stelae protocol. It must never depend on a `dolos-*`
 # package, so that extracting it later is a directory move rather than a
 # refactor. `cargo tree -p stelae -e normal` shows the boundary holding.
@@ -17,6 +34,36 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 zstd.workspace = true
+
+# --- feature `oci` ---------------------------------------------------------
+#
+# `oci-client` is the oras-project registry client. Its default TLS feature
+# (`rustls-tls`) is kept: without a TLS backend the client can only reach a
+# plaintext registry, which is a test fixture and not a distribution channel.
+# The cost is that it pins `reqwest/rustls` and `jsonwebtoken/aws_lc_rs`, so
+# `aws-lc-sys` enters the tree under `--all-features` and wants `cmake` to
+# build it — the very dependency the root package's `mithril-client` entry
+# goes out of its way to avoid. `test-registry` is dropped: it exists for the
+# crate's own test suite.
+oci-client = { version = "0.17", optional = true, default-features = false, features = [
+    "rustls-tls",
+] }
+# One current-thread runtime, owned by the transport and entered with
+# `block_on` at each call, so the protocol stays synchronous. See `oci.rs`.
+tokio = { workspace = true, optional = true }
+# `push_blob_stream` takes a `Stream`, which is how a layer is uploaded from
+# its staging file without ever being held.
+futures-util = { workspace = true, optional = true }
+bytes = { version = "1", optional = true }
+# Solely to name the manifest's `Content-Type`. The manifest is pushed as the
+# exact canonical bytes this crate produced — the ones the golden freezes and
+# the size ceiling measured — which means `push_manifest_raw`, which takes a
+# `HeaderValue`. `http` is the same one `reqwest` re-exports.
+http = { version = "1", optional = true }
+# Staging on the way up, and the pulled blob on the way down. Both are files
+# for the same reason: a blob's digest is only known once its last byte has
+# gone past, in either direction.
+tempfile = { version = "3.20.0", optional = true }
 
 [dev-dependencies]
 # The peak-allocation test instruments the global allocator, the same idiom the

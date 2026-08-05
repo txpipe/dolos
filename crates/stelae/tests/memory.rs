@@ -45,7 +45,7 @@ use stats_alloc::{Region, StatsAlloc, INSTRUMENTED_SYSTEM};
 use stelae::{
     dir::{LayerSpec, SteleDir},
     frame::{encode, CanonicalCbor, Limits, RecordReader, SeqWriter},
-    Compression, Error, Inscription, Profile,
+    Compression, Error, Inscription, Profile, RecordSink, SteleReader, SteleWriter,
 };
 
 #[global_allocator]
@@ -247,7 +247,7 @@ fn streaming_a_layer_does_not_scale_with_its_size() {
         },
     );
     inscription.layers = vec![written.descriptor.clone()];
-    stele.write_inscription(&inscription).unwrap();
+    stele.seal(&BulkProfile, &inscription).unwrap();
 
     let descriptor = &inscription.layers[0];
     assert!(
