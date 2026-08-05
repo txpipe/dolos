@@ -348,6 +348,28 @@ mod tests {
         }
     }
 
+    /// The era is a `u16` in the stores and a CBOR uint on the wire, so the
+    /// widths disagree and the decoder narrows. `encode_utxo_value` cannot
+    /// reach the refusal — an `EraCbor` already holds a `u16` — so the wire
+    /// bytes are built directly, which is the only way an out-of-range era
+    /// arrives at all.
+    #[test]
+    fn an_out_of_range_era_is_refused() {
+        for era in [u64::from(u16::MAX) + 1, u64::MAX] {
+            let wire = frame::encode(|e| {
+                e.array(2)?.u64(era)?.bytes(&[])?;
+                Ok(())
+            })
+            .unwrap();
+
+            let err = decode_utxo_value(wire.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedRecord { .. }),
+                "{era}: {err:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_two_readers_refuse_each_others_records() {
         let entity_record = entity(PoolState::NS, &entity_key(1), &Vec::new()).unwrap();

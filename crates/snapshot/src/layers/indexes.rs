@@ -288,20 +288,31 @@ mod tests {
         assert!(matches!(err, Error::UnknownDimension(_)), "{err:?}");
     }
 
+    /// `"block_number"` is the deliberate one: it is the plausible spelling of
+    /// a kind that really exists, and `dolos-core` pins `block_num`
+    /// precisely because that rename looks cosmetic and orphans every
+    /// stored entry. If `ExactKind::as_str` ever moves to it, this case is
+    /// *supposed* to fail — the wire literal is the stored form, and the
+    /// goldens would move with it.
     #[test]
     fn an_unknown_exact_kind_is_refused() {
-        let wire = frame::encode(|e| {
-            e.array(4)?
-                .u64(EXACT_DISCRIMINANT)?
-                .str("block_number")?
-                .bytes(&[0u8; 8])?
-                .u64(1)?;
-            Ok(())
-        })
-        .unwrap();
+        for name in ["block_number", "not_an_exact_kind", "", "TxHash"] {
+            let wire = frame::encode(|e| {
+                e.array(4)?
+                    .u64(EXACT_DISCRIMINANT)?
+                    .str(name)?
+                    .bytes(&[0u8; 8])?
+                    .u64(1)?;
+                Ok(())
+            })
+            .unwrap();
 
-        let err = decode(wire.as_bytes()).unwrap_err();
-        assert!(matches!(err, Error::UnknownExactKind(_)), "{err:?}");
+            let err = decode(wire.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, Error::UnknownExactKind(_)),
+                "{name:?}: {err:?}"
+            );
+        }
     }
 
     /// A key wider than any kind's — and wider than the inline buffer — is

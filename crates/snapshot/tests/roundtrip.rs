@@ -236,10 +236,14 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
     assert!(ExactRecord::new(ExactKind::TxHash, &4242u64.to_be_bytes(), 1).is_err());
 }
 
-/// A layer whose header names another profile is refused before a record is
-/// handed out — the fail-closed rule, exercised from this profile's side.
+/// A layer read under the wrong kind is refused before a record is handed out.
+///
+/// The blob's header names `blocks`; the descriptor claims `digests`. Both
+/// kinds are this profile's, so what refuses it is the kind check and not the
+/// profile check — `a_layer_of_another_profile_is_refused` covers the other
+/// half.
 #[test]
-fn a_layer_of_another_profile_is_refused() {
+fn a_layer_read_under_the_wrong_kind_is_refused() {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
@@ -252,17 +256,89 @@ fn a_layer_of_another_profile_is_refused() {
 
     let index = stele.blob_index().unwrap();
 
-    let mut foreign = written.descriptor.clone();
-    foreign.kind = DIGESTS.to_owned();
-    foreign.media_type = DolosProfile
+    let mut mislabelled = written.descriptor.clone();
+    mislabelled.kind = DIGESTS.to_owned();
+    mislabelled.media_type = DolosProfile
         .layer_media_type(DIGESTS)
         .expect("a kind this profile defines");
 
     let err = stele
-        .read_layer(&index, &DolosProfile, &foreign)
+        .read_layer(&index, &DolosProfile, &mislabelled)
         .unwrap_err();
     assert!(
         matches!(err, stelae::Error::LayerMismatch { .. }),
         "{err:?}"
+    );
+}
+
+/// A layer whose header names another profile is refused before a record is
+/// handed out — the fail-closed rule, exercised from this profile's side.
+///
+/// The awkward case on purpose: a vendor whose records frame identically to
+/// ours, under a kind name we also use. Nothing about the bytes distinguishes
+/// the two layers. Only the profile name in the header record does, which is
+/// why the protocol puts it there.
+#[test]
+fn a_layer_of_another_profile_is_refused() {
+    struct Other;
+
+    impl Profile for Other {
+        fn name(&self) -> &str {
+            "com.acme.receipts"
+        }
+
+        fn version(&self) -> u64 {
+            1
+        }
+
+        fn kinds(&self) -> &[&str] {
+            &[BLOCKS]
+        }
+
+        fn layer_media_type(&self, kind: &str) -> Result<String, stelae::Error> {
+            Ok(format!("application/vnd.acme.stele.{kind}.v1+zstd"))
+        }
+
+        fn tag_for_sequence(&self, sequence: u64) -> Result<String, stelae::Error> {
+            Ok(format!("r-{sequence}"))
+        }
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let scope = epoch_scope();
+    let written = stele
+        .write_layer(
+            &Other,
+            &stelae::dir::LayerSpec::new(BLOCKS, scope.header().unwrap(), scope.descriptor()),
+            dolos_snapshot::COMPRESSION_LEVEL,
+            &encode_all(&common::blocks(), blocks::encode),
+        )
+        .unwrap();
+
+    let index = stele.blob_index().unwrap();
+
+    let buffered = stele
+        .read_layer(&index, &DolosProfile, &written.descriptor)
+        .unwrap_err();
+    assert!(
+        matches!(buffered, stelae::Error::UnknownProfile { .. }),
+        "{buffered:?}"
+    );
+
+    // And on the streaming path, which is the one a restore uses.
+    let streamed = stele
+        .stream_layer(
+            &index,
+            &DolosProfile,
+            &written.descriptor,
+            frame::Limits::default(),
+        )
+        .map(|_| ())
+        .unwrap_err();
+    assert!(
+        matches!(streamed, stelae::Error::UnknownProfile { .. }),
+        "{streamed:?}"
     );
 }

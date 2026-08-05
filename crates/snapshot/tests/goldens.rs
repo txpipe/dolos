@@ -126,8 +126,19 @@ fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
 /// without a directory in the way.
 #[test]
 fn per_kind_diff_ids_are_pinned() {
+    let layers = all_layers();
+
+    // Before the zip, not after: `zip` stops at the shorter side, so a dropped
+    // layer would quietly shorten the loop rather than fail it — in the one test
+    // whose whole job is to notice a layer changing.
+    assert_eq!(
+        layers.len(),
+        GOLDEN_LAYERS.len(),
+        "the stele no longer has the layers the goldens pin"
+    );
+
     for ((kind, scope, records), (expected_kind, diff_id, count, size)) in
-        all_layers().into_iter().zip(GOLDEN_LAYERS)
+        layers.into_iter().zip(GOLDEN_LAYERS)
     {
         assert_eq!(kind, expected_kind);
 
@@ -226,6 +237,12 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
 fn descriptors_match_the_per_kind_goldens() {
     let temp = tempfile::tempdir().unwrap();
     let (inscription, _) = write_stele(temp.path());
+
+    assert_eq!(
+        inscription.layers.len(),
+        GOLDEN_LAYERS.len(),
+        "the stele no longer has the layers the goldens pin"
+    );
 
     for (descriptor, (kind, diff_id, records, size)) in inscription.layers.iter().zip(GOLDEN_LAYERS)
     {
