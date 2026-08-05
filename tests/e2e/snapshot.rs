@@ -182,11 +182,13 @@ fn snapshot_roundtrip(scenario: &Scenario) {
 
 /// The stele roundtrip: publish to a directory, wipe, restore from it.
 ///
-/// The same five phases as the tarball roundtrip above, against the format that
-/// replaces it. What is different is what crosses between them: a directory of
-/// deterministic CBOR layers and one canonical document, rather than a gzip tar
-/// of the storage engines' own files — so this is also the check that the
-/// format survives a real preview ledger, which no in-process fixture reaches.
+/// The same five phases as the tarball roundtrip above, and the two run side by
+/// side because the commands do: `bootstrap snapshot` and `bootstrap stelae`
+/// are siblings, not one replacing the other. What differs is what crosses
+/// between the phases — a directory of deterministic CBOR layers and one
+/// canonical document, rather than a gzip tar of the storage engines' own files
+/// — so this is also the check that the format survives a real preview ledger,
+/// which no in-process fixture reaches.
 ///
 /// The wipe is `--force` on the restore command itself rather than a separate
 /// bootstrap: a stele carries the genesis-derived state in its own layers, so
@@ -228,16 +230,16 @@ fn stele_roundtrip(scenario: &Scenario) {
     // Phase 3: Wipe data and restore from the stele
     let mut cmd = prepare_scenario_process(scenario);
     let restore = cmd
-        .args(["bootstrap", "snapshot", "--force", "--source"])
+        .args(["bootstrap", "stelae", "--force", "--source"])
         .arg(format!("file://{}", stele_path.display()))
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .output()
-        .expect("failed to run bootstrap snapshot --source");
+        .expect("failed to run bootstrap stelae");
 
     assert!(
         restore.status.success(),
-        "bootstrap snapshot --source failed: {}",
+        "bootstrap stelae failed: {}",
         String::from_utf8_lossy(&restore.stderr)
     );
 

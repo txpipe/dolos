@@ -10,12 +10,14 @@ mod mithril;
 mod ranged;
 mod relay;
 mod snapshot;
+mod stelae;
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Command {
     Relay(relay::Args),
     Mithril(mithril::Args),
     Snapshot(snapshot::Args),
+    Stelae(stelae::Args),
 }
 
 impl Command {
@@ -24,8 +26,12 @@ impl Command {
             "which bootstrap method would you like to use?",
             vec![
                 ListOption::new(0, "Dolos snapshot (a few mins, trust me bro)"),
-                ListOption::new(1, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
-                ListOption::new(2, "Relay chain-sync (several days, trust your relay)"),
+                ListOption::new(
+                    1,
+                    "Stelae snapshot (a few mins, from a stele you can verify)",
+                ),
+                ListOption::new(2, "Mithril snapshot (a few hours, trust Mithril SPOs)"),
+                ListOption::new(3, "Relay chain-sync (several days, trust your relay)"),
             ],
         )
         .prompt()
@@ -33,8 +39,9 @@ impl Command {
 
         match cmd.index {
             0 => Ok(Command::Snapshot(snapshot::Args::inquire()?)),
-            1 => Ok(Command::Mithril(mithril::Args::default())),
-            2 => Ok(Command::Relay(relay::Args::default())),
+            1 => Ok(Command::Stelae(stelae::Args::inquire()?)),
+            2 => Ok(Command::Mithril(mithril::Args::default())),
+            3 => Ok(Command::Relay(relay::Args::default())),
             _ => unreachable!(),
         }
     }
@@ -121,6 +128,9 @@ fn dispatch(config: &RootConfig, command: &Command, feedback: &Feedback) -> miet
         Command::Relay(args) => relay::run(config, args, feedback),
         Command::Mithril(args) => mithril::run(config, args, feedback),
         Command::Snapshot(args) => snapshot::run(config, args, feedback),
+        // No `feedback`: a stele restore has no progress reporting yet, which
+        // is a stated gap rather than an oversight — see the follow-up plan.
+        Command::Stelae(args) => stelae::run(config, args),
     }
 }
 

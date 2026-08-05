@@ -150,15 +150,15 @@ impl Node {
         command.output().unwrap()
     }
 
-    /// `dolos bootstrap snapshot --force --source …`, the operator's own
-    /// restore command.
+    /// `dolos bootstrap stelae --force --source …`, the operator's own restore
+    /// command.
     ///
     /// `--force` is what clears the storage directory first, so this is the
     /// wipe and the restore in the one step an operator actually runs.
-    pub fn bootstrap_from(&self, source: &str) -> std::process::Output {
+    pub fn bootstrap_stelae(&self, source: &str) -> std::process::Output {
         let mut command = self.command();
 
-        command.args(["bootstrap", "snapshot", "--force", "--source", source]);
+        command.args(["bootstrap", "stelae", "--force", "--source", source]);
 
         command.output().unwrap()
     }

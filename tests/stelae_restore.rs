@@ -1,5 +1,5 @@
-//! `dolos bootstrap snapshot --source file://…`, end to end against real
-//! on-disk stores.
+//! `dolos bootstrap stelae --source file://…`, end to end against real on-disk
+//! stores.
 //!
 //! The restore driver itself is covered by `cargo test -p dolos-snapshot`,
 //! which runs it against both live backend bindings. What only this test
@@ -66,7 +66,7 @@ fn a_published_stele_restores_the_node_that_published_it() {
     let stele = node.root.path().join("stele");
     assert_ok(&node.publish(&stele, &[]));
 
-    let stdout = assert_ok(&node.bootstrap_from(&format!("file://{}", stele.display())));
+    let stdout = assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
 
     // The name comes from the magic, the same on both sides of the roundtrip.
     assert!(stdout.contains("preview (2)"), "{stdout}");
@@ -89,7 +89,7 @@ fn a_stele_restores_into_a_directory_that_does_not_exist() {
 
     std::fs::remove_dir_all(&node.config.storage.path).unwrap();
 
-    assert_ok(&node.bootstrap_from(&format!("file://{}", stele.display())));
+    assert_ok(&node.bootstrap_stelae(&format!("file://{}", stele.display())));
 
     assert_eq!(Contents::read(&node), before);
 }
@@ -109,7 +109,7 @@ fn an_unimplemented_source_is_refused_before_force_clears_anything() {
         "https://example.invalid/snapshot",
         "/var/lib/dolos/stele",
     ] {
-        let output = node.bootstrap_from(source);
+        let output = node.bootstrap_stelae(source);
         assert!(!output.status.success(), "{source}");
 
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -129,7 +129,7 @@ fn a_source_that_is_not_a_stele_is_refused() {
     let empty = node.root.path().join("not-a-stele");
     std::fs::create_dir_all(&empty).unwrap();
 
-    let output = node.bootstrap_from(&format!("file://{}", empty.display()));
+    let output = node.bootstrap_stelae(&format!("file://{}", empty.display()));
     assert!(!output.status.success());
 
     // `--force` cleared the storage on the way in, so what this asserts is that
