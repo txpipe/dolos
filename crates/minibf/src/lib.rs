@@ -28,6 +28,7 @@ use dolos_core::{
 mod cache;
 mod error;
 pub(crate) mod hacks;
+pub(crate) mod inputs;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;

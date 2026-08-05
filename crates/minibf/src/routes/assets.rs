@@ -34,6 +34,7 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
+    inputs::{InputDeps, InputResolver},
     mapping::{asset_fingerprint, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -612,14 +613,11 @@ fn output_has_subject(subject: &[u8], output: &MultiEraOutput) -> bool {
     false
 }
 
-async fn tx_has_subject<D>(
-    domain: &Facade<D>,
+fn tx_has_subject(
+    resolver: &mut InputResolver<'_>,
     subject: &[u8],
     tx: &MultiEraTx<'_>,
-) -> Result<bool, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
+) -> Result<bool, StatusCode> {
     for (_, output) in tx.produces() {
         if output_has_subject(subject, &output) {
             return Ok(true);
@@ -627,22 +625,9 @@ where
     }
 
     for input in tx.consumes() {
-        if let Some(EraCbor(era, cbor)) = domain
-            .query()
-            .tx_cbor(input.hash().as_slice().to_vec())
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        {
-            let parsed = MultiEraTx::decode_for_era(
-                era.try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                &cbor,
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if let Some(output) = parsed.produces_at(input.index() as usize) {
-                if output_has_subject(subject, &output) {
-                    return Ok(true);
-                }
+        if let Some(output) = resolver.resolve(&input)? {
+            if output_has_subject(subject, &output) {
+                return Ok(true);
             }
         }
     }
@@ -652,6 +637,7 @@ where
 
 async fn find_txs<D>(
     domain: &Facade<D>,
+    deps: &mut InputDeps,
     subject: &[u8],
     chain: &ChainSummary,
     pagination: &Pagination,
@@ -662,11 +648,22 @@ where
 {
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let txs = block.txs();
+
+    // only the txs that will actually be scanned contribute dependencies
+    let scanned = txs
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
+        .map(|(_, tx)| tx);
+
+    let mut resolver = deps.prepare(domain, scanned).await?;
+
     let mut matches = vec![];
 
-    for (idx, tx) in block.txs().iter().enumerate() {
+    for (idx, tx) in txs.iter().enumerate() {
         if !pagination.should_skip(block.number(), idx)
-            && tx_has_subject(domain, subject, tx).await?
+            && tx_has_subject(&mut resolver, subject, tx)?
         {
             let model = AssetTransactionsInner {
                 tx_hash: hex::encode(tx.hash().as_slice()),
@@ -712,6 +709,7 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let mut matches = Vec::new();
+    let mut deps = InputDeps::default();
     let mut stream = Box::pin(stream);
 
     while let Some(res) = stream.next().await {
@@ -721,7 +719,7 @@ where
             continue;
         };
 
-        let mut txs = find_txs(&domain, &subject, &chain, &pagination, &block)
+        let mut txs = find_txs(&domain, &mut deps, &subject, &chain, &pagination, &block)
             .await
             .map_err(Error::Code)?;
         matches.append(&mut txs);
