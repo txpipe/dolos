@@ -6,7 +6,7 @@ use axum::{
 };
 use dolos_cardano::{
     model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
-    ChainSummary, PParamsSet,
+    ChainSummary, PParamsSet, StakeLog,
 };
 use pallas::{
     crypto::hash::Hash,
@@ -257,6 +257,64 @@ impl<D: Domain> Facade<D> {
         Ok(out)
     }
 
+    /// The log key is `(slot, pool)`, ranging `slot..slot + 1` (both padded with
+    /// a zeroed entity key) covers every pool at this epoch's start slot without
+    /// spilling into the next one. Returns `None` when no logs exist.
+    fn stake_logs_sum_at_epoch(
+        &self,
+        epoch: Epoch,
+        chain_summary: &ChainSummary,
+    ) -> Result<Option<u64>, StatusCode> {
+        let slot = chain_summary.epoch_start(epoch);
+
+        let start = LogKey::from(TemporalKey::from(slot));
+        let end = LogKey::from(TemporalKey::from(slot + 1));
+
+        let iter = self
+            .archive()
+            .iter_logs_typed::<StakeLog>(StakeLog::NS, Some(start..end))
+            .map_err(log_and_500("failed to iterate stake logs for epoch"))?;
+
+        let mut total = 0u64;
+        let mut found = false;
+        for entry in iter {
+            let (_, log) = entry.map_err(log_and_500("failed to read stake log for epoch"))?;
+            total += log.total_stake;
+            found = true;
+        }
+
+        Ok(found.then_some(total))
+    }
+
+    // Dolos only starts writing `StakeLog`s once its stake-snapshot pipeline has
+    // warmed up, so the first snapshot epoch has logs but the epoch just before
+    // it does not, even though both share the same genesis stake distribution
+    // (the reference implementation reports the same value for both). For that
+    // one epoch we fall back to the next epoch's logs. Earlier epochs have no
+    // active stake and stay `None`.
+    pub fn sum_active_stake_for_epoch(
+        &self,
+        epoch: Epoch,
+        chain_summary: &ChainSummary,
+    ) -> Result<Option<u64>, StatusCode> {
+        if let Some(total) = self.stake_logs_sum_at_epoch(epoch, chain_summary)? {
+            return Ok(Some(total));
+        }
+
+        // No logs for this epoch. If the *next* epoch is the earliest one that
+        // does have logs (i.e. this epoch has none but `epoch + 1` does), this
+        // epoch shares that first snapshot's genesis stake. Any earlier epoch
+        // (where neither it nor its successor has logs) has no active stake.
+        if self
+            .stake_logs_sum_at_epoch(epoch + 1, chain_summary)?
+            .is_some()
+        {
+            return self.stake_logs_sum_at_epoch(epoch + 1, chain_summary);
+        }
+
+        Ok(None)
+    }
+
     pub fn read_cardano_entity<T>(&self, key: impl Into<EntityKey>) -> Result<Option<T>, StatusCode>
     where
         T: FixedNamespace,
@@ -409,6 +467,15 @@ where
         .route(
             "/blocks/slot/{slot_number}",
             get(routes::blocks::by_slot::<D>),
+        )
+        .route("/epochs/{epoch}", get(routes::epochs::by_number::<D>))
+        .route(
+            "/epochs/{epoch}/next",
+            get(routes::epochs::by_number_next::<D>),
+        )
+        .route(
+            "/epochs/{epoch}/previous",
+            get(routes::epochs::by_number_previous::<D>),
         )
         .route(
             "/epochs/{epoch}/blocks",
