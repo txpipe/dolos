@@ -163,6 +163,23 @@ impl Node {
         command.output().unwrap()
     }
 
+    /// `dolos bootstrap <flags>` with no subcommand and no terminal.
+    ///
+    /// With no subcommand, bootstrap asks which method to use — and, for a
+    /// stele, where the stele is. With no stdin the first prompt cannot be
+    /// answered, which is the cheapest stand-in for the cases that matter: a
+    /// typo, a cancel, a machine with no terminal.
+    pub fn bootstrap_headless(&self, flags: &[&str]) -> std::process::Output {
+        let mut command = self.command();
+
+        command
+            .arg("bootstrap")
+            .args(flags)
+            .stdin(std::process::Stdio::null());
+
+        command.output().unwrap()
+    }
+
     fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dolos"));
 
