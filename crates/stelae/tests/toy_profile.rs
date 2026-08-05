@@ -16,14 +16,16 @@
 //!    core canonicalizes and hashes them without ever typing them.
 //! 5. A stele of a *different* profile, or a profile major version above the
 //!    one implemented, is refused cleanly.
+//! 6. Both write paths — a layer handed over whole, and a layer streamed into a
+//!    sink — produce the same artifact, and this profile publishes one of each.
 
-use std::io::Write as _;
+use std::{collections::BTreeSet, io::Write as _};
 
 use serde_json::json;
 
 use stelae::{
     digest::read_blob,
-    dir::{BlobIndex, LayerSpec, SteleDir},
+    dir::{BlobIndex, LayerSpec, SteleDir, WrittenLayer},
     frame::{encode, CanonicalCbor, Limits},
     Compression, Error, Inscription, LayerDescriptor, LayerWriter, Profile,
 };
@@ -207,9 +209,6 @@ fn write_stele(root: &std::path::Path) -> (Inscription, stelae::Digest) {
     let (index_header_scope, index_scope) = index_scopes();
 
     let notes: Vec<CanonicalCbor> = NOTES.iter().map(note_record).collect();
-    let mut sorted: Vec<&Note> = NOTES.iter().collect();
-    sorted.sort_by_key(|n| n.title);
-    let index: Vec<CanonicalCbor> = sorted.into_iter().map(index_record).collect();
 
     let written_notes = stele
         .write_layer(
@@ -220,14 +219,28 @@ fn write_stele(root: &std::path::Path) -> (Inscription, stelae::Digest) {
         )
         .unwrap();
 
-    let written_index = stele
-        .write_layer(
+    // The index layer is streamed into a sink instead, so this profile — which
+    // the protocol knows nothing about — exercises both write paths in the same
+    // stele. The records are never collected: a profile publishing at Dolos
+    // sizes cannot hold a layer, and the shape it needs has to work for a
+    // three-note chapter too. That the goldens below do not move is the proof
+    // that the two paths produce one artifact.
+    let mut sorted: Vec<&Note> = NOTES.iter().collect();
+    sorted.sort_by_key(|n| n.title);
+
+    let mut index_sink = stele
+        .layer_sink(
             &ToyProfile,
             &LayerSpec::new("index", index_header_scope, index_scope),
             COMPRESSION_LEVEL,
-            &index,
         )
         .unwrap();
+
+    for note in sorted {
+        index_sink.write_record(&index_record(note)).unwrap();
+    }
+
+    let written_index = index_sink.finish().unwrap();
 
     let mut inscription = Inscription::new(
         &ToyProfile,
@@ -469,6 +482,210 @@ fn layers_round_trip_byte_identically() {
             descriptor.kind
         );
     }
+}
+
+/// The two write paths are one write path.
+///
+/// The same records, handed over whole and streamed a record at a time, yield
+/// the same identity digest, the same blob digest, the same descriptor and the
+/// same bytes on disk. `write_layer` is a wrapper over `layer_sink`, so what
+/// this pins is that the wrapper stayed thin: staging, digest-naming, the
+/// rename and the descriptor have one implementation, and a change that made
+/// the buffered path special would have to move a digest here to land.
+#[test]
+fn both_write_paths_produce_the_same_layer() {
+    let buffered_dir = tempfile::tempdir().unwrap();
+    let streamed_dir = tempfile::tempdir().unwrap();
+
+    let buffered_stele = SteleDir::create(buffered_dir.path()).unwrap();
+    let streamed_stele = SteleDir::create(streamed_dir.path()).unwrap();
+
+    let (header_scope, scope) = notes_scopes();
+    let spec = LayerSpec::new("notes", header_scope, scope);
+    let records: Vec<CanonicalCbor> = NOTES.iter().map(note_record).collect();
+
+    let buffered = buffered_stele
+        .write_layer(&ToyProfile, &spec, COMPRESSION_LEVEL, &records)
+        .unwrap();
+
+    let mut sink = streamed_stele
+        .layer_sink(&ToyProfile, &spec, COMPRESSION_LEVEL)
+        .unwrap();
+
+    // A sink is a layer already in progress: the protocol's header record is
+    // written before the handle is returned, so a producer only ever adds its
+    // own records and the count is never off by one.
+    assert_eq!(sink.records(), 1);
+
+    for record in &records {
+        sink.write_record(record).unwrap();
+    }
+
+    assert_eq!(sink.records(), 1 + NOTES.len() as u64);
+
+    let streamed = sink.finish().unwrap();
+
+    assert_eq!(buffered.descriptor, streamed.descriptor);
+    assert_eq!(buffered.digests, streamed.digests);
+
+    // Same blob digest means the same file name; the bytes under it are the
+    // same too, which is what an OCI registry would be asked to deduplicate.
+    let blob = |stele: &SteleDir, written: &WrittenLayer| {
+        std::fs::read(stele.blob_path(&written.digests.blob_digest)).unwrap()
+    };
+
+    assert_eq!(
+        blob(&buffered_stele, &buffered),
+        blob(&streamed_stele, &streamed)
+    );
+
+    // And one layer in each stele, with no staging file beside it.
+    for root in [buffered_dir.path(), streamed_dir.path()] {
+        let blobs = root.join("blobs");
+        assert_eq!(
+            std::fs::read_dir(&blobs).unwrap().count(),
+            1,
+            "only sha256/"
+        );
+        assert_eq!(std::fs::read_dir(blobs.join("sha256")).unwrap().count(), 1);
+    }
+}
+
+/// Sixteen sinks open at once, which is the case the sink exists for.
+///
+/// The Dolos profile shards its state into sixteen layers and cannot walk the
+/// store sixteen times, so it walks once and routes each record to the shard it
+/// belongs in. That works only if a sink is an ordinary independent value: no
+/// borrow of the stele it will land in, no shared staging name, no ordering
+/// between them. Here the records interleave across all sixteen and every layer
+/// still reads back — through both readers — exactly what was routed to it.
+#[test]
+fn sixteen_sinks_are_written_in_one_pass() {
+    const SHARDS: u64 = 16;
+    const RECORDS: u64 = 8 * SHARDS;
+
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+    let blobs = temp.path().join("blobs");
+
+    let mut sinks: Vec<_> = (0..SHARDS)
+        .map(|shard| {
+            let header_scope = encode(|e| {
+                e.array(1)?.u64(shard)?;
+                Ok(())
+            })
+            .unwrap();
+
+            stele
+                .layer_sink(
+                    &ToyProfile,
+                    &LayerSpec::new("notes", header_scope, json!({"shard": shard})),
+                    COMPRESSION_LEVEL,
+                )
+                .unwrap()
+        })
+        .collect();
+
+    let mut routed: Vec<Vec<Vec<u8>>> = vec![Vec::new(); SHARDS as usize];
+
+    for id in 0..RECORDS {
+        let shard = (id % SHARDS) as usize;
+        let record = encode(|e| {
+            e.array(2)?.u64(id)?.str("routed")?;
+            Ok(())
+        })
+        .unwrap();
+
+        sinks[shard].write_record(&record).unwrap();
+        routed[shard].push(record.as_bytes().to_vec());
+    }
+
+    // Sixteen staging files beside `sha256/`, and not one layer yet: nothing is
+    // published until its digest is known, which is not until `finish`.
+    assert_eq!(
+        std::fs::read_dir(&blobs).unwrap().count() as u64,
+        SHARDS + 1
+    );
+    assert!(stele.blob_index().unwrap().is_empty());
+
+    let written: Vec<WrittenLayer> = sinks
+        .into_iter()
+        .map(|sink| sink.finish().unwrap())
+        .collect();
+
+    // Sixteen distinct layers, sixteen distinct blobs, nothing staged left.
+    let diff_ids: BTreeSet<_> = written.iter().map(|w| w.descriptor.diff_id).collect();
+    let blob_digests: BTreeSet<_> = written.iter().map(|w| w.digests.blob_digest).collect();
+    assert_eq!(diff_ids.len() as u64, SHARDS);
+    assert_eq!(blob_digests.len() as u64, SHARDS);
+    assert_eq!(
+        std::fs::read_dir(&blobs).unwrap().count(),
+        1,
+        "only sha256/"
+    );
+
+    let index = stele.blob_index().unwrap();
+    assert_eq!(index.len() as u64, SHARDS);
+
+    for (shard, written) in written.iter().enumerate() {
+        let records = read_both_ways(&stele, &index, &written.descriptor).unwrap();
+        assert_eq!(records, routed[shard], "shard {shard}");
+        assert_eq!(
+            written.descriptor.records,
+            routed[shard].len() as u64 + 1,
+            "shard {shard} record count, header included"
+        );
+    }
+}
+
+/// A sink that is never finished leaves nothing behind.
+///
+/// The case is a mainnet export that fails partway: sixteen state shards open,
+/// hundreds of megabytes written, and then a store iterator returns an error.
+/// Nothing would ever *read* what is left — staging files sit beside `sha256/`
+/// and `blob_index` only considers digest-named entries inside it — but leaving
+/// them on the disk is its own incident, so the sink removes its file on the
+/// way out.
+#[test]
+fn a_sink_dropped_without_finishing_leaves_nothing() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+    let blobs = temp.path().join("blobs");
+
+    let (header_scope, scope) = notes_scopes();
+
+    {
+        let mut sink = stele
+            .layer_sink(
+                &ToyProfile,
+                &LayerSpec::new("notes", header_scope, scope),
+                COMPRESSION_LEVEL,
+            )
+            .unwrap();
+
+        for note in NOTES {
+            sink.write_record(&note_record(note)).unwrap();
+        }
+
+        // Open: one staging file, which is not a blob and never was.
+        let staged: Vec<_> = std::fs::read_dir(&blobs)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_file())
+            .collect();
+
+        assert_eq!(staged.len(), 1, "{staged:?}");
+        assert!(stele.blob_index().unwrap().is_empty());
+    }
+
+    // Dropped: nothing staged, nothing published.
+    assert_eq!(
+        std::fs::read_dir(&blobs).unwrap().count(),
+        1,
+        "only sha256/"
+    );
+    assert_eq!(std::fs::read_dir(blobs.join("sha256")).unwrap().count(), 0);
+    assert!(stele.blob_index().unwrap().is_empty());
 }
 
 /// Unknown #4: nothing vendor-owned in the artifact was composed by the core.

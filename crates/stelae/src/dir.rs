@@ -154,6 +154,151 @@ impl Layer {
     }
 }
 
+/// A layer being written, one record at a time.
+///
+/// The mirror of [`LayerReader`] on the write side, and push-style for the same
+/// reason a reader is pull-style: the party that owns the records owns the
+/// errors of producing them. A profile streaming out of a fallible store
+/// iterator keeps its own error type on its own side of the boundary, and the
+/// protocol only ever sees a [`CanonicalCbor`] it was handed.
+///
+/// Nothing is buffered. Records are framed, hashed and compressed on the way
+/// past — [`LayerWriter`] was always a one-pass writer — so a layer of any size
+/// costs the compressor's window and one record, whatever the profile is
+/// publishing.
+///
+/// A sink owns its staging file rather than borrowing the directory, so several
+/// can be open at once; the counter in [`SteleDir::layer_sink`] keeps their
+/// staging names apart.
+///
+/// ## Nothing exists until `finish`
+///
+/// A layer's name is the digest of its own compressed bytes, so it cannot be
+/// known before the last record is written. Until then the layer is a staging
+/// file, invisible to [`SteleDir::blob_index`], and a sink dropped without
+/// [`LayerSink::finish`] takes it with it — an export that fails halfway leaves
+/// no partial layer behind. Only `finish` puts a blob in the stele.
+pub struct LayerSink {
+    /// Declared before `staging` on purpose: fields drop in declaration order,
+    /// so the file handle is closed before the file it names is unlinked. On
+    /// Windows that is the difference between removing an abandoned staging
+    /// file and failing to.
+    sequence: SeqWriter<LayerWriter<fs::File>>,
+    staging: Staging,
+    root: PathBuf,
+    kind: String,
+    media_type: String,
+    scope: serde_json::Value,
+}
+
+impl LayerSink {
+    /// Append one of the profile's records.
+    ///
+    /// The header record is already written; everything a caller adds is
+    /// content. [`CanonicalCbor`] is the proof that the record is in
+    /// deterministic form, so nothing is re-checked here.
+    pub fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), Error> {
+        self.sequence.write_record(record)
+    }
+
+    /// Records written so far, header record included — the number that ends up
+    /// in the descriptor.
+    pub fn records(&self) -> u64 {
+        self.sequence.count()
+    }
+
+    /// Close the layer: finish the compressed frame, name the blob by its own
+    /// digest and hand back the descriptor to put in the inscription.
+    ///
+    /// The rename is what publishes the layer, and it is the last thing that
+    /// happens. A failure anywhere in here leaves the stele exactly as it was:
+    /// the staging file is removed on the way out, the same as for a sink that
+    /// was simply dropped.
+    pub fn finish(self) -> Result<WrittenLayer, Error> {
+        let Self {
+            sequence,
+            mut staging,
+            root,
+            kind,
+            media_type,
+            scope,
+        } = self;
+
+        let count = sequence.count();
+        let (file, digests) = sequence.into_inner().finish()?;
+        file.sync_all()?;
+        drop(file);
+
+        // Named by the digest of the bytes stored, per the OCI image layout.
+        fs::rename(&staging.path, blob_path(&root, &digests.blob_digest))?;
+        staging.published();
+
+        Ok(WrittenLayer {
+            descriptor: LayerDescriptor {
+                kind,
+                media_type,
+                diff_id: digests.diff_id,
+                records: count,
+                uncompressed_size: digests.uncompressed_size,
+                scope,
+            },
+            digests,
+        })
+    }
+}
+
+/// The staging file a layer is written into before it has a name.
+///
+/// Removing it is a `Drop` rather than a step in [`LayerSink::finish`] because
+/// the case that matters is the one nobody writes code for: a producer that
+/// hits an error mid-layer and returns. Nothing *reads* an abandoned staging
+/// file — it sits beside `sha256/` and [`SteleDir::blob_index`] only considers
+/// digest-named entries inside it — but a mainnet state shard is hundreds of
+/// megabytes, and a failed export leaving sixteen of them on the disk is its
+/// own incident.
+struct Staging {
+    path: PathBuf,
+    published: bool,
+}
+
+impl Staging {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            published: false,
+        }
+    }
+
+    /// The file has been renamed to its content-addressed name: nothing is left
+    /// at the staging path, and an unlink of it later could only ever hit
+    /// somebody else's.
+    fn published(&mut self) {
+        self.published = true;
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if !self.published {
+            // The sink has already failed or been abandoned; a failure to
+            // remove the file has nobody left to report it to, and the file is
+            // inert either way.
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Where a blob of `digest` lives under `root`, per the OCI image layout.
+///
+/// One definition, used both to write a layer and to find it again — a stele
+/// whose writer and reader disagreed about the path would be unreadable by
+/// itself and perfectly readable by nobody.
+fn blob_path(root: &Path, digest: &Digest) -> PathBuf {
+    root.join(BLOBS_DIR)
+        .join(Digest::ALGORITHM)
+        .join(digest.to_hex())
+}
+
 /// A stele directory.
 pub struct SteleDir {
     root: PathBuf,
@@ -195,28 +340,32 @@ impl SteleDir {
     }
 
     pub fn blob_path(&self, digest: &Digest) -> PathBuf {
-        self.root
-            .join(BLOBS_DIR)
-            .join(Digest::ALGORITHM)
-            .join(digest.to_hex())
+        blob_path(&self.root, digest)
     }
 
-    /// Frame, compress and store one layer.
+    /// Open a layer and stream records into it.
     ///
-    /// The records are the profile's; the header record is the protocol's and
-    /// is written first. The media type comes from the profile and is
-    /// validated against the naming rules on the way through — the protocol
-    /// does not build it.
-    pub fn write_layer<'a, I>(
+    /// This is the write side's mirror of [`SteleDir::stream_layer`]: the
+    /// producer holds one record at a time and the layer never exists in
+    /// memory. The header record is written here, before the handle is
+    /// returned, so a sink is always a well-formed layer in progress; the media
+    /// type comes from the profile and is validated against the naming rules
+    /// first, so a profile that claims a name it does not own is refused before
+    /// anything is created on disk.
+    ///
+    /// The handle owns everything it needs — its staging path and the root it
+    /// will land in, not a borrow of this `SteleDir` — so a producer can hold
+    /// many open at once and route each record to one of them. That is the
+    /// shape the Dolos profile's sixteen state shards need: one pass over the
+    /// store, sixteen layers being written.
+    ///
+    /// See [`LayerSink`] for what a sink that is never finished leaves behind.
+    pub fn layer_sink(
         &self,
         profile: &dyn Profile,
         spec: &LayerSpec,
         level: i32,
-        records: I,
-    ) -> Result<WrittenLayer, Error>
-    where
-        I: IntoIterator<Item = &'a CanonicalCbor>,
-    {
+    ) -> Result<LayerSink, Error> {
         let media_type = checked_layer_media_type(profile, &spec.kind)?;
         let header = LayerHeader::new(profile.name(), &spec.kind, spec.header_scope.clone());
 
@@ -228,40 +377,61 @@ impl SteleDir {
         // for a blob.
         static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-        let staging = self.root.join(BLOBS_DIR).join(format!(
+        let staging = Staging::new(self.root.join(BLOBS_DIR).join(format!(
             ".staging-{}-{}",
             std::process::id(),
             STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        )));
 
-        let file = fs::File::create(&staging)?;
-        let mut sequence = SeqWriter::new(LayerWriter::new(file, level)?);
+        // From here on every `?` unwinds through `staging`, which removes the
+        // file it named.
+        let file = fs::File::create(&staging.path)?;
 
-        sequence.write_record(&header.encode()?)?;
+        let mut sink = LayerSink {
+            sequence: SeqWriter::new(LayerWriter::new(file, level)?),
+            staging,
+            root: self.root.clone(),
+            kind: spec.kind.clone(),
+            media_type,
+            scope: spec.scope.clone(),
+        };
+
+        sink.write_record(&header.encode()?)?;
+
+        Ok(sink)
+    }
+
+    /// Frame, compress and store one layer.
+    ///
+    /// The records are the profile's; the header record is the protocol's and
+    /// is written first. The media type comes from the profile and is
+    /// validated against the naming rules on the way through — the protocol
+    /// does not build it.
+    ///
+    /// A convenience over [`SteleDir::layer_sink`] and nothing more: staging,
+    /// digest-naming, the rename and the descriptor are that one
+    /// implementation, so the buffered and streaming write paths cannot drift
+    /// apart the way two of them would. It is the right call for a layer a
+    /// caller already holds — every record has to be materialized somewhere
+    /// that outlives the call, which is exactly what the sink exists to avoid
+    /// at profile sizes.
+    pub fn write_layer<'a, I>(
+        &self,
+        profile: &dyn Profile,
+        spec: &LayerSpec,
+        level: i32,
+        records: I,
+    ) -> Result<WrittenLayer, Error>
+    where
+        I: IntoIterator<Item = &'a CanonicalCbor>,
+    {
+        let mut sink = self.layer_sink(profile, spec, level)?;
+
         for record in records {
-            sequence.write_record(record)?;
+            sink.write_record(record)?;
         }
 
-        let count = sequence.count();
-        let (file, digests) = sequence.into_inner().finish()?;
-        file.sync_all()?;
-        drop(file);
-
-        // Named by the digest of the bytes stored, per the OCI image layout.
-        let path = self.blob_path(&digests.blob_digest);
-        fs::rename(&staging, &path)?;
-
-        Ok(WrittenLayer {
-            descriptor: LayerDescriptor {
-                kind: spec.kind.clone(),
-                media_type,
-                diff_id: digests.diff_id,
-                records: count,
-                uncompressed_size: digests.uncompressed_size,
-                scope: spec.scope.clone(),
-            },
-            digests,
-        })
+        sink.finish()
     }
 
     /// Write the inscription in canonical form and return its digest — the

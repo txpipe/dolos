@@ -14,6 +14,17 @@
 //! allocated and freed one record per iteration would be caught here, not
 //! excused by its tidiness.
 //!
+//! ## The write path is measured differently, and has to be
+//!
+//! Cumulative is unavailable on the write side. A producer handing 32,768
+//! records to a layer has to *encode* 32,768 records, and those allocations are
+//! its own — incurred identically whether it buffers them or streams them, so a
+//! cumulative figure reports the same ~33 MB for both paths and distinguishes
+//! nothing. What separates them is what is *held*: bytes allocated inside the
+//! region and not yet given back, sampled at every record and maximized. That
+//! is peak rather than a bound on peak, which is the weaker of the two claims —
+//! stated here rather than quietly substituted.
+//!
 //! ## Why these tests take a lock
 //!
 //! A `Region` reads a *process-wide* counter, and the test harness runs tests
@@ -80,6 +91,28 @@ const MINIMUM_WINDOWS: usize = 400;
 /// weaken the claim, but the number below is the Rust side only and saying so
 /// is cheaper than someone rediscovering it.
 const STREAMING_BUDGET: usize = 1024 * 1024;
+
+/// What the streaming *write* path is allowed to hold at any one moment: one
+/// record, the compressor's buffers, and the sink's own handful of fields.
+///
+/// The same figure as the read budget, for the same reasons — the zstd bindings
+/// buffer on either side of the encoder, and libzstd's own context is
+/// `malloc`ed inside the C library where `stats_alloc` cannot see it. The
+/// observed peak is around 34 KB against a 33 MB layer, so this is a ceiling
+/// with room under it rather than a number tuned until the test passed; what
+/// matters is that it does not move when the layer does.
+const SINK_BUDGET: usize = 1024 * 1024;
+
+/// Bytes allocated inside `region` and not yet returned.
+///
+/// Saturating because a region can also *free* memory that was allocated before
+/// it began, which is a negative change and not a measurement of anything.
+fn in_flight(region: &Region<'_, System>) -> usize {
+    let change = region.change();
+    change
+        .bytes_allocated
+        .saturating_sub(change.bytes_deallocated)
+}
 
 struct BulkProfile;
 
@@ -266,5 +299,88 @@ fn streaming_a_layer_does_not_scale_with_its_size() {
         "the buffered path allocated {buffered} bytes for a {}-byte layer; \
          it is supposed to hold the whole thing",
         descriptor.uncompressed_size,
+    );
+}
+
+/// The same property on the way in: a producer streams a layer it could not
+/// hold.
+///
+/// This is the bound the Dolos export needs. `write_layer` takes an iterator of
+/// *references*, so every record has to be materialized somewhere that outlives
+/// the call — fine for a chapter of notes, impossible for a mainnet epoch of
+/// blocks at 0.5–1.5 GB. A sink takes each record by reference for the length
+/// of one call and keeps nothing.
+///
+/// Both paths write the same layer here, so the comparison is between two ways
+/// of producing one artifact and not between two artifacts. They go into
+/// separate steles: the blob is named by its own digest, so writing it twice
+/// into one directory would be a rename onto a file that is already there.
+#[test]
+fn writing_a_layer_through_a_sink_does_not_scale_with_its_size() {
+    let _serial = exclusive();
+
+    let streamed_dir = tempfile::tempdir().unwrap();
+    let buffered_dir = tempfile::tempdir().unwrap();
+
+    let streamed_stele = SteleDir::create(streamed_dir.path()).unwrap();
+    let buffered_stele = SteleDir::create(buffered_dir.path()).unwrap();
+
+    let spec = LayerSpec::new("bulk", scope(), json!({}));
+
+    // The sink. Each record is encoded, written and dropped; the peak is
+    // sampled with the record still in hand, so what it reports is one record
+    // plus whatever the protocol is holding on its behalf.
+    let region = Region::new(GLOBAL);
+
+    let mut sink = streamed_stele
+        .layer_sink(&BulkProfile, &spec, COMPRESSION_LEVEL)
+        .unwrap();
+
+    let mut held = 0usize;
+
+    for i in 0..RECORDS {
+        let record = bulk_record(i);
+        sink.write_record(&record).unwrap();
+        held = held.max(in_flight(&region));
+    }
+
+    let streamed = sink.finish().unwrap();
+    let streamed_held = held.max(in_flight(&region));
+
+    // The control. Without it this test proves only that some number is small:
+    // the buffered path writes the same records and, by construction, has to
+    // hold every one of them until the call returns.
+    let region = Region::new(GLOBAL);
+
+    let records: Vec<CanonicalCbor> = (0..RECORDS).map(bulk_record).collect();
+    let buffered = buffered_stele
+        .write_layer(&BulkProfile, &spec, COMPRESSION_LEVEL, &records)
+        .unwrap();
+
+    let buffered_held = in_flight(&region);
+    drop(records);
+
+    let size = streamed.descriptor.uncompressed_size;
+
+    assert!(
+        size > (16 * SINK_BUDGET) as u64,
+        "the layer has to dwarf the budget for this to prove anything: \
+         {size} bytes against {SINK_BUDGET}"
+    );
+
+    // One artifact, two ways of writing it.
+    assert_eq!(streamed.descriptor, buffered.descriptor);
+    assert_eq!(streamed.digests, buffered.digests);
+
+    assert!(
+        streamed_held < SINK_BUDGET,
+        "streaming a {size}-byte layer held {streamed_held} bytes at peak; \
+         the budget is {SINK_BUDGET}",
+    );
+
+    assert!(
+        buffered_held as u64 > size,
+        "the buffered path held {buffered_held} bytes for a {size}-byte layer; \
+         it is supposed to hold the whole thing",
     );
 }
