@@ -191,6 +191,7 @@ members = [
     "crates/cardano",
     "crates/core",
     "crates/fjall",
+    "crates/snapshot",
     "crates/stelae",
     "crates/testing",
     "crates/minibf",
