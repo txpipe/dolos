@@ -44,6 +44,7 @@ dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
+dolos-snapshot = { path = "crates/snapshot" }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-minikupo = { path = "crates/minikupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
@@ -120,6 +121,7 @@ tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 stats_alloc = "0.1"
 serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
+stelae = { path = "crates/stelae" }
 
 [build-dependencies]
 vergen-gitcl = "9.1.0"
