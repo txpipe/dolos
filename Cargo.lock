@@ -1610,6 +1610,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dolos-snapshot"
+version = "1.6.0"
+dependencies = [
+ "dolos-cardano",
+ "dolos-core",
+ "hex",
+ "minicbor 0.26.4",
+ "serde_json",
+ "stelae",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "dolos-testing"
 version = "1.6.0"
 dependencies = [

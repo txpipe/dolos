@@ -1,0 +1,443 @@
+//! The `state` layer: the ledger tip, as sixteen uniform key-value shards.
+//!
+//! `[ns: tstr, key: bytes, value: bytes]`, ordered by `(ns, key)`, with the
+//! shard given by the first nibble of `key[0]`.
+//!
+//! ## One record shape, including for UTxOs
+//!
+//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
+//! fourteen entity namespaces, rather than as a special layer kind. That is
+//! what keeps the format's state vocabulary to a single record, and it makes
+//! the planned refactor folding UTxOs into the entity system (#1042) invisible
+//! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
+//! file changes.
+//!
+//! ## The one place bytes are built rather than carried
+//!
+//! Entity values are the stored minicbor, verbatim. UTxO values are not: the
+//! state store holds an [`EraCbor`], which is a Rust value rather than a byte
+//! string, so this codec composes `[era, body]` itself. It composes it through
+//! [`stelae::frame::encode`] — the same validator every record goes through —
+//! so the one transformed field in the whole profile is canonical by
+//! construction rather than by inspection.
+//!
+//! ## Sharding
+//!
+//! The first nibble of the first key byte, so sixteen shards. Keys are
+//! hash-derived (transaction hashes, credentials, script hashes), so the split
+//! is uniform without a hash of its own; shards can be fetched in parallel and
+//! stay far from registry size limits as state grows.
+
+use dolos_core::{state::KEY_SIZE, EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef};
+use stelae::frame::{self, CanonicalCbor};
+
+use super::{blob, close, open, text, uint};
+use crate::{namespaces, Error, STATE, UTXOS};
+
+/// Number of state shards. Reported to readers as `parameters.stateShards`.
+pub const STATE_SHARDS: u64 = 16;
+
+/// Width of an entity key — every namespace but [`crate::UTXOS`].
+pub const ENTITY_KEY_LEN: usize = KEY_SIZE;
+
+/// Width of a UTxO key: `tx_hash(32) ‖ output_index(4, BE)`.
+pub const UTXO_KEY_LEN: usize = KEY_SIZE + 4;
+
+/// The shard a state key belongs to: the first nibble of its first byte.
+///
+/// Total by construction — [`decode`] refuses a record whose key is not the
+/// width its namespace requires, and both widths are non-zero — so the fallback
+/// for an empty key is unreachable rather than a policy.
+pub fn shard_of(key: &[u8]) -> u8 {
+    key.first().copied().unwrap_or(0) >> 4
+}
+
+/// One state entry, as the layer carries it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct StateRecord {
+    pub ns: Namespace,
+    /// [`ENTITY_KEY_LEN`] bytes, or [`UTXO_KEY_LEN`] under [`crate::UTXOS`].
+    pub key: Vec<u8>,
+    /// The stored `EntityValue` verbatim, or CBOR `[era, body]` under
+    /// [`crate::UTXOS`].
+    pub value: EntityValue,
+}
+
+impl StateRecord {
+    /// The shard this record belongs in.
+    pub fn shard(&self) -> u8 {
+        shard_of(&self.key)
+    }
+}
+
+/// A record for an entity, whose value is carried verbatim.
+///
+/// Refuses [`crate::UTXOS`]: that namespace's value has a shape this function
+/// would not build, and a raw byte string smuggled in under it would restore as
+/// an unreadable UTxO.
+pub fn entity(ns: Namespace, key: &EntityKey, value: &EntityValue) -> Result<StateRecord, Error> {
+    if ns == UTXOS {
+        return Err(Error::malformed(
+            STATE,
+            format!("namespace {UTXOS:?} is built by `utxo`, not by `entity`"),
+        ));
+    }
+
+    Ok(StateRecord {
+        ns: namespaces::resolve(ns)?,
+        key: key.as_ref().to_vec(),
+        value: value.clone(),
+    })
+}
+
+/// A record for one UTxO, composing the `[era, body]` value.
+pub fn utxo(txo: &TxoRef, value: &EraCbor) -> Result<StateRecord, Error> {
+    let mut key = Vec::with_capacity(UTXO_KEY_LEN);
+    key.extend_from_slice(txo.0.as_ref());
+    key.extend_from_slice(&txo.1.to_be_bytes());
+
+    Ok(StateRecord {
+        ns: UTXOS,
+        key,
+        value: encode_utxo_value(value)?.into_bytes(),
+    })
+}
+
+/// Read a record back as an entity. Refuses a [`crate::UTXOS`] record.
+pub fn as_entity(record: &StateRecord) -> Result<(Namespace, EntityKey), Error> {
+    if record.ns == UTXOS {
+        return Err(Error::malformed(
+            STATE,
+            format!("namespace {UTXOS:?} is read by `as_utxo`, not by `as_entity`"),
+        ));
+    }
+
+    let key: [u8; ENTITY_KEY_LEN] = record.key.as_slice().try_into().map_err(|_| {
+        Error::malformed(
+            STATE,
+            format!(
+                "{}: expected a {ENTITY_KEY_LEN}-byte key, found {}",
+                record.ns,
+                record.key.len()
+            ),
+        )
+    })?;
+
+    Ok((record.ns, EntityKey::from(&key)))
+}
+
+/// Read a record back as a UTxO. Refuses any namespace but [`crate::UTXOS`].
+pub fn as_utxo(record: &StateRecord) -> Result<(TxoRef, EraCbor), Error> {
+    if record.ns != UTXOS {
+        return Err(Error::malformed(
+            STATE,
+            format!("namespace {:?} is not the utxo set", record.ns),
+        ));
+    }
+
+    let key: [u8; UTXO_KEY_LEN] = record.key.as_slice().try_into().map_err(|_| {
+        Error::malformed(
+            STATE,
+            format!(
+                "utxo key: expected {UTXO_KEY_LEN} bytes, found {}",
+                record.key.len()
+            ),
+        )
+    })?;
+
+    let (hash, index) = key.split_at(KEY_SIZE);
+    let hash: [u8; KEY_SIZE] = hash.try_into().expect("split at KEY_SIZE");
+    let index = u32::from_be_bytes(index.try_into().expect("the remaining four bytes"));
+
+    Ok((
+        TxoRef(hash.into(), index),
+        decode_utxo_value(&record.value)?,
+    ))
+}
+
+/// The `utxos` value: `[era: uint, body: bytes]`.
+pub fn encode_utxo_value(value: &EraCbor) -> Result<CanonicalCbor, Error> {
+    Ok(frame::encode(|e| {
+        e.array(2)?.u64(u64::from(value.0))?.bytes(&value.1)?;
+        Ok(())
+    })?)
+}
+
+pub fn decode_utxo_value(bytes: &[u8]) -> Result<EraCbor, Error> {
+    let mut decoder = minicbor::Decoder::new(bytes);
+
+    open(STATE, &mut decoder, 2)?;
+
+    let era = uint(STATE, "era", &mut decoder)?;
+    let era = Era::try_from(era)
+        .map_err(|_| Error::malformed(STATE, format!("era {era} does not fit a u16")))?;
+    let body = blob(STATE, "body", &mut decoder)?.to_vec();
+
+    close(STATE, &decoder, bytes)?;
+
+    Ok(EraCbor(era, body))
+}
+
+pub fn encode(record: &StateRecord) -> Result<CanonicalCbor, Error> {
+    let ns = namespaces::resolve(record.ns)?;
+
+    check_key_width(ns, record.key.len())?;
+
+    Ok(frame::encode(|e| {
+        e.array(3)?
+            .str(ns)?
+            .bytes(&record.key)?
+            .bytes(&record.value)?;
+        Ok(())
+    })?)
+}
+
+pub fn decode(bytes: &[u8]) -> Result<StateRecord, Error> {
+    let mut decoder = minicbor::Decoder::new(bytes);
+
+    open(STATE, &mut decoder, 3)?;
+
+    let ns = namespaces::resolve(text(STATE, "ns", &mut decoder)?)?;
+    let key = blob(STATE, "key", &mut decoder)?.to_vec();
+    let value = blob(STATE, "value", &mut decoder)?.to_vec();
+
+    close(STATE, &decoder, bytes)?;
+
+    check_key_width(ns, key.len())?;
+
+    Ok(StateRecord { ns, key, value })
+}
+
+/// Both key widths are fixed by their namespace, and both `EntityKey` and a
+/// UTxO ref convert from a slice by padding or truncating — so a wrong width
+/// that got through would become a well-formed key pointing at nothing.
+fn check_key_width(ns: Namespace, len: usize) -> Result<(), Error> {
+    let expected = if ns == UTXOS {
+        UTXO_KEY_LEN
+    } else {
+        ENTITY_KEY_LEN
+    };
+
+    if len != expected {
+        return Err(Error::malformed(
+            STATE,
+            format!("{ns}: expected a {expected}-byte key, found {len}"),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Strictly ascending `(ns, key)`, optionally within one shard.
+#[derive(Debug, Default, Clone)]
+pub struct OrderCheck {
+    shard: Option<u8>,
+    last: Option<(Namespace, Vec<u8>)>,
+}
+
+impl OrderCheck {
+    /// A check that also insists every record belongs to `shard`.
+    ///
+    /// Worth having beside the ordering rule: a record in the wrong shard layer
+    /// still restores — the write path dispatches on the namespace, not on the
+    /// shard — so nothing downstream would ever notice, and a client fetching
+    /// shards selectively would silently miss it.
+    pub fn for_shard(shard: u8) -> Self {
+        Self {
+            shard: Some(shard),
+            last: None,
+        }
+    }
+
+    pub fn check(&mut self, record: &StateRecord) -> Result<(), Error> {
+        if let Some(shard) = self.shard {
+            if record.shard() != shard {
+                return Err(Error::malformed(
+                    STATE,
+                    format!(
+                        "{}/{} belongs to shard {}, not shard {shard}",
+                        record.ns,
+                        hex::encode(&record.key),
+                        record.shard(),
+                    ),
+                ));
+            }
+        }
+
+        let current = (record.ns, record.key.clone());
+
+        if let Some(previous) = &self.last {
+            if current <= *previous {
+                return Err(Error::out_of_order(
+                    STATE,
+                    format!(
+                        "{}/{} follows {}/{}",
+                        current.0,
+                        hex::encode(&current.1),
+                        previous.0,
+                        hex::encode(&previous.1),
+                    ),
+                ));
+            }
+        }
+
+        self.last = Some(current);
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_cardano::model::{AccountState, FixedNamespace, PoolState};
+
+    use super::*;
+
+    fn entity_key(byte: u8) -> EntityKey {
+        EntityKey::from(&[byte; ENTITY_KEY_LEN])
+    }
+
+    fn txo(byte: u8, index: u32) -> TxoRef {
+        TxoRef([byte; KEY_SIZE].into(), index)
+    }
+
+    #[test]
+    fn an_entity_record_round_trips() {
+        let original =
+            entity(AccountState::NS, &entity_key(0x5a), &vec![0x82, 0x01, 0x02]).unwrap();
+
+        let encoded = encode(&original).unwrap();
+        let decoded = decode(encoded.as_bytes()).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(
+            as_entity(&decoded).unwrap(),
+            (AccountState::NS, entity_key(0x5a))
+        );
+    }
+
+    #[test]
+    fn a_utxo_record_round_trips() {
+        let ref_ = txo(0x30, 7);
+        let value = EraCbor(6, vec![0xa0, 0x01]);
+
+        let original = utxo(&ref_, &value).unwrap();
+
+        assert_eq!(original.ns, UTXOS);
+        assert_eq!(original.key.len(), UTXO_KEY_LEN);
+
+        let encoded = encode(&original).unwrap();
+        let decoded = decode(encoded.as_bytes()).unwrap();
+
+        assert_eq!(decoded, original);
+        assert_eq!(as_utxo(&decoded).unwrap(), (ref_, value));
+    }
+
+    /// The composed field, checked against the encoding profile it has to obey
+    /// rather than against itself.
+    #[test]
+    fn the_utxo_value_is_canonical_by_construction() {
+        for era in [0u16, 23, 24, 255, 256, u16::MAX] {
+            let value = EraCbor(era, vec![0xff; 3]);
+            let composed = encode_utxo_value(&value).unwrap();
+
+            // `CanonicalCbor::new` is the validator; re-running it over the
+            // bytes proves the composition did not merely happen to pass once.
+            CanonicalCbor::new(composed.as_bytes().to_vec()).unwrap();
+            assert_eq!(decode_utxo_value(composed.as_bytes()).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn the_two_readers_refuse_each_others_records() {
+        let entity_record = entity(PoolState::NS, &entity_key(1), &Vec::new()).unwrap();
+        let utxo_record = utxo(&txo(1, 0), &EraCbor(1, Vec::new())).unwrap();
+
+        assert!(as_utxo(&entity_record).is_err());
+        assert!(as_entity(&utxo_record).is_err());
+        assert!(entity(UTXOS, &entity_key(1), &Vec::new()).is_err());
+    }
+
+    #[test]
+    fn a_wrong_width_key_is_refused() {
+        for (ns, width) in [
+            (AccountState::NS, UTXO_KEY_LEN),
+            (AccountState::NS, 0),
+            (UTXOS, ENTITY_KEY_LEN),
+            (UTXOS, UTXO_KEY_LEN + 1),
+        ] {
+            let wire = frame::encode(|e| {
+                e.array(3)?.str(ns)?.bytes(&vec![0u8; width])?.bytes(&[])?;
+                Ok(())
+            })
+            .unwrap();
+
+            let err = decode(wire.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, Error::MalformedRecord { .. }),
+                "{ns}/{width}: {err:?}"
+            );
+        }
+    }
+
+    /// Hash-derived keys spread evenly over the sixteen shards, which is the
+    /// premise the shard split rests on.
+    #[test]
+    fn sharding_is_the_first_nibble_and_covers_every_shard() {
+        assert_eq!(shard_of(&[0x00]), 0);
+        assert_eq!(shard_of(&[0x0f]), 0);
+        assert_eq!(shard_of(&[0x10]), 1);
+        assert_eq!(shard_of(&[0xff]), 15);
+
+        let mut counts = [0usize; STATE_SHARDS as usize];
+        for byte in 0u8..=255 {
+            counts[shard_of(&[byte]) as usize] += 1;
+        }
+
+        assert!(counts.iter().all(|c| *c == 16), "{counts:?}");
+    }
+
+    /// The two key widths shard the same way, so one rule covers the whole
+    /// layer kind.
+    #[test]
+    fn both_key_widths_shard_identically() {
+        let entity_record = entity(PoolState::NS, &entity_key(0xc3), &Vec::new()).unwrap();
+        let utxo_record = utxo(&txo(0xc3, 0), &EraCbor(1, Vec::new())).unwrap();
+
+        assert_eq!(entity_record.shard(), 12);
+        assert_eq!(utxo_record.shard(), 12);
+    }
+
+    #[test]
+    fn ordering_is_namespace_then_key() {
+        let mut order = OrderCheck::default();
+
+        for record in [
+            entity(AccountState::NS, &entity_key(0x00), &Vec::new()).unwrap(),
+            entity(AccountState::NS, &entity_key(0x01), &Vec::new()).unwrap(),
+            entity(PoolState::NS, &entity_key(0x00), &Vec::new()).unwrap(),
+            utxo(&txo(0x00, 0), &EraCbor(1, Vec::new())).unwrap(),
+        ] {
+            order.check(&record).unwrap();
+        }
+
+        let err = order
+            .check(&entity(AccountState::NS, &entity_key(0x09), &Vec::new()).unwrap())
+            .unwrap_err();
+        assert!(matches!(err, Error::OutOfOrder { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_record_from_another_shard_is_refused() {
+        let mut order = OrderCheck::for_shard(0);
+
+        order
+            .check(&entity(AccountState::NS, &entity_key(0x0a), &Vec::new()).unwrap())
+            .unwrap();
+
+        let err = order
+            .check(&entity(AccountState::NS, &entity_key(0xa0), &Vec::new()).unwrap())
+            .unwrap_err();
+        assert!(matches!(err, Error::MalformedRecord { .. }), "{err:?}");
+    }
+}

@@ -1,0 +1,340 @@
+//! One small, hand-pinned Dolos stele, shared by the roundtrip and golden
+//! tests.
+//!
+//! Every value here is a literal. Nothing is drawn from `dolos-testing`'s
+//! seeder, and nothing is derived from a store: a golden digest whose input can
+//! move when an unrelated fixture is edited is not a golden, and the drift it
+//! was there to catch would be re-pinned as a matter of routine.
+//!
+//! The records are synthetic — synthetic block bodies, synthetic hashes,
+//! synthetic key hashes. That is deliberate and sufficient: this crate's job is
+//! the *shape* of a record, and no part of it interprets a block, a hash or a
+//! stored key. What the fixture does have to be is *complete*, because the
+//! golden digests are what freeze the vocabulary: every archive dimension,
+//! every exact-record kind, every state namespace and every log namespace
+//! appears at least once.
+
+// Each integration test binary compiles this module in full, so the parts one
+// binary does not reach look dead to it. They are not.
+#![allow(dead_code)]
+
+use dolos_cardano::{
+    indexes::archive_dimensions,
+    model::{
+        EpochState, FixedNamespace, LeaderRewardLog, MemberRewardLog, PoolDepositRefundLog,
+        StakeLog,
+    },
+};
+use dolos_core::{
+    key_hash, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
+    TagRecord, TxoRef, VERBATIM_KEY_DIMENSION,
+};
+use dolos_snapshot::{
+    layers::{
+        blocks::BlockRecord,
+        digests::ImmutableDigests,
+        logs::{LogRecord, LOG_KEY_LEN},
+        state::{self, StateRecord, ENTITY_KEY_LEN},
+    },
+    DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
+    INDEXES, LOGS, NAMESPACES, STATE, UTXOS,
+};
+use stelae::{
+    dir::{BlobIndex, SteleDir, WrittenLayer},
+    frame::{CanonicalCbor, LayerHeader, Limits},
+    inscription::LayerDescriptor,
+    Digest, Profile,
+};
+
+pub const NETWORK_MAGIC: u64 = 764824073;
+pub const NETWORK_NAME: &str = "mainnet";
+
+/// The stele's sequence, which for this profile is the epoch.
+pub const EPOCH: u64 = 7;
+pub const START_SLOT: u64 = 100;
+pub const END_SLOT: u64 = 101;
+pub const LAST_IMMUTABLE: u64 = 3;
+
+/// The boundary block this stele stands at.
+pub const POINT_HASH: [u8; 32] = [0x0b; 32];
+
+/// A transaction-metadata label, carried verbatim rather than hashed.
+pub const METADATA_LABEL: u64 = 674;
+
+/// The two state shards the fixture populates. Sixteen exist; a fixture that
+/// wrote all of them would say nothing more than two do about the split.
+pub const SHARDS: [u8; 2] = [0, 1];
+
+pub fn network() -> Network {
+    Network::new(NETWORK_MAGIC, NETWORK_NAME)
+}
+
+pub fn epoch_scope() -> EpochScope {
+    EpochScope {
+        network_magic: NETWORK_MAGIC,
+        epoch: EPOCH,
+        start_slot: START_SLOT,
+        end_slot: END_SLOT,
+    }
+}
+
+pub fn state_scope(shard: u8) -> StateScope {
+    StateScope {
+        network_magic: NETWORK_MAGIC,
+        epoch: EPOCH,
+        shard,
+    }
+}
+
+pub fn digests_scope() -> DigestsScope {
+    DigestsScope {
+        network_magic: NETWORK_MAGIC,
+        epoch: EPOCH,
+        last_immutable: LAST_IMMUTABLE,
+    }
+}
+
+/// Three blocks, two of which share a slot — the Byron end-of-epoch boundary
+/// case, whose order no comparator recovers.
+pub fn blocks() -> Vec<BlockRecord> {
+    vec![
+        BlockRecord::new(
+            START_SLOT,
+            BlockHash::new([0x41; 32]),
+            vec![0x82, 0x00, 0x00],
+        ),
+        BlockRecord::new(
+            START_SLOT,
+            BlockHash::new([0x42; 32]),
+            vec![0x82, 0x00, 0x01],
+        ),
+        BlockRecord::new(END_SLOT, BlockHash::new([0x43; 32]), vec![0x82, 0x01, 0x00]),
+    ]
+}
+
+/// One tag record per archive dimension, then one exact record per kind.
+///
+/// The tag run is sorted by dimension name, which is not the order the registry
+/// declares them in — the layer's order is the contract, the registry's is
+/// documentation.
+pub fn indexes() -> Vec<IndexRecord> {
+    let mut dimensions = archive_dimensions::ALL;
+    dimensions.sort_unstable();
+
+    let mut records: Vec<IndexRecord> = dimensions
+        .into_iter()
+        .enumerate()
+        .map(|(i, dimension)| {
+            let stored = if dimension == VERBATIM_KEY_DIMENSION {
+                // The exception, and the only place the fixture derives a stored
+                // key rather than pinning one: the point of this record is that
+                // the label survives untouched.
+                key_hash(dimension, &METADATA_LABEL.to_be_bytes()).unwrap()
+            } else {
+                [0x10 + i as u8; 8]
+            };
+
+            TagRecord::new(dimension, stored, START_SLOT).into()
+        })
+        .collect();
+
+    records.extend([
+        IndexRecord::Exact(
+            ExactRecord::new(ExactKind::BlockHash, &[0x21; 32], START_SLOT).unwrap(),
+        ),
+        IndexRecord::Exact(
+            ExactRecord::new(ExactKind::BlockNumber, &4242u64.to_be_bytes(), END_SLOT).unwrap(),
+        ),
+        IndexRecord::Exact(ExactRecord::new(ExactKind::TxHash, &[0x23; 32], END_SLOT).unwrap()),
+    ]);
+
+    records
+}
+
+/// One log per namespace the ledger actually writes logs under.
+pub fn logs() -> Vec<LogRecord> {
+    [
+        EpochState::NS,
+        LeaderRewardLog::NS,
+        MemberRewardLog::NS,
+        PoolDepositRefundLog::NS,
+        StakeLog::NS,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, ns)| LogRecord::new(ns, log_key(START_SLOT, 0x30 + i as u8), vec![0x81, i as u8]))
+    .collect()
+}
+
+/// One record per state namespace, in the requested shard.
+///
+/// Every namespace appears in every shard, which no real stele would do — real
+/// keys are hash-derived and land where they land. It is what makes the golden
+/// freeze all fifteen namespace strings twice over.
+pub fn state(shard: u8) -> Vec<StateRecord> {
+    NAMESPACES
+        .into_iter()
+        .enumerate()
+        .map(|(i, ns)| {
+            let byte = (shard << 4) | (i as u8 & 0x0f);
+
+            if ns == UTXOS {
+                state::utxo(
+                    &TxoRef([byte; ENTITY_KEY_LEN].into(), 3),
+                    &EraCbor(6, vec![0xa0, byte]),
+                )
+                .unwrap()
+            } else {
+                state::entity(
+                    ns,
+                    &EntityKey::from(&[byte; ENTITY_KEY_LEN]),
+                    &vec![byte, 0xff],
+                )
+                .unwrap()
+            }
+        })
+        .collect()
+}
+
+pub fn digests() -> Vec<ImmutableDigests> {
+    (0..2u64)
+        .map(|n| ImmutableDigests {
+            immutable_number: n,
+            chunk: Digest::from_bytes([0x50 | n as u8; 32]),
+            primary: Digest::from_bytes([0x60 | n as u8; 32]),
+            secondary: Digest::from_bytes([0x70 | n as u8; 32]),
+        })
+        .collect()
+}
+
+pub fn log_key(slot: u64, entity: u8) -> LogKey {
+    let mut raw = [0u8; LOG_KEY_LEN];
+    raw[..8].copy_from_slice(&slot.to_be_bytes());
+    raw[8..].fill(entity);
+
+    LogKey::from(raw.as_slice())
+}
+
+pub fn encode_all<T>(
+    records: &[T],
+    encode: impl Fn(&T) -> Result<CanonicalCbor, Error>,
+) -> Vec<CanonicalCbor> {
+    records.iter().map(|r| encode(r).unwrap()).collect()
+}
+
+/// The uncompressed byte string of a layer: its header record, then its
+/// content.
+///
+/// This is exactly what a `diffId` covers, so a golden computed from it is the
+/// same number `SteleDir::write_layer` puts in a descriptor —
+/// `descriptors_match_the_per_kind_goldens` holds the two against each other.
+pub fn sequence(kind: &str, scope: &dyn Scope, records: &[CanonicalCbor]) -> Vec<u8> {
+    let header = LayerHeader::new(DolosProfile.name(), kind, scope.header().unwrap())
+        .encode()
+        .unwrap();
+
+    let mut bytes = header.into_bytes();
+
+    for record in records {
+        bytes.extend_from_slice(record.as_bytes());
+    }
+
+    bytes
+}
+
+pub fn write_layer(
+    stele: &SteleDir,
+    kind: &str,
+    scope: &dyn Scope,
+    records: &[CanonicalCbor],
+) -> WrittenLayer {
+    stele
+        .write_layer(
+            &DolosProfile,
+            &scope.layer_spec(kind).unwrap(),
+            dolos_snapshot::COMPRESSION_LEVEL,
+            records,
+        )
+        .unwrap()
+}
+
+/// The fixture's five kinds, encoded, in inscription order.
+///
+/// `state` appears twice — one layer per populated shard — which is the normal
+/// case for this profile rather than an edge one.
+pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
+    use dolos_snapshot::layers::{
+        blocks, digests as digests_layer, indexes as indexes_layer, logs,
+    };
+
+    let mut layers: Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> = vec![
+        (
+            BLOCKS,
+            Box::new(epoch_scope()),
+            encode_all(&self::blocks(), blocks::encode),
+        ),
+        (
+            INDEXES,
+            Box::new(epoch_scope()),
+            encode_all(&self::indexes(), indexes_layer::encode),
+        ),
+        (
+            LOGS,
+            Box::new(epoch_scope()),
+            encode_all(&self::logs(), logs::encode),
+        ),
+    ];
+
+    for shard in SHARDS {
+        layers.push((
+            STATE,
+            Box::new(state_scope(shard)),
+            encode_all(&state(shard), state::encode),
+        ));
+    }
+
+    layers.push((
+        DIGESTS,
+        Box::new(digests_scope()),
+        encode_all(&self::digests(), digests_layer::encode),
+    ));
+
+    layers
+}
+
+/// Read a layer both ways and insist the two paths agree.
+///
+/// The same discipline `crates/stelae/tests/toy_profile.rs` applies to the toy
+/// profile: a layer that reads back through one path and not the other is a
+/// determinism bug in the format, and this profile is the first real one to put
+/// that to the test.
+pub fn read_both_ways(
+    stele: &SteleDir,
+    index: &BlobIndex,
+    descriptor: &LayerDescriptor,
+) -> Vec<Vec<u8>> {
+    let buffered = stele.read_layer(index, &DolosProfile, descriptor).unwrap();
+
+    // A window far below one record, so the refill path is exercised rather
+    // than swallowing the layer in a single read.
+    let limits = Limits {
+        window: 8,
+        ..Limits::default()
+    };
+
+    let mut reader = stele
+        .stream_layer(index, &DolosProfile, descriptor, limits)
+        .unwrap();
+
+    let mut streamed = Vec::new();
+    while let Some(record) = reader.next_record() {
+        streamed.push(record.unwrap().to_vec());
+    }
+
+    assert_eq!(&reader.finish().unwrap(), buffered.digests(), "digests");
+
+    let held: Vec<Vec<u8>> = buffered.records().map(|r| r.unwrap().to_vec()).collect();
+    assert_eq!(held, streamed, "records, layer {:?}", descriptor.kind);
+
+    streamed
+}
