@@ -348,6 +348,10 @@ where
             get(routes::accounts::by_stake_withdrawals::<D>),
         )
         .route(
+            "/accounts/{stake_address}/transactions",
+            get(routes::accounts::by_stake_transactions::<D>),
+        )
+        .route(
             "/addresses/{address}",
             get(routes::addresses::by_address::<D>),
         )
