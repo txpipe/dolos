@@ -73,6 +73,13 @@ use stelae::{
     Digest, SteleReader as _,
 };
 
+/// How a repository is named, re-exported so the binary need not name the
+/// protocol crate to hold an operator's `--repo` to the distribution grammar.
+///
+/// The profile is the only thing in `dolos` that reaches into `stelae`, here as
+/// everywhere else.
+pub use stelae::oci::Reference;
+
 use crate::{
     export::{self, Plan, Predecessor},
     layers::digests,
@@ -191,13 +198,28 @@ where
 }
 
 /// What [`publish`] would do, without writing anything.
-pub fn preview(registry: &Registry, plan: &Plan, rebuild: bool) -> Result<Preview, Error> {
+///
+/// Takes `digest_records` for the same reason [`publish`] does, and not because
+/// anything supplies them yet: a `digests` layer is one more layer, and a dry
+/// run that counted the layers of a *different* publish than the one that
+/// follows it is the one number a publisher trusts, wrong. The two entry points
+/// read the same input so they cannot drift when Phase 4 gives the records a
+/// source.
+pub fn preview(
+    registry: &Registry,
+    plan: &Plan,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+    rebuild: bool,
+) -> Result<Preview, Error> {
     let latest = registry.latest(&DolosProfile)?;
     let previous = Chained::new(latest.as_ref(), registry, plan, rebuild)?;
 
-    // Every epoch selected contributes one layer per epoch kind, and the state
-    // tip contributes its sixteen shards however the epochs were restricted.
-    let total = plan.epochs.len() * EPOCH_KINDS.len() + STATE_SHARDS as usize;
+    // Every epoch selected contributes one layer per epoch kind, the state tip
+    // contributes its sixteen shards however the epochs were restricted, and
+    // the digests layer is there exactly when its records are.
+    let total = plan.epochs.len() * EPOCH_KINDS.len()
+        + STATE_SHARDS as usize
+        + usize::from(digest_records.is_some());
 
     // The same lookup `export` will make, through the same `layer_spec`, so a
     // preview and the publish that follows it cannot disagree about which
@@ -320,10 +342,14 @@ impl Predecessor for Chained<'_> {
 /// equality could not tell one publish's shard from another's. `digests` has no
 /// source in this slice.
 ///
-/// Two layers of one kind claiming one scope with different identities is a
-/// refusal rather than a first-wins: it means the stele being chained to
-/// describes the same window twice and disagrees with itself about what is in
-/// it, and inheriting either answer would publish that disagreement forward.
+/// Two layers of one kind claiming one scope, described differently in any
+/// respect, is a refusal rather than a first-wins: it means the stele being
+/// chained to describes the same window twice and disagrees with itself about
+/// what is in it, and inheriting either answer would publish that disagreement
+/// forward. "In any respect" and not "with different identities", because
+/// `records` and `uncompressed_size` are determined by the bytes a `diff_id`
+/// names — so a disagreement about them under one identity is the same
+/// contradiction wearing a quieter shape.
 fn inheritable_layers(
     previous: &Inscription,
 ) -> Result<BTreeMap<(String, String), LayerDescriptor>, Error> {
@@ -339,12 +365,32 @@ fn inheritable_layers(
         if let Some(existing) = inheritable.get(&key) {
             let existing: &LayerDescriptor = existing;
 
-            if existing.diff_id != layer.diff_id {
+            // The whole descriptor, not the identity alone. `records` and
+            // `uncompressed_size` are functions of the bytes `diff_id` names,
+            // so two descriptors sharing an identity and disagreeing about
+            // either are a stele contradicting itself just as surely as two
+            // identities would be — and `adopt_layer` carries
+            // `uncompressed_size` forward into a stele that never reads the
+            // bytes that would settle it.
+            if existing != layer {
+                // Spelled out rather than named by identity alone: the two can
+                // now differ while sharing a `diff_id`, and a message printing
+                // one digest twice would describe nothing.
+                let describe = |layer: &LayerDescriptor| {
+                    format!(
+                        "{} ({} records, {} bytes)",
+                        layer.diff_id, layer.records, layer.uncompressed_size,
+                    )
+                };
+
                 return Err(Error::malformed_inscription(
                     format!("layers[{}]", layer.kind),
                     format!(
                         "sequence {} describes {} twice at one scope, as {} and as {}",
-                        previous.sequence, layer.kind, existing.diff_id, layer.diff_id,
+                        previous.sequence,
+                        layer.kind,
+                        describe(existing),
+                        describe(layer),
                     ),
                 ));
             }
@@ -444,10 +490,12 @@ fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
+    use dolos_core::{BlockHash, ChainPoint};
     use serde_json::json;
     use stelae::Profile as _;
 
     use super::*;
+    use crate::Network;
 
     fn inscription(sequence: u64, history: Vec<HistoryEntry>) -> Inscription {
         let mut inscription = Inscription::new(
@@ -603,6 +651,90 @@ mod tests {
         let err = inheritable_layers(&previous).unwrap_err();
 
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+    }
+
+    /// The quieter half of the same contradiction: one identity, two
+    /// descriptions of what it contains.
+    ///
+    /// `records` and `uncompressed_size` are determined by the bytes a
+    /// `diff_id` names, so a stele describing them two ways is describing
+    /// bytes that cannot exist. It matters because `adopt_layer` carries
+    /// `uncompressed_size` into the new stele without reading the blob, so
+    /// whichever of the two came first would be published forward as fact.
+    #[test]
+    fn one_identity_described_two_ways_is_refused() {
+        let mut previous = inscription(3, vec![]);
+        let scope = json!({"epoch": 2, "startSlot": 200, "endSlot": 299});
+
+        let mut second = layer(crate::BLOCKS, scope.clone(), 1);
+        second.records = 2;
+        second.uncompressed_size = 4096;
+
+        previous.layers = vec![layer(crate::BLOCKS, scope, 1), second];
+
+        let err = inheritable_layers(&previous).unwrap_err();
+
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+
+        // Both descriptions are in the message: naming the shared identity
+        // twice would describe nothing.
+        let message = err.to_string();
+        assert!(message.contains("1 records"), "{message}");
+        assert!(message.contains("2 records"), "{message}");
+    }
+
+    /// The only thing standing between a publisher and a history chained onto
+    /// another chain's stele.
+    ///
+    /// A publish reads its own magic from genesis and the predecessor's from
+    /// the predecessor. If they were allowed to differ, the new inscription
+    /// would attest a chain of steles from a network it has never seen — and
+    /// nothing downstream re-checks it, because `history` entries carry a
+    /// sequence and a digest and no position at all.
+    #[test]
+    fn a_predecessor_from_another_network_is_refused() {
+        let preview = Network::for_magic(crate::PREVIEW_MAGIC);
+        let preprod = Network::for_magic(crate::PREPROD_MAGIC);
+
+        let plan = plan_at(preview.clone());
+
+        // Built by `crate::position`, not by the `inscription` helper's shape:
+        // `same_network` reads it back through `crate::read_position`, which
+        // the helper's bare `{"epoch": n}` would not survive.
+        let stele = |network: &Network| {
+            let mut previous = inscription(3, vec![]);
+
+            previous.position = crate::position(
+                network,
+                &ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
+                2,
+            )
+            .unwrap();
+
+            previous
+        };
+
+        same_network(&stele(&preview), &plan).unwrap();
+
+        let err = same_network(&stele(&preprod), &plan).unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                Error::NetworkMismatch { expected, found }
+                    if expected == preview.magic() && found == preprod.magic()
+            ),
+            "{err:?}"
+        );
+    }
+
+    fn plan_at(network: Network) -> Plan {
+        Plan {
+            network,
+            cursor: ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
+            sequence: 3,
+            epochs: vec![],
+        }
     }
 
     fn layer(kind: &str, scope: serde_json::Value, identity: u8) -> LayerDescriptor {

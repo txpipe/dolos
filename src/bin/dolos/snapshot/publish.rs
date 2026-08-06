@@ -56,6 +56,16 @@ pub struct Args {
 /// particular: the tag a stele publishes under is the profile's — `epoch-{n}`
 /// and `latest` — so a URL naming one is a publisher expecting something this
 /// command will not do.
+///
+/// The repository *name* is held to the distribution grammar — lowercase
+/// components, `.`/`_`/`-` separators, no empty segments — by handing it to the
+/// parser `oci-client` already ships rather than by a second copy of that
+/// grammar living here. It is a validator only: its own splitter applies
+/// registry defaults (a bare name becomes `docker.io/...`) that would quietly
+/// rewrite what the operator typed, so the split above stays ours. Without the
+/// check, `oci://ghcr.io//txpipe/dolos` or an uppercase component is accepted
+/// here and refused by the registry, hours later, in its words rather than
+/// ours.
 #[derive(Debug, Clone)]
 struct RepoRef {
     host: String,
@@ -91,6 +101,16 @@ impl std::str::FromStr for RepoRef {
                  profile's",
             ));
         }
+
+        // Checked here, discarded here: what is wanted is the grammar's verdict
+        // on the name, not the reference it would build out of it.
+        //
+        // Gated because the parser arrives with the registry client. A build
+        // without one refuses `--repo` outright, so the check it cannot make is
+        // one nothing would reach.
+        #[cfg(feature = "registry")]
+        rest.parse::<dolos_snapshot::registry::Reference>()
+            .map_err(|_| bad("its repository path is not a valid OCI name"))?;
 
         Ok(Self {
             host: host.to_owned(),
@@ -210,7 +230,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     match (&args.repo, &args.output_dir) {
         (Some(repo), _) => to_repository(args, repo, &plan, &stores),
         (None, Some(dir)) => to_directory(args, dir, &plan, &stores),
-        // clap's `required_unless_present` already refuses this.
+        // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
     }
 }
@@ -269,7 +289,10 @@ fn to_repository(
         .context("opening the repository")?;
 
     if args.dry_run {
-        let preview = registry::preview(&registry, plan, args.rebuild)
+        // `None` here and `None` at the `publish` below are one decision: a dry
+        // run describes the publish that follows it, so the two calls are
+        // handed the same digest records or the number is about something else.
+        let preview = registry::preview(&registry, plan, None, args.rebuild)
             .into_diagnostic()
             .context("planning the publish")?;
 
@@ -406,6 +429,45 @@ mod tests {
             "",
         ] {
             assert!(raw.parse::<RepoRef>().is_err(), "{raw:?}");
+        }
+    }
+
+    /// Names the distribution grammar refuses, which a split on `/` alone
+    /// cannot see.
+    ///
+    /// Each of these reaches the registry as part of the request path, so
+    /// accepting them here buys the operator an opaque error from someone
+    /// else's server at the end of a publish rather than a sentence from this
+    /// command at the start of one.
+    #[cfg(feature = "registry")]
+    #[test]
+    fn a_repository_path_outside_the_grammar_is_refused() {
+        for raw in [
+            "oci://ghcr.io//txpipe/dolos",      // an empty component
+            "oci://ghcr.io/txpipe//dolos",      // an empty component, inside
+            "oci://ghcr.io/TxPipe/dolos",       // uppercase; names are lowercase
+            "oci://ghcr.io/txpipe/dolos?x=1",   // a query
+            "oci://ghcr.io/txpipe/dolos#frag",  // a fragment
+            "oci://ghcr.io/txpipe/dolos snaps", // whitespace
+            "oci://ghcr.io/txpipe/-dolos",      // a component opening on a separator
+        ] {
+            assert!(raw.parse::<RepoRef>().is_err(), "{raw:?}");
+        }
+    }
+
+    /// And the shapes it allows, so the check above is not quietly refusing
+    /// everything.
+    #[cfg(feature = "registry")]
+    #[test]
+    fn ordinary_repository_paths_still_parse() {
+        for raw in [
+            "oci://ghcr.io/txpipe/dolos-snapshots/mainnet",
+            "oci://ghcr.io/txpipe/dolos_snapshots",
+            "oci://ghcr.io/txpipe/dolos.snapshots",
+            "oci://localhost:5000/dolos/mainnet",
+            "oci://127.0.0.1:5000/dolos",
+        ] {
+            assert!(raw.parse::<RepoRef>().is_ok(), "{raw:?}");
         }
     }
 }

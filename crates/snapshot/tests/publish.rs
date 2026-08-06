@@ -129,15 +129,27 @@ impl Fixture {
     /// A connect is *not* the readiness signal, however much it looks like one:
     /// Docker's port forwarder accepts on the published port from the moment
     /// the container exists and only then tries to reach the process inside.
+    ///
+    /// Every socket operation is bounded, because that forwarder is exactly the
+    /// thing that accepts and then says nothing. Without the timeouts the three
+    /// hundred attempts below are not the thirty seconds they read as: one
+    /// silent connection blocks the loop indefinitely, and a test meant to fail
+    /// with a message hangs instead.
     fn wait_until_ready(&self) {
         use std::io::{Read, Write};
 
         let address = format!("127.0.0.1:{}", self.port);
+        let socket_address: std::net::SocketAddr =
+            address.parse().expect("a loopback address and a port");
+        let patience = std::time::Duration::from_millis(500);
 
         for _ in 0..300 {
-            let answered = std::net::TcpStream::connect(&address)
+            let answered = std::net::TcpStream::connect_timeout(&socket_address, patience)
                 .ok()
                 .and_then(|mut socket| {
+                    socket.set_write_timeout(Some(patience)).ok()?;
+                    socket.set_read_timeout(Some(patience)).ok()?;
+
                     socket
                         .write_all(
                             format!("GET /v2/ HTTP/1.0\r\nHost: {address}\r\n\r\n").as_bytes(),
@@ -341,7 +353,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     let repository = fixture.repository("dolos/dry-run");
 
     // Against an empty repository: nothing to follow, nothing to inherit.
-    let empty = registry::preview(&repository, &node.first, false).unwrap();
+    let empty = registry::preview(&repository, &node.first, None, false).unwrap();
 
     assert_eq!(empty.predecessor, None);
     assert_eq!(empty.history, 0);
@@ -354,7 +366,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     assert_eq!(first.layers_reused, empty.layers_reused);
 
     // And against the stele that is now there.
-    let next = registry::preview(&repository, &node.second, false).unwrap();
+    let next = registry::preview(&repository, &node.second, None, false).unwrap();
 
     assert_eq!(next.predecessor, Some((1, first.identity)));
     assert_eq!(next.history, 1);
@@ -363,7 +375,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     // here, while sequence 2 is still unpublished: a preview reads the chain
     // through the same rule a publish does, so asking after the fact would be
     // refused as a republish.
-    let rebuilding = registry::preview(&repository, &node.second, true).unwrap();
+    let rebuilding = registry::preview(&repository, &node.second, None, true).unwrap();
 
     assert_eq!(rebuilding.layers_reused, 0);
     assert_eq!(rebuilding.layers_built, PER_PUBLISH + 3);
@@ -385,7 +397,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
 
     // A preview reaches the chain refusal too, which is what makes `--dry-run`
     // the cheap way to find out that a publisher has skipped an epoch.
-    let refused = registry::preview(&repository, &node.second, false).unwrap_err();
+    let refused = registry::preview(&repository, &node.second, None, false).unwrap_err();
 
     assert!(matches!(refused, Error::HistoryBreak { .. }), "{refused:?}");
 }
