@@ -1,0 +1,429 @@
+{
+  "network": "preprod",
+  "generated_at": "2026-02-09T16:51:45.580710+00:00",
+  "dbsync_source": "cardano-preprod.dbsync-v3.demeter.run:5432",
+  "addresses": [
+    {
+      "address": "addr_test1wqt7v9crzydwpwx7f4sjp7w7wsy7rr3ahkldels6tsc707q3xhdsk",
+      "address_type": "shelley_payment_only",
+      "tx_count": 315980
+    },
+    {
+      "address": "addr_test1wzn5ee2qaqvly3hx7e0nk3vhm240n5muq3plhjcnvx9ppjgf62u6a",
+      "address_type": "shelley_payment_only",
+      "tx_count": 272746
+    },
+    {
+      "address": "addr_test1wqlcn3pks3xdptxjw9pqrqtcx6ev694sstsruw3phd57ttg0lh0zq",
+      "address_type": "shelley_payment_only",
+      "tx_count": 260935
+    },
+    {
+      "address": "addr_test1wr64gtafm8rpkndue4ck2nx95u4flhwf643l2qmg9emjajg2ww0nj",
+      "address_type": "shelley_payment_only",
+      "tx_count": 243461
+    },
+    {
+      "address": "addr_test1qphe4ktmglgyhwqh42ltf8y2nxxgqvdv6c8tcgp7d637xqwsy7cw3eq0wqtup2fyh54q3e0r0ulvjhd6aewm2l6y7k9q7952rc",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 176505
+    },
+    {
+      "address": "addr_test1wp8rka0tdzpfe20x8d2p7dj97790arg3nye20gjjs9c7wjgdefdv0",
+      "address_type": "shelley_payment_only",
+      "tx_count": 156143
+    },
+    {
+      "address": "addr_test1wzc86g4ym366hkaphryqqvaptwznqkmk2gdqz9930u534pcx58ahw",
+      "address_type": "shelley_payment_only",
+      "tx_count": 155785
+    },
+    {
+      "address": "addr_test1wqd2qdzhh3x280q6erdksyku6k3eknrqsmrpkjnn6hsvjegk9gghn",
+      "address_type": "shelley_payment_only",
+      "tx_count": 145287
+    },
+    {
+      "address": "addr_test1qqzk45kfse4ppwywm0n0n39j3r9y66lchznx9t4p5ume6uqcutrjdtuyrf7g4nr45636k5fnzkv4rz8kcqwect9dx78qqgwtpv",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 140672
+    },
+    {
+      "address": "addr_test1vrghqljgzecagulwt2x4vx42cjslf6xfxl8xrew3rlqxz8crj5as6",
+      "address_type": "shelley_payment_only",
+      "tx_count": 114319
+    },
+    {
+      "address": "addr_test1vqe33tv0p36r5e6gx8tfunrpcrvqtmdxjkc0yzj07rk7h3gp7wqvu",
+      "address_type": "shelley_payment_only",
+      "tx_count": 113283
+    },
+    {
+      "address": "addr_test1qr273sxu9mg679ya3c406pwe2nl0scy6dwzcj7n7ask5jhelu5pu3xlq09au0h20q7ykx5nc027sltg0thyvxstfmytq2syuef",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 112160
+    },
+    {
+      "address": "addr_test1vpwzy2m5v2svadxjqkj62z83xatq4hugvv9eklwv2wcc8hg3ecszk",
+      "address_type": "shelley_payment_only",
+      "tx_count": 111784
+    },
+    {
+      "address": "addr_test1qqtu7g3e7pqwt9f4dqlkme9qj80cejr5v0jwugthywvgjyyxn4dgcgtv9swlj6snz3cdx59ru4u7mhrvg5rl50wunlls5z3e57",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 109572
+    },
+    {
+      "address": "addr_test1wq5yehcpw4e3r32rltrww40e6ezdckr9v9l0ehptsxeynlg630pts",
+      "address_type": "shelley_payment_only",
+      "tx_count": 107719
+    },
+    {
+      "address": "addr_test1vqz5nu55v72gqs6ev4rkxurqaaut7l9747akt2kpezgg9gcjw8kk6",
+      "address_type": "shelley_payment_only",
+      "tx_count": 105388
+    },
+    {
+      "address": "addr_test1qrkzc4slyjag0aj73sahznxjarqqwdchjzrp8h02097vzuxv9jcm6htzrttl7pdtfkhtvnxx4y4gz0rxcq7fkdde2vmsrlzzfk",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 102027
+    },
+    {
+      "address": "addr_test1wpg6eael9tk4jzrnugcn000u9ej65wwm0c86uxcsugud89qdjvl6t",
+      "address_type": "shelley_payment_only",
+      "tx_count": 100069
+    },
+    {
+      "address": "addr_test1wppg9l6relcpls4u667twqyggkrpfrs5cdge9hhl9cv2upchtch0h",
+      "address_type": "shelley_payment_only",
+      "tx_count": 98875
+    },
+    {
+      "address": "addr_test1vzpwq95z3xyum8vqndgdd9mdnmafh3djcxnc6jemlgdmswcve6tkw",
+      "address_type": "shelley_payment_only",
+      "tx_count": 93703
+    },
+    {
+      "address": "addr_test1vr80076l3x5uw6n94nwhgmv7ssgy6muzf47ugn6z0l92rhg2mgtu0",
+      "address_type": "shelley_payment_only",
+      "tx_count": 90135
+    },
+    {
+      "address": "addr_test1vp5afqy4kzj3229luvsmf0626v6ury5lzlngzrw7fl3z3hgkc4qkl",
+      "address_type": "shelley_payment_only",
+      "tx_count": 88905
+    },
+    {
+      "address": "addr_test1wz4h6068hs93n8j5ar88fgzz6sfnw8krng09xx0mmf36m8c7j9yap",
+      "address_type": "shelley_payment_only",
+      "tx_count": 87810
+    },
+    {
+      "address": "addr_test1vp9dz4c70hmr6ntvfyjqeqmjad3e747qaanfxwxq6af09xc2pd49l",
+      "address_type": "shelley_payment_only",
+      "tx_count": 87246
+    },
+    {
+      "address": "addr_test1wr4se9nuh57rnwu350mzy7ltztnhekpptmpdkzwupaj49nqkldg8j",
+      "address_type": "shelley_payment_only",
+      "tx_count": 87112
+    },
+    {
+      "address": "addr_test1wzs7xqd6y04p6nyeqjzt8gpuktw4x82p4ve9fmg5vut22ksl6el0e",
+      "address_type": "shelley_payment_only",
+      "tx_count": 86303
+    },
+    {
+      "address": "addr_test1wpt4ekrdt386wusdgg82ylwm4gv5s9fk996tehj7ch94nesj2v0ku",
+      "address_type": "shelley_payment_only",
+      "tx_count": 85458
+    },
+    {
+      "address": "addr_test1wzk66pus8w3g08v8uzklz8jyu7u255cu329tj200xwfr59s4p9qtd",
+      "address_type": "shelley_payment_only",
+      "tx_count": 85182
+    },
+    {
+      "address": "addr_test1wraqlpezmu3h9n9mxey6y03u2sdd0e8cyx9n2qxscz6staczrlnuj",
+      "address_type": "shelley_payment_only",
+      "tx_count": 82716
+    },
+    {
+      "address": "addr_test1vz7st3e4f5tqzyldkwdr9gkwvpzlfr6364egl7ha4ck7emctt2gnq",
+      "address_type": "shelley_payment_only",
+      "tx_count": 81096
+    },
+    {
+      "address": "addr_test1vptykfqquzgpuvm98zl2966g7zav32nhkrp6jj8s0ng4luq3kcv6w",
+      "address_type": "shelley_payment_only",
+      "tx_count": 80886
+    },
+    {
+      "address": "addr_test1vpv3s36futt85l4zegc77j8up0hm8sl66k5g4aexg5c6upc3hygac",
+      "address_type": "shelley_payment_only",
+      "tx_count": 80719
+    },
+    {
+      "address": "addr_test1wp3e3h5t69ma37zv37ra9ux3nstt0f3clsqakwaz2l8hyxgvedxsr",
+      "address_type": "shelley_payment_only",
+      "tx_count": 80135
+    },
+    {
+      "address": "addr_test1qzmph7666hj5yadja34pdlm8n5un0fhc9p0hv2g9ask7m49n3kr657fpa3q8mzwmjqvl9lqdn9g2pm3ejhlgwpprwy2srzd2xd",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 74756
+    },
+    {
+      "address": "addr_test1vrqrt84m05rg34usvj73rryeezu8kkznuwh4jfzmh9lgf5swrdhze",
+      "address_type": "shelley_payment_only",
+      "tx_count": 73274
+    },
+    {
+      "address": "addr_test1wz7uytdxstxe4nhdtl2gj9rcnlyce99tc707mz6qewxyx9qac0urr",
+      "address_type": "shelley_payment_only",
+      "tx_count": 72229
+    },
+    {
+      "address": "addr_test1vqcdlelfsk5l509lnlq2tfhrkj62rgvycwul3shjqq693usptapx4",
+      "address_type": "shelley_payment_only",
+      "tx_count": 68447
+    },
+    {
+      "address": "addr_test1vpymmxpazg6n5jxnntg4yy3zp67hrhfl39lt9x4cnu7ttrsh9ldm4",
+      "address_type": "shelley_payment_only",
+      "tx_count": 65740
+    },
+    {
+      "address": "addr_test1qqxfprwjvj2mlulhwvwz7kajgtg2p4svk60w07ppdrqt7r7a5ynn9ddhk88t352n3e9myjylu58h97h0sfjdugrjtrwq5r8ga5",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 65425
+    },
+    {
+      "address": "addr_test1vz7et4vz3z9vmft6yqjkhvp7f39tk67lpxj867yxq4qjc5c378xa3",
+      "address_type": "shelley_payment_only",
+      "tx_count": 65004
+    },
+    {
+      "address": "addr_test1vz8fa5ucdfmnmvjzpvrqgdt6vh6an5ndp9p8nyv26szlmjswj2gcv",
+      "address_type": "shelley_payment_only",
+      "tx_count": 64624
+    },
+    {
+      "address": "addr_test1wqkgja788mjxwfrte22hwszqreqfl60p8apkvpz9cmdpkfshcu4rl",
+      "address_type": "shelley_payment_only",
+      "tx_count": 62383
+    },
+    {
+      "address": "addr_test1qrc2ym7pwzkc9dj284paahsgu782dcsz3dgszpvdqf36szjvpmpraw365fayhrtpzpl4nulq6f9hhdkh4cdyh0tgnjxsaxg4ak",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 61079
+    },
+    {
+      "address": "addr_test1vquqz9efsnka08p3uluvmjs8zwjkqg2m58smqpywve7p96sfn22vf",
+      "address_type": "shelley_payment_only",
+      "tx_count": 59651
+    },
+    {
+      "address": "addr_test1wpmuql0ykw6fjzl2z39chf44y6xtj72ag27cfevey5lmuvqmrws5q",
+      "address_type": "shelley_payment_only",
+      "tx_count": 59287
+    },
+    {
+      "address": "addr_test1vrpndfxnauuezwmruc0eyqyd2xg42mknc0zuzx6swe9ureqrthyny",
+      "address_type": "shelley_payment_only",
+      "tx_count": 58950
+    },
+    {
+      "address": "addr_test1zpd7cjjwcqllzps9uaqtdjy7ytxzk6sg2tmvxzwm9am0pq8xq98rskrmxdgx4hmax4uuqrklkzg0n52fk5gug57g7cts8wt3jz",
+      "address_type": "shelley_payment_stake",
+      "tx_count": 58096
+    },
+    {
+      "address": "addr_test1vqnku6rsllyln4fa5s4tlv5ujx0y6kvu4mzzfh5jaht8nfq8584jf",
+      "address_type": "shelley_payment_only",
+      "tx_count": 54319
+    },
+    {
+      "address": "addr_test1vr7g6edlpquqfl02pjr2cz0rdpwdwvlr3hea3qxxe6wa6qggygcsd",
+      "address_type": "shelley_payment_only",
+      "tx_count": 52487
+    },
+    {
+      "address": "addr_test1vry3appc9j737z67gperyapaszy5u74wt0k8eq6nxjzpuusw3kd9e",
+      "address_type": "shelley_payment_only",
+      "tx_count": 50302
+    }
+  ],
+  "stake_addresses": [
+    {
+      "stake_address": "stake_test1uzycrl3729mp93et47x9rhsr6dfwxuyn7zs9g2uu7myzsgc06p9sg",
+      "delegation_count": 1922,
+      "reward_count": 16
+    },
+    {
+      "stake_address": "stake_test1urczp2hz9u2gsdu7lqh7lgvv8mmegqt3hzrt6zm25u63uyc77tleh",
+      "delegation_count": 1708,
+      "reward_count": 20
+    },
+    {
+      "stake_address": "stake_test1uzx2s8rk2a925v4rfq5r3um8avypq70vfsszfequ247ygwg6mzl4u",
+      "delegation_count": 1480,
+      "reward_count": 41
+    },
+    {
+      "stake_address": "stake_test1uq2lfrauuqz5f75xqp8sl3qahspa7l3ef65nzcu3fm75m7glkzhp3",
+      "delegation_count": 1323,
+      "reward_count": 4
+    },
+    {
+      "stake_address": "stake_test1ur6l9f5l9jw44kl2nf6nm5kca3nwqqkccwynnjm0h2cv60ccngdwa",
+      "delegation_count": 1259,
+      "reward_count": 55
+    },
+    {
+      "stake_address": "stake_test1upgxfdn3vdx3fjud2sl8rhvwksm6glhmg7cty2yzsekyyrgm428xq",
+      "delegation_count": 1019,
+      "reward_count": 2
+    },
+    {
+      "stake_address": "stake_test1ur7tpuvdkjfjs6wae9p26rvvzr4msmm4xlpffhlkfl4uvzseeul3m",
+      "delegation_count": 936,
+      "reward_count": 162
+    },
+    {
+      "stake_address": "stake_test17q8snfkq7uhtcaksmwd6mpn85f84su623aagk2peaswvs3shre8vr",
+      "delegation_count": 762,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uqsykuy9pvcd3nm34yvf5tfuqyhf90zya7xpy83rh86l3rqxxmkyx",
+      "delegation_count": 679,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uqp805rr47yly7g858q26y9wwehr3jjps9u4v5797pr732s0754el",
+      "delegation_count": 593,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1upr9pnn0vul7dmqtksksyjg2qc65ewjzej02pfwcshdj9ls5ldzfp",
+      "delegation_count": 591,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uzk9r7mnwsghr8fd72dw8zcxqm804h3dqf9lwzu7yea2p3gl3wk3l",
+      "delegation_count": 591,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1urvp7670m5ec50fz5dekdu5e8pycx62ys2fkuu80m5v823q59qmel",
+      "delegation_count": 570,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uz5c800m3kegt0zuhyyup703agjg72g5tp299p0y2d4q70qdtrr9j",
+      "delegation_count": 565,
+      "reward_count": 107
+    },
+    {
+      "stake_address": "stake_test1ur74mnnv32h23mhwa2f8g5s78xql8af6zg34ukmn6assywgulh4cc",
+      "delegation_count": 540,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uznjv7kaj0rcg07vsxg708w9xv2lu2tfaax29gudsjrfktq9qk99f",
+      "delegation_count": 540,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uzmumppm3p8vpau7se3646t37dqy3cy4uy3k4cm08jefr6qwx93cc",
+      "delegation_count": 540,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1ur9gwqky69yemg3qf2526qp20rltl9ez84cqlgl002t3qsgx7w3p2",
+      "delegation_count": 540,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uzr5ad223jghze3ql7lfms25xlmk8xtd26ycn6twcns7sjcmzx0fu",
+      "delegation_count": 540,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1urtyeyl0qz20tsteu5uqzz0tamczyfzegn3ezn6mej360ycky7cg5",
+      "delegation_count": 534,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test17rs4wd04fx4ls9rpdelrp9qwnh3w6cexlmgj42h5t0tvv8gjrqqjc",
+      "delegation_count": 462,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test17qedgvzpjdv6shzz974fuaedrsa7rdenwzcce4k9wyetfqsqfm4kt",
+      "delegation_count": 388,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1ur7kvvy4ukkuyexuy7pdyhk48lyr2tufk3a6xdcyrdwd5kqmwc45y",
+      "delegation_count": 275,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uqhtnq65j6gxxepjka4swdsvgdx2jcdqulws6m4fkr3uw7ckxp06v",
+      "delegation_count": 251,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1ur8u69tv9k3fnc7q8a3xqw6ugs5t4nq4dmjy02zw3w0zjgg7tewuu",
+      "delegation_count": 240,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test17psajmusqzl46vja59e93msxj0se63quanhxfqjj38hxklglcp8y8",
+      "delegation_count": 218,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test17rhka4r6dyt68ja7k3jkr6y98k5kjdphjntxz2ze3g627tqtlqdeh",
+      "delegation_count": 209,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1uz99t67x3ypduu8xdtcwh527p5s9dyhgjh99qjptvqsgtpg32nec5",
+      "delegation_count": 204,
+      "reward_count": 7
+    },
+    {
+      "stake_address": "stake_test1urkmj2vzdey7ac065rleyrc03fzp7gxxhw32pzgxv8dwuasaqtjuz",
+      "delegation_count": 189,
+      "reward_count": 0
+    },
+    {
+      "stake_address": "stake_test1urt4qclt9nafll5xkjmx6gam2f6fdrezjkz4xzjzxn34llqjlke05",
+      "delegation_count": 188,
+      "reward_count": 174
+    }
+  ],
+  "reference_blocks": {
+    "early": {
+      "height": 440647,
+      "hash": "\\xdd811d450847ac086901e6736a85509c2026f2f66ae0c4335ff85c7f2df7d66e",
+      "epoch": 41,
+      "slot": 16281734
+    },
+    "mid": {
+      "height": 2203237,
+      "hash": "\\x2944dd290435227f96340addb4b616a75035a55fc8119e7752fe4c05642d7889",
+      "epoch": 140,
+      "slot": 59122449
+    },
+    "recent": {
+      "height": 3965826,
+      "hash": "\\xdfc06de3d85ad3c8c7f223b4304a67a50377d1de7eb29b136f3e128f07c89778",
+      "epoch": 243,
+      "slot": 103708196
+    }
+  }
+}
