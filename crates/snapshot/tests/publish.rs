@@ -328,6 +328,68 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
     );
 }
 
+/// A dry run says what the publish then does.
+///
+/// The number a publisher checks before committing hours is worth nothing if it
+/// is computed by a second reading of the same rules, so this holds the two
+/// against each other rather than against a literal.
+#[test]
+#[ignore]
+fn a_dry_run_agrees_with_the_publish_that_follows_it() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/dry-run");
+
+    // Against an empty repository: nothing to follow, nothing to inherit.
+    let empty = registry::preview(&repository, &node.first, false).unwrap();
+
+    assert_eq!(empty.predecessor, None);
+    assert_eq!(empty.history, 0);
+    assert_eq!(empty.layers_reused, 0);
+    assert_eq!(empty.layers_built, PER_PUBLISH);
+
+    let first = node.publish(&repository, &node.first, false);
+
+    assert_eq!(first.layers_built, empty.layers_built);
+    assert_eq!(first.layers_reused, empty.layers_reused);
+
+    // And against the stele that is now there.
+    let next = registry::preview(&repository, &node.second, false).unwrap();
+
+    assert_eq!(next.predecessor, Some((1, first.identity)));
+    assert_eq!(next.history, 1);
+
+    // `--rebuild` is visible in the preview, not only in the publish. Asked
+    // here, while sequence 2 is still unpublished: a preview reads the chain
+    // through the same rule a publish does, so asking after the fact would be
+    // refused as a republish.
+    let rebuilding = registry::preview(&repository, &node.second, true).unwrap();
+
+    assert_eq!(rebuilding.layers_reused, 0);
+    assert_eq!(rebuilding.layers_built, PER_PUBLISH + 3);
+    assert_eq!(rebuilding.history, 1, "a rebuild still chains");
+
+    let second = node.publish(&repository, &node.second, false);
+
+    assert_eq!(
+        (next.layers_built, next.layers_reused),
+        (second.layers_built, second.layers_reused),
+        "the dry run and the publish read the same rules once, not twice"
+    );
+
+    assert_eq!(
+        next.history,
+        second.inscription.history.len(),
+        "and agree about the chain they extend"
+    );
+
+    // A preview reaches the chain refusal too, which is what makes `--dry-run`
+    // the cheap way to find out that a publisher has skipped an epoch.
+    let refused = registry::preview(&repository, &node.second, false).unwrap_err();
+
+    assert!(matches!(refused, Error::HistoryBreak { .. }), "{refused:?}");
+}
+
 /// Done criterion 3. The check that inheritance is *faithful* rather than fast.
 #[test]
 #[ignore]
