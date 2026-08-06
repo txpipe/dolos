@@ -257,9 +257,10 @@ impl<D: Domain> Facade<D> {
         Ok(out)
     }
 
-    /// The log key is `(slot, pool)`, ranging `slot..slot + 1` (both padded with
-    /// a zeroed entity key) covers every pool at this epoch's start slot without
-    /// spilling into the next one. Returns `None` when no logs exist.
+    /// The log key is `(slot, pool)`, ranging `slot..slot + 1` (both padded
+    /// with a zeroed entity key) covers every pool at this epoch's start
+    /// slot without spilling into the next one. Returns `None` when no logs
+    /// exist.
     fn stake_logs_sum_at_epoch(
         &self,
         epoch: Epoch,
