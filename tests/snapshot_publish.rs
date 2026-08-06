@@ -10,7 +10,7 @@
 mod node;
 
 use node::{assert_ok, toml_string, Node};
-use stelae::dir::SteleDir;
+use stelae::{dir::SteleDir, SteleReader};
 
 /// Done criterion 5.
 #[test]

@@ -29,8 +29,13 @@
 //!   its digest, and the `history` attestation invariant.
 //! - [`profile`] — the [`Profile`] trait plus the protocol's media-type,
 //!   profile name and tag naming rules.
-//! - [`dir`] — a minimal on-disk stele, used as a test fixture and as the seam
-//!   that OCI transport slots into later.
+//! - [`transport`] — the seam a stele is written through and read back from:
+//!   the two halves a profile uses, and the `diffId`→blob map both transports
+//!   answer differently.
+//! - [`dir`] — a minimal on-disk stele: the first implementation of that seam,
+//!   and the one a stele is inspectable by hand through.
+//! - [`oci`] — (feature `oci`) an OCI registry as the other implementation:
+//!   push with blob-skip, pull by manifest.
 //!
 //! ## Boundaries this crate keeps
 //!
@@ -46,7 +51,10 @@ pub mod dir;
 pub mod frame;
 pub mod inscription;
 pub mod layer;
+#[cfg(feature = "oci")]
+pub mod oci;
 pub mod profile;
+pub mod transport;
 
 pub use digest::{Digest, LayerDigests, LayerWriter};
 pub use frame::{CanonicalCbor, LayerHeader, Limits, Measure, RecordReader, SeqReader, SeqWriter};
@@ -55,6 +63,7 @@ pub use inscription::{
 };
 pub use layer::LayerReader;
 pub use profile::{MediaType, Profile};
+pub use transport::{BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer};
 
 /// Artifact type of a stele manifest. Generic tooling discovers stelae of every
 /// profile by filtering on this; the inscription's `profile` field
@@ -85,6 +94,16 @@ pub const LAYER_FORMAT_VERSION: u64 = 1;
 /// The moving tag every profile is required to maintain alongside its immutable
 /// per-sequence tags.
 pub const MOVING_TAG: &str = "latest";
+
+/// Ceiling on the size of a stele's OCI manifest.
+///
+/// Not a spec limit — the OCI distribution specification sets none — but the
+/// figure registries converge on, and the one ADR-004 sized the format against
+/// ("~1,700 manifest descriptors, well under the 4 MiB manifest guidance"). A
+/// stele that exceeds it is refused before the push rather than after a
+/// registry answers `413`, because the failure is a property of the document
+/// and the same everywhere. See [`oci`].
+pub const MANIFEST_SIZE_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Largest integer RFC 8785 (via ECMAScript number serialization) renders
 /// exactly: `2^53 - 1`.
@@ -209,4 +228,27 @@ pub enum Error {
 
     #[error("inscription.json is not in canonical form; its bytes must be exactly the RFC 8785 encoding of its content")]
     NonCanonicalInscription,
+
+    /// The manifest and the inscription describe different sets of layers.
+    ///
+    /// They are two views of one stele — the inscription holds identity, the
+    /// manifest holds transport — and the whole reason a registry can hand over
+    /// a `diffId`→blob map for free is that the two agree. A disagreement is a
+    /// refusal, in either direction: a layer the document describes and the
+    /// manifest does not carry cannot be fetched, and a layer the manifest
+    /// carries and the document does not describe is a blob nothing attests.
+    #[error("manifest disagrees with the inscription: {0}")]
+    ManifestMismatch(String),
+
+    /// A manifest past [`MANIFEST_SIZE_LIMIT`].
+    #[error(
+        "the manifest for this stele is {size} bytes, past the {MANIFEST_SIZE_LIMIT}-byte ceiling \
+         registries converge on; it describes {layers} layer(s)"
+    )]
+    ManifestTooLarge { size: usize, layers: usize },
+
+    /// Anything the registry client reported.
+    #[cfg(feature = "oci")]
+    #[error("registry error: {0}")]
+    Registry(#[from] oci_client::errors::OciDistributionError),
 }

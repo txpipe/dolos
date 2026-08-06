@@ -62,6 +62,19 @@ pub struct LayerReader<R: Read> {
     descriptor: LayerDescriptor,
 }
 
+/// The descriptor and header a reader is verifying against, and nothing about
+/// the stream itself — the same shape [`crate::dir::Layer`] reports, and for
+/// the same reason: a caller that has to say *which* layer failed needs the
+/// claims, not the pipeline.
+impl<R: Read> std::fmt::Debug for LayerReader<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LayerReader")
+            .field("header", &self.header)
+            .field("descriptor", &self.descriptor)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<R: Read> LayerReader<R> {
     /// Open `source` — the compressed bytes of the layer `descriptor`
     /// describes — and read its header record.

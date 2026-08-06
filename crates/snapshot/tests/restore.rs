@@ -36,7 +36,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, Blank};
-use stelae::{dir::SteleDir, frame::Limits};
+use stelae::{dir::SteleDir, frame::Limits, SteleReader};
 
 /// Every layer read through a window far below one record and every write
 /// batch committed after a single record.

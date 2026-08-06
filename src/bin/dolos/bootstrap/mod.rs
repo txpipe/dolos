@@ -1,3 +1,5 @@
+use std::io::IsTerminal;
+
 use clap::{Parser, Subcommand};
 use inquire::list_option::ListOption;
 use miette::{bail, Context, IntoDiagnostic};
@@ -21,7 +23,20 @@ pub enum Command {
 }
 
 impl Command {
+    /// Ask the operator which bootstrap method to use.
+    ///
+    /// Refused outright when there is no terminal to ask on, *before* the
+    /// prompt rather than through it. `inquire` reads the console directly on
+    /// Windows rather than this process's stdin, so a redirected or closed
+    /// stdin does not make the prompt fail there — it waits for a keypress a
+    /// script will never send. Checking here is what makes "a machine with no
+    /// terminal" the same clean refusal on every platform, which is what
+    /// `inspect_existing_data` below is written to assume.
     pub fn inquire() -> miette::Result<Self> {
+        if !std::io::stdin().is_terminal() {
+            bail!("no bootstrap method given and no terminal to ask on; pass a subcommand instead (see `dolos bootstrap --help`)");
+        }
+
         let cmd = inquire::Select::new(
             "which bootstrap method would you like to use?",
             vec![

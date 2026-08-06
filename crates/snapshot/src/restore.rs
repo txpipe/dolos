@@ -66,9 +66,9 @@ use dolos_core::{
     IndexWriter, StateStore, StateWriter, TxoRef, UtxoSetDelta,
 };
 use stelae::{
-    dir::{BlobIndex, SteleDir},
     frame::Limits,
     inscription::{Inscription, LayerDescriptor},
+    transport::{BlobIndex, SteleReader},
     LayerHeader,
 };
 use tracing::info;
@@ -220,7 +220,11 @@ impl Plan {
 /// from [`restore`]. `max_history` is `sync.max_history` in slots: epochs whose
 /// layers fall entirely below `cursor - max_history` are dropped, which is what
 /// ADR-004 replaced the old `full`/`ledger` snapshot variants with.
-pub fn plan(stele: &SteleDir, network_magic: u64, max_history: Option<u64>) -> Result<Plan, Error> {
+pub fn plan<R: SteleReader>(
+    stele: &R,
+    network_magic: u64,
+    max_history: Option<u64>,
+) -> Result<Plan, Error> {
     let inscription = stele.read_inscription()?;
 
     // Refuses a foreign profile, a profile major above this one, and any layer
@@ -392,8 +396,8 @@ pub struct Summary {
 /// The stores are the caller's and are expected to be empty: this writes, it
 /// never clears. Emptiness is `bootstrap`'s business, and it already owns
 /// `--force`.
-pub fn restore<A, S, I>(
-    stele: &SteleDir,
+pub fn restore<R, A, S, I>(
+    stele: &R,
     index: &BlobIndex,
     plan: &Plan,
     archive: &A,
@@ -402,6 +406,7 @@ pub fn restore<A, S, I>(
     budget: Budget,
 ) -> Result<Summary, Error>
 where
+    R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
     I: IndexStore,
@@ -483,7 +488,7 @@ where
     S: StateStore,
     I: IndexStore,
 {
-    let stele = SteleDir::open(root)?;
+    let stele = stelae::dir::SteleDir::open(root)?;
 
     let plan = plan(&stele, network_magic, max_history)?;
     plan.preflight(storage_path)?;
@@ -507,8 +512,8 @@ where
 /// Carried as one value because every layer is read the same way, and because
 /// the alternative is threading four unchanging arguments through each of the
 /// four per-kind drivers.
-struct Reader<'a> {
-    stele: &'a SteleDir,
+struct Reader<'a, R: SteleReader> {
+    stele: &'a R,
     index: &'a BlobIndex,
     /// The magic every layer's header has to name. Taken from the stele's
     /// `position`, which [`plan`] has already held against the node's — so
@@ -517,7 +522,7 @@ struct Reader<'a> {
     budget: Budget,
 }
 
-impl Reader<'_> {
+impl<R: SteleReader> Reader<'_, R> {
     /// Stream one layer's records into `flush`, one bounded chunk at a time.
     ///
     /// The single read path for every kind, so the verification discipline is
@@ -603,8 +608,8 @@ fn check_layer_magic(
 }
 
 /// One epoch's blocks, appended to the archive in stream order.
-fn restore_blocks<A: ArchiveStore>(
-    reader: &Reader<'_>,
+fn restore_blocks<R: SteleReader, A: ArchiveStore>(
+    reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
 ) -> Result<u64, Error> {
@@ -629,8 +634,8 @@ fn restore_blocks<A: ArchiveStore>(
 }
 
 /// One epoch's ledger logs.
-fn restore_logs<A: ArchiveStore>(
-    reader: &Reader<'_>,
+fn restore_logs<R: SteleReader, A: ArchiveStore>(
+    reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
 ) -> Result<u64, Error> {
@@ -660,8 +665,8 @@ fn restore_logs<A: ArchiveStore>(
 /// is this caller's, which is what the trait says, and the sort order the
 /// backends want holds across the whole layer because that is what the codec's
 /// `OrderCheck` made the exporter prove.
-fn restore_indexes<I: IndexStore>(
-    reader: &Reader<'_>,
+fn restore_indexes<R: SteleReader, I: IndexStore>(
+    reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     indexes: &I,
 ) -> Result<u64, Error> {
@@ -685,8 +690,8 @@ fn restore_indexes<I: IndexStore>(
 /// Returns the entities and the UTxOs it wrote, separately, because they are
 /// the two halves the cross-check compares and a shard that restored one and
 /// silently dropped the other would still add up.
-fn restore_state<S: StateStore>(
-    reader: &Reader<'_>,
+fn restore_state<R: SteleReader, S: StateStore>(
+    reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     state: &S,
 ) -> Result<(u64, u64), Error> {

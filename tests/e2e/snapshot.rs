@@ -13,10 +13,10 @@ use common::*;
 /// Shared by the tarball roundtrip and the stele one so both start from the
 /// same node: two roundtrips that disagreed about what they were restoring
 /// would compare nothing.
-fn sync_and_summarize(scenario: &Scenario) -> dolos::cli::DataSummary {
-    reset_and_bootstrap(scenario);
+fn sync_and_summarize(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary {
+    reset_and_bootstrap(workspace);
 
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
     let handle = cmd
         .args(["daemon"])
         .stdout(Stdio::inherit())
@@ -37,7 +37,7 @@ fn sync_and_summarize(scenario: &Scenario) -> dolos::cli::DataSummary {
 
     shutdown_gracefully(&mut guard);
 
-    let original_summary = fetch_summary(scenario);
+    let original_summary = fetch_summary(workspace);
 
     let original_max_tip = original_summary
         .wal
@@ -52,7 +52,7 @@ fn sync_and_summarize(scenario: &Scenario) -> dolos::cli::DataSummary {
     assert!(
         original_max_tip > 0,
         "expected tip to advance after syncing for {}",
-        scenario.name
+        workspace.name()
     );
 
     println!(
@@ -95,8 +95,8 @@ fn assert_summaries_match(original: &dolos::cli::DataSummary, restored: &dolos::
 
 /// The last thing either roundtrip checks: a restored node is a node the daemon
 /// will start on.
-fn assert_daemon_starts(scenario: &Scenario) {
-    let mut cmd = prepare_scenario_process(scenario);
+fn assert_daemon_starts(workspace: &ScenarioWorkspace) {
+    let mut cmd = prepare_scenario_process(workspace);
     let handle = cmd
         .args(["daemon"])
         .stdout(Stdio::inherit())
@@ -118,17 +118,16 @@ fn assert_daemon_starts(scenario: &Scenario) {
     shutdown_gracefully(&mut guard);
 }
 
-fn snapshot_roundtrip(scenario: &Scenario) {
-    println!("e2e snapshot roundtrip start: {}", scenario.name);
+fn snapshot_roundtrip(workspace: &ScenarioWorkspace) {
+    println!("e2e snapshot roundtrip start: {}", workspace.name());
 
     // Phase 1: Sync some blocks
-    let original_summary = sync_and_summarize(scenario);
+    let original_summary = sync_and_summarize(workspace);
 
     // Phase 2: Export snapshot
-    let dir = scenario_path(scenario);
-    let snapshot_path = dir.join("snapshot.tar.gz");
+    let snapshot_path = workspace.path().join("snapshot.tar.gz");
 
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
     let export = cmd
         .args([
             "data",
@@ -148,9 +147,9 @@ fn snapshot_roundtrip(scenario: &Scenario) {
     assert!(snapshot_path.exists(), "snapshot file not created");
 
     // Phase 3: Wipe data and restore from snapshot
-    reset_and_bootstrap(scenario);
+    reset_and_bootstrap(workspace);
 
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
     let restore = cmd
         .args([
             "bootstrap",
@@ -171,13 +170,10 @@ fn snapshot_roundtrip(scenario: &Scenario) {
     );
 
     // Phase 4: Verify cursors match
-    assert_summaries_match(&original_summary, &fetch_summary(scenario));
+    assert_summaries_match(&original_summary, &fetch_summary(workspace));
 
     // Phase 5: Verify daemon starts from restored data
-    assert_daemon_starts(scenario);
-
-    // Cleanup
-    let _ = std::fs::remove_file(&snapshot_path);
+    assert_daemon_starts(workspace);
 }
 
 /// The stele roundtrip: publish to a directory, wipe, restore from it.
@@ -194,20 +190,19 @@ fn snapshot_roundtrip(scenario: &Scenario) {
 /// bootstrap: a stele carries the genesis-derived state in its own layers, so
 /// restoring onto a genesis-applied node would be writing over data the stele
 /// already has, and the operator's one-command flow is the one worth testing.
-fn stele_roundtrip(scenario: &Scenario) {
-    println!("e2e stele roundtrip start: {}", scenario.name);
+fn stele_roundtrip(workspace: &ScenarioWorkspace) {
+    println!("e2e stele roundtrip start: {}", workspace.name());
 
     // Phase 1: Sync some blocks
-    let original_summary = sync_and_summarize(scenario);
+    let original_summary = sync_and_summarize(workspace);
 
     // Phase 2: Publish a stele
-    let stele_path = scenario_path(scenario).join("stele");
+    //
+    // `publish` refuses a directory that already holds one; the workspace is
+    // fresh per test, so this path has never been written to.
+    let stele_path = workspace.path().join("stele");
 
-    // `publish` refuses a directory that already holds one, which is the right
-    // behaviour and the wrong one for a test that may have run before.
-    let _ = std::fs::remove_dir_all(&stele_path);
-
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
     let publish = cmd
         .args(["snapshot", "publish", "--output-dir"])
         .arg(&stele_path)
@@ -228,7 +223,7 @@ fn stele_roundtrip(scenario: &Scenario) {
     );
 
     // Phase 3: Wipe data and restore from the stele
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
     let restore = cmd
         .args(["bootstrap", "stelae", "--force", "--source"])
         .arg(format!("file://{}", stele_path.display()))
@@ -244,23 +239,20 @@ fn stele_roundtrip(scenario: &Scenario) {
     );
 
     // Phase 4: Verify cursors match
-    assert_summaries_match(&original_summary, &fetch_summary(scenario));
+    assert_summaries_match(&original_summary, &fetch_summary(workspace));
 
     // Phase 5: Verify daemon starts from restored data
-    assert_daemon_starts(scenario);
-
-    // Cleanup
-    let _ = std::fs::remove_dir_all(&stele_path);
+    assert_daemon_starts(workspace);
 }
 
 #[test]
 #[ignore]
 fn snapshot_roundtrip_for_preview_full_explicit() {
-    snapshot_roundtrip(&SCENARIOS[0]);
+    snapshot_roundtrip(&ScenarioWorkspace::new(&SCENARIOS[0]));
 }
 
 #[test]
 #[ignore]
 fn stele_roundtrip_for_preview_full_explicit() {
-    stele_roundtrip(&SCENARIOS[0]);
+    stele_roundtrip(&ScenarioWorkspace::new(&SCENARIOS[0]));
 }

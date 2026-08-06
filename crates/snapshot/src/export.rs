@@ -23,9 +23,17 @@
 //!
 //! ## Memory
 //!
-//! Nothing here holds a layer. Records go into a [`LayerSink`] one at a time,
+//! Nothing here holds a layer. Records go into a [`RecordSink`] one at a time,
 //! and the state pass keeps all sixteen shard sinks open across a single walk
 //! of the store rather than sorting a mainnet-sized set into buckets first.
+//!
+//! ## Where the stele ends up is not this module's business
+//!
+//! [`export`] takes any [`SteleWriter`] — a directory, a registry, whatever
+//! comes next — because nothing in the walk of a store depends on it. The two
+//! calls it makes are "open a sink for this layer" and "seal the stele with
+//! this inscription", and both are the same code whether the bytes land in
+//! `blobs/sha256/` or in a repository.
 //!
 //! ## What is deliberately not here
 //!
@@ -33,7 +41,7 @@
 //! records, but obtaining them means a Mithril aggregator and a certificate
 //! check, which is publisher plumbing. No history: an inscription is permitted
 //! an empty one at any sequence, and filling it belongs to the slice that has a
-//! registry to read. No restore, no OCI, no signatures.
+//! registry to read. No restore, no signatures.
 
 use std::ops::Range;
 
@@ -44,8 +52,8 @@ use dolos_core::{
     ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexStore, LogKey, StateStore, TemporalKey,
 };
 use stelae::{
-    dir::{LayerSink, SteleDir},
     inscription::{Inscription, LayerDescriptor},
+    transport::{LayerSpec, RecordSink, SteleWriter},
 };
 
 use crate::{
@@ -201,8 +209,8 @@ pub fn plan<S: StateStore>(state: &S, network_magic: u64) -> Result<Plan, Error>
 /// `digest_records` is optional and has no source in this slice — a stele
 /// without a `digests` layer is valid, since ADR-004 makes every layer
 /// individually non-mandatory.
-pub fn export<A, S, I>(
-    stele: &SteleDir,
+pub fn export<W, A, S, I>(
+    stele: &W,
     plan: &Plan,
     archive: &A,
     state: &S,
@@ -210,6 +218,7 @@ pub fn export<A, S, I>(
     digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Inscription, Error>
 where
+    W: SteleWriter,
     A: ArchiveStore,
     S: StateStore,
     I: IndexStore,
@@ -244,9 +253,9 @@ where
 
     inscription.layers = layers;
 
-    // Validated before it is written, so a directory never holds a document
-    // that has no digest.
-    stele.write_inscription(&inscription)?;
+    // Validated before it is written, so a stele is never sealed over a
+    // document that has no digest.
+    stele.seal(&DolosProfile, &inscription)?;
 
     Ok(inscription)
 }
@@ -271,12 +280,12 @@ where
     S: StateStore,
     I: IndexStore,
 {
-    let stele = SteleDir::create(root)?;
+    let stele = stelae::dir::SteleDir::create(root)?;
 
     export(&stele, plan, archive, state, indexes, digest_records)
 }
 
-fn sink(stele: &SteleDir, spec: &stelae::dir::LayerSpec) -> Result<LayerSink, Error> {
+fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
 }
 
@@ -285,8 +294,8 @@ fn sink(stele: &SteleDir, spec: &stelae::dir::LayerSpec) -> Result<LayerSink, Er
 /// The hash is not stored beside the block, so it is derived here by decoding
 /// the header — the codec takes it as an input and neither derives nor checks
 /// it, which makes this the one site that has to be right.
-fn write_blocks<A: ArchiveStore>(
-    stele: &SteleDir,
+fn write_blocks<W: SteleWriter, A: ArchiveStore>(
+    stele: &W,
     plan: &Plan,
     archive: &A,
     window: &EpochWindow,
@@ -317,8 +326,8 @@ fn write_blocks<A: ArchiveStore>(
 /// Walking [`NAMESPACES`] in order *is* that ordering: the registry is sorted
 /// and each namespace's iterator is key-ascending, so no second registry of
 /// "namespaces that have logs" is needed — one with none simply yields nothing.
-fn write_logs<A: ArchiveStore>(
-    stele: &SteleDir,
+fn write_logs<W: SteleWriter, A: ArchiveStore>(
+    stele: &W,
     plan: &Plan,
     archive: &A,
     window: &EpochWindow,
@@ -370,8 +379,8 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// the banded traversal that answers it are in
 /// `plans/dolos-stelae-publish-cost.md`. It is stated here because a reader of
 /// this loop should not have to rediscover it.
-fn write_indexes<I: IndexStore>(
-    stele: &SteleDir,
+fn write_indexes<W: SteleWriter, I: IndexStore>(
+    stele: &W,
     plan: &Plan,
     store: &I,
     window: &EpochWindow,
@@ -409,8 +418,8 @@ fn write_indexes<I: IndexStore>(
 /// Every shard is written, including an empty one, so the shard count a reader
 /// sees is [`STATE_SHARDS`] and never a function of what the data happened to
 /// contain.
-fn write_state<S: StateStore>(
-    stele: &SteleDir,
+fn write_state<W: SteleWriter, S: StateStore>(
+    stele: &W,
     plan: &Plan,
     store: &S,
 ) -> Result<Vec<LayerDescriptor>, Error> {
@@ -464,8 +473,8 @@ fn write_state<S: StateStore>(
 /// misrouted record still restores — the write path dispatches on the
 /// namespace, not the shard — and only a client fetching shards selectively
 /// would ever notice it was missing.
-fn route(
-    sinks: &mut [LayerSink],
+fn route<K: RecordSink>(
+    sinks: &mut [K],
     orders: &mut [state::OrderCheck],
     record: state::StateRecord,
 ) -> Result<(), Error> {
@@ -482,8 +491,8 @@ fn route(
 /// `lastImmutable` is read off the records rather than taken as a second input:
 /// it is the last immutable file the layer covers, so deriving it removes the
 /// only way the scope and the records could disagree.
-fn write_digests(
-    stele: &SteleDir,
+fn write_digests<W: SteleWriter>(
+    stele: &W,
     plan: &Plan,
     records: &[digests::ImmutableDigests],
 ) -> Result<LayerDescriptor, Error> {
