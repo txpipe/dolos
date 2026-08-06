@@ -48,7 +48,7 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use crate::{
     error::Error,
-    inputs::{InputDeps, InputResolver},
+    inputs::{for_each_touched_output, InputDeps, InputResolver},
     mapping::{self, bech32_drep, bech32_pool, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -1001,7 +1001,9 @@ fn account_addresses_in_tx(
 ) -> Result<BTreeSet<String>, StatusCode> {
     let mut addresses = BTreeSet::new();
 
-    for (_, output) in tx.produces() {
+    // never stops early: every touched output that belongs to the account
+    // contributes its address to the set.
+    for_each_touched_output(resolver, tx, |output| {
         let candidate = output
             .address()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1009,19 +1011,9 @@ fn account_addresses_in_tx(
         if address_belongs_to_account(&candidate, account) {
             addresses.insert(candidate.to_string());
         }
-    }
 
-    for input in tx.consumes() {
-        if let Some(output) = resolver.resolve(&input)? {
-            let candidate = output
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if address_belongs_to_account(&candidate, account) {
-                addresses.insert(candidate.to_string());
-            }
-        }
-    }
+        Ok(false)
+    })?;
 
     Ok(addresses)
 }
