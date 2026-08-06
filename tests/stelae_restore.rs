@@ -163,6 +163,12 @@ fn a_source_that_is_not_a_stele_is_refused() {
 /// cancel, or a machine with no terminal, and hand back nothing. The
 /// non-interactive half of this is covered above, where clap refuses a bad
 /// `--source`; this is the half clap cannot reach.
+///
+/// The refusal is asserted by its reason, not only by its exit code. `inquire`
+/// reads the console rather than stdin on Windows, so a run that got as far as
+/// the prompt would block there forever instead of failing — which it did, for
+/// six hours a job, until `Command::inquire` started checking for a terminal
+/// first. An exit code alone would not have told those two apart.
 #[test]
 fn force_does_not_clear_before_the_command_is_resolved() {
     let node = Node::new();
@@ -176,6 +182,12 @@ fn force_does_not_clear_before_the_command_is_resolved() {
     assert!(
         !output.status.success(),
         "an unanswerable prompt should have failed the run"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no terminal to ask on"),
+        "expected a refusal to prompt, got: {stderr}"
     );
 
     assert_eq!(
