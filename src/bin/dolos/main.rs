@@ -7,6 +7,7 @@ mod daemon;
 mod doctor;
 mod eval;
 mod feedback;
+mod repo;
 mod serve;
 mod snapshot;
 mod sync;

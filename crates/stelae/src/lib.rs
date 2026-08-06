@@ -32,6 +32,8 @@
 //! - [`transport`] — the seam a stele is written through and read back from:
 //!   the two halves a profile uses, and the `diffId`→blob map both transports
 //!   answer differently.
+//! - [`plan`] — what a restore has already done and what it has left to fetch:
+//!   the progress file, the resume rule, and remaining-bytes accounting.
 //! - [`dir`] — a minimal on-disk stele: the first implementation of that seam,
 //!   and the one a stele is inspectable by hand through.
 //! - [`oci`] — (feature `oci`) an OCI registry as the other implementation:
@@ -53,6 +55,7 @@ pub mod inscription;
 pub mod layer;
 #[cfg(feature = "oci")]
 pub mod oci;
+pub mod plan;
 pub mod profile;
 pub mod transport;
 
@@ -62,6 +65,7 @@ pub use inscription::{
     canonical_json, Compression, HistoryEntry, Inscription, LayerDescriptor, ProfileRef,
 };
 pub use layer::LayerReader;
+pub use plan::{Remaining, RestoreProgress, Resume};
 pub use profile::{MediaType, Profile};
 pub use transport::{BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer};
 

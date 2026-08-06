@@ -110,30 +110,121 @@ fn a_stele_restores_into_a_directory_that_does_not_exist() {
     assert_eq!(Contents::read(&node), before);
 }
 
-/// A source scheme the binary does not implement is refused at argument
-/// parsing, which is the only place it can be refused without consequences:
-/// `--force` clears the storage directory before a subcommand ever runs, so a
-/// source rejected any later would have cost the operator the node they still
-/// have.
+/// A source the binary cannot use is refused at argument parsing, which is the
+/// only place it can be refused without consequences: `--force` clears the
+/// storage directory before a subcommand ever runs, so a source rejected any
+/// later would have cost the operator the node they still have.
+///
+/// Two schemes are usable now — `file://DIR` and `oci://HOST/PATH` — so the
+/// cases here are the ones neither reading admits: an unknown scheme, a bare
+/// path, and an `oci://` URL that is not a repository. The last group is the
+/// one worth having: a repository name is held to the distribution grammar
+/// *here*, so a typo costs a sentence from this command rather than an opaque
+/// error from someone else's server at the end of a restore.
 #[test]
-fn an_unimplemented_source_is_refused_before_force_clears_anything() {
+fn an_unusable_source_is_refused_before_force_clears_anything() {
     let node = Node::new();
     node.sync();
 
-    for source in [
-        "oci://ghcr.io/txpipe/dolos-snapshots/preview",
-        "https://example.invalid/snapshot",
-        "/var/lib/dolos/stele",
-    ] {
+    let mut cases = vec![
+        // Not a scheme this understands: the message names both that are.
+        ("https://example.invalid/snapshot", "file://DIR"),
+        ("/var/lib/dolos/stele", "file://DIR"),
+        // Well-formed scheme, unusable repository.
+        ("oci://ghcr.io", "no repository path"),
+        ("oci:///txpipe/dolos", "no registry host"),
+        // A tag is `--point`'s to name, not the URL's.
+        ("oci://ghcr.io/txpipe/dolos:v1", "names a tag or a digest"),
+    ];
+
+    // The distribution grammar arrives with the registry client, so a build
+    // without one cannot make this check — and does not need to: it refuses
+    // every `oci://` source outright, by feature name. Gated rather than
+    // dropped, because the check is the one that saves an operator from an
+    // opaque error out of someone else's server.
+    if cfg!(feature = "registry") {
+        cases.push(("oci://ghcr.io/TxPipe/dolos", "not a valid OCI name"));
+    }
+
+    for (source, expected) in cases {
         let output = node.bootstrap_stelae(source);
         assert!(!output.status.success(), "{source}");
 
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("file://DIR"), "{source}: {stderr}");
+        assert!(stderr.contains(expected), "{source}: {stderr}");
 
         // The node it refused to overwrite is still the node it was.
         Contents::read(&node).assert_populated();
     }
+}
+
+/// A `--point` that names no tag is refused the same way, and for the same
+/// reason.
+///
+/// `latest` and `epoch-N` are what the profile renders; anything else would
+/// reach a registry as a tag nobody published, after `--force` had already
+/// taken the node away.
+#[test]
+fn an_unusable_point_is_refused_before_force_clears_anything() {
+    let node = Node::new();
+    node.sync();
+
+    for (point, expected) in [
+        // Nothing like either spelling: the message names both.
+        ("tip", "`latest` or `epoch-N`"),
+        ("500", "`latest` or `epoch-N`"),
+        // The right shape with the wrong number, which earns the sharper
+        // message: the operator meant an epoch and mistyped it.
+        ("epoch", "`latest` or `epoch-N`"),
+        ("epoch-abc", "does not name an epoch"),
+        ("epoch--1", "does not name an epoch"),
+    ] {
+        let output =
+            node.bootstrap_stelae_at("oci://ghcr.io/txpipe/dolos-snapshots/preview", point);
+
+        assert!(!output.status.success(), "{point}");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{point}: {stderr}");
+
+        Contents::read(&node).assert_populated();
+    }
+}
+
+/// A well-formed `oci://` source gets past the parse.
+///
+/// The other half of the two tests above, and the half that would catch a
+/// grammar so strict it refused everything: this URL is accepted, the command
+/// runs, and what stops it is the registry not being there — which happens
+/// after `--force`, as a runtime failure, exactly like a `file://` directory
+/// that turns out not to hold a stele.
+#[test]
+fn a_well_formed_repository_reaches_the_registry() {
+    let node = Node::new();
+    node.sync();
+
+    // A port nothing is listening on, on the loopback address, so the failure
+    // is a connection refused rather than a name lookup that could hang.
+    let output = node.bootstrap_stelae("oci://127.0.0.1:1/txpipe/dolos-snapshots/preview");
+
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Not a parse error: the source was accepted and the command got as far as
+    // trying to use it. Which of the two it is depends on how the binary was
+    // built, and both are the right answer.
+    assert!(
+        stderr.contains("restoring the stele")
+            || stderr.contains("opening the repository")
+            || stderr.contains("--features registry"),
+        "the repository was refused before it was tried: {stderr}"
+    );
+
+    assert!(
+        !stderr.contains("is not an OCI repository"),
+        "a well-formed repository was refused by the grammar: {stderr}"
+    );
 }
 
 /// A directory that is not a stele is a clean refusal, not a half-restore.

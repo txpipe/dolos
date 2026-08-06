@@ -817,15 +817,32 @@ impl Stele {
 
     /// Compressed bytes across every layer, as the manifest reports them.
     ///
-    /// The inscription carries only uncompressed sizes — identity does not
-    /// depend on a compressor — so this is the one number that can answer "how
-    /// much is left to download", and it lives here.
-    pub fn compressed_size(&self) -> u64 {
+    /// The whole-stele case of [`SteleReader::compressed_size`], for a caller
+    /// that wants the total without walking the inscription — a publisher
+    /// reporting what a repository holds, above all. A restore wants the
+    /// per-layer figure, because what it is going to fetch is a subset.
+    pub fn total_compressed_size(&self) -> u64 {
         self.manifest
             .layers
             .iter()
             .map(|layer| layer.size.max(0) as u64)
             .sum()
+    }
+
+    /// The manifest's own descriptor for a layer, by identity.
+    ///
+    /// One lookup, shared by the read path and the size estimate, so the two
+    /// cannot come to disagree about which blob holds a layer. Two steps and
+    /// both are needed: the [`BlobIndex`] maps identity to a blob digest, and
+    /// the manifest maps that digest to the descriptor carrying the compressed
+    /// size the download is held to.
+    fn layer_of(&self, index: &BlobIndex, descriptor: &LayerDescriptor) -> Option<&OciDescriptor> {
+        let blob = index.blob_for(&descriptor.diff_id)?.to_string();
+
+        self.manifest
+            .layers
+            .iter()
+            .find(|layer| layer.digest == blob)
     }
 }
 
@@ -840,6 +857,23 @@ impl SteleReader for Stele {
         Ok(self.blobs.clone())
     }
 
+    /// Read the layer's compressed size off the manifest.
+    ///
+    /// Free, and the reason a registry restore can report a correct total
+    /// before it fetches anything: the manifest is already in hand by the time
+    /// a [`Stele`] exists. A negative size — a manifest claiming something
+    /// impossible — reads as `None` rather than as a number, so it widens the
+    /// estimate's stated uncertainty instead of shrinking its total.
+    fn compressed_size(
+        &self,
+        index: &BlobIndex,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Option<u64>, Error> {
+        Ok(self
+            .layer_of(index, descriptor)
+            .and_then(|oci| u64::try_from(oci.size).ok()))
+    }
+
     fn stream_layer(
         &self,
         index: &BlobIndex,
@@ -847,22 +881,14 @@ impl SteleReader for Stele {
         descriptor: &LayerDescriptor,
         limits: Limits,
     ) -> Result<LayerReader<File>, Error> {
-        let missing = || Error::LayerNotFound {
-            kind: descriptor.kind.clone(),
-            diff_id: descriptor.diff_id.to_string(),
-        };
-
-        let blob = index.blob_for(&descriptor.diff_id).ok_or_else(missing)?;
-        let blob = blob.to_string();
-
         // The manifest's own descriptor, not one built here: it carries the
         // compressed size, which is the ceiling the download is held to.
         let oci = self
-            .manifest
-            .layers
-            .iter()
-            .find(|layer| layer.digest == blob)
-            .ok_or_else(missing)?;
+            .layer_of(index, descriptor)
+            .ok_or_else(|| Error::LayerNotFound {
+                kind: descriptor.kind.clone(),
+                diff_id: descriptor.diff_id.to_string(),
+            })?;
 
         let file = self.shared.pull_blob_file(&self.reference, oci)?;
 

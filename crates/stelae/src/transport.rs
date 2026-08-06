@@ -253,6 +253,26 @@ pub trait SteleReader {
     /// The `diffId` → blob map for this stele.
     fn blob_index(&self) -> Result<BlobIndex, Error>;
 
+    /// How many compressed bytes fetching this layer moves, if the transport
+    /// can say.
+    ///
+    /// The inscription carries only *uncompressed* sizes, because identity must
+    /// not depend on a compressor — so it is the one number a document cannot
+    /// answer, and the only place "how much is left to download" can come from.
+    /// Where a transport keeps it differs exactly as [`BlobIndex`] does: a
+    /// registry reads it off the manifest, a directory asks the filesystem how
+    /// big the blob file is. Neither reads the blob.
+    ///
+    /// `None` means the transport holds no size for this layer, not that the
+    /// layer is empty. A caller summing these should carry the count of
+    /// unanswered layers rather than treat them as zero —
+    /// [`crate::plan::Remaining`] does.
+    fn compressed_size(
+        &self,
+        index: &BlobIndex,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Option<u64>, Error>;
+
     /// Stream one layer's records without holding it.
     ///
     /// Every claim the descriptor makes is checked, each as early as the bytes
