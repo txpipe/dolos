@@ -504,6 +504,7 @@ where
         .route("/pools/{id}/relays", get(routes::pools::by_id_relays::<D>))
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route("/pools/retiring", get(routes::pools::all_retiring::<D>))
+        .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
         .route(
             "/governance/dreps/{drep_id}",
