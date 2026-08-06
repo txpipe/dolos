@@ -199,21 +199,25 @@ pub fn preview(registry: &Registry, plan: &Plan, rebuild: bool) -> Result<Previe
     // tip contributes its sixteen shards however the epochs were restricted.
     let total = plan.epochs.len() * EPOCH_KINDS.len() + STATE_SHARDS as usize;
 
-    let layers_reused = plan
-        .epochs
-        .iter()
-        .flat_map(|window| {
-            let scope = window.scope(plan.network.magic());
+    // The same lookup `export` will make, through the same `layer_spec`, so a
+    // preview and the publish that follows it cannot disagree about which
+    // layers are inherited. A failure here is the scope refusing a kind it does
+    // not describe, and it propagates rather than counting as a miss: a dry run
+    // that quietly reported "build it" for a layer nobody could build would be
+    // the one number a publisher trusts, wrong.
+    let mut layers_reused = 0;
 
-            EPOCH_KINDS.map(move |kind| (kind, scope))
-        })
-        .filter(|(kind, scope)| {
-            scope
-                .layer_spec(kind)
-                .map(|spec| previous.inheritable(kind, &spec.scope).is_some())
-                .unwrap_or(false)
-        })
-        .count();
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+
+        for kind in EPOCH_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            if previous.inheritable(kind, &spec.scope)?.is_some() {
+                layers_reused += 1;
+            }
+        }
+    }
 
     Ok(Preview {
         sequence: plan.sequence,
@@ -276,8 +280,12 @@ impl<'a> Chained<'a> {
         })
     }
 
-    fn inheritable(&self, kind: &str, scope: &serde_json::Value) -> Option<&LayerDescriptor> {
-        self.inheritable.get(&key(kind, scope).ok()?)
+    fn inheritable(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<&LayerDescriptor>, Error> {
+        Ok(self.inheritable.get(&key(kind, scope)?))
     }
 }
 
@@ -291,7 +299,7 @@ impl Predecessor for Chained<'_> {
         kind: &str,
         scope: &serde_json::Value,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        let (Some(source), Some(descriptor)) = (self.source, self.inheritable(kind, scope)) else {
+        let (Some(source), Some(descriptor)) = (self.source, self.inheritable(kind, scope)?) else {
             return Ok(None);
         };
 
