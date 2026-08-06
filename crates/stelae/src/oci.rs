@@ -517,26 +517,40 @@ impl SteleWriter for Registry {
     /// leaves untagged blobs the registry will reclaim, and a `latest` that
     /// still points at the previous stele — which is a stele, and restores.
     ///
-    /// **Sealing consumes the layers finished since the last seal.** One
-    /// transport can therefore publish several steles in turn — which is what a
-    /// publisher chaining a `history` does — and a second seal of the same
-    /// inscription is refused rather than republishing a manifest over layers
-    /// that are no longer accounted for.
+    /// **A seal that succeeds consumes the layers finished since the last
+    /// one.** One transport can therefore publish several steles in turn —
+    /// which is what a publisher chaining a `history` does — and a second seal
+    /// of the same inscription is refused rather than republishing a manifest
+    /// over layers that are no longer accounted for.
+    ///
+    /// **A seal that fails consumes nothing.** Every fallible step runs before
+    /// the layers are taken, so a registry that answers a manifest push with a
+    /// 500 leaves a transport the caller can seal again — the blobs are
+    /// already up, and re-exporting a stele to recover from a transient error
+    /// is not a price this owes anyone.
     fn seal(&self, profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
-        let layers = std::mem::take(&mut self.shared.locked().pending);
+        // Both tags before either push. Validating the moving tag after the
+        // sequence manifest is already public would make a bad tag something
+        // the registry finds out about half way through.
+        let sequence_tag = checked_tag_for_sequence(profile, inscription.sequence)?;
+        let moving_tag = profile.moving_tag().to_owned();
+        validate_tag(&moving_tag)?;
 
-        let (manifest, config) = build_manifest(inscription, &layers)?;
-        let body = manifest_bytes(&manifest)?;
+        // Scoped so the guard is gone before anything touches the network.
+        let (body, config) = {
+            let state = self.shared.locked();
+            let (manifest, config) = build_manifest(inscription, &state.pending)?;
+            (manifest_bytes(&manifest)?, config)
+        };
 
         let identity = Digest::compute(&config);
         self.shared.put_bytes(&identity, config)?;
 
-        let sequence_tag = checked_tag_for_sequence(profile, inscription.sequence)?;
         self.shared.push_manifest(&sequence_tag, body.clone())?;
-
-        let moving_tag = profile.moving_tag().to_owned();
-        validate_tag(&moving_tag)?;
         self.shared.push_manifest(&moving_tag, body)?;
+
+        // Only here, with nothing fallible left, are the layers spent.
+        self.shared.locked().pending.clear();
 
         Ok(identity)
     }
@@ -803,12 +817,17 @@ fn layer_descriptor(
 /// that agree until they do not.
 ///
 /// The ceiling is [`MANIFEST_SIZE_LIMIT`]. What it refuses is a stele with too
-/// many layers: at roughly 400 bytes of descriptor and annotations apiece, a
-/// manifest reaches 4 MiB somewhere north of ten thousand of them — around
-/// seventeen times what ADR-004 sizes a mainnet stele at (~600 epoch
-/// descriptors). It is not a limit anything is expected to reach; it is the
-/// limit that turns "the registry answered 413" into a refusal that names the
+/// many layers: at roughly 350 bytes of descriptor and annotations apiece, a
+/// manifest reaches 4 MiB somewhere around twelve thousand of them — nearly
+/// seven times a mainnet stele's ~1,816. The comparison is in layers because
+/// layers are what the ceiling counts; ADR-004's ~600 is a count of *epochs*,
+/// and a mainnet stele carries three layers per epoch plus sixteen state
+/// shards. It is not a limit anything is expected to reach; it is the limit
+/// that turns "the registry answered 413" into a refusal that names the
 /// document and the number of layers in it.
+///
+/// `a_manifest_past_the_size_ceiling_is_refused` in `tests/oci.rs` measures
+/// those figures rather than asserting them; keep the two in step.
 pub fn manifest_bytes(manifest: &OciImageManifest) -> Result<Vec<u8>, Error> {
     let body = canonical_json(&serde_json::to_value(manifest)?)?;
 

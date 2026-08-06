@@ -1052,10 +1052,14 @@ fn neither_direction_holds_a_layer() {
 ///
 /// The registry is content-addressed, so tampering with a stored blob is not
 /// possible without changing its name — which is exactly what makes the
-/// interesting failure a *manifest* that points at the wrong blob. The pull
-/// verifies the compressed digest as the bytes arrive and the `diffId` when the
-/// layer ends, and this checks that the second one is not skipped when the
-/// first passes.
+/// interesting failure a *manifest* that points at the wrong blob.
+///
+/// Both refusals here land in `LayerReader::new`, before a single record past
+/// the header is read: one because the header names another kind, one because
+/// the index has no blob under that identity at all. The check at the *other*
+/// end of the layer — the identity digest over every byte — is out of reach
+/// from here for the reason the first case shows, and is
+/// [`a_same_kind_blob_is_refused_when_the_layer_ends`].
 #[test]
 #[ignore = "spawns a registry"]
 fn a_layer_that_is_not_the_one_described_is_refused() {
@@ -1089,6 +1093,98 @@ fn a_layer_that_is_not_the_one_described_is_refused() {
         .unwrap_err();
 
     assert!(matches!(err, Error::LayerNotFound { .. }), "{err:?}");
+}
+
+/// The identity check at the end of a layer, reached.
+///
+/// A `diffId` annotation lives in the manifest, outside the inscription, so
+/// nothing about a stele's *identity* covers it — which makes a manifest that
+/// points a descriptor at the wrong blob the tamper this format has to survive
+/// on its own. Point it at a blob of another kind and the header record settles
+/// it immediately, which is what
+/// [`a_layer_that_is_not_the_one_described_is_refused`] shows. Point it at a
+/// blob of its own kind and the header has nothing to say: only the hash of
+/// every byte, once the layer ends, can tell the two apart.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_same_kind_blob_is_refused_when_the_layer_ends() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+    let registry = fixture.registry("stelae/tamper-same-kind");
+
+    // Two layers of one kind under one scope, differing only in how many
+    // records they hold, so their headers are byte-identical and their
+    // identities are not.
+    let write = |count: u64| {
+        let (header, scope) = notes_scope(3);
+
+        let mut sink = registry
+            .layer_sink(
+                &ToyProfile,
+                &LayerSpec::new("notes", header, scope),
+                COMPRESSION_LEVEL,
+            )
+            .unwrap();
+
+        for id in 1..=count {
+            sink.write_record(&note_record(id)).unwrap();
+        }
+
+        sink.finish().unwrap()
+    };
+
+    let short = write(3);
+    let long = write(6);
+
+    let mut inscription = Inscription::new(
+        &ToyProfile,
+        1,
+        json!({"chapter": 1, "shelf": "east"}),
+        json!({"noteWidth": 40}),
+        Compression {
+            algo: "zstd".to_owned(),
+            level: COMPRESSION_LEVEL as i64,
+        },
+    );
+
+    inscription.layers = vec![short.descriptor.clone(), long.descriptor.clone()];
+    registry.seal(&ToyProfile, &inscription).unwrap();
+
+    let stele = registry.pull_latest(&ToyProfile).unwrap();
+
+    // The long layer's identity, pointed at the short layer's blob. The short
+    // one is the target on purpose: reading it stays inside the size the long
+    // descriptor claims, so the meter cannot refuse this before the digest
+    // does, and it is the digest that is under test.
+    let mut tampered = stele.blob_index().unwrap();
+    tampered.insert(long.descriptor.diff_id, short.digests.blob_digest);
+
+    let mut reader = stele
+        .stream_layer(&tampered, &ToyProfile, &long.descriptor, Limits::default())
+        .unwrap();
+
+    // Every record reads cleanly. Nothing up to here is wrong; the layer is
+    // simply not the one that was asked for.
+    while let Some(record) = reader.next_record() {
+        record.unwrap();
+    }
+
+    let err = reader.finish().unwrap_err();
+
+    // Named exactly, because a `DigestMismatch` is also what a blob that
+    // arrived corrupt would produce: this one has to be the identity check,
+    // reporting the layer that was asked for against the one that was read.
+    assert!(
+        matches!(
+            &err,
+            Error::DigestMismatch { subject, expected, actual }
+                if subject.contains("notes")
+                    && *expected == long.descriptor.diff_id.to_string()
+                    && *actual == short.descriptor.diff_id.to_string()
+        ),
+        "{err:?}"
+    );
 }
 
 /// The scratch directory is honoured, and nothing survives a push.
