@@ -247,6 +247,26 @@ pub enum Error {
     )]
     ManifestTooLarge { size: usize, layers: usize },
 
+    /// A layer a publisher asked to carry forward, whose blob the repository no
+    /// longer holds.
+    ///
+    /// Distinct from [`Error::LayerNotFound`], which is about a stele that does
+    /// not describe a layer. This one is the opposite shape: a stele describes
+    /// it, and the bytes are gone — a descriptor pointing at a blob a registry
+    /// has reclaimed. Publishing it would produce a well-formed stele nobody
+    /// can restore, so it is refused where it is discovered rather than where
+    /// it would eventually be noticed.
+    #[cfg(feature = "oci")]
+    #[error(
+        "layer {kind:?} ({diff_id}) cannot be carried forward: this repository no longer holds \
+         its blob {blob}"
+    )]
+    BlobMissing {
+        kind: String,
+        diff_id: String,
+        blob: String,
+    },
+
     /// Anything the registry client reported.
     #[cfg(feature = "oci")]
     #[error("registry error: {0}")]

@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
-use dolos_snapshot::export::{self, Plan};
+use dolos_snapshot::export::{self, First, Plan};
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{ToyDomain, ToyStores},
@@ -116,6 +116,7 @@ pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) ->
         domain.state(),
         domain.indexes(),
         None,
+        &First,
     )
     .unwrap()
 }
