@@ -4,6 +4,14 @@ description = "The io.txpipe.dolos.cardano Stelae profile"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Publishing into an OCI registry (`src/registry.rs`). Default-off, and it
+# forwards to `stelae/oci` rather than adding anything of its own: a build that
+# only writes steles to a directory keeps the dependency tree it had, which is
+# the whole reason the protocol's transport is behind a feature in the first
+# place. `dolos`'s own `registry` feature is what turns this on.
+oci = ["stelae/oci"]
+
 # This crate is the *profile* half of the Stelae boundary: it may depend on
 # `stelae` and on `dolos-*`, never the other way around. See
 # adrs/004_stelae_snapshots.md, "Code layout".

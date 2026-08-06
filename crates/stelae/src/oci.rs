@@ -87,11 +87,20 @@ use oci_client::{
     client::{ClientConfig, ClientProtocol},
     manifest::{OciDescriptor, OciImageManifest, OCI_IMAGE_MEDIA_TYPE},
     secrets::RegistryAuth,
-    Client, Reference,
+    Client,
 };
 
+/// The reference type this transport addresses a repository by.
+///
+/// Re-exported because its `FromStr` is the distribution grammar — lowercase
+/// name components, `.`/`_`/`-` separators, no empty segments — and a caller
+/// taking a repository from an operator wants that verdict rather than a second
+/// copy of the grammar of its own. `dolos snapshot publish --repo` is the
+/// caller that does.
+pub use oci_client::Reference;
+
 use crate::{
-    digest::LayerWriter,
+    digest::{LayerDigests, LayerWriter},
     frame::{CanonicalCbor, LayerHeader, Limits, SeqWriter},
     inscription::{canonical_json, Inscription, LayerDescriptor},
     layer::LayerReader,
@@ -149,10 +158,22 @@ pub struct Transfer {
     pub layers_uploaded: u64,
     /// Layer blobs the registry already had, and that were not.
     pub layers_skipped: u64,
+    /// Layer blobs that were never built, because [`Registry::adopt_layer`]
+    /// took them from a stele already in this repository.
+    ///
+    /// Deliberately not folded into `layers_skipped`. A skipped layer was
+    /// built, hashed and then found to be present already, so the publisher
+    /// paid for it and saved only the upload; an adopted one was never read out
+    /// of a store at all. They are different costs and a publisher comparing
+    /// two publishes wants to tell them apart.
+    pub layers_reused: u64,
     /// Compressed bytes uploaded.
     pub bytes_uploaded: u64,
     /// Compressed bytes the skip saved.
     pub bytes_skipped: u64,
+    /// Compressed bytes an adopted layer did not move, as the manifest it came
+    /// from reports them.
+    pub bytes_reused: u64,
 }
 
 /// How to reach a registry.
@@ -343,6 +364,137 @@ impl Registry {
     pub fn pull_latest(&self, profile: &dyn Profile) -> Result<Stele, Error> {
         let tag = profile.moving_tag().to_owned();
         self.pull(profile, &tag)
+    }
+
+    /// The most recent stele, or `None` if this repository has never held one.
+    ///
+    /// The whole value of this over [`Registry::pull_latest`] is the
+    /// distinction it draws, and the distinction is load-bearing rather than
+    /// convenient. A publisher chains each stele to the one before it, so
+    /// "there is nothing to chain to" starts a history and *anything else*
+    /// must not: a timeout, a 500 or an expired token read as absence would
+    /// silently restart the chain, which is the exact outcome an inscription's
+    /// `history` exists to prevent. So only the shapes a registry uses to say
+    /// "no such manifest" become `None`, and every other failure propagates.
+    ///
+    /// Those shapes are three, because `oci-client` reports a 404 in three
+    /// ways depending on which layer of the client noticed it. Matching them
+    /// here rather than at a caller is the point: this is the only module in
+    /// the crate that has any business naming an `oci_client` error type.
+    pub fn latest(&self, profile: &dyn Profile) -> Result<Option<Stele>, Error> {
+        match self.pull_latest(profile) {
+            Ok(stele) => Ok(Some(stele)),
+            Err(Error::Registry(e)) if is_absent(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Carry a layer this repository already holds into the stele being
+    /// written, without building it.
+    ///
+    /// This is the operation a content-addressed registry makes possible and a
+    /// directory does not: the caller has established — by whatever rule its
+    /// profile owns — that a layer it *would* write is the layer a previous
+    /// stele already published, so the bytes need neither be produced nor sent,
+    /// and the new manifest simply points at the blob the old one pointed at.
+    ///
+    /// **The new stele attests a layer it did not reproduce.** That is the
+    /// trade, and it is the caller's to make: nothing here can check that the
+    /// descriptor describes those bytes, because checking would mean reading
+    /// them, which is the cost being avoided. What *is* checked is that the
+    /// blob is still there — one `HEAD`, before the manifest is written —
+    /// because a descriptor pointing at a blob the registry has reclaimed is a
+    /// stele nobody can restore, and it would be published looking perfectly
+    /// well-formed.
+    ///
+    /// The caller names the layer by its `descriptor` — identity, out of an
+    /// inscription — and the stele it came from. The blob digest and the
+    /// compressed size are read off *that stele's manifest*, by exactly the
+    /// lookup [`SteleReader::stream_layer`] uses, rather than passed in beside
+    /// the descriptor: they are transport facts, they belong to the manifest,
+    /// and a caller assembling the pair by hand is a caller that can mismatch
+    /// them.
+    pub fn adopt_layer(&self, source: &Stele, descriptor: LayerDescriptor) -> Result<(), Error> {
+        let missing = || Error::LayerNotFound {
+            kind: descriptor.kind.clone(),
+            diff_id: descriptor.diff_id.to_string(),
+        };
+
+        let blob = source
+            .blobs
+            .blob_for(&descriptor.diff_id)
+            .ok_or_else(missing)?;
+        let named = blob.to_string();
+
+        let oci = source
+            .manifest
+            .layers
+            .iter()
+            .find(|layer| layer.digest == named)
+            .ok_or_else(missing)?;
+
+        // Refused rather than clamped. A descriptor's size is an `i64` and a
+        // negative one is a manifest saying something impossible; clamping it
+        // to zero would carry that zero into the new manifest, where it becomes
+        // the ceiling a later reader holds the download to — so the stele would
+        // publish looking well-formed and refuse to restore. Every other
+        // malformed-manifest shape here is a refusal, and this is one too.
+        let compressed_size = u64::try_from(oci.size).map_err(|_| {
+            Error::ManifestMismatch(format!(
+                "layer {:?} ({}) claims a compressed size of {}",
+                descriptor.kind, descriptor.diff_id, oci.size,
+            ))
+        })?;
+
+        if !self.shared.blob_exists(&blob)? {
+            return Err(Error::BlobMissing {
+                kind: descriptor.kind,
+                diff_id: descriptor.diff_id.to_string(),
+                blob: named,
+            });
+        }
+
+        let adopted = WrittenLayer {
+            digests: LayerDigests {
+                diff_id: descriptor.diff_id,
+                blob_digest: blob,
+                uncompressed_size: descriptor.uncompressed_size,
+                compressed_size,
+            },
+            descriptor,
+        };
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_reused += 1;
+        state.transfer.bytes_reused += compressed_size;
+        state.pending.push(adopted);
+
+        Ok(())
+    }
+}
+
+/// Whether a registry error means "no such manifest" rather than "something
+/// went wrong".
+///
+/// `oci-client` does not normalize this, and the three shapes are not
+/// interchangeable in practice: `distribution` answers a missing tag with a
+/// `MANIFEST_UNKNOWN` envelope, a repository that has never existed with
+/// `NAME_UNKNOWN`, and some registries answer with a bare 404 that the client
+/// turns into `ImageManifestNotFoundError` or a `ServerError`. The client's own
+/// referrers fallback matches the same set, for the same reason.
+fn is_absent(error: &oci_client::errors::OciDistributionError) -> bool {
+    use oci_client::errors::{OciDistributionError as E, OciErrorCode};
+
+    match error {
+        E::ImageManifestNotFoundError(_) => true,
+        E::ServerError { code: 404, .. } => true,
+        E::RegistryError { envelope, .. } => envelope.errors.iter().any(|e| {
+            matches!(
+                e.code,
+                OciErrorCode::ManifestUnknown | OciErrorCode::NameUnknown
+            )
+        }),
+        _ => false,
     }
 }
 
@@ -986,6 +1138,13 @@ fn blob_stream(file: File) -> impl Stream<Item = oci_client::errors::Result<byte
 /// fails at the *end*, after every byte has been written; the ceiling fails as
 /// soon as the stream exceeds what its descriptor claims, so a blob that lies
 /// about its size costs its size and not the disk.
+///
+/// A negative size clamps to a ceiling of zero here, and that is deliberate
+/// rather than an oversight — unlike [`Registry::adopt_layer`], which refuses
+/// one. The directions differ: a zero ceiling refuses every non-empty blob,
+/// which is the safe answer to a manifest claiming something impossible, while
+/// clamping on the way *into* a manifest would publish that impossible claim
+/// forward as a number a later reader trusts.
 struct Blocking<'a, W: Write> {
     inner: &'a mut W,
     written: u64,
@@ -1043,5 +1202,64 @@ impl<W: Write + Unpin> tokio::io::AsyncWrite for Blocking<'_, W> {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Poll::Ready(self.get_mut().inner.flush())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use oci_client::errors::{OciDistributionError, OciEnvelope, OciError, OciErrorCode};
+
+    use super::*;
+
+    fn envelope(code: OciErrorCode) -> OciDistributionError {
+        OciDistributionError::RegistryError {
+            envelope: OciEnvelope {
+                errors: vec![OciError {
+                    code,
+                    message: String::new(),
+                    detail: serde_json::Value::Null,
+                }],
+            },
+            url: "https://registry.invalid/v2/x/manifests/latest".to_owned(),
+        }
+    }
+
+    fn server_error(code: u16) -> OciDistributionError {
+        OciDistributionError::ServerError {
+            code,
+            url: "https://registry.invalid/v2/x/manifests/latest".to_owned(),
+            message: String::new(),
+        }
+    }
+
+    /// The three shapes a registry uses to say "no such manifest".
+    #[test]
+    fn absence_is_the_three_shapes_of_a_missing_manifest() {
+        assert!(is_absent(
+            &OciDistributionError::ImageManifestNotFoundError("latest".to_owned())
+        ));
+        assert!(is_absent(&server_error(404)));
+        assert!(is_absent(&envelope(OciErrorCode::ManifestUnknown)));
+        assert!(is_absent(&envelope(OciErrorCode::NameUnknown)));
+    }
+
+    /// The half that carries the weight: a registry that failed is not a
+    /// registry that is empty.
+    ///
+    /// [`Registry::latest`] turns absence into `None`, and a publisher reads
+    /// `None` as "nothing to chain to" and starts a fresh history. So a
+    /// timeout, a 500 or an expired token widening into absence would silently
+    /// restart the attestation chain — which is the outcome an inscription's
+    /// `history` exists to prevent, arrived at without anything looking wrong.
+    #[test]
+    fn a_failed_request_is_never_absence() {
+        assert!(!is_absent(&server_error(500)));
+        assert!(!is_absent(&server_error(503)));
+        assert!(!is_absent(&envelope(OciErrorCode::Unauthorized)));
+        assert!(!is_absent(&envelope(OciErrorCode::Denied)));
+        assert!(!is_absent(&OciDistributionError::UnauthorizedError {
+            url: "https://registry.invalid/v2/x/manifests/latest".to_owned(),
+        }));
+        assert!(!is_absent(&OciDistributionError::GenericError(None)));
     }
 }

@@ -121,7 +121,16 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
     )
     .unwrap();
 
-    let inscription = export::export(&stele, &plan, &archive, &state, &index, None).unwrap();
+    let inscription = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        &index,
+        None,
+        &export::First,
+    )
+    .unwrap();
 
     // Three epochs of blocks, indexes and logs, then sixteen state shards. No
     // `digests` layer: nothing supplies one.

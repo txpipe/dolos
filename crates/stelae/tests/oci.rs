@@ -43,8 +43,8 @@ use stelae::{
     frame::{encode, CanonicalCbor, Limits},
     inscription::LayerDescriptor,
     oci::{
-        build_manifest, manifest_bytes, read_manifest, Options, Registry, DIFF_ID_ANNOTATION,
-        KIND_ANNOTATION, SCOPE_ANNOTATION,
+        build_manifest, manifest_bytes, read_manifest, Options, Registry, Transfer,
+        DIFF_ID_ANNOTATION, KIND_ANNOTATION, SCOPE_ANNOTATION,
     },
     Compression, Digest, Error, HistoryEntry, Inscription, LayerDigests, LayerSpec, Profile,
     RecordSink, SteleReader, SteleWriter, WrittenLayer,
@@ -1243,6 +1243,94 @@ fn staging_stays_in_the_scratch_directory_and_leaves_nothing() {
         .collect();
 
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// `latest` tells "this repository holds nothing" apart from "this repository
+/// could not be read", which is the distinction a publisher's history chain
+/// rests on.
+///
+/// Both halves against a real server, because the shape a registry uses to say
+/// "no such manifest" is exactly the thing that cannot be established by
+/// reading a client's source.
+#[test]
+#[ignore = "spawns a registry"]
+fn latest_is_absent_until_something_is_published() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+    let registry = fixture.registry("stelae/eventually");
+
+    assert!(
+        registry.latest(&ToyProfile).unwrap().is_none(),
+        "an empty repository holds no stele, and that is not an error"
+    );
+
+    let published = write_stele(&registry, 3);
+
+    let found = registry
+        .latest(&ToyProfile)
+        .unwrap()
+        .expect("the repository holds a stele now");
+
+    assert_eq!(found.read_inscription().unwrap(), published);
+
+    // A repository that never existed is absent too, and by a different
+    // registry error code than a missing tag in one that does.
+    let empty = fixture.registry("stelae/never-written-to");
+    assert!(empty.latest(&ToyProfile).unwrap().is_none());
+}
+
+/// A layer cannot be carried forward into a repository that does not hold its
+/// blob.
+///
+/// The guard exists because the failure it prevents is invisible: a manifest
+/// pointing at a reclaimed blob is a perfectly well-formed stele that nobody
+/// can restore.
+///
+/// **Provoked with a second registry, not a second repository**, and the
+/// difference is a real one this test found. `zot` answers `HEAD` *and* `GET`
+/// for a blob under a repository it was never pushed to — its storage is
+/// content-addressed across the whole registry — while `distribution` 2.8 and
+/// 3.0 answer 404. So a sibling repository is not reliably a place a blob is
+/// absent from, and on `zot` it would not even be the wrong answer: a registry
+/// that will serve the blob is a registry where the manifest works. Only a
+/// separate server is absent everywhere.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_layer_whose_blob_is_not_there_cannot_be_carried_forward() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    let source = fixture.registry("stelae/source");
+    let published = write_stele(&source, 3);
+    let stele = source.latest(&ToyProfile).unwrap().unwrap();
+
+    let somewhere_else = Fixture::spawn();
+    let elsewhere = somewhere_else.registry("stelae/source");
+
+    let err = elsewhere
+        .adopt_layer(&stele, published.layers[0].clone())
+        .unwrap_err();
+
+    assert!(matches!(err, Error::BlobMissing { .. }), "{err:?}");
+    assert_eq!(elsewhere.transfer(), Transfer::default(), "nothing counted");
+
+    // The same call against the repository that does hold it is the whole
+    // operation: no bytes move, and the layer is counted as carried forward.
+    // Reset first, so what is read back is this call's cost and not the two
+    // layers `write_stele` pushed through the same transport.
+    source.take_transfer();
+
+    source
+        .adopt_layer(&stele, published.layers[0].clone())
+        .unwrap();
+
+    let transfer = source.take_transfer();
+
+    assert_eq!(transfer.layers_reused, 1);
+    assert_eq!(transfer.layers_uploaded, 0);
+    assert!(transfer.bytes_reused > 0);
 }
 
 /// The annotation map is a `BTreeMap`, so the canonical JSON above is not

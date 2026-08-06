@@ -273,6 +273,7 @@ fn roundtrip<B: ToyStores>() {
             blank.state(),
             blank.indexes(),
             None,
+            &dolos_snapshot::export::First,
         )
         .unwrap()
     };

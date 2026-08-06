@@ -35,13 +35,21 @@
 //! this inscription", and both are the same code whether the bytes land in
 //! `blobs/sha256/` or in a repository.
 //!
+//! ## What a publish inherits from the one before it
+//!
+//! [`export`] takes a [`Predecessor`]: the stele this one follows, wherever it
+//! was published. It answers two questions, and they are one concept rather
+//! than two because both are things only the previous publish can say — what
+//! `history` this inscription attests, and which of its layers this publish may
+//! carry forward instead of rebuilding. A publish with no predecessor passes
+//! [`First`], which answers "no history" and "nothing to inherit", and that is
+//! every directory publish and the first stele of any repository.
+//!
 //! ## What is deliberately not here
 //!
 //! No `digests` layer is *sourced* — [`export`] writes one when handed the
 //! records, but obtaining them means a Mithril aggregator and a certificate
-//! check, which is publisher plumbing. No history: an inscription is permitted
-//! an empty one at any sequence, and filling it belongs to the slice that has a
-//! registry to read. No restore, no signatures.
+//! check, which is publisher plumbing. No restore, no signatures.
 
 use std::ops::Range;
 
@@ -52,7 +60,7 @@ use dolos_core::{
     ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexStore, LogKey, StateStore, TemporalKey,
 };
 use stelae::{
-    inscription::{Inscription, LayerDescriptor},
+    inscription::{HistoryEntry, Inscription, LayerDescriptor},
     transport::{LayerSpec, RecordSink, SteleWriter},
 };
 
@@ -200,6 +208,61 @@ pub fn plan<S: StateStore>(state: &S, network_magic: u64) -> Result<Plan, Error>
     Plan::new(&summary, Network::for_magic(network_magic), cursor)
 }
 
+/// The publish this one follows.
+///
+/// Two questions, one concept: what a new inscription attests about the steles
+/// before it, and which of their layers it may carry forward rather than build
+/// again. Both are answers only the previous publish has, and holding them
+/// together is what lets a publisher rebuild everything while still chaining —
+/// the `--rebuild` case, which suppresses [`Predecessor::adopt`] and leaves
+/// [`Predecessor::history`] exactly as it was.
+pub trait Predecessor {
+    /// The history the new inscription carries: every prior publication,
+    /// contiguous and ascending, ending at `sequence - 1`.
+    ///
+    /// Assembling it is the implementor's business, and the protocol holds it
+    /// to the invariant when the document is validated
+    /// (`stelae::inscription`).
+    fn history(&self) -> &[HistoryEntry];
+
+    /// The descriptor to adopt for a layer of `kind` at `scope`, or `None` to
+    /// build it from the stores.
+    ///
+    /// An implementation that answers `Some` **has already arranged for the
+    /// transport to carry the layer's blob**; all that is left for [`export`]
+    /// is to not walk the store. That ordering is why this returns a descriptor
+    /// rather than a boolean: the answer and the arrangement are one act, and
+    /// an export that reused a descriptor whose blob nothing carried would
+    /// publish a manifest with a hole in it.
+    ///
+    /// The default reuses nothing, which is what makes [`First`] one line and
+    /// what a transport with no notion of "already there" — a directory —
+    /// wants.
+    fn adopt(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<Option<LayerDescriptor>, Error> {
+        let _ = (kind, scope);
+
+        Ok(None)
+    }
+}
+
+/// The first stele of a repository: no history, nothing to inherit.
+///
+/// The protocol permits an empty history at any sequence, so this is not only
+/// the very first publish — it is every publish into a directory, which has no
+/// way to be asked what it already holds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct First;
+
+impl Predecessor for First {
+    fn history(&self) -> &[HistoryEntry] {
+        &[]
+    }
+}
+
 /// Export a complete stele into `stele`: every layer, then the inscription.
 ///
 /// Layers are listed in [`crate::KINDS`] order, and within a kind in ascending
@@ -209,6 +272,11 @@ pub fn plan<S: StateStore>(state: &S, network_magic: u64) -> Result<Plan, Error>
 /// `digest_records` is optional and has no source in this slice — a stele
 /// without a `digests` layer is valid, since ADR-004 makes every layer
 /// individually non-mandatory.
+///
+/// `previous` is the stele this one follows; pass [`First`] when there is none.
+/// A layer it adopts is *attested without being reproduced*: this function
+/// never opens a sink for it and never touches a store on its behalf, which is
+/// the whole saving and the whole risk. See [`Predecessor::adopt`].
 pub fn export<W, A, S, I>(
     stele: &W,
     plan: &Plan,
@@ -216,6 +284,7 @@ pub fn export<W, A, S, I>(
     state: &S,
     indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
+    previous: &dyn Predecessor,
 ) -> Result<Inscription, Error>
 where
     W: SteleWriter,
@@ -226,15 +295,15 @@ where
     let mut layers = Vec::new();
 
     for window in &plan.epochs {
-        layers.push(write_blocks(stele, plan, archive, window)?);
+        layers.push(write_blocks(stele, plan, archive, window, previous)?);
     }
 
     for window in &plan.epochs {
-        layers.push(write_indexes(stele, plan, indexes, window)?);
+        layers.push(write_indexes(stele, plan, indexes, window, previous)?);
     }
 
     for window in &plan.epochs {
-        layers.push(write_logs(stele, plan, archive, window)?);
+        layers.push(write_logs(stele, plan, archive, window, previous)?);
     }
 
     layers.extend(write_state(stele, plan, state)?);
@@ -251,6 +320,7 @@ where
         crate::compression(),
     );
 
+    inscription.history = previous.history().to_vec();
     inscription.layers = layers;
 
     // Validated before it is written, so a stele is never sealed over a
@@ -282,11 +352,35 @@ where
 {
     let stele = stelae::dir::SteleDir::create(root)?;
 
-    export(&stele, plan, archive, state, indexes, digest_records)
+    export(
+        &stele,
+        plan,
+        archive,
+        state,
+        indexes,
+        digest_records,
+        &First,
+    )
 }
 
 fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
+}
+
+/// The layer spec for one epoch window, and what the predecessor says about it.
+///
+/// The lookup happens **before the store is touched**, which is the entire
+/// point: the cost this saves is the traversal, not the compression. A hit
+/// short-circuits the caller's whole function.
+fn inherit(
+    scope: &EpochScope,
+    kind: &'static str,
+    previous: &dyn Predecessor,
+) -> Result<(LayerSpec, Option<LayerDescriptor>), Error> {
+    let spec = scope.layer_spec(kind)?;
+    let adopted = previous.adopt(kind, &spec.scope)?;
+
+    Ok((spec, adopted))
 }
 
 /// One epoch's blocks, ascending slot.
@@ -299,9 +393,17 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     window: &EpochWindow,
+    previous: &dyn Predecessor,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
-    let mut sink = sink(stele, &scope.layer_spec(BLOCKS)?)?;
+
+    let (spec, adopted) = inherit(&scope, BLOCKS, previous)?;
+
+    if let Some(descriptor) = adopted {
+        return Ok(descriptor);
+    }
+
+    let mut sink = sink(stele, &spec)?;
     let mut order = blocks::OrderCheck::default();
 
     let slots = window.slots();
@@ -331,9 +433,17 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
     plan: &Plan,
     archive: &A,
     window: &EpochWindow,
+    previous: &dyn Predecessor,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
-    let mut sink = sink(stele, &scope.layer_spec(LOGS)?)?;
+
+    let (spec, adopted) = inherit(&scope, LOGS, previous)?;
+
+    if let Some(descriptor) = adopted {
+        return Ok(descriptor);
+    }
+
+    let mut sink = sink(stele, &spec)?;
     let mut order = logs::OrderCheck::default();
 
     let slots = window.slots();
@@ -384,9 +494,20 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
     plan: &Plan,
     store: &I,
     window: &EpochWindow,
+    previous: &dyn Predecessor,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
-    let mut sink = sink(stele, &scope.layer_spec(INDEXES)?)?;
+
+    // The layer this saves the most: a publish that inherits a closed epoch's
+    // index layer skips a whole pass over the index store, which is the cost
+    // the doc comment above measures.
+    let (spec, adopted) = inherit(&scope, INDEXES, previous)?;
+
+    if let Some(descriptor) = adopted {
+        return Ok(descriptor);
+    }
+
+    let mut sink = sink(stele, &spec)?;
     let mut order = indexes::OrderCheck::default();
 
     let slots = window.slots();
@@ -418,6 +539,18 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
 /// Every shard is written, including an empty one, so the shard count a reader
 /// sees is [`STATE_SHARDS`] and never a function of what the data happened to
 /// contain.
+///
+/// ## No shard is ever inherited from a predecessor
+///
+/// Two reasons, and the second is the one that matters. The first is what a
+/// reader expects: the state is the *tip*, so it changes every publish and
+/// there would be nothing to inherit. The second is that scope equality — the
+/// rule a [`Predecessor`] decides by — could not detect it if there were:
+/// [`StateScope::descriptor`](crate::StateScope) is `{"shard": n}` and carries
+/// no epoch, so every previous publish's shard `n` compares equal to this
+/// one's. The rule here is therefore not a policy that could be relaxed; it is
+/// the only safe reading of a descriptor scope that does not identify the
+/// stele it came from.
 fn write_state<W: SteleWriter, S: StateStore>(
     stele: &W,
     plan: &Plan,

@@ -47,10 +47,14 @@
 //!   to the protocol in the order above.
 //! - [`restore`] — its inverse: the driver that reads a stele back into an
 //!   empty store set, in the order ADR-004 specifies.
+//! - `registry` (feature `oci`) — publishing into an OCI repository: the
+//!   history chain, and the layers a publish inherits instead of rebuilding.
 
 pub mod export;
 pub mod layers;
 pub mod namespaces;
+#[cfg(feature = "oci")]
+pub mod registry;
 pub mod restore;
 
 use dolos_core::ChainPoint;
@@ -182,6 +186,22 @@ pub enum Error {
     /// The stele is well-formed but does not carry enough to rebuild a node.
     #[error("this stele cannot restore a node: {0}")]
     IncompleteStele(String),
+
+    /// A publish that would not extend the repository's chain.
+    ///
+    /// Both sequences are in the message because the fix depends on which of
+    /// them is wrong: a gap means a publisher skipped epochs, an equal or lower
+    /// sequence means it is republishing one. There is deliberately no flag
+    /// that overrides this — see [`crate::registry`].
+    #[error(
+        "this repository's latest stele is sequence {latest} and this publish is sequence \
+         {publishing}: {reason}"
+    )]
+    HistoryBreak {
+        latest: u64,
+        publishing: u64,
+        reason: &'static str,
+    },
 }
 
 impl Error {
