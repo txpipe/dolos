@@ -306,11 +306,8 @@ impl<D: Domain> Facade<D> {
         // does have logs (i.e. this epoch has none but `epoch + 1` does), this
         // epoch shares that first snapshot's genesis stake. Any earlier epoch
         // (where neither it nor its successor has logs) has no active stake.
-        if self
-            .stake_logs_sum_at_epoch(epoch + 1, chain_summary)?
-            .is_some()
-        {
-            return self.stake_logs_sum_at_epoch(epoch + 1, chain_summary);
+        if let Some(next_total) = self.stake_logs_sum_at_epoch(epoch + 1, chain_summary)? {
+            return Ok(Some(next_total));
         }
 
         Ok(None)
