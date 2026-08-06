@@ -43,66 +43,6 @@ fn ensure_epoch_in_range(epoch: Epoch) -> Result<(), Error> {
     Ok(())
 }
 
-// Per-epoch aggregates not persisted on `EpochState`, derived by scanning the
-// epoch's archived blocks.
-struct EpochBlockAggregates {
-    tx_count: u64,
-    output: u128,
-    first_block_time: u64,
-    last_block_time: u64,
-}
-
-fn scan_epoch_block_aggregates<D: Domain>(
-    domain: &Facade<D>,
-    chain: &ChainSummary,
-    epoch: Epoch,
-) -> Result<EpochBlockAggregates, StatusCode> {
-    let start = chain.epoch_start(epoch);
-    // `get_range`'s upper bound is exclusive, so the next epoch's start slot is
-    // the correct end: it includes every block up to (but not including) the
-    // boundary. Subtracting one would drop the epoch's final block(s).
-    let end = chain.epoch_start(epoch + 1);
-
-    let iter = domain
-        .archive()
-        .get_range(Some(start), Some(end))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let mut tx_count = 0u64;
-    // Accumulated in u128: the epoch-wide sum of all outputs can exceed u64
-    // (a single tx's outputs fit in u64, but the per-epoch total need not).
-    let mut output = 0u128;
-    let mut first_block_time = None;
-    let mut last_block_time = 0u64;
-
-    for (slot, body) in iter {
-        let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let txs = block.txs();
-        tx_count += txs.len() as u64;
-
-        // `output` is the sum of every transaction output's lovelace, matching
-        // the Blockfrost definition (total output of all txs in the epoch).
-        for tx in &txs {
-            output += tx
-                .produces()
-                .iter()
-                .map(|(_, o)| o.value().coin() as u128)
-                .sum::<u128>();
-        }
-
-        let time = chain.slot_time(slot);
-        first_block_time.get_or_insert(time);
-        last_block_time = time;
-    }
-
-    Ok(EpochBlockAggregates {
-        tx_count,
-        output,
-        first_block_time: first_block_time.unwrap_or(0),
-        last_block_time,
-    })
-}
-
 fn build_epoch_content<D: Domain>(
     domain: &Facade<D>,
     chain: &ChainSummary,
@@ -117,17 +57,38 @@ fn build_epoch_content<D: Domain>(
     let start_time = chain.slot_time(chain.epoch_start(epoch));
     let end_time = chain.slot_time(chain.epoch_start(epoch + 1));
 
-    let aggregates = scan_epoch_block_aggregates(domain, chain, epoch)?;
+    // The roll pipeline precomputes the block aggregates on `RollingStats`, so
+    // this request needs no block scan. The first and last block times are
+    // slots, and this function converts them here. A zero slot means the epoch
+    // had no block.
+    //
+    // A Byron epoch boundary block (EBB) does not pass through the roll
+    // pipeline. So `first_block_slot` is the first *regular* block of the epoch.
+    // Every Byron epoch opens with an EBB. For these epochs, Blockfrost reports
+    // the time of the EBB, so `first_block_time` differs. See the systemic EBB
+    // omission tracked for `/epochs/{n}/blocks` and `/blocks/{block}`.
+    let rolling = state.rolling.live().cloned().unwrap_or_default();
+    let first_block_time = if rolling.first_block_slot == 0 {
+        0
+    } else {
+        chain.slot_time(rolling.first_block_slot)
+    };
+    let last_block_time = if rolling.last_block_slot == 0 {
+        0
+    } else {
+        chain.slot_time(rolling.last_block_slot)
+    };
+
     let active_stake = domain.sum_active_stake_for_epoch(epoch, chain)?;
 
     Ok(mapping::EpochContentModelBuilder {
         state,
         start_time,
         end_time,
-        first_block_time: aggregates.first_block_time,
-        last_block_time: aggregates.last_block_time,
-        tx_count: aggregates.tx_count,
-        output: aggregates.output,
+        first_block_time,
+        last_block_time,
+        tx_count: rolling.tx_count,
+        output: rolling.output,
         active_stake,
     })
 }
