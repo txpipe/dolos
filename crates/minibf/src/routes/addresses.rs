@@ -26,7 +26,7 @@ use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
 
 use crate::{
     error::Error,
-    inputs::{InputDeps, InputResolver},
+    inputs::{tx_touches_output, InputDeps, InputResolver},
     mapping::{aggregate_assets, AddressKind, AddressModelBuilder, AssetTotals, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -384,29 +384,13 @@ fn has_address(
     address: &VKeyOrAddress,
     tx: &MultiEraTx<'_>,
 ) -> Result<bool, StatusCode> {
-    for (_, output) in tx.produces() {
+    tx_touches_output(resolver, tx, |output| {
         let candidate = output
             .address()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if address_matches(address, &candidate) {
-            return Ok(true);
-        }
-    }
-
-    for input in tx.consumes() {
-        if let Some(output) = resolver.resolve(&input)? {
-            let candidate = output
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if address_matches(address, &candidate) {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
+        Ok(address_matches(address, &candidate))
+    })
 }
 
 async fn sum_block_txs<D>(

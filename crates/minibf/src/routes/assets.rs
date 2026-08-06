@@ -34,7 +34,7 @@ use serde::Deserialize;
 
 use crate::{
     error::Error,
-    inputs::{InputDeps, InputResolver},
+    inputs::{tx_touches_output, InputDeps, InputResolver},
     mapping::{asset_fingerprint, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -618,21 +618,9 @@ fn tx_has_subject(
     subject: &[u8],
     tx: &MultiEraTx<'_>,
 ) -> Result<bool, StatusCode> {
-    for (_, output) in tx.produces() {
-        if output_has_subject(subject, &output) {
-            return Ok(true);
-        }
-    }
-
-    for input in tx.consumes() {
-        if let Some(output) = resolver.resolve(&input)? {
-            if output_has_subject(subject, &output) {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
+    tx_touches_output(resolver, tx, |output| {
+        Ok(output_has_subject(subject, output))
+    })
 }
 
 async fn find_txs<D>(

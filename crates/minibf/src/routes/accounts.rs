@@ -27,8 +27,8 @@ use dolos_cardano::{
     PoolDepositRefundLog,
 };
 use dolos_core::{
-    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, EraCbor, LogKey,
-    StateStore as _, TemporalKey, TxHash,
+    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _,
+    TemporalKey, TxHash,
 };
 use futures::future::join_all;
 use futures_util::StreamExt;
@@ -48,6 +48,7 @@ use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use crate::{
     error::Error,
+    inputs::{for_each_touched_output, InputDeps, InputResolver},
     mapping::{self, bech32_drep, bech32_pool, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -993,17 +994,16 @@ fn address_belongs_to_account(address: &Address, account: &[u8]) -> bool {
     }
 }
 
-async fn account_addresses_in_tx<D>(
-    domain: &Facade<D>,
+fn account_addresses_in_tx(
+    resolver: &mut InputResolver<'_>,
     account: &[u8],
     tx: &MultiEraTx<'_>,
-) -> Result<BTreeSet<String>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
+) -> Result<BTreeSet<String>, StatusCode> {
     let mut addresses = BTreeSet::new();
 
-    for (_, output) in tx.produces() {
+    // never stops early: every touched output that belongs to the account
+    // contributes its address to the set.
+    for_each_touched_output(resolver, tx, |output| {
         let candidate = output
             .address()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1011,39 +1011,16 @@ where
         if address_belongs_to_account(&candidate, account) {
             addresses.insert(candidate.to_string());
         }
-    }
 
-    for input in tx.consumes() {
-        if let Some(EraCbor(era, cbor)) = domain
-            .query()
-            .tx_cbor(input.hash().as_slice().to_vec())
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        {
-            let parsed = MultiEraTx::decode_for_era(
-                era.try_into()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                &cbor,
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if let Some(output) = parsed.produces_at(input.index() as usize) {
-                let candidate = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                if address_belongs_to_account(&candidate, account) {
-                    addresses.insert(candidate.to_string());
-                }
-            }
-        }
-    }
+        Ok(false)
+    })?;
 
     Ok(addresses)
 }
 
 async fn find_account_txs_in_block<D>(
     domain: &Facade<D>,
+    deps: &mut InputDeps,
     account: &[u8],
     chain: &ChainSummary,
     pagination: &Pagination,
@@ -1054,14 +1031,25 @@ where
 {
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let txs = block.txs();
+
+    // only the txs that will actually be scanned contribute dependencies
+    let scanned = txs
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !pagination.should_skip(block.number(), *idx))
+        .map(|(_, tx)| tx);
+
+    let mut resolver = deps.prepare(domain, scanned).await?;
+
     let mut matches = vec![];
 
-    for (idx, tx) in block.txs().iter().enumerate() {
+    for (idx, tx) in txs.iter().enumerate() {
         if pagination.should_skip(block.number(), idx) {
             continue;
         }
 
-        let addresses = account_addresses_in_tx(domain, account, tx).await?;
+        let addresses = account_addresses_in_tx(&mut resolver, account, tx)?;
 
         let tx_hash = hex::encode(tx.hash().as_slice());
         let block_height = block.number() as i32;
@@ -1117,6 +1105,7 @@ where
     );
 
     let mut matches = Vec::new();
+    let mut deps = InputDeps::default();
     let mut stream = Box::pin(stream);
 
     while let Some(res) = stream.next().await {
@@ -1127,7 +1116,8 @@ where
         };
 
         let mut txs =
-            find_account_txs_in_block(&domain, &account, &chain, &pagination, &block).await?;
+            find_account_txs_in_block(&domain, &mut deps, &account, &chain, &pagination, &block)
+                .await?;
         matches.append(&mut txs);
 
         if matches.len() >= pagination.from() + pagination.count {

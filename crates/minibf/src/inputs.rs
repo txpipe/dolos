@@ -212,6 +212,51 @@ impl<'a> InputResolver<'a> {
     }
 }
 
+/// Call `visit` on every output that the tx touches. A touched output is one
+/// that the tx produces, or one that the tx consumes. The `resolver` supplies
+/// the consumed outputs.
+///
+/// `visit` returns `true` to stop early. It returns `false` to continue. The
+/// result is `true` when a call to `visit` stopped the scan early.
+pub fn for_each_touched_output<F>(
+    resolver: &mut InputResolver<'_>,
+    tx: &MultiEraTx<'_>,
+    mut visit: F,
+) -> Result<bool, StatusCode>
+where
+    F: FnMut(&MultiEraOutput<'_>) -> Result<bool, StatusCode>,
+{
+    for (_, output) in tx.produces() {
+        if visit(&output)? {
+            return Ok(true);
+        }
+    }
+
+    for input in tx.consumes() {
+        if let Some(output) = resolver.resolve(&input)? {
+            if visit(&output)? {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// Return `true` when the tx touches an output that satisfies `matches`.
+///
+/// The scan stops at the first output that satisfies `matches`.
+pub fn tx_touches_output<F>(
+    resolver: &mut InputResolver<'_>,
+    tx: &MultiEraTx<'_>,
+    matches: F,
+) -> Result<bool, StatusCode>
+where
+    F: FnMut(&MultiEraOutput<'_>) -> Result<bool, StatusCode>,
+{
+    for_each_touched_output(resolver, tx, matches)
+}
+
 #[cfg(test)]
 mod tests {
     use dolos_core::config::MinibfConfig;
