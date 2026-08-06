@@ -98,6 +98,7 @@ impl BlockVisitor for EpochStateVisitor {
     ) -> Result<(), ChainError> {
         self.stats_delta = Some(EpochStatsUpdate {
             epoch,
+            block_slot: block.header().slot(),
             ..Default::default()
         });
         if let Some(stats) = self.stats_delta.as_mut() {
@@ -132,6 +133,7 @@ impl BlockVisitor for EpochStateVisitor {
         let fees = define_tx_fees(tx, utxos)?;
 
         self.stats_delta.as_mut().unwrap().block_fees += fees;
+        self.stats_delta.as_mut().unwrap().tx_count += 1;
 
         if let Some(donation) = pallas_extras::tx_treasury_donation(tx) {
             self.stats_delta.as_mut().unwrap().treasury_donations += donation;
@@ -163,7 +165,12 @@ impl BlockVisitor for EpochStateVisitor {
         output: &pallas::ledger::traverse::MultiEraOutput,
     ) -> Result<(), ChainError> {
         let amount = output.value().coin();
-        self.stats_delta.as_mut().unwrap().utxo_delta += amount as i64;
+        let stats = self.stats_delta.as_mut().unwrap();
+        stats.utxo_delta += amount as i64;
+        // Gross, unsigned sum of all produced outputs (db-sync `epoch.out_sum`).
+        // The driver iterates `tx.produces()`, so this covers regular outputs
+        // for valid txs and collateral-return outputs for phase-2 failures.
+        stats.output += amount as u128;
 
         Ok(())
     }

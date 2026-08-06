@@ -24,6 +24,32 @@ pub type Lovelace = u64;
 
 pub const CURRENT_EPOCH_KEY: &[u8] = b"0";
 
+/// CBOR codec for `u128` fields. This minicbor version has no native `u128`
+/// support, so the value is stored as a 16-byte big-endian byte string.
+mod cbor_u128 {
+    use pallas::codec::minicbor::{
+        decode::{Decoder, Error as DecodeError},
+        encode::{Encoder, Error as EncodeError, Write},
+    };
+
+    pub fn encode<C, W: Write>(
+        v: &u128,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), EncodeError<W::Error>> {
+        e.bytes(&v.to_be_bytes())?;
+        Ok(())
+    }
+
+    pub fn decode<C>(d: &mut Decoder<'_>, _ctx: &mut C) -> Result<u128, DecodeError> {
+        let bytes = d.bytes()?;
+        let arr: [u8; 16] = bytes
+            .try_into()
+            .map_err(|_| DecodeError::message("expected 16-byte u128"))?;
+        Ok(u128::from_be_bytes(arr))
+    }
+}
+
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Nonces {
     #[n(0)]
@@ -140,6 +166,30 @@ pub struct RollingStats {
     #[n(21)]
     #[cbor(default)]
     pub treasury_mirs: Lovelace,
+
+    /// Number of transactions across all blocks minted this epoch.
+    #[n(22)]
+    #[cbor(default)]
+    pub tx_count: u64,
+
+    /// Gross sum of all produced transaction output lovelace this epoch
+    /// (matches db-sync's `epoch.out_sum`). u128 because the per-epoch total
+    /// can exceed u64 even though a single tx's outputs fit in u64.
+    #[n(23)]
+    #[cbor(default, with = "cbor_u128")]
+    pub output: u128,
+
+    /// Slot of the first block minted this epoch (0 if none). Stored as a slot
+    /// and converted to a wall-clock time by the reader via `ChainSummary`.
+    #[n(24)]
+    #[cbor(default)]
+    pub first_block_slot: u64,
+
+    /// Slot of the last block minted this epoch (0 if none). Stored as a slot
+    /// and converted to a wall-clock time by the reader via `ChainSummary`.
+    #[n(25)]
+    #[cbor(default)]
+    pub last_block_slot: u64,
 }
 
 impl TransitionDefault for RollingStats {
@@ -343,12 +393,20 @@ pub(crate) mod testing {
             consumed_utxos in root::any_lovelace(),
             gathered_fees in root::any_lovelace(),
             blocks_minted in 0u32..1000u32,
+            tx_count in 0u64..100_000u64,
+            output in 0u128..u128::from(u64::MAX),
+            first_block_slot in root::any_slot(),
+            last_block_slot in root::any_slot(),
         ) -> RollingStats {
             RollingStats {
                 produced_utxos,
                 consumed_utxos,
                 gathered_fees,
                 blocks_minted,
+                tx_count,
+                output,
+                first_block_slot,
+                last_block_slot,
                 ..Default::default()
             }
         }
@@ -442,11 +500,19 @@ pub struct EpochStatsUpdate {
     pub(crate) reserve_mirs: Lovelace,
     pub(crate) treasury_mirs: Lovelace,
     pub(crate) non_overlay_blocks_minted: u32,
+    pub(crate) tx_count: u64,
+    pub(crate) output: u128,
+    pub(crate) block_slot: u64,
 
     // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
     // can't be recovered by set subtraction (a pool in both prev and self would be removed).
     pub(crate) was_new: bool,
     pub(crate) prev_registered_pools: HashSet<PoolHash>,
+
+    // undo for first/last block slot: min/max are not reversible by arithmetic,
+    // so the pre-apply values are captured to restore them exactly.
+    pub(crate) prev_first_block_slot: u64,
+    pub(crate) prev_last_block_slot: u64,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
@@ -484,6 +550,21 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.reserve_mirs += self.reserve_mirs;
         stats.treasury_mirs += self.treasury_mirs;
         stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
+        stats.tx_count += self.tx_count;
+        stats.output += self.output;
+
+        // Capture the pre-apply slots so `undo` can restore them (first/last
+        // are min/max, not reversible by arithmetic).
+        self.prev_first_block_slot = stats.first_block_slot;
+        self.prev_last_block_slot = stats.last_block_slot;
+
+        // `first_block_slot` is set only once (the epoch's earliest block);
+        // `last_block_slot` always advances to the most recent block. Blocks
+        // roll in slot order, so this yields the correct min/max.
+        if stats.first_block_slot == 0 {
+            stats.first_block_slot = self.block_slot;
+        }
+        stats.last_block_slot = self.block_slot;
 
         stats.registered_pools = stats
             .registered_pools
@@ -522,6 +603,11 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.reserve_mirs -= self.reserve_mirs;
         stats.treasury_mirs -= self.treasury_mirs;
         stats.non_overlay_blocks_minted -= self.non_overlay_blocks_minted;
+        stats.tx_count -= self.tx_count;
+        stats.output -= self.output;
+
+        stats.first_block_slot = self.prev_first_block_slot;
+        stats.last_block_slot = self.prev_last_block_slot;
 
         stats.registered_pools = self.prev_registered_pools.clone();
     }
@@ -1549,10 +1635,14 @@ mod prop_tests {
             new_accounts in 0u64..100u64,
             removed_accounts in 0u64..100u64,
             withdrawals in root::any_lovelace(),
+            tx_count in 0u64..1000u64,
+            output in 0u128..u128::from(u64::MAX),
+            block_slot in root::any_slot(),
         ) -> EpochStatsUpdate {
             EpochStatsUpdate {
                 epoch, block_fees, utxo_delta,
                 new_accounts, removed_accounts, withdrawals,
+                tx_count, output, block_slot,
                 ..EpochStatsUpdate::default()
             }
         }
