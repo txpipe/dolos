@@ -230,8 +230,20 @@ impl LedgerHarness {
             genesis,
         };
 
-        // 5. Bootstrap (integrity check + drain pending work)
-        domain.bootstrap()?;
+        // 5. Seed WAL from state cursor so the integrity check accepts
+        //    seed-based runs. Mirrors CLI's seed_wal_from_state (#950).
+        if let Some(cursor) = domain.state.read_cursor()? {
+            if cursor.is_fully_defined() {
+                domain.wal.reset_to(&cursor)?;
+            }
+        }
+
+        // 6. Integrity check only. We skip the rest of `bootstrap()`
+        //    (catch_up_stores + drain_pending_work) because the harness
+        //    uses NoOp archive/index stores, and catch_up_indexes would
+        //    try to decode the synthetic `LogValue::origin()` block
+        //    produced by `reset_to` and fail.
+        domain.check_integrity()?;
 
         Ok(Self {
             domain,
