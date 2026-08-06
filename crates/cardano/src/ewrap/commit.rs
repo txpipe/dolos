@@ -62,49 +62,6 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// EpochState-specific variant of `stream_and_apply_namespace` that
-    /// returns the post-apply singleton so callers can refresh
-    /// `self.ending_state` (and pass the finalised state to archive
-    /// writes that would otherwise carry the stale pre-commit snapshot).
-    fn apply_epoch_state_deltas<D>(
-        &mut self,
-        state: &D::State,
-        writer: &<D::State as StateStore>::Writer,
-    ) -> Result<Option<EpochState>, ChainError>
-    where
-        D: Domain,
-    {
-        let records = state.iter_entities_typed::<EpochState>(EpochState::NS, None)?;
-        let mut applied: Option<EpochState> = None;
-
-        for record in records {
-            let (entity_id, entity) = record?;
-
-            let to_apply = self
-                .deltas
-                .entities
-                .remove(&NsKey::from((EpochState::NS, entity_id.clone())));
-
-            if let Some(to_apply) = to_apply {
-                let mut value: Option<CardanoEntity> = Some(entity.into());
-
-                for mut delta in to_apply {
-                    delta.apply(&mut value);
-                }
-
-                writer.save_entity_typed(EpochState::NS, &entity_id, value.as_ref())?;
-
-                if let Some(CardanoEntity::EpochState(boxed)) = value {
-                    applied = Some(*boxed);
-                }
-            } else {
-                trace!(ns = EpochState::NS, key = %entity_id, "no deltas for entity");
-            }
-        }
-
-        Ok(applied)
-    }
-
     /// Commit a single per-shard run: apply per-account deltas (rewards +
     /// drops) and the `EWrapProgress` delta against `EpochState`,
     /// flush archive logs (`{Leader,Member}RewardLog`), and delete applied
@@ -129,8 +86,9 @@ impl BoundaryWork {
             self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
         }
 
-        // EpochState gets the EWrapProgress delta (single entity).
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+        // EpochState gets the EWrapProgress delta.
+        self.deltas
+            .apply_singleton::<EpochState, _>(state, &writer)?;
 
         // Delete applied pending rewards.
         debug!(
@@ -215,7 +173,10 @@ impl BoundaryWork {
         // Capture the post-apply state so the archive write below sees
         // the finalised EpochState rather than the pre-commit snapshot
         // still cached on `self.ending_state`.
-        if let Some(applied) = self.apply_epoch_state_deltas::<D>(state, &writer)? {
+        if let Some(applied) = self
+            .deltas
+            .apply_singleton::<EpochState, _>(state, &writer)?
+        {
             self.ending_state = applied;
         }
 

@@ -9,6 +9,13 @@ use dolos_core::{
 use std::sync::Arc;
 use std::sync::RwLock;
 
+/// A bare in-memory state store with the Cardano schema and no cursor —
+/// the "genesis never ran" starting condition, typed as `ToyDomain`'s
+/// state so domain-generic code can run against it.
+pub fn empty_state_store() -> dolos_redb3::state::StateStore {
+    dolos_redb3::state::StateStore::in_memory(dolos_cardano::model::build_schema()).unwrap()
+}
+
 pub fn seed_random_memory_store(utxo_generator: impl UtxoGenerator) -> impl StateStore {
     let store = MemoryStateStore::new();
 

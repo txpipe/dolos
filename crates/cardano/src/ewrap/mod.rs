@@ -154,6 +154,11 @@ pub struct BoundaryWork {
     pub retiring_dreps: Vec<DRep>,
     pub reregistrating_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
+    /// `GovState::num_dormant_epochs` at the boundary. Stored DRep expiries
+    /// carry no dormancy credit, so the expiry check adds the counter back
+    /// (`actual = stored + dormant`, Haskell-style).
+    pub num_dormant_epochs: u64,
+
     // computed via visitors
     pub deltas: WorkDeltas,
     pub logs: Vec<(EntityKey, CardanoEntity)>,
