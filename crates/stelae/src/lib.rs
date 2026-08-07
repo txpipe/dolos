@@ -271,6 +271,14 @@ pub enum Error {
         blob: String,
     },
 
+    /// A repository name an operator gave that cannot address a repository.
+    ///
+    /// Raised while *reading* a name, never while using one, so a caller can
+    /// refuse a typo before it does anything the typo would have cost.
+    #[cfg(feature = "oci")]
+    #[error("{value:?} is not an OCI repository: {reason}")]
+    InvalidRepository { value: String, reason: String },
+
     /// Anything the registry client reported.
     #[cfg(feature = "oci")]
     #[error("registry error: {0}")]

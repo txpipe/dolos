@@ -86,12 +86,14 @@ use stelae::{
     Digest, SteleReader as _,
 };
 
-/// How a repository is named, re-exported so the binary need not name the
-/// protocol crate to hold an operator's `--repo` to the distribution grammar.
+/// How a repository is named, re-exported so the binary can take one from an
+/// operator without reaching into the protocol crate itself.
 ///
+/// The type is the transport's, and so is every rule about what makes a name
+/// usable — the distribution grammar lives with the client that defines it.
 /// The profile is the only thing in `dolos` that reaches into `stelae`, here as
 /// everywhere else.
-pub use stelae::oci::Reference;
+pub use stelae::oci::{Repository, SCHEME};
 
 use crate::{
     export::{self, Plan, Predecessor},
@@ -108,9 +110,13 @@ use crate::{
 /// is the thing an operator means, and rendering it back into a tag is the
 /// profile's job through [`stelae::Profile::tag_for_sequence`]. Nothing here
 /// builds a tag by formatting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Point {
     /// The most recent stele in the repository — the moving tag.
+    ///
+    /// The default, because it is what an operator restoring a node wants
+    /// without having to know which epoch the publisher last closed.
+    #[default]
     Latest,
     /// The stele published for a given epoch — the immutable tag.
     Epoch(u64),
@@ -208,13 +214,8 @@ where
 /// **Never call any of this from inside an async context.** The transport owns
 /// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
 /// module documentation states the rule and the reason.
-pub fn open(
-    host: impl Into<String>,
-    repository: impl Into<String>,
-    insecure: bool,
-) -> Result<Registry, Error> {
+pub fn open(repository: &Repository, insecure: bool) -> Result<Registry, Error> {
     Ok(Registry::open(
-        host,
         repository,
         Options {
             insecure,

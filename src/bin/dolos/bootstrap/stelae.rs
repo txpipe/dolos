@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use dolos_core::config::RootConfig;
 use miette::{Context as _, IntoDiagnostic as _};
 
-use crate::repo::RepoRef;
+use dolos_snapshot::registry::{self, Point, Repository};
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
@@ -95,7 +95,7 @@ pub enum Source {
     /// A stele directory on this filesystem.
     Dir(PathBuf),
     /// A stele repository in an OCI registry.
-    Repo(RepoRef),
+    Repo(Repository),
 }
 
 impl std::str::FromStr for Source {
@@ -114,58 +114,17 @@ impl std::str::FromStr for Source {
             return Ok(Self::Dir(PathBuf::from(path)));
         }
 
-        if raw.starts_with("oci://") {
-            return raw.parse::<RepoRef>().map(Self::Repo);
+        if raw.starts_with(registry::SCHEME) {
+            return raw
+                .parse::<Repository>()
+                .map(Self::Repo)
+                .map_err(|e| e.to_string());
         }
 
         Err(format!(
-            "{raw:?} is not a stele source; it is `file://DIR` or `oci://HOST/PATH`"
+            "{raw:?} is not a stele source; it is `file://DIR` or `{}HOST/PATH`",
+            registry::SCHEME,
         ))
-    }
-}
-
-/// Which stele in a repository to read.
-///
-/// A thin newtype over the profile's own [`dolos_snapshot::registry::Point`] in
-/// a build that has one, and a parsed-but-unusable value in a build that does
-/// not. The parse has to exist either way — clap needs a type for the flag, and
-/// a flag that only parses under a feature would be a different command
-/// depending on how it was built — so the refusal lands in [`run`], where it
-/// can name the feature.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Point {
-    #[default]
-    Latest,
-    Epoch(u64),
-}
-
-impl std::str::FromStr for Point {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        if raw == "latest" {
-            return Ok(Self::Latest);
-        }
-
-        if let Some(epoch) = raw.strip_prefix("epoch-") {
-            return epoch
-                .parse::<u64>()
-                .map(Self::Epoch)
-                .map_err(|e| format!("{raw:?} does not name an epoch: {e}"));
-        }
-
-        Err(format!(
-            "{raw:?} is not a point in a stele repository; it is `latest` or `epoch-N`"
-        ))
-    }
-}
-
-impl std::fmt::Display for Point {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Latest => write!(f, "latest"),
-            Self::Epoch(epoch) => write!(f, "epoch-{epoch}"),
-        }
     }
 }
 
@@ -237,26 +196,18 @@ fn restore_dir(config: &RootConfig, dir: &std::path::Path, resume: bool) -> miet
     Ok(())
 }
 
-#[cfg(feature = "registry")]
 fn restore_repo(
     config: &RootConfig,
-    repo: &RepoRef,
+    repo: &Repository,
     point: Point,
     insecure: bool,
     resume: bool,
 ) -> miette::Result<()> {
-    use dolos_snapshot::registry;
-
     let node = Node::open(config)?;
 
-    let registry = registry::open(&repo.host, &repo.repository, insecure)
+    let registry = registry::open(repo, insecure)
         .into_diagnostic()
         .context("opening the repository")?;
-
-    let point = match point {
-        Point::Latest => registry::Point::Latest,
-        Point::Epoch(epoch) => registry::Point::Epoch(epoch),
-    };
 
     println!("source:   {repo} ({point})");
 
@@ -268,25 +219,6 @@ fn restore_repo(
     report(&plan, &outlook, &summary);
 
     Ok(())
-}
-
-/// The same command in a build that has no registry client.
-///
-/// A clean refusal naming the feature, rather than a source that parses and
-/// then does nothing. The `registry` feature is default-off because the TLS
-/// stack it brings needs `cmake` to build.
-#[cfg(not(feature = "registry"))]
-fn restore_repo(
-    _config: &RootConfig,
-    repo: &RepoRef,
-    _point: Point,
-    _insecure: bool,
-    _resume: bool,
-) -> miette::Result<()> {
-    miette::bail!(
-        "cannot restore from {repo}: this build has no registry client; \
-         rebuild dolos with `--features registry`",
-    )
 }
 
 /// What the run did, in the numbers an operator checks.
@@ -373,61 +305,31 @@ mod tests {
             panic!("an oci url did not parse as a repository");
         };
 
-        assert_eq!(repo.host, "ghcr.io");
-        assert_eq!(repo.repository, "txpipe/dolos-snapshots/mainnet");
+        assert_eq!(repo.registry(), "ghcr.io");
+        assert_eq!(repo.repository(), "txpipe/dolos-snapshots/mainnet");
     }
 
-    /// A malformed repository is refused by the source parse, not carried to
-    /// the registry — the whole reason `--source` is a parsed type.
+    /// A source this command cannot use is refused by the parse, not carried to
+    /// the registry — the whole reason `--source` is a parsed type, and what
+    /// makes the refusal land before `--force` clears anything.
+    ///
+    /// Only the scheme dispatch is this module's. What makes a *repository*
+    /// usable is the transport's and is tested there; these are the two cases
+    /// that get here either way, plus one that proves an unusable repository
+    /// does propagate.
     #[test]
     fn an_unusable_source_is_refused() {
         for raw in [
-            "oci://ghcr.io",                    // no repository path
-            "oci://ghcr.io/txpipe/dolos:v1",    // a tag; `--point` names steles
             "https://example.invalid/snapshot", // not a scheme this understands
             "/var/lib/dolos/stele",             // a path is not a URL
             "file://",
             "",
+            // And a repository the transport refuses is refused here too,
+            // rather than being carried as far as a connection.
+            "oci://ghcr.io",
+            "oci://ghcr.io/txpipe/dolos:v1",
         ] {
             assert!(raw.parse::<Source>().is_err(), "{raw:?}");
-        }
-    }
-
-    /// The CLI's point and the profile's agree on their spelling.
-    ///
-    /// Two types rather than one because the profile's lives behind the
-    /// `registry` feature and this flag must parse in every build. That makes
-    /// drift possible, so it is pinned: `--point epoch-500` here and
-    /// `registry::Point::Epoch(500)` there have to print the same tag.
-    #[test]
-    fn a_point_names_latest_or_an_epoch() {
-        assert_eq!("latest".parse::<Point>().unwrap(), Point::Latest);
-        assert_eq!("epoch-500".parse::<Point>().unwrap(), Point::Epoch(500));
-        assert_eq!(Point::default(), Point::Latest);
-
-        assert_eq!(Point::Latest.to_string(), "latest");
-        assert_eq!(Point::Epoch(500).to_string(), "epoch-500");
-
-        for raw in ["epoch", "epoch-", "epoch-abc", "500", "Latest", ""] {
-            assert!(raw.parse::<Point>().is_err(), "{raw:?}");
-        }
-    }
-
-    #[cfg(feature = "registry")]
-    #[test]
-    fn the_two_points_render_the_same_tag() {
-        use dolos_snapshot::registry;
-
-        assert_eq!(
-            Point::Latest.to_string(),
-            registry::Point::Latest.to_string()
-        );
-
-        for epoch in [0, 1, 500] {
-            assert_eq!(
-                Point::Epoch(epoch).to_string(),
-                registry::Point::Epoch(epoch).to_string(),
-            );
         }
     }
 }

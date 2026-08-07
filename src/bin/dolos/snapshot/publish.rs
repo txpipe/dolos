@@ -5,7 +5,7 @@ use dolos_core::config::RootConfig;
 use dolos_snapshot::export;
 use miette::{Context as _, IntoDiagnostic as _};
 
-use crate::repo::RepoRef;
+use dolos_snapshot::registry::{self, Repository};
 
 /// Where a stele goes, and it goes to exactly one place.
 ///
@@ -27,7 +27,7 @@ pub struct Args {
     /// OCI repository to publish into, e.g.
     /// `oci://ghcr.io/txpipe/dolos-mainnet`
     #[arg(long, value_name = "OCI_URL")]
-    repo: Option<RepoRef>,
+    repo: Option<Repository>,
 
     /// epochs to write layers for, e.g. `500..520`, `500..=520`, `500..`,
     /// `..520` or `500`; defaults to every epoch below the cursor
@@ -206,16 +206,13 @@ fn to_directory(
 /// The report is what a publisher wants to check rather than trust: how much of
 /// this stele was inherited rather than built, and how much of it moved. Both
 /// are numbers the code counted, not an inference from a duration.
-#[cfg(feature = "registry")]
 fn to_repository(
     args: &Args,
-    repo: &RepoRef,
+    repo: &Repository,
     plan: &export::Plan,
     stores: &crate::common::Stores,
 ) -> miette::Result<()> {
-    use dolos_snapshot::registry;
-
-    let registry = registry::open(&repo.host, &repo.repository, args.insecure)
+    let registry = registry::open(repo, args.insecure)
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -235,10 +232,7 @@ fn to_repository(
         println!("history:  {} entries", preview.history);
         println!("reuse:    {} layers carried forward", preview.layers_reused);
         println!("build:    {} layers", preview.layers_built);
-        println!(
-            "dry run: nothing written to oci://{}/{}",
-            repo.host, repo.repository
-        );
+        println!("dry run: nothing written to {repo}");
 
         return Ok(());
     }
@@ -257,7 +251,7 @@ fn to_repository(
 
     let transfer = published.transfer;
 
-    println!("wrote oci://{}/{}", repo.host, repo.repository);
+    println!("wrote {repo}");
     println!("history:  {} entries", published.inscription.history.len());
     println!(
         "layers:   {} ({} built, {} carried forward)",
@@ -280,26 +274,6 @@ fn to_repository(
     println!("identity: {}", published.identity);
 
     Ok(())
-}
-
-/// The same command in a build that has no registry client.
-///
-/// A clean refusal naming the feature, rather than a flag that parses and then
-/// does nothing. The `registry` feature is default-off because the TLS stack it
-/// brings needs `cmake` to build.
-#[cfg(not(feature = "registry"))]
-fn to_repository(
-    _args: &Args,
-    repo: &RepoRef,
-    _plan: &export::Plan,
-    _stores: &crate::common::Stores,
-) -> miette::Result<()> {
-    miette::bail!(
-        "cannot publish to oci://{}/{}: this build has no registry client; \
-         rebuild dolos with `--features registry`",
-        repo.host,
-        repo.repository,
-    )
 }
 
 #[cfg(test)]

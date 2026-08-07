@@ -574,8 +574,9 @@ impl Fixture {
 
     fn registry(&self, repository: &str) -> Registry {
         Registry::open(
-            format!("127.0.0.1:{}", self.port),
-            repository.to_owned(),
+            &format!("oci://127.0.0.1:{}/{repository}", self.port)
+                .parse()
+                .expect("the fixture named a usable repository"),
             Options {
                 insecure: true,
                 scratch_dir: None,
@@ -1221,8 +1222,9 @@ fn staging_stays_in_the_scratch_directory_and_leaves_nothing() {
 
     let scratch = tempfile::tempdir().unwrap();
     let registry = Registry::open(
-        format!("127.0.0.1:{}", fixture.port),
-        "stelae/scratch".to_owned(),
+        &format!("oci://127.0.0.1:{}/stelae/scratch", fixture.port)
+            .parse()
+            .expect("the fixture named a usable repository"),
         Options {
             insecure: true,
             scratch_dir: Some(scratch.path().to_owned()),

@@ -126,7 +126,7 @@ fn an_unusable_source_is_refused_before_force_clears_anything() {
     let node = Node::new();
     node.sync();
 
-    let mut cases = vec![
+    let cases = [
         // Not a scheme this understands: the message names both that are.
         ("https://example.invalid/snapshot", "file://DIR"),
         ("/var/lib/dolos/stele", "file://DIR"),
@@ -135,16 +135,15 @@ fn an_unusable_source_is_refused_before_force_clears_anything() {
         ("oci:///txpipe/dolos", "no registry host"),
         // A tag is `--point`'s to name, not the URL's.
         ("oci://ghcr.io/txpipe/dolos:v1", "names a tag or a digest"),
+        // Held to the distribution grammar, which is the check that saves an
+        // operator from an opaque error out of someone else's server hours
+        // later.
+        ("oci://ghcr.io/TxPipe/dolos", "not a valid OCI name"),
+        // And the one a hand-written splitter cannot make: `dolos` is not a
+        // host the grammar recognises, so this would silently address Docker
+        // Hub.
+        ("oci://dolos/mainnet", "docker.io"),
     ];
-
-    // The distribution grammar arrives with the registry client, so a build
-    // without one cannot make this check — and does not need to: it refuses
-    // every `oci://` source outright, by feature name. Gated rather than
-    // dropped, because the check is the one that saves an operator from an
-    // opaque error out of someone else's server.
-    if cfg!(feature = "registry") {
-        cases.push(("oci://ghcr.io/TxPipe/dolos", "not a valid OCI name"));
-    }
 
     for (source, expected) in cases {
         let output = node.bootstrap_stelae(source);

@@ -125,7 +125,11 @@ impl Fixture {
     /// layers and the transfer counters live in the transport, and a test
     /// comparing two publishes wants two of them.
     pub fn repository(&self, name: &str) -> Registry {
-        registry::open(format!("127.0.0.1:{}", self.port), name.to_owned(), true).unwrap()
+        let repository = format!("oci://127.0.0.1:{}/{name}", self.port)
+            .parse()
+            .expect("the fixture named a usable repository");
+
+        registry::open(&repository, true).unwrap()
     }
 }
 

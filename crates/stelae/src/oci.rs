@@ -90,13 +90,6 @@ use oci_client::{
     Client,
 };
 
-/// The reference type this transport addresses a repository by.
-///
-/// Re-exported because its `FromStr` is the distribution grammar — lowercase
-/// name components, `.`/`_`/`-` separators, no empty segments — and a caller
-/// taking a repository from an operator wants that verdict rather than a second
-/// copy of the grammar of its own. `dolos snapshot publish --repo` is the
-/// caller that does.
 pub use oci_client::Reference;
 
 use crate::{
@@ -194,6 +187,124 @@ pub struct Options {
     pub scratch_dir: Option<PathBuf>,
 }
 
+/// A repository an operator named, as `oci://HOST/PATH`.
+///
+/// The `oci://` scheme is not this project's invention — it is how Helm, ORAS
+/// and the rest of the ecosystem spell "this URL names an OCI registry
+/// reference" — so parsing it belongs here, beside the client, rather than in
+/// every command that takes one from a human.
+///
+/// **Everything about the name is decided here, once.** That is the whole point
+/// of the type: [`Registry::open`] used to take the host and the repository
+/// path as two already-split strings, which meant every caller split the URL
+/// itself and then handed back the pieces this module immediately glued
+/// together again — while the only crate holding the grammar to split it
+/// *correctly* was this one.
+///
+/// Three things are refused, and the third is the one a hand-written splitter
+/// gets wrong:
+///
+/// - **A tag or a digest.** `oci://…/dolos:v1` names a stele, and which stele
+///   is not part of naming the repository — a profile renders the tags, and a
+///   caller that wants a particular one says so separately.
+/// - **An empty host or path**, so the two halves a client needs both exist.
+/// - **A host the distribution grammar would have inferred rather than read.**
+///   [`Reference`]'s own parser applies registry defaults: a first component
+///   with no dot and no colon is not a host at all, and `dolos/mainnet`
+///   silently becomes `docker.io/dolos/mainnet`. Parsing and then checking that
+///   the registry it reports is the text the operator actually wrote is what
+///   turns that rewrite into a refusal. It also buys the rest of the grammar —
+///   lowercase components, `.`/`_`/`-` separators, no empty segments — from the
+///   parser that defines it rather than from a second copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Repository {
+    registry: String,
+    repository: String,
+}
+
+impl Repository {
+    /// The registry host, with its port if it has one.
+    pub fn registry(&self) -> &str {
+        &self.registry
+    }
+
+    /// The repository path within that registry.
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+}
+
+impl std::str::FromStr for Repository {
+    type Err = Error;
+
+    fn from_str(raw: &str) -> Result<Self, Error> {
+        let bad = |why: &str| Error::InvalidRepository {
+            value: raw.to_owned(),
+            reason: why.to_owned(),
+        };
+
+        let rest = raw
+            .strip_prefix(SCHEME)
+            .ok_or_else(|| bad(&format!("it does not start with `{SCHEME}`")))?;
+
+        let (registry, repository) = rest
+            .split_once('/')
+            .ok_or_else(|| bad("it names a registry but no repository path"))?;
+
+        if registry.is_empty() {
+            return Err(bad("it names no registry host"));
+        }
+
+        if repository.is_empty() || repository.ends_with('/') {
+            return Err(bad("it names no repository path"));
+        }
+
+        // A host may carry a port, so only the path is asked about a reference.
+        if repository.contains(':') || repository.contains('@') {
+            return Err(bad(
+                "it names a tag or a digest, and which stele to read is not part of naming \
+                 the repository",
+            ));
+        }
+
+        let reference: Reference = rest
+            .parse()
+            .map_err(|_| bad("its repository path is not a valid OCI name"))?;
+
+        // The parser applies registry defaults, so a first component it did not
+        // recognise as a host became part of the repository under `docker.io`.
+        // Publishing to a registry the operator did not name is worse than
+        // refusing, and this comparison is the only thing standing between the
+        // two.
+        if reference.registry() != registry {
+            return Err(bad(&format!(
+                "{registry:?} is not a registry host, so this would address \
+                 {:?} instead",
+                reference.registry(),
+            )));
+        }
+
+        Ok(Self {
+            registry: registry.to_owned(),
+            repository: repository.to_owned(),
+        })
+    }
+}
+
+/// Back in the spelling it was read from, so an error message names what the
+/// operator typed.
+impl std::fmt::Display for Repository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{SCHEME}{}/{}", self.registry, self.repository)
+    }
+}
+
+/// The URL scheme an OCI registry reference is named by.
+///
+/// The ecosystem's, not this protocol's: Helm, ORAS and others already use it
+/// for exactly this.
+pub const SCHEME: &str = "oci://";
+
 /// A stele repository in an OCI registry.
 ///
 /// Implements [`SteleWriter`], so a profile publishes into it exactly as it
@@ -225,17 +336,19 @@ struct PushState {
 }
 
 impl Registry {
-    /// Open `repository` on `registry` — e.g. `ghcr.io` and
-    /// `txpipe/dolos-snapshots/mainnet`.
+    /// Open a repository — e.g. `oci://ghcr.io/txpipe/dolos-snapshots/mainnet`,
+    /// already parsed into a [`Repository`].
+    ///
+    /// Takes the name as one value rather than as a pre-split pair, because
+    /// splitting it correctly needs the distribution grammar and this is the
+    /// only crate that has it. A caller holding a string an operator typed
+    /// parses it into a [`Repository`] and hands that over; nothing outside
+    /// this module needs to know where the host ends.
     ///
     /// Builds the current-thread runtime the whole transport runs on. Reads
     /// [`TOKEN_ENV`] once, here, so a token never has to be threaded through a
     /// profile's call stack.
-    pub fn open(
-        registry: impl Into<String>,
-        repository: impl Into<String>,
-        options: Options,
-    ) -> Result<Self, Error> {
+    pub fn open(repository: &Repository, options: Options) -> Result<Self, Error> {
         let protocol = if options.insecure {
             ClientProtocol::Http
         } else {
@@ -250,8 +363,8 @@ impl Registry {
         // The tag is never read: `Reference` is the client's way of naming a
         // repository, and every manifest operation below builds its own.
         let reference = Reference::with_tag(
-            registry.into(),
-            repository.into(),
+            repository.registry.clone(),
+            repository.repository.clone(),
             crate::MOVING_TAG.to_owned(),
         );
 
@@ -1267,6 +1380,104 @@ mod tests {
         assert!(is_absent(&server_error(404)));
         assert!(is_absent(&envelope(OciErrorCode::ManifestUnknown)));
         assert!(is_absent(&envelope(OciErrorCode::NameUnknown)));
+    }
+
+    fn repository(raw: &str) -> Result<Repository, Error> {
+        raw.parse()
+    }
+
+    #[test]
+    fn a_repository_splits_into_a_registry_and_a_path() {
+        let parsed = repository("oci://ghcr.io/txpipe/dolos-snapshots/mainnet").unwrap();
+
+        assert_eq!(parsed.registry(), "ghcr.io");
+        assert_eq!(parsed.repository(), "txpipe/dolos-snapshots/mainnet");
+
+        // A port belongs to the host, which is what makes the tag check safe to
+        // run on the path alone.
+        let local = repository("oci://127.0.0.1:5000/dolos").unwrap();
+
+        assert_eq!(local.registry(), "127.0.0.1:5000");
+        assert_eq!(local.repository(), "dolos");
+
+        // And what it prints is what it parsed, so a message naming a
+        // repository names the one the operator typed.
+        assert_eq!(local.to_string(), "oci://127.0.0.1:5000/dolos");
+    }
+
+    #[test]
+    fn ordinary_repositories_parse() {
+        for raw in [
+            "oci://ghcr.io/txpipe/dolos-snapshots/mainnet",
+            "oci://ghcr.io/txpipe/dolos_snapshots",
+            "oci://ghcr.io/txpipe/dolos.snapshots",
+            "oci://localhost:5000/dolos/mainnet",
+            "oci://127.0.0.1:5000/dolos",
+        ] {
+            assert!(repository(raw).is_ok(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_cannot_address_a_repository_is_refused() {
+        for raw in [
+            "ghcr.io/txpipe/dolos",                  // no scheme
+            "https://ghcr.io/txpipe/dolos",          // the wrong scheme
+            "oci://ghcr.io",                         // no repository path
+            "oci://ghcr.io/",                        // still no repository path
+            "oci:///txpipe/dolos",                   // no host
+            "oci://ghcr.io/txpipe/dolos/",           // a trailing slash
+            "oci://ghcr.io/txpipe/dolos:v1",         // a tag names a stele
+            "oci://ghcr.io/txpipe/dolos@sha256:abc", // and so does a digest
+            "",
+        ] {
+            assert!(repository(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    /// Names the distribution grammar refuses, which a split on `/` alone
+    /// cannot see.
+    ///
+    /// Each of these reaches the registry as part of the request path, so
+    /// accepting them buys an opaque error from someone else's server at the
+    /// end of a publish rather than a sentence at the start of one.
+    #[test]
+    fn a_path_outside_the_grammar_is_refused() {
+        for raw in [
+            "oci://ghcr.io//txpipe/dolos",      // an empty component
+            "oci://ghcr.io/txpipe//dolos",      // an empty component, inside
+            "oci://ghcr.io/TxPipe/dolos",       // uppercase; names are lowercase
+            "oci://ghcr.io/txpipe/dolos?x=1",   // a query
+            "oci://ghcr.io/txpipe/dolos#frag",  // a fragment
+            "oci://ghcr.io/txpipe/dolos snaps", // whitespace
+            "oci://ghcr.io/txpipe/-dolos",      // a component opening on a separator
+        ] {
+            assert!(repository(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    /// The refusal a hand-written splitter cannot make.
+    ///
+    /// `Reference`'s parser treats a first component with no dot and no colon
+    /// as part of the repository rather than as a host, so `dolos/mainnet`
+    /// resolves to `docker.io/dolos/mainnet`. An operator who wrote
+    /// `oci://dolos/mainnet` meant a registry called `dolos`, and publishing to
+    /// Docker Hub instead is the one outcome worse than refusing.
+    #[test]
+    fn a_host_the_parser_would_have_invented_is_refused() {
+        let err = repository("oci://dolos/mainnet").unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("docker.io"), "{message}");
+        assert!(message.contains("dolos"), "{message}");
+
+        // `localhost` is the one bare name the grammar does treat as a host, so
+        // it must still work — the check is against inference, not against
+        // hosts that happen to have no dot.
+        assert_eq!(
+            repository("oci://localhost:5000/dolos").unwrap().registry(),
+            "localhost:5000"
+        );
     }
 
     /// The half that carries the weight: a registry that failed is not a
