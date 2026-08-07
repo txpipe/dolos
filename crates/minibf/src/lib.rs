@@ -466,6 +466,7 @@ where
             "/blocks/slot/{slot_number}",
             get(routes::blocks::by_slot::<D>),
         )
+        .route("/epochs/latest", get(routes::epochs::latest::<D>))
         .route("/epochs/{epoch}", get(routes::epochs::by_number::<D>))
         .route(
             "/epochs/{epoch}/next",

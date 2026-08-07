@@ -8,7 +8,7 @@ use blockfrost_openapi::models::{
 };
 use pallas::ledger::{primitives::Epoch, traverse::MultiEraBlock};
 
-use dolos_cardano::{model::EpochState, ChainSummary};
+use dolos_cardano::{model::EpochState, rupd::StakeSnapshot, ChainSummary, EraProtocol};
 use dolos_core::{archive::Skippable as _, ArchiveStore, Domain};
 
 use crate::{
@@ -36,6 +36,7 @@ fn build_epoch_content<D: Domain>(
     chain: &ChainSummary,
     epoch: Epoch,
     mut state: EpochState,
+    active_stake: Option<u64>,
 ) -> Result<mapping::EpochContentModelBuilder, StatusCode> {
     // Trust the caller's epoch over `state.number`: the live `EpochState` (used
     // for the current epoch) may not carry the number resolved from the tip.
@@ -65,7 +66,10 @@ fn build_epoch_content<D: Domain>(
         chain.slot_time(rolling.last_block_slot)
     };
 
-    let active_stake = domain.sum_active_stake_for_epoch(epoch, chain)?;
+    let active_stake = match active_stake {
+        Some(active_stake) => Some(active_stake),
+        None => domain.sum_active_stake_for_epoch(epoch, chain)?,
+    };
 
     Ok(mapping::EpochContentModelBuilder {
         state,
@@ -77,6 +81,31 @@ fn build_epoch_content<D: Domain>(
         output: rolling.output,
         active_stake,
     })
+}
+
+async fn derive_current_active_stake<D: Domain>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    current: Epoch,
+) -> Result<u64, StatusCode> {
+    // A stake distribution becomes active three epoch boundaries after it is
+    // live (live -> mark -> set -> go). So the active stake for epoch E is the
+    // stake that was live at E-2. RUPD applies this same offset one epoch back
+    // (it scores E-1 from the snapshot at E-3); here we target the current
+    // epoch, so we read the snapshot at `current - 2`.
+    let stake_epoch = current.saturating_sub(2);
+    let protocol = EraProtocol::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
+    let domain = domain.clone();
+
+    tokio::task::spawn_blocking(move || {
+        StakeSnapshot::load_globals::<D>(domain.state(), current, stake_epoch, protocol)
+            .map(|snapshot| snapshot.active_stake_sum)
+    })
+    .await
+    .map_err(crate::log_and_500(
+        "failed to join current active stake scan",
+    ))?
+    .map_err(crate::log_and_500("failed to derive current active stake"))
 }
 
 fn load_epoch_state<D: Domain>(
@@ -98,6 +127,22 @@ where
     }
 }
 
+pub async fn latest<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<EpochContent>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (current, _) = chain.slot_epoch(tip);
+
+    // The current epoch always has a live `EpochState`, so this never 404s.
+    let state = load_epoch_state(&domain, &chain, current, current)?;
+    let active_stake = derive_current_active_stake(&domain, &chain, current).await?;
+    let model = build_epoch_content(&domain, &chain, current, state, Some(active_stake))?;
+
+    Ok(model.into_response()?)
+}
+
 pub async fn by_number<D: Domain>(
     State(domain): State<Facade<D>>,
     Path(epoch): Path<Epoch>,
@@ -116,7 +161,12 @@ where
     }
 
     let state = load_epoch_state(&domain, &chain, current, epoch)?;
-    let model = build_epoch_content(&domain, &chain, epoch, state)?;
+    let active_stake = if epoch == current {
+        Some(derive_current_active_stake(&domain, &chain, current).await?)
+    } else {
+        None
+    };
+    let model = build_epoch_content(&domain, &chain, epoch, state, active_stake)?;
 
     Ok(model.into_response()?)
 }
@@ -147,7 +197,7 @@ where
         .take(pagination.count)
         .collect();
 
-    collect_epoch_contents(&domain, &chain, current, epochs)
+    collect_epoch_contents(&domain, &chain, current, epochs).await
 }
 
 pub async fn by_number_previous<D: Domain>(
@@ -183,10 +233,10 @@ where
         (low..=high).collect()
     };
 
-    collect_epoch_contents(&domain, &chain, current, epochs)
+    collect_epoch_contents(&domain, &chain, current, epochs).await
 }
 
-fn collect_epoch_contents<D: Domain>(
+async fn collect_epoch_contents<D: Domain>(
     domain: &Facade<D>,
     chain: &ChainSummary,
     current: Epoch,
@@ -195,6 +245,12 @@ fn collect_epoch_contents<D: Domain>(
 where
     Option<EpochState>: From<D::Entity>,
 {
+    let current_active_stake = if epochs.contains(&current) {
+        Some(derive_current_active_stake(domain, chain, current).await?)
+    } else {
+        None
+    };
+
     let mut out = Vec::with_capacity(epochs.len());
     for epoch in epochs {
         let state = if epoch == current {
@@ -207,7 +263,12 @@ where
             }
         };
 
-        let model = build_epoch_content(domain, chain, epoch, state)?;
+        let active_stake = if epoch == current {
+            current_active_stake
+        } else {
+            None
+        };
+        let model = build_epoch_content(domain, chain, epoch, state, active_stake)?;
         out.push(model.into_model()?);
     }
 
@@ -379,6 +440,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn epochs_latest_happy_path() {
+        let app = TestApp::new();
+        let path = "/epochs/latest";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: EpochContent =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        // The synthetic chain's tip sits in epoch 2, so `latest` resolves there.
+        assert_eq!(content.epoch, 2);
+        assert!(content.start_time < content.end_time);
+        assert!(content.active_stake.is_some());
+    }
+
+    #[tokio::test]
+    async fn epochs_latest_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = "/epochs/latest";
+        assert_status(&app, path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
     async fn epochs_by_number_happy_path() {
         let app = TestApp::new();
         let path = "/epochs/1";
@@ -397,6 +486,24 @@ mod tests {
         // The synthetic chain places all blocks in epoch 2, so epoch 1 has no
         // blocks: its aggregates and rolling stats are zero.
         assert!(content.start_time < content.end_time);
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_current_has_active_stake() {
+        let app = TestApp::new();
+        let path = "/epochs/2";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: EpochContent =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        assert!(content.active_stake.is_some());
     }
 
     #[tokio::test]
