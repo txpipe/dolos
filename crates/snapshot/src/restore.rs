@@ -149,7 +149,13 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Self {
-            limits: Limits::default(),
+            // The profile's ceiling, not the protocol's default: a restore that
+            // read under a tighter limit than the publisher wrote under would
+            // refuse this profile's own steles.
+            limits: Limits {
+                max_record: crate::MAX_RECORD,
+                ..Limits::default()
+            },
             commit_records: 50_000,
             commit_bytes: 64 * 1024 * 1024,
         }

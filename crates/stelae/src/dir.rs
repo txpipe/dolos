@@ -325,7 +325,10 @@ impl SteleWriter for SteleDir {
         let file = fs::File::create(&staging.path)?;
 
         let mut sink = LayerSink {
-            sequence: SeqWriter::new(LayerWriter::new(file, level)?),
+            sequence: SeqWriter::with_max_record(
+                LayerWriter::new(file, level)?,
+                profile.max_record(),
+            ),
             staging,
             root: self.root.clone(),
             kind: spec.kind.clone(),

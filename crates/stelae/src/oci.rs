@@ -795,7 +795,10 @@ impl SteleWriter for Registry {
 
         let mut sink = RegistrySink {
             shared: Arc::clone(&self.shared),
-            sequence: SeqWriter::new(LayerWriter::new(self.shared.scratch()?, level)?),
+            sequence: SeqWriter::with_max_record(
+                LayerWriter::new(self.shared.scratch()?, level)?,
+                profile.max_record(),
+            ),
             kind: spec.kind.clone(),
             media_type,
             scope: spec.scope.clone(),

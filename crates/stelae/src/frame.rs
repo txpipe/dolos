@@ -473,22 +473,60 @@ impl<'a> Scanner<'a> {
     }
 }
 
-/// Writes a CBOR sequence, counting the records it emits.
+/// Writes a CBOR sequence, counting the records it emits and holding each to
+/// the ceiling its reader will apply.
 pub struct SeqWriter<W> {
     inner: W,
     count: u64,
+    written: u64,
+    max_record: usize,
 }
 
 impl<W: Write> SeqWriter<W> {
+    /// A writer holding records to [`DEFAULT_MAX_RECORD`].
     pub fn new(inner: W) -> Self {
-        Self { inner, count: 0 }
+        Self::with_max_record(inner, DEFAULT_MAX_RECORD)
+    }
+
+    /// A writer holding records to `max_record`.
+    ///
+    /// `max_record` must be the ceiling the eventual reader is given, which is
+    /// why the profile owns the number rather than each end picking its own —
+    /// see [`crate::profile::Profile::max_record`].
+    pub fn with_max_record(inner: W, max_record: usize) -> Self {
+        Self {
+            inner,
+            count: 0,
+            written: 0,
+            max_record,
+        }
     }
 
     /// Append one record. The [`CanonicalCbor`] type is the proof that it is in
     /// deterministic form, so nothing is re-checked here.
+    ///
+    /// Its *size* is checked, and that check is the writer's whole reason for
+    /// knowing a ceiling. A record past it is refused here rather than written
+    /// and discovered by whoever tries to read the layer back: a stele whose
+    /// records no reader will accept is not a stele, and the publisher is the
+    /// only party positioned to say so while the fix is still cheap. Reported
+    /// in the record's offset within the layer, the same coordinate
+    /// [`RecordReader`] fails in, so the two ends name the same byte.
     pub fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), Error> {
-        self.inner.write_all(record.as_bytes())?;
+        let bytes = record.as_bytes();
+
+        if bytes.len() > self.max_record {
+            return Err(Error::RecordTooLarge {
+                offset: self.written as usize,
+                required: bytes.len() as u64,
+                limit: self.max_record,
+            });
+        }
+
+        self.inner.write_all(bytes)?;
         self.count += 1;
+        self.written += bytes.len() as u64;
+
         Ok(())
     }
 
@@ -1220,6 +1258,80 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(rewriter.into_inner(), written);
+    }
+
+    /// The writer refuses what the reader would refuse, at the same ceiling.
+    ///
+    /// Regression for a stele that published cleanly and restored nowhere: the
+    /// reader held records to 16 MiB, nothing held the writer to anything, and
+    /// a profile with a 24 MiB record produced 928 layers, a valid manifest and
+    /// an artifact whose first oversized record ended every restore of it.
+    #[test]
+    fn writer_refuses_a_record_past_its_ceiling() {
+        let big = encode(|e| {
+            e.bytes(&[0u8; 4096])?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut writer = SeqWriter::with_max_record(Vec::new(), 1024);
+        let err = writer.write_record(&big).unwrap_err();
+
+        assert!(
+            matches!(err, Error::RecordTooLarge { limit: 1024, .. }),
+            "{err:?}"
+        );
+
+        // Refused before the write, so nothing partial reached the sink.
+        assert_eq!(writer.count(), 0);
+        assert!(writer.into_inner().is_empty());
+    }
+
+    /// The offset a refusal names is the record's offset in the layer, so a
+    /// publisher and a reader failing on the same record report the same byte.
+    #[test]
+    fn writer_refusal_names_the_offset_the_reader_would() {
+        let small = encode(|e| {
+            e.bytes(&[0u8; 8])?;
+            Ok(())
+        })
+        .unwrap();
+        let big = encode(|e| {
+            e.bytes(&[0u8; 4096])?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut writer = SeqWriter::with_max_record(Vec::new(), 1024);
+        writer.write_record(&small).unwrap();
+        writer.write_record(&small).unwrap();
+
+        let err = writer.write_record(&big).unwrap_err();
+        let Error::RecordTooLarge { offset, .. } = err else {
+            panic!("{err:?}");
+        };
+
+        assert_eq!(offset, small.as_bytes().len() * 2);
+    }
+
+    /// A profile that raises its ceiling can write what the default refuses,
+    /// which is the whole point of the number being the profile's.
+    #[test]
+    fn a_raised_ceiling_admits_a_record_the_default_would_refuse() {
+        let record = encode(|e| {
+            e.bytes(&[0u8; DEFAULT_MAX_RECORD + 1])?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(SeqWriter::new(Vec::new()).write_record(&record).is_err());
+
+        let mut writer = SeqWriter::with_max_record(Vec::new(), DEFAULT_MAX_RECORD * 4);
+        writer
+            .write_record(&record)
+            .expect("within the raised ceiling");
+
+        assert_eq!(writer.count(), 1);
     }
 
     #[test]
