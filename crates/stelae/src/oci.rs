@@ -80,12 +80,15 @@
 //! build time to run time.
 //!
 //! **A process that opens a [`Registry`] must have installed a process-default
-//! [`rustls`] `CryptoProvider` before the first connection.** Nothing here can
-//! do it — the choice of provider belongs to the program, not to one of its
+//! [`rustls`] `CryptoProvider` before it does so.** Nothing here can do it —
+//! the choice of provider belongs to the program, not to one of its
 //! transports, and a library that installed one would silently win a race
-//! against whatever its host had chosen. Omitting it fails at the first
-//! request rather than at the build, which is the worse failure mode being
-//! bought: an operator sees a connection error, not a link error.
+//! against whatever its host had chosen. Omitting it panics inside
+//! [`Registry::open`], where `oci-client` builds its HTTP client: `reqwest`
+//! resolves its TLS backend there, before any request and before any URL
+//! scheme, so [`Options::insecure`] does not spare a plaintext registry.
+//! That is the worse failure mode being bought — a runtime abort rather than a
+//! link error — though the panic does name the missing feature.
 //!
 //! In Dolos this is `main()`, which installs `ring` for `mithril-client`'s
 //! sake and covers this transport by the same line. In this crate's own tests
@@ -376,6 +379,15 @@ impl Registry {
     /// Builds the current-thread runtime the whole transport runs on. Reads
     /// [`TOKEN_ENV`] once, here, so a token never has to be threaded through a
     /// profile's call stack.
+    ///
+    /// # Panics
+    ///
+    /// If no process-default [`rustls`] `CryptoProvider` has been installed —
+    /// see the module documentation. The panic comes from `reqwest`, which
+    /// resolves its TLS backend when `oci-client` builds the HTTP client here,
+    /// so [`Options::insecure`] does not avoid it.
+    ///
+    /// [`rustls`]: https://docs.rs/rustls
     pub fn open(repository: &Repository, options: Options) -> Result<Self, Error> {
         let protocol = if options.insecure {
             ClientProtocol::Http
