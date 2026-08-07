@@ -97,11 +97,21 @@ fn has_existing_data(config: &RootConfig) -> miette::Result<bool> {
     Ok(cursor.is_some())
 }
 
+/// Empty the storage directory.
+///
+/// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
+/// for one thing that is not a store: a stele restore's progress file lives
+/// inside `storage.path`, and a progress file that outlived the stores it
+/// describes would tell the next `--continue` to skip layers whose data is
+/// gone. Anything that clears storage has to clear that too, and taking the
+/// directory is how this does it without having to remember.
 fn clear_storage(config: &RootConfig) -> miette::Result<()> {
     info!("existing data detected, clearing storage due to --force");
 
-    let storage_path = &config.storage.path;
+    clear_storage_path(&config.storage.path)
+}
 
+fn clear_storage_path(storage_path: &std::path::Path) -> miette::Result<()> {
     std::fs::remove_dir_all(storage_path)
         .into_diagnostic()
         .context("removing existing storage")?;
@@ -155,14 +165,26 @@ fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Exi
     bail!("existing data detected in storage. Use --force to clear and re-bootstrap, --skip-if-data to skip, or --continue to resume");
 }
 
-fn dispatch(config: &RootConfig, command: &Command, feedback: &Feedback) -> miette::Result<()> {
+fn dispatch(
+    config: &RootConfig,
+    command: &Command,
+    feedback: &Feedback,
+    resume: bool,
+) -> miette::Result<()> {
     match command {
         Command::Relay(args) => relay::run(config, args, feedback),
         Command::Mithril(args) => mithril::run(config, args, feedback),
         Command::Snapshot(args) => snapshot::run(config, args, feedback),
         // No `feedback`: a stele restore has no progress reporting yet, which
         // is a stated gap rather than an oversight — see the follow-up plan.
-        Command::Stelae(args) => stelae::run(config, args),
+        //
+        // `resume` is `--continue`, and this is the only subcommand that does
+        // anything with it. For the others it has always meant no more than
+        // "proceed even though there is data here"; for a stele restore it is
+        // also the instruction to read the progress file an interrupted attempt
+        // left behind. Passing it rather than re-reading `args` keeps that one
+        // flag with one meaning per subcommand instead of two spellings.
+        Command::Stelae(args) => stelae::run(config, args, resume),
     }
 }
 
@@ -234,7 +256,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         clear_storage(config)?;
     }
 
-    dispatch(config, &command, feedback)?;
+    dispatch(config, &command, feedback, args.r#continue)?;
 
     // Reset WAL after any successful bootstrap so that `find_intersect` works.
     // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty
@@ -245,4 +267,68 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_snapshot::restore::Checkpoint;
+
+    /// A `--force` wipe takes the progress file with the data it describes.
+    ///
+    /// The hazard this rules out is specific and quiet. `--continue` reads the
+    /// progress file and skips every layer it names; `--force` clears the
+    /// stores. A progress file that survived a wipe would therefore tell the
+    /// next run that layers it has no data for are already done, and the node
+    /// that came out would be missing a slice of chain with nothing reporting
+    /// it.
+    ///
+    /// Asserted against [`clear_storage`]'s actual behaviour rather than
+    /// against the fact that it happens to call `remove_dir_all`: what has to
+    /// stay true is the outcome, however the wipe is later spelled.
+    #[test]
+    fn clearing_storage_removes_a_restore_in_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("data");
+
+        std::fs::create_dir_all(&storage).unwrap();
+
+        let progress = Checkpoint::path_in(&storage);
+        std::fs::write(&progress, b"{}").unwrap();
+
+        // A stand-in for the stores the progress file describes, so the
+        // assertion is about a directory that had a node in it.
+        std::fs::write(storage.join("state"), b"a store").unwrap();
+
+        assert!(progress.exists());
+
+        super::clear_storage_path(&storage).unwrap();
+
+        assert!(
+            !progress.exists(),
+            "a progress file outlived the stores it describes"
+        );
+
+        assert!(
+            storage.is_dir(),
+            "the storage directory itself has to come back, empty"
+        );
+
+        assert_eq!(
+            std::fs::read_dir(&storage).unwrap().count(),
+            0,
+            "and come back empty"
+        );
+    }
+
+    /// The progress file is *inside* the storage path.
+    ///
+    /// The other half of the test above, and the half that would fail first if
+    /// the file were ever moved: a wipe of `storage.path` only takes it while
+    /// it lives there.
+    #[test]
+    fn the_progress_file_lives_inside_the_storage_path() {
+        let storage = std::path::Path::new("/var/lib/dolos/data");
+
+        assert!(Checkpoint::path_in(storage).starts_with(storage));
+    }
 }

@@ -44,7 +44,7 @@ dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
-dolos-snapshot = { path = "crates/snapshot" }
+dolos-snapshot = { path = "crates/snapshot", features = ["oci"] }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-minikupo = { path = "crates/minikupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
@@ -158,13 +158,6 @@ path = "tests/bootstrap.rs"
 strict = ["dolos-cardano/strict"]
 mithril = ["mithril-client"]
 
-# `dolos snapshot publish --repo oci://...`. Deliberately NOT in `default`:
-# `stelae`'s registry client keeps a TLS backend, and the only one `oci-client`
-# offers pins `aws-lc-sys`, which needs `cmake` to build — the same C dependency
-# the `mithril-client` entry below goes out of its way to avoid. Until that is
-# resolved, turning this on is a choice a builder makes rather than one every
-# `cargo build` inherits.
-registry = ["dolos-snapshot/oci"]
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
 

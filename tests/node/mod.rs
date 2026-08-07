@@ -163,6 +163,23 @@ impl Node {
         command.output().unwrap()
     }
 
+    /// The same, naming which stele in a repository to read.
+    pub fn bootstrap_stelae_at(&self, source: &str, point: &str) -> std::process::Output {
+        let mut command = self.command();
+
+        command.args([
+            "bootstrap",
+            "stelae",
+            "--force",
+            "--source",
+            source,
+            "--point",
+            point,
+        ]);
+
+        command.output().unwrap()
+    }
+
     /// `dolos bootstrap <flags>` with no subcommand and no terminal.
     ///
     /// With no subcommand, bootstrap asks which method to use — and, for a

@@ -63,6 +63,19 @@
 //! garbage collection reclaims exactly that — and the moving tag still resolves
 //! to the previous stele, which is a stele, and restores. Publishing again
 //! re-uploads nothing it already sent, because the blob check finds them.
+//!
+//! ## Reading one back
+//!
+//! [`restore_registry`] is the other half, and almost all of it is
+//! [`crate::restore`]'s: the same plan, the same checkpoints, the same store
+//! writes. What only this side knows is how a repository is addressed — a
+//! [`Point`], resolved into a tag — and that is the whole of the difference.
+//!
+//! A tag is **rendered by the profile and never composed here**. `epoch-500` is
+//! `DolosProfile::tag_for_sequence(500)` and `latest` is its moving tag; the
+//! protocol takes the string and validates it. An operator naming `epoch-500`
+//! is naming a sequence, so that is what [`Point`] parses to, and the round
+//! trip back to a tag goes through the profile like every other one.
 
 use std::{cell::Cell, collections::BTreeMap};
 
@@ -73,18 +86,120 @@ use stelae::{
     Digest, SteleReader as _,
 };
 
-/// How a repository is named, re-exported so the binary need not name the
-/// protocol crate to hold an operator's `--repo` to the distribution grammar.
+/// How a repository is named, re-exported so the binary can take one from an
+/// operator without reaching into the protocol crate itself.
 ///
+/// The type is the transport's, and so is every rule about what makes a name
+/// usable — the distribution grammar lives with the client that defines it.
 /// The profile is the only thing in `dolos` that reaches into `stelae`, here as
 /// everywhere else.
-pub use stelae::oci::Reference;
+pub use stelae::oci::{Repository, SCHEME};
 
 use crate::{
     export::{self, Plan, Predecessor},
     layers::digests,
+    restore::{Outlook, Restoring, Summary, Target},
     DolosProfile, Error, Scope as _, EPOCH_KINDS, STATE_SHARDS,
 };
+
+/// Which stele in a repository a restore wants.
+///
+/// The two tags every repository has, named the way an operator names them.
+/// `Epoch(n)` is deliberately a *sequence* and not the string `epoch-n`: this
+/// profile sets the protocol's `sequence` to the Cardano epoch, so the number
+/// is the thing an operator means, and rendering it back into a tag is the
+/// profile's job through [`stelae::Profile::tag_for_sequence`]. Nothing here
+/// builds a tag by formatting.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Point {
+    /// The most recent stele in the repository — the moving tag.
+    ///
+    /// The default, because it is what an operator restoring a node wants
+    /// without having to know which epoch the publisher last closed.
+    #[default]
+    Latest,
+    /// The stele published for a given epoch — the immutable tag.
+    Epoch(u64),
+}
+
+impl Point {
+    /// Resolve this point into a readable stele.
+    pub fn pull(&self, registry: &Registry) -> Result<Stele, Error> {
+        Ok(match self {
+            Self::Latest => registry.pull_latest(&DolosProfile)?,
+            Self::Epoch(epoch) => registry.pull_sequence(&DolosProfile, *epoch)?,
+        })
+    }
+}
+
+impl std::fmt::Display for Point {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Latest => write!(f, "latest"),
+            Self::Epoch(epoch) => write!(f, "epoch-{epoch}"),
+        }
+    }
+}
+
+/// An operator's `--point`, in the two spellings a repository answers to.
+///
+/// The parse is the inverse of the profile's own tag rendering, which is why
+/// `epoch-` is written once in each direction and nowhere else. A point that is
+/// neither is refused here, before a connection is opened, rather than by a
+/// registry answering "no such tag" at the end of a round trip.
+impl std::str::FromStr for Point {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        if raw == stelae::MOVING_TAG {
+            return Ok(Self::Latest);
+        }
+
+        if let Some(epoch) = raw.strip_prefix("epoch-") {
+            return epoch
+                .parse::<u64>()
+                .map(Self::Epoch)
+                .map_err(|e| format!("{raw:?} does not name an epoch: {e}"));
+        }
+
+        Err(format!(
+            "{raw:?} is not a point in a stele repository; \
+             it is `{}` or `epoch-N`",
+            stelae::MOVING_TAG,
+        ))
+    }
+}
+
+/// Restore a node from a stele in `registry`.
+///
+/// The registry counterpart of [`crate::restore::restore_dir`], and everything
+/// after the pull is the same code: an inscription that names another network
+/// is refused before a store is opened, the plan is preflighted against free
+/// space, and each epoch layer is checkpointed as it commits so `resume` can
+/// pick the run back up.
+///
+/// The one thing this transport does better is free. A directory has no
+/// manifest and so rebuilds the `diffId`→blob map by decompressing every blob
+/// before the restore reads any of it; a registry states it, and states each
+/// layer's compressed size along with it — which is what makes the
+/// remaining-download figure in [`Outlook`] exact rather than an extrapolation.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn restore_registry<A, S, I>(
+    registry: &Registry,
+    point: Point,
+    node: Restoring<'_>,
+    target: Target<'_, A, S, I>,
+) -> Result<(crate::restore::Plan, Outlook, Summary), Error>
+where
+    A: ArchiveStore,
+    S: StateStore,
+    I: IndexStore,
+{
+    let stele = point.pull(registry)?;
+
+    crate::restore::restore_stele(&stele, node, target)
+}
 
 /// Open a repository in a registry.
 ///
@@ -99,13 +214,8 @@ use crate::{
 /// **Never call any of this from inside an async context.** The transport owns
 /// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
 /// module documentation states the rule and the reason.
-pub fn open(
-    host: impl Into<String>,
-    repository: impl Into<String>,
-    insecure: bool,
-) -> Result<Registry, Error> {
+pub fn open(repository: &Repository, insecure: bool) -> Result<Registry, Error> {
     Ok(Registry::open(
-        host,
         repository,
         Options {
             insecure,
@@ -734,6 +844,46 @@ mod tests {
             cursor: ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
             sequence: 3,
             epochs: vec![],
+        }
+    }
+
+    /// A point round-trips through the profile's own tag rendering, in both
+    /// directions.
+    ///
+    /// The assertion that matters is the second one: `Point`'s `Display` and
+    /// `DolosProfile::tag_for_sequence` are two spellings of one rule, and this
+    /// is what stops them drifting into a CLI that prints a tag the registry
+    /// does not have.
+    #[test]
+    fn a_point_is_the_profile_s_own_tag() {
+        use stelae::Profile as _;
+
+        assert_eq!("latest".parse::<Point>().unwrap(), Point::Latest);
+        assert_eq!("epoch-500".parse::<Point>().unwrap(), Point::Epoch(500));
+        assert_eq!("epoch-0".parse::<Point>().unwrap(), Point::Epoch(0));
+
+        assert_eq!(Point::Latest.to_string(), DolosProfile.moving_tag());
+
+        for epoch in [0, 1, 500] {
+            assert_eq!(
+                Point::Epoch(epoch).to_string(),
+                DolosProfile.tag_for_sequence(epoch).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_point_that_names_no_tag_is_refused() {
+        for raw in [
+            "epoch",     // no number
+            "epoch-",    // still no number
+            "epoch-abc", // not a number
+            "epoch--1",  // not an unsigned one
+            "500",       // a bare sequence is not a tag this profile renders
+            "Latest",    // tags are lowercase
+            "",
+        ] {
+            assert!(raw.parse::<Point>().is_err(), "{raw:?}");
         }
     }
 

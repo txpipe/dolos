@@ -451,6 +451,34 @@ impl SteleReader for SteleDir {
         Ok(index.into_iter().collect())
     }
 
+    /// Ask the filesystem how big the blob holding this layer is.
+    ///
+    /// One `stat`, and deliberately not a read: the compressed size is the
+    /// length of the file the blob is stored in, and a directory needs no
+    /// manifest to learn it. This is *not* the double-read a directory pays for
+    /// [`SteleDir::blob_index`] — nothing is opened and nothing is
+    /// decompressed.
+    ///
+    /// A layer the index does not place is `None` rather than an error, because
+    /// the caller asking this is estimating a download and not performing one.
+    /// The refusal belongs to [`SteleDir::stream_layer`], which is where the
+    /// missing layer actually stops something.
+    fn compressed_size(
+        &self,
+        index: &BlobIndex,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Option<u64>, Error> {
+        let Some(blob) = index.blob_for(&descriptor.diff_id) else {
+            return Ok(None);
+        };
+
+        match fs::metadata(self.blob_path(&blob)) {
+            Ok(metadata) => Ok(Some(metadata.len())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Stream one layer's records without holding it.
     ///
     /// The same verification as [`SteleDir::read_layer`] — the checks are one

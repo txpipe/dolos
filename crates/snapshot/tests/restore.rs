@@ -1,6 +1,6 @@
 //! The restore driver, against real store sets.
 //!
-//! Four properties, and the order they are stated in is the order they get
+//! Six properties, and the order they are stated in is the order they get
 //! harder to satisfy:
 //!
 //! 1. **A stele for another chain is refused before anything is written.** The
@@ -17,11 +17,25 @@
 //!    replayed ledger, compared against the restored one. This is what catches
 //!    a restore that agrees with its own export and is wrong: the roundtrip
 //!    cannot, because it compares against the same bytes.
+//! 5. **A killed restore, resumed, is an uninterrupted one** — and refetches
+//!    only what it had not finished. Both halves are needed and neither implies
+//!    the other: a resume that redid everything would pass the first, and one
+//!    that skipped a layer it had not written would pass the second.
+//! 6. **The resume rule survives an inscription change.** A layer completed
+//!    under an older stele stays completed, because a `diffId` names bytes; the
+//!    state tip is redone regardless, because it is the tip.
 //!
 //! Every property runs on both live backend bindings — the builtin memory pair
 //! and the on-disk fjall pair — because `append_prehashed` and `apply_utxoset`
 //! are backend code and the restore is the only caller that drives them from a
 //! wire format.
+//!
+//! ## The interruption is a layer boundary, never a moment
+//!
+//! [`Interrupted`] wraps a reader and fails on a **chosen `diffId`**. A test
+//! that killed a restore after a duration would sometimes interrupt nothing and
+//! pass for the wrong reason; this one stops at a layer the test named, so what
+//! the resume has left to do is known before it runs.
 
 mod node;
 
@@ -31,12 +45,19 @@ use dolos_core::{
     StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
-    restore::{self, Budget},
+    restore::{self, Budget, Checkpoint},
     Error, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, Blank};
-use stelae::{dir::SteleDir, frame::Limits, SteleReader};
+use stelae::{
+    dir::SteleDir,
+    frame::Limits,
+    inscription::{Inscription, LayerDescriptor},
+    plan::RestoreProgress,
+    transport::BlobIndex,
+    Digest, LayerReader, Profile, SteleReader,
+};
 
 /// Every layer read through a window far below one record and every write
 /// batch committed after a single record.
@@ -95,11 +116,17 @@ fn restore_into<B: ToyStores>(
         &stele,
         &index,
         &plan,
-        &blank.archive,
-        blank.state(),
-        blank.indexes(),
+        target(blank),
         budget,
+        &mut Checkpoint::none(),
     )
+}
+
+/// Where a restore writes, for a blank store set.
+fn target<B: ToyStores>(
+    blank: &Blank<B>,
+) -> restore::Target<'_, impl ArchiveStore, B::State, B::Indexes> {
+    restore::Target::new(&blank.archive, blank.state(), blank.indexes())
 }
 
 // --------------------------------------------------------------------------
@@ -493,6 +520,513 @@ fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
 
     found.sort_by_key(|record| (record.kind, record.key().to_vec()));
     found
+}
+
+// --------------------------------------------------------------------------
+// 4. Resume
+// --------------------------------------------------------------------------
+
+/// A reader that stops at a layer the test chose.
+///
+/// The deterministic half of the kill-and-resume property. Every call is
+/// delegated except [`SteleReader::stream_layer`], which refuses the moment it
+/// is asked for `stop_at` — so an interrupted restore has committed exactly the
+/// layers ahead of that one in the driver's order, and nothing of it.
+///
+/// Refusing at `stream_layer` rather than partway through the records is the
+/// stronger placement, not the weaker one: it means the layer being interrupted
+/// contributed *nothing*, so anything the resume gets wrong about it shows up
+/// as a difference in the stores rather than being masked by a partial write
+/// that happened to be enough.
+struct Interrupted<'a> {
+    inner: &'a SteleDir,
+    stop_at: Digest,
+}
+
+impl SteleReader for Interrupted<'_> {
+    type Blob = std::fs::File;
+
+    fn read_inscription(&self) -> Result<Inscription, stelae::Error> {
+        self.inner.read_inscription()
+    }
+
+    fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
+        self.inner.blob_index()
+    }
+
+    fn compressed_size(
+        &self,
+        index: &BlobIndex,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Option<u64>, stelae::Error> {
+        self.inner.compressed_size(index, descriptor)
+    }
+
+    fn stream_layer(
+        &self,
+        index: &BlobIndex,
+        profile: &dyn Profile,
+        descriptor: &LayerDescriptor,
+        limits: Limits,
+    ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
+        if descriptor.diff_id == self.stop_at {
+            return Err(stelae::Error::Io(std::io::Error::other(
+                "the machine went away",
+            )));
+        }
+
+        self.inner.stream_layer(index, profile, descriptor, limits)
+    }
+}
+
+/// Restore into `blank`, checkpointing into `storage`, optionally stopping at a
+/// chosen layer.
+fn restore_checkpointed<B: ToyStores>(
+    root: &std::path::Path,
+    storage: &std::path::Path,
+    magic: u64,
+    blank: &Blank<B>,
+    resume: bool,
+    stop_at: Option<Digest>,
+) -> Result<restore::Summary, Error> {
+    let stele = SteleDir::open(root)?;
+    let identity = stele.read_inscription()?.digest()?;
+
+    let plan = restore::plan(&stele, magic, None)?;
+    let index = stele.blob_index()?;
+
+    let mut checkpoint = Checkpoint::open(storage, identity, resume)?;
+
+    match stop_at {
+        Some(stop_at) => restore::restore(
+            &Interrupted {
+                inner: &stele,
+                stop_at,
+            },
+            &index,
+            &plan,
+            target(blank),
+            Budget::default(),
+            &mut checkpoint,
+        ),
+        None => restore::restore(
+            &stele,
+            &index,
+            &plan,
+            target(blank),
+            Budget::default(),
+            &mut checkpoint,
+        ),
+    }
+}
+
+/// Done criterion 2: killed mid-way, resumed, and the same node — having
+/// refetched only what it had not finished.
+///
+/// The interruption is at the *second epoch layer the driver reaches*, taken
+/// from the plan rather than from the inscription: the document's layer order
+/// is the export's and the driver's is epoch-by-epoch, kind-by-kind, and only
+/// the second one says what has committed by the time a given layer is asked
+/// for.
+///
+/// Both numbers come from the driver's own counters rather than from the stores
+/// afterwards, which is what the criterion asks for: "counted, not asserted".
+fn kill_and_resume<B: ToyStores>() {
+    let domain: ToyDomain<B> = harness();
+    let magic = magic_of(&domain);
+
+    let stele = tempfile::tempdir().unwrap();
+    let inscription = export_to(stele.path(), &domain);
+
+    let (epoch_layers, _) = layers_in_driver_order(stele.path(), magic);
+    assert!(
+        epoch_layers.len() >= 2,
+        "the fixture needs at least two epoch layers to interrupt between"
+    );
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<B>::open();
+
+    // The interruption. The first epoch layer commits; the second refuses.
+    let err = restore_checkpointed(
+        stele.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(epoch_layers[1]),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Error::Stelae(stelae::Error::Io(_))),
+        "{err:?}"
+    );
+
+    // What the killed run left behind: a progress file naming exactly the
+    // layers that committed, and no cursor.
+    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+        .unwrap()
+        .expect("a killed restore left no progress file");
+
+    assert_eq!(
+        progress.completed,
+        [epoch_layers[0]].into_iter().collect(),
+        "exactly the one epoch layer that committed before the interruption"
+    );
+    assert_eq!(progress.inscription_digest, inscription.digest().unwrap());
+
+    assert!(
+        blank.state().read_cursor().unwrap().is_none(),
+        "an interrupted restore left a cursor behind"
+    );
+
+    // The resume.
+    let resumed =
+        restore_checkpointed(stele.path(), storage.path(), magic, &blank, true, None).unwrap();
+
+    assert_eq!(
+        resumed.layers_skipped, 1,
+        "the resume refetched a layer the first attempt had already committed"
+    );
+    assert_eq!(
+        resumed.layers_fetched,
+        inscription.layers.len() - 1,
+        "and refetched everything else, the state tip included"
+    );
+
+    // The progress file is gone: the restore finished.
+    assert_eq!(
+        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        None,
+        "a finished restore left its progress file behind"
+    );
+
+    // And the node is the one an uninterrupted restore would have produced.
+    assert_stores_match(&blank, &domain);
+}
+
+#[test]
+fn a_killed_restore_resumes_into_the_same_node_on_memory() {
+    kill_and_resume::<MemoryStores>();
+}
+
+#[test]
+fn a_killed_restore_resumes_into_the_same_node_on_fjall() {
+    kill_and_resume::<FjallStores>();
+}
+
+/// Done criteria 3 and 4, which are one scenario asked two ways.
+///
+/// A node carrying a progress file from an earlier stele restores a *newer*
+/// one. The epoch layers it already has are kept — that is the resume rule, and
+/// it holds because a `diffId` names bytes and an epoch's window has closed —
+/// and the state tip is redone, because the tip is what a new stele changes.
+///
+/// The harness ledger is one epoch, so "a newer inscription" is built the way
+/// `tests/publish.rs` builds its second publish: the same stores, standing at
+/// two synthetic chain points a slot apart. The first closes epoch 0; the
+/// second stands in epoch 1.
+///
+/// That geometry is what makes the assertions mean anything. Epoch 0's layers
+/// are byte-identical across the two steles, because its window closed and a
+/// closed window cannot be published differently. The state shards are **not**,
+/// because a shard's header record names the epoch it is the tip of. So the
+/// resume has genuinely different bytes on both sides of the rule: layers it
+/// may skip, and layers it must not.
+#[test]
+fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let boundary = epoch_one_starts_at(&domain);
+
+    let older = tempfile::tempdir().unwrap();
+    let newer = tempfile::tempdir().unwrap();
+
+    let first = export_standing_at(older.path(), &domain, boundary - 1);
+    let second = export_standing_at(newer.path(), &domain, boundary);
+
+    // Two steles, not one. The whole test is about a `diffId` recorded under
+    // the first staying true under the second, and that says nothing unless
+    // the second is a different document.
+    assert_ne!(first.digest().unwrap(), second.digest().unwrap());
+    assert_eq!(first.sequence, 1);
+    assert_eq!(second.sequence, 2);
+
+    // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
+    // every state shard is new.
+    let epoch_zero = |stele: &Inscription| -> Vec<Digest> {
+        stele
+            .layers
+            .iter()
+            .filter(|l| l.kind != STATE && l.scope["epoch"] == 0)
+            .map(|l| l.diff_id)
+            .collect()
+    };
+
+    assert_eq!(
+        epoch_zero(&first),
+        epoch_zero(&second),
+        "epoch 0's window closed, so its layers cannot differ"
+    );
+
+    assert!(
+        state_diff_ids(&first)
+            .iter()
+            .all(|shard| !state_diff_ids(&second).contains(shard)),
+        "a state shard names the epoch it is the tip of, so none can be shared"
+    );
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    // The node is pre-seeded by an actual interrupted restore of the older
+    // stele, stopped at its first state shard, rather than by a hand-written
+    // progress file. That matters: a hand-written one would claim layers whose
+    // records were never committed, and the store comparison at the end would
+    // then be checking that a resume skipped work nobody had done.
+    let (_, state_shards) = layers_in_driver_order(older.path(), magic);
+
+    let err = restore_checkpointed(
+        older.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(state_shards[0]),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Error::Stelae(stelae::Error::Io(_))),
+        "{err:?}"
+    );
+
+    let seeded = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+        .unwrap()
+        .expect("the interrupted restore left no progress file")
+        .completed
+        .len();
+
+    assert_eq!(
+        seeded,
+        first.layers.len() - STATE_SHARDS as usize,
+        "every epoch layer committed before the tip was reached"
+    );
+
+    // Now the newer stele, resumed.
+    let resumed =
+        restore_checkpointed(newer.path(), storage.path(), magic, &blank, true, None).unwrap();
+
+    assert_eq!(
+        resumed.layers_skipped, seeded,
+        "every epoch layer the older stele had completed was kept"
+    );
+
+    assert_eq!(
+        resumed.layers_fetched,
+        second.layers.len() - seeded,
+        "and everything the newer stele adds was fetched: epoch 1's layers, \
+         and all sixteen shards because a shard is never inherited"
+    );
+
+    assert!(
+        resumed.layers_fetched > STATE_SHARDS as usize,
+        "the newer stele has to add an epoch, or the tip is all this proves"
+    );
+
+    // Against an uninterrupted restore of the *same* stele, not against the
+    // domain: the two steles stand at synthetic chain points the harness ledger
+    // never reached, so their cursor is theirs and not the domain's. What has
+    // to match is everything a restore of `second` produces.
+    let reference = Blank::<MemoryStores>::open();
+    let reference_storage = tempfile::tempdir().unwrap();
+
+    restore_checkpointed(
+        newer.path(),
+        reference_storage.path(),
+        magic,
+        &reference,
+        false,
+        None,
+    )
+    .unwrap();
+
+    assert_state_matches(blank.state(), reference.state());
+    assert_archive_matches(&blank.archive, &reference.archive);
+    assert_indexes_match(blank.indexes(), reference.indexes(), blank.state());
+}
+
+/// The slot epoch 1 begins at, for a test that needs to stand on the boundary.
+fn epoch_one_starts_at<B: ToyStores>(domain: &ToyDomain<B>) -> u64 {
+    dolos_cardano::eras::load_chain_summary_from_state(domain.state())
+        .unwrap()
+        .epoch_start(1)
+}
+
+/// Export `domain` as if its cursor stood at `slot`.
+///
+/// [`export_to`] derives everything from the store's own cursor, so two calls
+/// produce one stele twice. A test about what changes *between* steles needs
+/// two, and standing at a synthetic chain point is how `tests/publish.rs`
+/// builds its second publish — for the same reason, and with the same caveat:
+/// the resulting cursor is not one the harness ledger ever reached, so a
+/// restore of it must be compared against another restore rather than against
+/// the domain.
+fn export_standing_at<B: ToyStores>(
+    root: &std::path::Path,
+    domain: &ToyDomain<B>,
+    slot: u64,
+) -> Inscription {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+
+    // Any hash will do: `position` needs one to exist, and nothing in an export
+    // reads it back out of the store.
+    let plan = dolos_snapshot::export::Plan::new(
+        &summary,
+        dolos_snapshot::Network::for_magic(magic_of(domain)),
+        ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
+    )
+    .unwrap();
+
+    let stele = SteleDir::create(root).unwrap();
+
+    dolos_snapshot::export::export(
+        &stele,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &dolos_snapshot::export::First,
+    )
+    .unwrap()
+}
+
+/// The resume is `--continue`'s and nobody else's.
+///
+/// A progress file sitting beside the stores does not make the next restore
+/// skip anything. That is what makes `--force` safe: a wipe removes the file,
+/// and even a file that somehow survived one cannot cause layers to be skipped
+/// onto stores that no longer hold them.
+#[test]
+fn a_restore_that_is_not_resuming_honours_no_progress_file() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let stele = tempfile::tempdir().unwrap();
+    let inscription = export_to(stele.path(), &domain);
+
+    let storage = tempfile::tempdir().unwrap();
+    let path = Checkpoint::path_in(storage.path());
+
+    // A progress file claiming every epoch layer is done, over empty stores.
+    let mut progress = RestoreProgress::new(inscription.digest().unwrap());
+
+    for diff_id in epoch_diff_ids(&inscription) {
+        progress.record(diff_id);
+    }
+
+    progress.save(&path).unwrap();
+
+    let blank = Blank::<MemoryStores>::open();
+    let summary =
+        restore_checkpointed(stele.path(), storage.path(), magic, &blank, false, None).unwrap();
+
+    assert_eq!(
+        summary.layers_skipped, 0,
+        "a restore that was not asked to resume skipped a layer anyway"
+    );
+    assert_eq!(summary.layers_fetched, inscription.layers.len());
+
+    // And the node is whole, which is the point: had the file been honoured
+    // here, this comparison is what would have failed.
+    assert_stores_match(&blank, &domain);
+}
+
+/// The remaining-download figure drops by what a resume inherits.
+///
+/// Compressed bytes, from the blobs on disk, because the inscription carries
+/// only uncompressed sizes. The state tip is in both totals — it is always
+/// refetched — so the difference is exactly the epoch layers the resume skips.
+#[test]
+fn the_remaining_download_excludes_what_is_already_done() {
+    let domain: ToyDomain = harness();
+
+    let temp = tempfile::tempdir().unwrap();
+    let inscription = export_to(temp.path(), &domain);
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let index = stele.blob_index().unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+
+    let fresh = plan
+        .remaining(&stele, &index, &stelae::Resume::none())
+        .unwrap();
+
+    assert_eq!(fresh.layers, inscription.layers.len());
+    assert_eq!(
+        fresh.unsized_layers, 0,
+        "every blob is on disk to be stat'd"
+    );
+    assert!(fresh.compressed_bytes > 0);
+
+    // Compressed, not uncompressed: the two are what a download costs and what
+    // a disk needs, and confusing them is how an estimate becomes fiction.
+    assert!(
+        fresh.compressed_bytes < plan.uncompressed_size(),
+        "the fixture's layers did not compress, so this proves nothing"
+    );
+
+    let mut progress = RestoreProgress::new(inscription.digest().unwrap());
+    let epochs = epoch_diff_ids(&inscription);
+
+    for diff_id in &epochs {
+        progress.record(*diff_id);
+    }
+
+    let resumed = plan.remaining(&stele, &index, &progress.resume()).unwrap();
+
+    assert_eq!(resumed.layers, fresh.layers - epochs.len());
+    assert!(resumed.compressed_bytes < fresh.compressed_bytes);
+
+    // The tip is still in it, always.
+    assert_eq!(resumed.layers, STATE_SHARDS as usize);
+}
+
+/// The epoch layers and the state shards, each in the order the driver reaches
+/// them.
+///
+/// Read off the [`restore::Plan`] and not the inscription. The document's order
+/// is whatever the export wrote; the driver's is epoch by epoch and, within an
+/// epoch, blocks then logs then indexes. Only the second answers "what has
+/// committed by the time this layer is asked for", which is the question every
+/// interruption below is built on.
+fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, Vec<Digest>) {
+    let stele = SteleDir::open(root).unwrap();
+    let plan = restore::plan(&stele, magic, None).unwrap();
+
+    (
+        plan.immutable_layers().map(|l| l.diff_id).collect(),
+        plan.tip_layers().map(|l| l.diff_id).collect(),
+    )
+}
+
+fn state_diff_ids(inscription: &Inscription) -> Vec<Digest> {
+    inscription
+        .layers_of_kind(STATE)
+        .map(|layer| layer.diff_id)
+        .collect()
+}
+
+fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
+    inscription
+        .layers
+        .iter()
+        .filter(|layer| layer.kind != STATE)
+        .map(|layer| layer.diff_id)
+        .collect()
 }
 
 // --------------------------------------------------------------------------

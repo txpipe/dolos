@@ -46,6 +46,7 @@
 #![cfg(feature = "oci")]
 
 mod node;
+mod registry_fixture;
 
 use dolos_core::{BlockHash, ChainPoint, Domain as _};
 use dolos_snapshot::{
@@ -57,133 +58,10 @@ use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
 use stelae::{oci::Registry, SteleReader as _};
 
 use node::harness;
+use registry_fixture::Fixture;
 
 /// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
 const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
-
-// ---------------------------------------------------------------------------
-// A registry the test spawns
-// ---------------------------------------------------------------------------
-
-/// A container running an OCI Distribution server, removed when this is
-/// dropped.
-///
-/// Deliberately a second copy of `Fixture` in `crates/stelae/tests/oci.rs`
-/// rather than a shared one. `stelae` must never depend on a `dolos-*` package
-/// — that is the boundary ADR-004 sets and `cargo tree` checks — so a fixture
-/// both suites could import would have to live somewhere neither of them owns.
-/// Two copies of sixty lines is the cheaper of the two prices. Keep them in
-/// step; the readiness probe below in particular was arrived at the hard way.
-struct Fixture {
-    container: String,
-    port: u16,
-}
-
-impl Fixture {
-    fn spawn() -> Self {
-        let image =
-            std::env::var("STELAE_TEST_REGISTRY_IMAGE").unwrap_or_else(|_| "registry:2".to_owned());
-
-        let run = std::process::Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--publish",
-                "127.0.0.1::5000",
-                &image,
-            ])
-            .output()
-            .expect("docker is required to run the registry tests");
-
-        assert!(
-            run.status.success(),
-            "docker run {image}: {}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-
-        let container = String::from_utf8(run.stdout).unwrap().trim().to_owned();
-
-        let ports = std::process::Command::new("docker")
-            .args(["port", &container, "5000/tcp"])
-            .output()
-            .expect("docker port");
-
-        let mapped = String::from_utf8(ports.stdout).unwrap();
-        let port = mapped
-            .lines()
-            .find_map(|line| line.rsplit(':').next())
-            .and_then(|port| port.trim().parse::<u16>().ok())
-            .unwrap_or_else(|| panic!("no published port in {mapped:?}"));
-
-        let fixture = Self { container, port };
-        fixture.wait_until_ready();
-
-        eprintln!("registry: {image} on 127.0.0.1:{port}");
-
-        fixture
-    }
-
-    /// Wait until the server answers `GET /v2/`.
-    ///
-    /// A connect is *not* the readiness signal, however much it looks like one:
-    /// Docker's port forwarder accepts on the published port from the moment
-    /// the container exists and only then tries to reach the process inside.
-    ///
-    /// Every socket operation is bounded, because that forwarder is exactly the
-    /// thing that accepts and then says nothing. Without the timeouts the three
-    /// hundred attempts below are not the thirty seconds they read as: one
-    /// silent connection blocks the loop indefinitely, and a test meant to fail
-    /// with a message hangs instead.
-    fn wait_until_ready(&self) {
-        use std::io::{Read, Write};
-
-        let address = format!("127.0.0.1:{}", self.port);
-        let socket_address: std::net::SocketAddr =
-            address.parse().expect("a loopback address and a port");
-        let patience = std::time::Duration::from_millis(500);
-
-        for _ in 0..300 {
-            let answered = std::net::TcpStream::connect_timeout(&socket_address, patience)
-                .ok()
-                .and_then(|mut socket| {
-                    socket.set_write_timeout(Some(patience)).ok()?;
-                    socket.set_read_timeout(Some(patience)).ok()?;
-
-                    socket
-                        .write_all(
-                            format!("GET /v2/ HTTP/1.0\r\nHost: {address}\r\n\r\n").as_bytes(),
-                        )
-                        .ok()?;
-
-                    let mut answer = [0u8; 16];
-                    let read = socket.read(&mut answer).ok()?;
-
-                    answer[..read].starts_with(b"HTTP/1.").then_some(())
-                });
-
-            if answered.is_some() {
-                return;
-            }
-
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
-        panic!("the registry never answered GET /v2/ on {address}");
-    }
-
-    fn repository(&self, name: &str) -> Registry {
-        registry::open(format!("127.0.0.1:{}", self.port), name.to_owned(), true).unwrap()
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "--force", &self.container])
-            .output();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // The node, and the two chain points it publishes from

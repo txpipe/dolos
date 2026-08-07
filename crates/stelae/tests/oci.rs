@@ -574,8 +574,9 @@ impl Fixture {
 
     fn registry(&self, repository: &str) -> Registry {
         Registry::open(
-            format!("127.0.0.1:{}", self.port),
-            repository.to_owned(),
+            &format!("oci://127.0.0.1:{}/{repository}", self.port)
+                .parse()
+                .expect("the fixture named a usable repository"),
             Options {
                 insecure: true,
                 scratch_dir: None,
@@ -744,8 +745,26 @@ fn a_stele_survives_the_round_trip() {
     println!(
         "pulled {} layers, {} compressed bytes",
         published.layers.len(),
-        latest.compressed_size(),
+        latest.total_compressed_size(),
     );
+
+    // The whole-stele figure is the per-layer one summed, which is what makes
+    // the per-layer answer usable for a restore's remaining-download estimate:
+    // a subset of the layers weighs a subset of the bytes, on the same scale.
+    let index = latest.blob_index().unwrap();
+
+    let summed: u64 = published
+        .layers
+        .iter()
+        .map(|layer| {
+            latest
+                .compressed_size(&index, layer)
+                .unwrap()
+                .expect("a pulled stele states every layer's compressed size")
+        })
+        .sum();
+
+    assert_eq!(summed, latest.total_compressed_size());
 
     // A stele of another profile is refused before a layer is fetched.
     struct Other;
@@ -1203,8 +1222,9 @@ fn staging_stays_in_the_scratch_directory_and_leaves_nothing() {
 
     let scratch = tempfile::tempdir().unwrap();
     let registry = Registry::open(
-        format!("127.0.0.1:{}", fixture.port),
-        "stelae/scratch".to_owned(),
+        &format!("oci://127.0.0.1:{}/stelae/scratch", fixture.port)
+            .parse()
+            .expect("the fixture named a usable repository"),
         Options {
             insecure: true,
             scratch_dir: Some(scratch.path().to_owned()),

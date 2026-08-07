@@ -1,0 +1,730 @@
+//! Restoring a node from a stele in a registry.
+//!
+//! Everything here needs a **registry**, and spawns one: `docker run` of an OCI
+//! Distribution server, torn down on the way out. So everything here is
+//! `#[ignore]`d, and an `#[ignore]`d test that was never executed proves
+//! nothing — run it with:
+//!
+//! ```text
+//! cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture
+//! ```
+//!
+//! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
+//! same knob `tests/publish.rs` and `crates/stelae/tests/oci.rs` use.
+//!
+//! ## The four properties
+//!
+//! 1. **A registry restore is a directory restore.** The same stele, published
+//!    both ways and restored both ways, produces store sets that are equal —
+//!    cursors, entities, the whole UTxO set, the archive, index records and the
+//!    live-UTxO tag queries. The transport is where the bytes come from and
+//!    nothing else, and this is the assertion that says so.
+//! 2. **A killed restore resumes over the wire**, refetching only what it had
+//!    not committed. Counted by the driver, not inferred from a duration.
+//! 3. **A node pre-seeded with epochs fetches only what it lacks** when a newer
+//!    stele arrives — ADR-004's second delta assertion for this phase. Over a
+//!    registry, so what is *not* refetched is genuinely not downloaded.
+//! 4. **A point names a stele.** `epoch-N` resolves to that sequence and
+//!    `latest` to the newest, which is what makes a repository holding a
+//!    history restorable at any of them.
+//!
+//! ## Why the interruption is a layer boundary
+//!
+//! The same discipline `tests/restore.rs` states: the reader refuses a `diffId`
+//! the test named, so the interruption lands where the test meant it to. A kill
+//! after a wall-clock delay would sometimes interrupt nothing over a loopback
+//! registry — the fixture stele is kilobytes — and pass for the wrong reason.
+
+#![cfg(feature = "oci")]
+
+mod node;
+mod registry_fixture;
+
+use dolos_cardano::indexes::{archive_dimensions, index_delta_from_utxo_delta};
+use dolos_core::{
+    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, IndexStore,
+    LogKey, StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+};
+use dolos_snapshot::{
+    export::Plan,
+    registry::{self, Point},
+    restore::{self, Budget, Checkpoint},
+    Error, Network, NAMESPACES, STATE_SHARDS, UTXOS,
+};
+use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
+use node::{harness, Blank};
+use registry_fixture::Fixture;
+use stelae::{
+    frame::Limits,
+    inscription::LayerDescriptor,
+    oci::{Registry, Stele},
+    plan::RestoreProgress,
+    transport::BlobIndex,
+    Digest, LayerReader, Profile, SteleReader,
+};
+
+/// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
+const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
+
+// ---------------------------------------------------------------------------
+// The node, and the two chain points it publishes from
+// ---------------------------------------------------------------------------
+
+/// The harness ledger and the two plans it publishes.
+///
+/// The same shape `tests/publish.rs` uses and for the same reason: the first
+/// cursor sits on the epoch-0 boundary so epoch 0's window is unclamped, and
+/// the second one slot past it, so the two steles share epoch 0's layers
+/// exactly and differ in their tips. That is the shape the resume rule is
+/// about.
+struct Node {
+    domain: ToyDomain<MemoryStores>,
+    magic: u64,
+    first: Plan,
+    second: Plan,
+}
+
+impl Node {
+    fn build() -> Self {
+        let domain = harness::<MemoryStores>();
+
+        let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+
+        let magic = u64::from(domain.genesis().network_magic());
+        let network = Network::for_magic(magic);
+        let boundary = summary.epoch_start(1);
+
+        let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
+
+        let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
+        let second = Plan::new(&summary, network, point(boundary)).unwrap();
+
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
+
+        Self {
+            domain,
+            magic,
+            first,
+            second,
+        }
+    }
+
+    fn publish(&self, repository: &Registry, plan: &Plan) {
+        registry::publish(
+            repository,
+            plan,
+            self.domain.archive(),
+            self.domain.state(),
+            self.domain.indexes(),
+            None,
+            false,
+        )
+        .unwrap();
+    }
+}
+
+/// Restore from a repository into `blank`, checkpointing into `storage`.
+fn restore_from(
+    repository: &Registry,
+    point: Point,
+    storage: &std::path::Path,
+    magic: u64,
+    blank: &Blank<MemoryStores>,
+    resume: bool,
+) -> Result<restore::Summary, Error> {
+    registry::restore_registry(
+        repository,
+        point,
+        restoring(storage, magic, resume),
+        target(blank),
+    )
+    .map(|(_, _, summary)| summary)
+}
+
+/// What the node reading a stele knows about itself.
+fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Restoring<'_> {
+    restore::Restoring {
+        network_magic: magic,
+        max_history: None,
+        storage_path: storage,
+        resume,
+    }
+}
+
+/// Where a restore writes, for a blank store set.
+fn target<B: ToyStores>(
+    blank: &Blank<B>,
+) -> restore::Target<'_, impl ArchiveStore, B::State, B::Indexes> {
+    restore::Target::new(&blank.archive, blank.state(), blank.indexes())
+}
+
+// ---------------------------------------------------------------------------
+// Done criterion 1
+// ---------------------------------------------------------------------------
+
+/// A stele restored from a registry is the stele restored from a directory.
+///
+/// The comparison the local slice established, now across the transport
+/// boundary: the same node published both ways, restored both ways, and the two
+/// store sets held against each other rather than each against the original.
+/// That is the stronger of the two available checks — a transport bug that
+/// happened to reproduce the export's own mistake would survive a comparison
+/// against the export and not this one.
+#[test]
+#[ignore]
+fn a_registry_restore_is_a_directory_restore() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+
+    let repository = fixture.repository("dolos/restore");
+    node.publish(&repository, &node.first);
+
+    // The same stele, written to a directory.
+    let dir = tempfile::tempdir().unwrap();
+    let from_dir = Blank::<MemoryStores>::open();
+
+    {
+        let stele = stelae::dir::SteleDir::create(dir.path()).unwrap();
+
+        dolos_snapshot::export::export(
+            &stele,
+            &node.first,
+            node.domain.archive(),
+            node.domain.state(),
+            node.domain.indexes(),
+            None,
+            &dolos_snapshot::export::First,
+        )
+        .unwrap();
+    }
+
+    let dir_storage = tempfile::tempdir().unwrap();
+
+    let (_, _, by_dir) = restore::restore_dir(
+        dir.path(),
+        restoring(dir_storage.path(), node.magic, false),
+        target(&from_dir),
+    )
+    .unwrap();
+
+    // And out of the registry.
+    let from_registry = Blank::<MemoryStores>::open();
+    let registry_storage = tempfile::tempdir().unwrap();
+
+    let by_registry = restore_from(
+        &repository,
+        Point::Latest,
+        registry_storage.path(),
+        node.magic,
+        &from_registry,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(
+        by_registry, by_dir,
+        "the two transports restored different amounts of the same stele"
+    );
+
+    assert_eq!(by_registry.layers_fetched, PER_PUBLISH);
+    assert_eq!(by_registry.layers_skipped, 0);
+
+    assert_stores_match(&from_registry, &from_dir);
+
+    // And the records are the published node's, not merely each other's — the
+    // check that both transports did not reproduce one wrong thing.
+    //
+    // The *cursor* is deliberately not in this comparison. `Node::build` stands
+    // at a synthetic epoch boundary so that epoch 0's window publishes
+    // unclamped, which is a chain point the harness ledger never reached; the
+    // restored node carries the stele's position, correctly, and that is not the
+    // domain's. What a stele has to reproduce is the data, and that is what is
+    // asserted.
+    assert_eq!(
+        utxos_of(from_registry.state()),
+        utxos_of(node.domain.state()),
+        "the utxo set the node published"
+    );
+
+    assert_eq!(
+        blocks_of(&from_registry.archive),
+        blocks_of(node.domain.archive()),
+        "the blocks the node published"
+    );
+
+    for ns in NAMESPACES {
+        if ns == UTXOS {
+            continue;
+        }
+
+        assert_eq!(
+            entities_of(from_registry.state(), ns),
+            entities_of(node.domain.state(), ns),
+            "entities under {ns}"
+        );
+    }
+
+    eprintln!(
+        "registry restore: {} layers, {} blocks, {} utxos, {} entities — equal to the directory \
+         restore",
+        by_registry.layers_fetched, by_registry.blocks, by_registry.utxos, by_registry.entities,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Done criterion 2
+// ---------------------------------------------------------------------------
+
+/// Killed over the wire, resumed over the wire.
+#[test]
+#[ignore]
+fn a_killed_registry_restore_resumes_where_it_stopped() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+
+    let repository = fixture.repository("dolos/resume");
+    node.publish(&repository, &node.first);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    let stele = Point::Latest.pull(&repository).unwrap();
+    let identity = stele.read_inscription().unwrap().digest().unwrap();
+    let plan = restore::plan(&stele, node.magic, None).unwrap();
+    let index = stele.blob_index().unwrap();
+
+    let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
+    assert!(epoch_layers.len() >= 2);
+
+    // The interruption, at the second epoch layer the driver reaches.
+    let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+
+    let err = restore::restore(
+        &Interrupted {
+            inner: &stele,
+            stop_at: epoch_layers[1],
+        },
+        &index,
+        &plan,
+        target(&blank),
+        Budget::default(),
+        &mut checkpoint,
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Error::Stelae(stelae::Error::Io(_))),
+        "{err:?}"
+    );
+
+    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+        .unwrap()
+        .expect("a killed restore left no progress file");
+
+    assert_eq!(progress.completed, [epoch_layers[0]].into_iter().collect());
+
+    assert!(
+        blank.state().read_cursor().unwrap().is_none(),
+        "an interrupted restore left a cursor behind"
+    );
+
+    // The resume: a fresh pull, a fresh transport, the progress file the only
+    // thing carried between them — which is the situation after a reboot.
+    let resumed = restore_from(
+        &fixture.repository("dolos/resume"),
+        Point::Latest,
+        storage.path(),
+        node.magic,
+        &blank,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(resumed.layers_skipped, 1);
+    assert_eq!(resumed.layers_fetched, PER_PUBLISH - 1);
+
+    assert_eq!(
+        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        None,
+        "a finished restore left its progress file behind"
+    );
+
+    // The node the uninterrupted run would have produced.
+    let uninterrupted = Blank::<MemoryStores>::open();
+    let clean_storage = tempfile::tempdir().unwrap();
+
+    restore_from(
+        &fixture.repository("dolos/resume"),
+        Point::Latest,
+        clean_storage.path(),
+        node.magic,
+        &uninterrupted,
+        false,
+    )
+    .unwrap();
+
+    assert_stores_match(&blank, &uninterrupted);
+
+    eprintln!(
+        "resumed: {} layers fetched, {} skipped (of {PER_PUBLISH}) — and the same node",
+        resumed.layers_fetched, resumed.layers_skipped,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Done criteria 3 and 4
+// ---------------------------------------------------------------------------
+
+/// A node that already holds epochs fetches only the layers it lacks, and a
+/// point names which stele it is catching up to.
+///
+/// The repository holds two steles. A restore of the first is interrupted at
+/// its tip, so the node holds epoch 0's layers and no cursor. Resuming against
+/// the *second* — a newer inscription, a longer history, a different tip —
+/// keeps epoch 0's layers and downloads epoch 1's plus the sixteen shards. That
+/// is the resume rule and the delta assertion in one run, which is what they
+/// are.
+#[test]
+#[ignore]
+fn a_pre_seeded_node_fetches_only_what_it_lacks() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+
+    let repository = fixture.repository("dolos/delta");
+    node.publish(&repository, &node.first);
+    node.publish(&fixture.repository("dolos/delta"), &node.second);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    // Sequence 1, interrupted at its first state shard: every epoch layer it
+    // carries commits, the tip does not.
+    let first = Point::Epoch(1).pull(&repository).unwrap();
+    let identity = first.read_inscription().unwrap().digest().unwrap();
+    let plan = restore::plan(&first, node.magic, None).unwrap();
+    let index = first.blob_index().unwrap();
+
+    let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
+    let epoch_layers = plan.immutable_layers().count();
+
+    let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+
+    restore::restore(
+        &Interrupted {
+            inner: &first,
+            stop_at: shards[0],
+        },
+        &index,
+        &plan,
+        target(&blank),
+        Budget::default(),
+        &mut checkpoint,
+    )
+    .unwrap_err();
+
+    let seeded = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+        .unwrap()
+        .unwrap()
+        .completed
+        .len();
+
+    assert_eq!(seeded, epoch_layers, "epoch 0's layers all committed");
+
+    // Now catch up to sequence 2 — which describes epoch 0 with the same
+    // identities, epoch 1 besides, and a tip of its own.
+    let resumed = restore_from(
+        &fixture.repository("dolos/delta"),
+        Point::Latest,
+        storage.path(),
+        node.magic,
+        &blank,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(
+        resumed.layers_skipped, seeded,
+        "epoch 0's layers were kept across the inscription change"
+    );
+
+    assert_eq!(
+        resumed.layers_fetched, PER_PUBLISH,
+        "epoch 1's three layers and the sixteen shards, and nothing else"
+    );
+
+    // The point resolved to what it claimed. `latest` is sequence 2 here, and
+    // `epoch-1` is still the stele the first half of this test read.
+    let latest = Point::Latest.pull(&repository).unwrap();
+    assert_eq!(latest.read_inscription().unwrap().sequence, 2);
+    assert_eq!(
+        Point::Epoch(1)
+            .pull(&repository)
+            .unwrap()
+            .read_inscription()
+            .unwrap()
+            .digest()
+            .unwrap(),
+        identity,
+    );
+
+    eprintln!(
+        "delta restore: {} layers already held, {} fetched (of {} in the stele)",
+        resumed.layers_skipped,
+        resumed.layers_fetched,
+        latest.read_inscription().unwrap().layers.len(),
+    );
+}
+
+/// A point that names no stele fails as a refusal, not as a partial restore.
+#[test]
+#[ignore]
+fn a_point_that_names_no_stele_is_refused() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+
+    let repository = fixture.repository("dolos/absent");
+    node.publish(&repository, &node.first);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    // The repository holds sequence 1 and nothing else.
+    let err = restore_from(
+        &repository,
+        Point::Epoch(97),
+        storage.path(),
+        node.magic,
+        &blank,
+        false,
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, Error::Stelae(_)), "{err:?}");
+
+    assert!(
+        blank.state().read_cursor().unwrap().is_none(),
+        "a refused point still wrote a cursor"
+    );
+
+    assert_eq!(
+        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        None,
+        "a restore that never started left a progress file"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The interruption
+// ---------------------------------------------------------------------------
+
+/// A reader that stops at a layer the test chose.
+///
+/// The same device `tests/restore.rs` uses, over the registry transport rather
+/// than a directory: refuses the moment `stream_layer` is asked for `stop_at`,
+/// so the interrupted run committed exactly the layers ahead of that one and
+/// nothing of it.
+struct Interrupted<'a> {
+    inner: &'a Stele,
+    stop_at: Digest,
+}
+
+impl SteleReader for Interrupted<'_> {
+    type Blob = std::fs::File;
+
+    fn read_inscription(&self) -> Result<stelae::inscription::Inscription, stelae::Error> {
+        self.inner.read_inscription()
+    }
+
+    fn blob_index(&self) -> Result<BlobIndex, stelae::Error> {
+        self.inner.blob_index()
+    }
+
+    fn compressed_size(
+        &self,
+        index: &BlobIndex,
+        descriptor: &LayerDescriptor,
+    ) -> Result<Option<u64>, stelae::Error> {
+        self.inner.compressed_size(index, descriptor)
+    }
+
+    fn stream_layer(
+        &self,
+        index: &BlobIndex,
+        profile: &dyn Profile,
+        descriptor: &LayerDescriptor,
+        limits: Limits,
+    ) -> Result<LayerReader<Self::Blob>, stelae::Error> {
+        if descriptor.diff_id == self.stop_at {
+            return Err(stelae::Error::Io(std::io::Error::other(
+                "the machine went away",
+            )));
+        }
+
+        self.inner.stream_layer(index, profile, descriptor, limits)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The comparison
+// ---------------------------------------------------------------------------
+//
+// The same comparison `tests/restore.rs` makes, over two restored store sets
+// rather than a restored one and a replayed one. Kept here rather than shared
+// because the two suites compare different pairs, and a helper that took either
+// would say less about what each one is checking.
+
+fn assert_stores_match<B: ToyStores>(left: &Blank<B>, right: &Blank<B>) {
+    assert_state_matches(left.state(), right.state());
+    assert_archive_matches(&left.archive, &right.archive);
+    assert_indexes_match(left.indexes(), right.indexes(), left.state());
+}
+
+fn assert_state_matches<S: StateStore>(left: &S, right: &S) {
+    assert_eq!(
+        left.read_cursor().unwrap(),
+        right.read_cursor().unwrap(),
+        "cursor"
+    );
+
+    assert!(
+        matches!(left.read_cursor().unwrap(), Some(ChainPoint::Specific(..))),
+        "a restored cursor has to be anchored, or the WAL cannot be reseeded from it"
+    );
+
+    let mut any = false;
+
+    for ns in NAMESPACES {
+        if ns == UTXOS {
+            continue;
+        }
+
+        let a = entities_of(left, ns);
+        let b = entities_of(right, ns);
+
+        any |= !b.is_empty();
+
+        assert_eq!(a, b, "entities under {ns}");
+    }
+
+    assert!(any, "the fixture has no entities, so this proves nothing");
+
+    let utxos = utxos_of(right);
+    assert!(!utxos.is_empty(), "the fixture has no utxos");
+    assert_eq!(utxos_of(left), utxos, "the utxo set");
+}
+
+fn assert_archive_matches<A: ArchiveStore>(left: &A, right: &A) {
+    let blocks = blocks_of(right);
+    assert!(!blocks.is_empty(), "the fixture archived no blocks");
+    assert_eq!(blocks_of(left), blocks, "blocks");
+
+    let mut any = false;
+
+    for ns in NAMESPACES {
+        if ns == UTXOS {
+            continue;
+        }
+
+        let a = logs_of(left, ns);
+        let b = logs_of(right, ns);
+
+        any |= !b.is_empty();
+
+        assert_eq!(a, b, "logs under {ns}");
+    }
+
+    assert!(any, "the fixture wrote no logs, so this proves nothing");
+}
+
+/// Both halves of the index store: the archive records the layers carry, and
+/// the live-UTxO dimensions they deliberately do not.
+fn assert_indexes_match<I: IndexStore, S: StateStore>(left: &I, right: &I, state: &S) {
+    assert_eq!(left.cursor().unwrap(), right.cursor().unwrap(), "cursor");
+
+    let tags = tags_of(right);
+    assert!(!tags.is_empty(), "the fixture produced no archive tags");
+    assert_eq!(tags_of(left), tags, "archive tags");
+
+    let exact = exact_of(right);
+    assert!(!exact.is_empty(), "the fixture produced no exact records");
+    assert_eq!(exact_of(left), exact, "exact records");
+
+    let delta = UtxoSetDelta {
+        produced_utxo: utxos_of(state)
+            .into_iter()
+            .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
+            .collect(),
+        ..Default::default()
+    };
+
+    let rebuilt = index_delta_from_utxo_delta(ChainPoint::Origin, &delta);
+    let mut asked = 0usize;
+
+    for (txo, tags) in &rebuilt.utxo.produced {
+        for tag in tags {
+            let a: UtxoSet = left.utxos_by_tag(tag.dimension, &tag.key).unwrap();
+            let b: UtxoSet = right.utxos_by_tag(tag.dimension, &tag.key).unwrap();
+
+            assert!(
+                a.contains(txo),
+                "the rebuilt index lost {txo:?} under {}",
+                tag.dimension
+            );
+            assert_eq!(a, b, "utxos under {}", tag.dimension);
+
+            asked += 1;
+        }
+    }
+
+    assert!(
+        asked > 0,
+        "the fixture's utxos carry no tags, so the rebuild proves nothing"
+    );
+}
+
+fn entities_of<S: StateStore>(store: &S, ns: &'static str) -> Vec<(EntityKey, Vec<u8>)> {
+    store
+        .iter_entities(ns, EntityKey::full_range())
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn utxos_of<S: StateStore>(store: &S) -> std::collections::BTreeMap<TxoRef, EraCbor> {
+    store.iter_utxos().unwrap().map(Result::unwrap).collect()
+}
+
+fn blocks_of<A: ArchiveStore>(store: &A) -> Vec<(u64, Vec<u8>)> {
+    store.get_range(None, None).unwrap().collect()
+}
+
+fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>)> {
+    store
+        .iter_logs(ns, LogKey::full_range())
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
+    let mut found: Vec<TagRecord> = store
+        .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    found.sort();
+    found
+}
+
+fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
+    let mut found: Vec<ExactRecord> = store
+        .iter_exact_records(0..u64::MAX)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    found.sort_by_key(|record| (record.kind, record.key().to_vec()));
+    found
+}
