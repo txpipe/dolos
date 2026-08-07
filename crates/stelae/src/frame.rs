@@ -493,12 +493,20 @@ impl<W: Write> SeqWriter<W> {
     /// `max_record` must be the ceiling the eventual reader is given, which is
     /// why the profile owns the number rather than each end picking its own —
     /// see [`crate::profile::Profile::max_record`].
+    ///
+    /// Floored at one byte to agree with [`Limits::normalized`], which floors a
+    /// reader's ceiling the same way. Zero is not a meaningful ceiling for
+    /// either end — the smallest CBOR item is one byte — so what matters about
+    /// it is not which behaviour it selects but that both ends select the same
+    /// one. A writer keeping a literal zero would refuse every record a reader
+    /// at that ceiling goes on to accept, which is the disagreement this type
+    /// exists to prevent.
     pub fn with_max_record(inner: W, max_record: usize) -> Self {
         Self {
             inner,
             count: 0,
             written: 0,
-            max_record,
+            max_record: max_record.max(1),
         }
     }
 
@@ -1312,6 +1320,62 @@ mod tests {
         };
 
         assert_eq!(offset, small.as_bytes().len() * 2);
+    }
+
+    /// At any ceiling, the writer accepts exactly what a reader at that same
+    /// ceiling will.
+    ///
+    /// The guarantee the profile's number buys is that one value binds both
+    /// ends; a ceiling where the two disagree is that guarantee with a hole in
+    /// it, and the hole does not have to be a reachable value to be worth
+    /// closing. Zero is the only such value, because [`Limits::normalized`]
+    /// floors a reader at one byte: a writer keeping a literal zero refuses the
+    /// one-byte records that reader accepts.
+    #[test]
+    fn the_writer_accepts_exactly_what_the_reader_will() {
+        let one_byte = encode(|e| {
+            e.u64(0)?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(one_byte.as_bytes().len(), 1, "smallest possible record");
+
+        let larger = encode(|e| {
+            e.bytes(&[0xab; 1000])?;
+            Ok(())
+        })
+        .unwrap();
+
+        let ceilings = [0, 1, 2, larger.as_bytes().len(), DEFAULT_MAX_RECORD];
+
+        for ceiling in ceilings {
+            for record in [&one_byte, &larger] {
+                let mut writer = SeqWriter::with_max_record(Vec::new(), ceiling);
+                let writer_took = writer.write_record(record).is_ok();
+
+                // The reader needs a sequence to walk, so the record is laid
+                // down by a writer with a ceiling that refuses nothing.
+                let mut permissive = SeqWriter::with_max_record(Vec::new(), usize::MAX);
+                permissive.write_record(record).unwrap();
+                let sequence = permissive.into_inner();
+
+                let mut reader = RecordReader::with_limits(
+                    std::io::Cursor::new(&sequence),
+                    Limits {
+                        max_record: ceiling,
+                        window: 64,
+                    },
+                );
+                let reader_took = matches!(reader.next_record(), Some(Ok(_)));
+
+                assert_eq!(
+                    writer_took,
+                    reader_took,
+                    "ceiling {ceiling} disagrees on a {}-byte record",
+                    record.as_bytes().len()
+                );
+            }
+        }
     }
 
     /// A profile that raises its ceiling can write what the default refuses,
