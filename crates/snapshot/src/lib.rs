@@ -101,6 +101,23 @@ pub const MEDIA_TYPE_VERSION: u64 = 1;
 /// part of a stele's identity — see [`stelae::inscription`].
 pub const MEDIA_TYPE_CODEC: &str = "zstd";
 
+/// Largest single record this profile writes or reads: 64 MiB.
+///
+/// Four times the protocol's 16 MiB default, and raised for one record shape
+/// that genuinely exceeds it. A Cardano block is order 100 KB and every
+/// `blocks`, `indexes` and `logs` record stays far under the default; what does
+/// not is a Conway **governance proposal**, whose action embeds an unbounded
+/// list. A `UpdateCommittee` naming hundreds of members is a single entity of
+/// tens of megabytes, and preprod carries five of them at ~24.7 MiB each.
+///
+/// The ledger is what bounds this, and it bounds it loosely: the ceiling is a
+/// refusal to allocate for a hostile length prefix, not a statement about what
+/// Cardano permits. So it is set with headroom over the largest record the
+/// chain has actually produced, and a proposal that one day exceeds *this* is a
+/// publish-time refusal naming the record — which is the outcome worth having,
+/// because the alternative is a stele that publishes and never restores.
+pub const MAX_RECORD: usize = 64 * 1024 * 1024;
+
 /// The key-hashing scheme index layers ship under, as reported in
 /// `parameters.indexKeyHash`.
 ///
@@ -270,6 +287,10 @@ impl Profile for DolosProfile {
     /// immutable tag names it.
     fn tag_for_sequence(&self, sequence: u64) -> Result<String, stelae::Error> {
         Ok(format!("epoch-{sequence}"))
+    }
+
+    fn max_record(&self) -> usize {
+        MAX_RECORD
     }
 }
 

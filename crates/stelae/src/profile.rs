@@ -26,7 +26,7 @@
 //! 3. The protocol never parses layer bodies or a profile's opaque objects. An
 //!    unknown profile is a clean refusal, never a partial restore.
 
-use crate::{Error, MOVING_TAG, RESERVED_VENDOR};
+use crate::{frame::DEFAULT_MAX_RECORD, Error, MOVING_TAG, RESERVED_VENDOR};
 
 /// A vendor's definition of what its stelae contain.
 ///
@@ -62,6 +62,22 @@ pub trait Profile {
     /// the spelling; the protocol only requires that one exists.
     fn moving_tag(&self) -> &str {
         MOVING_TAG
+    }
+
+    /// Largest single record this profile's layers may contain.
+    ///
+    /// One number, asked of one party, and it bounds **both** ends: what a
+    /// publisher is allowed to write and what a reader will accept. That is the
+    /// point of putting it here rather than letting each end carry a constant.
+    /// A writer with the looser of two ceilings publishes a stele that restores
+    /// nowhere, and it publishes it *successfully* — the failure surfaces on
+    /// whoever tries to read it back, which is the party least able to fix it.
+    ///
+    /// The default is [`DEFAULT_MAX_RECORD`]. A profile whose records genuinely
+    /// exceed it raises this deliberately and says why, which is the
+    /// conversation `DEFAULT_MAX_RECORD`'s own documentation asks for.
+    fn max_record(&self) -> usize {
+        DEFAULT_MAX_RECORD
     }
 }
 
