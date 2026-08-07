@@ -66,6 +66,37 @@
 //! caller that is not is a design question, and the answer is not a second
 //! runtime.
 //!
+//! ## TLS, and the second rule it comes with
+//!
+//! The client speaks TLS through rustls, built with **no crypto provider wired
+//! in** (`reqwest/rustls-no-provider`). The alternative is the backend
+//! `oci-client`'s own `rustls-tls` feature selects, `aws-lc-rs`, whose
+//! `aws-lc-sys` needs `cmake` on the build machine — a build tool this
+//! protocol will not make a contributor install to compile a snapshot format.
+//! `crates/stelae/Cargo.toml` records which dependency each half of that
+//! choice lands on.
+//!
+//! The trade is the same one the async boundary makes: a guarantee moves from
+//! build time to run time.
+//!
+//! **A process that opens a [`Registry`] must have installed a process-default
+//! [`rustls`] `CryptoProvider` before it does so.** Nothing here can do it —
+//! the choice of provider belongs to the program, not to one of its
+//! transports, and a library that installed one would silently win a race
+//! against whatever its host had chosen. Omitting it panics inside
+//! [`Registry::open`], where `oci-client` builds its HTTP client: `reqwest`
+//! resolves its TLS backend there, before any request and before any URL
+//! scheme, so [`Options::insecure`] does not spare a plaintext registry.
+//! That is the worse failure mode being bought — a runtime abort rather than a
+//! link error — though the panic does name the missing feature.
+//!
+//! In Dolos this is `main()`, which installs `ring` for `mithril-client`'s
+//! sake and covers this transport by the same line. In this crate's own tests
+//! it is an explicit install in the fixture, so the suite proves the
+//! precondition rather than inheriting a provider by luck.
+//!
+//! [`rustls`]: https://docs.rs/rustls
+//!
 //! ## Authentication
 //!
 //! Anonymous, or a bearer token read from [`TOKEN_ENV`]. Nothing else: registry
@@ -348,6 +379,15 @@ impl Registry {
     /// Builds the current-thread runtime the whole transport runs on. Reads
     /// [`TOKEN_ENV`] once, here, so a token never has to be threaded through a
     /// profile's call stack.
+    ///
+    /// # Panics
+    ///
+    /// If no process-default [`rustls`] `CryptoProvider` has been installed —
+    /// see the module documentation. The panic comes from `reqwest`, which
+    /// resolves its TLS backend when `oci-client` builds the HTTP client here,
+    /// so [`Options::insecure`] does not avoid it.
+    ///
+    /// [`rustls`]: https://docs.rs/rustls
     pub fn open(repository: &Repository, options: Options) -> Result<Self, Error> {
         let protocol = if options.insecure {
             ClientProtocol::Http

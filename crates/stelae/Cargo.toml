@@ -17,6 +17,7 @@ oci = [
     "dep:futures-util",
     "dep:http",
     "dep:oci-client",
+    "dep:reqwest",
     "dep:tempfile",
     "dep:tokio",
 ]
@@ -37,16 +38,56 @@ zstd.workspace = true
 
 # --- feature `oci` ---------------------------------------------------------
 #
-# `oci-client` is the oras-project registry client. Its default TLS feature
-# (`rustls-tls`) is kept: without a TLS backend the client can only reach a
-# plaintext registry, which is a test fixture and not a distribution channel.
-# The cost is that it pins `reqwest/rustls` and `jsonwebtoken/aws_lc_rs`, so
-# `aws-lc-sys` enters the tree under `--all-features` and wants `cmake` to
-# build it — the very dependency the root package's `mithril-client` entry
-# goes out of its way to avoid. `test-registry` is dropped: it exists for the
-# crate's own test suite.
-oci-client = { version = "0.17", optional = true, default-features = false, features = [
-    "rustls-tls",
+# `oci-client` is the oras-project registry client, taken with none of its own
+# TLS features. Both of them are pure feature-forwarding — `rustls-tls =
+# ["reqwest/rustls", "jsonwebtoken/aws_lc_rs"]`, `native-tls =
+# ["reqwest/native-tls", "jsonwebtoken/rust_crypto"]` — and no line of the
+# crate is `#[cfg]`-gated on `rustls-tls` at all. So the feature does not
+# decide whether the client speaks TLS; it decides which crypto backend two of
+# its dependencies are built with, and that choice is made below instead.
+#
+# It has to be made somewhere, because `rustls-tls` reaches `aws-lc-sys`
+# twice over — through `jsonwebtoken/aws_lc_rs` for registry auth tokens and
+# through `reqwest 0.13`'s `rustls`, which fans out to `rustls/aws-lc-rs` —
+# and `aws-lc-sys` requires `cmake` to build, the very dependency the root
+# package's `mithril-client` entry goes out of its way to avoid. Defeating one
+# path leaves the other, so both are answered here — the `reqwest` one by
+# naming a different feature, the `jsonwebtoken` one by needing nothing.
+#
+# The `jsonwebtoken` half needs nothing to replace it. `oci-client` reaches
+# for that crate in exactly one place outside its own tests —
+# `dangerous::insecure_decode`, reading a bearer token's `exp` claim to decide
+# when the token cache should refetch — and that call is base64 and serde. It
+# never signs and never verifies, so it never asks for a crypto provider, and
+# the backend `rustls-tls` was selecting was paying for capability the client
+# does not use. Leaving `jsonwebtoken` with no backend is a configuration
+# `oci-client` supports rather than a hole punched in it: nothing in the crate
+# is `#[cfg]`-gated on having one.
+#
+# The alternative the mithril precedent suggests, `jsonwebtoken/rust_crypto`,
+# was tried first and rejected on evidence: it pulls `rsa 0.9`, which carries
+# RUSTSEC-2023-0071 with no fixed version, so `cargo deny check advisories`
+# fails from that commit onward — a standing tax on every later PR, bought for
+# an RSA implementation that no reachable line calls.
+#
+# `test-registry` is dropped for its own reason: it exists for the crate's own
+# test suite.
+oci-client = { version = "0.17", optional = true, default-features = false }
+# Named for `oci-client`, not for this crate: nothing here calls it. Cargo
+# unifies features across the graph, so declaring it chooses the TLS `reqwest`
+# that `oci-client` is built against without this crate ever naming the
+# aws-lc-rs one. `default-features = false`, matching what `oci-client` itself
+# asks for, so this adds one capability and no surface.
+#
+# `rustls-no-provider` is rustls with no crypto provider wired in — the same
+# trade the root package already makes for `mithril-client`. It buys a smaller
+# tree by moving a compile-time guarantee to a runtime one: a process that
+# opens a `Registry` must have installed a process-default provider first.
+# That precondition is stated in `oci.rs`'s module documentation, beside the
+# async-context rule, and the tests here install `ring` rather than inheriting
+# one.
+reqwest = { version = "0.13", optional = true, default-features = false, features = [
+    "rustls-no-provider",
 ] }
 # One current-thread runtime, owned by the transport and entered with
 # `block_on` at each call, so the protocol stays synchronous. See `oci.rs`.
@@ -72,3 +113,13 @@ tempfile = { version = "3.20.0", optional = true }
 # above is unaffected.
 stats_alloc = "0.1"
 tempfile = "3.20.0"
+# The registry tests install `ring` as the process-default crypto provider,
+# which is the precondition `oci.rs` puts on a caller and the reason `ring` is
+# named here and nowhere else in this manifest: choosing a provider is the
+# program's job, and under `cargo test` this crate's test binary is the
+# program. A dev-dependency, so `cargo tree -p stelae -e normal
+# --all-features` still matches no provider at all.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }
