@@ -23,12 +23,32 @@
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), so
 //! the same suite can be pointed at another implementation — which is the only
 //! way to find out whether a given registry accepts an OCI 1.1 `artifactType`.
+//!
+//! ## Running them over TLS
+//!
+//! The fixture speaks plaintext by default, which is enough for everything
+//! about the *protocol* and evidence for nothing about the transport's crypto.
+//! Set both of
+//!
+//! ```text
+//! STELAE_TEST_REGISTRY_TLS_CERT=/abs/path/server.pem
+//! STELAE_TEST_REGISTRY_TLS_KEY=/abs/path/server.key
+//! ```
+//!
+//! and the same suite runs against the same server terminating TLS, with the
+//! client verifying the certificate for real. The certificate has to cover
+//! `127.0.0.1` — that is where the fixture publishes — and its issuer has to be
+//! trusted by the process, which on Linux means `SSL_CERT_FILE` pointing at the
+//! CA. Nothing here weakens verification to make a self-signed certificate
+//! work: a suite that accepted any certificate would pass just as happily with
+//! the handshake broken, which is the one thing this mode exists to detect.
 
 #![cfg(feature = "oci")]
 
 use std::{
     alloc::System,
     collections::BTreeMap,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex, MutexGuard,
@@ -474,6 +494,70 @@ fn a_manifest_past_the_size_ceiling_is_refused() {
 // A registry the test spawns
 // ---------------------------------------------------------------------------
 
+/// The certificate the fixture hands the server, when the environment supplies
+/// one.
+///
+/// Read from the environment rather than generated here, because the half that
+/// matters is the one this process cannot do to itself: the issuer has to be
+/// trusted *before* the first client is built, and on Linux that is
+/// `SSL_CERT_FILE`, which is read once. A test that minted a certificate would
+/// have nowhere to put its CA.
+struct Tls {
+    certificate: String,
+    key: String,
+}
+
+impl Tls {
+    fn from_env() -> Option<Self> {
+        match (
+            std::env::var("STELAE_TEST_REGISTRY_TLS_CERT"),
+            std::env::var("STELAE_TEST_REGISTRY_TLS_KEY"),
+        ) {
+            (Ok(certificate), Ok(key)) if !certificate.is_empty() && !key.is_empty() => {
+                Some(Self { certificate, key })
+            }
+            (Ok(_), _) | (_, Ok(_)) => {
+                panic!("STELAE_TEST_REGISTRY_TLS_CERT and _KEY are set together or not at all")
+            }
+            _ => None,
+        }
+    }
+
+    /// The `docker run` arguments that make the server terminate TLS.
+    ///
+    /// Single-file bind mounts, so the two may live in different directories
+    /// and neither directory is exposed whole.
+    fn docker_args(&self) -> Vec<String> {
+        vec![
+            "--volume".to_owned(),
+            format!("{}:/tls/certificate.pem:ro", self.certificate),
+            "--volume".to_owned(),
+            format!("{}:/tls/key.pem:ro", self.key),
+            "--env".to_owned(),
+            "REGISTRY_HTTP_TLS_CERTIFICATE=/tls/certificate.pem".to_owned(),
+            "--env".to_owned(),
+            "REGISTRY_HTTP_TLS_KEY=/tls/key.pem".to_owned(),
+        ]
+    }
+}
+
+/// Install `ring` as the process-default crypto provider.
+///
+/// `oci.rs` documents this as the caller's job — the transport is built on
+/// rustls with no provider wired in — so the suite does it explicitly. Doing
+/// it here rather than relying on whatever a dependency might have installed
+/// is the point: if the precondition were ever dropped from the transport's
+/// documentation, this line is what would still be true.
+fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    ONCE.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("nothing else installed a provider first");
+    });
+}
+
 /// A container running an OCI Distribution server, removed when this is
 /// dropped.
 ///
@@ -483,22 +567,31 @@ fn a_manifest_past_the_size_ceiling_is_refused() {
 struct Fixture {
     container: String,
     port: u16,
+    tls: bool,
 }
 
 impl Fixture {
     fn spawn() -> Self {
+        install_crypto_provider();
+
         let image =
             std::env::var("STELAE_TEST_REGISTRY_IMAGE").unwrap_or_else(|_| "registry:2".to_owned());
 
+        let tls = Tls::from_env();
+
+        let mut args: Vec<String> = ["run", "--detach", "--rm", "--publish", "127.0.0.1::5000"]
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect();
+
+        if let Some(tls) = &tls {
+            args.extend(tls.docker_args());
+        }
+
+        args.push(image.clone());
+
         let run = std::process::Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--publish",
-                "127.0.0.1::5000",
-                &image,
-            ])
+            .args(&args)
             .output()
             .expect("docker is required to run the registry tests");
 
@@ -522,15 +615,28 @@ impl Fixture {
             .and_then(|port| port.trim().parse::<u16>().ok())
             .unwrap_or_else(|| panic!("no published port in {mapped:?}"));
 
-        let fixture = Self { container, port };
+        let fixture = Self {
+            container,
+            port,
+            tls: tls.is_some(),
+        };
+
         fixture.wait_until_ready();
 
-        eprintln!("registry: {image} on 127.0.0.1:{port}");
+        eprintln!(
+            "registry: {image} on {}, {}",
+            fixture.address(),
+            if fixture.tls { "TLS" } else { "plaintext" }
+        );
 
         fixture
     }
 
-    /// Wait until the server answers `GET /v2/`.
+    fn address(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Wait until the server answers a real request.
     ///
     /// A connect is *not* the readiness signal, however much it looks like one:
     /// Docker's port forwarder accepts on the published port from the moment
@@ -539,47 +645,53 @@ impl Fixture {
     /// message. That failure looks exactly like a registry rejecting the
     /// request, which is the wrong thing to conclude about a registry.
     ///
-    /// So the probe is a real request, spoken by hand over the socket rather
-    /// than with an HTTP client this crate does not otherwise need.
+    /// So the probe is the client under test asking a repository nothing has
+    /// ever been written to for its latest stele. `Ok(None)` is the answer only
+    /// a registry that read the request can give — and under TLS it is
+    /// reachable only through a handshake that verified, which makes the same
+    /// call the readiness probe and the first assertion.
     fn wait_until_ready(&self) {
-        use std::io::{Read, Write};
-
-        let address = format!("127.0.0.1:{}", self.port);
-
         for _ in 0..300 {
-            let answered = std::net::TcpStream::connect(&address)
-                .ok()
-                .and_then(|mut socket| {
-                    socket
-                        .write_all(
-                            format!("GET /v2/ HTTP/1.0\r\nHost: {address}\r\n\r\n").as_bytes(),
-                        )
-                        .ok()?;
-
-                    let mut answer = [0u8; 16];
-                    let read = socket.read(&mut answer).ok()?;
-
-                    answer[..read].starts_with(b"HTTP/1.").then_some(())
-                });
-
-            if answered.is_some() {
+            if self
+                .registry("stelae/readiness")
+                .latest(&ToyProfile)
+                .is_ok()
+            {
                 return;
             }
 
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        panic!("the registry never answered GET /v2/ on {address}");
+        let refusal = self
+            .registry("stelae/readiness")
+            .latest(&ToyProfile)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+
+        panic!(
+            "the registry never answered on {}: {refusal}",
+            self.address()
+        );
     }
 
     fn registry(&self, repository: &str) -> Registry {
+        self.registry_staging_in(repository, None)
+    }
+
+    /// Every transport in this file is built here, so that whether the fixture
+    /// is speaking TLS is decided in exactly one place. A test that assembled
+    /// its own [`Options`] to set a scratch directory would keep working
+    /// against a plaintext fixture and quietly send `http://` at a TLS one.
+    fn registry_staging_in(&self, repository: &str, scratch_dir: Option<PathBuf>) -> Registry {
         Registry::open(
-            &format!("oci://127.0.0.1:{}/{repository}", self.port)
+            &format!("oci://{}/{repository}", self.address())
                 .parse()
                 .expect("the fixture named a usable repository"),
             Options {
-                insecure: true,
-                scratch_dir: None,
+                insecure: !self.tls,
+                scratch_dir,
             },
         )
         .unwrap()
@@ -1221,16 +1333,7 @@ fn staging_stays_in_the_scratch_directory_and_leaves_nothing() {
     let fixture = Fixture::spawn();
 
     let scratch = tempfile::tempdir().unwrap();
-    let registry = Registry::open(
-        &format!("oci://127.0.0.1:{}/stelae/scratch", fixture.port)
-            .parse()
-            .expect("the fixture named a usable repository"),
-        Options {
-            insecure: true,
-            scratch_dir: Some(scratch.path().to_owned()),
-        },
-    )
-    .unwrap();
+    let registry = fixture.registry_staging_in("stelae/scratch", Some(scratch.path().to_owned()));
 
     let inscription = write_stele(&registry, 3);
     let stele = registry.pull_latest(&ToyProfile).unwrap();
