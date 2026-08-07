@@ -724,25 +724,59 @@ fn a_killed_restore_resumes_into_the_same_node_on_fjall() {
 /// and the state tip is redone, because the tip is what a new stele changes.
 ///
 /// The harness ledger is one epoch, so "a newer inscription" is built the way
-/// `tests/publish.rs` builds its second publish: the same stores, a cursor one
-/// slot further on. The epoch-0 layers are byte-identical across the two and
-/// the state shards are not, which is exactly the shape the rule is about.
+/// `tests/publish.rs` builds its second publish: the same stores, standing at
+/// two synthetic chain points a slot apart. The first closes epoch 0; the
+/// second stands in epoch 1.
+///
+/// That geometry is what makes the assertions mean anything. Epoch 0's layers
+/// are byte-identical across the two steles, because its window closed and a
+/// closed window cannot be published differently. The state shards are **not**,
+/// because a shard's header record names the epoch it is the tip of. So the
+/// resume has genuinely different bytes on both sides of the rule: layers it
+/// may skip, and layers it must not.
 #[test]
 fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     let domain: ToyDomain = harness();
     let magic = magic_of(&domain);
 
+    let boundary = epoch_one_starts_at(&domain);
+
     let older = tempfile::tempdir().unwrap();
     let newer = tempfile::tempdir().unwrap();
 
-    let first = export_to(older.path(), &domain);
-    let second = export_to(newer.path(), &domain);
+    let first = export_standing_at(older.path(), &domain, boundary - 1);
+    let second = export_standing_at(newer.path(), &domain, boundary);
 
-    // Same stores and same plan, so the two steles are the same stele. What
-    // makes this a test of the *rule* rather than of an identity is that the
-    // progress file records the first one's digest and the restore reads the
-    // second.
-    assert_eq!(first.digest().unwrap(), second.digest().unwrap());
+    // Two steles, not one. The whole test is about a `diffId` recorded under
+    // the first staying true under the second, and that says nothing unless
+    // the second is a different document.
+    assert_ne!(first.digest().unwrap(), second.digest().unwrap());
+    assert_eq!(first.sequence, 1);
+    assert_eq!(second.sequence, 2);
+
+    // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
+    // every state shard is new.
+    let epoch_zero = |stele: &Inscription| -> Vec<Digest> {
+        stele
+            .layers
+            .iter()
+            .filter(|l| l.kind != STATE && l.scope["epoch"] == 0)
+            .map(|l| l.diff_id)
+            .collect()
+    };
+
+    assert_eq!(
+        epoch_zero(&first),
+        epoch_zero(&second),
+        "epoch 0's window closed, so its layers cannot differ"
+    );
+
+    assert!(
+        state_diff_ids(&first)
+            .iter()
+            .all(|shard| !state_diff_ids(&second).contains(shard)),
+        "a state shard names the epoch it is the tip of, so none can be shared"
+    );
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
@@ -791,11 +825,83 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     );
 
     assert_eq!(
-        resumed.layers_fetched, STATE_SHARDS as usize,
-        "and only the state tip was fetched: the shards are never inherited"
+        resumed.layers_fetched,
+        second.layers.len() - seeded,
+        "and everything the newer stele adds was fetched: epoch 1's layers, \
+         and all sixteen shards because a shard is never inherited"
     );
 
-    assert_stores_match(&blank, &domain);
+    assert!(
+        resumed.layers_fetched > STATE_SHARDS as usize,
+        "the newer stele has to add an epoch, or the tip is all this proves"
+    );
+
+    // Against an uninterrupted restore of the *same* stele, not against the
+    // domain: the two steles stand at synthetic chain points the harness ledger
+    // never reached, so their cursor is theirs and not the domain's. What has
+    // to match is everything a restore of `second` produces.
+    let reference = Blank::<MemoryStores>::open();
+    let reference_storage = tempfile::tempdir().unwrap();
+
+    restore_checkpointed(
+        newer.path(),
+        reference_storage.path(),
+        magic,
+        &reference,
+        false,
+        None,
+    )
+    .unwrap();
+
+    assert_state_matches(blank.state(), reference.state());
+    assert_archive_matches(&blank.archive, &reference.archive);
+    assert_indexes_match(blank.indexes(), reference.indexes(), blank.state());
+}
+
+/// The slot epoch 1 begins at, for a test that needs to stand on the boundary.
+fn epoch_one_starts_at<B: ToyStores>(domain: &ToyDomain<B>) -> u64 {
+    dolos_cardano::eras::load_chain_summary_from_state(domain.state())
+        .unwrap()
+        .epoch_start(1)
+}
+
+/// Export `domain` as if its cursor stood at `slot`.
+///
+/// [`export_to`] derives everything from the store's own cursor, so two calls
+/// produce one stele twice. A test about what changes *between* steles needs
+/// two, and standing at a synthetic chain point is how `tests/publish.rs`
+/// builds its second publish — for the same reason, and with the same caveat:
+/// the resulting cursor is not one the harness ledger ever reached, so a
+/// restore of it must be compared against another restore rather than against
+/// the domain.
+fn export_standing_at<B: ToyStores>(
+    root: &std::path::Path,
+    domain: &ToyDomain<B>,
+    slot: u64,
+) -> Inscription {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+
+    // Any hash will do: `position` needs one to exist, and nothing in an export
+    // reads it back out of the store.
+    let plan = dolos_snapshot::export::Plan::new(
+        &summary,
+        dolos_snapshot::Network::for_magic(magic_of(domain)),
+        ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
+    )
+    .unwrap();
+
+    let stele = SteleDir::create(root).unwrap();
+
+    dolos_snapshot::export::export(
+        &stele,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &dolos_snapshot::export::First,
+    )
+    .unwrap()
 }
 
 /// The resume is `--continue`'s and nobody else's.
@@ -905,6 +1011,13 @@ fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, V
         plan.immutable_layers().map(|l| l.diff_id).collect(),
         plan.tip_layers().map(|l| l.diff_id).collect(),
     )
+}
+
+fn state_diff_ids(inscription: &Inscription) -> Vec<Digest> {
+    inscription
+        .layers_of_kind(STATE)
+        .map(|layer| layer.diff_id)
+        .collect()
 }
 
 fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
