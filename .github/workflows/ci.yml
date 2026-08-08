@@ -140,9 +140,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Pulled in its own step so an image that cannot be fetched fails as
-      # infrastructure, distinguishable from a fixture or suite failure.
+      # infrastructure, distinguishable from a fixture or suite failure. The
+      # pull backs off and tries again because ECR Public *throttles*
+      # anonymous pulls per source IP — runner IPs are shared and the three
+      # legs start at once — and a throttle, unlike Docker Hub's six-hour
+      # quota, clears in seconds. The suites below still run exactly once:
+      # the no-retry rule is about the round trip, and this step exists to
+      # keep infrastructure out of it.
       - name: Pull the registry image
-        run: docker pull "$STELAE_TEST_REGISTRY_IMAGE"
+        run: |
+          for attempt in 1 2 3 4 5; do
+            docker pull "$STELAE_TEST_REGISTRY_IMAGE" && exit 0
+            echo "pull attempt ${attempt} failed; backing off"
+            sleep $((attempt * 30))
+          done
+          exit 1
 
       - name: Stelae transport round trip
         run: cargo test -p stelae --all-features --test oci -- --ignored --nocapture --test-threads=1
