@@ -24,6 +24,19 @@
 //! the same suite can be pointed at another implementation — which is the only
 //! way to find out whether a given registry accepts an OCI 1.1 `artifactType`.
 //!
+//! ## The fixture demands credentials
+//!
+//! Every registry this suite spawns is behind htpasswd, and every transport it
+//! opens carries the pair. That is not incidental hardening: the registry this
+//! transport is aimed at authenticates every request — access to a stele
+//! repository is free and identity-less, and still credentialed — so a suite
+//! that only ever spoke to an anonymous server would prove the round trip
+//! against a server unlike the one it runs against.
+//!
+//! [`credentials_are_required`] is what keeps that honest. A server the fixture
+//! does not know how to configure would run anonymous and every other test here
+//! would pass regardless; that one fails instead, and says so.
+//!
 //! ## Running them over TLS
 //!
 //! The fixture speaks plaintext by default, which is enough for everything
@@ -63,7 +76,7 @@ use stelae::{
     frame::{encode, CanonicalCbor, Limits},
     inscription::LayerDescriptor,
     oci::{
-        build_manifest, manifest_bytes, read_manifest, Options, Registry, Transfer,
+        build_manifest, manifest_bytes, read_manifest, Auth, Options, Registry, Transfer,
         DIFF_ID_ANNOTATION, KIND_ANNOTATION, SCOPE_ANNOTATION,
     },
     Compression, Digest, Error, HistoryEntry, Inscription, LayerDigests, LayerSpec, Profile,
@@ -558,6 +571,30 @@ fn install_crypto_provider() {
     });
 }
 
+/// The credentials the fixture's registry demands.
+///
+/// A test credential, not a secret: it lives as long as one container. [`HTPASSWD`]
+/// is the bcrypt encoding of this pair — `distribution` accepts no other hash
+/// algorithm in an htpasswd file — so the two move together or not at all.
+const USER: &str = "stelae";
+const PASSWORD: &str = "stelae-fixture";
+
+const HTPASSWD: &str = "stelae:$2y$05$1Hb22zONvzLAj4WaYl34/uDWF5rDgQkS9MoewgRvsTlsNrusMYTW6\n";
+
+/// zot's whole configuration, which is a file or nothing: it has no environment
+/// equivalent, and the image's own default carries no auth.
+const ZOT_CONFIG: &str = r#"{
+  "distSpecVersion": "1.1.1",
+  "storage": { "rootDirectory": "/var/lib/registry" },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "auth": { "htpasswd": { "path": "/auth/htpasswd" } }
+  },
+  "log": { "level": "warn" }
+}
+"#;
+
 /// A container running an OCI Distribution server, removed when this is
 /// dropped.
 ///
@@ -568,6 +605,9 @@ struct Fixture {
     container: String,
     port: u16,
     tls: bool,
+    /// The htpasswd file and the configuration naming it, held so they outlive
+    /// the container that has them mounted.
+    _auth: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -578,6 +618,7 @@ impl Fixture {
             std::env::var("STELAE_TEST_REGISTRY_IMAGE").unwrap_or_else(|_| "registry:2".to_owned());
 
         let tls = Tls::from_env();
+        let auth = auth_dir();
 
         let mut args: Vec<String> = ["run", "--detach", "--rm", "--publish", "127.0.0.1::5000"]
             .iter()
@@ -588,6 +629,7 @@ impl Fixture {
             args.extend(tls.docker_args());
         }
 
+        args.extend(auth_args(auth.path()));
         args.push(image.clone());
 
         let run = std::process::Command::new("docker")
@@ -619,12 +661,13 @@ impl Fixture {
             container,
             port,
             tls: tls.is_some(),
+            _auth: auth,
         };
 
         fixture.wait_until_ready();
 
         eprintln!(
-            "registry: {image} on {}, {}",
+            "registry: {image} on {}, {}, basic auth as {USER:?}",
             fixture.address(),
             if fixture.tls { "TLS" } else { "plaintext" }
         );
@@ -681,10 +724,23 @@ impl Fixture {
     }
 
     /// Every transport in this file is built here, so that whether the fixture
-    /// is speaking TLS is decided in exactly one place. A test that assembled
-    /// its own [`Options`] to set a scratch directory would keep working
-    /// against a plaintext fixture and quietly send `http://` at a TLS one.
+    /// is speaking TLS — and which credentials it presents — is decided in
+    /// exactly one place. A test that assembled its own [`Options`] to set a
+    /// scratch directory would keep working against a plaintext fixture and
+    /// quietly send `http://` at a TLS one.
     fn registry_staging_in(&self, repository: &str, scratch_dir: Option<PathBuf>) -> Registry {
+        self.registry_as(repository, scratch_dir, self.credentials())
+    }
+
+    /// The pair the fixture's registry accepts.
+    fn credentials(&self) -> Auth {
+        Auth::Basic {
+            user: USER.to_owned(),
+            password: PASSWORD.to_owned(),
+        }
+    }
+
+    fn registry_as(&self, repository: &str, scratch_dir: Option<PathBuf>, auth: Auth) -> Registry {
         Registry::open(
             &format!("oci://{}/{repository}", self.address())
                 .parse()
@@ -692,10 +748,55 @@ impl Fixture {
             Options {
                 insecure: !self.tls,
                 scratch_dir,
+                auth,
             },
         )
         .unwrap()
     }
+}
+
+/// An htpasswd file, plus the configuration a registry that wants one in a file
+/// rather than in the environment reads.
+///
+/// Returned as a directory the caller holds: the container has both mounted,
+/// and a `TempDir` dropped early would unlink them out from under it.
+fn auth_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temporary directory for the htpasswd file");
+
+    std::fs::write(dir.path().join("htpasswd"), HTPASSWD).expect("writing the htpasswd file");
+    std::fs::write(dir.path().join("zot.json"), ZOT_CONFIG).expect("writing the zot config");
+
+    dir
+}
+
+/// The `docker run` arguments that make a registry demand [`USER`]/[`PASSWORD`].
+///
+/// **Both configurations, unconditionally, and no per-image branch.** The two
+/// server families this suite is pointed at read their auth from different
+/// places and each ignores the other's: `distribution` reads `REGISTRY_AUTH_*`
+/// out of the environment and never opens `/etc/zot/config.json`, while `zot`
+/// reads that file and knows nothing about `REGISTRY_*`. Applying both is
+/// therefore not a guess about which image is running — it is the union of two
+/// settings that cannot collide.
+///
+/// A registry that reads neither would run anonymous, which every other test
+/// here would be perfectly happy with. [`credentials_are_required`] is what
+/// notices.
+fn auth_args(dir: &std::path::Path) -> Vec<String> {
+    let path = |name: &str| dir.join(name).display().to_string();
+
+    vec![
+        "--volume".to_owned(),
+        format!("{}:/auth/htpasswd:ro", path("htpasswd")),
+        "--volume".to_owned(),
+        format!("{}:/etc/zot/config.json:ro", path("zot.json")),
+        "--env".to_owned(),
+        "REGISTRY_AUTH=htpasswd".to_owned(),
+        "--env".to_owned(),
+        "REGISTRY_AUTH_HTPASSWD_REALM=stelae".to_owned(),
+        "--env".to_owned(),
+        "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd".to_owned(),
+    ]
 }
 
 impl Drop for Fixture {
@@ -1401,6 +1502,59 @@ fn latest_is_absent_until_something_is_published() {
     // registry error code than a missing tag in one that does.
     let empty = fixture.registry("stelae/never-written-to");
     assert!(empty.latest(&ToyProfile).unwrap().is_none());
+}
+
+/// The registry the fixture spawns actually demands credentials, and a refusal
+/// is never read as absence.
+///
+/// Two claims, and the second is the one with teeth. `Registry::latest` turns
+/// "no such manifest" into `None`, and a publisher reads `None` as "nothing to
+/// chain to" and starts a fresh history — so a 401 widening into absence would
+/// silently restart the attestation chain against a registry that simply did
+/// not recognise the caller. `is_absent` is written not to, and this is that
+/// claim against a server that really answers 401 rather than against a
+/// hand-built error value.
+///
+/// The first claim is what keeps the rest of this file honest: the fixture
+/// configures htpasswd for the two server families it knows, and a registry
+/// that read neither would run anonymous with every other test here passing
+/// exactly as before. This one fails instead — which, for an operator pointing
+/// `STELAE_TEST_REGISTRY_IMAGE` at a fourth implementation, is the fixture
+/// saying it does not know how to make that one ask for credentials.
+#[test]
+#[ignore = "spawns a registry"]
+fn credentials_are_required() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    // The pair the fixture configured reads the repository, which is the
+    // baseline every other test in this file rests on.
+    let allowed = fixture.registry("stelae/credentials");
+    assert!(allowed.latest(&ToyProfile).unwrap().is_none());
+
+    for (who, auth) in [
+        ("anonymous", Auth::Anonymous),
+        (
+            "the wrong password",
+            Auth::Basic {
+                user: USER.to_owned(),
+                password: "not-the-password".to_owned(),
+            },
+        ),
+    ] {
+        let refused = fixture.registry_as("stelae/credentials", None, auth);
+
+        let err = refused
+            .latest(&ToyProfile)
+            .expect_err("the registry answered an unauthenticated request");
+
+        println!("{who}: {err}");
+
+        // And a publish through this transport is refused rather than starting
+        // a chain, which is the consequence that matters.
+        assert!(refused.pull_latest(&ToyProfile).is_err(), "{who}");
+    }
 }
 
 /// A layer cannot be carried forward into a repository that does not hold its

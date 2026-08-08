@@ -3,8 +3,8 @@ use dolos_cardano::{include, mutable_slots};
 use dolos_core::{
     config::{
         CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
-        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StorageConfig, StorageVersion,
-        TrpConfig, UpstreamConfig,
+        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StelaeConfig, StorageConfig,
+        StorageVersion, TrpConfig, UpstreamConfig,
     },
     Genesis,
 };
@@ -352,6 +352,13 @@ impl Default for ConfigEditor {
                 upstream: From::from(&KnownNetwork::CardanoMainnet),
                 mithril: Some(From::from(&KnownNetwork::CardanoMainnet)),
                 snapshot: Default::default(),
+                // Seeded, so a node created here restores from the official
+                // stele registry without an operator having to find a
+                // credential first. Only on a *fresh* config: an existing
+                // `dolos.toml` keeps whatever it carries, because a section
+                // an operator removed and one that predates the field look
+                // the same from here, and overwriting would undo the first.
+                stelae: StelaeConfig::official(),
                 storage: StorageConfig {
                     version: StorageVersion::V3,
                     ..Default::default()
@@ -704,9 +711,13 @@ impl ConfigEditor {
     }
 
     fn save(self, path: &Path) -> miette::Result<()> {
-        let config = toml::to_string_pretty(&self.0)
+        let mut config = toml::to_string_pretty(&self.0)
             .into_diagnostic()
             .context("serializing config toml")?;
+
+        if self.0.stelae.registry.is_none() {
+            config.push_str(STELAE_REGISTRY_TEMPLATE);
+        }
 
         std::fs::write(path, config)
             .into_diagnostic()
@@ -715,6 +726,29 @@ impl ConfigEditor {
         Ok(())
     }
 }
+
+/// The stelae registry section, written commented out when there is no pair to
+/// seed.
+///
+/// A comment rather than nothing. The section is how a node authenticates
+/// against a stele registry, and an operator pointing `dolos bootstrap stelae`
+/// at one — the official registry before its credentials ship, or a private one
+/// — should find the shape of it in the file they already have. Serde cannot
+/// emit a comment, so this is appended after serialization; it is written only
+/// when the section itself is absent, so it never sits next to a real one
+/// contradicting it.
+const STELAE_REGISTRY_TEMPLATE: &str = "\
+# Credentials for the stele registry `dolos bootstrap stelae` reads from.
+# Registries that charge nothing for reads may still refuse an unidentified
+# one; this is the published read-only pair such a registry hands out. The
+# environment overrides it — STELAE_REGISTRY_USER and STELAE_REGISTRY_PASSWORD,
+# or STELAE_REGISTRY_TOKEN for a registry that issues bearer tokens — which is
+# where a publisher's own full-access credentials belong.
+#
+# [stelae.registry]
+# user = \"\"
+# password = \"\"
+";
 
 pub fn run(
     config: miette::Result<RootConfig>,
@@ -745,4 +779,70 @@ pub fn run(
     println!("- run `dolos daemon` to start the node");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A freshly initialized node carries the stelae registry section.
+    ///
+    /// Two shapes, one test, because which one is written depends on a
+    /// constant: the section itself once `OFFICIAL_REGISTRY_CREDENTIALS` is
+    /// filled, the commented template until then. Both have to parse — a
+    /// generated `dolos.toml` that `dolos daemon` cannot read is worse than one
+    /// that says nothing about registries — and this is what will still be true
+    /// on the day the constant is filled in.
+    #[test]
+    fn a_fresh_config_carries_the_stelae_registry_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+
+        ConfigEditor::default().save(&path).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        println!("{written}");
+
+        assert!(written.contains("[stelae.registry]"), "{written}");
+
+        // The environment is named beside it either way: it is where a
+        // publisher's credentials go, and the section is where an operator
+        // looks for that fact.
+        assert!(written.contains("STELAE_REGISTRY_USER"), "{written}");
+
+        let parsed: RootConfig = toml::from_str(&written).expect("the generated config parses");
+        assert_eq!(parsed.stelae, StelaeConfig::official());
+    }
+
+    /// A config that already carries a pair keeps it, and gets no commented
+    /// template contradicting it.
+    #[test]
+    fn a_configured_pair_is_written_rather_than_commented() {
+        use dolos_core::config::StelaeRegistryConfig;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dolos.toml");
+
+        let mut editor = ConfigEditor::default();
+        editor.0.stelae.registry = Some(StelaeRegistryConfig {
+            user: "dolos".to_owned(),
+            password: "published".to_owned(),
+        });
+
+        editor.save(&path).unwrap();
+
+        let written = std::fs::read_to_string(&path).unwrap();
+
+        assert!(written.contains("[stelae.registry]"), "{written}");
+        assert!(
+            !written.contains("# [stelae.registry]"),
+            "the template was written next to a real section: {written}"
+        );
+
+        let parsed: RootConfig = toml::from_str(&written).unwrap();
+        let registry = parsed.stelae.registry.expect("the pair round-trips");
+
+        assert_eq!(registry.user, "dolos");
+        assert_eq!(registry.password, "published");
+    }
 }

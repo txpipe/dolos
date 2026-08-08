@@ -16,8 +16,28 @@
 // binary does not reach look dead to it. They are not.
 #![allow(dead_code)]
 
+use dolos_core::config::StelaeRegistryConfig;
 use dolos_snapshot::registry;
 use stelae::oci::Registry;
+
+/// The credentials the fixture's registry demands, and the ones these suites
+/// hand `registry::open` as a node's configured pair.
+///
+/// A test credential, not a secret: it exists for the length of one container.
+/// The bcrypt hash below is this pair, and `distribution` accepts no other
+/// hash algorithm in an htpasswd file.
+pub const USER: &str = "stelae";
+pub const PASSWORD: &str = "stelae-fixture";
+
+const HTPASSWD: &str = "stelae:$2y$05$1Hb22zONvzLAj4WaYl34/uDWF5rDgQkS9MoewgRvsTlsNrusMYTW6\n";
+
+/// The node-side half of the same pair.
+pub fn credentials() -> StelaeRegistryConfig {
+    StelaeRegistryConfig {
+        user: USER.to_owned(),
+        password: PASSWORD.to_owned(),
+    }
+}
 
 /// Install `ring` as the process-default crypto provider.
 ///
@@ -42,9 +62,18 @@ fn install_crypto_provider() {
 
 /// A container running an OCI Distribution server, removed when this is
 /// dropped.
+///
+/// It demands Basic credentials, because the registry these suites exist to
+/// stand in for does: access to a stele repository is free and identity-less,
+/// and still authenticated. An anonymous fixture would leave the credential
+/// plumbing in `registry::open` exercised by unit tests alone.
 pub struct Fixture {
     container: String,
     port: u16,
+    /// The htpasswd file — and, for a registry that reads a file rather than
+    /// the environment, the configuration naming it. Held so it outlives the
+    /// container that has it mounted.
+    _auth: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -54,15 +83,18 @@ impl Fixture {
         let image =
             std::env::var("STELAE_TEST_REGISTRY_IMAGE").unwrap_or_else(|_| "registry:2".to_owned());
 
+        let auth = auth_dir();
+
+        let mut args: Vec<String> = ["run", "--detach", "--rm", "--publish", "127.0.0.1::5000"]
+            .iter()
+            .map(|arg| (*arg).to_owned())
+            .collect();
+
+        args.extend(auth_args(auth.path()));
+        args.push(image.clone());
+
         let run = std::process::Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--publish",
-                "127.0.0.1::5000",
-                &image,
-            ])
+            .args(&args)
             .output()
             .expect("docker is required to run the registry tests");
 
@@ -86,10 +118,15 @@ impl Fixture {
             .and_then(|port| port.trim().parse::<u16>().ok())
             .unwrap_or_else(|| panic!("no published port in {mapped:?}"));
 
-        let fixture = Self { container, port };
+        let fixture = Self {
+            container,
+            port,
+            _auth: auth,
+        };
+
         fixture.wait_until_ready();
 
-        eprintln!("registry: {image} on 127.0.0.1:{port}");
+        eprintln!("registry: {image} on 127.0.0.1:{port}, basic auth as {USER:?}");
 
         fixture
     }
@@ -147,12 +184,22 @@ impl Fixture {
     /// A fresh transport per call, even for a name already opened: the pending
     /// layers and the transfer counters live in the transport, and a test
     /// comparing two publishes wants two of them.
+    ///
+    /// Through `registry::open` with the pair as a *configured* one, so these
+    /// suites exercise the path a restoring node takes — credentials off
+    /// `[stelae.registry]` in `dolos.toml` — rather than a transport assembled
+    /// beside it.
     pub fn repository(&self, name: &str) -> Registry {
+        self.repository_as(name, Some(&credentials()))
+    }
+
+    /// The same, with whatever credentials a caller wants to try.
+    pub fn repository_as(&self, name: &str, configured: Option<&StelaeRegistryConfig>) -> Registry {
         let repository = format!("oci://127.0.0.1:{}/{name}", self.port)
             .parse()
             .expect("the fixture named a usable repository");
 
-        registry::open(&repository, true).unwrap()
+        registry::open(&repository, true, configured).unwrap()
     }
 }
 
@@ -163,3 +210,60 @@ impl Drop for Fixture {
             .output();
     }
 }
+
+/// An htpasswd file, plus the configuration a registry that wants one in a file
+/// rather than in the environment reads.
+///
+/// Returned as a directory the caller holds: the container has both mounted,
+/// and a `TempDir` dropped early would unlink them out from under it.
+pub fn auth_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a temporary directory for the htpasswd file");
+
+    std::fs::write(dir.path().join("htpasswd"), HTPASSWD).expect("writing the htpasswd file");
+    std::fs::write(dir.path().join("zot.json"), ZOT_CONFIG).expect("writing the zot config");
+
+    dir
+}
+
+/// The `docker run` arguments that make a registry demand [`USER`]/[`PASSWORD`].
+///
+/// **Both configurations, unconditionally, and no per-image branch.** The two
+/// server families this suite is pointed at read their auth from different
+/// places and each ignores the other's: `distribution` reads `REGISTRY_AUTH_*`
+/// out of the environment and never opens `/etc/zot/config.json`, while `zot`
+/// reads that file and knows nothing about `REGISTRY_*`. Applying both is
+/// therefore not a guess about which image is running — it is the union of two
+/// settings that cannot collide.
+///
+/// A registry that reads neither would run anonymous, which is why every suite
+/// that uses this fixture also asserts that credentials are actually required.
+pub fn auth_args(dir: &std::path::Path) -> Vec<String> {
+    let path = |name: &str| dir.join(name).display().to_string();
+
+    vec![
+        "--volume".to_owned(),
+        format!("{}:/auth/htpasswd:ro", path("htpasswd")),
+        "--volume".to_owned(),
+        format!("{}:/etc/zot/config.json:ro", path("zot.json")),
+        "--env".to_owned(),
+        "REGISTRY_AUTH=htpasswd".to_owned(),
+        "--env".to_owned(),
+        "REGISTRY_AUTH_HTPASSWD_REALM=stelae".to_owned(),
+        "--env".to_owned(),
+        "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd".to_owned(),
+    ]
+}
+
+/// zot's whole configuration, which is a file or nothing — it has no
+/// environment equivalent, and the image's own default has no auth in it.
+const ZOT_CONFIG: &str = r#"{
+  "distSpecVersion": "1.1.1",
+  "storage": { "rootDirectory": "/var/lib/registry" },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "5000",
+    "auth": { "htpasswd": { "path": "/auth/htpasswd" } }
+  },
+  "log": { "level": "warn" }
+}
+"#;

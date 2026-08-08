@@ -240,7 +240,16 @@ The arithmetic is counted in layers, because layers are what the ceiling counts:
 #### What the transport requires of its host
 
 - **A process that opens a registry client must have installed a process-default rustls `CryptoProvider` first.** The transport ships no crypto backend of its own (`reqwest/rustls-no-provider`): the backend the client library would otherwise pick, `aws-lc-rs`, wants `cmake` on every build machine — the dependency this workspace already goes out of its way to avoid — so it stays out of the tree and the choice of provider moves to the program. In Dolos, `main()` installs `ring`. Omitting the install is a panic when the registry client opens, not a link error.
-- **Authentication is a bearer token from `STELAE_REGISTRY_TOKEN`, or anonymous.** Read once, when the registry client opens. Nothing else: registry credentials are a publisher's concern with a policy of its own.
+- **Authentication is the host's decision, in one of three shapes.** The client is opened with credentials its caller supplies — anonymous, a bearer token, or an HTTP Basic pair — and never goes looking on its own: which identity a program authenticates as is that program's policy. What the protocol owns is the environment grammar, because it owns the variable names:
+
+  | Variable | Shape |
+  | --- | --- |
+  | `STELAE_REGISTRY_TOKEN` | bearer token |
+  | `STELAE_REGISTRY_USER` + `STELAE_REGISTRY_PASSWORD` | Basic pair |
+
+  An empty value is unset. A token and a pair set together is a **refusal**, not a precedence rule, and so is half a pair: an operator who exported both meant one of them, and a client that guessed would authenticate as an identity nobody chose — which on a registry whose credentials carry different capabilities is the difference between a publish and a 403 nobody can explain.
+
+  Anonymous remains legitimate and is what a genuinely public repository wants. It is not what a registry that authenticates every request wants, and that is the deployment Dolos is heading for: read access to a stele repository is free and identity-less, and still credentialed.
 
 ### Code layout
 
@@ -286,7 +295,13 @@ download_url = "https://…"    # legacy, kept working, deprecated in docs
 source = "oci://ghcr.io/txpipe/dolos-snapshots/mainnet"  # new, takes precedence
 require_signatures = 0         # k-of-n enforcement
 trusted_keys = ["ed25519:…"]  # mirrors mithril genesis_key style
+
+[stelae.registry]              # the registry's published read-only pair
+user = "…"                     # seeded by `dolos init`; overridden by
+password = "…"                 # STELAE_REGISTRY_USER/_PASSWORD
 ```
+
+The read-only pair is a **published secret and belongs in the file**: it is what makes stele distribution free and identity-less while still authenticated, and `dolos init` seeds it so a fresh node restores from the official registry with nothing exported. A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never here — which is why the environment overrides the file rather than the other way round, so a node carrying the read-only pair can publish without having it removed first.
 
 ### Publisher pipeline
 

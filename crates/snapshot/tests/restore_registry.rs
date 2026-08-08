@@ -27,6 +27,11 @@
 //! 4. **A point names a stele.** `epoch-N` resolves to that sequence and
 //!    `latest` to the newest, which is what makes a repository holding a
 //!    history restorable at any of them.
+//! 5. **The pair in `dolos.toml` is what opens the repository.** The fixture's
+//!    registry demands Basic credentials, and every restore above reaches it
+//!    through `registry::open` with the pair as a node's *configured* one — so
+//!    the four properties are all evidence for this fifth. `a_node_authenticates_
+//!    with_its_configured_pair` states it directly, from both sides.
 //!
 //! ## Why the interruption is a layer boundary
 //!
@@ -512,6 +517,58 @@ fn a_point_that_names_no_stele_is_refused() {
         None,
         "a restore that never started left a progress file"
     );
+}
+
+/// The credentials `[stelae.registry]` carries are what a restore authenticates
+/// with — and a node carrying none does not get in.
+///
+/// This is the consumer half of the access policy the registry exists under:
+/// pulling a stele costs nothing and identifies nobody, and is still refused
+/// without a credential. What a fresh `dolos init` seeds is exactly the pair
+/// this test hands `registry::open`.
+///
+/// The negative half doubles as the fixture's own honesty check: a registry
+/// this fixture did not manage to put behind htpasswd would run anonymous, and
+/// every other test in this file would pass unchanged.
+#[test]
+#[ignore]
+fn a_node_authenticates_with_its_configured_pair() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+
+    let repository = fixture.repository("dolos/credentialed");
+    node.publish(&repository, &node.first);
+
+    // With the pair a node carries in its configuration, the stele resolves.
+    let configured = registry_fixture::credentials();
+    let reader = fixture.repository_as("dolos/credentialed", Some(&configured));
+
+    let stele = Point::Latest.pull(&reader).unwrap();
+    println!("with the configured pair: {stele:?}");
+
+    // Without it, and with the wrong one, the repository refuses — and the
+    // refusal is an error rather than an empty repository. `latest` reading a
+    // 401 as absence is what would let a publisher restart a history chain
+    // against a registry that merely did not recognise it.
+    let wrong = dolos_core::config::StelaeRegistryConfig {
+        user: registry_fixture::USER.to_owned(),
+        password: "not-the-password".to_owned(),
+    };
+
+    for (who, credentials) in [("no credentials", None), ("the wrong pair", Some(&wrong))] {
+        let refused = fixture.repository_as("dolos/credentialed", credentials);
+
+        let err = Point::Latest
+            .pull(&refused)
+            .expect_err("the registry answered an unauthenticated request");
+
+        println!("{who}: {err}");
+
+        assert!(
+            refused.latest(&dolos_snapshot::DolosProfile).is_err(),
+            "{who}: a refusal read as an empty repository",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

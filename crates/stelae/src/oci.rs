@@ -99,9 +99,21 @@
 //!
 //! ## Authentication
 //!
-//! Anonymous, or a bearer token read from [`TOKEN_ENV`]. Nothing else: registry
-//! credentials are a publisher's concern with a policy of their own, and a
-//! transport that has no secrets policy should not invent one.
+//! Anonymous, a bearer token, or a Basic credential pair — whichever the caller
+//! puts in [`Options::auth`]. The transport does not go looking: which
+//! credentials a program authenticates with is that program's policy, and a
+//! transport that reached into the environment behind its caller's back would
+//! be making that policy for it.
+//!
+//! What the transport *does* own is the environment grammar, because it owns
+//! the variable names: [`Auth::from_env`] reads [`TOKEN_ENV`] and the
+//! [`USER_ENV`]/[`PASSWORD_ENV`] pair and answers with the same value a caller
+//! would otherwise assemble. A host that wants credentials from the environment
+//! calls it; a host that reads them from a configuration file does not.
+//!
+//! Both shapes set at once is a **refusal**, not a precedence rule. An operator
+//! who exported a token and a pair meant one of them, and a transport that
+//! silently picked would authenticate as an identity nobody chose.
 
 use std::{
     collections::BTreeMap,
@@ -135,9 +147,118 @@ use crate::{
 
 /// Environment variable holding a bearer token for the registry.
 ///
-/// Read once, when a [`Registry`] is opened. Absent means anonymous, which is
-/// what a public read-only repository wants.
+/// Read by [`Auth::from_env`], and by nothing else in this crate.
 pub const TOKEN_ENV: &str = "STELAE_REGISTRY_TOKEN";
+
+/// Environment variable holding the user half of a Basic credential pair.
+pub const USER_ENV: &str = "STELAE_REGISTRY_USER";
+
+/// Environment variable holding the password half of a Basic credential pair.
+pub const PASSWORD_ENV: &str = "STELAE_REGISTRY_PASSWORD";
+
+/// How a [`Registry`] authenticates.
+///
+/// The three shapes `oci-client` implements, named here rather than re-exported
+/// so that a caller assembling credentials does not have to depend on the
+/// registry client this transport happens to be built on.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum Auth {
+    /// No credentials. What a genuinely public repository wants, and what a
+    /// registry that authenticates every request will answer with a 401.
+    #[default]
+    Anonymous,
+    /// A bearer token, as GHCR and the token-exchange registries issue.
+    Bearer(String),
+    /// A user and password, sent as HTTP Basic. What a registry fronted by
+    /// htpasswd — or by a Worker checking a credential table — expects.
+    Basic { user: String, password: String },
+}
+
+/// Says which shape it is and never what is in it.
+///
+/// A transport is held in structures that get logged and printed in error
+/// context; a derived `Debug` would put a publisher's password in the first
+/// backtrace anybody pastes into an issue.
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Self::Basic { user, .. } => f
+                .debug_struct("Basic")
+                .field("user", user)
+                .field("password", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+impl Auth {
+    /// The credentials the environment names, or [`Auth::Anonymous`] if it
+    /// names none.
+    ///
+    /// The grammar is this crate's because the variable names are: [`TOKEN_ENV`]
+    /// for a bearer token, [`USER_ENV`] and [`PASSWORD_ENV`] for a pair. An
+    /// empty value counts as unset, so `STELAE_REGISTRY_TOKEN=` in a stale
+    /// shell profile does not authenticate as the empty token.
+    ///
+    /// Two refusals, and both are operator mistakes worth a sentence rather
+    /// than a rule:
+    ///
+    /// - **a token and a pair together** — two answers to one question, and
+    ///   which was meant is not something to guess at;
+    /// - **half a pair** — a user with no password, or the other way round, is
+    ///   a typo or a secret that failed to reach the process, and sending the
+    ///   half that arrived would authenticate as somebody the operator did not
+    ///   name.
+    pub fn from_env() -> Result<Self, Error> {
+        let read = |name: &str| match std::env::var(name) {
+            Ok(value) if !value.is_empty() => Some(value),
+            _ => None,
+        };
+
+        let token = read(TOKEN_ENV);
+        let user = read(USER_ENV);
+        let password = read(PASSWORD_ENV);
+
+        if token.is_some() && (user.is_some() || password.is_some()) {
+            return Err(Error::AmbiguousRegistryAuth);
+        }
+
+        match (user, password) {
+            (Some(user), Some(password)) => Ok(Self::Basic { user, password }),
+            (Some(_), None) => Err(Error::IncompleteRegistryAuth {
+                set: USER_ENV,
+                missing: PASSWORD_ENV,
+            }),
+            (None, Some(_)) => Err(Error::IncompleteRegistryAuth {
+                set: PASSWORD_ENV,
+                missing: USER_ENV,
+            }),
+            (None, None) => Ok(match token {
+                Some(token) => Self::Bearer(token),
+                None => Self::Anonymous,
+            }),
+        }
+    }
+
+    /// Whether these credentials name anybody.
+    ///
+    /// The question a caller layering sources asks — "did the environment say
+    /// anything, or should I fall back to what was configured?" — so it is
+    /// answered here rather than by every caller matching on the variant.
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, Self::Anonymous)
+    }
+
+    fn to_registry_auth(&self) -> RegistryAuth {
+        match self {
+            Self::Anonymous => RegistryAuth::Anonymous,
+            Self::Bearer(token) => RegistryAuth::Bearer(token.clone()),
+            Self::Basic { user, password } => RegistryAuth::Basic(user.clone(), password.clone()),
+        }
+    }
+}
 
 /// Annotation naming a layer's profile-defined kind.
 ///
@@ -217,6 +338,15 @@ pub struct Options {
     /// compressed, and the platform temporary directory is not always on the
     /// volume with room for sixteen of them.
     pub scratch_dir: Option<PathBuf>,
+
+    /// How to authenticate, decided by the caller.
+    ///
+    /// Defaults to [`Auth::Anonymous`]. [`Auth::from_env`] is here for a host
+    /// that wants the environment's answer, but it is the host that asks: a
+    /// transport reading credentials on its caller's behalf would be choosing
+    /// that program's credential policy for it, and this one has no standing
+    /// to.
+    pub auth: Auth,
 }
 
 /// A repository an operator named, as `oci://HOST/PATH`.
@@ -377,9 +507,9 @@ impl Registry {
     /// parses it into a [`Repository`] and hands that over; nothing outside
     /// this module needs to know where the host ends.
     ///
-    /// Builds the current-thread runtime the whole transport runs on. Reads
-    /// [`TOKEN_ENV`] once, here, so a token never has to be threaded through a
-    /// profile's call stack.
+    /// Builds the current-thread runtime the whole transport runs on, and
+    /// stores the credentials [`Options::auth`] carries so they never have to
+    /// be threaded through a profile's call stack.
     ///
     /// # Panics
     ///
@@ -409,10 +539,7 @@ impl Registry {
             crate::MOVING_TAG.to_owned(),
         );
 
-        let auth = match std::env::var(TOKEN_ENV) {
-            Ok(token) if !token.is_empty() => RegistryAuth::Bearer(token),
-            _ => RegistryAuth::Anonymous,
-        };
+        let auth = options.auth.to_registry_auth();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1542,5 +1669,164 @@ mod tests {
             url: "https://registry.invalid/v2/x/manifests/latest".to_owned(),
         }));
         assert!(!is_absent(&OciDistributionError::GenericError(None)));
+    }
+
+    // ---------------------------------------------------------------------
+    // Credentials, out of the environment
+    // ---------------------------------------------------------------------
+
+    /// The environment is process-wide, so these run one at a time.
+    static ENV: Mutex<()> = Mutex::new(());
+
+    /// Run `body` with exactly `token`, `user` and `password` set, and the
+    /// process environment put back afterwards.
+    ///
+    /// Restoring is not politeness: `cargo test` runs every test in this binary
+    /// in one process, and a leaked `STELAE_REGISTRY_TOKEN` would be read by
+    /// whatever ran next.
+    fn with_env<T>(
+        token: Option<&str>,
+        user: Option<&str>,
+        password: Option<&str>,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        let _guard = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let previous: Vec<(&str, Option<String>)> = [TOKEN_ENV, USER_ENV, PASSWORD_ENV]
+            .into_iter()
+            .map(|name| (name, std::env::var(name).ok()))
+            .collect();
+
+        for (name, value) in [
+            (TOKEN_ENV, token),
+            (USER_ENV, user),
+            (PASSWORD_ENV, password),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        let outcome = body();
+
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        outcome
+    }
+
+    #[test]
+    fn the_environment_names_a_token_a_pair_or_nobody() {
+        with_env(None, None, None, || {
+            assert_eq!(Auth::from_env().unwrap(), Auth::Anonymous);
+        });
+
+        with_env(Some("ghp_x"), None, None, || {
+            assert_eq!(Auth::from_env().unwrap(), Auth::Bearer("ghp_x".to_owned()));
+        });
+
+        with_env(None, Some("reader"), Some("hunter2"), || {
+            assert_eq!(
+                Auth::from_env().unwrap(),
+                Auth::Basic {
+                    user: "reader".to_owned(),
+                    password: "hunter2".to_owned(),
+                }
+            );
+        });
+
+        // An empty value is unset. A stale `export STELAE_REGISTRY_TOKEN=` in a
+        // shell profile should leave a client anonymous rather than have it
+        // authenticate as the empty token.
+        with_env(Some(""), Some(""), Some(""), || {
+            assert_eq!(Auth::from_env().unwrap(), Auth::Anonymous);
+        });
+    }
+
+    /// A token and a pair together is a refusal, and the message names every
+    /// variable involved so an operator knows which one to unset.
+    #[test]
+    fn a_token_and_a_pair_together_are_refused() {
+        with_env(Some("ghp_x"), Some("reader"), Some("hunter2"), || {
+            let err = Auth::from_env().unwrap_err();
+
+            assert!(matches!(err, Error::AmbiguousRegistryAuth), "{err:?}");
+
+            let message = err.to_string();
+            assert!(message.contains(TOKEN_ENV), "{message}");
+            assert!(message.contains(USER_ENV), "{message}");
+            assert!(message.contains(PASSWORD_ENV), "{message}");
+        });
+
+        // Either half of the pair is enough to make it ambiguous. The operator
+        // set two kinds of credential; that one of them is incomplete is not a
+        // reason to silently prefer the other.
+        for (user, password) in [(Some("reader"), None), (None, Some("hunter2"))] {
+            with_env(Some("ghp_x"), user, password, || {
+                assert!(matches!(
+                    Auth::from_env().unwrap_err(),
+                    Error::AmbiguousRegistryAuth
+                ));
+            });
+        }
+    }
+
+    #[test]
+    fn half_a_pair_is_refused() {
+        with_env(None, Some("reader"), None, || {
+            let err = Auth::from_env().unwrap_err();
+
+            assert!(
+                matches!(&err, Error::IncompleteRegistryAuth { set, missing }
+                    if *set == USER_ENV && *missing == PASSWORD_ENV),
+                "{err:?}"
+            );
+        });
+
+        with_env(None, None, Some("hunter2"), || {
+            let err = Auth::from_env().unwrap_err();
+
+            assert!(
+                matches!(&err, Error::IncompleteRegistryAuth { set, missing }
+                    if *set == PASSWORD_ENV && *missing == USER_ENV),
+                "{err:?}"
+            );
+        });
+    }
+
+    /// A password never reaches a log through this type.
+    ///
+    /// [`Options`] derives `Debug` and error context is printed freely, so this
+    /// redaction is what stands between a publisher's credentials and the first
+    /// backtrace anybody pastes into an issue.
+    #[test]
+    fn credentials_are_redacted_in_debug_output() {
+        let basic = Auth::Basic {
+            user: "reader".to_owned(),
+            password: "hunter2".to_owned(),
+        };
+
+        let printed = format!("{basic:?}");
+        assert!(printed.contains("reader"), "{printed}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+
+        let printed = format!("{:?}", Auth::Bearer("ghp_x".to_owned()));
+        assert!(!printed.contains("ghp_x"), "{printed}");
+
+        // And through the structure a caller actually holds, which is where it
+        // would leak from.
+        let printed = format!(
+            "{:?}",
+            Options {
+                auth: basic,
+                ..Default::default()
+            }
+        );
+        assert!(!printed.contains("hunter2"), "{printed}");
     }
 }

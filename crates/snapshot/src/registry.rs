@@ -76,13 +76,21 @@
 //! protocol takes the string and validates it. An operator naming `epoch-500`
 //! is naming a sequence, so that is what [`Point`] parses to, and the round
 //! trip back to a tag goes through the profile like every other one.
+//!
+//! ## Who the client authenticates as
+//!
+//! A registry that charges nothing for reads may still refuse an unidentified
+//! one, so both directions carry credentials, from two different places: a
+//! publisher's full-access pair out of the environment, a consumer's published
+//! read-only pair out of `dolos.toml`. [`auth`] is the one place that resolves
+//! them, in one rule, for both directions.
 
 use std::{cell::Cell, collections::BTreeMap};
 
-use dolos_core::{ArchiveStore, IndexStore, StateStore};
+use dolos_core::{config::StelaeRegistryConfig, ArchiveStore, IndexStore, StateStore};
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
-    oci::{Options, Registry, Stele, Transfer},
+    oci::{Auth, Options, Registry, Stele, Transfer},
     Digest, SteleReader as _,
 };
 
@@ -211,17 +219,63 @@ where
 /// or a mirror inside a cluster, and for nothing that is reachable from outside
 /// one.
 ///
+/// `configured` is the read-only pair a node carries in `[stelae.registry]`,
+/// which the environment overrides — see [`auth`].
+///
 /// **Never call any of this from inside an async context.** The transport owns
 /// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
 /// module documentation states the rule and the reason.
-pub fn open(repository: &Repository, insecure: bool) -> Result<Registry, Error> {
+pub fn open(
+    repository: &Repository,
+    insecure: bool,
+    configured: Option<&StelaeRegistryConfig>,
+) -> Result<Registry, Error> {
     Ok(Registry::open(
         repository,
         Options {
             insecure,
             scratch_dir: None,
+            auth: auth(configured)?,
         },
     )?)
+}
+
+/// The credentials a registry client authenticates with: the environment's, or
+/// the node's configured pair, or nobody.
+///
+/// **One resolution for both directions**, and that is the point. A publish
+/// takes its full-access pair from `STELAE_REGISTRY_USER` /
+/// `STELAE_REGISTRY_PASSWORD` (or a bearer token from
+/// `STELAE_REGISTRY_TOKEN`); a restore takes the published read-only pair from
+/// `[stelae.registry]` in `dolos.toml`. Those are two *sources*, not two rules,
+/// and the rule is:
+///
+/// - **the environment wins.** A publisher's credentials are a secret and never
+///   enter a configuration file, so the environment is the only place they can
+///   come from — and a node that already carries the read-only pair must not
+///   have to have it removed before it can publish.
+/// - **what is configured is the fallback**, which is what makes a fresh
+///   `dolos init` pull from the official registry with nothing exported.
+/// - **neither is anonymous**, which is what a genuinely public repository
+///   wants and what a credentialed one answers with a 401.
+///
+/// The environment naming two kinds of credential at once is a refusal rather
+/// than a third precedence rule; `stelae::oci::Auth::from_env` raises it and
+/// says which variables to unset.
+pub fn auth(configured: Option<&StelaeRegistryConfig>) -> Result<Auth, Error> {
+    let from_env = Auth::from_env()?;
+
+    if !from_env.is_anonymous() {
+        return Ok(from_env);
+    }
+
+    Ok(match configured {
+        Some(credentials) => Auth::Basic {
+            user: credentials.user.clone(),
+            password: credentials.password.clone(),
+        },
+        None => Auth::Anonymous,
+    })
 }
 
 /// What a publish into a repository did.
@@ -896,5 +950,128 @@ mod tests {
             uncompressed_size: 1,
             scope,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Which credentials a client ends up with
+    // -----------------------------------------------------------------------
+
+    /// The environment is process-wide, so these run one at a time.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with exactly these registry variables set, and put the
+    /// process environment back afterwards.
+    fn with_env<T>(
+        token: Option<&str>,
+        user: Option<&str>,
+        password: Option<&str>,
+        body: impl FnOnce() -> T,
+    ) -> T {
+        use stelae::oci::{PASSWORD_ENV, TOKEN_ENV, USER_ENV};
+
+        let _guard = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let previous: Vec<(&str, Option<String>)> = [TOKEN_ENV, USER_ENV, PASSWORD_ENV]
+            .into_iter()
+            .map(|name| (name, std::env::var(name).ok()))
+            .collect();
+
+        for (name, value) in [
+            (TOKEN_ENV, token),
+            (USER_ENV, user),
+            (PASSWORD_ENV, password),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        let outcome = body();
+
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        outcome
+    }
+
+    fn configured() -> StelaeRegistryConfig {
+        StelaeRegistryConfig {
+            user: "dolos-reader".to_owned(),
+            password: "published".to_owned(),
+        }
+    }
+
+    /// The restore path: the pair `dolos init` seeded is what a client
+    /// authenticates with when nothing is exported.
+    #[test]
+    fn a_configured_pair_is_used_when_the_environment_is_silent() {
+        with_env(None, None, None, || {
+            assert_eq!(
+                auth(Some(&configured())).unwrap(),
+                Auth::Basic {
+                    user: "dolos-reader".to_owned(),
+                    password: "published".to_owned(),
+                }
+            );
+
+            // And a node that configured nothing stays anonymous rather than
+            // inventing an identity.
+            assert_eq!(auth(None).unwrap(), Auth::Anonymous);
+        });
+    }
+
+    /// The publish path, and the precedence that makes it work on a node that
+    /// already carries the read-only pair.
+    #[test]
+    fn the_environment_overrides_a_configured_pair() {
+        with_env(None, Some("publisher"), Some("full-access"), || {
+            assert_eq!(
+                auth(Some(&configured())).unwrap(),
+                Auth::Basic {
+                    user: "publisher".to_owned(),
+                    password: "full-access".to_owned(),
+                },
+                "a publisher must not have to strip the read-only pair out of \
+                 dolos.toml before it can publish",
+            );
+        });
+
+        // A bearer token overrides it too: the environment is the source, and
+        // which shape it names is the environment's business.
+        with_env(Some("ghp_x"), None, None, || {
+            assert_eq!(
+                auth(Some(&configured())).unwrap(),
+                Auth::Bearer("ghp_x".to_owned())
+            );
+        });
+    }
+
+    /// The refusal reaches this far rather than being resolved on the way.
+    ///
+    /// A configured pair is not a tie-breaker for an ambiguous environment: an
+    /// operator who exported both a token and a pair gets told so, whatever is
+    /// in `dolos.toml`.
+    #[test]
+    fn an_ambiguous_environment_is_refused_even_with_a_configured_pair() {
+        with_env(
+            Some("ghp_x"),
+            Some("publisher"),
+            Some("full-access"),
+            || {
+                for configured in [None, Some(configured())] {
+                    let err = auth(configured.as_ref()).unwrap_err();
+
+                    assert!(
+                        matches!(err, Error::Stelae(stelae::Error::AmbiguousRegistryAuth)),
+                        "{err:?}"
+                    );
+                }
+            },
+        );
     }
 }

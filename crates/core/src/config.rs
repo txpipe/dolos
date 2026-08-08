@@ -699,6 +699,80 @@ pub struct SnapshotConfig {
     pub download_url: String,
 }
 
+/// The official stele registry's published read-only credentials.
+///
+/// **Deliberately a published secret**, and the only one this project has:
+/// stele distribution is free and identity-less, but never unrestricted — the
+/// registry authenticates every request, and the pair below is what a consumer
+/// authenticates with. It is seeded into `dolos.toml` by `dolos init` so that a
+/// fresh node pulls from the official registry out of the box; the pair
+/// therefore gates out-of-band tooling and nothing else.
+///
+/// Empty until the registry that issues it exists. Filling it is a one-line
+/// change *here* and nowhere else, which is the reason this constant is a
+/// constant rather than a literal at the seeding site.
+pub const OFFICIAL_REGISTRY_CREDENTIALS: Option<(&str, &str)> = None;
+
+/// `[stelae]` — how this node reaches a stele registry.
+///
+/// One section carrying one credential pair, and that is the whole of the
+/// consumer surface: a node restoring from a stele repository needs to
+/// authenticate, and nothing more about a registry belongs in a node's
+/// configuration.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct StelaeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<StelaeRegistryConfig>,
+}
+
+impl StelaeConfig {
+    /// What `dolos init` seeds, from [`OFFICIAL_REGISTRY_CREDENTIALS`].
+    ///
+    /// Empty while that constant is, which is why it is a constructor rather
+    /// than a `Default` impl: a caller reading this name knows it is asking for
+    /// the official registry specifically, and gets the honest answer when
+    /// there is not one yet.
+    pub fn official() -> Self {
+        Self {
+            registry: OFFICIAL_REGISTRY_CREDENTIALS.map(|(user, password)| StelaeRegistryConfig {
+                user: user.to_owned(),
+                password: password.to_owned(),
+            }),
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.registry.is_none()
+    }
+}
+
+/// `[stelae.registry]` — the credentials a stele registry is read with.
+///
+/// Read credentials only. A publisher's full-access pair is a secret and lives
+/// in the environment (`STELAE_REGISTRY_USER` / `STELAE_REGISTRY_PASSWORD`) or
+/// in a secret manager, never in a file that gets committed alongside a node's
+/// other settings — and the environment overrides what is here, so a publisher
+/// running on a node that carries the read-only pair does not have to remove it
+/// first.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct StelaeRegistryConfig {
+    pub user: String,
+    pub password: String,
+}
+
+/// Names the user and never the password.
+///
+/// `RootConfig` is printed in diagnostics; a derived `Debug` here would put the
+/// pair in whatever a bug report happens to include.
+impl std::fmt::Debug for StelaeRegistryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StelaeRegistryConfig")
+            .field("user", &self.user)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OuroborosConfig {
     pub listen_path: PathBuf,
@@ -1142,6 +1216,9 @@ pub struct RootConfig {
     pub mithril: Option<MithrilConfig>,
 
     pub snapshot: Option<SnapshotConfig>,
+
+    #[serde(default, skip_serializing_if = "StelaeConfig::is_default")]
+    pub stelae: StelaeConfig,
 
     pub chain: ChainConfig,
 
