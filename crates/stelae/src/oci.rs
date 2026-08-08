@@ -197,10 +197,11 @@ impl Auth {
     /// The credentials the environment names, or [`Auth::Anonymous`] if it
     /// names none.
     ///
-    /// The grammar is this crate's because the variable names are: [`TOKEN_ENV`]
-    /// for a bearer token, [`USER_ENV`] and [`PASSWORD_ENV`] for a pair. An
-    /// empty value counts as unset, so `STELAE_REGISTRY_TOKEN=` in a stale
-    /// shell profile does not authenticate as the empty token.
+    /// The grammar is this crate's because the variable names are:
+    /// [`TOKEN_ENV`] for a bearer token, [`USER_ENV`] and [`PASSWORD_ENV`]
+    /// for a pair. An empty value counts as unset, so
+    /// `STELAE_REGISTRY_TOKEN=` in a stale shell profile does not
+    /// authenticate as the empty token.
     ///
     /// Two refusals, and both are operator mistakes worth a sentence rather
     /// than a rule:

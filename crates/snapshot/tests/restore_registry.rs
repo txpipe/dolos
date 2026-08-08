@@ -30,8 +30,8 @@
 //! 5. **The pair in `dolos.toml` is what opens the repository.** The fixture's
 //!    registry demands Basic credentials, and every restore above reaches it
 //!    through `registry::open` with the pair as a node's *configured* one — so
-//!    the four properties are all evidence for this fifth. `a_node_authenticates_
-//!    with_its_configured_pair` states it directly, from both sides.
+//!    the four properties are all evidence for this fifth. The test named for
+//!    it states the same thing directly, from both sides.
 //!
 //! ## Why the interruption is a layer boundary
 //!

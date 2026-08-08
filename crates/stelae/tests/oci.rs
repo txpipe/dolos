@@ -573,9 +573,10 @@ fn install_crypto_provider() {
 
 /// The credentials the fixture's registry demands.
 ///
-/// A test credential, not a secret: it lives as long as one container. [`HTPASSWD`]
-/// is the bcrypt encoding of this pair — `distribution` accepts no other hash
-/// algorithm in an htpasswd file — so the two move together or not at all.
+/// A test credential, not a secret: it lives as long as one container.
+/// [`HTPASSWD`] is the bcrypt encoding of this pair — `distribution` accepts no
+/// other hash algorithm in an htpasswd file — so the two move together or not
+/// at all.
 const USER: &str = "stelae";
 const PASSWORD: &str = "stelae-fixture";
 
@@ -769,7 +770,8 @@ fn auth_dir() -> tempfile::TempDir {
     dir
 }
 
-/// The `docker run` arguments that make a registry demand [`USER`]/[`PASSWORD`].
+/// The `docker run` arguments that make a registry demand
+/// [`USER`]/[`PASSWORD`].
 ///
 /// **Both configurations, unconditionally, and no per-image branch.** The two
 /// server families this suite is pointed at read their auth from different

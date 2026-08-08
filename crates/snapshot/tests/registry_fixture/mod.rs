@@ -225,7 +225,8 @@ pub fn auth_dir() -> tempfile::TempDir {
     dir
 }
 
-/// The `docker run` arguments that make a registry demand [`USER`]/[`PASSWORD`].
+/// The `docker run` arguments that make a registry demand
+/// [`USER`]/[`PASSWORD`].
 ///
 /// **Both configurations, unconditionally, and no per-image branch.** The two
 /// server families this suite is pointed at read their auth from different

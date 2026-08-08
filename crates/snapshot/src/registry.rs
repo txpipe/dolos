@@ -254,8 +254,8 @@ pub fn open(
 ///   enter a configuration file, so the environment is the only place they can
 ///   come from — and a node that already carries the read-only pair must not
 ///   have to have it removed before it can publish.
-/// - **what is configured is the fallback**, which is what makes a fresh
-///   `dolos init` pull from the official registry with nothing exported.
+/// - **what is configured is the fallback**, which is what lets a node created
+///   by `dolos init` pull from the official registry with nothing exported.
 /// - **neither is anonymous**, which is what a genuinely public repository
 ///   wants and what a credentialed one answers with a 401.
 ///
