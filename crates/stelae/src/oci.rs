@@ -141,24 +141,25 @@ pub const TOKEN_ENV: &str = "STELAE_REGISTRY_TOKEN";
 
 /// Annotation naming a layer's profile-defined kind.
 ///
-/// The three annotation keys below are this implementation's, not the
-/// specification's: ADR-004 asks for "informational annotations per layer
-/// (kind, diffid, and the profile's scope fields)" without naming them. They
-/// are transport metadata and sit outside the inscription, so they are outside
-/// a stele's identity — but they are frozen by a golden all the same, because
-/// [`DIFF_ID_ANNOTATION`] is load-bearing on the way back: it *is* the
-/// identity→blob map a directory has to rebuild by decompressing everything.
-pub const KIND_ANNOTATION: &str = "dev.stelae.layer.kind";
+/// The three annotation keys below are the specification's: ADR-004's "OCI
+/// layout and the inscription" section names them, reverse-DNS under
+/// `stelae.store`, a domain TxPipe owns. They are transport metadata and sit
+/// outside the inscription, so they are outside a stele's identity — but only
+/// two of them are informational. [`DIFF_ID_ANNOTATION`] is normative, because
+/// it is load-bearing on the way back: it *is* the identity→blob map a
+/// directory has to rebuild by decompressing everything. The golden freezes
+/// all three.
+pub const KIND_ANNOTATION: &str = "store.stelae.layer.kind";
 
 /// Annotation carrying a layer's `diffId` — its identity, and the key of the
 /// map a pull reads off the manifest.
-pub const DIFF_ID_ANNOTATION: &str = "dev.stelae.layer.diffId";
+pub const DIFF_ID_ANNOTATION: &str = "store.stelae.layer.diffId";
 
 /// Annotation carrying the canonical JSON of a layer's profile-owned scope.
 ///
 /// Informational: a human or a generic tool reading the manifest can see which
 /// epoch or shard a blob covers without fetching the config blob.
-pub const SCOPE_ANNOTATION: &str = "dev.stelae.layer.scope";
+pub const SCOPE_ANNOTATION: &str = "store.stelae.layer.scope";
 
 /// How much of a staged layer is held in memory on the way up.
 ///
