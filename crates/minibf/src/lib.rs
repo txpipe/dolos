@@ -419,6 +419,10 @@ where
             get(routes::epochs::by_number_parameters::<D>),
         )
         .route(
+            "/epochs/{epoch}/stakes",
+            get(routes::epochs::by_number_stakes::<D>),
+        )
+        .route(
             "/epochs/latest/parameters",
             get(routes::epochs::latest_parameters::<D>),
         )
