@@ -1678,6 +1678,7 @@ dependencies = [
  "fs4",
  "hex",
  "minicbor 0.26.4",
+ "rustls",
  "serde_json",
  "stelae",
  "tempfile",
