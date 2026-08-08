@@ -1132,6 +1132,7 @@ fn layer_descriptor(
 
     let annotations = BTreeMap::from([
         (KIND_ANNOTATION.to_owned(), described.kind.clone()),
+        (DIFF_ID_ANNOTATION.to_owned(), described.diff_id.to_string()),
         (SCOPE_ANNOTATION.to_owned(), scope),
     ]);
 
