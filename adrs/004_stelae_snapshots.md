@@ -159,7 +159,7 @@ The `digests` layer covers the immutable files fully contained in the stele's bl
 ### OCI layout and the inscription
 
 - Repository per (profile, network) — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`; tags `epoch-E` (E = newly started epoch; layers cover epochs `0..E-1`) and `latest`. The protocol requires an immutable tag per sequence plus a moving `latest`; the profile renders the strings.
-- `artifactType: application/vnd.stelae.stele.v1`; layer media types per the table above; informational annotations per layer (kind, diffid, and the profile's scope fields).
+- `artifactType: application/vnd.stelae.stele.v1`; layer media types per the table above; three annotations per layer, named in "The manifest" below — one of them normative, the other two informational.
 - Config blob (`application/vnd.stelae.inscription.v1+json`), canonical JSON per RFC 8785. Generic keys plus three profile-owned opaque objects — `position`, `parameters` and each layer's `scope`:
 
 ```json
@@ -193,6 +193,54 @@ The `digests` layer covers the immutable files fully contained in the stele's bl
 History invariant: `history` contains exactly one entry per published sequence, contiguous from the network's first published sequence (pinned per network alongside the default repository) up to `sequence - 1`, in strictly ascending order — no gaps, no duplicates. JCS canonicalizes object keys but preserves array order, so the ordering is normative. Verifiers reject inscriptions that violate the invariant. This is a reproducibility requirement as much as a safety one: independent publishers converge on byte-identical inscriptions only if the publication schedule and history encoding are canonical; an independent party reproduces the digest chain naturally by computing each boundary inscription while replaying the chain. If the list ever outgrows the inscription, or succinct append-only consistency proofs become a requirement, the designated evolution is a sequence-indexed Merkle Mountain Range commitment (`{root, size}`) — a schema-versioned change that can be built retroactively from the flat list.
 
 Note: a side-effect of anchoring identity on uncompressed content digests is that layer *content* can be mirrored over any content-addressed transport (e.g. IPFS) — or re-compressed with a different algorithm — and still be verified against the same signed inscription via diffIds. Consumption is stricter than verification: the restore client expects the canonical zstd blobs referenced by the OCI manifest, so re-encoded mirrors serve archival and verification, not direct restore. This is a property of the format, not a requirement of the protocol; the OCI registry remains the canonical distribution channel.
+
+#### The manifest
+
+A stele in a registry is one OCI image manifest, and its shape is closed: a conforming publisher writes exactly the fields below, and a conforming client refuses anything else.
+
+- `schemaVersion: 2`; `mediaType: application/vnd.oci.image.manifest.v1+json`; `artifactType: application/vnd.stelae.stele.v1`.
+- `config` is the inscription's descriptor: `mediaType` is `application/vnd.stelae.inscription.v1+json`, `digest` is the sha256 of the canonical inscription bytes — the same digest independent parties reproduce and sign — and `size` is those bytes' length.
+- `layers`: one descriptor per inscription layer, **in inscription order**. Each carries the layer's `mediaType` exactly as the inscription states it, the compressed blob's `digest` and `size`, and the three annotations below.
+- No `subject` and no manifest-level `annotations`.
+
+The manifest bytes are canonical JSON per RFC 8785, through the same canonicalizer as the inscription, and are pushed verbatim: the protocol has one answer to "what are the bytes of this JSON document", not two that agree until they do not.
+
+The per-layer annotation keys are reverse-DNS under `stelae.store`, a domain TxPipe owns:
+
+| Key | Status | Value |
+| --- | --- | --- |
+| `store.stelae.layer.diffId` | **normative** | the layer's `diffId`, exactly as the inscription states it |
+| `store.stelae.layer.kind` | informational | the layer's profile-defined kind |
+| `store.stelae.layer.scope` | informational | the layer's scope object as stringified canonical JSON (annotation values are strings) |
+
+`store.stelae.layer.diffId` is the identity→blob map — the thing a registry hands over for free and a directory has to rebuild by decompressing every blob. A client that does not read it cannot fetch a layer; it is the one annotation a reader must understand. The other two exist so a human or a generic registry tool can see what a blob covers without fetching the config blob, and a client may ignore them.
+
+#### Manifest–inscription agreement
+
+The manifest and the inscription are two views of one stele — the inscription holds identity, the manifest holds transport — and a disagreement between them, in either direction, is a refusal, never a preference.
+
+A publisher refuses to build a manifest — before anything is pushed — when the inscription describes a layer that was never written, or a layer was written that the inscription does not describe: a blob nothing attests must not be published.
+
+A client refuses a manifest — before any blob is fetched — when:
+
+- `artifactType` is missing. This fails closed by choice: a registry that strips the OCI 1.1 discovery field has published something a client cannot recognize as a stele, and reading it anyway would make the discovery contract advisory.
+- `artifactType` is present and is not `application/vnd.stelae.stele.v1`.
+- the config descriptor's media type is not the inscription's.
+- the manifest's layer count differs from the inscription's.
+- a layer carries no `store.stelae.layer.diffId` annotation, so nothing says which layer it holds.
+- a layer's `diffId` annotation disagrees with the inscription's layer *at that position*. Positional correspondence is a check of its own: a manifest carrying the right blobs in the wrong order passes the map and fails the order.
+- a layer's media type disagrees with the inscription's at that position.
+
+#### The manifest size ceiling
+
+A manifest past **4 MiB** (`stelae::MANIFEST_SIZE_LIMIT`) is refused before the push. The figure is not a limit the OCI specification imposes; it is the ceiling registries converge on, and the refusal is measured on the exact canonical bytes that would have been pushed, so it names the document and its layer count instead of arriving later as a registry's `413`.
+
+The arithmetic is counted in layers, because layers are what the ceiling counts: a descriptor with its annotations costs ~350 bytes, so the ceiling falls near 12,000 layers. A mainnet stele today is ~1,816 layers — ~600 epochs × 3 per-epoch kinds, plus 16 state shards — a manifest of roughly 0.6 MB, about a seventh of the ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time sizing of the same artifact; this paragraph is the authoritative count, and it counts layers rather than epochs.)
+
+#### What the transport requires of its host
+
+- **A process that opens a registry client must have installed a process-default rustls `CryptoProvider` first.** The transport ships no crypto backend of its own (`reqwest/rustls-no-provider`): the backend the client library would otherwise pick, `aws-lc-rs`, wants `cmake` on every build machine — the dependency this workspace already goes out of its way to avoid — so it stays out of the tree and the choice of provider moves to the program. In Dolos, `main()` installs `ring`. Omitting the install is a panic when the registry client opens, not a link error.
+- **Authentication is a bearer token from `STELAE_REGISTRY_TOKEN`, or anonymous.** Read once, when the registry client opens. Nothing else: registry credentials are a publisher's concern with a policy of its own.
 
 ### Code layout
 

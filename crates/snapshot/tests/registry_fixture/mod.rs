@@ -19,6 +19,27 @@
 use dolos_snapshot::registry;
 use stelae::oci::Registry;
 
+/// Install `ring` as the process-default crypto provider.
+///
+/// `stelae::oci` documents this as the caller's job — the transport is built
+/// on rustls with no provider wired in — and under `cargo test` this test
+/// binary is the caller. The `dolos` binary satisfies the same precondition in
+/// `main()`; nothing satisfies it for a test process except the test process.
+/// These suites passed when they were hand-run for their own PRs because the
+/// tree then still compiled a provider in; the switch to
+/// `reqwest/rustls-no-provider` made the install explicit, and nothing ran the
+/// suites again to notice — which is exactly the gap running them in CI
+/// closes.
+fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+
+    ONCE.call_once(|| {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .expect("nothing else installed a provider first");
+    });
+}
+
 /// A container running an OCI Distribution server, removed when this is
 /// dropped.
 pub struct Fixture {
@@ -28,6 +49,8 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn spawn() -> Self {
+        install_crypto_provider();
+
         let image =
             std::env::var("STELAE_TEST_REGISTRY_IMAGE").unwrap_or_else(|_| "registry:2".to_owned());
 
