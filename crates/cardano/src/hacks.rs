@@ -101,6 +101,29 @@ pub mod proposals {
 
         pub fn outcome(protocol: u16, proposal: &str) -> ProposalOutcome {
             match proposal {
+                // Committee Update enacted at epoch 1370
+                "06dcb60f4b6ee78024bd4c7978e8e093437903198cf06c3c5d34bf825129bc73#0" => {
+                    Ratified(1369)
+                }
+                // Parameter Change enacted at epoch 1367
+                "dd4fbc61680bd7fa3cf97d815bdfaf54bc9872d2fd0c6f5e9bdb86fef0260c51#0" => {
+                    Ratified(1366)
+                }
+                // Committee Update enacted at epoch 1361
+                "65c41d163aceb2be0b821b79fa71ee1ead7ecd13bd1ae812baddf5c962c9d62b#0" => {
+                    Ratified(1360)
+                }
+                // Parameter Changes superseded at epoch 1367
+                "8009f3a24731320244568273a4d7eed1b436067c91aeb98bdb2872e45ef5b1d6#0"
+                | "8b5f096ad63618f1b73112d8ac46fb59519897cbfa318fdb9ffed2dfcee782e4#0"
+                | "8bd727c7aab758be609958b9bdaf84096b8f30bc7cfa0956d6a3ddc91b816550#0" => {
+                    Canceled(1367)
+                }
+                // Committee actions superseded at epoch 1361
+                "1160cd45096980e1985628521aa6a84ac693e2616401dc459b3abe97a140b934#0"
+                | "2c3657d09e194507a4b120c3aeed4616818ad3875382ba68b4e668e6d3d5d625#0" => {
+                    Canceled(1361)
+                }
                 // Parameter Change enacted at epoch 1270
                 "014c32e57347d114744210e1934a2084c5d0052a2312170d93758bfd566f3956#0" => {
                     Ratified(1269)
@@ -296,6 +319,18 @@ pub mod proposals {
 
         pub fn outcome(protocol: u16, proposal: &str) -> ProposalOutcome {
             match proposal {
+                // Parameter Change superseded at epoch 305
+                "38b9c1901e472f1318f44a324e74589466d77ff44a63cd35f034aa8998fc53aa#0" => {
+                    Canceled(305)
+                }
+                // Parameter Change enacted at epoch 305
+                "e641ec802bb109e150e920c6c0387e85f2efd30944a46d08d08212bde540f69c#0" => {
+                    Ratified(304)
+                }
+                // Committee Update enacted at epoch 304
+                "bbfa303aa35d19919934fb5fe36b174609a0c1dfb47a546ccd6ea58aa752e2aa#0" => {
+                    Ratified(303)
+                }
                 // Byron intra-era hardfork
                 "9972ffaee13b4afcf1a133434161ce25e8ecaf34b7a76e06b0c642125cf911a9#0" => Ratified(1),
                 // Shelley hardfork
@@ -359,6 +394,30 @@ pub mod proposals {
 
         pub fn outcome(protocol: u16, proposal: &str) -> ProposalOutcome {
             match proposal {
+                // Treasury Withdrawal enacted at epoch 647
+                "d8de068952df50c862fa1bce9b8180d3387976cbae0fb2c3d9ef84f0faaf64d6#0" => {
+                    Ratified(646)
+                }
+
+                // Treasury Withdrawals enacted at epoch 646
+                "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#2"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#3"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#4"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#5"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#6" => {
+                    Ratified(645)
+                }
+
+                // Treasury Withdrawals enacted at epoch 645
+                "fbb8d1a4a8d6b62f8cd706944a0582b884c2b90187b8fada7953d5c6a33eb5a7#0"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#1"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#7"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#8"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#9"
+                | "b3d452bff7769d7f557ec6b8974760ee6c5e496c276652b654032966621e0ccf#10" => {
+                    Ratified(644)
+                }
+
                 // Replace Interim Constitutional Committee
                 "47a0e7a4f9383b1afc2192b23b41824d65ac978d7741aca61fc1fa16833d1111#0" => {
                     Ratified(580)
