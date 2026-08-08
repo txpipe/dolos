@@ -342,9 +342,11 @@ All agents working on this repository must verify their modifications by running
    stays green without a container runtime. Run them when touching
    `crates/stelae/src/oci.rs`, the manifest shape, or `crates/snapshot`'s
    registry publish/restore paths. `STELAE_TEST_REGISTRY_IMAGE` selects the
-   server; CI's `registry` job runs these suites on Linux (with `--nocapture`)
-   against `registry:2`, `registry:3` and a pinned `zot`, so the round trip
-   against a real registry never depends on someone remembering to run it.
+   server; the `Registry` workflow (`.github/workflows/registry.yml` — its
+   own workflow, so the gate can travel with a future extraction of
+   `crates/stelae`) runs these suites on Linux (with `--nocapture`) against
+   `registry:2`, `registry:3` and a pinned `zot`, so the round trip against a
+   real registry never depends on someone remembering to run it.
 
 ### Code Quality Standards
 

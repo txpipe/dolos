@@ -1,0 +1,89 @@
+# The #[ignore]d registry suites, in a workflow of their own. Stelae is a
+# supporting module of this repository and is expected to move to its own
+# repository one day (ADR-004 names the extraction condition); keeping its
+# registry gate out of ci.yml keeps the main workflow about this repo's own
+# purpose, and lets the gate travel with the crate when it goes. The two
+# dolos-snapshot suites ride along because they exercise the same round trip
+# from the profile's side; they stay behind when the crate leaves.
+name: Registry
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Each test spawns a real OCI registry itself (`docker run`, torn down on
+  # the way out), so there is no `services:` block to configure and nothing
+  # here to keep in step with the fixtures. Ubuntu only: the runner with a
+  # Docker daemon, and the transport is platform-independent. The suites stay
+  # #[ignore]d so plain `cargo test` is green without a container runtime;
+  # this job is what makes "ignored" mean "runs here" instead of "runs when
+  # somebody remembers". No retries: a flake that is not the fixture's is a
+  # finding about the registry, and it belongs in a PR rather than in a retry
+  # loop. AGENTS.md ("Code Verification Requirements") mirrors these
+  # commands; the two must not drift.
+  registry:
+    name: Registry round trip (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          # The Docker Official registry, via the ECR Public mirror of the
+          # same image so the job never spends Docker Hub's anonymous pull
+          # allowance from a shared runner IP: 2.x is what most operators
+          # still run, 3.0 is the OCI 1.1 release.
+          - public.ecr.aws/docker/library/registry:2
+          - public.ecr.aws/docker/library/registry:3
+          # zot, an OCI-native registry. Pinned: `latest` is a moving
+          # answer to "which registry did this pass against".
+          - ghcr.io/project-zot/zot-linux-amd64:v2.1.20
+    env:
+      STELAE_TEST_REGISTRY_IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      # The three matrix legs compile identical artifacts (the image is a
+      # runtime knob), so they deliberately share one cache; the first leg
+      # to finish saves it.
+      - uses: Swatinem/rust-cache@v2
+
+      # Pulled in its own step so an image that cannot be fetched fails as
+      # infrastructure, distinguishable from a fixture or suite failure. The
+      # pull backs off and tries again because ECR Public *throttles*
+      # anonymous pulls per source IP — runner IPs are shared and the three
+      # legs start at once — and a throttle, unlike Docker Hub's six-hour
+      # quota, clears in seconds. The suites below still run exactly once:
+      # the no-retry rule is about the round trip, and this step exists to
+      # keep infrastructure out of it.
+      - name: Pull the registry image
+        run: |
+          for attempt in 1 2 3 4 5; do
+            docker pull "$STELAE_TEST_REGISTRY_IMAGE" && exit 0
+            echo "pull attempt ${attempt} failed; backing off"
+            sleep $((attempt * 30))
+          done
+          exit 1
+
+      - name: Stelae transport round trip
+        run: cargo test -p stelae --all-features --test oci -- --ignored --nocapture --test-threads=1
+
+      - name: Snapshot publish over a registry
+        run: cargo test -p dolos-snapshot --features oci --test publish -- --ignored --nocapture --test-threads=1
+
+      - name: Snapshot restore over a registry
+        run: cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture --test-threads=1
