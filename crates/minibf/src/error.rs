@@ -12,6 +12,7 @@ pub enum Error {
     Pagination(PaginationError),
     Code(StatusCode),
     InvalidAddress,
+    InvalidStakeAddress,
     InvalidAsset,
     InvalidPoolId,
     InvalidBlockNumber,
@@ -60,6 +61,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Invalid address for this network or malformed address format.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidStakeAddress => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid or malformed stake address format.",
                 )),
             )
                 .into_response(),
