@@ -98,3 +98,57 @@ jobs:
       - name: Run e2e tests
         if: runner.os != 'Windows'
         run: cargo test --test sync --test snapshot -- --ignored
+
+  # The #[ignore]d registry suites. Each test spawns a real OCI registry
+  # itself (`docker run`, torn down on the way out), so there is no
+  # `services:` block to configure and nothing here to keep in step with
+  # the fixtures. Ubuntu only: the runner with a Docker daemon, and the
+  # transport is platform-independent. The suites stay #[ignore]d so plain
+  # `cargo test` is green without a container runtime; this job is what
+  # makes "ignored" mean "runs here" instead of "runs when somebody
+  # remembers". No retries: a flake that is not the fixture's is a finding
+  # about the registry, and it belongs in a PR rather than in a retry loop.
+  # AGENTS.md ("Code Verification Requirements") mirrors these commands;
+  # the two must not drift.
+  registry:
+    name: Registry round trip (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          # The Docker Official registry, via the ECR Public mirror of the
+          # same image so the job never spends Docker Hub's anonymous pull
+          # allowance from a shared runner IP: 2.x is what most operators
+          # still run, 3.0 is the OCI 1.1 release.
+          - public.ecr.aws/docker/library/registry:2
+          - public.ecr.aws/docker/library/registry:3
+          # zot, an OCI-native registry. Pinned: `latest` is a moving
+          # answer to "which registry did this pass against".
+          - ghcr.io/project-zot/zot-linux-amd64:v2.1.20
+    env:
+      STELAE_TEST_REGISTRY_IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      # The three matrix legs compile identical artifacts (the image is a
+      # runtime knob), so they deliberately share one cache; the first leg
+      # to finish saves it.
+      - uses: Swatinem/rust-cache@v2
+
+      # Pulled in its own step so an image that cannot be fetched fails as
+      # infrastructure, distinguishable from a fixture or suite failure.
+      - name: Pull the registry image
+        run: docker pull "$STELAE_TEST_REGISTRY_IMAGE"
+
+      - name: Stelae transport round trip
+        run: cargo test -p stelae --all-features --test oci -- --ignored --nocapture --test-threads=1
+
+      - name: Snapshot publish over a registry
+        run: cargo test -p dolos-snapshot --features oci --test publish -- --ignored --nocapture --test-threads=1
+
+      - name: Snapshot restore over a registry
+        run: cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture --test-threads=1

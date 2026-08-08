@@ -329,6 +329,23 @@ All agents working on this repository must verify their modifications by running
    runs both commands, so a verification that passes locally cannot drift from
    what the repository keeps green.
 
+4. **Registry round trip** (requires Docker): the `#[ignore]`d suites that
+   spawn a real OCI registry
+   ```bash
+   cargo test -p stelae --all-features --test oci -- --ignored --test-threads=1
+   cargo test -p dolos-snapshot --features oci --test publish -- --ignored --test-threads=1
+   cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --test-threads=1
+   ```
+
+   Each test spawns its own registry container via `docker run` and tears it
+   down on the way out; the suites are `#[ignore]`d so plain `cargo test`
+   stays green without a container runtime. Run them when touching
+   `crates/stelae/src/oci.rs`, the manifest shape, or `crates/snapshot`'s
+   registry publish/restore paths. `STELAE_TEST_REGISTRY_IMAGE` selects the
+   server; CI's `registry` job runs these suites on Linux (with `--nocapture`)
+   against `registry:2`, `registry:3` and a pinned `zot`, so the round trip
+   against a real registry never depends on someone remembering to run it.
+
 ### Code Quality Standards
 
 - All warnings from `cargo clippy` must be resolved before committing changes
