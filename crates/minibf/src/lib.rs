@@ -257,10 +257,9 @@ impl<D: Domain> Facade<D> {
         Ok(out)
     }
 
-    /// The log key is `(slot, pool)`, ranging `slot..slot + 1` (both padded
-    /// with a zeroed entity key) covers every pool at this epoch's start
-    /// slot without spilling into the next one. Returns `None` when no logs
-    /// exist.
+    /// The log key is `(slot, pool)`. The range `slot..slot + 1`, with a zeroed
+    /// entity key on each bound, includes every pool at the start slot of this
+    /// epoch and no pool from the next epoch. Returns `None` when no log exists.
     fn stake_logs_sum_at_epoch(
         &self,
         epoch: Epoch,
@@ -287,12 +286,12 @@ impl<D: Domain> Facade<D> {
         Ok(found.then_some(total))
     }
 
-    // Dolos only starts writing `StakeLog`s once its stake-snapshot pipeline has
-    // warmed up, so the first snapshot epoch has logs but the epoch just before
-    // it does not, even though both share the same genesis stake distribution
-    // (the reference implementation reports the same value for both). For that
-    // one epoch we fall back to the next epoch's logs. Earlier epochs have no
-    // active stake and stay `None`.
+    // Dolos starts to write `StakeLog`s only after the stake-snapshot pipeline
+    // is ready. So the first snapshot epoch has logs, but the epoch just before
+    // it has none. Both epochs share the same genesis stake distribution, and
+    // the reference implementation reports the same value for both. For that one
+    // epoch, this function reads the logs of the next epoch instead. Each
+    // earlier epoch has no active stake and stays `None`.
     pub fn sum_active_stake_for_epoch(
         &self,
         epoch: Epoch,
@@ -302,10 +301,10 @@ impl<D: Domain> Facade<D> {
             return Ok(Some(total));
         }
 
-        // No logs for this epoch. If the *next* epoch is the earliest one that
-        // does have logs (i.e. this epoch has none but `epoch + 1` does), this
-        // epoch shares that first snapshot's genesis stake. Any earlier epoch
-        // (where neither it nor its successor has logs) has no active stake.
+        // This epoch has no logs. The next epoch can be the earliest one with
+        // logs: this epoch has none, but `epoch + 1` has them. Then this epoch
+        // shares the genesis stake of that first snapshot. An earlier epoch,
+        // where neither it nor its successor has logs, has no active stake.
         if let Some(next_total) = self.stake_logs_sum_at_epoch(epoch + 1, chain_summary)? {
             return Ok(Some(next_total));
         }

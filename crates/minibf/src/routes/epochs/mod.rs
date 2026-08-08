@@ -38,21 +38,23 @@ fn build_epoch_content<D: Domain>(
     mut state: EpochState,
     active_stake: Option<u64>,
 ) -> Result<mapping::EpochContentModelBuilder, StatusCode> {
-    // Trust the caller's epoch over `state.number`: the live `EpochState` (used
-    // for the current epoch) may not carry the number resolved from the tip.
+    // Use the epoch from the caller, not `state.number`. The live `EpochState`
+    // of the current epoch can hold a number that differs from the number that
+    // the tip resolves.
     state.number = epoch;
 
     let start_time = chain.slot_time(chain.epoch_start(epoch));
     let end_time = chain.slot_time(chain.epoch_start(epoch + 1));
 
-    // The block aggregates are precomputed on `RollingStats` during roll, so no
-    // per-request block scan is needed. First/last block times are stored as
-    // slots and converted here; a zero slot means the epoch had no blocks.
+    // The roll pipeline precomputes the block aggregates on `RollingStats`, so
+    // this request needs no block scan. The first and last block times are
+    // slots, and this function converts them here. A zero slot means the epoch
+    // had no block.
     //
-    // Byron epoch boundary blocks (EBBs) never flow through the roll pipeline,
-    // so `first_block_slot` is the epoch's first *regular* block. For epochs
-    // that open with an EBB (every Byron epoch), Blockfrost reports the EBB's
-    // time instead, so `first_block_time` differs there. See the systemic EBB
+    // A Byron epoch boundary block (EBB) does not pass through the roll
+    // pipeline. So `first_block_slot` is the first *regular* block of the epoch.
+    // Every Byron epoch opens with an EBB. For these epochs, Blockfrost reports
+    // the time of the EBB, so `first_block_time` differs. See the systemic EBB
     // omission tracked for `/epochs/{n}/blocks` and `/blocks/{block}`.
     let rolling = state.rolling.live().cloned().unwrap_or_default();
     let first_block_time = if rolling.first_block_slot == 0 {
@@ -135,7 +137,8 @@ where
     let chain = domain.get_chain_summary()?;
     let (current, _) = chain.slot_epoch(tip);
 
-    // The current epoch always has a live `EpochState`, so this never 404s.
+    // The current epoch always has a live `EpochState`, so this never returns a
+    // 404 error.
     let state = load_epoch_state(&domain, &chain, current, current)?;
     let active_stake = derive_current_active_stake(&domain, &chain, current).await?;
     let model = build_epoch_content(&domain, &chain, current, state, Some(active_stake))?;
@@ -190,8 +193,8 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    // Epochs following `epoch`, up to and including the current one, in
-    // ascending order. Pagination selects the requested window.
+    // Collect the epochs after `epoch`, up to and including the current epoch,
+    // in ascending order. The pagination selects the window.
     let epochs: Vec<Epoch> = ((epoch + 1)..=current)
         .skip(pagination.skip())
         .take(pagination.count)
@@ -218,12 +221,12 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    // Epochs preceding `epoch`, walking backwards from `epoch - 1`, but always
-    // rendered in ascending order (matching the reference implementation).
+    // Collect the epochs before `epoch`, from `epoch - 1` backward. The result
+    // is always in ascending order, the same as the reference implementation.
     let count = pagination.count as u64;
     let skip = pagination.skip() as u64;
 
-    // Highest epoch in the requested page (inclusive) and lowest (inclusive).
+    // The highest and lowest epoch in the page. Both bounds are inclusive.
     let high = epoch.saturating_sub(1 + skip);
     let low = high.saturating_sub(count.saturating_sub(1));
 
@@ -454,7 +457,8 @@ mod tests {
 
         let content: EpochContent =
             serde_json::from_slice(&bytes).expect("failed to parse epoch content");
-        // The synthetic chain's tip sits in epoch 2, so `latest` resolves there.
+        // The tip of the synthetic chain is in epoch 2, so `latest` resolves to
+        // epoch 2.
         assert_eq!(content.epoch, 2);
         assert!(content.start_time < content.end_time);
         assert!(content.active_stake.is_some());
@@ -483,8 +487,8 @@ mod tests {
         let content: EpochContent =
             serde_json::from_slice(&bytes).expect("failed to parse epoch content");
         assert_eq!(content.epoch, 1);
-        // The synthetic chain places all blocks in epoch 2, so epoch 1 has no
-        // blocks: its aggregates and rolling stats are zero.
+        // The synthetic chain puts all blocks in epoch 2, so epoch 1 has no
+        // block. Its aggregates and rolling stats are zero.
         assert!(content.start_time < content.end_time);
     }
 
@@ -522,8 +526,8 @@ mod tests {
 
     #[tokio::test]
     async fn epochs_by_number_out_of_range() {
-        // Epoch numbers above the reference API's `i32` range are rejected as
-        // bad requests, not treated as (404) missing epochs.
+        // An epoch number greater than the `i32` range of the reference API gets a
+        // bad-request error, not a 404 error for a missing epoch.
         let app = TestApp::new();
         assert_status(&app, "/epochs/696969696969", StatusCode::BAD_REQUEST).await;
         assert_status(&app, "/epochs/696969696969/next", StatusCode::BAD_REQUEST).await;
@@ -558,7 +562,7 @@ mod tests {
         let content: Vec<EpochContent> =
             serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
 
-        // Epochs are returned in strictly ascending order, all greater than the
+        // The result is in strict ascending order. Every epoch is greater than the
         // requested epoch.
         let mut prev = None;
         for item in &content {
@@ -600,7 +604,8 @@ mod tests {
         let content: Vec<EpochContent> =
             serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
 
-        // Everything returned precedes the requested epoch, in ascending order.
+        // Every epoch in the result is before the requested epoch, in ascending
+        // order.
         let mut prev = None;
         for item in &content {
             assert!(item.epoch < 2);

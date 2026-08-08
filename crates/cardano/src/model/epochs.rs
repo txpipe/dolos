@@ -24,8 +24,8 @@ pub type Lovelace = u64;
 
 pub const CURRENT_EPOCH_KEY: &[u8] = b"0";
 
-/// CBOR codec for `u128` fields. This minicbor version has no native `u128`
-/// support, so the value is stored as a 16-byte big-endian byte string.
+/// CBOR codec for `u128` fields. This version of minicbor has no `u128` type.
+/// The codec stores the value as a 16-byte big-endian byte string.
 mod cbor_u128 {
     use pallas::codec::minicbor::{
         decode::{Decoder, Error as DecodeError},
@@ -172,21 +172,22 @@ pub struct RollingStats {
     #[cbor(default)]
     pub tx_count: u64,
 
-    /// Gross sum of all produced transaction output lovelace this epoch
-    /// (matches db-sync's `epoch.out_sum`). u128 because the per-epoch total
-    /// can exceed u64 even though a single tx's outputs fit in u64.
+    /// Gross sum of all lovelace in transaction outputs this epoch (matches
+    /// db-sync's `epoch.out_sum`). The type is u128 because the sum for one
+    /// epoch can be more than u64 allows, although the outputs of one
+    /// transaction always fit in u64.
     #[n(23)]
     #[cbor(default, with = "cbor_u128")]
     pub output: u128,
 
-    /// Slot of the first block minted this epoch (0 if none). Stored as a slot
-    /// and converted to a wall-clock time by the reader via `ChainSummary`.
+    /// Slot of the first block minted this epoch (0 if the epoch has no block).
+    /// The reader converts this slot to a wall-clock time with `ChainSummary`.
     #[n(24)]
     #[cbor(default)]
     pub first_block_slot: u64,
 
-    /// Slot of the last block minted this epoch (0 if none). Stored as a slot
-    /// and converted to a wall-clock time by the reader via `ChainSummary`.
+    /// Slot of the last block minted this epoch (0 if the epoch has no block).
+    /// The reader converts this slot to a wall-clock time with `ChainSummary`.
     #[n(25)]
     #[cbor(default)]
     pub last_block_slot: u64,
@@ -509,8 +510,9 @@ pub struct EpochStatsUpdate {
     pub(crate) was_new: bool,
     pub(crate) prev_registered_pools: HashSet<PoolHash>,
 
-    // undo for first/last block slot: min/max are not reversible by arithmetic,
-    // so the pre-apply values are captured to restore them exactly.
+    // Undo data for the first and last block slots. A min or max operation is
+    // not reversible by arithmetic. So `apply` keeps the earlier values here,
+    // and `undo` restores them.
     pub(crate) prev_first_block_slot: u64,
     pub(crate) prev_last_block_slot: u64,
 }
@@ -553,14 +555,15 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.tx_count += self.tx_count;
         stats.output += self.output;
 
-        // Capture the pre-apply slots so `undo` can restore them (first/last
-        // are min/max, not reversible by arithmetic).
+        // Keep the earlier slots so `undo` can restore them. The first and last
+        // slots are a min and a max, which arithmetic cannot reverse.
         self.prev_first_block_slot = stats.first_block_slot;
         self.prev_last_block_slot = stats.last_block_slot;
 
-        // `first_block_slot` is set only once (the epoch's earliest block);
-        // `last_block_slot` always advances to the most recent block. Blocks
-        // roll in slot order, so this yields the correct min/max.
+        // `first_block_slot` gets a value only once, at the earliest block of
+        // the epoch. `last_block_slot` moves forward to the most recent block.
+        // Blocks roll in slot order, so these values are the correct min and
+        // max.
         if stats.first_block_slot == 0 {
             stats.first_block_slot = self.block_slot;
         }
