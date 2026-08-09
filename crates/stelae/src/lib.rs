@@ -279,37 +279,6 @@ pub enum Error {
     #[error("{value:?} is not an OCI repository: {reason}")]
     InvalidRepository { value: String, reason: String },
 
-    /// The environment names two sets of registry credentials at once.
-    ///
-    /// Refused rather than resolved by precedence. An operator who exported
-    /// both a bearer token and a Basic pair meant one of them, and a client
-    /// that quietly picked would authenticate as an identity nobody chose —
-    /// which, on a registry where the two credentials carry different
-    /// capabilities, is the difference between a publish and a 403 nobody can
-    /// explain.
-    #[cfg(feature = "oci")]
-    #[error(
-        "{} and {}/{} are both set; registry credentials come from one of the two and \
-         which one was meant is not something to guess at — unset the one you did not mean",
-        crate::oci::TOKEN_ENV,
-        crate::oci::USER_ENV,
-        crate::oci::PASSWORD_ENV
-    )]
-    AmbiguousRegistryAuth,
-
-    /// Half of a Basic credential pair.
-    ///
-    /// A user with no password (or the reverse) is a typo or a secret that
-    /// never reached the process. Sending the half that arrived would
-    /// authenticate as somebody the operator did not name, so it is refused
-    /// where it is read.
-    #[cfg(feature = "oci")]
-    #[error("{set} is set without {missing}; basic registry credentials are a pair")]
-    IncompleteRegistryAuth {
-        set: &'static str,
-        missing: &'static str,
-    },
-
     /// Anything the registry client reported.
     #[cfg(feature = "oci")]
     #[error("registry error: {0}")]

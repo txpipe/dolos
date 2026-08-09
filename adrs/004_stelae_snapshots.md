@@ -240,14 +240,7 @@ The arithmetic is counted in layers, because layers are what the ceiling counts:
 #### What the transport requires of its host
 
 - **A process that opens a registry client must have installed a process-default rustls `CryptoProvider` first.** The transport ships no crypto backend of its own (`reqwest/rustls-no-provider`): the backend the client library would otherwise pick, `aws-lc-rs`, wants `cmake` on every build machine — the dependency this workspace already goes out of its way to avoid — so it stays out of the tree and the choice of provider moves to the program. In Dolos, `main()` installs `ring`. Omitting the install is a panic when the registry client opens, not a link error.
-- **Authentication is the host's decision, in one of three shapes.** The client is opened with credentials its caller supplies — anonymous, a bearer token, or an HTTP Basic pair — and never goes looking on its own: which identity a program authenticates as is that program's policy. What the protocol owns is the environment grammar, because it owns the variable names:
-
-  | Variable | Shape |
-  | --- | --- |
-  | `STELAE_REGISTRY_TOKEN` | bearer token |
-  | `STELAE_REGISTRY_USER` + `STELAE_REGISTRY_PASSWORD` | Basic pair |
-
-  An empty value is unset. A token and a pair set together is a **refusal**, not a precedence rule, and so is half a pair: an operator who exported both meant one of them, and a client that guessed would authenticate as an identity nobody chose — which on a registry whose credentials carry different capabilities is the difference between a publish and a 403 nobody can explain.
+- **Authentication is the host's decision, in one of three shapes.** The client is opened with credentials its caller supplies — anonymous, a bearer token, or an HTTP Basic pair — and never sources them itself. Which identity a program authenticates as is that program's credential policy, and where it keeps its credentials is that program's deployment: a protocol library that read an environment variable would be deciding both on its host's behalf, and naming the variable would freeze that decision into a published API. **So this specification names no environment variable and no configuration key**, and `stelae::oci::Options::auth` is the whole of the interface. Dolos's own answer is under "CLI and configuration" below.
 
   Anonymous remains legitimate and is what a genuinely public repository wants. It is not what a registry that authenticates every request wants, and that is the deployment Dolos is heading for: read access to a stele repository is free and identity-less, and still credentialed.
 
@@ -304,7 +297,16 @@ user = "…"                     # seeded by `dolos init`
 
 The official registry's read-only password is a **published secret**: it is what makes stele distribution free and identity-less while still authenticated. It is compiled into the binary rather than seeded into the file, so `dolos init` writes a `user` and no password and a rotation reaches every node that takes a release, instead of having to be found again in every generated `dolos.toml`. A node pointing at a private registry sets `password` and gets its own.
 
-A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never in this file — which is why the environment overrides both the file and the compiled-in default, so a node carrying the read-only user can publish without being edited first.
+A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never in this file, so `dolos` reads three variables of its own:
+
+| Variable | Shape |
+| --- | --- |
+| `STELAE_REGISTRY_TOKEN` | bearer token |
+| `STELAE_REGISTRY_USER` + `STELAE_REGISTRY_PASSWORD` | Basic pair |
+
+An empty value is unset. The environment overrides both the file and the compiled-in default, so a node carrying the read-only user can publish without being edited first. A token and a pair set together is a **refusal**, not a precedence rule, and so is half a pair: an operator who exported both meant one of them, and a client that guessed would authenticate as an identity nobody chose — which on a registry whose credentials carry different capabilities is the difference between a publish and a 403 nobody can explain.
+
+These are Dolos's variables and Dolos's rule, resolved in `dolos::common::stele_registry_auth`, which hands the answer to the transport as a value. Another host embedding `stelae` names its own, or none.
 
 ### Publisher pipeline
 

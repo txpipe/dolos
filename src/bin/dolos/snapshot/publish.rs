@@ -215,10 +215,12 @@ fn to_repository(
 ) -> miette::Result<()> {
     // A publisher's credentials come from `STELAE_REGISTRY_USER` /
     // `STELAE_REGISTRY_PASSWORD`, which override anything configured. The
-    // configured pair is still handed over: it is read-only, so authenticating
+    // configured user is still the fallback: it is read-only, so authenticating
     // with it fails the push at the registry rather than a step earlier — which
     // is the honest place for "these credentials cannot publish" to be said.
-    let registry = registry::open(repo, args.insecure, config.stelae.registry.as_ref())
+    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+
+    let registry = registry::open(repo, args.insecure, auth)
         .into_diagnostic()
         .context("opening the repository")?;
 

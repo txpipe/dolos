@@ -16,9 +16,8 @@
 // binary does not reach look dead to it. They are not.
 #![allow(dead_code)]
 
-use dolos_core::config::StelaeRegistryConfig;
 use dolos_snapshot::registry;
-use stelae::oci::Registry;
+use stelae::oci::{Auth, Registry};
 
 /// The credentials the fixture's registry demands, and the ones these suites
 /// hand `registry::open` as a node's configured pair.
@@ -31,11 +30,11 @@ pub const PASSWORD: &str = "stelae-fixture";
 
 const HTPASSWD: &str = "stelae:$2y$05$1Hb22zONvzLAj4WaYl34/uDWF5rDgQkS9MoewgRvsTlsNrusMYTW6\n";
 
-/// The node-side half of the same pair.
-pub fn credentials() -> StelaeRegistryConfig {
-    StelaeRegistryConfig {
+/// The same pair, as the value a host hands `registry::open`.
+pub fn credentials() -> Auth {
+    Auth::Basic {
         user: USER.to_owned(),
-        password: Some(PASSWORD.to_owned()),
+        password: PASSWORD.to_owned(),
     }
 }
 
@@ -185,21 +184,19 @@ impl Fixture {
     /// layers and the transfer counters live in the transport, and a test
     /// comparing two publishes wants two of them.
     ///
-    /// Through `registry::open` with the pair as a *configured* one, so these
-    /// suites exercise the path a restoring node takes — credentials off
-    /// `[stelae.registry]` in `dolos.toml` — rather than a transport assembled
-    /// beside it.
+    /// Through `registry::open`, credentials and all, so these suites exercise
+    /// the call a node makes rather than a transport assembled beside it.
     pub fn repository(&self, name: &str) -> Registry {
-        self.repository_as(name, Some(&credentials()))
+        self.repository_as(name, credentials())
     }
 
     /// The same, with whatever credentials a caller wants to try.
-    pub fn repository_as(&self, name: &str, configured: Option<&StelaeRegistryConfig>) -> Registry {
+    pub fn repository_as(&self, name: &str, auth: Auth) -> Registry {
         let repository = format!("oci://127.0.0.1:{}/{name}", self.port)
             .parse()
             .expect("the fixture named a usable repository");
 
-        registry::open(&repository, true, configured).unwrap()
+        registry::open(&repository, true, auth).unwrap()
     }
 }
 

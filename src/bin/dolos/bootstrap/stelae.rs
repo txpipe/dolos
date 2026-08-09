@@ -205,9 +205,12 @@ fn restore_repo(
 ) -> miette::Result<()> {
     let node = Node::open(config)?;
 
-    // The published read-only pair a fresh `dolos init` seeds, which the
-    // environment overrides — `dolos_snapshot::registry::auth` owns the rule.
-    let registry = registry::open(repo, insecure, config.stelae.registry.as_ref())
+    // Resolved here rather than inside the transport: which identity this node
+    // reads a registry as is the node's policy, and `crate::common` is where
+    // this program keeps its own.
+    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+
+    let registry = registry::open(repo, insecure, auth)
         .into_diagnostic()
         .context("opening the repository")?;
 
