@@ -109,10 +109,13 @@ pub fn stele_registry_auth(config: &StelaeConfig) -> miette::Result<Auth> {
     match &registry.user {
         Some(user) => Ok(Auth::Basic {
             user: user.clone(),
-            // Through the accessor, not the field: a section that names a user
-            // and no password means the official registry's, which is compiled
-            // in rather than written into every generated `dolos.toml`.
-            password: registry.password().to_owned(),
+            // A user and no password means the official registry's, which is
+            // compiled in beside the rest of the hardcoded defaults rather than
+            // written into every generated `dolos.toml`.
+            password: registry
+                .password
+                .clone()
+                .unwrap_or_else(|| crate::init::OFFICIAL_REGISTRY_PASSWORD.to_owned()),
         }),
         // A password with nobody to be. Anonymous would be the quiet answer and
         // the wrong one: the operator supplied a secret and it would go unused.
@@ -386,9 +389,10 @@ pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::config::{StelaeRegistryConfig, OFFICIAL_REGISTRY_PASSWORD};
+    use dolos_core::config::StelaeRegistryConfig;
 
     use super::*;
+    use crate::init::OFFICIAL_REGISTRY_PASSWORD;
 
     fn config(registry: Option<StelaeRegistryConfig>) -> StelaeConfig {
         StelaeConfig { registry }

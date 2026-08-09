@@ -3,8 +3,8 @@ use dolos_cardano::{include, mutable_slots};
 use dolos_core::{
     config::{
         CardanoConfig, ChainConfig, GenesisConfig, GrpcConfig, MinibfConfig, MinikupoConfig,
-        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StelaeConfig, StorageConfig,
-        StorageVersion, TrpConfig, UpstreamConfig,
+        MithrilConfig, PeerConfig, RelayConfig, RootConfig, StelaeConfig, StelaeRegistryConfig,
+        StorageConfig, StorageVersion, TrpConfig, UpstreamConfig,
     },
     Genesis,
 };
@@ -189,6 +189,54 @@ impl From<&KnownNetwork> for MithrilConfig {
     }
 }
 
+/// The official stele registry's published read-only user.
+///
+/// A hardcoded default of the same kind as the relay addresses and the Mithril
+/// aggregators above, and here for the same reason: this module is where a
+/// generated `dolos.toml` gets everything it points at. Written into the file,
+/// so a config says which identity it reads the registry as.
+///
+/// Empty until the registry that issues it exists.
+const OFFICIAL_REGISTRY_USER: &str = "";
+
+/// The password that goes with [`OFFICIAL_REGISTRY_USER`], compiled in rather
+/// than written to `dolos.toml`.
+///
+/// **Deliberately a published secret**, and the only one this project has:
+/// stele distribution is free and identity-less, but never unrestricted — the
+/// registry authenticates every request, and this is what a consumer
+/// authenticates with. So it gates out-of-band tooling and nothing else.
+///
+/// Compiled in rather than seeded into the file because a password copied into
+/// every generated `dolos.toml` is a password that has to be found again in
+/// every one of them. Here, a rotation reaches every node that takes the
+/// release; a node that overrode it in its own config keeps its override.
+///
+/// That makes this the one default here with a runtime reader as well as an
+/// init-time one: [`crate::common::stele_registry_auth`] answers a section that
+/// names a user and no password with it, reaching into this module the way
+/// `doctor` reaches into it for [`KnownNetwork`] rather than keeping a second
+/// account of what the defaults are.
+///
+/// Empty until the registry exists. Filling both constants is a two-line change
+/// here and nowhere else.
+pub const OFFICIAL_REGISTRY_PASSWORD: &str = "";
+
+/// `[stelae]` as a generated config carries it: the official registry's user,
+/// and no password.
+///
+/// Empty while [`OFFICIAL_REGISTRY_USER`] is, which is why it is a function
+/// rather than a `Default` impl on the config type — it asks for the official
+/// registry specifically, and gives the honest answer while there is not one.
+fn official_stelae() -> StelaeConfig {
+    StelaeConfig {
+        registry: (!OFFICIAL_REGISTRY_USER.is_empty()).then(|| StelaeRegistryConfig {
+            user: Some(OFFICIAL_REGISTRY_USER.to_owned()),
+            ..Default::default()
+        }),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum HistoryPrunningOptions {
     Keep1Day,
@@ -358,7 +406,7 @@ impl Default for ConfigEditor {
                 // `dolos.toml` keeps whatever it carries, because a section
                 // an operator removed and one that predates the field look
                 // the same from here, and overwriting would undo the first.
-                stelae: StelaeConfig::official(),
+                stelae: official_stelae(),
                 storage: StorageConfig {
                     version: StorageVersion::V3,
                     ..Default::default()
@@ -761,11 +809,11 @@ mod tests {
     /// A freshly initialized node carries the stelae registry section the
     /// official registry needs, and no password.
     ///
-    /// The section appears once `OFFICIAL_REGISTRY_USER` names one; until then
-    /// there is no user to write and the file says nothing. Either way the
+    /// The section appears once [`OFFICIAL_REGISTRY_USER`] names one; until
+    /// then there is no user to write and the file says nothing. Either way the
     /// generated config has to parse and to round-trip to exactly what
-    /// `StelaeConfig::official()` is, which is what will still hold on the day
-    /// the constants are filled in.
+    /// [`official_stelae`] is, which is what will still hold on the day the
+    /// constants are filled in.
     #[test]
     fn a_fresh_config_seeds_the_official_registry_and_no_password() {
         let dir = tempfile::tempdir().unwrap();
@@ -781,23 +829,23 @@ mod tests {
         assert!(!written.contains("password"), "{written}");
 
         let parsed: RootConfig = toml::from_str(&written).expect("the generated config parses");
-        assert_eq!(parsed.stelae, StelaeConfig::official());
+        assert_eq!(parsed.stelae, official_stelae());
 
         if let Some(registry) = &parsed.stelae.registry {
-            assert_eq!(
-                registry.user.as_deref(),
-                Some(dolos_core::config::OFFICIAL_REGISTRY_USER)
-            );
+            assert_eq!(registry.user.as_deref(), Some(OFFICIAL_REGISTRY_USER));
             assert_eq!(registry.password, None);
         }
     }
 
-    /// A password an operator wrote is kept; one they did not is the official
-    /// registry's, out of the binary.
+    /// A password an operator wrote is kept, so a private registry is
+    /// configurable in the file the same command generates.
+    ///
+    /// Only the round trip is asserted here. What a section with *no* password
+    /// authenticates with is [`crate::common::stele_registry_auth`]'s question,
+    /// and is answered by its tests against
+    /// [`OFFICIAL_REGISTRY_PASSWORD`].
     #[test]
-    fn a_configured_password_overrides_the_compiled_in_one() {
-        use dolos_core::config::{StelaeRegistryConfig, OFFICIAL_REGISTRY_PASSWORD};
-
+    fn a_configured_password_survives_the_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
@@ -817,14 +865,6 @@ mod tests {
         let registry = parsed.stelae.registry.expect("the section round-trips");
 
         assert_eq!(registry.user.as_deref(), Some("dolos"));
-        assert_eq!(registry.password(), "a-private-registry");
-
-        // And the same user with the password left out falls back.
-        let defaulted = StelaeRegistryConfig {
-            user: Some("dolos".to_owned()),
-            ..Default::default()
-        };
-
-        assert_eq!(defaulted.password(), OFFICIAL_REGISTRY_PASSWORD);
+        assert_eq!(registry.password.as_deref(), Some("a-private-registry"));
     }
 }

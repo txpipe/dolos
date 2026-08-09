@@ -699,37 +699,18 @@ pub struct SnapshotConfig {
     pub download_url: String,
 }
 
-/// The official stele registry's published read-only user.
-///
-/// Written into `dolos.toml` by `dolos init`, so a generated config says which
-/// identity it reads the registry as.
-///
-/// Empty until the registry that issues it exists.
-pub const OFFICIAL_REGISTRY_USER: &str = "";
-
-/// The password that goes with [`OFFICIAL_REGISTRY_USER`], compiled in rather
-/// than written to `dolos.toml`.
-///
-/// **Deliberately a published secret**, and the only one this project has:
-/// stele distribution is free and identity-less, but never unrestricted — the
-/// registry authenticates every request, and this is what a consumer
-/// authenticates with. So it gates out-of-band tooling and nothing else.
-///
-/// Compiled in rather than seeded into the file because a password copied into
-/// every generated `dolos.toml` is a password that has to be found again in
-/// every one of them. Here, a rotation reaches every node that takes the
-/// release; a node that overrode it in its own config keeps its override.
-///
-/// Empty until the registry exists. Filling both constants is a two-line change
-/// *here* and nowhere else, which is why they are constants rather than
-/// literals at the sites that use them.
-pub const OFFICIAL_REGISTRY_PASSWORD: &str = "";
-
 /// `[stelae]` — how this node reaches a stele registry.
 ///
 /// One section carrying one credential, and that is the whole of the consumer
 /// surface: a node restoring from a stele repository needs to authenticate, and
 /// nothing more about a registry belongs in a node's configuration.
+///
+/// **Which registry is the official one, and what it is read as, is not decided
+/// here.** That is a hardcoded default of the same kind as a network's relay
+/// address or its Mithril aggregator, and it lives where those live: beside
+/// `KnownNetwork` in the binary, which is both what seeds a generated
+/// `dolos.toml` and what answers for a section naming a user and no password.
+/// This crate carries the shape and none of the values.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct StelaeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -737,21 +718,6 @@ pub struct StelaeConfig {
 }
 
 impl StelaeConfig {
-    /// What `dolos init` seeds: the official registry's user, and no password.
-    ///
-    /// Empty while [`OFFICIAL_REGISTRY_USER`] is, which is why it is a
-    /// constructor rather than a `Default` impl: a caller reading this name
-    /// knows it is asking for the official registry specifically, and gets the
-    /// honest answer when there is not one yet.
-    pub fn official() -> Self {
-        Self {
-            registry: (!OFFICIAL_REGISTRY_USER.is_empty()).then(|| StelaeRegistryConfig {
-                user: Some(OFFICIAL_REGISTRY_USER.to_owned()),
-                ..Default::default()
-            }),
-        }
-    }
-
     pub fn is_default(&self) -> bool {
         self.registry.is_none()
     }
@@ -779,8 +745,9 @@ pub struct StelaeRegistryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
-    /// Omitted by `dolos init`, and by anything reading the official registry:
-    /// see [`StelaeRegistryConfig::password`].
+    /// Omitted by `dolos init`, and by anything reading the official registry —
+    /// the binary supplies that one rather than copying it into every generated
+    /// file. Set it for a registry that is not the official one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 
@@ -788,20 +755,6 @@ pub struct StelaeRegistryConfig {
     /// pair. Mutually exclusive with `user`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
-}
-
-impl StelaeRegistryConfig {
-    /// The password to send: the one configured, or
-    /// [`OFFICIAL_REGISTRY_PASSWORD`].
-    ///
-    /// The fallback is what lets a generated config name a user and no secret.
-    /// A private registry sets `password` and gets its own; the official one is
-    /// answered by the binary.
-    pub fn password(&self) -> &str {
-        self.password
-            .as_deref()
-            .unwrap_or(OFFICIAL_REGISTRY_PASSWORD)
-    }
 }
 
 /// Names the user and never a secret.
