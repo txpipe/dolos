@@ -196,8 +196,8 @@ impl From<&KnownNetwork> for MithrilConfig {
 /// generated `dolos.toml` gets everything it points at. Written into the file,
 /// so a config says which identity it reads the registry as.
 ///
-/// Empty until the registry that issues it exists.
-const OFFICIAL_REGISTRY_USER: &str = "";
+/// Issued by the official registry at `oci.stelae.store`.
+const OFFICIAL_REGISTRY_USER: &str = "stelae";
 
 /// The password that goes with [`OFFICIAL_REGISTRY_USER`], compiled in rather
 /// than written to `dolos.toml`.
@@ -218,16 +218,18 @@ const OFFICIAL_REGISTRY_USER: &str = "";
 /// `doctor` reaches into it for [`KnownNetwork`] rather than keeping a second
 /// account of what the defaults are.
 ///
-/// Empty until the registry exists. Filling both constants is a two-line change
-/// here and nowhere else.
-pub const OFFICIAL_REGISTRY_PASSWORD: &str = "";
+/// Rotating the pair is a change here and nowhere else — paired with a release
+/// and comms, because generated configs and released binaries carry the old one
+/// until their nodes update.
+pub const OFFICIAL_REGISTRY_PASSWORD: &str = "7214892e36157f4051677b51526382cc96693d45eda4e4cd";
 
 /// `[stelae]` as a generated config carries it: the official registry's user,
 /// and no password.
 ///
-/// Empty while [`OFFICIAL_REGISTRY_USER`] is, which is why it is a function
-/// rather than a `Default` impl on the config type — it asks for the official
-/// registry specifically, and gives the honest answer while there is not one.
+/// Empty only while [`OFFICIAL_REGISTRY_USER`] is, which is why it is a
+/// function rather than a `Default` impl on the config type — it asks for the
+/// official registry specifically, and would give the honest answer if there
+/// were not one.
 fn official_stelae() -> StelaeConfig {
     StelaeConfig {
         registry: (!OFFICIAL_REGISTRY_USER.is_empty()).then(|| StelaeRegistryConfig {
