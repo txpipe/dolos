@@ -55,6 +55,30 @@
 //! CA. Nothing here weakens verification to make a self-signed certificate
 //! work: a suite that accepted any certificate would pass just as happily with
 //! the handshake broken, which is the one thing this mode exists to detect.
+//!
+//! ## Pointing them at a deployment
+//!
+//! Set
+//!
+//! ```text
+//! STELAE_TEST_REGISTRY_URL=oci.example.com
+//! STELAE_TEST_REGISTRY_USER=publisher
+//! STELAE_TEST_REGISTRY_PASSWORD=…
+//! ```
+//!
+//! and the same suite runs against that registry instead of spawning one —
+//! over TLS, no exceptions: a deployment is the one place plaintext has no
+//! business. The docker knobs above are the container's and are ignored.
+//!
+//! A deployment persists between runs where a container never does, so every
+//! fixture scopes its repositories under a fresh `staging/…` namespace — the
+//! assertions written against an empty repository stay true, and a finished
+//! run leaves its namespace to the deployment's own garbage collection.
+//!
+//! `STELAE_TEST_REGISTRY_PULL_USER` / `_PULL_PASSWORD` optionally name a
+//! second pair, narrower by contract: expected to read a stele and be refused
+//! a write, which is what [`the_read_only_pair_pulls_and_cannot_push`] proves.
+//! The htpasswd fixture knows one pair, so that proof asks for a deployment.
 
 #![cfg(feature = "oci")]
 
@@ -596,24 +620,58 @@ const ZOT_CONFIG: &str = r#"{
 }
 "#;
 
-/// A container running an OCI Distribution server, removed when this is
-/// dropped.
+/// The registry under test: a container this suite spawned, or a deployment
+/// the environment pointed it at.
 ///
-/// `docker` rather than a library: the point of these tests is that the client
-/// talks to a *real* registry, and a fake one written here would only ever
-/// agree with this implementation's reading of the specification.
+/// `docker` rather than a library when it spawns one: the point of these tests
+/// is that the client talks to a *real* registry, and a fake one written here
+/// would only ever agree with this implementation's reading of the
+/// specification. The remote arm is the same conviction carried further — the
+/// registry the transport is actually aimed at, reached the way an operator
+/// reaches it.
 struct Fixture {
-    container: String,
-    port: u16,
+    server: Server,
     tls: bool,
-    /// The htpasswd file and the configuration naming it, held so they outlive
-    /// the container that has them mounted.
-    _auth: tempfile::TempDir,
+}
+
+/// Where [`Fixture`]'s registry lives.
+enum Server {
+    /// A container running an OCI Distribution server, removed when the
+    /// fixture is dropped.
+    Container {
+        container: String,
+        port: u16,
+        /// The htpasswd file and the configuration naming it, held so they
+        /// outlive the container that has them mounted.
+        _auth: tempfile::TempDir,
+    },
+    /// A deployed registry, reached over TLS and never torn down.
+    Remote {
+        host: String,
+        push_user: String,
+        push_password: String,
+        pull: Option<(String, String)>,
+        /// This fixture's private corner of a registry that outlives it: a
+        /// repository prefix no other run writes to.
+        namespace: String,
+    },
 }
 
 impl Fixture {
     fn spawn() -> Self {
         install_crypto_provider();
+
+        if let Some(fixture) = Self::remote() {
+            fixture.wait_until_ready();
+
+            eprintln!(
+                "registry: deployment on {}, TLS, basic auth as {:?}",
+                fixture.address(),
+                fixture.push_user(),
+            );
+
+            return fixture;
+        }
 
         let image =
             std::env::var("STELAE_TEST_REGISTRY_IMAGE").unwrap_or_else(|_| "registry:2".to_owned());
@@ -659,10 +717,12 @@ impl Fixture {
             .unwrap_or_else(|| panic!("no published port in {mapped:?}"));
 
         let fixture = Self {
-            container,
-            port,
+            server: Server::Container {
+                container,
+                port,
+                _auth: auth,
+            },
             tls: tls.is_some(),
-            _auth: auth,
         };
 
         fixture.wait_until_ready();
@@ -676,8 +736,63 @@ impl Fixture {
         fixture
     }
 
+    /// The deployment the environment names, if it names one.
+    ///
+    /// A fresh namespace per fixture, because a deployment persists where a
+    /// container never does: two fixtures in one test are two namespaces —
+    /// which is what lets
+    /// [`a_layer_whose_blob_is_not_there_cannot_be_carried_forward`] keep
+    /// meaning "a place the blob is absent from" — and two runs never share
+    /// one.
+    fn remote() -> Option<Self> {
+        let host = std::env::var("STELAE_TEST_REGISTRY_URL").ok()?;
+
+        let push_user = std::env::var("STELAE_TEST_REGISTRY_USER")
+            .expect("STELAE_TEST_REGISTRY_URL is set, so _USER is too");
+        let push_password = std::env::var("STELAE_TEST_REGISTRY_PASSWORD")
+            .expect("STELAE_TEST_REGISTRY_URL is set, so _PASSWORD is too");
+
+        let pull = match (
+            std::env::var("STELAE_TEST_REGISTRY_PULL_USER"),
+            std::env::var("STELAE_TEST_REGISTRY_PULL_PASSWORD"),
+        ) {
+            (Ok(user), Ok(password)) => Some((user, password)),
+            (Ok(_), _) | (_, Ok(_)) => panic!(
+                "STELAE_TEST_REGISTRY_PULL_USER and _PULL_PASSWORD are set \
+                 together or not at all"
+            ),
+            _ => None,
+        };
+
+        static FIXTURES: AtomicUsize = AtomicUsize::new(0);
+
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let namespace = format!(
+            "staging/{run:x}-{}",
+            FIXTURES.fetch_add(1, Ordering::Relaxed)
+        );
+
+        Some(Self {
+            server: Server::Remote {
+                host,
+                push_user,
+                push_password,
+                pull,
+                namespace,
+            },
+            tls: true,
+        })
+    }
+
     fn address(&self) -> String {
-        format!("127.0.0.1:{}", self.port)
+        match &self.server {
+            Server::Container { port, .. } => format!("127.0.0.1:{port}"),
+            Server::Remote { host, .. } => host.clone(),
+        }
     }
 
     /// Wait until the server answers a real request.
@@ -733,15 +848,53 @@ impl Fixture {
         self.registry_as(repository, scratch_dir, self.credentials())
     }
 
-    /// The pair the fixture's registry accepts.
+    /// The pair the fixture's registry accepts writes under.
     fn credentials(&self) -> Auth {
-        Auth::Basic {
-            user: USER.to_owned(),
-            password: PASSWORD.to_owned(),
+        match &self.server {
+            Server::Container { .. } => Auth::Basic {
+                user: USER.to_owned(),
+                password: PASSWORD.to_owned(),
+            },
+            Server::Remote {
+                push_user,
+                push_password,
+                ..
+            } => Auth::Basic {
+                user: push_user.clone(),
+                password: push_password.clone(),
+            },
+        }
+    }
+
+    /// The user [`credentials`](Self::credentials) authenticates as — what a
+    /// test that presents the right name with the wrong password asks for.
+    fn push_user(&self) -> &str {
+        match &self.server {
+            Server::Container { .. } => USER,
+            Server::Remote { push_user, .. } => push_user,
+        }
+    }
+
+    /// A second pair with narrower rights, where the registry has one.
+    ///
+    /// `None` against a container: htpasswd grants every authenticated pair
+    /// the same thing, so there is no narrower pair to hand out.
+    fn pull_credentials(&self) -> Option<Auth> {
+        match &self.server {
+            Server::Container { .. } => None,
+            Server::Remote { pull, .. } => pull.as_ref().map(|(user, password)| Auth::Basic {
+                user: user.clone(),
+                password: password.clone(),
+            }),
         }
     }
 
     fn registry_as(&self, repository: &str, scratch_dir: Option<PathBuf>, auth: Auth) -> Registry {
+        let repository = match &self.server {
+            Server::Container { .. } => repository.to_owned(),
+            Server::Remote { namespace, .. } => format!("{namespace}/{repository}"),
+        };
+
         Registry::open(
             &format!("oci://{}/{repository}", self.address())
                 .parse()
@@ -803,9 +956,11 @@ fn auth_args(dir: &std::path::Path) -> Vec<String> {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "--force", &self.container])
-            .output();
+        if let Server::Container { container, .. } = &self.server {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "--force", container])
+                .output();
+        }
     }
 }
 
@@ -1075,6 +1230,21 @@ const BULK_RECORD_BODY: usize = 1000;
 /// even a fifth of a layer would show up.
 const BULK_RECORDS: u64 = 48 * 1024;
 
+/// [`BULK_RECORDS`], unless the run says otherwise.
+///
+/// `STELAE_TEST_BULK_RECORDS` exists for the registry deployment's gates,
+/// which ask the same question at a mainnet shard's scale — a gibibyte and up
+/// — where a default that size would make every local run unbearable. Nothing
+/// else moves: the budget stays fixed precisely because the layer does not.
+fn bulk_records() -> u64 {
+    match std::env::var("STELAE_TEST_BULK_RECORDS") {
+        Ok(count) => count
+            .parse()
+            .expect("STELAE_TEST_BULK_RECORDS is a record count"),
+        Err(_) => BULK_RECORDS,
+    }
+}
+
 /// What either direction may hold at any one moment.
 ///
 /// Above the 1 MiB upload chunk because the HTTP client copies a body on its
@@ -1197,12 +1367,13 @@ fn neither_direction_holds_a_layer() {
 
     // --- up ---------------------------------------------------------------
     let sampler = Peak::start();
+    let started = std::time::Instant::now();
 
     let mut sink = registry
         .layer_sink(&ToyProfile, &spec, COMPRESSION_LEVEL)
         .unwrap();
 
-    for i in 0..BULK_RECORDS {
+    for i in 0..bulk_records() {
         sink.write_record(&bulk_record(i)).unwrap();
     }
 
@@ -1227,7 +1398,11 @@ fn neither_direction_holds_a_layer() {
     let size = layer.descriptor.uncompressed_size;
     let compressed = layer.digests.compressed_size;
 
-    println!("push: {size} uncompressed / {compressed} compressed bytes, peak {pushed} bytes held",);
+    println!(
+        "push: {size} uncompressed / {compressed} compressed bytes, \
+         peak {pushed} bytes held, {:.1?} elapsed",
+        started.elapsed(),
+    );
 
     assert!(
         size > 8 * TRANSPORT_BUDGET as u64,
@@ -1252,6 +1427,7 @@ fn neither_direction_holds_a_layer() {
 
     // --- down -------------------------------------------------------------
     let sampler = Peak::start();
+    let started = std::time::Instant::now();
 
     let stele = registry.pull_latest(&ToyProfile).unwrap();
     let read = stele.read_inscription().unwrap();
@@ -1270,7 +1446,10 @@ fn neither_direction_holds_a_layer() {
     let digests = reader.finish().unwrap();
     let pulled = sampler.finish();
 
-    println!("pull: {count} records, peak {pulled} bytes held");
+    println!(
+        "pull: {count} records, peak {pulled} bytes held, {:.1?} elapsed",
+        started.elapsed(),
+    );
 
     assert_eq!(count, layer.descriptor.records);
     assert_eq!(digests.diff_id, layer.descriptor.diff_id);
@@ -1540,7 +1719,7 @@ fn credentials_are_required() {
         (
             "the wrong password",
             Auth::Basic {
-                user: USER.to_owned(),
+                user: fixture.push_user().to_owned(),
                 password: "not-the-password".to_owned(),
             },
         ),
@@ -1557,6 +1736,58 @@ fn credentials_are_required() {
         // a chain, which is the consequence that matters.
         assert!(refused.pull_latest(&ToyProfile).is_err(), "{who}");
     }
+}
+
+/// The published read-only pair reads a stele whole and cannot write one.
+///
+/// The deployment this suite points at hands consumers a pull-only pair —
+/// free, identity-less, and still credentialed — and its access policy rests
+/// on the registry enforcing that narrowness: a pull-only pair that could
+/// push would make the published credential a write credential. So both
+/// halves run against the real enforcement: a stele published under the full
+/// pair pulls back whole under the narrow one, and the same narrow pair is
+/// refused an upload.
+///
+/// Only a deployment names a second pair; htpasswd grants every pair the same
+/// thing. Against a container this says so and proves nothing.
+#[test]
+#[ignore = "spawns a registry"]
+fn the_read_only_pair_pulls_and_cannot_push() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    let Some(pull) = fixture.pull_credentials() else {
+        eprintln!(
+            "no pull-only pair here: set STELAE_TEST_REGISTRY_PULL_USER and \
+             _PULL_PASSWORD to run this against a deployment"
+        );
+        return;
+    };
+
+    let published = write_stele(&fixture.registry("stelae/read-only"), 3);
+
+    let reading = fixture.registry_as("stelae/read-only", None, pull);
+    let stele = reading.pull_latest(&ToyProfile).unwrap();
+    let inscription = stele.read_inscription().unwrap();
+
+    assert_eq!(inscription, published);
+    records_of(&stele, &inscription);
+
+    let (header, scope) = notes_scope(4);
+    let refused = reading
+        .layer_sink(
+            &ToyProfile,
+            &LayerSpec::new("notes", header, scope),
+            COMPRESSION_LEVEL,
+        )
+        .and_then(|mut sink| {
+            sink.write_record(&note_record(1))?;
+            sink.finish().map(|_| ())
+        })
+        .expect_err("a pull-only pair was allowed to upload a layer");
+
+    println!("write through the pull-only pair: {refused}");
 }
 
 /// A layer cannot be carried forward into a repository that does not hold its
