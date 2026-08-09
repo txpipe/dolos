@@ -699,6 +699,80 @@ pub struct SnapshotConfig {
     pub download_url: String,
 }
 
+/// `[stelae]` — how this node reaches a stele registry.
+///
+/// One section carrying one credential, and that is the whole of the consumer
+/// surface: a node restoring from a stele repository needs to authenticate, and
+/// nothing more about a registry belongs in a node's configuration.
+///
+/// **Which registry is the official one, and what it is read as, is not decided
+/// here.** That is a hardcoded default of the same kind as a network's relay
+/// address or its Mithril aggregator, and it lives where those live: beside
+/// `KnownNetwork` in the binary, which is both what seeds a generated
+/// `dolos.toml` and what answers for a section naming a user and no password.
+/// This crate carries the shape and none of the values.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct StelaeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<StelaeRegistryConfig>,
+}
+
+impl StelaeConfig {
+    pub fn is_default(&self) -> bool {
+        self.registry.is_none()
+    }
+}
+
+/// `[stelae.registry]` — the credentials a stele registry is reached with.
+///
+/// **Every field is settable from the environment as `DOLOS_STELAE_REGISTRY_*`,
+/// and that is not a feature this section implements.** `RootConfig` is loaded
+/// through a `config::Environment` layer with the `DOLOS` prefix, so a
+/// publisher exports `DOLOS_STELAE_REGISTRY_USER` and
+/// `DOLOS_STELAE_REGISTRY_PASSWORD` the same way any other setting is
+/// overridden, and the precedence is the one the whole configuration already
+/// has. Nothing in Dolos reads a registry credential out of the environment by
+/// hand.
+///
+/// That is what keeps a publisher's real secret out of the file while a
+/// consumer's published user stays in it.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct StelaeRegistryConfig {
+    /// The identity to authenticate as, sent with [a
+    /// password](StelaeRegistryConfig::password) as HTTP Basic.
+    ///
+    /// Seeded by `dolos init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Omitted by `dolos init`, and by anything reading the official registry —
+    /// the binary supplies that one rather than copying it into every generated
+    /// file. Set it for a registry that is not the official one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+
+    /// A bearer token, for a registry that issues them rather than accepting a
+    /// pair. Mutually exclusive with `user`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+/// Names the user and never a secret.
+///
+/// `RootConfig` is printed in diagnostics; a derived `Debug` here would put a
+/// publisher's credentials in whatever a bug report happens to include.
+impl std::fmt::Debug for StelaeRegistryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |value: &Option<String>| value.as_ref().map(|_| "<redacted>");
+
+        f.debug_struct("StelaeRegistryConfig")
+            .field("user", &self.user)
+            .field("password", &redacted(&self.password))
+            .field("token", &redacted(&self.token))
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct OuroborosConfig {
     pub listen_path: PathBuf,
@@ -1142,6 +1216,9 @@ pub struct RootConfig {
     pub mithril: Option<MithrilConfig>,
 
     pub snapshot: Option<SnapshotConfig>,
+
+    #[serde(default, skip_serializing_if = "StelaeConfig::is_default")]
+    pub stelae: StelaeConfig,
 
     pub chain: ChainConfig,
 

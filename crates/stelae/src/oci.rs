@@ -99,9 +99,20 @@
 //!
 //! ## Authentication
 //!
-//! Anonymous, or a bearer token read from [`TOKEN_ENV`]. Nothing else: registry
-//! credentials are a publisher's concern with a policy of their own, and a
-//! transport that has no secrets policy should not invent one.
+//! Anonymous, a bearer token, or a Basic credential pair — whichever the caller
+//! puts in [`Options::auth`]. That is the whole of it: [`Auth`] is a value the
+//! caller constructs and hands over.
+//!
+//! **Where those credentials came from is not this crate's business, and it has
+//! no way to ask.** A protocol library that read an environment variable would
+//! be deciding its host's credential policy for it, and naming the variable
+//! would freeze that decision into a published API — a program embedding this
+//! transport gets no say in either. So a host reads its own environment, its
+//! own configuration file, its own secret manager, or all three in whatever
+//! order it has decided, and the answer arrives here as an [`Auth`].
+//!
+//! In Dolos that host is the `dolos` binary; `dolos::common` holds the
+//! variables and the precedence between them.
 
 use std::{
     collections::BTreeMap,
@@ -133,11 +144,64 @@ use crate::{
     Digest, Error, ARTIFACT_TYPE, INSCRIPTION_MEDIA_TYPE, MANIFEST_SIZE_LIMIT,
 };
 
-/// Environment variable holding a bearer token for the registry.
+/// How a [`Registry`] authenticates.
 ///
-/// Read once, when a [`Registry`] is opened. Absent means anonymous, which is
-/// what a public read-only repository wants.
-pub const TOKEN_ENV: &str = "STELAE_REGISTRY_TOKEN";
+/// The three shapes `oci-client` implements, named here rather than re-exported
+/// so that a caller assembling credentials does not have to depend on the
+/// registry client this transport happens to be built on. Constructing one is
+/// the caller's whole side of the arrangement: this crate never sources
+/// credentials, so there is no `from_env` here and no variable name for a host
+/// to inherit.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum Auth {
+    /// No credentials. What a genuinely public repository wants, and what a
+    /// registry that authenticates every request will answer with a 401.
+    #[default]
+    Anonymous,
+    /// A bearer token, as GHCR and the token-exchange registries issue.
+    Bearer(String),
+    /// A user and password, sent as HTTP Basic. What a registry fronted by
+    /// htpasswd — or by a Worker checking a credential table — expects.
+    Basic { user: String, password: String },
+}
+
+/// Says which shape it is and never what is in it.
+///
+/// A transport is held in structures that get logged and printed in error
+/// context; a derived `Debug` would put a publisher's password in the first
+/// backtrace anybody pastes into an issue.
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Self::Basic { user, .. } => f
+                .debug_struct("Basic")
+                .field("user", user)
+                .field("password", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+impl Auth {
+    /// Whether these credentials name anybody.
+    ///
+    /// The question a host layering credential sources asks — "did that one say
+    /// anything, or do I fall through to the next?" — so it is answered here
+    /// rather than by every host matching on the variant.
+    pub fn is_anonymous(&self) -> bool {
+        matches!(self, Self::Anonymous)
+    }
+
+    fn to_registry_auth(&self) -> RegistryAuth {
+        match self {
+            Self::Anonymous => RegistryAuth::Anonymous,
+            Self::Bearer(token) => RegistryAuth::Bearer(token.clone()),
+            Self::Basic { user, password } => RegistryAuth::Basic(user.clone(), password.clone()),
+        }
+    }
+}
 
 /// Annotation naming a layer's profile-defined kind.
 ///
@@ -217,6 +281,13 @@ pub struct Options {
     /// compressed, and the platform temporary directory is not always on the
     /// volume with room for sixteen of them.
     pub scratch_dir: Option<PathBuf>,
+
+    /// How to authenticate, decided entirely by the caller.
+    ///
+    /// Defaults to [`Auth::Anonymous`]. Nothing in this crate sources
+    /// credentials — see the module documentation for why that is a boundary
+    /// rather than an omission.
+    pub auth: Auth,
 }
 
 /// A repository an operator named, as `oci://HOST/PATH`.
@@ -377,9 +448,9 @@ impl Registry {
     /// parses it into a [`Repository`] and hands that over; nothing outside
     /// this module needs to know where the host ends.
     ///
-    /// Builds the current-thread runtime the whole transport runs on. Reads
-    /// [`TOKEN_ENV`] once, here, so a token never has to be threaded through a
-    /// profile's call stack.
+    /// Builds the current-thread runtime the whole transport runs on, and
+    /// stores the credentials [`Options::auth`] carries so they never have to
+    /// be threaded through a profile's call stack.
     ///
     /// # Panics
     ///
@@ -409,10 +480,7 @@ impl Registry {
             crate::MOVING_TAG.to_owned(),
         );
 
-        let auth = match std::env::var(TOKEN_ENV) {
-            Ok(token) if !token.is_empty() => RegistryAuth::Bearer(token),
-            _ => RegistryAuth::Anonymous,
-        };
+        let auth = options.auth.to_registry_auth();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1542,5 +1610,36 @@ mod tests {
             url: "https://registry.invalid/v2/x/manifests/latest".to_owned(),
         }));
         assert!(!is_absent(&OciDistributionError::GenericError(None)));
+    }
+
+    /// A password never reaches a log through this type.
+    ///
+    /// [`Options`] derives `Debug` and error context is printed freely, so this
+    /// redaction is what stands between a publisher's credentials and the first
+    /// backtrace anybody pastes into an issue.
+    #[test]
+    fn credentials_are_redacted_in_debug_output() {
+        let basic = Auth::Basic {
+            user: "reader".to_owned(),
+            password: "hunter2".to_owned(),
+        };
+
+        let printed = format!("{basic:?}");
+        assert!(printed.contains("reader"), "{printed}");
+        assert!(!printed.contains("hunter2"), "{printed}");
+
+        let printed = format!("{:?}", Auth::Bearer("ghp_x".to_owned()));
+        assert!(!printed.contains("ghp_x"), "{printed}");
+
+        // And through the structure a caller actually holds, which is where it
+        // would leak from.
+        let printed = format!(
+            "{:?}",
+            Options {
+                auth: basic,
+                ..Default::default()
+            }
+        );
+        assert!(!printed.contains("hunter2"), "{printed}");
     }
 }

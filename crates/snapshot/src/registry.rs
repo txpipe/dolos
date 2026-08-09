@@ -76,6 +76,14 @@
 //! protocol takes the string and validates it. An operator naming `epoch-500`
 //! is naming a sequence, so that is what [`Point`] parses to, and the round
 //! trip back to a tag goes through the profile like every other one.
+//!
+//! ## Who the client authenticates as
+//!
+//! A registry that charges nothing for reads may still refuse an unidentified
+//! one, so both directions carry credentials — and this module takes them as an
+//! argument rather than finding them. Which identity a Dolos node authenticates
+//! as is the node's policy, not the profile's: the `dolos` binary reads its own
+//! configuration and its own environment and hands the answer to [`open`].
 
 use std::{cell::Cell, collections::BTreeMap};
 
@@ -93,7 +101,11 @@ use stelae::{
 /// usable — the distribution grammar lives with the client that defines it.
 /// The profile is the only thing in `dolos` that reaches into `stelae`, here as
 /// everywhere else.
-pub use stelae::oci::{Repository, SCHEME};
+///
+/// [`Auth`] rides along for the same reason: a host resolving its own
+/// credentials should not have to name the protocol crate to say what it
+/// resolved them to.
+pub use stelae::oci::{Auth, Repository, SCHEME};
 
 use crate::{
     export::{self, Plan, Predecessor},
@@ -211,15 +223,21 @@ where
 /// or a mirror inside a cluster, and for nothing that is reachable from outside
 /// one.
 ///
+/// `auth` is who to authenticate as, decided by the caller. A node resolves it
+/// from its own configuration and environment; nothing here goes looking, for
+/// the reason `stelae::oci` states one layer down and this crate has no more
+/// standing to override than that one does.
+///
 /// **Never call any of this from inside an async context.** The transport owns
 /// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
 /// module documentation states the rule and the reason.
-pub fn open(repository: &Repository, insecure: bool) -> Result<Registry, Error> {
+pub fn open(repository: &Repository, insecure: bool, auth: Auth) -> Result<Registry, Error> {
     Ok(Registry::open(
         repository,
         Options {
             insecure,
             scratch_dir: None,
+            auth,
         },
     )?)
 }

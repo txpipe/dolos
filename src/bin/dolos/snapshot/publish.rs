@@ -159,7 +159,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 
     match (&args.repo, &args.output_dir) {
-        (Some(repo), _) => to_repository(args, repo, &plan, &stores),
+        (Some(repo), _) => to_repository(config, args, repo, &plan, &stores),
         (None, Some(dir)) => to_directory(args, dir, &plan, &stores),
         // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
@@ -207,12 +207,20 @@ fn to_directory(
 /// this stele was inherited rather than built, and how much of it moved. Both
 /// are numbers the code counted, not an inference from a duration.
 fn to_repository(
+    config: &RootConfig,
     args: &Args,
     repo: &Repository,
     plan: &export::Plan,
     stores: &crate::common::Stores,
 ) -> miette::Result<()> {
-    let registry = registry::open(repo, args.insecure)
+    // A publisher's credentials come from `STELAE_REGISTRY_USER` /
+    // `STELAE_REGISTRY_PASSWORD`, which override anything configured. The
+    // configured user is still the fallback: it is read-only, so authenticating
+    // with it fails the push at the registry rather than a step earlier — which
+    // is the honest place for "these credentials cannot publish" to be said.
+    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+
+    let registry = registry::open(repo, args.insecure, auth)
         .into_diagnostic()
         .context("opening the repository")?;
 
