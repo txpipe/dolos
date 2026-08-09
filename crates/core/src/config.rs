@@ -746,8 +746,8 @@ impl StelaeConfig {
     pub fn official() -> Self {
         Self {
             registry: (!OFFICIAL_REGISTRY_USER.is_empty()).then(|| StelaeRegistryConfig {
-                user: OFFICIAL_REGISTRY_USER.to_owned(),
-                password: None,
+                user: Some(OFFICIAL_REGISTRY_USER.to_owned()),
+                ..Default::default()
             }),
         }
     }
@@ -757,22 +757,37 @@ impl StelaeConfig {
     }
 }
 
-/// `[stelae.registry]` — the credentials a stele registry is read with.
+/// `[stelae.registry]` — the credentials a stele registry is reached with.
 ///
-/// Read credentials only. A publisher's full-access pair is a secret and lives
-/// in the environment (`STELAE_REGISTRY_USER` / `STELAE_REGISTRY_PASSWORD`) or
-/// in a secret manager, never in a file that gets committed alongside a node's
-/// other settings — and the environment overrides what is here, so a publisher
-/// running on a node that carries the read-only user does not have to remove it
-/// first.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+/// **Every field is settable from the environment as `DOLOS_STELAE_REGISTRY_*`,
+/// and that is not a feature this section implements.** `RootConfig` is loaded
+/// through a `config::Environment` layer with the `DOLOS` prefix, so a
+/// publisher exports `DOLOS_STELAE_REGISTRY_USER` and
+/// `DOLOS_STELAE_REGISTRY_PASSWORD` the same way any other setting is
+/// overridden, and the precedence is the one the whole configuration already
+/// has. Nothing in Dolos reads a registry credential out of the environment by
+/// hand.
+///
+/// That is what keeps a publisher's real secret out of the file while a
+/// consumer's published user stays in it.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
 pub struct StelaeRegistryConfig {
-    pub user: String,
+    /// The identity to authenticate as, sent with [a
+    /// password](StelaeRegistryConfig::password) as HTTP Basic.
+    ///
+    /// Seeded by `dolos init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 
     /// Omitted by `dolos init`, and by anything reading the official registry:
     /// see [`StelaeRegistryConfig::password`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+
+    /// A bearer token, for a registry that issues them rather than accepting a
+    /// pair. Mutually exclusive with `user`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 impl StelaeRegistryConfig {
@@ -789,15 +804,18 @@ impl StelaeRegistryConfig {
     }
 }
 
-/// Names the user and never the password.
+/// Names the user and never a secret.
 ///
-/// `RootConfig` is printed in diagnostics; a derived `Debug` here would put the
-/// pair in whatever a bug report happens to include.
+/// `RootConfig` is printed in diagnostics; a derived `Debug` here would put a
+/// publisher's credentials in whatever a bug report happens to include.
 impl std::fmt::Debug for StelaeRegistryConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |value: &Option<String>| value.as_ref().map(|_| "<redacted>");
+
         f.debug_struct("StelaeRegistryConfig")
             .field("user", &self.user)
-            .field("password", &"<redacted>")
+            .field("password", &redacted(&self.password))
+            .field("token", &redacted(&self.token))
             .finish()
     }
 }

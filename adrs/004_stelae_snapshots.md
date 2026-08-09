@@ -293,20 +293,23 @@ trusted_keys = ["ed25519:…"]  # mirrors mithril genesis_key style
 user = "…"                     # seeded by `dolos init`
 # password = "…"               # optional; omitted means the official
                                # registry's, compiled into the binary
+# token = "…"                   # a bearer registry instead; excludes `user`
 ```
 
 The official registry's read-only password is a **published secret**: it is what makes stele distribution free and identity-less while still authenticated. It is compiled into the binary rather than seeded into the file, so `dolos init` writes a `user` and no password and a rotation reaches every node that takes a release, instead of having to be found again in every generated `dolos.toml`. A node pointing at a private registry sets `password` and gets its own.
 
-A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never in this file, so `dolos` reads three variables of its own:
+A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never in this file. **Dolos introduces no environment variable for it**: `RootConfig` is already loaded through a `config::Environment` layer with the `DOLOS` prefix, so a publisher exports
 
-| Variable | Shape |
-| --- | --- |
-| `STELAE_REGISTRY_TOKEN` | bearer token |
-| `STELAE_REGISTRY_USER` + `STELAE_REGISTRY_PASSWORD` | Basic pair |
+```sh
+DOLOS_STELAE_REGISTRY_USER=…
+DOLOS_STELAE_REGISTRY_PASSWORD=…
+```
 
-An empty value is unset. The environment overrides both the file and the compiled-in default, so a node carrying the read-only user can publish without being edited first. A token and a pair set together is a **refusal**, not a precedence rule, and so is half a pair: an operator who exported both meant one of them, and a client that guessed would authenticate as an identity nobody chose — which on a registry whose credentials carry different capabilities is the difference between a publish and a 403 nobody can explain.
+and the override applies by the same mechanism and with the same precedence as every other setting. That is the whole of the environment story — nothing in Dolos reads a registry credential by hand, which is what keeps one answer to "where does configuration come from" rather than two. A node carrying the read-only user in `dolos.toml` therefore publishes with nothing to remove first.
 
-These are Dolos's variables and Dolos's rule, resolved in `dolos::common::stele_registry_auth`, which hands the answer to the transport as a value. Another host embedding `stelae` names its own, or none.
+Two shapes are refusals rather than precedence rules, checked once the configuration has resolved: `token` together with `user`, and `password` with no `user`. An operator who supplied two identities meant one of them, and a client that guessed would authenticate as one nobody chose — which on a registry whose credentials carry different capabilities is the difference between a publish and a 403 nobody can explain.
+
+The resolution is `dolos::common::stele_registry_auth`, a pure function of `[stelae.registry]` that hands the answer to the transport as a value. Another host embedding `stelae` decides its own credential sources, and this specification constrains none of them.
 
 ### Publisher pipeline
 

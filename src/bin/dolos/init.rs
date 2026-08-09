@@ -784,7 +784,10 @@ mod tests {
         assert_eq!(parsed.stelae, StelaeConfig::official());
 
         if let Some(registry) = &parsed.stelae.registry {
-            assert_eq!(registry.user, dolos_core::config::OFFICIAL_REGISTRY_USER);
+            assert_eq!(
+                registry.user.as_deref(),
+                Some(dolos_core::config::OFFICIAL_REGISTRY_USER)
+            );
             assert_eq!(registry.password, None);
         }
     }
@@ -800,8 +803,9 @@ mod tests {
 
         let mut editor = ConfigEditor::default();
         editor.0.stelae.registry = Some(StelaeRegistryConfig {
-            user: "dolos".to_owned(),
+            user: Some("dolos".to_owned()),
             password: Some("a-private-registry".to_owned()),
+            token: None,
         });
 
         editor.save(&path).unwrap();
@@ -812,13 +816,13 @@ mod tests {
         let parsed: RootConfig = toml::from_str(&written).unwrap();
         let registry = parsed.stelae.registry.expect("the section round-trips");
 
-        assert_eq!(registry.user, "dolos");
+        assert_eq!(registry.user.as_deref(), Some("dolos"));
         assert_eq!(registry.password(), "a-private-registry");
 
         // And the same user with the password left out falls back.
         let defaulted = StelaeRegistryConfig {
-            user: "dolos".to_owned(),
-            password: None,
+            user: Some("dolos".to_owned()),
+            ..Default::default()
         };
 
         assert_eq!(defaulted.password(), OFFICIAL_REGISTRY_PASSWORD);

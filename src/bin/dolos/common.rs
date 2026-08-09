@@ -64,92 +64,64 @@ pub fn load_config(
     s.build()?.try_deserialize()
 }
 
-/// Environment variable holding a bearer token for a stele registry.
-///
-/// These three are **this program's**, not the protocol's. `stelae` takes
-/// credentials as a value and never sources them: a library that read an
-/// environment variable would be choosing its host's credential policy, and
-/// naming the variable would freeze that choice into a published API. So the
-/// names live here, in the binary whose deployment they describe, and so does
-/// the precedence between them.
-pub const STELE_REGISTRY_TOKEN_ENV: &str = "STELAE_REGISTRY_TOKEN";
-
-/// The user half of a Basic credential pair for a stele registry.
-pub const STELE_REGISTRY_USER_ENV: &str = "STELAE_REGISTRY_USER";
-
-/// The password half of a Basic credential pair for a stele registry.
-pub const STELE_REGISTRY_PASSWORD_ENV: &str = "STELAE_REGISTRY_PASSWORD";
-
 /// Who this node authenticates to a stele registry as.
 ///
-/// Two sources, one rule. A publish takes its full-access pair from
-/// [`STELE_REGISTRY_USER_ENV`] / [`STELE_REGISTRY_PASSWORD_ENV`] (or a token
-/// from [`STELE_REGISTRY_TOKEN_ENV`]); a restore takes the published read-only
-/// user from `[stelae.registry]` in `dolos.toml`. Those are two *sources*, not
-/// two rules:
+/// A pure function of `[stelae.registry]`, and deliberately nothing more.
+/// **Dolos reads no environment variable of its own here**, because it does not
+/// have to: `load_config` layers `config::Environment` with the `DOLOS` prefix
+/// over every setting, so `DOLOS_STELAE_REGISTRY_USER` and
+/// `DOLOS_STELAE_REGISTRY_PASSWORD` already override what the file says, by the
+/// same mechanism and with the same precedence as every other field. A second,
+/// hand-rolled set of variables would be a second answer to a question the
+/// configuration has already answered — and this binary has no other.
 ///
-/// - **the environment wins.** A publisher's credentials are a secret and never
-///   enter a configuration file, so the environment is the only place they can
-///   come from — and a node that already carries the read-only user must not
-///   have to be edited before it can publish.
-/// - **what is configured is the fallback**, which is what lets a node created
-///   by `dolos init` pull from the official registry with nothing exported.
-/// - **neither is anonymous**, which is what a genuinely public repository
-///   wants and what a credentialed one answers with a 401.
+/// So the two sources the operator sees are the two the configuration has: a
+/// consumer's published user in `dolos.toml`, and a publisher's real
+/// credentials exported into the environment and never written down.
 ///
 /// Two refusals, because both are operator mistakes worth a sentence rather
-/// than a precedence rule: a token and a pair set together, and half a pair. An
-/// operator who exported both meant one of them, and a client that guessed
-/// would authenticate as an identity nobody chose — which on a registry whose
-/// credentials carry different capabilities is the difference between a publish
-/// and a 403 nobody can explain.
+/// than a precedence rule:
+///
+/// - **a token and a user together** — two identities, and which was meant is
+///   not something to guess at. On a registry whose credentials carry different
+///   capabilities, guessing is the difference between a publish and a 403
+///   nobody can explain.
+/// - **a password with no user** — a secret that arrived with nobody to be. It
+///   is a typo or half an export, and the half that arrived cannot be sent on
+///   its own.
 pub fn stele_registry_auth(config: &StelaeConfig) -> miette::Result<Auth> {
-    let read = |name: &str| match std::env::var(name) {
-        // An empty value is unset, so a stale `export STELAE_REGISTRY_TOKEN=`
-        // in a shell profile leaves a node anonymous rather than
-        // authenticating it as the empty token.
-        Ok(value) if !value.is_empty() => Some(value),
-        _ => None,
+    let Some(registry) = &config.registry else {
+        return Ok(Auth::Anonymous);
     };
 
-    let token = read(STELE_REGISTRY_TOKEN_ENV);
-    let user = read(STELE_REGISTRY_USER_ENV);
-    let password = read(STELE_REGISTRY_PASSWORD_ENV);
-
-    if token.is_some() && (user.is_some() || password.is_some()) {
+    if registry.token.is_some() && registry.user.is_some() {
         miette::bail!(
-            "{STELE_REGISTRY_TOKEN_ENV} and \
-             {STELE_REGISTRY_USER_ENV}/{STELE_REGISTRY_PASSWORD_ENV} are both set; registry \
-             credentials come from one of the two and which one was meant is not something to \
-             guess at — unset the one you did not mean"
+            "[stelae.registry] sets both `token` and `user`; a registry client authenticates as \
+             one identity and which one was meant is not something to guess at — drop the one \
+             you did not mean, or unset DOLOS_STELAE_REGISTRY_TOKEN / DOLOS_STELAE_REGISTRY_USER"
         );
     }
 
-    let half = |set: &str, missing: &str| {
-        miette::miette!("{set} is set without {missing}; basic registry credentials are a pair")
-    };
-
-    match (user, password) {
-        (Some(user), Some(password)) => return Ok(Auth::Basic { user, password }),
-        (Some(_), None) => return Err(half(STELE_REGISTRY_USER_ENV, STELE_REGISTRY_PASSWORD_ENV)),
-        (None, Some(_)) => return Err(half(STELE_REGISTRY_PASSWORD_ENV, STELE_REGISTRY_USER_ENV)),
-        (None, None) => {}
+    if let Some(token) = &registry.token {
+        return Ok(Auth::Bearer(token.clone()));
     }
 
-    if let Some(token) = token {
-        return Ok(Auth::Bearer(token));
-    }
-
-    Ok(match &config.registry {
-        Some(credentials) => Auth::Basic {
-            user: credentials.user.clone(),
-            // Through the accessor, not the field: a config that names a user
+    match &registry.user {
+        Some(user) => Ok(Auth::Basic {
+            user: user.clone(),
+            // Through the accessor, not the field: a section that names a user
             // and no password means the official registry's, which is compiled
             // in rather than written into every generated `dolos.toml`.
-            password: credentials.password().to_owned(),
-        },
-        None => Auth::Anonymous,
-    })
+            password: registry.password().to_owned(),
+        }),
+        // A password with nobody to be. Anonymous would be the quiet answer and
+        // the wrong one: the operator supplied a secret and it would go unused.
+        None if registry.password.is_some() => miette::bail!(
+            "[stelae.registry] sets `password` with no `user`; basic registry credentials are a \
+             pair"
+        ),
+        None => Ok(Auth::Anonymous),
+    }
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
@@ -418,193 +390,148 @@ mod tests {
 
     use super::*;
 
-    /// The environment is process-wide, so these run one at a time.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    fn config(registry: Option<StelaeRegistryConfig>) -> StelaeConfig {
+        StelaeConfig { registry }
+    }
 
-    /// Run `body` with exactly these registry variables set, and put the
-    /// process environment back afterwards.
+    fn basic(user: &str, password: Option<&str>) -> StelaeRegistryConfig {
+        StelaeRegistryConfig {
+            user: Some(user.to_owned()),
+            password: password.map(str::to_owned),
+            token: None,
+        }
+    }
+
+    /// The three shapes `[stelae.registry]` can name, and the one it names by
+    /// saying nothing.
+    #[test]
+    fn the_section_names_a_user_a_token_or_nobody() {
+        assert_eq!(stele_registry_auth(&config(None)).unwrap(), Auth::Anonymous);
+
+        assert_eq!(
+            stele_registry_auth(&config(Some(basic("dolos-reader", Some("published"))))).unwrap(),
+            Auth::Basic {
+                user: "dolos-reader".to_owned(),
+                password: "published".to_owned(),
+            }
+        );
+
+        let bearer = StelaeRegistryConfig {
+            token: Some("ghp_x".to_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            stele_registry_auth(&config(Some(bearer))).unwrap(),
+            Auth::Bearer("ghp_x".to_owned())
+        );
+    }
+
+    /// A user with no password is the shape `dolos init` seeds: the file says
+    /// who, the binary says with what.
+    #[test]
+    fn a_seeded_user_takes_the_compiled_in_password() {
+        assert_eq!(
+            stele_registry_auth(&config(Some(basic("dolos-reader", None)))).unwrap(),
+            Auth::Basic {
+                user: "dolos-reader".to_owned(),
+                password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn two_identities_at_once_are_refused() {
+        let both = StelaeRegistryConfig {
+            user: Some("dolos-reader".to_owned()),
+            password: None,
+            token: Some("ghp_x".to_owned()),
+        };
+
+        let message = stele_registry_auth(&config(Some(both)))
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains("token"), "{message}");
+        assert!(message.contains("user"), "{message}");
+    }
+
+    /// A password with nobody to be. Anonymous would be the quiet answer and
+    /// the wrong one: the operator supplied a secret and it would go unused.
+    #[test]
+    fn a_password_with_no_user_is_refused() {
+        let orphan = StelaeRegistryConfig {
+            password: Some("full-access".to_owned()),
+            ..Default::default()
+        };
+
+        let message = stele_registry_auth(&config(Some(orphan)))
+            .unwrap_err()
+            .to_string();
+
+        assert!(message.contains("password"), "{message}");
+        assert!(message.contains("user"), "{message}");
+    }
+
+    /// The environment reaches this section by the same route as every other
+    /// setting, and *this* is the assertion that says so.
     ///
-    /// Restoring is not politeness: `cargo test` runs every test in this binary
-    /// in one process, and a leaked `STELAE_REGISTRY_TOKEN` would be read by
-    /// whatever ran next.
-    fn with_env<T>(
-        token: Option<&str>,
-        user: Option<&str>,
-        password: Option<&str>,
-        body: impl FnOnce() -> T,
-    ) -> T {
+    /// It is the whole of Dolos's registry-credential environment story — a
+    /// publisher exports `DOLOS_STELAE_REGISTRY_USER` and
+    /// `DOLOS_STELAE_REGISTRY_PASSWORD` and nothing in this binary reads them —
+    /// so it is worth pinning rather than trusting. The source is built exactly
+    /// as [`load_config`] builds it; only the file layers are left off, because
+    /// those would make the test depend on the working directory.
+    ///
+    /// What would break it is a rename of either field or a change to the
+    /// prefix or separator, and all three are silent failures at run time: the
+    /// override would simply stop applying, and a publisher would authenticate
+    /// as the read-only user.
+    #[test]
+    fn the_dolos_environment_prefix_reaches_the_registry_section() {
+        #[derive(serde::Deserialize)]
+        struct Root {
+            stelae: StelaeConfig,
+        }
+
+        // Process-wide, so this test owns these three names for its duration.
+        // Nothing else in this binary reads them.
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let names = [
-            STELE_REGISTRY_TOKEN_ENV,
-            STELE_REGISTRY_USER_ENV,
-            STELE_REGISTRY_PASSWORD_ENV,
+            "DOLOS_STELAE_REGISTRY_USER",
+            "DOLOS_STELAE_REGISTRY_PASSWORD",
+            "DOLOS_STELAE_REGISTRY_TOKEN",
         ];
 
-        let previous: Vec<(&str, Option<String>)> = names
-            .into_iter()
-            .map(|name| (name, std::env::var(name).ok()))
-            .collect();
+        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
 
-        let apply = |values: [Option<&str>; 3]| {
-            for (name, value) in names.into_iter().zip(values) {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        };
+        std::env::set_var("DOLOS_STELAE_REGISTRY_USER", "publisher");
+        std::env::set_var("DOLOS_STELAE_REGISTRY_PASSWORD", "full-access");
+        std::env::remove_var("DOLOS_STELAE_REGISTRY_TOKEN");
 
-        apply([token, user, password]);
+        let built: Root = ::config::Config::builder()
+            .add_source(::config::Environment::with_prefix("DOLOS").separator("_"))
+            .build()
+            .expect("the environment source builds")
+            .try_deserialize()
+            .expect("DOLOS_STELAE_REGISTRY_* deserializes into [stelae.registry]");
 
-        let outcome = body();
-
-        for (name, value) in previous {
+        for (name, value) in names.iter().zip(previous) {
             match value {
                 Some(value) => std::env::set_var(name, value),
                 None => std::env::remove_var(name),
             }
         }
 
-        outcome
-    }
-
-    /// A `[stelae]` section carrying `registry`, or carrying nothing.
-    fn config(registry: Option<StelaeRegistryConfig>) -> StelaeConfig {
-        StelaeConfig { registry }
-    }
-
-    fn reader() -> StelaeRegistryConfig {
-        StelaeRegistryConfig {
-            user: "dolos-reader".to_owned(),
-            password: Some("published".to_owned()),
-        }
-    }
-
-    /// The restore path: what `dolos init` seeded is what a node authenticates
-    /// with when nothing is exported.
-    #[test]
-    fn a_configured_user_is_used_when_the_environment_is_silent() {
-        with_env(None, None, None, || {
-            assert_eq!(
-                stele_registry_auth(&config(Some(reader()))).unwrap(),
-                Auth::Basic {
-                    user: "dolos-reader".to_owned(),
-                    password: "published".to_owned(),
-                }
-            );
-
-            // A user with no password is the seeded shape: the file says who,
-            // the binary says with what.
-            let seeded = StelaeRegistryConfig {
-                user: "dolos-reader".to_owned(),
-                password: None,
-            };
-
-            assert_eq!(
-                stele_registry_auth(&config(Some(seeded))).unwrap(),
-                Auth::Basic {
-                    user: "dolos-reader".to_owned(),
-                    password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
-                }
-            );
-
-            // And a node that configured nothing stays anonymous rather than
-            // inventing an identity.
-            assert_eq!(stele_registry_auth(&config(None)).unwrap(), Auth::Anonymous);
-        });
-    }
-
-    /// The publish path, and the precedence that makes it work on a node that
-    /// already carries the read-only user.
-    #[test]
-    fn the_environment_overrides_what_is_configured() {
-        with_env(None, Some("publisher"), Some("full-access"), || {
-            assert_eq!(
-                stele_registry_auth(&config(Some(reader()))).unwrap(),
-                Auth::Basic {
-                    user: "publisher".to_owned(),
-                    password: "full-access".to_owned(),
-                },
-                "a publisher must not have to edit dolos.toml before it can publish",
-            );
-        });
-
-        // A bearer token overrides it too: the environment is the source, and
-        // which shape it names is the environment's business.
-        with_env(Some("ghp_x"), None, None, || {
-            assert_eq!(
-                stele_registry_auth(&config(Some(reader()))).unwrap(),
-                Auth::Bearer("ghp_x".to_owned())
-            );
-        });
-
-        // An empty value is unset. A stale `export STELAE_REGISTRY_TOKEN=` in a
-        // shell profile should not authenticate as the empty token.
-        with_env(Some(""), Some(""), Some(""), || {
-            assert_eq!(stele_registry_auth(&config(None)).unwrap(), Auth::Anonymous);
-        });
-    }
-
-    /// Two kinds of credential at once is a refusal, and the message names
-    /// every variable involved so an operator knows which to unset.
-    ///
-    /// A configured user is not a tie-breaker for it: the operator's mistake is
-    /// in the environment, and what is in `dolos.toml` cannot resolve it.
-    #[test]
-    fn a_token_and_a_pair_together_are_refused() {
-        with_env(
-            Some("ghp_x"),
-            Some("publisher"),
-            Some("full-access"),
-            || {
-                for configured in [None, Some(reader())] {
-                    let err = stele_registry_auth(&config(configured)).unwrap_err();
-                    let message = err.to_string();
-
-                    assert!(message.contains(STELE_REGISTRY_TOKEN_ENV), "{message}");
-                    assert!(message.contains(STELE_REGISTRY_USER_ENV), "{message}");
-                    assert!(message.contains(STELE_REGISTRY_PASSWORD_ENV), "{message}");
-                }
+        assert_eq!(
+            stele_registry_auth(&built.stelae).unwrap(),
+            Auth::Basic {
+                user: "publisher".to_owned(),
+                password: "full-access".to_owned(),
             },
+            "the DOLOS_ prefix no longer reaches [stelae.registry]",
         );
-
-        // Either half of the pair is enough to make it ambiguous. That one of
-        // them is incomplete is not a reason to silently prefer the other.
-        for (user, password) in [(Some("publisher"), None), (None, Some("full-access"))] {
-            with_env(Some("ghp_x"), user, password, || {
-                assert!(stele_registry_auth(&config(None)).is_err());
-            });
-        }
-    }
-
-    /// Half a pair is a typo or a secret that never reached the process, and
-    /// sending the half that arrived would authenticate as somebody the
-    /// operator did not name.
-    #[test]
-    fn half_a_pair_is_refused() {
-        for (user, password, set, missing) in [
-            (
-                Some("publisher"),
-                None,
-                STELE_REGISTRY_USER_ENV,
-                STELE_REGISTRY_PASSWORD_ENV,
-            ),
-            (
-                None,
-                Some("full-access"),
-                STELE_REGISTRY_PASSWORD_ENV,
-                STELE_REGISTRY_USER_ENV,
-            ),
-        ] {
-            with_env(None, user, password, || {
-                let message = stele_registry_auth(&config(Some(reader())))
-                    .unwrap_err()
-                    .to_string();
-
-                assert!(message.contains(set), "{message}");
-                assert!(message.contains(missing), "{message}");
-            });
-        }
     }
 }

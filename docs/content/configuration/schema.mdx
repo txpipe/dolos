@@ -409,10 +409,13 @@ repositories `dolos bootstrap stelae --source oci://…` restores from and
 | -------- | ------ | ------- |
 | user     | string | "dolos" |
 | password | string | "a-private-registry-credential" |
+| token    | string | "ghp_…" |
 
 - `user`: the identity the registry is read as, sent as HTTP Basic.
 - `password`: optional. Omitted, Dolos uses the official registry's published
   read-only password, which is compiled into the binary.
+- `token`: a bearer token, for a registry that issues them rather than accepting
+  a pair. Mutually exclusive with `user`.
 
 A registry may charge nothing for reads and still refuse an unidentified one. The
 credential the official registry hands out is not a secret — it is what makes
@@ -423,21 +426,25 @@ release instead of having to be found again in every generated file. Set
 `password` to point at a registry of your own. Omit the section entirely to
 connect anonymously, which is what a genuinely public repository wants.
 
-### Registry credentials in the environment
+Setting `token` and `user` at the same time is an error rather than a precedence
+puzzle — Dolos refuses to open the registry and names both — and so is setting
+`password` with no `user`.
 
-Three variables override what the section carries, and are where a **publisher's**
-credentials belong — those are real secrets and never go in this file:
+#### A publisher's credentials
 
-| variable | shape |
-| -------- | ----- |
-| `STELAE_REGISTRY_USER` + `STELAE_REGISTRY_PASSWORD` | an HTTP Basic pair |
-| `STELAE_REGISTRY_TOKEN` | a bearer token, for a registry that issues them |
+Those are real secrets and never belong in this file. Export them instead, using
+the same `DOLOS_` environment overrides that apply to [every other
+setting](./introduction#environmental-variables):
 
-An empty value counts as unset. Setting a token and a pair at the same time is an
-error rather than a precedence puzzle — Dolos refuses to open the registry and
-names both — and so is setting one half of the pair without the other. Because
-the environment wins, a node that carries the read-only pair in `dolos.toml` can
-publish by exporting the full pair, with nothing to remove first.
+```sh
+export DOLOS_STELAE_REGISTRY_USER=publisher
+export DOLOS_STELAE_REGISTRY_PASSWORD=…
+dolos snapshot publish --repo oci://…
+```
+
+There is nothing registry-specific about that: the environment layer overrides
+the file for every field, so a node that carries the read-only `user` in
+`dolos.toml` can publish with nothing to remove first.
 
 ## `logging` section
 
