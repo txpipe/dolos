@@ -296,12 +296,15 @@ source = "oci://ghcr.io/txpipe/dolos-snapshots/mainnet"  # new, takes precedence
 require_signatures = 0         # k-of-n enforcement
 trusted_keys = ["ed25519:…"]  # mirrors mithril genesis_key style
 
-[stelae.registry]              # the registry's published read-only pair
-user = "…"                     # seeded by `dolos init`; overridden by
-password = "…"                 # STELAE_REGISTRY_USER/_PASSWORD
+[stelae.registry]              # who this node reads the registry as
+user = "…"                     # seeded by `dolos init`
+# password = "…"               # optional; omitted means the official
+                               # registry's, compiled into the binary
 ```
 
-The read-only pair is a **published secret and belongs in the file**: it is what makes stele distribution free and identity-less while still authenticated, and `dolos init` seeds it so a fresh node restores from the official registry with nothing exported. A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never here — which is why the environment overrides the file rather than the other way round, so a node carrying the read-only pair can publish without having it removed first.
+The official registry's read-only password is a **published secret**: it is what makes stele distribution free and identity-less while still authenticated. It is compiled into the binary rather than seeded into the file, so `dolos init` writes a `user` and no password and a rotation reaches every node that takes a release, instead of having to be found again in every generated `dolos.toml`. A node pointing at a private registry sets `password` and gets its own.
+
+A publisher's full-access pair is a real secret and belongs in the environment or a secret manager, never in this file — which is why the environment overrides both the file and the compiled-in default, so a node carrying the read-only user can publish without being edited first.
 
 ### Publisher pipeline
 

@@ -699,26 +699,37 @@ pub struct SnapshotConfig {
     pub download_url: String,
 }
 
-/// The official stele registry's published read-only credentials.
+/// The official stele registry's published read-only user.
+///
+/// Written into `dolos.toml` by `dolos init`, so a generated config says which
+/// identity it reads the registry as.
+///
+/// Empty until the registry that issues it exists.
+pub const OFFICIAL_REGISTRY_USER: &str = "";
+
+/// The password that goes with [`OFFICIAL_REGISTRY_USER`], compiled in rather
+/// than written to `dolos.toml`.
 ///
 /// **Deliberately a published secret**, and the only one this project has:
 /// stele distribution is free and identity-less, but never unrestricted — the
-/// registry authenticates every request, and the pair below is what a consumer
-/// authenticates with. It is seeded into `dolos.toml` by `dolos init` so that a
-/// fresh node pulls from the official registry out of the box; the pair
-/// therefore gates out-of-band tooling and nothing else.
+/// registry authenticates every request, and this is what a consumer
+/// authenticates with. So it gates out-of-band tooling and nothing else.
 ///
-/// Empty until the registry that issues it exists. Filling it is a one-line
-/// change *here* and nowhere else, which is the reason this constant is a
-/// constant rather than a literal at the seeding site.
-pub const OFFICIAL_REGISTRY_CREDENTIALS: Option<(&str, &str)> = None;
+/// Compiled in rather than seeded into the file because a password copied into
+/// every generated `dolos.toml` is a password that has to be found again in
+/// every one of them. Here, a rotation reaches every node that takes the
+/// release; a node that overrode it in its own config keeps its override.
+///
+/// Empty until the registry exists. Filling both constants is a two-line change
+/// *here* and nowhere else, which is why they are constants rather than
+/// literals at the sites that use them.
+pub const OFFICIAL_REGISTRY_PASSWORD: &str = "";
 
 /// `[stelae]` — how this node reaches a stele registry.
 ///
-/// One section carrying one credential pair, and that is the whole of the
-/// consumer surface: a node restoring from a stele repository needs to
-/// authenticate, and nothing more about a registry belongs in a node's
-/// configuration.
+/// One section carrying one credential, and that is the whole of the consumer
+/// surface: a node restoring from a stele repository needs to authenticate, and
+/// nothing more about a registry belongs in a node's configuration.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct StelaeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -726,17 +737,17 @@ pub struct StelaeConfig {
 }
 
 impl StelaeConfig {
-    /// What `dolos init` seeds, from [`OFFICIAL_REGISTRY_CREDENTIALS`].
+    /// What `dolos init` seeds: the official registry's user, and no password.
     ///
-    /// Empty while that constant is, which is why it is a constructor rather
-    /// than a `Default` impl: a caller reading this name knows it is asking for
-    /// the official registry specifically, and gets the honest answer when
-    /// there is not one yet.
+    /// Empty while [`OFFICIAL_REGISTRY_USER`] is, which is why it is a
+    /// constructor rather than a `Default` impl: a caller reading this name
+    /// knows it is asking for the official registry specifically, and gets the
+    /// honest answer when there is not one yet.
     pub fn official() -> Self {
         Self {
-            registry: OFFICIAL_REGISTRY_CREDENTIALS.map(|(user, password)| StelaeRegistryConfig {
-                user: user.to_owned(),
-                password: password.to_owned(),
+            registry: (!OFFICIAL_REGISTRY_USER.is_empty()).then(|| StelaeRegistryConfig {
+                user: OFFICIAL_REGISTRY_USER.to_owned(),
+                password: None,
             }),
         }
     }
@@ -752,12 +763,30 @@ impl StelaeConfig {
 /// in the environment (`STELAE_REGISTRY_USER` / `STELAE_REGISTRY_PASSWORD`) or
 /// in a secret manager, never in a file that gets committed alongside a node's
 /// other settings — and the environment overrides what is here, so a publisher
-/// running on a node that carries the read-only pair does not have to remove it
+/// running on a node that carries the read-only user does not have to remove it
 /// first.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct StelaeRegistryConfig {
     pub user: String,
-    pub password: String,
+
+    /// Omitted by `dolos init`, and by anything reading the official registry:
+    /// see [`StelaeRegistryConfig::password`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+impl StelaeRegistryConfig {
+    /// The password to send: the one configured, or
+    /// [`OFFICIAL_REGISTRY_PASSWORD`].
+    ///
+    /// The fallback is what lets a generated config name a user and no secret.
+    /// A private registry sets `password` and gets its own; the official one is
+    /// answered by the binary.
+    pub fn password(&self) -> &str {
+        self.password
+            .as_deref()
+            .unwrap_or(OFFICIAL_REGISTRY_PASSWORD)
+    }
 }
 
 /// Names the user and never the password.

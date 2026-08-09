@@ -74,7 +74,6 @@ download_url = "https://example.com/snapshot.tar.zst"
 
 [stelae.registry]
 user = "dolos"
-password = "published-read-only-credential"
 
 ```
 
@@ -409,17 +408,20 @@ repositories `dolos bootstrap stelae --source oci://…` restores from and
 | property | type   | example |
 | -------- | ------ | ------- |
 | user     | string | "dolos" |
-| password | string | "published-read-only-credential" |
+| password | string | "a-private-registry-credential" |
 
-- `user`, `password`: the credentials the registry is read with, sent as HTTP Basic.
+- `user`: the identity the registry is read as, sent as HTTP Basic.
+- `password`: optional. Omitted, Dolos uses the official registry's published
+  read-only password, which is compiled into the binary.
 
 A registry may charge nothing for reads and still refuse an unidentified one. The
-pair that belongs here is the **published read-only credential** such a registry
-hands out: it is not a secret, it is what makes free, identity-less access
-possible without leaving the registry unrestricted. `dolos init` seeds it, so a
-freshly initialized node restores from the official registry without an operator
-having to find a credential first. Omit the section entirely to connect
-anonymously, which is what a genuinely public repository wants.
+credential the official registry hands out is not a secret — it is what makes
+free, identity-less access possible without leaving the registry unrestricted —
+but it is not written into your config either: `dolos init` seeds the `user` and
+leaves the password to the binary, so a rotation reaches every node that takes a
+release instead of having to be found again in every generated file. Set
+`password` to point at a registry of your own. Omit the section entirely to
+connect anonymously, which is what a genuinely public repository wants.
 
 ### Registry credentials in the environment
 

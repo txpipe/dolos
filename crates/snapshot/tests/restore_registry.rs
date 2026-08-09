@@ -552,7 +552,7 @@ fn a_node_authenticates_with_its_configured_pair() {
     // against a registry that merely did not recognise it.
     let wrong = dolos_core::config::StelaeRegistryConfig {
         user: registry_fixture::USER.to_owned(),
-        password: "not-the-password".to_owned(),
+        password: Some("not-the-password".to_owned()),
     };
 
     for (who, credentials) in [("no credentials", None), ("the wrong pair", Some(&wrong))] {

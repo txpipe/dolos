@@ -272,7 +272,10 @@ pub fn auth(configured: Option<&StelaeRegistryConfig>) -> Result<Auth, Error> {
     Ok(match configured {
         Some(credentials) => Auth::Basic {
             user: credentials.user.clone(),
-            password: credentials.password.clone(),
+            // Through the accessor, not the field: a config that names a user
+            // and no password means the official registry's, which is compiled
+            // in rather than written into every generated `dolos.toml`.
+            password: credentials.password().to_owned(),
         },
         None => Auth::Anonymous,
     })
@@ -1002,8 +1005,32 @@ mod tests {
     fn configured() -> StelaeRegistryConfig {
         StelaeRegistryConfig {
             user: "dolos-reader".to_owned(),
-            password: "published".to_owned(),
+            password: Some("published".to_owned()),
         }
+    }
+
+    /// A section naming a user and no password authenticates with the
+    /// compiled-in one.
+    ///
+    /// This is the shape `dolos init` writes, so it is the shape the official
+    /// registry is actually reached in: the file says who, the binary says
+    /// with what.
+    #[test]
+    fn a_seeded_user_takes_the_compiled_in_password() {
+        let seeded = StelaeRegistryConfig {
+            user: "dolos-reader".to_owned(),
+            password: None,
+        };
+
+        with_env(None, None, None, || {
+            assert_eq!(
+                auth(Some(&seeded)).unwrap(),
+                Auth::Basic {
+                    user: "dolos-reader".to_owned(),
+                    password: dolos_core::config::OFFICIAL_REGISTRY_PASSWORD.to_owned(),
+                }
+            );
+        });
     }
 
     /// The restore path: the pair `dolos init` seeded is what a client

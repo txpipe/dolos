@@ -711,13 +711,9 @@ impl ConfigEditor {
     }
 
     fn save(self, path: &Path) -> miette::Result<()> {
-        let mut config = toml::to_string_pretty(&self.0)
+        let config = toml::to_string_pretty(&self.0)
             .into_diagnostic()
             .context("serializing config toml")?;
-
-        if self.0.stelae.registry.is_none() {
-            config.push_str(STELAE_REGISTRY_TEMPLATE);
-        }
 
         std::fs::write(path, config)
             .into_diagnostic()
@@ -726,29 +722,6 @@ impl ConfigEditor {
         Ok(())
     }
 }
-
-/// The stelae registry section, written commented out when there is no pair to
-/// seed.
-///
-/// A comment rather than nothing. The section is how a node authenticates
-/// against a stele registry, and an operator pointing `dolos bootstrap stelae`
-/// at one — the official registry before its credentials ship, or a private one
-/// — should find the shape of it in the file they already have. Serde cannot
-/// emit a comment, so this is appended after serialization; it is written only
-/// when the section itself is absent, so it never sits next to a real one
-/// contradicting it.
-const STELAE_REGISTRY_TEMPLATE: &str = "\
-# Credentials for the stele registry `dolos bootstrap stelae` reads from.
-# Registries that charge nothing for reads may still refuse an unidentified
-# one; this is the published read-only pair such a registry hands out. The
-# environment overrides it — STELAE_REGISTRY_USER and STELAE_REGISTRY_PASSWORD,
-# or STELAE_REGISTRY_TOKEN for a registry that issues bearer tokens — which is
-# where a publisher's own full-access credentials belong.
-#
-# [stelae.registry]
-# user = \"\"
-# password = \"\"
-";
 
 pub fn run(
     config: miette::Result<RootConfig>,
@@ -785,16 +758,16 @@ pub fn run(
 mod tests {
     use super::*;
 
-    /// A freshly initialized node carries the stelae registry section.
+    /// A freshly initialized node carries the stelae registry section the
+    /// official registry needs, and no password.
     ///
-    /// Two shapes, one test, because which one is written depends on a
-    /// constant: the section itself once `OFFICIAL_REGISTRY_CREDENTIALS` is
-    /// filled, the commented template until then. Both have to parse — a
-    /// generated `dolos.toml` that `dolos daemon` cannot read is worse than one
-    /// that says nothing about registries — and this is what will still be true
-    /// on the day the constant is filled in.
+    /// The section appears once `OFFICIAL_REGISTRY_USER` names one; until then
+    /// there is no user to write and the file says nothing. Either way the
+    /// generated config has to parse and to round-trip to exactly what
+    /// `StelaeConfig::official()` is, which is what will still hold on the day
+    /// the constants are filled in.
     #[test]
-    fn a_fresh_config_carries_the_stelae_registry_section() {
+    fn a_fresh_config_seeds_the_official_registry_and_no_password() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
 
@@ -803,22 +776,24 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         println!("{written}");
 
-        assert!(written.contains("[stelae.registry]"), "{written}");
-
-        // The environment is named beside it either way: it is where a
-        // publisher's credentials go, and the section is where an operator
-        // looks for that fact.
-        assert!(written.contains("STELAE_REGISTRY_USER"), "{written}");
+        // The password is compiled in, so a generated config never carries one
+        // however the constants are set.
+        assert!(!written.contains("password"), "{written}");
 
         let parsed: RootConfig = toml::from_str(&written).expect("the generated config parses");
         assert_eq!(parsed.stelae, StelaeConfig::official());
+
+        if let Some(registry) = &parsed.stelae.registry {
+            assert_eq!(registry.user, dolos_core::config::OFFICIAL_REGISTRY_USER);
+            assert_eq!(registry.password, None);
+        }
     }
 
-    /// A config that already carries a pair keeps it, and gets no commented
-    /// template contradicting it.
+    /// A password an operator wrote is kept; one they did not is the official
+    /// registry's, out of the binary.
     #[test]
-    fn a_configured_pair_is_written_rather_than_commented() {
-        use dolos_core::config::StelaeRegistryConfig;
+    fn a_configured_password_overrides_the_compiled_in_one() {
+        use dolos_core::config::{StelaeRegistryConfig, OFFICIAL_REGISTRY_PASSWORD};
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dolos.toml");
@@ -826,23 +801,26 @@ mod tests {
         let mut editor = ConfigEditor::default();
         editor.0.stelae.registry = Some(StelaeRegistryConfig {
             user: "dolos".to_owned(),
-            password: "published".to_owned(),
+            password: Some("a-private-registry".to_owned()),
         });
 
         editor.save(&path).unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
-
         assert!(written.contains("[stelae.registry]"), "{written}");
-        assert!(
-            !written.contains("# [stelae.registry]"),
-            "the template was written next to a real section: {written}"
-        );
 
         let parsed: RootConfig = toml::from_str(&written).unwrap();
-        let registry = parsed.stelae.registry.expect("the pair round-trips");
+        let registry = parsed.stelae.registry.expect("the section round-trips");
 
         assert_eq!(registry.user, "dolos");
-        assert_eq!(registry.password, "published");
+        assert_eq!(registry.password(), "a-private-registry");
+
+        // And the same user with the password left out falls back.
+        let defaulted = StelaeRegistryConfig {
+            user: "dolos".to_owned(),
+            password: None,
+        };
+
+        assert_eq!(defaulted.password(), OFFICIAL_REGISTRY_PASSWORD);
     }
 }

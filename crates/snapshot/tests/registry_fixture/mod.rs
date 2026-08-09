@@ -35,7 +35,7 @@ const HTPASSWD: &str = "stelae:$2y$05$1Hb22zONvzLAj4WaYl34/uDWF5rDgQkS9MoewgRvsT
 pub fn credentials() -> StelaeRegistryConfig {
     StelaeRegistryConfig {
         user: USER.to_owned(),
-        password: PASSWORD.to_owned(),
+        password: Some(PASSWORD.to_owned()),
     }
 }
 
