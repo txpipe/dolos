@@ -9,6 +9,7 @@ use blockfrost_openapi::models::{
     asset::{Asset, OnchainMetadataStandard},
     asset_addresses_inner::AssetAddressesInner,
     asset_metadata::AssetMetadata as OffchainMetadata,
+    asset_policy_inner::AssetPolicyInner,
     asset_transactions_inner::AssetTransactionsInner,
 };
 use dolos_cardano::{
@@ -726,6 +727,96 @@ where
     Ok(Json(transactions))
 }
 
+fn collect_minted_subjects(block: &[u8], policy: &[u8], seen: &mut Vec<Vec<u8>>) {
+    // Blockfrost groups the `ma_tx_mint` rows by policy and name. Then it sorts
+    // the rows by the first mint event. The caller supplies blocks in ascending
+    // slot order. `seen` keeps the first subject for each name.
+    let Ok(block) = MultiEraBlock::decode(block) else {
+        return;
+    };
+
+    for tx in block.txs() {
+        for policy_assets in tx.mints() {
+            if policy_assets.policy().as_slice() != policy {
+                continue;
+            }
+
+            for asset in policy_assets.assets() {
+                let mut subject = policy.to_vec();
+                subject.extend_from_slice(asset.name());
+
+                if !seen.contains(&subject) {
+                    seen.push(subject);
+                }
+            }
+        }
+    }
+}
+
+pub async fn by_policy<D>(
+    Path(policy_hex): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AssetPolicyInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let policy = hex::decode(&policy_hex).map_err(|_| Error::InvalidPolicy)?;
+    if policy.len() != 28 {
+        return Err(Error::InvalidPolicy);
+    }
+
+    // Pagination depends on first-mint order. The scan collects all asset names
+    // before it selects a page because one name can occur in many blocks. It
+    // scans the blocks in ascending slot order and reverses the result for
+    // `desc`.
+    let end_slot = domain.get_tip_slot()?;
+    let stream = domain
+        .query()
+        .blocks_by_policy_stream(&policy, 0, end_slot, SlotOrder::Asc);
+    let mut stream = Box::pin(stream);
+
+    let mut subjects: Vec<Vec<u8>> = Vec::new();
+    while let Some(res) = stream.next().await {
+        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(block) = block else {
+            continue;
+        };
+        collect_minted_subjects(&block, &policy, &mut subjects);
+    }
+
+    // Blockfrost returns 404 when the policy has no mint operations.
+    if subjects.is_empty() {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    if matches!(pagination.order, Order::Desc) {
+        subjects.reverse();
+    }
+
+    let mut items = Vec::new();
+    for subject in subjects
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+    {
+        let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+        let asset_state = domain
+            .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        items.push(AssetPolicyInner {
+            asset: hex::encode(&subject),
+            quantity: asset_state.quantity().to_string(),
+        });
+    }
+
+    Ok(Json(items))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,6 +916,53 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}/addresses");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn unminted_policy() -> &'static str {
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+
+    #[tokio::test]
+    async fn assets_by_policy_happy_path() {
+        let app = TestApp::new();
+        let policy = app.vectors().policy_id.clone();
+        let unit = app.vectors().asset_unit.clone();
+        let path = format!("/assets/policy/{policy}");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let assets: Vec<AssetPolicyInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse policy assets");
+        assert!(assets.iter().any(|a| a.asset == unit));
+    }
+
+    #[tokio::test]
+    async fn assets_by_policy_bad_request() {
+        let app = TestApp::new();
+        // This policy contains non-hexadecimal characters.
+        assert_status(&app, "/assets/policy/not-hex", StatusCode::BAD_REQUEST).await;
+        // This policy contains fewer than 28 bytes.
+        assert_status(&app, "/assets/policy/abcd", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_policy_not_found() {
+        let app = TestApp::new();
+        let path = format!("/assets/policy/{}", unminted_policy());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_policy_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let policy = app.vectors().policy_id.clone();
+        let path = format!("/assets/policy/{policy}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

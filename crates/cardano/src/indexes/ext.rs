@@ -95,6 +95,17 @@ pub trait CardanoIndexExt: IndexStore {
         self.slots_by_tag(archive::ASSET, asset, start, end)
     }
 
+    /// Iterate over slots of blocks that contain transactions for assets of a
+    /// policy.
+    fn slots_by_policy(
+        &self,
+        policy: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, IndexError> {
+        self.slots_by_tag(archive::POLICY, policy, start, end)
+    }
+
     /// Iterate over slots of blocks containing a datum hash.
     fn slots_by_datum(
         &self,
