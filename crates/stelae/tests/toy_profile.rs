@@ -552,6 +552,94 @@ fn both_write_paths_produce_the_same_layer() {
     }
 }
 
+/// A layer whose blob is already on disk is deduplicated, not rewritten.
+///
+/// The same records under the same header scope hash to the same blob digest,
+/// which is the same file name — so the second write finds its destination
+/// occupied by the bytes it was about to write. Publishing it anyway would
+/// rewrite hundreds of megabytes with their own contents, and on Windows would
+/// collide with any reader holding the blob open. The second write is therefore
+/// expected to keep the file that is there and drop its own staging copy, while
+/// handing back the very same [`WrittenLayer`] the first write produced.
+///
+/// The proof that no bytes moved is a doctored modification time. A rename
+/// replaces the file behind the name, and the timestamp belongs to the file, so
+/// a mark set on the first write's blob survives only if the second write left
+/// it alone — evidence that neither an equality assertion on the descriptor nor
+/// a count of the directory could give on its own.
+#[test]
+fn a_blob_that_already_exists_is_deduplicated() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+    let blobs = temp.path().join("blobs");
+
+    let (header_scope, scope) = notes_scopes();
+    let spec = LayerSpec::new("notes", header_scope, scope);
+    let records: Vec<CanonicalCbor> = NOTES.iter().map(note_record).collect();
+
+    // Byte-identical writes: same records, same header scope, same stele. The
+    // header scope matters — it is inside the layer, so two shards of one kind
+    // that differ only there are different blobs and never meet here.
+    let write = || {
+        let mut sink = stele
+            .layer_sink(&ToyProfile, &spec, COMPRESSION_LEVEL)
+            .unwrap();
+
+        for record in &records {
+            sink.write_record(record).unwrap();
+        }
+
+        sink.finish().unwrap()
+    };
+
+    let first = write();
+    let blob = stele.blob_path(&first.digests.blob_digest);
+    assert!(blob.is_file());
+
+    let mark = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&blob)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(mark))
+        .unwrap();
+
+    let second = write();
+
+    // Whatever the writer observes is what it would have observed first: the
+    // descriptor and the digests come from the record stream, not from the
+    // rename that did not happen.
+    assert_eq!(first.descriptor, second.descriptor);
+    assert_eq!(first.digests, second.digests);
+
+    // One blob, and it is the first write's file: the mark is still on it, so
+    // nothing was written over it.
+    assert_eq!(std::fs::read_dir(blobs.join("sha256")).unwrap().count(), 1);
+    assert_eq!(
+        std::fs::metadata(&blob).unwrap().modified().unwrap(),
+        mark,
+        "the blob was rewritten"
+    );
+
+    // And the duplicate staging file went with the sink that made it.
+    assert_eq!(
+        std::fs::read_dir(&blobs).unwrap().count(),
+        1,
+        "only sha256/"
+    );
+
+    // The layer the second writer describes reads back, through both readers,
+    // out of the blob the first writer published.
+    let index = stele.blob_index().unwrap();
+    assert_eq!(index.len(), 1);
+
+    let expected: Vec<Vec<u8>> = records.iter().map(|r| r.as_bytes().to_vec()).collect();
+    assert_eq!(
+        read_both_ways(&stele, &index, &second.descriptor).unwrap(),
+        expected
+    );
+}
+
 /// Sixteen sinks open at once, which is the case the sink exists for.
 ///
 /// The Dolos profile shards its state into sixteen layers and cannot walk the

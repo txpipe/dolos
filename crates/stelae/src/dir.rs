@@ -155,6 +155,37 @@ impl RecordSink for LayerSink {
     /// happens. A failure anywhere in here leaves the stele exactly as it was:
     /// the staging file is removed on the way out, the same as for a sink that
     /// was simply dropped.
+    ///
+    /// ## A blob that is already there is a success, not a rename
+    ///
+    /// The destination is named by the digest of the very bytes about to be
+    /// moved onto it, so a destination that already exists already holds those
+    /// bytes — that is what content addressing means. Renaming anyway rewrites
+    /// a file with its own contents: hundreds of megabytes of I/O for a mainnet
+    /// state shard, and on Windows a failure. Every reader here opens a blob
+    /// with a plain [`fs::File::open`], without `FILE_SHARE_DELETE`, so
+    /// replacing a blob that a concurrent [`SteleReader::stream_layer`] holds
+    /// open is a sharing violation there and silently fine on Unix. So the blob
+    /// on disk is kept, the staging file goes the way an abandoned one does,
+    /// and the caller gets exactly the [`WrittenLayer`] it would have got had
+    /// it been first: `descriptor` and `digests` are computed from the record
+    /// stream, never from the rename.
+    ///
+    /// The existing blob is **trusted on its name, not re-read**. This writer
+    /// computed that digest itself, out of the bytes it had just written, a
+    /// microsecond earlier, and re-reading a file that may be gigabytes to
+    /// confirm what content addressing already asserts would put a second full
+    /// pass on the write path. That is a deliberate divergence from the
+    /// neighbour: [`SteleDir::blob_index`] re-digests every blob it finds, at a
+    /// cost its own documentation calls out. It is a fixture scanner rebuilding
+    /// a map with no manifest to lean on and no knowledge of who wrote what,
+    /// which is not the position of a writer holding its own digest.
+    ///
+    /// The window between the test and the rename is a TOCTOU, and an unguarded
+    /// one on purpose: the path *is* the digest, so the only racer that can
+    /// create it is another writer of byte-identical content, and both orders
+    /// leave the same blob. A lock here would serialize every layer write to
+    /// arbitrate between two callers who agree.
     fn finish(self) -> Result<WrittenLayer, Error> {
         let Self {
             sequence,
@@ -171,8 +202,14 @@ impl RecordSink for LayerSink {
         drop(file);
 
         // Named by the digest of the bytes stored, per the OCI image layout.
-        fs::rename(&staging.path, blob_path(&root, &digests.blob_digest))?;
-        staging.published();
+        let blob = blob_path(&root, &digests.blob_digest);
+
+        // Already published, by this run or an earlier one: leave it alone and
+        // let `staging` take the duplicate with it on the way out.
+        if !blob.exists() {
+            fs::rename(&staging.path, &blob)?;
+            staging.published();
+        }
 
         Ok(WrittenLayer {
             descriptor: LayerDescriptor {
