@@ -389,6 +389,13 @@ impl Distribution {
         }
     }
 
+    /// Every socket operation is bounded, for the reason the fixture's
+    /// `wait_until_ready` bounds its own: a registry that accepts and then says
+    /// nothing turns an `#[ignore]`d end-to-end test into a CI job that hangs
+    /// rather than one that fails with a message. A loopback exchange of a few
+    /// test-sized blobs has no legitimate use for more than this.
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(30);
+
     fn request(
         &self,
         method: &str,
@@ -398,7 +405,16 @@ impl Distribution {
     ) -> (u16, Vec<(String, String)>, Vec<u8>) {
         use std::io::{Read as _, Write as _};
 
-        let mut socket = std::net::TcpStream::connect(&self.address).unwrap();
+        // `Fixture::address` is `127.0.0.1:{port}`, so this parses without
+        // resolution — which is what lets the connect itself be bounded.
+        let socket_address: std::net::SocketAddr =
+            self.address.parse().expect("a loopback address and a port");
+
+        let mut socket =
+            std::net::TcpStream::connect_timeout(&socket_address, Self::PATIENCE).unwrap();
+
+        socket.set_write_timeout(Some(Self::PATIENCE)).unwrap();
+        socket.set_read_timeout(Some(Self::PATIENCE)).unwrap();
 
         let credentials =
             base64(format!("{}:{}", registry_fixture::USER, registry_fixture::PASSWORD).as_bytes());

@@ -647,7 +647,13 @@ where
 ///
 /// The sequence is checked before a single record is walked. A plan standing
 /// at a different epoch than the published stele cannot match it, and finding
-/// that out should not cost the hours of compression a full walk does.
+/// that out should not cost the hours of compression a full walk does. The
+/// network is checked on the same terms, and it is not implied by the sequence:
+/// epoch numbers collide across chains, so a preprod stele and a mainnet store
+/// can stand at the same sequence and still have nothing to say to each other.
+/// [`Attested`] takes the published history verbatim and so — unlike
+/// [`Following::new`] — checks nothing about it; this is where that check
+/// lands.
 pub fn verify_reproduction<A, S, I>(
     published: &Inscription,
     plan: &Plan,
@@ -671,6 +677,11 @@ where
             ),
         });
     }
+
+    // Same reasoning as the sequence check, and not covered by it: a store on
+    // another chain cannot reproduce this stele, and epoch numbers collide
+    // across networks, so same-sequence-different-chain is reachable.
+    same_network(published, plan)?;
 
     let reproduced = export(
         &stelae::Discarding,
@@ -1433,6 +1444,70 @@ mod chain_tests {
             Following::new(&skipped, &plan).unwrap_err(),
             Error::HistoryBreak { .. }
         ));
+    }
+
+    /// The bytes handed to `--chain-from` have to *be* the document, not merely
+    /// encode it.
+    ///
+    /// Every caller inside this tree hands [`Following::read`] canonical bytes,
+    /// so the only thing that ever exercises this refusal is an operator's
+    /// pipeline: a predecessor that went through a pretty-printer, an editor,
+    /// or a shell that put a newline on the end parses cleanly and
+    /// describes the very same stele. Chaining onto it anyway would produce
+    /// a history entry naming the digest of bytes nobody published — a
+    /// reproduction that reports a digest correct for a stele that does not
+    /// exist, which is the failure [`Following::read`] exists to prevent.
+    #[test]
+    fn a_predecessor_that_is_not_in_canonical_form_is_refused() {
+        let network = Network::for_magic(crate::PREVIEW_MAGIC);
+
+        let mut previous = inscription(2, vec![entry(1)]);
+        previous.position = crate::position(
+            &network,
+            &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
+            1,
+        )
+        .unwrap();
+
+        let plan = plan_at(network);
+
+        let canonical = previous.canonicalize().unwrap();
+
+        assert_eq!(
+            Following::read(&canonical, &plan).unwrap(),
+            Following::new(&previous, &plan).unwrap(),
+            "the canonical bytes chain exactly as the document does"
+        );
+
+        // Both parse, both describe this same stele, and neither is it: one
+        // re-serialized in the struct's declaration order rather than JCS's
+        // sorted one, one the canonical bytes with a newline appended.
+        let reordered = serde_json::to_vec(&previous).unwrap();
+
+        let mut newline_terminated = canonical.clone();
+        newline_terminated.push(b'\n');
+
+        for (label, raw) in [
+            ("reordered keys", reordered),
+            ("a trailing newline", newline_terminated),
+        ] {
+            assert_ne!(
+                raw, canonical,
+                "{label}: the fixture is canonical after all"
+            );
+
+            assert!(
+                Inscription::parse(&raw).is_ok(),
+                "{label}: it must be refused for its encoding, not for being unparseable"
+            );
+
+            let err = Following::read(&raw, &plan).unwrap_err();
+
+            assert!(
+                matches!(err, Error::MalformedInscription { .. }),
+                "{label}: {err:?}"
+            );
+        }
     }
 
     /// The four readings of a repository a publisher on a timer meets, and the

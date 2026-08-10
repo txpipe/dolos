@@ -12,7 +12,7 @@
 //! Publishing into a registry is behind the `registry` feature, which is
 //! default-off; `--repo` in a build without it is a refusal naming the feature.
 //!
-//! ## Two commands, one epoch selection
+//! ## One epoch selection, however many commands take one
 //!
 //! [`EpochRange`] lives here rather than in either command, because a publisher
 //! that names "epochs 500 through 519" to one and gets a different window from

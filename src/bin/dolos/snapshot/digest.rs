@@ -146,10 +146,24 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             // document is bytes, `digest > stele.json` has to hash to the
             // identity reported above, and `--chain-from` refuses anything
             // that is not the canonical encoding itself.
-            std::io::stdout()
+            //
+            // Flushed explicitly, because no trailing newline means a
+            // line-buffered stdout still holds the tail of the document when
+            // this returns, and the flush at process exit discards its error:
+            // `digest > stele.json` onto a full disk would write a truncated
+            // inscription and exit zero. The `--output` arm gets this from
+            // `fs::write`.
+            let mut stdout = std::io::stdout();
+
+            stdout
                 .write_all(&canonical)
                 .into_diagnostic()
                 .context("writing the inscription to stdout")?;
+
+            stdout
+                .flush()
+                .into_diagnostic()
+                .context("flushing the inscription to stdout")?;
         }
     }
 

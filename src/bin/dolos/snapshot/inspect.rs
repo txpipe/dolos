@@ -69,10 +69,22 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         // be refused by `digest --chain-from`.
         let canonical = inspected.inscription.canonicalize().into_diagnostic()?;
 
-        std::io::stdout()
+        // Flushed explicitly: with no trailing newline a line-buffered stdout
+        // still holds the tail of the document here, and the flush at process
+        // exit discards its error — `inspect --json > stele.json` onto a full
+        // disk or a closed pipe would otherwise write a truncated inscription
+        // and exit zero.
+        let mut stdout = std::io::stdout();
+
+        stdout
             .write_all(&canonical)
             .into_diagnostic()
             .context("writing the inscription to stdout")?;
+
+        stdout
+            .flush()
+            .into_diagnostic()
+            .context("flushing the inscription to stdout")?;
 
         return Ok(());
     }
