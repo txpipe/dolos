@@ -30,8 +30,9 @@
 //! - [`profile`] — the [`Profile`] trait plus the protocol's media-type,
 //!   profile name and tag naming rules.
 //! - [`transport`] — the seam a stele is written through and read back from:
-//!   the two halves a profile uses, and the `diffId`→blob map both transports
-//!   answer differently.
+//!   the two halves a profile uses, the `diffId`→blob map both transports
+//!   answer differently, and the discarding writer that computes a stele's
+//!   identity without storing it.
 //! - [`plan`] — what a restore has already done and what it has left to fetch:
 //!   the progress file, the resume rule, and remaining-bytes accounting.
 //! - [`dir`] — a minimal on-disk stele: the first implementation of that seam,
@@ -67,7 +68,10 @@ pub use inscription::{
 pub use layer::LayerReader;
 pub use plan::{Remaining, RestoreProgress, Resume};
 pub use profile::{MediaType, Profile};
-pub use transport::{BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer};
+pub use transport::{
+    BlobIndex, Discarding, DiscardingSink, LayerSpec, RecordSink, SteleReader, SteleWriter,
+    WrittenLayer,
+};
 
 /// Artifact type of a stele manifest. Generic tooling discovers stelae of every
 /// profile by filtering on this; the inscription's `profile` field

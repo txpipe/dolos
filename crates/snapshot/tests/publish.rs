@@ -28,6 +28,14 @@
 //! 4. **A different predecessor is a different digest**, deliberately —
 //!    `history` is inside the canonical document, so a repository's identity is
 //!    path-dependent.
+//! 5. **A stele published with reuse on can be reproduced from stores alone.**
+//!    The trust gap the incremental publish opened: layers inherited rather
+//!    than rebuilt are attested without being reproduced, and until something
+//!    reproduces them nothing but the publisher has ever checked the
+//!    attestation. `export::reproduce` is that something.
+//! 6. **A repository already at this node's sequence is not a fault.** The
+//!    detection a publisher on a timer needs, read off the same moving tag a
+//!    publish reads.
 //!
 //! ## Why the two cursors sit where they do
 //!
@@ -48,91 +56,18 @@
 mod node;
 mod registry_fixture;
 
-use dolos_core::{BlockHash, ChainPoint, Domain as _};
+use dolos_core::Domain as _;
 use dolos_snapshot::{
-    export::Plan,
-    registry::{self, Published},
-    DolosProfile, Error, Network, BLOCKS, INDEXES, LOGS, STATE_SHARDS,
+    export::{self, Following, Predecessor as _, Standing},
+    registry, DolosProfile, Error, BLOCKS, INDEXES, LOGS, STATE_SHARDS,
 };
-use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
-use stelae::{oci::Registry, SteleReader as _};
+use stelae::SteleReader as _;
 
-use node::harness;
+use node::Node;
 use registry_fixture::Fixture;
 
 /// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
 const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
-
-// ---------------------------------------------------------------------------
-// The node, and the two chain points it publishes from
-// ---------------------------------------------------------------------------
-
-/// The harness ledger and the two plans it publishes: sequence 1 standing on
-/// the epoch-0 boundary, and sequence 2 one slot past it.
-struct Node {
-    domain: ToyDomain<MemoryStores>,
-    first: Plan,
-    second: Plan,
-}
-
-impl Node {
-    fn build() -> Self {
-        let domain = harness::<MemoryStores>();
-
-        let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
-
-        let magic = u64::from(domain.genesis().network_magic());
-        let network = Network::for_magic(magic);
-        let boundary = summary.epoch_start(1);
-
-        // Any hash will do: `position` needs one to exist, and nothing in an
-        // export reads it back out of the store.
-        let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
-
-        let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
-        let second = Plan::new(&summary, network, point(boundary)).unwrap();
-
-        assert_eq!(first.sequence, 1);
-        assert_eq!(second.sequence, 2);
-        assert_eq!(
-            first.epochs,
-            second.epochs[..1],
-            "epoch 0's window has to be the same in both, or there is nothing to inherit"
-        );
-
-        Self {
-            domain,
-            first,
-            second,
-        }
-    }
-
-    fn publish(&self, repository: &Registry, plan: &Plan, rebuild: bool) -> Published {
-        registry::publish(
-            repository,
-            plan,
-            self.domain.archive(),
-            self.domain.state(),
-            self.domain.indexes(),
-            None,
-            rebuild,
-        )
-        .unwrap()
-    }
-
-    fn refuse(&self, repository: &Registry, plan: &Plan) -> Error {
-        registry::publish(
-            repository,
-            plan,
-            self.domain.archive(),
-            self.domain.state(),
-            self.domain.indexes(),
-            None,
-            false,
-        )
-        .unwrap_err()
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Done criteria 1 and 2
@@ -408,4 +343,149 @@ fn layer<'a>(
         .iter()
         .find(|layer| layer.kind == kind && layer.scope["epoch"] == epoch)
         .unwrap_or_else(|| panic!("no {kind} layer for epoch {epoch}"))
+}
+
+// ---------------------------------------------------------------------------
+// The trust gap, closed
+// ---------------------------------------------------------------------------
+
+/// A stele published **with reuse on** is reproduced from the stores alone.
+///
+/// This is the check the incremental publish deferred. `a_second_publish` shows
+/// that the second stele inherits epoch 0's three layers and never opens the
+/// store for them; `reuse_and_a_forced_rebuild_agree_on_the_digest` shows the
+/// same publisher rebuilding them and agreeing. Neither is an *independent*
+/// reproduction: both go through the registry publisher, and one of them is
+/// the very code whose inheritance is in question.
+///
+/// Here the reproduction touches no registry at all. The discarding writer
+/// walks the stores, builds every layer including the ones the publish
+/// inherited, chains onto the predecessor's inscription through the same
+/// `history_for` the publish used — and has to arrive at the digest that is in
+/// the repository.
+///
+/// The predecessor is an input rather than something the reproduction works
+/// out, and it has to be: `history` is inside the canonical document, so a
+/// verifier that guessed the chain would compute a digest that is correct for a
+/// stele nobody published. That is the residual independence gap, and it is
+/// what a signature closes rather than this.
+#[test]
+#[ignore]
+fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/reproduced");
+
+    let first = node.publish(&repository, &node.first, false);
+    let second = node.publish(&repository, &node.second, false);
+
+    assert_eq!(
+        second.layers_reused, 3,
+        "there is nothing to reproduce unless the publish inherited something"
+    );
+
+    // What a verifier is handed: the predecessor's canonical bytes, exactly as
+    // they sit in the repository's config blob.
+    let canonical = first.inscription.canonicalize().unwrap();
+    let following = Following::read(&canonical, &node.second).unwrap();
+
+    assert_eq!(following.history().len(), 1);
+
+    let reproduced = export::reproduce(
+        &node.second,
+        node.domain.archive(),
+        node.domain.state(),
+        node.domain.indexes(),
+        None,
+        &following,
+    )
+    .unwrap();
+
+    assert_eq!(
+        reproduced.canonicalize().unwrap(),
+        second.inscription.canonicalize().unwrap(),
+        "the reproduction and the published stele are not the same document"
+    );
+
+    assert_eq!(reproduced.digest().unwrap(), second.identity);
+
+    eprintln!(
+        "published (3 layers inherited) {} == reproduced from stores {}",
+        second.identity,
+        reproduced.digest().unwrap(),
+    );
+
+    // And the reproduction is not trivially right: chained onto nothing it is a
+    // different document, which is the path-dependence the history field is
+    // for.
+    let unchained = export::reproduce(
+        &node.second,
+        node.domain.archive(),
+        node.domain.state(),
+        node.domain.indexes(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    assert_ne!(unchained.digest().unwrap(), second.identity);
+}
+
+// ---------------------------------------------------------------------------
+// Incremental detection
+// ---------------------------------------------------------------------------
+
+/// The four readings of a repository, against a real one.
+///
+/// The arithmetic is unit-tested in `export`; what this adds is that
+/// `registry::standing` reads the *same* moving tag a publish reads and gets
+/// the same sequence out of it — the half of the comparison a unit test cannot
+/// supply.
+#[test]
+#[ignore]
+fn a_publisher_can_ask_where_it_stands() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/standing");
+
+    assert_eq!(
+        registry::standing(&repository, &node.first).unwrap(),
+        Standing::Empty,
+        "nothing published yet"
+    );
+
+    node.publish(&repository, &node.first, false);
+
+    // The ordinary case for a job on a timer: the node has not entered a new
+    // epoch since the last run. It used to arrive as the same refusal a skipped
+    // epoch raises.
+    assert_eq!(
+        registry::standing(&repository, &node.first).unwrap(),
+        Standing::UpToDate { latest: 1 },
+    );
+
+    assert_eq!(
+        registry::standing(&repository, &node.second).unwrap(),
+        Standing::Next { latest: 1 },
+    );
+
+    // A node three epochs ahead of the repository.
+    let mut skipped = node.second.clone();
+    skipped.sequence = 4;
+
+    assert_eq!(
+        registry::standing(&repository, &skipped).unwrap(),
+        Standing::Ahead {
+            latest: 1,
+            distance: 3
+        },
+    );
+
+    // And the refusal that still stands behind it names both sequences and the
+    // distance.
+    let message = node.refuse(&repository, &skipped).to_string();
+
+    assert!(message.contains('1'), "{message}");
+    assert!(message.contains('4'), "{message}");
+    assert!(message.contains("3 sequences ahead"), "{message}");
 }

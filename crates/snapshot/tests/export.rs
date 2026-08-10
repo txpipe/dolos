@@ -19,6 +19,11 @@
 //!    stores and to the builtin memory stores publish the same inscription
 //!    digest. This is the claim ADR-004 rests on and the first place it is
 //!    measured rather than asserted.
+//! 5. **A stele can be reproduced without being stored.** The discarding writer
+//!    walks the same stores and produces the same canonical document, byte for
+//!    byte, as the publish that wrote one to disk — which is what `dolos
+//!    snapshot digest` is, and what makes an independent verifier possible at
+//!    all.
 
 mod common;
 mod node;
@@ -40,7 +45,7 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, plan_for};
-use stelae::{dir::SteleDir, SteleReader};
+use stelae::{dir::SteleDir, Discarding, SteleReader};
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
@@ -570,3 +575,140 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:0eb6fed603f60e527eb9622e04d72a74c21dcd7ee88e98b95ae6f8895736d5fd","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":40}"#,
     r#"],"parameters":{"indexKeyHash":"xxh3-64","stateShards":16},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":3}"#,
 );
+
+// --------------------------------------------------------------------------
+// 5. A stele reproduced without being stored
+// --------------------------------------------------------------------------
+
+/// The check that the discarding writer is *faithful* rather than merely fast,
+/// and no other check stands in for it.
+///
+/// Two exports over one store set: one into a directory, which is
+/// `snapshot publish --output-dir`, and one into nothing, which is
+/// `snapshot digest`. The comparison is on the canonical bytes rather than on
+/// the digest — the digest is a function of them, so an equal digest is
+/// implied, while an unequal document says *where* in a two-kilobyte JSON the
+/// two disagreed.
+///
+/// Run over the harness ledger rather than the skeleton on purpose: an empty
+/// store set exercises the layer *skeleton*, and what a discarding writer could
+/// plausibly get wrong is a layer with records in it — the compressor's state,
+/// the record count, the uncompressed size.
+#[test]
+fn a_discarding_export_reproduces_what_a_publish_stores() {
+    let domain: ToyDomain = harness();
+    let plan = plan_for(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let stored = export_to(temp.path(), &domain);
+
+    let reproduced = export::export(
+        &Discarding,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    // Non-trivial: a stele of empty layers would compare equal for the wrong
+    // reason.
+    assert!(
+        stored.uncompressed_size() > 1024,
+        "the fixture has to carry records for this to prove anything"
+    );
+
+    assert_eq!(
+        String::from_utf8(reproduced.canonicalize().unwrap()).unwrap(),
+        String::from_utf8(stored.canonicalize().unwrap()).unwrap(),
+    );
+
+    assert_eq!(reproduced.digest().unwrap(), stored.digest().unwrap());
+
+    // Nothing was written on the reproduction's behalf: the only stele on disk
+    // is the one the directory export made, and it holds exactly its own
+    // blobs.
+    let blobs = std::fs::read_dir(temp.path().join("blobs").join("sha256"))
+        .unwrap()
+        .count();
+
+    assert_eq!(blobs, distinct_layers(&stored));
+}
+
+/// A verifier checking a *different* stele than the one published is the
+/// failure `--epochs` exists to prevent, so the two commands share one range
+/// type and one restriction.
+///
+/// The restriction goes through `Plan::restrict_epochs` on both sides here for
+/// the same reason: a reproduction over a narrower selection is a different
+/// document, and it has to be the *same* different document.
+#[test]
+fn a_restricted_reproduction_matches_the_same_restricted_publish() {
+    let domain: ToyDomain = harness();
+    let plan = plan_for(&domain).restrict_epochs(Some(1), None);
+
+    assert!(
+        plan.epochs.is_empty(),
+        "the harness ledger lives in epoch zero; selecting above it selects nothing"
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+
+    let stored = export::publish(
+        temp.path(),
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+    )
+    .unwrap();
+
+    let reproduced = export::export(
+        &Discarding,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    // The state tip alone, which is a legitimate publish and the narrowest one
+    // there is.
+    assert_eq!(stored.layers.len(), STATE_SHARDS as usize);
+
+    assert_eq!(
+        stored.canonicalize().unwrap(),
+        reproduced.canonicalize().unwrap()
+    );
+
+    // And it is genuinely a different stele from the unrestricted one, so the
+    // equality above is not the equality of two full exports.
+    let whole = export::export(
+        &Discarding,
+        &plan_for(&domain),
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    assert_ne!(whole.digest().unwrap(), reproduced.digest().unwrap());
+}
+
+/// How many blobs a stele's layers occupy: distinct `diffId`s, because two
+/// layers with identical content are one content-addressed file.
+fn distinct_layers(inscription: &stelae::Inscription) -> usize {
+    inscription
+        .layers
+        .iter()
+        .map(|layer| layer.diff_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}

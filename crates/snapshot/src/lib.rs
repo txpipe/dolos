@@ -210,6 +210,11 @@ pub enum Error {
     /// them is wrong: a gap means a publisher skipped epochs, an equal or lower
     /// sequence means it is republishing one. There is deliberately no flag
     /// that overrides this — see [`crate::registry`].
+    ///
+    /// `reason` is owned rather than static so a gap can state its *distance*.
+    /// "The repository is at 500 and you are at 540" is a different incident
+    /// from being one epoch out, and an operator reading the message should not
+    /// have to subtract.
     #[error(
         "this repository's latest stele is sequence {latest} and this publish is sequence \
          {publishing}: {reason}"
@@ -217,7 +222,32 @@ pub enum Error {
     HistoryBreak {
         latest: u64,
         publishing: u64,
-        reason: &'static str,
+        reason: String,
+    },
+
+    /// A reproduction that arrived at a different answer than the published
+    /// stele it recomputed.
+    ///
+    /// A finding, not a routine failure: same stores, same epochs and the same
+    /// history reproduce the same document, so a divergence means either the
+    /// inputs are not what the operator believes — a store at another epoch, a
+    /// different `--epochs` window than the publish used — or the format's
+    /// determinism claim has a hole, which is ADR-004's residual risk with a
+    /// name on it. `subject` names the layer (or the generic field) so the two
+    /// can be told apart.
+    #[error("the reproduction does not match the published stele — {subject}: {reason}")]
+    ReproductionMismatch { subject: String, reason: String },
+
+    /// A layer that failed its transport verification, named.
+    ///
+    /// The wrapper exists because the protocol's refusals name a layer by kind
+    /// at best, and `snapshot verify`'s deliverable is an exit code plus the
+    /// offending layer — so the scope rides along with the kind.
+    #[error("the {kind} layer at {scope} failed verification: {source}")]
+    LayerVerification {
+        kind: String,
+        scope: String,
+        source: Box<Error>,
     },
 }
 

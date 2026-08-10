@@ -106,7 +106,7 @@ None of those four goals is Cardano-specific, and neither are the mechanisms tha
 
 10. **Specify the mechanism as a Dolos feature, without a protocol name or profile boundary** (the shape of this ADR before the Stelae amendment)
     - Pros: one crate, one vocabulary, no extension machinery to design or test.
-    - Cons: a third-party publisher has no collision-free namespace and would have to fork the spec; the Dolos context absorbs decisions (framing, attestation, transport) unrelated to a data node; and extraction later means renaming every media type, tag and identifier already published. The boundary costs one crate and one CI check today and is irreversible-cheap only before implementation starts.
+    - Cons: a third-party publisher has no collision-free namespace and would have to fork the spec; the Dolos context absorbs decisions (framing, attestation, transport) unrelated to a data node; and extraction later means renaming every media type, tag and identifier already published. The boundary costs one crate today and is irreversible-cheap only before implementation starts.
 
 ## Implementation Details
 
@@ -246,7 +246,7 @@ The arithmetic is counted in layers, because layers are what the ceiling counts:
 
 ### Code layout
 
-Two crates, both workspace members. The split is the protocol/profile boundary made mechanical: **`cargo tree -p stelae` must contain no `dolos-*` package**, checked in CI, so extracting the protocol later is a directory move rather than a refactor.
+Two crates, both workspace members. The split is the protocol/profile boundary made mechanical: **`cargo tree -p stelae` must contain no `dolos-*` package**, so extracting the protocol later is a directory move rather than a refactor.
 
 ```
 crates/stelae/            # package `stelae` — protocol, zero dolos deps
@@ -335,7 +335,7 @@ Steps 1–2 and the fetch/verify half of steps 4–5 are protocol code; the stor
 
 ### Development phases
 
-**1a. Stelae core** — `crates/stelae`: framing, inscription (schema, JCS, digest, history invariant), the `Profile` trait and naming rules, streaming digest/compression, signatures. Verified by CBOR-seq roundtrip and write→read→write byte-identity property tests, a JCS inscription golden test, history-invariant tests (gap/duplicate/out-of-order → reject), fail-closed tests (unknown generic key, unknown profile, higher profile major), a toy non-Dolos profile exercising the full path, and the `cargo tree -p stelae` boundary check.
+**1a. Stelae core** — `crates/stelae`: framing, inscription (schema, JCS, digest, history invariant), the `Profile` trait and naming rules, streaming digest/compression, signatures. Verified by CBOR-seq roundtrip and write→read→write byte-identity property tests, a JCS inscription golden test, history-invariant tests (gap/duplicate/out-of-order → reject), fail-closed tests (unknown generic key, unknown profile, higher profile major), and a toy non-Dolos profile exercising the full path.
 
 **1b. Dolos profile core** — `crates/snapshot`: `DolosProfile`, layer readers/writers, and the three trait additions with backend impls and adapter enums. Verified by per-layer roundtrip unit tests and golden-digest tests (fixed input → asserted sha256, catching encoding drift).
 
