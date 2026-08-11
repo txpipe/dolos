@@ -5,7 +5,12 @@ use dolos_core::config::RootConfig;
 use dolos_snapshot::export;
 use miette::{Context as _, IntoDiagnostic as _};
 
-use dolos_snapshot::registry::{self, Repository};
+use dolos_snapshot::{
+    export::Standing,
+    registry::{self, Registry, Repository},
+};
+
+use super::EpochRange;
 
 /// Where a stele goes, and it goes to exactly one place.
 ///
@@ -48,74 +53,14 @@ pub struct Args {
     /// report what would be written and exit
     #[arg(long, action)]
     dry_run: bool,
-}
 
-/// An epoch selection, in Rust's own range spellings.
-///
-/// Spelled the way a reader already knows how to read: `..` excludes its end,
-/// `..=` includes it. Both are accepted because a publisher naming "epochs 500
-/// through 519" and one naming "up to and including 519" are both natural, and
-/// silently picking one of the two meanings is how an operator publishes an
-/// epoch short.
-#[derive(Debug, Clone, Copy)]
-struct EpochRange {
-    first: Option<u64>,
-    last: Option<u64>,
-}
-
-impl std::str::FromStr for EpochRange {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let bad = |why: &str| format!("{raw:?} is not an epoch range: {why}");
-
-        let parse = |part: &str| -> Result<Option<u64>, String> {
-            match part.trim() {
-                "" => Ok(None),
-                value => value
-                    .parse::<u64>()
-                    .map(Some)
-                    .map_err(|e| bad(&format!("{value:?}: {e}"))),
-            }
-        };
-
-        // `..=` first: `..` is a prefix of it, so testing in the other order
-        // would read `500..=520` as a range ending at `=520`.
-        let (raw, inclusive) = match raw.split_once("..=") {
-            Some(_) => (raw.replacen("..=", "..", 1), true),
-            None => (raw.to_owned(), false),
-        };
-
-        let Some((start, end)) = raw.split_once("..") else {
-            // A bare number: exactly that epoch.
-            let only = parse(&raw)?.ok_or_else(|| bad("it is empty"))?;
-
-            return Ok(Self {
-                first: Some(only),
-                last: Some(only),
-            });
-        };
-
-        let first = parse(start)?;
-        let end = parse(end)?;
-
-        let last = match (end, inclusive) {
-            (Some(end), false) => Some(
-                end.checked_sub(1)
-                    .ok_or_else(|| bad("an exclusive end of 0 selects nothing"))?,
-            ),
-            (None, true) => return Err(bad("`..=` needs an end")),
-            (end, _) => end,
-        };
-
-        if let (Some(first), Some(last)) = (first, last) {
-            if first > last {
-                return Err(bad("it starts after it ends"));
-            }
-        }
-
-        Ok(Self { first, last })
-    }
+    /// fail when the repository is already at this node's sequence, instead of
+    /// reporting that there is nothing to publish and exiting zero; for an
+    /// operator who ran this expecting a new stele, and against a job on a
+    /// timer, for which "nothing has closed since last time" is the ordinary
+    /// case
+    #[arg(long, action, conflicts_with = "output_dir")]
+    require_new: bool,
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
@@ -129,34 +74,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("planning the publish")?;
 
-    let plan = match args.epochs {
-        Some(range) => plan.restrict_epochs(range.first, range.last),
-        None => plan,
-    };
+    let plan = super::restrict(plan, args.epochs);
 
-    let tag = plan.tag().into_diagnostic()?;
-
-    println!(
-        "network:  {} ({})",
-        plan.network.name(),
-        plan.network.magic()
-    );
-    println!("cursor:   {}", plan.cursor);
-    println!("sequence: {} (tag {tag})", plan.sequence);
-
-    match (plan.epochs.first(), plan.epochs.last()) {
-        (Some(first), Some(last)) => println!(
-            "epochs:   {}..={} ({} of them, slots {}..={})",
-            first.epoch,
-            last.epoch,
-            plan.epochs.len(),
-            first.start_slot,
-            last.end_slot,
-        ),
-        // The state tip alone is a legitimate publish; say so rather than
-        // printing an empty range and looking like a mistake.
-        _ => println!("epochs:   none selected; the state tip only"),
-    }
+    super::report_plan(&plan)?;
 
     match (&args.repo, &args.output_dir) {
         (Some(repo), _) => to_repository(config, args, repo, &plan, &stores),
@@ -224,6 +144,12 @@ fn to_repository(
         .into_diagnostic()
         .context("opening the repository")?;
 
+    // Before anything is built, and before the dry run too: a publisher asking
+    // what a publish would do wants the same answer the publish gives.
+    if !standing(&registry, plan, args)? {
+        return Ok(());
+    }
+
     if args.dry_run {
         // `None` here and `None` at the `publish` below are one decision: a dry
         // run describes the publish that follows it, so the two calls are
@@ -284,30 +210,55 @@ fn to_repository(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Read where this node stands against the repository, and report it.
+///
+/// Returns whether the publish should go on. Three of the four readings are
+/// terminal here, and it is the *middle* one that this exists for:
+///
+/// - **nothing published, or exactly one sequence behind** — carry on.
+/// - **the repository has already reached this node** — there is nothing to
+///   publish. A job on a timer that runs more often than epochs close arrives
+///   here every time it runs, and that is not a failure, so it is reported and
+///   the process exits zero. `--require-new` makes the same case an error, for
+///   an operator who ran it expecting a stele.
+/// - **the node is further ahead than one sequence** — refused, and the refusal
+///   stands: whether a deliberate gap ever gets a policy is not this command's
+///   to invent. What is new is that the message names the distance alongside
+///   both sequences, so "the publisher has been down for a day" and "the
+///   publisher has been down for a month" do not read the same.
+fn standing(registry: &Registry, plan: &export::Plan, args: &Args) -> miette::Result<bool> {
+    let standing = registry::standing(registry, plan)
+        .into_diagnostic()
+        .context("reading the repository's latest stele")?;
 
-    fn parse(raw: &str) -> (Option<u64>, Option<u64>) {
-        let range: EpochRange = raw.parse().unwrap();
-        (range.first, range.last)
-    }
-
-    #[test]
-    fn epoch_ranges_read_the_way_rust_ranges_do() {
-        assert_eq!(parse("500..520"), (Some(500), Some(519)));
-        assert_eq!(parse("500..=520"), (Some(500), Some(520)));
-        assert_eq!(parse("500.."), (Some(500), None));
-        assert_eq!(parse("..520"), (None, Some(519)));
-        assert_eq!(parse("..=520"), (None, Some(520)));
-        assert_eq!(parse(".."), (None, None));
-        assert_eq!(parse("500"), (Some(500), Some(500)));
-    }
-
-    #[test]
-    fn a_nonsensical_range_is_refused() {
-        for raw in ["520..500", "..0", "abc", "", "500..abc", "500..=", "-1"] {
-            assert!(raw.parse::<EpochRange>().is_err(), "{raw:?}");
+    match standing {
+        Standing::Empty => {
+            println!("follows:  nothing; this repository holds no stele");
+            Ok(true)
         }
+        Standing::Next { latest } => {
+            println!("follows:  sequence {latest}");
+            Ok(true)
+        }
+        Standing::UpToDate { latest } => {
+            let message = format!(
+                "nothing to publish: this repository is at sequence {latest} and this node is at \
+                 sequence {}",
+                plan.sequence,
+            );
+
+            if args.require_new {
+                return Err(miette::miette!("{message}"));
+            }
+
+            println!("{message}");
+            Ok(false)
+        }
+        Standing::Ahead { latest, distance } => Err(miette::miette!(
+            "this repository's latest stele is sequence {latest} and this node is at sequence \
+             {}, {distance} sequences ahead: a publish must follow the repository's latest \
+             stele, and this one would leave a gap no later stele could close",
+            plan.sequence,
+        )),
     }
 }

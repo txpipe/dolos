@@ -17,6 +17,20 @@
 //! fault, and silently starting a second chain in one repository is precisely
 //! what the field exists to prevent. There is no flag here that overrides that.
 //!
+//! The rule itself is [`crate::export::history_for`], one function shared with
+//! the verifier that reproduces a chained digest without a registry.
+//!
+//! ## "Nothing has closed since last time" is not a fault
+//!
+//! One of those refusals was carrying two meanings. A publisher on a timer
+//! whose node has not entered a new epoch is in the *ordinary* case, and it
+//! reached [`publish`] as the same `HistoryBreak` a skipped epoch raises.
+//! [`standing`] separates them before anything is built, out of the two numbers
+//! a publish already has: the sequence the moving tag carries and the one the
+//! cursor implies. A node that is not past the repository has nothing to do,
+//! which a caller reports and exits zero on; a node further ahead than one
+//! sequence still meets the refusal, now with the distance in it.
+//!
 //! ## A reused layer is attested without being reproduced
 //!
 //! The layers of an epoch that has closed cannot change, so a publish that
@@ -89,8 +103,11 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use dolos_core::{ArchiveStore, IndexStore, StateStore};
 use stelae::{
+    digest::LayerDigests,
+    frame::Limits,
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
-    oci::{Options, Registry, Stele, Transfer},
+    oci::{Options, Stele, Transfer},
+    transport::BlobIndex,
     Digest, SteleReader as _,
 };
 
@@ -105,10 +122,10 @@ use stelae::{
 /// [`Auth`] rides along for the same reason: a host resolving its own
 /// credentials should not have to name the protocol crate to say what it
 /// resolved them to.
-pub use stelae::oci::{Auth, Repository, SCHEME};
+pub use stelae::oci::{Auth, Registry, Repository, SCHEME};
 
 use crate::{
-    export::{self, Plan, Predecessor},
+    export::{self, history_for, same_network, Plan, Predecessor, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
     DolosProfile, Error, Scope as _, EPOCH_KINDS, STATE_SHARDS,
@@ -273,6 +290,202 @@ pub struct Preview {
     pub history: usize,
     pub layers_reused: usize,
     pub layers_built: usize,
+}
+
+/// Where this node stands relative to what `registry` already holds.
+///
+/// One read of the moving tag, and no store is touched. It is what turns "the
+/// node has not entered a new epoch" from the same refusal a skipped epoch
+/// raises into an answer a job on a timer can act on — see [`Standing`].
+///
+/// Cheap enough to ask before every publish: a manifest pull against the
+/// moving tag, which [`publish`] and [`preview`] are each about to make anyway.
+/// Asking twice is one HTTP round trip against the alternative, which is
+/// threading the answer out of a call that has already started building.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn standing(registry: &Registry, plan: &Plan) -> Result<Standing, Error> {
+    let latest = registry
+        .latest(&DolosProfile)?
+        .map(|stele| stele.read_inscription())
+        .transpose()?;
+
+    if let Some(previous) = &latest {
+        // The same refusal a publish makes, made before the report rather than
+        // after it: a repository holding another network's chain is not "up to
+        // date" with this node in any sense worth reporting.
+        same_network(previous, plan)?;
+    }
+
+    Ok(Standing::read(
+        latest.map(|previous| previous.sequence),
+        plan.sequence,
+    ))
+}
+
+/// What `snapshot verify` established about a published stele, transport side.
+///
+/// By the time this exists, every check that needs no store has run:
+///
+/// - **the two documents agree.** The pull itself proved it: the inscription is
+///   canonical, its digest is the config digest the manifest names, and every
+///   manifest layer matches the inscription's at the same position and `diffId`
+///   — `stelae::oci::read_manifest`, the contract the manifest golden freezes.
+/// - **the history chain is contiguous back to its first entry** and ends at
+///   `sequence - 1`. The protocol refuses to parse an inscription whose chain
+///   skips, so a gapped history never reaches the layer checks at all.
+/// - **every blob was streamed end to end.** Its bytes hash to the blob digest
+///   the manifest addresses it by and stay within the compressed size the
+///   manifest claims; what they decompress to stays within the size the
+///   descriptor claims and hashes to the layer's `diffId`, with the record
+///   count the inscription states.
+///
+/// What none of this establishes is *who published any of it*. The history's
+/// digests are attested by the newest inscription and nothing here verifies a
+/// signature over that inscription — signatures are Phase 5, and a verifier
+/// claiming provenance from digests alone would be worse than this sentence.
+#[derive(Debug, Clone)]
+pub struct Verified {
+    /// The inscription every layer was checked against.
+    pub inscription: Inscription,
+    /// The stele's identity — what a Phase 5 signature will be over.
+    pub identity: Digest,
+    /// Compressed bytes streamed and checked, counted off the wire.
+    pub compressed_bytes: u64,
+}
+
+/// Check a published stele's digests: manifest against inscription, then every
+/// blob against both of its digests.
+///
+/// The whole report is [`Verified`]; the whole verdict is the `Result`. A
+/// failing layer comes back as [`Error::LayerVerification`], naming the layer's
+/// kind and scope, because the exit code and the offending layer are the two
+/// things a caller is here for.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn verify(registry: &Registry, point: Point) -> Result<Verified, Error> {
+    let stele = point.pull(registry)?;
+    let inscription = stele.read_inscription()?;
+    let blobs = stele.blob_index()?;
+
+    // The profile's record ceiling, not the protocol's default, for the reason
+    // a restore uses it: a verifier reading under a tighter limit than the
+    // publisher wrote under would refuse this profile's own steles.
+    let limits = Limits {
+        max_record: crate::MAX_RECORD,
+        ..Limits::default()
+    };
+
+    let mut compressed_bytes = 0u64;
+
+    for descriptor in &inscription.layers {
+        let digests = check_layer(&stele, &blobs, descriptor, limits).map_err(|source| {
+            Error::LayerVerification {
+                kind: descriptor.kind.clone(),
+                scope: descriptor.scope.to_string(),
+                source: Box::new(source),
+            }
+        })?;
+
+        compressed_bytes += digests.compressed_size;
+    }
+
+    Ok(Verified {
+        identity: inscription.digest()?,
+        inscription,
+        compressed_bytes,
+    })
+}
+
+/// Stream one layer end to end and hold every claim against the bytes.
+///
+/// `LayerReader::finish` carries most of it — the header record, the
+/// decompression ceiling, the `diffId`, the uncompressed size and the record
+/// count. What it cannot know is what the *manifest* said, so the two
+/// transport facts are checked here: the bytes hash to the blob digest the
+/// manifest addresses the layer by, and their count is the compressed size it
+/// claims. `pull_blob` already refuses a digest mismatch in flight; comparing
+/// the digest again out of [`LayerDigests`] costs nothing and keeps the check
+/// in code this crate can point at.
+fn check_layer(
+    stele: &Stele,
+    blobs: &BlobIndex,
+    descriptor: &LayerDescriptor,
+    limits: Limits,
+) -> Result<LayerDigests, Error> {
+    let reader = stele.stream_layer(blobs, &DolosProfile, descriptor, limits)?;
+    let digests = reader.finish()?;
+
+    let mismatch = |what: &str, manifest: String, blob: String| {
+        Error::Stelae(stelae::Error::ManifestMismatch(format!(
+            "the manifest says this layer's {what} is {manifest} and the blob's is {blob}",
+        )))
+    };
+
+    if let Some(named) = blobs.blob_for(&descriptor.diff_id) {
+        if digests.blob_digest != named {
+            return Err(mismatch(
+                "blob digest",
+                named.to_string(),
+                digests.blob_digest.to_string(),
+            ));
+        }
+    }
+
+    if let Some(claimed) = stele.compressed_size(blobs, descriptor)? {
+        if digests.compressed_size != claimed {
+            return Err(mismatch(
+                "compressed size",
+                claimed.to_string(),
+                digests.compressed_size.to_string(),
+            ));
+        }
+    }
+
+    Ok(digests)
+}
+
+/// What a repository holds at a point, read without pulling a single layer.
+#[derive(Debug, Clone)]
+pub struct Inspected {
+    pub inscription: Inscription,
+    /// The stele's identity: sha256 of the canonical inscription.
+    pub identity: Digest,
+    /// Each layer's compressed size as the manifest carries it, in inscription
+    /// order. `None` where the manifest claims something impossible — a
+    /// negative size — which a report prints as unknown rather than as a
+    /// number.
+    pub compressed: Vec<Option<u64>>,
+    /// Compressed bytes across every layer, as the manifest reports them.
+    pub total_compressed: u64,
+}
+
+/// Read a stele's two documents and nothing else.
+///
+/// The first thing an operator does when a restore behaves oddly, priced
+/// accordingly: two small GETs — the manifest and the config blob — and no
+/// layer is fetched. Everything the pull verifies ([`Registry::pull`]) is
+/// verified here too, so what is reported is a stele, not merely a manifest
+/// that looked like one.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
+    let stele = point.pull(registry)?;
+    let inscription = stele.read_inscription()?;
+    let blobs = stele.blob_index()?;
+
+    let compressed = inscription
+        .layers
+        .iter()
+        .map(|descriptor| stele.compressed_size(&blobs, descriptor))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Inspected {
+        identity: inscription.digest()?,
+        total_compressed: stele.total_compressed_size(),
+        inscription,
+        compressed,
+    })
 }
 
 /// Publish `plan` into `registry`, chained to whatever is already there.
@@ -546,84 +759,12 @@ fn key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error>
     Ok((kind.to_owned(), canonical))
 }
 
-/// The history a stele at `sequence` carries when it follows `previous`.
-///
-/// The three legal readings of a repository, and the one refusal:
-///
-/// - **nothing there** — an empty history, which the protocol permits at any
-///   sequence. The first stele of a repository carries no history, and so does
-///   a publisher deliberately starting a new one at epoch 500;
-/// - **the stele before this one** — the old history plus an entry naming it.
-///   Contiguous by construction, so the protocol's invariant passes rather than
-///   being relied upon;
-/// - **anything else** — refused, naming both sequences. A gap means a
-///   publisher skipped epochs, an equal sequence means it is republishing one,
-///   and a higher one means the repository is ahead of this node. All three are
-///   operational faults with different fixes, so the message says which.
-///
-/// Whether a deliberate gap ever gets a policy is not this function's to
-/// invent; there is no flag here that overrides the refusal.
-fn history_for(previous: Option<&Inscription>, sequence: u64) -> Result<Vec<HistoryEntry>, Error> {
-    let Some(previous) = previous else {
-        return Ok(Vec::new());
-    };
-
-    let latest = previous.sequence;
-
-    let reason = match latest.checked_add(1) {
-        Some(next) if next == sequence => {
-            let mut history = previous.history.clone();
-
-            history.push(HistoryEntry {
-                sequence: latest,
-                inscription_digest: previous.digest()?,
-            });
-
-            return Ok(history);
-        }
-        _ if latest >= sequence => {
-            "this stele is at or behind the repository's latest; a republish would restart the \
-             chain rather than extend it"
-        }
-        _ => {
-            "a publish must follow the repository's latest stele, and this one would leave a gap \
-             no later stele could close"
-        }
-    };
-
-    Err(Error::HistoryBreak {
-        latest,
-        publishing: sequence,
-        reason,
-    })
-}
-
-/// Refuse a predecessor from another chain.
-///
-/// A repository holding two networks' steles is an operator fault, and the
-/// check costs nothing: the previous stele's `position` already names its
-/// network, and reading it is the same function a restore uses.
-fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
-    let found = crate::read_position(&previous.position)?.network;
-
-    if found.magic() != plan.network.magic() {
-        return Err(Error::NetworkMismatch {
-            expected: plan.network.magic(),
-            found: found.magic(),
-        });
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use dolos_core::{BlockHash, ChainPoint};
     use serde_json::json;
     use stelae::Profile as _;
 
     use super::*;
-    use crate::Network;
 
     fn inscription(sequence: u64, history: Vec<HistoryEntry>) -> Inscription {
         let mut inscription = Inscription::new(
@@ -636,82 +777,6 @@ mod tests {
 
         inscription.history = history;
         inscription
-    }
-
-    fn entry(sequence: u64) -> HistoryEntry {
-        HistoryEntry {
-            sequence,
-            inscription_digest: Digest::compute(sequence.to_be_bytes()),
-        }
-    }
-
-    /// The first stele of a repository carries no history, at any sequence.
-    #[test]
-    fn an_empty_repository_starts_a_history() {
-        assert!(history_for(None, 0).unwrap().is_empty());
-        assert!(history_for(None, 500).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_publish_that_follows_latest_extends_the_chain() {
-        let previous = inscription(3, vec![entry(1), entry(2)]);
-
-        let history = history_for(Some(&previous), 4).unwrap();
-
-        assert_eq!(
-            history.iter().map(|e| e.sequence).collect::<Vec<_>>(),
-            vec![1, 2, 3],
-            "the old history plus an entry naming the stele it came from"
-        );
-
-        assert_eq!(history[2].inscription_digest, previous.digest().unwrap());
-
-        // The invariant holds by construction rather than by inspection: a
-        // document built on this history validates.
-        inscription(4, history).validate().unwrap();
-    }
-
-    /// All three refusals name both sequences, because which of the three it is
-    /// decides what the publisher does about it.
-    #[test]
-    fn a_publish_that_does_not_follow_latest_is_refused() {
-        let previous = inscription(497, vec![]);
-
-        for publishing in [500, 497, 496] {
-            let err = history_for(Some(&previous), publishing).unwrap_err();
-            let message = err.to_string();
-
-            assert!(
-                matches!(err, Error::HistoryBreak { .. }),
-                "{publishing}: {err:?}"
-            );
-
-            assert!(message.contains("497"), "{publishing}: {message}");
-            assert!(
-                message.contains(&publishing.to_string()),
-                "{publishing}: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_gap_and_a_republish_are_told_apart() {
-        let previous = inscription(497, vec![]);
-
-        assert!(history_for(Some(&previous), 500)
-            .unwrap_err()
-            .to_string()
-            .contains("gap"));
-
-        assert!(history_for(Some(&previous), 497)
-            .unwrap_err()
-            .to_string()
-            .contains("republish"));
-
-        assert!(history_for(Some(&previous), 496)
-            .unwrap_err()
-            .to_string()
-            .contains("republish"));
     }
 
     /// Only the epoch kinds are inheritable, and a state shard is excluded by
@@ -809,60 +874,6 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("1 records"), "{message}");
         assert!(message.contains("2 records"), "{message}");
-    }
-
-    /// The only thing standing between a publisher and a history chained onto
-    /// another chain's stele.
-    ///
-    /// A publish reads its own magic from genesis and the predecessor's from
-    /// the predecessor. If they were allowed to differ, the new inscription
-    /// would attest a chain of steles from a network it has never seen — and
-    /// nothing downstream re-checks it, because `history` entries carry a
-    /// sequence and a digest and no position at all.
-    #[test]
-    fn a_predecessor_from_another_network_is_refused() {
-        let preview = Network::for_magic(crate::PREVIEW_MAGIC);
-        let preprod = Network::for_magic(crate::PREPROD_MAGIC);
-
-        let plan = plan_at(preview.clone());
-
-        // Built by `crate::position`, not by the `inscription` helper's shape:
-        // `same_network` reads it back through `crate::read_position`, which
-        // the helper's bare `{"epoch": n}` would not survive.
-        let stele = |network: &Network| {
-            let mut previous = inscription(3, vec![]);
-
-            previous.position = crate::position(
-                network,
-                &ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
-                2,
-            )
-            .unwrap();
-
-            previous
-        };
-
-        same_network(&stele(&preview), &plan).unwrap();
-
-        let err = same_network(&stele(&preprod), &plan).unwrap_err();
-
-        assert!(
-            matches!(
-                err,
-                Error::NetworkMismatch { expected, found }
-                    if expected == preview.magic() && found == preprod.magic()
-            ),
-            "{err:?}"
-        );
-    }
-
-    fn plan_at(network: Network) -> Plan {
-        Plan {
-            network,
-            cursor: ChainPoint::Specific(250, BlockHash::from([0xab; 32])),
-            sequence: 3,
-            epochs: vec![],
-        }
     }
 
     /// A point round-trips through the profile's own tag rendering, in both

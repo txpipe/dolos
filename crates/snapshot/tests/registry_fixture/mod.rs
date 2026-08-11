@@ -178,6 +178,17 @@ impl Fixture {
         panic!("the registry never answered GET /v2/ on {address}");
     }
 
+    /// Where the registry listens, for a suite that has to speak the
+    /// distribution API directly.
+    ///
+    /// The verify suite plants tampered manifests, and planting one is not
+    /// something the transport offers — deliberately, so nothing in the
+    /// production tree learns how to publish a manifest that disagrees with
+    /// its inscription.
+    pub fn address(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
     /// Open a transport onto one repository in this registry.
     ///
     /// A fresh transport per call, even for a name already opened: the pending

@@ -102,6 +102,107 @@ impl<B: ToyStores> Blank<B> {
     }
 }
 
+// The re-export mirrors the module's own rule stated above: every test binary
+// compiles this file in full, so the suites that never open a registry see an
+// import they do not use.
+#[cfg(feature = "oci")]
+#[allow(unused_imports)]
+pub use registry_node::Node;
+
+/// The registry suites' node: the harness ledger and the two chain points it
+/// publishes from.
+///
+/// Shared by `tests/publish.rs` and `tests/snapshot_verify.rs`, because a
+/// stele the one suite publishes is what the other verifies, and a second
+/// copy of the fixture would be a second answer to "where do the two plans
+/// stand".
+#[cfg(feature = "oci")]
+mod registry_node {
+    use dolos_core::{BlockHash, ChainPoint, Domain as _};
+    use dolos_snapshot::{
+        export::Plan,
+        registry::{self, Published, Registry},
+        Error, Network,
+    };
+    use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
+
+    use super::harness;
+
+    /// The harness ledger and the two plans it publishes: sequence 1 standing
+    /// on the epoch-0 boundary, and sequence 2 one slot past it.
+    ///
+    /// That the first cursor sits on the boundary is not a convenience: a
+    /// stele cut mid-epoch clamps its last window to the cursor, so the same
+    /// epoch published later in full has a different scope and is correctly
+    /// rebuilt rather than inherited. See `tests/publish.rs` for the longer
+    /// argument.
+    pub struct Node {
+        pub domain: ToyDomain<MemoryStores>,
+        pub first: Plan,
+        pub second: Plan,
+    }
+
+    impl Node {
+        pub fn build() -> Self {
+            let domain = harness::<MemoryStores>();
+
+            let summary =
+                dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+
+            let magic = u64::from(domain.genesis().network_magic());
+            let network = Network::for_magic(magic);
+            let boundary = summary.epoch_start(1);
+
+            // Any hash will do: `position` needs one to exist, and nothing in
+            // an export reads it back out of the store.
+            let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
+
+            let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
+            let second = Plan::new(&summary, network, point(boundary)).unwrap();
+
+            assert_eq!(first.sequence, 1);
+            assert_eq!(second.sequence, 2);
+            assert_eq!(
+                first.epochs,
+                second.epochs[..1],
+                "epoch 0's window has to be the same in both, or there is nothing to inherit"
+            );
+
+            Self {
+                domain,
+                first,
+                second,
+            }
+        }
+
+        pub fn publish(&self, repository: &Registry, plan: &Plan, rebuild: bool) -> Published {
+            registry::publish(
+                repository,
+                plan,
+                self.domain.archive(),
+                self.domain.state(),
+                self.domain.indexes(),
+                None,
+                rebuild,
+            )
+            .unwrap()
+        }
+
+        pub fn refuse(&self, repository: &Registry, plan: &Plan) -> Error {
+            registry::publish(
+                repository,
+                plan,
+                self.domain.archive(),
+                self.domain.state(),
+                self.domain.indexes(),
+                None,
+                false,
+            )
+            .unwrap_err()
+        }
+    }
+}
+
 pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
     export::plan(domain.state(), domain.genesis().network_magic() as u64).unwrap()
 }

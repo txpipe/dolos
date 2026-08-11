@@ -27,7 +27,7 @@ use stelae::{
     digest::read_blob,
     dir::{BlobIndex, LayerSpec, SteleDir, WrittenLayer},
     frame::{encode, CanonicalCbor, Limits},
-    Compression, Error, Inscription, LayerDescriptor, LayerWriter, Profile, RecordSink,
+    Compression, Discarding, Error, Inscription, LayerDescriptor, LayerWriter, Profile, RecordSink,
     SteleReader, SteleWriter,
 };
 
@@ -1223,4 +1223,127 @@ fn golden_digests_pin_the_encoding() {
             r#""profile":{"name":"dev.example.toy","version":1},"schema":1,"sequence":3}"#,
         )
     );
+}
+
+/// The discarding writer is faithful, not merely fast.
+///
+/// The same records through both write halves: one into a directory, one into
+/// nothing. Every field of the descriptor and every one of the four digests and
+/// sizes has to agree — including the *blob* digest and the compressed size,
+/// which only exist if zstd actually ran. That is the assertion this test is
+/// for: a discarding writer that skipped compression would still reproduce
+/// `diffId`, `records` and `uncompressedSize`, and would be exactly as wrong as
+/// one that never ran at all.
+///
+/// The seal is compared too, since a reproduction reports an identity: a
+/// directory's comes from the bytes it wrote to `inscription.json`, and this
+/// one from the document in hand.
+#[test]
+fn a_discarding_writer_reproduces_what_a_directory_stores() {
+    let temp = tempfile::tempdir().unwrap();
+    let (stored, stored_digest) = write_stele(temp.path());
+
+    let (notes_header_scope, notes_scope) = notes_scopes();
+    let (index_header_scope, index_scope) = index_scopes();
+
+    let notes: Vec<CanonicalCbor> = NOTES.iter().map(note_record).collect();
+
+    let reproduced_notes = Discarding
+        .write_layer(
+            &ToyProfile,
+            &LayerSpec::new("notes", notes_header_scope, notes_scope),
+            COMPRESSION_LEVEL,
+            &notes,
+        )
+        .unwrap();
+
+    let mut sorted: Vec<&Note> = NOTES.iter().collect();
+    sorted.sort_by_key(|n| n.title);
+
+    let mut index_sink = Discarding
+        .layer_sink(
+            &ToyProfile,
+            &LayerSpec::new("index", index_header_scope, index_scope),
+            COMPRESSION_LEVEL,
+        )
+        .unwrap();
+
+    for note in sorted {
+        index_sink.write_record(&index_record(note)).unwrap();
+    }
+
+    let reproduced_index = index_sink.finish().unwrap();
+
+    // The stored stele's own blob digests, recovered the way a directory has
+    // to: by hashing the files it holds. Nothing in an inscription carries
+    // them, which is the point — they are transport, and a reproduction that
+    // agreed on identity while disagreeing on the compressed bytes would still
+    // publish a different blob.
+    let stored_blobs: BTreeSet<String> =
+        std::fs::read_dir(temp.path().join("blobs").join(stelae::Digest::ALGORITHM))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+
+    for (stored, reproduced) in stored
+        .layers
+        .iter()
+        .zip([&reproduced_notes, &reproduced_index])
+    {
+        assert_eq!(
+            *stored, reproduced.descriptor,
+            "{}: the descriptor a publish would have written",
+            stored.kind,
+        );
+
+        assert!(
+            stored_blobs.contains(&reproduced.digests.blob_digest.to_hex()),
+            "{}: the reproduction named a blob the directory does not hold ({})",
+            stored.kind,
+            reproduced.digests.blob_digest,
+        );
+
+        let on_disk = std::fs::metadata(
+            temp.path()
+                .join("blobs")
+                .join(stelae::Digest::ALGORITHM)
+                .join(reproduced.digests.blob_digest.to_hex()),
+        )
+        .unwrap()
+        .len();
+
+        assert_eq!(
+            reproduced.digests.compressed_size, on_disk,
+            "{}: the compressed size only exists if zstd ran",
+            stored.kind,
+        );
+    }
+
+    // And the identity, over a document assembled exactly as `write_stele`
+    // assembles it.
+    let mut inscription = Inscription::new(
+        &ToyProfile,
+        3,
+        json!({"chapter": 3, "shelf": "east", "curator": {"name": "example", "since": 1998}}),
+        json!({"noteWidth": 40, "titleOrder": "byte"}),
+        Compression {
+            algo: "zstd".to_owned(),
+            level: COMPRESSION_LEVEL as i64,
+        },
+    );
+
+    inscription.history = stored.history.clone();
+    inscription.layers = vec![
+        reproduced_notes.descriptor.clone(),
+        reproduced_index.descriptor.clone(),
+    ];
+
+    assert_eq!(
+        Discarding.seal(&ToyProfile, &inscription).unwrap(),
+        stored_digest,
+    );
+
+    // Nothing was written anywhere on the way: the only stele on disk is the
+    // one the directory wrote, and it has exactly its own two blobs.
+    assert_eq!(stored_blobs.len(), 2);
 }

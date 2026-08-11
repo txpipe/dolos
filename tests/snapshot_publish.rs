@@ -19,11 +19,18 @@ fn publish_writes_a_directory_that_opens_and_verifies() {
     node.sync();
 
     let out = node.root.path().join("stele");
-    let stdout = assert_ok(&node.publish(&out, &[]));
+    let output = node.publish(&out, &[]);
+    let stdout = assert_ok(&output);
+
+    // The plan report — network, cursor, sequence, epochs — goes to stderr on
+    // every snapshot command: `digest` puts a document on stdout, the commands
+    // share one report, and a report split across streams by command would be
+    // two reports. The result lines stay on stdout.
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     // The name is derived from the magic, never from the configuration file,
     // which is what keeps two publishers on one chain from disagreeing.
-    assert!(stdout.contains("preview (2)"), "{stdout}");
+    assert!(stderr.contains("preview (2)"), "{stderr}");
     assert!(stdout.contains("identity: sha256:"), "{stdout}");
 
     let stele = SteleDir::open(&out).unwrap();

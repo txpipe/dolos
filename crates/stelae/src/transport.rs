@@ -34,6 +34,15 @@
 //! rather than parameterizing the reader on "how to find a blob" is what makes
 //! that difference a cost and not an interface.
 //!
+//! ## A third implementation that stores nothing
+//!
+//! [`Discarding`] is the write half with the storing taken out: every layer is
+//! framed, hashed and compressed exactly as a publish would, and the bytes go
+//! to [`std::io::sink`] instead of to a file or a registry. What comes back is
+//! the identity — a [`WrittenLayer`] per layer and the inscription's digest
+//! from [`SteleWriter::seal`] — which is the whole of what a reproduction needs
+//! and none of what it would have to store.
+//!
 //! ## What the seam deliberately does not carry
 //!
 //! No notion of *listing* what a repository holds, no tags beyond the two the
@@ -42,11 +51,11 @@
 //! question and should hold the transport-specific type.
 
 use crate::{
-    digest::LayerDigests,
-    frame::{CanonicalCbor, Limits},
+    digest::{LayerDigests, LayerWriter},
+    frame::{CanonicalCbor, LayerHeader, Limits, SeqWriter},
     inscription::{Inscription, LayerDescriptor},
     layer::LayerReader,
-    profile::Profile,
+    profile::{checked_layer_media_type, Profile},
     Digest, Error,
 };
 
@@ -225,6 +234,143 @@ pub trait SteleWriter {
         }
 
         sink.finish()
+    }
+}
+
+/// A stele that computes its identity and stores nothing.
+///
+/// The write half of the seam with the storing taken out. Every field of a
+/// [`WrittenLayer`] is a function of the record stream — [`RecordSink::finish`]
+/// reads the descriptor off the digests the pipeline computed, and only *then*
+/// does a directory rename onto the content-addressed name — so a writer whose
+/// sinks discard their bytes hands back the same descriptors as one that keeps
+/// them. Sealing is the same identity a directory returns after writing
+/// `inscription.json`: the sha256 of the canonical document.
+///
+/// That is the whole of `dolos snapshot digest`. A verifier reproduces a
+/// published stele's layers from its own stores and compares descriptors,
+/// without provisioning the disk the stele would occupy — hundreds of gigabytes
+/// on mainnet — and without touching a registry.
+///
+/// ## It compresses
+///
+/// The one shortcut this type must not take. `diffId`, `records` and
+/// `uncompressedSize` are all fixed before zstd sees a byte, so a writer that
+/// skipped compression would reproduce every field the inscription carries and
+/// still not be doing what a publish does. The bug class this exists to catch
+/// is the one that only appears when the same bytes go through the same
+/// pipeline twice, and the pipeline is [`LayerWriter`] — hash in, compress,
+/// hash out. What is dropped is the last step, the write to a file, and nothing
+/// upstream of it.
+///
+/// The cost of that honesty is real: a reproduction pays the compressor in full
+/// and saves only the I/O. It buys the blob digest and the compressed size,
+/// which a comparison against a registry manifest needs and a document cannot
+/// supply.
+///
+/// ## What it cannot answer
+///
+/// Nothing that needs bytes back. There is no [`SteleReader`] half here and
+/// there cannot be one: a stele that stored nothing has nothing to stream, and
+/// a caller wanting both halves wants a real transport.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Discarding;
+
+/// A layer being written into nothing, one record at a time.
+///
+/// The mirror of [`crate::dir::LayerSink`] with the file removed. Nothing is
+/// buffered here either — records are framed, hashed and compressed on the way
+/// past — so reproducing a mainnet state shard costs the compressor's window
+/// and one record, the same as publishing one.
+pub struct DiscardingSink {
+    sequence: SeqWriter<LayerWriter<std::io::Sink>>,
+    kind: String,
+    media_type: String,
+    scope: serde_json::Value,
+}
+
+impl RecordSink for DiscardingSink {
+    fn write_record(&mut self, record: &CanonicalCbor) -> Result<(), Error> {
+        self.sequence.write_record(record)
+    }
+
+    fn records(&self) -> u64 {
+        self.sequence.count()
+    }
+
+    /// Close the layer and hand back the descriptor it would have been
+    /// published under.
+    ///
+    /// Finishing the compressed frame is not skippable: zstd's epilogue is part
+    /// of the blob, so the blob digest and the compressed size are only correct
+    /// once the encoder has been closed. Everything else falls out of the same
+    /// [`LayerDigests`] a directory reads.
+    fn finish(self) -> Result<WrittenLayer, Error> {
+        let Self {
+            sequence,
+            kind,
+            media_type,
+            scope,
+        } = self;
+
+        let count = sequence.count();
+        let (_, digests) = sequence.into_inner().finish()?;
+
+        Ok(WrittenLayer {
+            descriptor: LayerDescriptor {
+                kind,
+                media_type,
+                diff_id: digests.diff_id,
+                records: count,
+                uncompressed_size: digests.uncompressed_size,
+                scope,
+            },
+            digests,
+        })
+    }
+}
+
+impl SteleWriter for Discarding {
+    type Sink = DiscardingSink;
+
+    /// Open a layer that goes nowhere.
+    ///
+    /// The media type is still asked of the profile and still validated against
+    /// the naming rules, and the header record is still the first thing in the
+    /// sequence. Both are inside the layer's identity, so a reproduction that
+    /// skipped either would compute a `diffId` no publish ever produces.
+    fn layer_sink(
+        &self,
+        profile: &dyn Profile,
+        spec: &LayerSpec,
+        level: i32,
+    ) -> Result<DiscardingSink, Error> {
+        let media_type = checked_layer_media_type(profile, &spec.kind)?;
+        let header = LayerHeader::new(profile.name(), &spec.kind, spec.header_scope.clone());
+
+        let mut sink = DiscardingSink {
+            sequence: SeqWriter::with_max_record(
+                LayerWriter::new(std::io::sink(), level)?,
+                profile.max_record(),
+            ),
+            kind: spec.kind.clone(),
+            media_type,
+            scope: spec.scope.clone(),
+        };
+
+        sink.write_record(&header.encode()?)?;
+
+        Ok(sink)
+    }
+
+    /// Return the stele's identity without writing it down.
+    ///
+    /// [`Inscription::digest`] canonicalizes, which validates — so a document
+    /// that could not be sealed into a directory is refused here too, and a
+    /// reproduction never reports a digest over an inscription no publish could
+    /// have written.
+    fn seal(&self, _profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
+        inscription.digest()
     }
 }
 
