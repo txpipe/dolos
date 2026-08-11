@@ -53,11 +53,8 @@ pub struct Args {
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    // An inspection pulls two small blobs into memory and stages nothing, so
-    // this directory is never created here. It is still the node's answer
-    // rather than a `None`: what a transport does with a path is the
-    // transport's to decide, and the one call site that decides where this
-    // node stages is `common::stele_scratch_dir`.
+    // An inspection reads two small blobs into memory, so nothing is staged
+    // and this directory is never created here.
     let scratch = crate::common::stele_scratch_dir(&config.storage, None);
 
     let registry = registry::open(&args.repo, args.insecure, auth, scratch)

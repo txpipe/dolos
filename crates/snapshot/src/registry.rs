@@ -97,19 +97,8 @@
 //! one, so both directions carry credentials — and this module takes them as an
 //! argument rather than finding them. Which identity a Dolos node authenticates
 //! as is the node's policy, not the profile's: the `dolos` binary reads its own
-//! configuration and its own environment and hands the answer to [`open`].
-//!
-//! ## Where the bytes are staged
-//!
-//! Every layer this module moves passes through a file on the way — built,
-//! compressed and hashed into one before it is uploaded, pulled into one before
-//! it is read back. Where those files live is the node's decision for the same
-//! reason its credentials are, and [`open`] takes it as an argument rather than
-//! leaving it unset: a mainnet state shard is hundreds of megabytes compressed,
-//! sixteen of them are in flight at once, and the platform temporary directory
-//! is not always on a volume with room for that. It is a plain path and not an
-//! `Option` on purpose — the whole of the defect this closed was one `None` at
-//! this one call site, and a parameter nobody can omit cannot grow another.
+//! configuration and its own environment and hands the answer to [`open`]. The
+//! same goes for where the layers are staged on the way through.
 
 use std::{cell::Cell, collections::BTreeMap, path::PathBuf};
 
@@ -257,12 +246,8 @@ where
 /// the reason `stelae::oci` states one layer down and this crate has no more
 /// standing to override than that one does.
 ///
-/// `scratch_dir` is where layers are staged, in both directions — see the
-/// module documentation. Required rather than optional: this is the one call
-/// site that decides it, and a transfer whose staging directory nobody named
-/// is the bug this parameter exists to make unwritable. The directory is
-/// created when the first layer needs it, by the transport, so a caller may
-/// name one that does not exist yet.
+/// `scratch_dir` is where layers are staged, in both directions. The transport
+/// creates it when the first layer needs it, so it need not exist yet.
 ///
 /// **Never call any of this from inside an async context.** The transport owns
 /// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s

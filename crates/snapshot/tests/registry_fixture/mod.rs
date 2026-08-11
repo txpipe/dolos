@@ -73,14 +73,8 @@ pub struct Fixture {
     /// the environment, the configuration naming it. Held so it outlives the
     /// container that has it mounted.
     _auth: tempfile::TempDir,
-    /// Where the transports this fixture opens stage their layers.
-    ///
-    /// A node names its own — `<storage.path>/scratch` — and these suites have
-    /// no node, so they name a directory of their own rather than the platform
-    /// temporary one. Held so it is removed with the fixture: a suite that
-    /// aborts mid-layer leaves its staged bytes behind on a filesystem that
-    /// keeps unlinked files alive for the process, and this is what bounds
-    /// them to the test run.
+    /// Where the transports this fixture opens stage their layers. Held so
+    /// staged bytes are bounded to the test run.
     scratch: tempfile::TempDir,
 }
 

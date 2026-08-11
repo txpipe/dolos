@@ -132,29 +132,14 @@ pub fn stele_registry_auth(config: &StelaeConfig) -> miette::Result<Auth> {
 ///
 /// A child of `storage.path` rather than a sibling of it: on a host where the
 /// data lives on a dedicated mount, a sibling is on the *parent* filesystem —
-/// which is the small root volume this default exists to keep bytes off.
+/// the small root volume this default exists to keep bytes off.
 pub const STELE_SCRATCH_DIR: &str = "scratch";
 
 /// Where this node stages the layers of a registry transfer.
 ///
-/// One function for all four commands that open a repository, so
-/// `<storage.path>/scratch` is one answer rather than four copies of it, and
-/// `--scratch-dir` overrides it in one place.
-///
-/// **The default is inside the data directory, and that is a change to what
-/// that directory means.** It is the volume already sized for the data, which
-/// is the whole argument: a mainnet state shard is hundreds of megabytes
-/// compressed, sixteen are in flight at once, and the platform temporary
-/// directory is not always on a volume with room for them. What lands there is
-/// unlinked at creation (`tempfile_in`), so a backup or a directory listing
-/// sees an empty `scratch/` and never a half-written shard — but an operator
-/// sizing that volume is affected, which is why the flags' help and the
-/// `storage.path` documentation both say so.
-///
-/// An explicit `--scratch-dir` is taken literally, relative paths included: it
-/// is the operator's path, resolved against the working directory like every
-/// other path this binary takes from a command line, and resolving it against
-/// `storage.path` instead would make `--scratch-dir .` mean somewhere else.
+/// An explicit `--scratch-dir` is taken literally, relative paths included:
+/// it is resolved against the working directory like every other path this
+/// binary takes from a command line.
 pub fn stele_scratch_dir(config: &StorageConfig, chosen: Option<&std::path::Path>) -> PathBuf {
     match chosen {
         Some(dir) => dir.to_path_buf(),
@@ -438,9 +423,6 @@ mod tests {
         toml::from_str(&document).expect("a storage section with a path")
     }
 
-    /// The default an operator gets by saying nothing, and the one thing it
-    /// must not be: a sibling of `storage.path`, which on a dedicated data
-    /// mount lands on the small root volume this default exists to avoid.
     #[test]
     fn staging_defaults_to_a_directory_inside_the_storage_path() {
         let config = storage("/var/lib/dolos/data");
@@ -451,11 +433,6 @@ mod tests {
         );
     }
 
-    /// `--scratch-dir` is taken literally — it is the operator's path, resolved
-    /// against the working directory like every other path this binary takes
-    /// from a command line. Joining it onto `storage.path` instead would make
-    /// `--scratch-dir /mnt/big` mean `<storage.path>/mnt/big` on some platforms
-    /// and itself on others.
     #[test]
     fn a_named_directory_is_used_as_it_was_written() {
         let config = storage("/var/lib/dolos/data");

@@ -111,18 +111,11 @@ The `storage` section controls how Dolos stores data in the local file system. E
 - `path`: root directory where all data will be stored.
 - `version`: storage schema version (`v0` - `v3`).
 
-Besides the stores, this directory holds `scratch/`: where
-`dolos snapshot publish --repo oci://…` and
-`dolos bootstrap stelae --source oci://…` stage the layers they are moving,
-unless `--scratch-dir` names somewhere else. `dolos snapshot verify` stages
-there too — it streams every blob through a file — and has no `--scratch-dir`
-of its own, so a host that verifies is sized for it here or nowhere. It is the
-default because this is
-the volume already sized for the data — a mainnet state shard is hundreds of
-megabytes compressed and sixteen are in flight at once, which the platform
-temporary directory cannot be assumed to fit. The files there are unlinked as
-they are created, so the directory reads as empty and a backup that copies it
-copies nothing; an operator sizing this volume should still count them.
+Besides the stores, this directory holds `scratch/`: where `dolos snapshot
+publish`, `dolos bootstrap stelae` and `dolos snapshot verify` stage the layers
+they move over an OCI registry. It defaults here because this volume is already
+sized for the data; a mainnet transfer stages gigabytes. The first two take
+`--scratch-dir` to point somewhere else.
 
 ### `storage.wal` section
 

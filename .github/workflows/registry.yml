@@ -88,8 +88,5 @@ jobs:
       - name: Snapshot restore over a registry
         run: cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture --test-threads=1
 
-      # The commands, not the transport: where `dolos snapshot publish` and
-      # `dolos bootstrap stelae` stage the bytes they move. This one drives the
-      # binary, so it belongs to the root package rather than to a crate.
       - name: Staging directories at the CLI
         run: cargo test --test stelae_scratch -- --ignored --nocapture --test-threads=1
