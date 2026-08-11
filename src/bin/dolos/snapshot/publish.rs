@@ -50,6 +50,15 @@ pub struct Args {
     #[arg(long, action, conflicts_with = "output_dir")]
     insecure: bool,
 
+    /// directory to stage layers in while they are built, compressed and
+    /// uploaded; defaults to `<storage.path>/scratch`, the volume already
+    /// sized for the data. It holds nothing but transient files, unlinked as
+    /// they are created — so it reads as empty even mid-publish — but it needs
+    /// room for the layers in flight: sixteen state shards at once, hundreds
+    /// of megabytes each on mainnet
+    #[arg(long, value_name = "DIR", conflicts_with = "output_dir")]
+    scratch_dir: Option<PathBuf>,
+
     /// report what would be written and exit
     #[arg(long, action)]
     dry_run: bool,
@@ -140,7 +149,12 @@ fn to_repository(
     // is the honest place for "these credentials cannot publish" to be said.
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    let registry = registry::open(repo, args.insecure, auth)
+    // Where every layer is staged on its way up. `--output-dir` never reaches
+    // here — it writes the stele in place — which is why the flag conflicts
+    // with it rather than being quietly ignored alongside it.
+    let scratch = crate::common::stele_scratch_dir(&config.storage, args.scratch_dir.as_deref());
+
+    let registry = registry::open(repo, args.insecure, auth, scratch)
         .into_diagnostic()
         .context("opening the repository")?;
 

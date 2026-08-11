@@ -42,8 +42,15 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 ├── wal      # Write-Ahead Log database
 ├── state    # Ledger state database
 ├── chain    # Archive/block storage database
-└── index    # Consolidated index database
+├── index    # Consolidated index database
+└── scratch  # Stele layers in flight (see below); not a store
 ```
+
+`scratch` is the one entry that is not a database: it is where a stele publish
+or restore over an OCI registry stages the layers it is moving, unless
+`--scratch-dir` says otherwise. Its files are unlinked as they are created, so
+the directory reads as empty, and it exists only once a transfer has staged
+something.
 
 Each database is a separate Redb or Fjall file with independent configuration for cache size and durability, depending on the chosen storage backend.
 
@@ -335,6 +342,7 @@ All agents working on this repository must verify their modifications by running
    cargo test -p stelae --all-features --test oci -- --ignored --test-threads=1
    cargo test -p dolos-snapshot --features oci --test publish -- --ignored --test-threads=1
    cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --test-threads=1
+   cargo test --test stelae_scratch -- --ignored --test-threads=1
    ```
 
    Each test spawns its own registry container via `docker run` and tears it
