@@ -50,6 +50,7 @@ macro_rules! entity_boilerplate {
 }
 
 pub mod accounts;
+pub mod activity;
 pub mod assets;
 pub mod datums;
 pub mod dreps;
@@ -67,6 +68,7 @@ pub mod proposals;
 pub(crate) mod testing;
 
 pub use accounts::*;
+pub use activity::*;
 pub use assets::*;
 pub use datums::*;
 pub use dreps::*;
@@ -86,6 +88,8 @@ pub use proposals::*;
 pub enum CardanoEntity {
     EraSummary(Box<EraSummary>),
     AccountState(Box<AccountState>),
+    AccountActivity(Box<AccountActivity>),
+    AccountAssetActivity(Box<AccountAssetActivity>),
     AssetState(Box<AssetState>),
     PoolState(Box<PoolState>),
     EpochState(Box<EpochState>),
@@ -123,6 +127,8 @@ macro_rules! variant_boilerplate {
 
 variant_boilerplate!(EraSummary);
 variant_boilerplate!(AccountState);
+variant_boilerplate!(AccountActivity);
+variant_boilerplate!(AccountAssetActivity);
 variant_boilerplate!(AssetState);
 variant_boilerplate!(PoolState);
 variant_boilerplate!(EpochState);
@@ -143,6 +149,10 @@ impl dolos_core::Entity for CardanoEntity {
         match ns {
             EraSummary::NS => EraSummary::decode_entity(ns, value).map(Into::into),
             AccountState::NS => AccountState::decode_entity(ns, value).map(Into::into),
+            AccountActivity::NS => AccountActivity::decode_entity(ns, value).map(Into::into),
+            AccountAssetActivity::NS => {
+                AccountAssetActivity::decode_entity(ns, value).map(Into::into)
+            }
             AssetState::NS => AssetState::decode_entity(ns, value).map(Into::into),
             PoolState::NS => PoolState::decode_entity(ns, value).map(Into::into),
             EpochState::NS => EpochState::decode_entity(ns, value).map(Into::into),
@@ -167,6 +177,8 @@ impl dolos_core::Entity for CardanoEntity {
         match value {
             Self::EraSummary(x) => EraSummary::encode_entity(x),
             Self::AccountState(x) => AccountState::encode_entity(x),
+            Self::AccountActivity(x) => AccountActivity::encode_entity(x),
+            Self::AccountAssetActivity(x) => AccountAssetActivity::encode_entity(x),
             Self::AssetState(x) => AssetState::encode_entity(x),
             Self::PoolState(x) => PoolState::encode_entity(x),
             Self::EpochState(x) => EpochState::encode_entity(x),
@@ -189,6 +201,8 @@ pub fn build_schema() -> StateSchema {
     let mut schema = StateSchema::default();
     schema.insert(EraSummary::NS, NamespaceType::KeyValue);
     schema.insert(AccountState::NS, NamespaceType::KeyValue);
+    schema.insert(AccountActivity::NS, NamespaceType::KeyValue);
+    schema.insert(AccountAssetActivity::NS, NamespaceType::KeyValue);
     schema.insert(AssetState::NS, NamespaceType::KeyValue);
     schema.insert(PoolState::NS, NamespaceType::KeyValue);
     schema.insert(EpochState::NS, NamespaceType::KeyValue);
@@ -281,6 +295,8 @@ pub enum CardanoDelta {
     CommitteeGc(Box<CommitteeGc>),
     GovDistrRotate(Box<GovDistrRotate>),
     ProposalResolved(Box<ProposalResolved>),
+    AccountActivityRecord(Box<AccountActivityRecord>),
+    AccountAssetActivityRecord(Box<AccountAssetActivityRecord>),
 }
 
 impl CardanoDelta {
@@ -384,6 +400,8 @@ delta_from!(GovDormancyTick);
 delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
 delta_from!(ProposalResolved);
+delta_from!(AccountActivityRecord);
+delta_from!(AccountAssetActivityRecord);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -454,6 +472,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => x.key(),
             Self::SetEpochIncentives(x) => x.key(),
             Self::DequeueReward(x) => x.key(),
+            Self::AccountActivityRecord(x) => x.key(),
+            Self::AccountAssetActivityRecord(x) => x.key(),
         }
     }
 
@@ -522,6 +542,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::DequeueReward(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::AccountActivityRecord(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::AccountAssetActivityRecord(x) => Self::downcast_apply(x.as_mut(), entity),
         }
     }
 
@@ -590,6 +612,8 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::EnqueueReward(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::SetEpochIncentives(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::DequeueReward(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::AccountActivityRecord(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::AccountAssetActivityRecord(x) => Self::downcast_undo(x.as_ref(), entity),
         }
     }
 }

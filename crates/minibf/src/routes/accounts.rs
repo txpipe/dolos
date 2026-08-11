@@ -11,6 +11,8 @@ use axum::{
 use blockfrost_openapi::models::{
     account_addresses_assets_inner::AccountAddressesAssetsInner,
     account_addresses_content_inner::AccountAddressesContentInner,
+    account_addresses_total::AccountAddressesTotal,
+    account_addresses_total_received_sum_inner::AccountAddressesTotalReceivedSumInner,
     account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
     account_registration_content_inner::{AccountRegistrationContentInner, Action},
@@ -22,7 +24,7 @@ use blockfrost_openapi::models::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    model::{AccountState, DRepState},
+    model::{AccountActivity, AccountAssetActivity, AccountState, DRepState},
     pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
     PoolDepositRefundLog,
 };
@@ -304,6 +306,66 @@ where
     }
 
     Ok(Json(items))
+}
+
+fn activity_amounts(
+    lovelace: u128,
+    assets: &std::collections::BTreeMap<pallas::codec::utils::Bytes, [u8; 16]>,
+) -> Vec<AccountAddressesTotalReceivedSumInner> {
+    let lovelace = AccountAddressesTotalReceivedSumInner {
+        unit: "lovelace".to_string(),
+        quantity: lovelace.to_string(),
+    };
+
+    // BTreeMap iteration keeps asset entries sorted by unit
+    let assets = assets
+        .iter()
+        .map(|(unit, quantity)| AccountAddressesTotalReceivedSumInner {
+            unit: hex::encode(unit.as_slice()),
+            quantity: u128::from_be_bytes(*quantity).to_string(),
+        });
+
+    std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub async fn by_stake_addresses_total<D>(
+    Path(stake_address): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<AccountAddressesTotal>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+    Option<AccountActivity>: From<D::Entity>,
+    Option<AccountAssetActivity>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let network = domain.get_network_id()?;
+    let account_key = parse_account_key_param(&stake_address, network)?;
+
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let activity = domain
+        .read_cardano_entity::<AccountActivity>(account_key.entity_key.as_slice())?
+        .unwrap_or_default();
+
+    let assets = domain
+        .read_cardano_entity::<AccountAssetActivity>(account_key.entity_key.as_slice())?
+        .unwrap_or_default();
+
+    let stake_address = account_key
+        .address
+        .to_bech32()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let model = AccountAddressesTotal {
+        stake_address,
+        received_sum: activity_amounts(activity.received_lovelace(), &assets.received_assets),
+        sent_sum: activity_amounts(activity.sent_lovelace(), &assets.sent_assets),
+        tx_count: activity.tx_count as i32,
+    };
+
+    Ok(Json(model))
 }
 
 pub async fn by_stake_utxos<D>(
@@ -1141,7 +1203,7 @@ mod tests {
     use blockfrost_openapi::models::{
         account_addresses_assets_inner::AccountAddressesAssetsInner,
         account_addresses_content_inner::AccountAddressesContentInner,
-        account_content::AccountContent,
+        account_addresses_total::AccountAddressesTotal, account_content::AccountContent,
         account_delegation_content_inner::AccountDelegationContentInner,
         account_registration_content_inner::AccountRegistrationContentInner,
         account_reward_content_inner::AccountRewardContentInner,
@@ -1592,6 +1654,72 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/addresses");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_total_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses/total");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let item: AccountAddressesTotal =
+            serde_json::from_slice(&bytes).expect("failed to parse account addresses total");
+
+        assert_eq!(item.stake_address, stake_address);
+
+        // every synthetic tx produces a single output to one of the account
+        // addresses, so the account totals cover all txs in all blocks
+        let tx_count: usize = app.vectors().blocks.iter().map(|x| x.tx_hashes.len()).sum();
+        assert_eq!(item.tx_count, tx_count as i32);
+
+        assert_eq!(item.received_sum[0].unit, "lovelace");
+        assert_eq!(
+            item.received_sum[0].quantity,
+            (tx_count as u64 * dolos_testing::MIN_UTXO_AMOUNT).to_string()
+        );
+
+        let asset = item
+            .received_sum
+            .iter()
+            .find(|x| x.unit == app.vectors().asset_unit)
+            .expect("expected synthetic asset in received_sum");
+        assert_eq!(asset.quantity, tx_count.to_string());
+
+        // the synthetic account addresses never spend, but lovelace must
+        // still be present (and first) with a zero quantity
+        assert_eq!(item.sent_sum.len(), 1);
+        assert_eq!(item.sent_sum[0].unit, "lovelace");
+        assert_eq!(item.sent_sum[0].quantity, "0");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_total_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/addresses/total", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_total_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/addresses/total", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_total_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/addresses/total");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 

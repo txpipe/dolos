@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
+
 use dolos_core::{ChainError, Genesis, TxOrder};
 
 use super::WorkDeltas;
+use pallas::codec::utils::Bytes;
 use pallas::ledger::primitives::alonzo::{
     InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward,
 };
-use pallas::ledger::primitives::Epoch;
+use pallas::ledger::primitives::{Epoch, StakeCredential};
 use pallas::ledger::{
     addresses::Address,
     traverse::{MultiEraBlock, MultiEraCert, MultiEraInput, MultiEraOutput, MultiEraTx},
@@ -12,9 +15,9 @@ use pallas::ledger::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    pallas_extras, roll::BlockVisitor, ControlledAmountDec, ControlledAmountInc, EnqueueMir,
-    PParamsSet, StakeDelegation, StakeDeregistration, StakeRegistration, VoteDelegation,
-    WithdrawalInc,
+    pallas_extras, roll::BlockVisitor, AccountActivityRecord, AccountAssetActivityRecord,
+    ControlledAmountDec, ControlledAmountInc, EnqueueMir, PParamsSet, StakeDelegation,
+    StakeDeregistration, StakeRegistration, VoteDelegation, WithdrawalInc,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +38,37 @@ impl TrackSeenAddresses {
 }
 
 #[derive(Default, Clone)]
+struct TxActivity {
+    received_lovelace: u128,
+    received_assets: BTreeMap<Bytes, u128>,
+    sent_lovelace: u128,
+    sent_assets: BTreeMap<Bytes, u128>,
+}
+
+impl TxActivity {
+    fn add_output(&mut self, output: &MultiEraOutput, sent: bool) {
+        let value = output.value();
+
+        let (lovelace, assets) = if sent {
+            (&mut self.sent_lovelace, &mut self.sent_assets)
+        } else {
+            (&mut self.received_lovelace, &mut self.received_assets)
+        };
+
+        *lovelace += value.coin() as u128;
+
+        for ma in value.assets() {
+            for asset in ma.assets() {
+                let mut unit = ma.policy().to_vec();
+                unit.extend(asset.name());
+                let amount = asset.output_coin().unwrap_or_default() as u128;
+                *assets.entry(Bytes::from(unit)).or_insert(0) += amount;
+            }
+        }
+    }
+}
+
+#[derive(Default, Clone)]
 pub struct AccountVisitor {
     deposit: Option<u64>,
     epoch: Option<Epoch>,
@@ -42,6 +76,30 @@ pub struct AccountVisitor {
     /// Pre-Alonzo (< 5): MIRs overwrite previous values.
     /// Alonzo+ (>= 5): MIRs accumulate.
     protocol_version: Option<u16>,
+    tx_activity: BTreeMap<StakeCredential, TxActivity>,
+}
+
+impl AccountVisitor {
+    fn flush_tx_activity(&mut self, deltas: &mut WorkDeltas) {
+        for (cred, activity) in std::mem::take(&mut self.tx_activity) {
+            deltas.add_for_entity(AccountActivityRecord::new(
+                cred.clone(),
+                activity.received_lovelace,
+                activity.sent_lovelace,
+            ));
+
+            let assets = AccountAssetActivityRecord::new(
+                cred,
+                activity.received_assets.into_iter().collect(),
+                activity.sent_assets.into_iter().collect(),
+            );
+
+            // lovelace-only txs skip the asset entity
+            if !assets.is_empty() {
+                deltas.add_for_entity(assets);
+            }
+        }
+    }
 }
 
 impl BlockVisitor for AccountVisitor {
@@ -61,6 +119,18 @@ impl BlockVisitor for AccountVisitor {
         Ok(())
     }
 
+    fn visit_tx(
+        &mut self,
+        deltas: &mut WorkDeltas,
+        _: &MultiEraBlock,
+        _: &MultiEraTx,
+        _: &std::collections::HashMap<dolos_core::TxoRef, crate::owned::OwnedMultiEraOutput>,
+    ) -> Result<(), ChainError> {
+        self.flush_tx_activity(deltas);
+
+        Ok(())
+    }
+
     fn visit_input(
         &mut self,
         deltas: &mut WorkDeltas,
@@ -74,6 +144,14 @@ impl BlockVisitor for AccountVisitor {
         let Some((cred, is_pointer)) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());
         };
+
+        // pointer addresses are excluded to match the account endpoints
+        if !is_pointer {
+            self.tx_activity
+                .entry(cred.clone())
+                .or_default()
+                .add_output(resolved, true);
+        }
 
         deltas.add_for_entity(ControlledAmountDec::new(
             cred,
@@ -98,6 +176,13 @@ impl BlockVisitor for AccountVisitor {
         let Some((cred, is_pointer)) = pallas_extras::address_as_stake_cred(&address) else {
             return Ok(());
         };
+
+        if !is_pointer {
+            self.tx_activity
+                .entry(cred.clone())
+                .or_default()
+                .add_output(output, false);
+        }
 
         deltas.add_for_entity(ControlledAmountInc::new(
             cred.clone(),
@@ -190,6 +275,12 @@ impl BlockVisitor for AccountVisitor {
         };
 
         deltas.add_for_entity(WithdrawalInc::new(cred, amount));
+
+        Ok(())
+    }
+
+    fn flush(&mut self, deltas: &mut WorkDeltas) -> Result<(), ChainError> {
+        self.flush_tx_activity(deltas);
 
         Ok(())
     }
