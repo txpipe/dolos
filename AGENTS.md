@@ -46,11 +46,12 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 └── scratch  # Stele layers in flight (see below); not a store
 ```
 
-`scratch` is the one entry that is not a database: it is where a stele publish
-or restore over an OCI registry stages the layers it is moving, unless
-`--scratch-dir` says otherwise. Its files are unlinked as they are created, so
-the directory reads as empty, and it exists only once a transfer has staged
-something.
+`scratch` is the one entry that is not a database: it is where a stele publish,
+restore or verification over an OCI registry stages the layers it is moving.
+`snapshot publish` and `bootstrap stelae` take `--scratch-dir` to point
+elsewhere; `snapshot verify` stages every blob it streams and has no flag, so it
+always uses this. Its files are unlinked as they are created, so the directory
+reads as empty, and it exists only once a transfer has staged something.
 
 Each database is a separate Redb or Fjall file with independent configuration for cache size and durability, depending on the chosen storage backend.
 

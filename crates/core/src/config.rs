@@ -548,14 +548,17 @@ pub struct StorageConfig {
     /// Root directory for storage files.
     ///
     /// It holds the stores, and one thing that is not a store: `scratch/`,
-    /// where a stele publish or restore over an OCI registry stages the layers
-    /// it is moving. That is the default and `--scratch-dir` overrides it, but
-    /// it is the default because this is the volume already sized for the
-    /// data — a mainnet state shard is hundreds of megabytes compressed and
-    /// sixteen are in flight at once, which the platform temporary directory
-    /// cannot be assumed to fit. What lands there is unlinked at creation, so
-    /// the directory reads as empty and a backup that copies it copies nothing;
-    /// an operator sizing this volume should still count it.
+    /// where a stele publish, restore or verification over an OCI registry
+    /// stages the layers it is moving — a verification streams every blob
+    /// through a file too, and unlike the other two it has no `--scratch-dir`
+    /// to point elsewhere. That is the default and `--scratch-dir` overrides
+    /// it, but it is the default because this is the volume already sized
+    /// for the data — a mainnet state shard is hundreds of megabytes
+    /// compressed and sixteen are in flight at once, which the platform
+    /// temporary directory cannot be assumed to fit. What lands there is
+    /// unlinked at creation, so the directory reads as empty and a backup
+    /// that copies it copies nothing; an operator sizing this volume should
+    /// still count it.
     pub path: std::path::PathBuf,
 
     /// WAL store configuration.
