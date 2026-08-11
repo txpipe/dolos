@@ -97,9 +97,10 @@
 //! one, so both directions carry credentials — and this module takes them as an
 //! argument rather than finding them. Which identity a Dolos node authenticates
 //! as is the node's policy, not the profile's: the `dolos` binary reads its own
-//! configuration and its own environment and hands the answer to [`open`].
+//! configuration and its own environment and hands the answer to [`open`]. The
+//! same goes for where the layers are staged on the way through.
 
-use std::{cell::Cell, collections::BTreeMap};
+use std::{cell::Cell, collections::BTreeMap, path::PathBuf};
 
 use dolos_core::{ArchiveStore, IndexStore, StateStore};
 use stelae::{
@@ -245,15 +246,23 @@ where
 /// the reason `stelae::oci` states one layer down and this crate has no more
 /// standing to override than that one does.
 ///
+/// `scratch_dir` is where layers are staged, in both directions. The transport
+/// creates it when the first layer needs it, so it need not exist yet.
+///
 /// **Never call any of this from inside an async context.** The transport owns
 /// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
 /// module documentation states the rule and the reason.
-pub fn open(repository: &Repository, insecure: bool, auth: Auth) -> Result<Registry, Error> {
+pub fn open(
+    repository: &Repository,
+    insecure: bool,
+    auth: Auth,
+    scratch_dir: PathBuf,
+) -> Result<Registry, Error> {
     Ok(Registry::open(
         repository,
         Options {
             insecure,
-            scratch_dir: None,
+            scratch_dir: Some(scratch_dir),
             auth,
         },
     )?)

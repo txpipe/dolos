@@ -73,6 +73,9 @@ pub struct Fixture {
     /// the environment, the configuration naming it. Held so it outlives the
     /// container that has it mounted.
     _auth: tempfile::TempDir,
+    /// Where the transports this fixture opens stage their layers. Held so
+    /// staged bytes are bounded to the test run.
+    scratch: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -121,6 +124,7 @@ impl Fixture {
             container,
             port,
             _auth: auth,
+            scratch: tempfile::tempdir().expect("a temporary directory to stage layers in"),
         };
 
         fixture.wait_until_ready();
@@ -207,7 +211,7 @@ impl Fixture {
             .parse()
             .expect("the fixture named a usable repository");
 
-        registry::open(&repository, true, auth).unwrap()
+        registry::open(&repository, true, auth, self.scratch.path().to_path_buf()).unwrap()
     }
 }
 

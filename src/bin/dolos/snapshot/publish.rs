@@ -50,6 +50,11 @@ pub struct Args {
     #[arg(long, action, conflicts_with = "output_dir")]
     insecure: bool,
 
+    /// directory to stage layers in while they are uploaded; defaults to
+    /// `<storage.path>/scratch`
+    #[arg(long, value_name = "DIR", conflicts_with = "output_dir")]
+    scratch_dir: Option<PathBuf>,
+
     /// report what would be written and exit
     #[arg(long, action)]
     dry_run: bool,
@@ -140,7 +145,9 @@ fn to_repository(
     // is the honest place for "these credentials cannot publish" to be said.
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    let registry = registry::open(repo, args.insecure, auth)
+    let scratch = crate::common::stele_scratch_dir(&config.storage, args.scratch_dir.as_deref());
+
+    let registry = registry::open(repo, args.insecure, auth, scratch)
         .into_diagnostic()
         .context("opening the repository")?;
 

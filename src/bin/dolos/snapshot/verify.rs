@@ -76,7 +76,12 @@ pub struct Args {
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    let registry = registry::open(&args.repo, args.insecure, auth)
+    // A verification streams every blob through a staged file. No
+    // `--scratch-dir` of its own: it reads what is already published rather
+    // than moving a node's own data.
+    let scratch = crate::common::stele_scratch_dir(&config.storage, None);
+
+    let registry = registry::open(&args.repo, args.insecure, auth, scratch)
         .into_diagnostic()
         .context("opening the repository")?;
 

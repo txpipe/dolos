@@ -58,6 +58,12 @@ pub struct Args {
     /// nothing reachable from outside one
     #[arg(long, action)]
     pub insecure: bool,
+
+    /// directory to stage pulled layers in; defaults to
+    /// `<storage.path>/scratch`. registry sources only — a `file://` restore
+    /// stages nothing
+    #[arg(long, value_name = "DIR")]
+    pub scratch_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -75,6 +81,7 @@ impl Args {
             source: source.parse().map_err(|e: String| miette::miette!("{e}"))?,
             point: Point::default(),
             insecure: false,
+            scratch_dir: None,
         })
     }
 }
@@ -201,16 +208,22 @@ fn restore_repo(
     repo: &Repository,
     point: Point,
     insecure: bool,
+    scratch_dir: Option<&std::path::Path>,
     resume: bool,
 ) -> miette::Result<()> {
+    // First: `Node::open` runs `ensure_storage_path`, so the default of
+    // `<storage.path>/scratch` needs no special case on a host where the
+    // storage directory does not exist yet.
     let node = Node::open(config)?;
 
     // Resolved here rather than inside the transport: which identity this node
     // reads a registry as is the node's policy, and `crate::common` is where
-    // this program keeps its own.
+    // this program keeps its own. Where it stages comes from the same place.
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    let registry = registry::open(repo, insecure, auth)
+    let scratch = crate::common::stele_scratch_dir(&config.storage, scratch_dir);
+
+    let registry = registry::open(repo, insecure, auth, scratch)
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -278,7 +291,14 @@ fn report(
 pub fn run(config: &RootConfig, args: &Args, resume: bool) -> miette::Result<()> {
     match &args.source {
         Source::Dir(dir) => restore_dir(config, dir, resume),
-        Source::Repo(repo) => restore_repo(config, repo, args.point, args.insecure, resume),
+        Source::Repo(repo) => restore_repo(
+            config,
+            repo,
+            args.point,
+            args.insecure,
+            args.scratch_dir.as_deref(),
+            resume,
+        ),
     }
 }
 

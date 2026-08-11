@@ -111,6 +111,12 @@ The `storage` section controls how Dolos stores data in the local file system. E
 - `path`: root directory where all data will be stored.
 - `version`: storage schema version (`v0` - `v3`).
 
+Besides the stores, this directory holds `scratch/`: where `dolos snapshot
+publish`, `dolos bootstrap stelae` and `dolos snapshot verify` stage the layers
+they move over an OCI registry. It defaults here because this volume is already
+sized for the data; a mainnet transfer stages gigabytes. The first two take
+`--scratch-dir` to point somewhere else.
+
 ### `storage.wal` section
 
 | property    | type    | example  |

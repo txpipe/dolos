@@ -42,7 +42,8 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 ├── wal      # Write-Ahead Log database
 ├── state    # Ledger state database
 ├── chain    # Archive/block storage database
-└── index    # Consolidated index database
+├── index    # Consolidated index database
+└── scratch  # not a store: stele layers staged in flight by a registry transfer
 ```
 
 Each database is a separate Redb or Fjall file with independent configuration for cache size and durability, depending on the chosen storage backend.

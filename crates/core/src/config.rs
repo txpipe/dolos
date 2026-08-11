@@ -545,7 +545,8 @@ impl MempoolStoreConfig {
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    /// Root directory for storage files.
+    /// Root directory for storage files. Also holds `scratch/`, where a stele
+    /// transfer over an OCI registry stages layers in flight.
     pub path: std::path::PathBuf,
 
     /// WAL store configuration.
