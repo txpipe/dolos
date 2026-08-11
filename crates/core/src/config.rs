@@ -545,13 +545,8 @@ impl MempoolStoreConfig {
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    /// Root directory for storage files.
-    ///
-    /// Besides the stores it holds `scratch/`, where a stele transfer over an
-    /// OCI registry stages the layers it is moving. That is the default
-    /// because this volume is already sized for the data; a mainnet transfer
-    /// stages gigabytes, which the platform temporary directory cannot be
-    /// assumed to fit.
+    /// Root directory for storage files. Also holds `scratch/`, where a stele
+    /// transfer over an OCI registry stages layers in flight.
     pub path: std::path::PathBuf,
 
     /// WAL store configuration.
