@@ -466,7 +466,7 @@ where
     // Blockfrost: their collateral inputs and collateral-return outputs move
     // funds, so those addresses are affected in ledger terms - considered a
     // bug in BF, not behavior worth reproducing
-    let builder = builder.with_touched_addresses(|tx| {
+    let builder = builder.collect_touched_addresses_with(|tx| {
         let mut addresses = BTreeSet::new();
 
         for_each_touched_output(&mut resolver, tx, |output| {
@@ -969,7 +969,7 @@ mod tests {
 
         let builder = BlockModelBuilder::new(raw).expect("failed to build block model");
         let addresses: Vec<BlockContentAddressesInner> = builder
-            .with_touched_addresses(|tx| {
+            .collect_touched_addresses_with(|tx| {
                 let mut touched = BTreeSet::new();
 
                 if tx.hash().to_string() == spender_hash {
@@ -987,13 +987,13 @@ mod tests {
             .find(|entry| entry.address == input_side_address)
             .expect("touched address missing from response");
 
-        assert!(
-            entry
-                .transactions
-                .iter()
-                .any(|tx| tx.tx_hash == spender_hash),
-            "spender tx must be attributed to the touched address"
-        );
+        let tx_hashes: Vec<_> = entry
+            .transactions
+            .iter()
+            .map(|tx| tx.tx_hash.as_str())
+            .collect();
+
+        assert_eq!(tx_hashes, vec![spender_hash]);
     }
 
     /// Mapping to the addresses model without collecting touched addresses

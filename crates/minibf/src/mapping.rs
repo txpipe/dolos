@@ -2041,7 +2041,7 @@ pub struct BlockModelBuilder<'a> {
     previous: Option<MultiEraBlock<'a>>,
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
-    touched_addresses: Option<Vec<BTreeSet<String>>>,
+    touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -2065,7 +2065,7 @@ impl<'a> BlockModelBuilder<'a> {
     /// Collect the addresses each tx touches by asking `collect` for every tx
     /// of the block, in block order. The builder drives the walk itself, so
     /// the sets cannot fall out of sync with the txs they describe.
-    pub fn with_touched_addresses<F>(mut self, collect: F) -> Result<Self, StatusCode>
+    pub fn collect_touched_addresses_with<F>(mut self, mut collect: F) -> Result<Self, StatusCode>
     where
         F: FnMut(&MultiEraTx<'_>) -> Result<BTreeSet<String>, StatusCode>,
     {
@@ -2073,8 +2073,8 @@ impl<'a> BlockModelBuilder<'a> {
             self.block
                 .txs()
                 .iter()
-                .map(collect)
-                .collect::<Result<_, _>>()?,
+                .map(|tx| collect(tx).map(|addresses| (tx.hash().to_string(), addresses)))
+                .try_collect()?,
         );
 
         Ok(self)
@@ -2389,40 +2389,17 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
-        let Self {
-            block,
-            touched_addresses,
-            ..
-        } = self;
-
-        let txs = block.txs();
-
-        let touched_addresses = touched_addresses.ok_or_else(|| {
+        let touched_addresses = self.touched_addresses.ok_or_else(|| {
             tracing::error!("touched addresses not collected for block");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-
-        // `with_touched_addresses` walks the block itself, so one set per tx
-        // is guaranteed. Refuse any mismatch rather than silently returning a
-        // partial response.
-        if touched_addresses.len() != txs.len() {
-            tracing::error!(
-                txs = txs.len(),
-                touched = touched_addresses.len(),
-                "touched addresses out of sync with block txs"
-            );
-
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
 
         // BTreeMap keeps entries sorted alphabetically by address, matching
         // Blockfrost. Tx hashes are appended in block order and deduped per
         // address because each tx's touched addresses arrive as a set.
         let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-        for (tx, touched_by_tx) in txs.iter().zip(touched_addresses) {
-            let tx_hash = tx.hash().to_string();
-
+        for (tx_hash, touched_by_tx) in touched_addresses {
             for address in touched_by_tx {
                 by_address.entry(address).or_default().push(tx_hash.clone());
             }
