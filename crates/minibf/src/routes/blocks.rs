@@ -451,6 +451,11 @@ where
 
     let mut deps = InputDeps::default();
 
+    let mut resolver = {
+        let txs = builder.txs();
+        deps.prepare(&domain, txs.iter()).await?
+    };
+
     // Collect the addresses each tx touches: its produced outputs plus the
     // source outputs of its inputs. Inputs whose source tx is missing from
     // the archive (possible on nodes without full history) are skipped,
@@ -461,34 +466,23 @@ where
     // Blockfrost: their collateral inputs and collateral-return outputs move
     // funds, so those addresses are affected in ledger terms - considered a
     // bug in BF, not behavior worth reproducing
-    let touched_addresses = {
-        let txs = builder.txs();
-        let mut resolver = deps.prepare(&domain, txs.iter()).await?;
+    let builder = builder.with_touched_addresses(|tx| {
+        let mut addresses = BTreeSet::new();
 
-        let mut touched = Vec::with_capacity(txs.len());
+        for_each_touched_output(&mut resolver, tx, |output| {
+            let address = output
+                .address()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        for tx in &txs {
-            let mut addresses = BTreeSet::new();
+            addresses.insert(address.to_string());
 
-            for_each_touched_output(&mut resolver, tx, |output| {
-                let address = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            Ok(false)
+        })?;
 
-                addresses.insert(address.to_string());
+        Ok(addresses)
+    })?;
 
-                Ok(false)
-            })?;
-
-            touched.push(addresses);
-        }
-
-        touched
-    };
-
-    let addresses: Vec<BlockContentAddressesInner> = builder
-        .with_touched_addresses(touched_addresses)
-        .into_model()?;
+    let addresses: Vec<BlockContentAddressesInner> = builder.into_model()?;
 
     // Blockfrost sorts this endpoint alphabetically by address and ignores
     // the `order` param; only count/page apply.
@@ -973,12 +967,18 @@ mod tests {
         // by any tx of the block
         let input_side_address = "addr_input_side_only";
 
-        let mut touched = vec![BTreeSet::new(); txs.len()];
-        touched[1].insert(input_side_address.to_string());
-
         let builder = BlockModelBuilder::new(raw).expect("failed to build block model");
         let addresses: Vec<BlockContentAddressesInner> = builder
-            .with_touched_addresses(touched)
+            .with_touched_addresses(|tx| {
+                let mut touched = BTreeSet::new();
+
+                if tx.hash().to_string() == spender_hash {
+                    touched.insert(input_side_address.to_string());
+                }
+
+                Ok(touched)
+            })
+            .expect("failed to collect touched addresses")
             .into_model()
             .expect("failed to map block addresses");
 
@@ -994,6 +994,22 @@ mod tests {
                 .any(|tx| tx.tx_hash == spender_hash),
             "spender tx must be attributed to the touched address"
         );
+    }
+
+    /// Mapping to the addresses model without collecting touched addresses
+    /// first must be a 500, not a silently empty response.
+    #[test]
+    fn block_addresses_require_touched_addresses() {
+        use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+        let raw = blocks.first().expect("missing synthetic block");
+
+        let builder = BlockModelBuilder::new(raw).expect("failed to build block model");
+
+        let result: Result<Vec<BlockContentAddressesInner>, StatusCode> = builder.into_model();
+
+        assert_eq!(result, Err(StatusCode::INTERNAL_SERVER_ERROR));
     }
 
     #[tokio::test]

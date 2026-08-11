@@ -2062,13 +2062,21 @@ impl<'a> BlockModelBuilder<'a> {
         self.block.txs()
     }
 
-    /// The addresses touched by each tx, in block order, collected by the
-    /// caller (see `inputs::for_each_touched_output`).
-    pub fn with_touched_addresses(self, touched_addresses: Vec<BTreeSet<String>>) -> Self {
-        Self {
-            touched_addresses,
-            ..self
-        }
+    /// Collect the addresses each tx touches by asking `collect` for every tx
+    /// of the block, in block order. The builder drives the walk itself, so
+    /// the sets cannot fall out of sync with the txs they describe.
+    pub fn with_touched_addresses<F>(mut self, collect: F) -> Result<Self, StatusCode>
+    where
+        F: FnMut(&MultiEraTx<'_>) -> Result<BTreeSet<String>, StatusCode>,
+    {
+        self.touched_addresses = self
+            .block
+            .txs()
+            .iter()
+            .map(collect)
+            .collect::<Result<_, _>>()?;
+
+        Ok(self)
     }
 
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
@@ -2386,15 +2394,29 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
             ..
         } = self;
 
+        let txs = block.txs();
+
+        // `with_touched_addresses` walks the block itself, so one set per tx
+        // is guaranteed; a mismatch here means it was never called. Zipping
+        // anyway would silently return an empty or partial response - refuse
+        // instead, the same way InputResolver::resolve refuses an input it
+        // was never prepared for.
+        if touched_addresses.len() != txs.len() {
+            tracing::error!(
+                txs = txs.len(),
+                touched = touched_addresses.len(),
+                "touched addresses out of sync with block txs"
+            );
+
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
         // BTreeMap keeps entries sorted alphabetically by address, matching
         // Blockfrost. Tx hashes are appended in block order and deduped per
         // address because each tx's touched addresses arrive as a set.
         let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-        let mut touched = touched_addresses.into_iter();
-
-        for tx in block.txs() {
-            let touched_by_tx = touched.next().unwrap_or_default();
+        for (tx, touched_by_tx) in txs.iter().zip(touched_addresses) {
             let tx_hash = tx.hash().to_string();
 
             for address in touched_by_tx {
