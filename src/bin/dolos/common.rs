@@ -424,18 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn staging_defaults_to_a_directory_inside_the_storage_path() {
+    fn staging_defaults_inside_the_storage_path_and_takes_a_named_one_literally() {
         let config = storage("/var/lib/dolos/data");
 
         assert_eq!(
             stele_scratch_dir(&config, None),
             PathBuf::from("/var/lib/dolos/data/scratch"),
         );
-    }
-
-    #[test]
-    fn a_named_directory_is_used_as_it_was_written() {
-        let config = storage("/var/lib/dolos/data");
 
         for named in ["/mnt/big/staging", "staging", "../staging"] {
             assert_eq!(

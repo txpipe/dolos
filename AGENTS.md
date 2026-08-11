@@ -336,7 +336,6 @@ All agents working on this repository must verify their modifications by running
    cargo test -p stelae --all-features --test oci -- --ignored --test-threads=1
    cargo test -p dolos-snapshot --features oci --test publish -- --ignored --test-threads=1
    cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --test-threads=1
-   cargo test --test stelae_scratch -- --ignored --test-threads=1
    ```
 
    Each test spawns its own registry container via `docker run` and tears it

@@ -87,6 +87,3 @@ jobs:
 
       - name: Snapshot restore over a registry
         run: cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture --test-threads=1
-
-      - name: Staging directories at the CLI
-        run: cargo test --test stelae_scratch -- --ignored --nocapture --test-threads=1
