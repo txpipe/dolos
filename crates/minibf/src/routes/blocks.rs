@@ -13,9 +13,12 @@ use futures::future::try_join_all;
 use itertools::Either;
 use pallas::ledger::traverse::MultiEraBlock;
 
+use std::collections::BTreeSet;
+
 use crate::{
     error::Error,
     hacks,
+    inputs::{for_each_touched_output, InputDeps},
     mapping::{BlockModelBuilder, IntoModel as _},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
@@ -444,21 +447,48 @@ where
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
 
-    let mut builder = BlockModelBuilder::new(&block)?;
+    let builder = BlockModelBuilder::new(&block)?;
 
-    let deps = builder.required_input_deps();
-    let deps = domain.get_tx_batch(deps).await?;
+    let mut deps = InputDeps::default();
 
-    // deps missing from the archive (possible on nodes without full history)
-    // are skipped, omitting their addresses from the response — the same
-    // graceful degradation as /txs/{hash}/utxos
-    for (key, cbor) in deps.iter() {
-        if let Some(cbor) = cbor {
-            builder.load_dep(*key, cbor)?;
+    // Collect the addresses each tx touches: its produced outputs plus the
+    // source outputs of its inputs. Inputs whose source tx is missing from
+    // the archive (possible on nodes without full history) are skipped,
+    // omitting their addresses from the response — the same graceful
+    // degradation as /txs/{hash}/utxos.
+    //
+    // Phase-2-failed txs are deliberately NOT skipped, diverging from
+    // Blockfrost: their collateral inputs and collateral-return outputs move
+    // funds, so those addresses are affected in ledger terms - considered a
+    // bug in BF, not behavior worth reproducing
+    let touched_addresses = {
+        let txs = builder.txs();
+        let mut resolver = deps.prepare(&domain, txs.iter()).await?;
+
+        let mut touched = Vec::with_capacity(txs.len());
+
+        for tx in &txs {
+            let mut addresses = BTreeSet::new();
+
+            for_each_touched_output(&mut resolver, tx, |output| {
+                let address = output
+                    .address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                addresses.insert(address.to_string());
+
+                Ok(false)
+            })?;
+
+            touched.push(addresses);
         }
-    }
 
-    let addresses: Vec<BlockContentAddressesInner> = builder.into_model()?;
+        touched
+    };
+
+    let addresses: Vec<BlockContentAddressesInner> = builder
+        .with_touched_addresses(touched_addresses)
+        .into_model()?;
 
     // Blockfrost sorts this endpoint alphabetically by address and ignores
     // the `order` param; only count/page apply.
@@ -922,69 +952,47 @@ mod tests {
         );
     }
 
-    /// Exercises the `produces_at` edge for input-side address resolution.
-    /// Invalid script txs don't produce their regular outputs, but they can
-    /// produce a collateral return at the next output index. When a later tx
-    /// spends that collateral return, block-address mapping must resolve the
-    /// collateral-return address from the dependency tx CBOR.
+    /// Feeds the builder one set of touched addresses per tx and checks the
+    /// grouping: a fake address touched only by the second tx must come back
+    /// listed under exactly that tx.
     #[test]
-    fn block_addresses_resolves_spent_collateral_return_address() {
-        use dolos_core::{EraCbor, TxoRef};
-        use dolos_testing::{
-            synthetic::{
-                build_phase2_invalid_tx_cbor, build_synthetic_blocks, SyntheticBlockConfig,
-            },
-            TestAddress,
-        };
-        use pallas::ledger::traverse::{Era, MultiEraBlock};
-
-        // Phase-2-invalid dep tx with no regular outputs. A collateral return
-        // is indexed after the regular outputs, so with none it sits at
-        // index 0.
-        let collateral_return_address = TestAddress::Alice;
-        let dep_tx_cbor = build_phase2_invalid_tx_cbor(
-            // arbitrary, never resolved in this test
-            TxoRef([1u8; 32].into(), 0),
-            // arbitrary, never resolved in this test
-            TxoRef([2u8; 32].into(), 16),
-            collateral_return_address.clone(), // what the spender's input must resolve to
-            1_500_000,
-        );
+    fn block_addresses_attribute_touched_addresses() {
+        use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+        use pallas::ledger::traverse::MultiEraBlock;
 
         let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
         let raw = blocks.first().expect("missing synthetic block");
 
         let block = MultiEraBlock::decode(raw).expect("failed to decode block");
         let txs = block.txs();
+        // the second tx, so attribution can't pass by "always the first tx"
         let spender = txs.get(1).expect("fixture needs a second tx");
-        let consumed = spender.consumes();
-        let input = consumed.first().expect("spender must consume");
-        // check test wiring
-        assert_eq!(
-            input.index(),
-            0,
-            "the spender's input index must match the index of the dep's collateral return (0)"
-        );
+        let spender_hash = spender.hash().to_string();
 
-        let mut builder = BlockModelBuilder::new(raw).expect("failed to build block model");
-        let dep_cbor = EraCbor(Era::Conway.into(), dep_tx_cbor);
-        builder
-            .load_dep(*input.hash(), &dep_cbor)
-            .expect("failed to load dep");
-        let addresses: Vec<BlockContentAddressesInner> =
-            builder.into_model().expect("failed to map block addresses");
+        // an address only reachable through input resolution, never produced
+        // by any tx of the block
+        let input_side_address = "addr_input_side_only";
+
+        let mut touched = vec![BTreeSet::new(); txs.len()];
+        touched[1].insert(input_side_address.to_string());
+
+        let builder = BlockModelBuilder::new(raw).expect("failed to build block model");
+        let addresses: Vec<BlockContentAddressesInner> = builder
+            .with_touched_addresses(touched)
+            .into_model()
+            .expect("failed to map block addresses");
 
         let entry = addresses
             .iter()
-            .find(|entry| entry.address == collateral_return_address.as_str())
-            .expect("collateral-return address missing from response");
+            .find(|entry| entry.address == input_side_address)
+            .expect("touched address missing from response");
 
         assert!(
             entry
                 .transactions
                 .iter()
-                .any(|tx| tx.tx_hash == spender.hash().to_string()),
-            "spender tx must be attributed to the consumed collateral-return address"
+                .any(|tx| tx.tx_hash == spender_hash),
+            "spender tx must be attributed to the touched address"
         );
     }
 
