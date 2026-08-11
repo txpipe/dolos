@@ -2041,7 +2041,7 @@ pub struct BlockModelBuilder<'a> {
     previous: Option<MultiEraBlock<'a>>,
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
-    touched_addresses: Vec<BTreeSet<String>>,
+    touched_addresses: Option<Vec<BTreeSet<String>>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -2054,7 +2054,7 @@ impl<'a> BlockModelBuilder<'a> {
             next: None,
             tip: None,
             chain: None,
-            touched_addresses: Vec::new(),
+            touched_addresses: None,
         })
     }
 
@@ -2069,12 +2069,13 @@ impl<'a> BlockModelBuilder<'a> {
     where
         F: FnMut(&MultiEraTx<'_>) -> Result<BTreeSet<String>, StatusCode>,
     {
-        self.touched_addresses = self
-            .block
-            .txs()
-            .iter()
-            .map(collect)
-            .collect::<Result<_, _>>()?;
+        self.touched_addresses = Some(
+            self.block
+                .txs()
+                .iter()
+                .map(collect)
+                .collect::<Result<_, _>>()?,
+        );
 
         Ok(self)
     }
@@ -2396,11 +2397,14 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
 
         let txs = block.txs();
 
+        let touched_addresses = touched_addresses.ok_or_else(|| {
+            tracing::error!("touched addresses not collected for block");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
         // `with_touched_addresses` walks the block itself, so one set per tx
-        // is guaranteed; a mismatch here means it was never called. Zipping
-        // anyway would silently return an empty or partial response - refuse
-        // instead, the same way InputResolver::resolve refuses an input it
-        // was never prepared for.
+        // is guaranteed. Refuse any mismatch rather than silently returning a
+        // partial response.
         if touched_addresses.len() != txs.len() {
             tracing::error!(
                 txs = txs.len(),
