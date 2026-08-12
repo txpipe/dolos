@@ -1,1 +1,5 @@
 *       @scarmuega
+
+# minibf is owned by the dolos-devs team: PRs touching only this path can be
+# approved and merged without a review from @scarmuega.
+/crates/minibf/ @scarmuega @txpipe/dolos-devs
