@@ -1650,6 +1650,84 @@ fn staging_stays_in_the_scratch_directory_and_leaves_nothing() {
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// A staging directory that cannot be used says which one, in both directions.
+///
+/// The operator this is for has just been told, by `--scratch-dir`'s own help,
+/// to point the tool at a volume with room on it — so the paths that arrive
+/// here are typos, unmounted volumes, and directories owned by somebody else.
+/// What they used to get was `io error: File exists (os error 17)`, three
+/// times over and naming neither the path nor what it was for, because
+/// `std::io::Error` carries the errno and not the path that produced it.
+///
+/// Both directions, because one [`Options::scratch_dir`] serves both — a sink
+/// on the way up and a pulled blob on the way down — and fixing the direction
+/// somebody happened to test first is how this defect would come back.
+///
+/// The unusable directory is an existing regular file: `create_dir_all` cannot
+/// turn one into a directory for anybody, `root` included, so it reproduces on
+/// every platform and under whatever user CI runs as.
+/// `an_unusable_staging_directory_names_itself` in `src/oci.rs` makes the same
+/// claim without a container; this one makes it through a real publish and a
+/// real pull.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_staging_directory_that_cannot_be_used_names_itself() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    let root = tempfile::tempdir().unwrap();
+    let occupied = root.path().join("not-a-directory");
+    std::fs::write(&occupied, b"").unwrap();
+
+    let names_it = |err: &Error| {
+        assert!(
+            matches!(err, Error::Scratch { dir, .. } if dir == &occupied),
+            "fell through to the catch-all: {err:?}",
+        );
+
+        let message = err.to_string();
+        assert!(
+            message.contains(&occupied.display().to_string()),
+            "{message}",
+        );
+        assert!(message.contains("staging directory"), "{message}");
+    };
+
+    // Up: the sink stages the layer it is building.
+    let (header_scope, scope) = notes_scope(3);
+    let Err(err) = fixture
+        .registry_staging_in("stelae/occupied", Some(occupied.clone()))
+        .layer_sink(
+            &ToyProfile,
+            &LayerSpec::new("notes", header_scope, scope),
+            COMPRESSION_LEVEL,
+        )
+    else {
+        panic!("staged a layer in a regular file")
+    };
+
+    names_it(&err);
+
+    // Down: the same directory, against a stele that is really there. Published
+    // through a staging directory that works, so what fails below is the pull.
+    let staged = tempfile::tempdir().unwrap();
+    let published = write_stele(
+        &fixture.registry_staging_in("stelae/occupied", Some(staged.path().to_owned())),
+        3,
+    );
+
+    let reader = fixture.registry_staging_in("stelae/occupied", Some(occupied.clone()));
+    let stele = reader.pull_latest(&ToyProfile).unwrap();
+    let index = stele.blob_index().unwrap();
+
+    let err = stele
+        .stream_layer(&index, &ToyProfile, &published.layers[0], Limits::default())
+        .expect_err("staged a pulled blob in a regular file");
+
+    names_it(&err);
+}
+
 /// `latest` tells "this repository holds nothing" apart from "this repository
 /// could not be read", which is the distinction a publisher's history chain
 /// rests on.
