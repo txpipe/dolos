@@ -1518,10 +1518,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // The resumption record
-    // -----------------------------------------------------------------------
-    //
     // What a record decides on its own, which is everything except whether the
     // registry still holds a blob. That last question needs a registry and is
     // in `tests/publish.rs`, with the interruption that raises it.

@@ -601,10 +601,6 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Resuming an interrupted publish
-// ---------------------------------------------------------------------------
-
 /// Done criterion 1: a restarted publish never rebuilds an epoch layer it
 /// already uploaded.
 ///
