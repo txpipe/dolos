@@ -777,72 +777,26 @@ fn blocks_by_tag_stream<D>(
     facade: AsyncQueryFacade<D>,
     dimension: TagDimension,
     key: Vec<u8>,
-    mut start_slot: BlockSlot,
-    mut end_slot: BlockSlot,
+    start_slot: BlockSlot,
+    end_slot: BlockSlot,
     order: SlotOrder,
 ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    async_stream::try_stream! {
-        loop {
-            // we fetch slots in chunks to avoid holding the index read transaction for too long
-            // and to avoid loading all slots into memory at once
-            let slots: Vec<BlockSlot> = facade
-                .run_blocking({
-                    let key = key.clone();
-                    move |domain| {
-                        let iter = domain
-                            .indexes()
-                            .slots_by_tag(dimension, &key, start_slot, end_slot)?;
-
-                        let slots = match order {
-                            SlotOrder::Asc => iter.take(SLOT_CHUNK_SIZE).collect::<Result<Vec<_>, _>>()?,
-                            SlotOrder::Desc => iter.rev().take(SLOT_CHUNK_SIZE).collect::<Result<Vec<_>, _>>()?,
-                        };
-
-                        Ok(slots)
-                    }
-                })
-                .await?;
-
-            if slots.is_empty() {
-                break;
-            }
-
-            for slot in slots {
-                let block = facade.block_by_slot(slot).await?;
-                yield (slot, block);
-
-                // update bounds to avoid re-fetching same slots in next iteration
-                match order {
-                    SlotOrder::Asc => start_slot = slot + 1,
-                    SlotOrder::Desc => {
-                        if slot == 0 {
-                            return;
-                        }
-                        end_slot = slot - 1;
-                    }
-                }
-            }
-
-            match order {
-                SlotOrder::Asc if start_slot > end_slot => break,
-                SlotOrder::Desc if end_slot < start_slot => break,
-                _ => {}
-            }
-        }
-    }
+    blocks_by_tags_stream(facade, vec![(dimension, key)], start_slot, end_slot, order)
 }
 
-/// Like [`blocks_by_tag_stream`], but for the ordered union of several
-/// (dimension, key) tags. A slot shared by more than one tag comes out once.
+/// Stream blocks tagged by any of the given (dimension, key) tags, in slot
+/// order. A slot shared by more than one tag comes out once.
 ///
-/// Each round fetches up to [`SLOT_CHUNK_SIZE`] slots per tag from the
-/// remaining window. It then emits only the first [`SLOT_CHUNK_SIZE`] slots
-/// of the merged order. Every tag contributed its closest slots, so the
-/// merged closest chunk is complete. The next round re-fetches the cut-off
-/// rest from the advanced window.
+/// Slots come in chunks, so no round holds the index read transaction for
+/// long or loads a full slot list into memory. Each round fetches up to
+/// [`SLOT_CHUNK_SIZE`] slots per tag from the remaining window. It then
+/// emits only the first [`SLOT_CHUNK_SIZE`] slots of the merged order.
+/// Every tag contributed its closest slots, so the merged closest chunk is
+/// complete. The next round re-fetches the cut-off rest from the advanced
+/// window.
 fn blocks_by_tags_stream<D>(
     facade: AsyncQueryFacade<D>,
     tags: Vec<(TagDimension, Vec<u8>)>,

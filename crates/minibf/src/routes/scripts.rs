@@ -10,10 +10,11 @@ use blockfrost_openapi::models::{
     script_datum::ScriptDatum,
     script_datum_cbor::ScriptDatumCbor,
     script_json::ScriptJson,
-    script_redeemers_inner::{Purpose, ScriptRedeemersInner},
+    script_redeemers_inner::ScriptRedeemersInner,
     script_utxos_inner::ScriptUtxosInner,
 };
 use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoIndexExt, ScriptLanguage, SlotOrder};
+use dolos_cardano::ChainSummary;
 use dolos_core::Domain;
 use futures_util::StreamExt;
 use pallas::crypto::hash::Hash;
@@ -27,7 +28,9 @@ use crate::{
     error::Error,
     inputs::InputDeps,
     log_and_500,
-    mapping::{redeemer_fee, redeemer_script_hash, IntoModel, PlutusDataWrapper},
+    mapping::{
+        redeemer_fee, redeemer_script_hash, script_redeemer_purpose, IntoModel, PlutusDataWrapper,
+    },
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -186,13 +189,32 @@ where
         .query()
         .script_by_hash(&hash)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(log_and_500("failed to query script by hash"))?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let chain = domain
-        .get_chain_summary()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let matches = scan_script_redeemers(&domain, hash, &pagination).await?;
 
+    let items = matches
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
+
+    Ok(Json(items))
+}
+
+/// Scan the chain for redeemers that point at `hash`, in the pagination's
+/// order. The scan stops once it has enough matches to fill the requested
+/// page.
+async fn scan_script_redeemers<D>(
+    domain: &Facade<D>,
+    hash: Hash<28>,
+    pagination: &Pagination,
+) -> Result<Vec<ScriptRedeemersInner>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let chain = domain.get_chain_summary()?;
     let end_slot = domain.get_tip_slot()?;
     let order = SlotOrder::from(pagination.order);
 
@@ -207,20 +229,14 @@ where
     let mut matches: Vec<ScriptRedeemersInner> = Vec::new();
     let target = pagination.from() + pagination.count;
 
-    'scan: while let Some(next) = stream.next().await {
-        let (slot, body) = next.map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    while let Some(next) = stream.next().await {
+        let (slot, body) = next.map_err(log_and_500("failed to stream script activity"))?;
 
         let Some(body) = body else {
             continue;
         };
 
-        let block = MultiEraBlock::decode(&body).map_err(|err| {
-            tracing::error!(?err);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        let block = MultiEraBlock::decode(&body).map_err(log_and_500("failed to decode block"))?;
 
         let txs = block.txs();
 
@@ -247,7 +263,9 @@ where
                 .any(|redeemer| matches!(redeemer.tag(), RedeemerTag::Spend))
         });
 
-        let mut resolver = deps.prepare(&domain, spending).await?;
+        let mut resolver = deps.prepare(domain, spending).await?;
+
+        let (epoch, _) = chain.slot_epoch(slot);
 
         for tx in with_redeemers {
             let mut redeemers = tx.redeemers();
@@ -265,37 +283,19 @@ where
                     output
                         .address()
                         .map(Some)
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                        .map_err(log_and_500("failed to decode input address"))
                 })?;
 
                 if resolved != Some(hash) {
                     continue;
                 }
 
-                let purpose = match redeemer.tag() {
-                    RedeemerTag::Spend => Purpose::Spend,
-                    RedeemerTag::Mint => Purpose::Mint,
-                    RedeemerTag::Cert => Purpose::Cert,
-                    RedeemerTag::Reward => Purpose::Reward,
-                    // unreachable: vote and propose resolve to None above
-                    _ => continue,
+                // never None here: vote and propose resolve to None above
+                let Some(purpose) = script_redeemer_purpose(redeemer.tag()) else {
+                    continue;
                 };
 
-                let (epoch, _) = chain.slot_epoch(slot);
-
-                let prices = match prices_by_epoch.entry(epoch) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        let pparams = domain.get_effective_pparams_for_epoch(epoch, &chain)?;
-
-                        let prices = pparams
-                            .execution_costs()
-                            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                        entry.insert(prices)
-                    }
-                };
-
+                let prices = prices_for_epoch(domain, &chain, epoch, &mut prices_by_epoch)?;
                 let units = redeemer.ex_units();
                 let fee = redeemer_fee(&units, prices)?;
                 let data_hash = redeemer.data().compute_hash().to_string();
@@ -313,19 +313,39 @@ where
                 });
 
                 if matches.len() >= target {
-                    break 'scan;
+                    return Ok(matches);
                 }
             }
         }
     }
 
-    let items = matches
-        .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .collect();
+    Ok(matches)
+}
 
-    Ok(Json(items))
+/// The execution prices of an epoch, memoized: most scanned blocks
+/// contribute no matches and must not pay a pparams lookup.
+fn prices_for_epoch<'a, D>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    epoch: Epoch,
+    cache: &'a mut HashMap<Epoch, ExUnitPrices>,
+) -> Result<&'a ExUnitPrices, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    match cache.entry(epoch) {
+        Entry::Occupied(entry) => Ok(entry.into_mut()),
+        Entry::Vacant(entry) => {
+            let pparams = domain.get_effective_pparams_for_epoch(epoch, chain)?;
+
+            let prices = pparams.execution_costs().ok_or_else(|| {
+                tracing::error!(epoch, "no execution prices in effective pparams");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            Ok(entry.insert(prices))
+        }
+    }
 }
 
 pub async fn by_datum_hash<D>(
