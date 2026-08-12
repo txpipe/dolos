@@ -826,6 +826,7 @@ mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::asset::Asset;
+    use dolos_testing::synthetic::SyntheticBlockConfig;
 
     fn invalid_asset() -> &'static str {
         "not-hex-asset"
@@ -944,6 +945,37 @@ mod tests {
         let assets: Vec<AssetPolicyInner> =
             serde_json::from_slice(&bytes).expect("failed to parse policy assets");
         assert!(assets.iter().any(|a| a.asset == unit));
+    }
+
+    #[tokio::test]
+    async fn assets_by_policy_ascending_pagination_preserves_first_mint_order() {
+        let asset_names = ["FIRST", "SECOND", "THIRD"];
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: asset_names.len(),
+            txs_per_block: 1,
+            asset_names_by_block: asset_names.iter().map(|x| (*x).to_string()).collect(),
+            ..Default::default()
+        });
+        let policy = app.vectors().policy_id.as_str();
+
+        for (index, asset_name) in asset_names.into_iter().enumerate() {
+            let page = index + 1;
+            let path = format!("/assets/policy/{policy}?order=asc&page={page}&count=1");
+            let (status, bytes) = app.get_bytes(&path).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "unexpected status {status} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let assets: Vec<AssetPolicyInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse policy assets");
+            let expected = format!("{policy}{}", hex::encode(asset_name));
+            assert_eq!(assets.len(), 1);
+            assert_eq!(assets[0].asset, expected);
+            assert_eq!(assets[0].quantity, "1");
+        }
     }
 
     #[tokio::test]

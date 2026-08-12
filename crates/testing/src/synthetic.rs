@@ -46,6 +46,7 @@ pub struct SyntheticBlockConfig {
     pub metadata_entries: Vec<(u64, alonzo::Metadatum)>,
     pub policy_id: [u8; 28],
     pub asset_name: String,
+    pub asset_names_by_block: Vec<String>,
     pub lovelace: u64,
     pub asset_amount: u64,
     pub mint_amount: i64,
@@ -100,6 +101,7 @@ impl Default for SyntheticBlockConfig {
             metadata_entries: vec![],
             policy_id: [1u8; 28],
             asset_name: "SYNTH".to_string(),
+            asset_names_by_block: vec![],
             lovelace: crate::MIN_UTXO_AMOUNT,
             asset_amount: 1,
             mint_amount: 1,
@@ -223,9 +225,19 @@ pub fn build_synthetic_blocks(
         .unwrap_or(cfg.metadata_label);
 
     let policy_id = Hash::from(cfg.policy_id);
-    let asset_name = Bytes::from(cfg.asset_name.as_bytes().to_vec());
+    let block_count = cfg.block_count.max(1);
+    let asset_names = if cfg.asset_names_by_block.is_empty() {
+        vec![cfg.asset_name.clone(); block_count]
+    } else {
+        assert_eq!(
+            cfg.asset_names_by_block.len(),
+            block_count,
+            "asset_names_by_block must contain one name per block"
+        );
+        cfg.asset_names_by_block.clone()
+    };
     let policy_id_hex = hex::encode(cfg.policy_id);
-    let asset_name_hex = hex::encode(cfg.asset_name.as_bytes());
+    let asset_name_hex = hex::encode(asset_names[0].as_bytes());
     let fixture_extras = Some(build_datum_and_script_fixture());
 
     let stake_cred = Address::from_bech32(&cfg.address)
@@ -253,7 +265,6 @@ pub fn build_synthetic_blocks(
         std::collections::HashMap::new();
     let mut account_withdrawals = Vec::new();
 
-    let block_count = cfg.block_count.max(1);
     let txs_per_block = cfg.txs_per_block.max(1);
     let submit_tx_hash = tx_sequence_to_hash(block_count as u64 * txs_per_block as u64 + 1);
     let submit_ref = TxoRef(submit_tx_hash, 0);
@@ -266,9 +277,10 @@ pub fn build_synthetic_blocks(
     });
     let mut prev_block_hash: Option<Hash<32>> = None;
 
-    for offset in 0..block_count {
+    for (offset, asset_name) in asset_names.iter().enumerate() {
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
+        let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
         let mut tx_specs = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
@@ -386,7 +398,7 @@ pub fn build_synthetic_blocks(
     let asset_unit = format!(
         "{}{}",
         hex::encode(cfg.policy_id),
-        hex::encode(cfg.asset_name.as_bytes())
+        hex::encode(asset_names[0].as_bytes())
     );
 
     let stake_address = match Address::from_bech32(&cfg.address).expect("invalid synthetic address")
