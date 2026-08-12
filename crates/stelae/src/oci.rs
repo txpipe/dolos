@@ -118,7 +118,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{Read, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -502,6 +502,18 @@ impl Registry {
                 state: Mutex::new(PushState::default()),
             }),
         })
+    }
+
+    /// Where this transport stages the layers it moves, in either direction.
+    ///
+    /// [`Options::scratch_dir`] as it was given, so a caller that wants to
+    /// size the staging volume asks the transport that will use it rather than
+    /// re-deriving the path it handed over — two derivations of one directory
+    /// is one more than can be kept in step. `None` is the platform temporary
+    /// directory, which is not a path this can name because
+    /// [`Shared::scratch`] never names one either.
+    pub fn scratch_dir(&self) -> Option<&Path> {
+        self.shared.scratch_dir.as_deref()
     }
 
     /// What has been pushed through this transport since it was opened, or

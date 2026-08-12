@@ -108,7 +108,9 @@ fn restore_into<B: ToyStores>(
     let stele = SteleDir::open(root)?;
 
     let plan = restore::plan(&stele, magic, None)?;
-    plan.preflight(root)?;
+    // A directory stele stages nothing — its blobs are read where they are —
+    // so the only volume this restore has a need on is the destination.
+    plan.preflight(root, None)?;
 
     let index = stele.blob_index()?;
 
@@ -979,6 +981,21 @@ fn the_remaining_download_excludes_what_is_already_done() {
         "the fixture's layers did not compress, so this proves nothing"
     );
 
+    // One pass, two numbers, and they answer different questions: the sum is
+    // what the download costs, and the largest single layer is what a transport
+    // staging one layer at a time has to fit on disk while it drains it.
+    let widest = |descriptors: &mut dyn Iterator<Item = &stelae::LayerDescriptor>| {
+        descriptors
+            .map(|d| stele.compressed_size(&index, d).unwrap().unwrap())
+            .max()
+    };
+
+    assert_eq!(fresh.largest_compressed, widest(&mut plan.layers()));
+    assert!(
+        fresh.largest_compressed.unwrap() < fresh.compressed_bytes,
+        "a fixture of one layer would make the peak and the total the same number"
+    );
+
     let mut progress = RestoreProgress::new(inscription.digest().unwrap());
     let epochs = epoch_diff_ids(&inscription);
 
@@ -993,6 +1010,11 @@ fn the_remaining_download_excludes_what_is_already_done() {
 
     // The tip is still in it, always.
     assert_eq!(resumed.layers, STATE_SHARDS as usize);
+
+    // So the peak a resumed run stages is the widest shard, not the widest
+    // layer of the stele — the epoch layers it skips are not staged either.
+    assert_eq!(resumed.largest_compressed, widest(&mut plan.tip_layers()));
+    assert!(resumed.largest_compressed <= fresh.largest_compressed);
 }
 
 /// The epoch layers and the state shards, each in the order the driver reaches

@@ -213,6 +213,15 @@ impl Fixture {
 
         registry::open(&repository, true, auth, self.scratch.path().to_path_buf()).unwrap()
     }
+
+    /// Where the transports this fixture opens stage their layers.
+    ///
+    /// Exposed so a suite can hold a transport's own answer against what the
+    /// fixture handed it: the preflight sizes the volume the transport names,
+    /// so the two agreeing is the whole reason it sizes the right one.
+    pub fn scratch(&self) -> &std::path::Path {
+        self.scratch.path()
+    }
 }
 
 impl Drop for Fixture {

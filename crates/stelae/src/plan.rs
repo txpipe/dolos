@@ -247,6 +247,18 @@ pub struct Remaining {
     /// says so. A total that silently under-reports is worse than one a caller
     /// can see the shape of.
     pub unsized_layers: usize,
+
+    /// The largest of those layers, compressed.
+    ///
+    /// A restore stages one layer at a time — pulled, staged, drained and
+    /// dropped in sequence — so what its scratch volume has to hold at once is
+    /// this and never [`Remaining::compressed_bytes`]. Summed here rather than
+    /// in a second pass because the walk that sums the total is already
+    /// visiting every size there is.
+    ///
+    /// `None` when nothing is left to fetch, and when no remaining layer could
+    /// be sized at all.
+    pub largest_compressed: Option<u64>,
 }
 
 impl Remaining {
@@ -257,6 +269,10 @@ impl Remaining {
     /// is the same one the rest of this module keeps: which layers a restore
     /// needs is the profile's question, and how big they are is the
     /// transport's.
+    ///
+    /// One pass answers both questions a caller has about these bytes: what
+    /// they cost to move, and — through [`Remaining::largest_compressed`] —
+    /// what has to fit on disk while one of them is being moved.
     pub fn of<'a, R, I>(stele: &R, index: &BlobIndex, layers: I) -> Result<Self, Error>
     where
         R: SteleReader,
@@ -268,7 +284,10 @@ impl Remaining {
             remaining.layers += 1;
 
             match stele.compressed_size(index, descriptor)? {
-                Some(bytes) => remaining.compressed_bytes += bytes,
+                Some(bytes) => {
+                    remaining.compressed_bytes += bytes;
+                    remaining.largest_compressed = remaining.largest_compressed.max(Some(bytes));
+                }
                 None => remaining.unsized_layers += 1,
             }
         }

@@ -489,3 +489,104 @@ fn a_publisher_can_ask_where_it_stands() {
     assert!(message.contains('4'), "{message}");
     assert!(message.contains("3 sequences ahead"), "{message}");
 }
+
+// ---------------------------------------------------------------------------
+// The staging preflight
+// ---------------------------------------------------------------------------
+
+/// What a publish stages at once, sized off the stele before it.
+///
+/// The half of the publish-side preflight that needs a registry: a manifest
+/// stating a compressed size per layer is the only thing this number can come
+/// from, and it is why the check costs no `HEAD` and no extra round trip
+/// beyond the one `standing` already makes. What the number then *means* for a
+/// volume — refuse a measured shortfall, warn about anything else — is decided
+/// in `registry`'s own unit tests, which need no registry to decide it.
+///
+/// The peak is deliberately not the stele's size. A publish holds all sixteen
+/// shard sinks open across one walk of the store plus whatever epoch layer is
+/// in flight beside them, and never the whole document, so an operator sizing
+/// a scratch volume off the repository's total would size it for a run that
+/// never happens.
+#[test]
+#[ignore]
+fn a_publish_sizes_its_staging_off_the_stele_before_it() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/staging");
+
+    // The volume the preflight sizes is the one the transport will write to,
+    // because the transport is what it asks. Both the publish check and the
+    // restore driver stand on this, and neither could catch it going wrong: a
+    // preflight against the wrong directory passes for the same reason the
+    // right one does.
+    assert_eq!(
+        stelae::oci::Registry::scratch_dir(&repository),
+        Some(fixture.scratch()),
+    );
+
+    // The no-predecessor path: an empty repository states no sizes, so nothing
+    // can be measured, so nothing is refused. A first publish runs.
+    assert_eq!(registry::staging_peak(&repository).unwrap(), None);
+    registry::preflight(&repository).unwrap();
+
+    node.publish(&repository, &node.first, false);
+
+    let peak = registry::staging_peak(&repository).unwrap().unwrap();
+
+    assert_eq!(
+        peak.unsized_layers, 0,
+        "a manifest states a size for every layer it names"
+    );
+
+    // The same arithmetic, from the same manifest, read back through the
+    // command an operator would read it with — so the peak is held against the
+    // registry's own numbers rather than against a literal that would have to
+    // be maintained beside the fixture.
+    let inspected = registry::inspect(&repository, registry::Point::Latest).unwrap();
+
+    let mut state_bytes = 0;
+    let mut largest_other_bytes = 0;
+
+    for (descriptor, size) in inspected
+        .inscription
+        .layers
+        .iter()
+        .zip(&inspected.compressed)
+    {
+        let size = size.expect("the manifest sizes every layer");
+
+        match descriptor.kind.as_str() {
+            dolos_snapshot::STATE => state_bytes += size,
+            _ => largest_other_bytes = std::cmp::max(largest_other_bytes, size),
+        }
+    }
+
+    assert_eq!(peak.state_bytes, state_bytes, "all sixteen shards at once");
+    assert_eq!(
+        peak.largest_other_bytes, largest_other_bytes,
+        "and the largest single layer beside them"
+    );
+    assert_eq!(peak.bytes(), state_bytes + largest_other_bytes);
+
+    // Epoch 0's other two layers are in the stele and not in the peak, which is
+    // the whole difference between what a repository holds and what a publish
+    // holds at once.
+    assert!(
+        peak.bytes() < inspected.total_compressed,
+        "peak {} is not below the stele's {} compressed bytes",
+        peak.bytes(),
+        inspected.total_compressed,
+    );
+
+    // And the volume the fixture stages on holds it, so the publish that
+    // follows is not refused.
+    registry::preflight(&repository).unwrap();
+
+    eprintln!(
+        "staging peak: {} bytes ({state_bytes} across sixteen shards, {largest_other_bytes} for \
+         the largest other layer), against {} compressed bytes in the repository",
+        peak.bytes(),
+        inspected.total_compressed,
+    );
+}
