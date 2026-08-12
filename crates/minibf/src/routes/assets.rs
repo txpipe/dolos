@@ -727,13 +727,15 @@ where
     Ok(Json(transactions))
 }
 
-fn collect_minted_subjects(block: &[u8], policy: &[u8], seen: &mut Vec<Vec<u8>>) {
+fn collect_minted_subjects(
+    block: &[u8],
+    policy: &[u8],
+    seen: &mut Vec<Vec<u8>>,
+) -> Result<(), StatusCode> {
     // Blockfrost groups the `ma_tx_mint` rows by policy and name. Then it sorts
     // the rows by the first mint event. The caller supplies blocks in ascending
     // slot order. `seen` keeps the first subject for each name.
-    let Ok(block) = MultiEraBlock::decode(block) else {
-        return;
-    };
+    let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for tx in block.txs() {
         for policy_assets in tx.mints() {
@@ -751,6 +753,8 @@ fn collect_minted_subjects(block: &[u8], policy: &[u8], seen: &mut Vec<Vec<u8>>)
             }
         }
     }
+
+    Ok(())
 }
 
 pub async fn by_policy<D>(
@@ -786,7 +790,7 @@ where
         let Some(block) = block else {
             continue;
         };
-        collect_minted_subjects(&block, &policy, &mut subjects);
+        collect_minted_subjects(&block, &policy, &mut subjects)?;
         if needed_unique.is_some_and(|needed| subjects.len() >= needed) {
             break;
         }
