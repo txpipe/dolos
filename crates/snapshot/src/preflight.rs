@@ -231,13 +231,15 @@ fn group_by_volume(sized: &[(&Need, u64, PathBuf)]) -> Vec<Vec<usize>> {
 /// they are spelled — so `--scratch-dir` pointed elsewhere on the same disk is
 /// still summed.
 ///
-/// Elsewhere stable Rust exposes no device id, so the test is containment: one
-/// path being an ancestor of the other. That is right for the default —
-/// `<storage.path>/scratch` is inside `storage.path` — and wrong only for a
-/// mount nested under the storage path, where it sums two needs that do not in
-/// fact share a pool. It over-states the need rather than under-stating it,
-/// which for a refusal with no override is the direction that gets reported
-/// instead of the direction that gets discovered at hour eight.
+/// Elsewhere stable Rust exposes no device id, so the test is the canonical
+/// path's **prefix** — the drive letter or UNC share, which is the coarsest
+/// thing Windows calls a volume. Two directories on `C:` are one pool however
+/// they are spelled and whether or not either contains the other, which is what
+/// containment alone would have got wrong for two siblings. What it still
+/// cannot see is a volume *mounted into a folder* on another drive: those read
+/// as one pool and are two, so the need is over-stated. For a refusal with no
+/// override that is the direction that gets reported, rather than the direction
+/// that gets discovered at hour eight.
 #[cfg(unix)]
 fn same_volume(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
@@ -258,7 +260,12 @@ fn same_volume(a: &Path, b: &Path) -> bool {
         _ => return false,
     };
 
-    a.starts_with(&b) || b.starts_with(&a)
+    match (a.components().next(), b.components().next()) {
+        (Some(std::path::Component::Prefix(a)), Some(std::path::Component::Prefix(b))) => a == b,
+        // No prefix to compare — not a shape a canonical Windows path has.
+        // Fall back to the narrowest honest answer.
+        _ => a == b,
+    }
 }
 
 #[cfg(test)]
@@ -294,37 +301,51 @@ mod tests {
     ///
     /// Each of these fits on its own and the pair does not, so a check that
     /// passed them separately would pass this and a check that sums them
-    /// refuses it. `scratch` is a child of the destination, which is what the
-    /// default `<storage.path>/scratch` makes of every restore that does not
-    /// name one.
+    /// refuses it.
+    ///
+    /// Both shapes the pair can take, because they are not the same test on
+    /// every platform: `<destination>/scratch` is what the default makes of
+    /// every restore that names no directory, and a *sibling* is what
+    /// `--scratch-dir` next to the storage path makes of one that does.
+    /// Containment answers the first and not the second.
     #[test]
     fn needs_sharing_a_volume_are_summed() {
-        let temp = tempfile::tempdir().unwrap();
-        let scratch = temp.path().join("scratch");
-        let available = fs4::available_space(temp.path()).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("data");
+        std::fs::create_dir(&storage).unwrap();
+
+        // A sibling only counts as one if it exists: an absent directory is
+        // measured through its parent, which here is an *ancestor* of the
+        // storage path and so would prove nothing about siblings.
+        let beside = root.path().join("staging");
+        std::fs::create_dir(&beside).unwrap();
+
+        let available = fs4::available_space(&storage).unwrap();
         let each = available / 2 + 1;
 
-        check(&[Need::of("restoring it", temp.path(), each)]).unwrap();
-        check(&[Need::of("staging the layers it pulls", &scratch, each)]).unwrap();
+        for scratch in [storage.join("scratch"), beside] {
+            check(&[Need::of("restoring it", &storage, each)]).unwrap();
+            check(&[Need::of("staging the layers it pulls", &scratch, each)]).unwrap();
 
-        let err = check(&[
-            Need::of("restoring it", temp.path(), each),
-            Need::of("staging the layers it pulls", &scratch, each),
-        ])
-        .unwrap_err();
+            let err = check(&[
+                Need::of("restoring it", &storage, each),
+                Need::of("staging the layers it pulls", &scratch, each),
+            ])
+            .unwrap_err();
 
-        let Error::NotEnoughSpace(message) = &err else {
-            panic!("{err:?}");
-        };
+            let Error::NotEnoughSpace(message) = &err else {
+                panic!("{err:?}");
+            };
 
-        assert!(message.contains("share one volume"), "{message}");
+            assert!(message.contains("share one volume"), "{message}");
 
-        for (what, path) in [
-            ("restoring it", temp.path().to_path_buf()),
-            ("staging the layers it pulls", scratch),
-        ] {
-            let part = format!("{what} ({each} bytes at {})", path.display());
-            assert!(message.contains(&part), "{part:?} missing from {message:?}");
+            for (what, path) in [
+                ("restoring it", storage.clone()),
+                ("staging the layers it pulls", scratch.clone()),
+            ] {
+                let part = format!("{what} ({each} bytes at {})", path.display());
+                assert!(message.contains(&part), "{part:?} missing from {message:?}");
+            }
         }
     }
 

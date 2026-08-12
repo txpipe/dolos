@@ -553,7 +553,14 @@ pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
             None => peak.unsized_layers += 1,
             // Every shard is open at once, so they add. Everything else is one
             // layer at a time beside them, so only the biggest counts.
-            Some(bytes) if descriptor.kind == STATE => peak.state_bytes += bytes,
+            //
+            // Saturating because these are a manifest's numbers and a manifest
+            // is not this node's document: a wrapped sum would be a *small*
+            // need, which is the one direction a refusal must never be wrong
+            // in.
+            Some(bytes) if descriptor.kind == STATE => {
+                peak.state_bytes = peak.state_bytes.saturating_add(bytes)
+            }
             Some(bytes) => peak.largest_other_bytes = peak.largest_other_bytes.max(bytes),
         }
     }

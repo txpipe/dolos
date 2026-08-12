@@ -287,6 +287,14 @@ impl Plan {
         )];
 
         if let Some(staging) = staging {
+            if staging.unsized_layers > 0 {
+                tracing::warn!(
+                    unsized_layers = staging.unsized_layers,
+                    "this stele's transport states no compressed size for some of the layers it \
+                     would pull; the staging estimate is a floor"
+                );
+            }
+
             needs.push(preflight::Need::or_unsized(
                 "staging the layers it pulls",
                 staging.dir,
@@ -314,6 +322,13 @@ pub struct Staging<'a> {
     /// The largest layer this run will stage, compressed. `None` when the
     /// transport could size none of them, which warns rather than refuses.
     pub largest_layer: Option<u64>,
+    /// How many of the layers it will stage the transport could not size.
+    ///
+    /// Carried beside `largest_layer` rather than folded into it: a run where
+    /// one layer is sized and another is not has a `largest_layer` that is a
+    /// floor, and a floor that says so is worth more than a `None` that
+    /// abandons the check. The count is what makes it say so.
+    pub unsized_layers: usize,
 }
 
 /// Read a stele's inscription and decide what restoring it into this node
@@ -857,6 +872,7 @@ where
     let staging = scratch_dir.map(|dir| Staging {
         dir,
         largest_layer: outlook.remaining.largest_compressed,
+        unsized_layers: outlook.remaining.unsized_layers,
     });
 
     plan.preflight(node.storage_path, staging)?;
@@ -1510,23 +1526,26 @@ mod tests {
             skipped_epochs: 0,
         };
 
-        let staging = |largest_layer| {
+        let staging = |largest_layer, unsized_layers| {
             plan.preflight(
                 temp.path(),
                 Some(Staging {
                     dir: &scratch,
                     largest_layer,
+                    unsized_layers,
                 }),
             )
         };
 
-        staging(Some(0)).unwrap();
+        staging(Some(0), 0).unwrap();
 
         // Nothing could size the layers, so nothing refuses: what cannot be
-        // measured warns and proceeds.
-        staging(None).unwrap();
+        // measured warns and proceeds. Nor does a partial sizing, where the
+        // number is a floor and the warning says so.
+        staging(None, 3).unwrap();
+        staging(Some(0), 1).unwrap();
 
-        let err = staging(Some(u64::MAX)).unwrap_err();
+        let err = staging(Some(u64::MAX), 0).unwrap_err();
 
         let Error::NotEnoughSpace(message) = &err else {
             panic!("{err:?}");
