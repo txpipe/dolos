@@ -1,5 +1,7 @@
 use std::{collections::HashMap, ops::Deref, time::Duration};
 
+use indexmap::IndexSet;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -730,11 +732,12 @@ where
 fn collect_minted_subjects(
     block: &[u8],
     policy: &[u8],
-    seen: &mut Vec<Vec<u8>>,
+    seen: &mut IndexSet<Vec<u8>>,
 ) -> Result<(), StatusCode> {
     // Blockfrost groups the `ma_tx_mint` rows by policy and name. Then it sorts
     // the rows by the first mint event. The caller supplies blocks in ascending
-    // slot order. `seen` keeps the first subject for each name.
+    // slot order. `seen` keeps the first subject for each name. The set skips a
+    // repeated name in O(1) and keeps the first-mint order.
     let block = MultiEraBlock::decode(block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for tx in block.txs() {
@@ -746,10 +749,7 @@ fn collect_minted_subjects(
             for asset in policy_assets.assets() {
                 let mut subject = policy.to_vec();
                 subject.extend_from_slice(asset.name());
-
-                if !seen.contains(&subject) {
-                    seen.push(subject);
-                }
+                seen.insert(subject);
             }
         }
     }
@@ -784,7 +784,7 @@ where
 
     let needed_unique =
         matches!(pagination.order, Order::Asc).then(|| pagination.from() + pagination.count);
-    let mut subjects: Vec<Vec<u8>> = Vec::new();
+    let mut subjects: IndexSet<Vec<u8>> = IndexSet::new();
     while let Some(res) = stream.next().await {
         let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let Some(block) = block else {
@@ -801,16 +801,16 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    if matches!(pagination.order, Order::Desc) {
-        subjects.reverse();
-    }
+    // The scan collects the subjects in ascending first-mint order. For `desc`,
+    // reverse this order.
+    let ordered: Box<dyn Iterator<Item = Vec<u8>>> = if matches!(pagination.order, Order::Desc) {
+        Box::new(subjects.into_iter().rev())
+    } else {
+        Box::new(subjects.into_iter())
+    };
 
     let mut items = Vec::new();
-    for subject in subjects
-        .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-    {
+    for subject in ordered.skip(pagination.skip()).take(pagination.count) {
         let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
         let asset_state = domain
             .read_cardano_entity::<AssetState>(entity_key.as_slice())?
