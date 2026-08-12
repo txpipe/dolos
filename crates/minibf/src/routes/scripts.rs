@@ -1,3 +1,5 @@
+use std::collections::{hash_map::Entry, HashMap};
+
 use axum::{
     extract::{Path, Query, State},
     Json,
@@ -8,19 +10,24 @@ use blockfrost_openapi::models::{
     script_datum::ScriptDatum,
     script_datum_cbor::ScriptDatumCbor,
     script_json::ScriptJson,
+    script_redeemers_inner::{Purpose, ScriptRedeemersInner},
     script_utxos_inner::ScriptUtxosInner,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoIndexExt, ScriptLanguage};
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoIndexExt, ScriptLanguage, SlotOrder};
 use dolos_core::Domain;
+use futures_util::StreamExt;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
+use pallas::ledger::primitives::{conway::RedeemerTag, Epoch, ExUnitPrices};
+use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraTx};
 use pallas::{codec::minicbor, ledger::primitives::ToCanonicalJson};
 use reqwest::StatusCode;
 
 use crate::{
     error::Error,
+    inputs::InputDeps,
     log_and_500,
-    mapping::{IntoModel, PlutusDataWrapper},
+    mapping::{redeemer_fee, redeemer_script_hash, IntoModel, PlutusDataWrapper},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -156,6 +163,167 @@ where
     }
 
     let items = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
+
+    Ok(Json(items))
+}
+
+pub async fn by_hash_redeemers<D>(
+    Path(script_hash): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<ScriptRedeemersInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let hash = parse_script_hash(&script_hash)?;
+
+    let pagination = Pagination::try_from(params)?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    // an unknown script is a 404. a known script with no redeemers is an
+    // empty page.
+    domain
+        .query()
+        .script_by_hash(&hash)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let chain = domain
+        .get_chain_summary()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let end_slot = domain.get_tip_slot()?;
+    let order = SlotOrder::from(pagination.order);
+
+    let stream = domain
+        .query()
+        .blocks_by_script_activity_stream(&hash, 0, end_slot, order);
+
+    let mut stream = Box::pin(stream);
+
+    let mut deps = InputDeps::default();
+    let mut prices_by_epoch: HashMap<Epoch, ExUnitPrices> = HashMap::new();
+    let mut matches: Vec<ScriptRedeemersInner> = Vec::new();
+    let target = pagination.from() + pagination.count;
+
+    'scan: while let Some(next) = stream.next().await {
+        let (slot, body) = next.map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let Some(body) = body else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(&body).map_err(|err| {
+            tracing::error!(?err);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        let txs = block.txs();
+
+        // db-sync stores no redeemers for phase-2-failed txs, so Blockfrost
+        // lists none. skip them. their spend redeemers also point at regular
+        // inputs, but a failed tx consumes only its collateral.
+        let mut with_redeemers: Vec<&MultiEraTx> = txs
+            .iter()
+            .filter(|tx| tx.is_valid() && !tx.redeemers().is_empty())
+            .collect();
+
+        if with_redeemers.is_empty() {
+            continue;
+        }
+
+        if matches!(order, SlotOrder::Desc) {
+            with_redeemers.reverse();
+        }
+
+        // only txs with spend redeemers need input resolution
+        let spending = with_redeemers.iter().copied().filter(|tx| {
+            tx.redeemers()
+                .iter()
+                .any(|redeemer| matches!(redeemer.tag(), RedeemerTag::Spend))
+        });
+
+        let mut resolver = deps.prepare(&domain, spending).await?;
+
+        for tx in with_redeemers {
+            let mut redeemers = tx.redeemers();
+
+            if matches!(order, SlotOrder::Desc) {
+                redeemers.reverse();
+            }
+
+            for redeemer in redeemers {
+                let resolved = redeemer_script_hash(tx, &redeemer, &mut |input| {
+                    let Some(output) = resolver.resolve(input)? else {
+                        return Ok(None);
+                    };
+
+                    output
+                        .address()
+                        .map(Some)
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                })?;
+
+                if resolved != Some(hash) {
+                    continue;
+                }
+
+                let purpose = match redeemer.tag() {
+                    RedeemerTag::Spend => Purpose::Spend,
+                    RedeemerTag::Mint => Purpose::Mint,
+                    RedeemerTag::Cert => Purpose::Cert,
+                    RedeemerTag::Reward => Purpose::Reward,
+                    // unreachable: vote and propose resolve to None above
+                    _ => continue,
+                };
+
+                let (epoch, _) = chain.slot_epoch(slot);
+
+                let prices = match prices_by_epoch.entry(epoch) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let pparams = domain.get_effective_pparams_for_epoch(epoch, &chain)?;
+
+                        let prices = pparams
+                            .execution_costs()
+                            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                        entry.insert(prices)
+                    }
+                };
+
+                let units = redeemer.ex_units();
+                let fee = redeemer_fee(&units, prices)?;
+                let data_hash = redeemer.data().compute_hash().to_string();
+
+                matches.push(ScriptRedeemersInner {
+                    tx_hash: tx.hash().to_string(),
+                    tx_index: redeemer.index() as i32,
+                    purpose,
+                    redeemer_data_hash: data_hash.clone(),
+                    // DEPRECATED in Blockfrost. same value as redeemer_data_hash.
+                    datum_hash: data_hash,
+                    unit_mem: units.mem.to_string(),
+                    unit_steps: units.steps.to_string(),
+                    fee: fee.to_string(),
+                });
+
+                if matches.len() >= target {
+                    break 'scan;
+                }
+            }
+        }
+    }
+
+    let items = matches
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
 
     Ok(Json(items))
 }
@@ -458,9 +626,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripts_by_hash_redeemers_happy_path() {
+        let app = fixture_app();
+        let script_hash = app.vectors().script_hash.as_str();
+        let path = format!("/scripts/{script_hash}/redeemers");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let items: Vec<ScriptRedeemersInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse script redeemers");
+
+        // the synthetic chain executes no scripts. a known script with no
+        // redeemers gives an empty page, not a 404.
+        assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_bad_request_for_invalid_pagination() {
+        let app = fixture_app();
+        let script_hash = app.vectors().script_hash.as_str();
+        let path = format!("/scripts/{script_hash}/redeemers?count=0");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
     async fn scripts_by_hash_utxos_not_found_for_invalid_hash() {
         let app = fixture_app();
         let path = format!("/scripts/{}/utxos", invalid_script_hash());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_not_found_for_invalid_hash() {
+        let app = fixture_app();
+        let path = format!("/scripts/{}/redeemers", invalid_script_hash());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
@@ -472,10 +677,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripts_by_hash_redeemers_not_found_for_missing_hash() {
+        let app = fixture_app();
+        let path = format!("/scripts/{}/redeemers", missing_script_hash());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
     async fn scripts_by_hash_utxos_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let script_hash = app.vectors().script_hash.as_str();
         let path = format!("/scripts/{script_hash}/utxos");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let script_hash = app.vectors().script_hash.as_str();
+        let path = format!("/scripts/{script_hash}/redeemers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
