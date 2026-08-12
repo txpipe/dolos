@@ -52,9 +52,8 @@ jobs:
         with:
           persist-credentials: false
       # Fails the build on any RustSec advisory affecting the locked
-      # dependency tree, and on any dependency that would put a cmake
-      # requirement back into the build. Config lives in deny.toml. The
-      # action installs cargo-deny and caches the advisory database.
+      # dependency tree. Config lives in deny.toml. The action installs
+      # cargo-deny and caches the advisory database.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans
