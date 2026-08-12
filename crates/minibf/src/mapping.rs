@@ -1345,6 +1345,141 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
     }
 }
 
+/// The script credential that witnesses a certificate, if any.
+///
+/// A certificate can name a script credential. The script must then validate
+/// the certificate. A cert-purpose redeemer points at that script. Pool
+/// certificates carry only key hashes.
+fn cert_script_hash(cert: &MultiEraCert) -> Option<Hash<28>> {
+    let credential = match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::StakeRegistration(cred)
+            | AlonzoCert::StakeDeregistration(cred)
+            | AlonzoCert::StakeDelegation(cred, _) => Some(cred),
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::StakeRegistration(cred)
+            | ConwayCert::StakeDeregistration(cred)
+            | ConwayCert::StakeDelegation(cred, _)
+            | ConwayCert::Reg(cred, _)
+            | ConwayCert::UnReg(cred, _)
+            | ConwayCert::VoteDeleg(cred, _)
+            | ConwayCert::StakeVoteDeleg(cred, _, _)
+            | ConwayCert::StakeRegDeleg(cred, _, _)
+            | ConwayCert::VoteRegDeleg(cred, _, _)
+            | ConwayCert::StakeVoteRegDeleg(cred, _, _, _)
+            | ConwayCert::AuthCommitteeHot(cred, _)
+            | ConwayCert::ResignCommitteeCold(cred, _)
+            | ConwayCert::RegDRepCert(cred, _, _)
+            | ConwayCert::UnRegDRepCert(cred, _)
+            | ConwayCert::UpdateDRepCert(cred, _) => Some(cred),
+            _ => None,
+        },
+        _ => None,
+    }?;
+
+    match credential {
+        StakeCredential::ScriptHash(hash) => Some(*hash),
+        StakeCredential::AddrKeyhash(_) => None,
+    }
+}
+
+/// The hash of the script that a redeemer points at.
+///
+/// The redeemer's tag and index select an entity in the tx. A spend redeemer
+/// indexes the sorted input set. Its script hash is the payment credential of
+/// the consumed output's address. That output lives in another tx, so the
+/// injected `resolve_input_address` supplies its address. All other purposes
+/// resolve inside the tx itself. Vote and propose redeemers resolve to
+/// `None`. The Blockfrost schema cannot represent them.
+pub fn redeemer_script_hash<F>(
+    tx: &MultiEraTx<'_>,
+    redeemer: &MultiEraRedeemer<'_>,
+    resolve_input_address: &mut F,
+) -> Result<Option<Hash<28>>, StatusCode>
+where
+    F: FnMut(&MultiEraInput<'_>) -> Result<Option<Address>, StatusCode>,
+{
+    let index = redeemer.index() as usize;
+
+    match redeemer.tag() {
+        RedeemerTag::Spend => {
+            let inputs = tx.inputs_sorted_set();
+            let Some(input) = inputs.get(index) else {
+                return Ok(None);
+            };
+
+            let Some(address) = resolve_input_address(input)? else {
+                return Ok(None);
+            };
+
+            match address {
+                Address::Shelley(x) => match x.payment() {
+                    ShelleyPaymentPart::Script(hash) => Ok(Some(*hash)),
+                    _ => Ok(None),
+                },
+                _ => Ok(None),
+            }
+        }
+        RedeemerTag::Mint => {
+            let mints = tx.mints();
+            Ok(mints.get(index).map(|x| x.policy()).cloned())
+        }
+        RedeemerTag::Cert => Ok(tx.certs().get(index).and_then(cert_script_hash)),
+        RedeemerTag::Reward => {
+            let withdrawals = tx.withdrawals_sorted_set();
+            let Some((account, _)) = withdrawals.get(index) else {
+                return Ok(None);
+            };
+
+            match Address::from_bytes(account) {
+                Ok(Address::Stake(stake)) => match stake.payload() {
+                    StakePayload::Script(hash) => Ok(Some(*hash)),
+                    StakePayload::Stake(_) => Ok(None),
+                },
+                _ => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The fee to run a redeemer. The inputs are the redeemer's execution units
+/// and the era's execution prices.
+pub fn redeemer_fee(units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
+    let ExUnitPrices {
+        mem_price,
+        step_price,
+    } = prices;
+
+    let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
+    let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
+
+    let mem_price = BigRational::new(
+        BigInt::from(mem_price.numerator),
+        BigInt::from(mem_price.denominator),
+    );
+
+    let step_price = BigRational::new(
+        BigInt::from(step_price.numerator),
+        BigInt::from(step_price.denominator),
+    );
+
+    let mem_fee = unit_mem * mem_price;
+    let step_fee = unit_steps * step_price;
+
+    let fee = mem_fee + step_fee;
+
+    let fee: u64 = fee
+        .ceil()
+        .to_integer()
+        .try_into()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(fee)
+}
+
 impl TxModelBuilder<'_> {
     fn find_output_for_input(&self, input: &MultiEraInput<'_>) -> Option<MultiEraOutput<'_>> {
         let tx_hash = input.hash();
@@ -1362,71 +1497,18 @@ impl TxModelBuilder<'_> {
         &self,
         redeemer: &MultiEraRedeemer<'_>,
     ) -> Result<Option<Hash<28>>, StatusCode> {
-        let index = redeemer.index() as usize;
         let tx = self.tx()?;
 
-        match redeemer.tag() {
-            RedeemerTag::Spend => {
-                let inputs = tx.inputs_sorted_set();
-                let Some(input) = inputs.get(index) else {
-                    return Ok(None);
-                };
+        redeemer_script_hash(&tx, redeemer, &mut |input| {
+            let Some(output) = self.find_output_for_input(input) else {
+                return Ok(None);
+            };
 
-                let Some(output) = self.find_output_for_input(input) else {
-                    return Ok(None);
-                };
-
-                let address = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                match address {
-                    Address::Shelley(x) => match x.payment() {
-                        ShelleyPaymentPart::Script(hash) => Ok(Some(*hash)),
-                        _ => Ok(None),
-                    },
-                    _ => Ok(None),
-                }
-            }
-            RedeemerTag::Mint => {
-                let mints = tx.mints();
-                Ok(mints.get(index).map(|x| x.policy()).cloned())
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn compute_fee(&self, units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
-        let ExUnitPrices {
-            mem_price,
-            step_price,
-        } = prices;
-
-        let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
-        let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
-
-        let mem_price = BigRational::new(
-            BigInt::from(mem_price.numerator),
-            BigInt::from(mem_price.denominator),
-        );
-
-        let step_price = BigRational::new(
-            BigInt::from(step_price.numerator),
-            BigInt::from(step_price.denominator),
-        );
-
-        let mem_fee = unit_mem * mem_price;
-        let step_fee = unit_steps * step_price;
-
-        let fee = mem_fee + step_fee;
-
-        let fee: u64 = fee
-            .ceil()
-            .to_integer()
-            .try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(fee)
+            output
+                .address()
+                .map(Some)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
     }
 
     fn build_redeemer_inner(
@@ -1436,7 +1518,7 @@ impl TxModelBuilder<'_> {
     ) -> Result<TxContentRedeemersInner, StatusCode> {
         let units = redeemer.ex_units();
 
-        let fee = self.compute_fee(&units, prices)?;
+        let fee = redeemer_fee(&units, prices)?;
 
         let out = TxContentRedeemersInner {
             purpose: match redeemer.tag() {
@@ -2598,5 +2680,200 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
     fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
         let value = self.as_value()?;
         serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+
+    use pallas::{
+        codec::utils::{Int, KeepRaw, NonEmptySet, NonZeroInt, Nullable, Set},
+        ledger::{
+            addresses::{ShelleyAddress, ShelleyDelegationPart},
+            primitives::{
+                conway::{Redeemer, Redeemers, TransactionBody, TransactionInput, Tx, WitnessSet},
+                BigInt,
+            },
+            traverse::Era,
+        },
+    };
+
+    const SCRIPT_HASH: [u8; 28] = [0xAA; 28];
+
+    fn redeemer(tag: RedeemerTag, index: u32) -> Redeemer {
+        Redeemer {
+            tag,
+            index,
+            data: PlutusData::BigInt(BigInt::Int(Int::from(0))),
+            ex_units: ExUnits {
+                mem: 10,
+                steps: 100,
+            },
+        }
+    }
+
+    /// A conway tx with one redeemer of every purpose. Each redeemer points
+    /// at an entity under [`SCRIPT_HASH`]. The spend target is the first
+    /// input; the injected closure resolves it. The mint target is the
+    /// script's policy. The cert target is a stake deregistration of its
+    /// stake credential. The reward target is a withdrawal from its reward
+    /// account.
+    fn tx_with_redeemers() -> Vec<u8> {
+        let script = Hash::<28>::from(SCRIPT_HASH);
+
+        let input = TransactionInput {
+            transaction_id: Hash::from([9u8; 32]),
+            index: 0,
+        };
+
+        let asset_name = Bytes::from(b"UNIT".to_vec());
+        let mint_amount = NonZeroInt::try_from(-1).expect("non-zero mint");
+        let mint =
+            BTreeMap::from_iter([(script, BTreeMap::from_iter([(asset_name, mint_amount)]))]);
+
+        let cert = ConwayCert::StakeDeregistration(StakeCredential::ScriptHash(script));
+
+        let reward_account = StakeAddress::new(Network::Testnet, StakePayload::Script(script));
+        let withdrawals = BTreeMap::from_iter([(Bytes::from(reward_account.to_vec()), 0)]);
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![input]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: Some(NonEmptySet::try_from(vec![cert]).expect("non-empty certs")),
+            withdrawals: Some(withdrawals),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: Some(mint),
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: None,
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let redeemers = Redeemers::List(vec![
+            redeemer(RedeemerTag::Spend, 0),
+            redeemer(RedeemerTag::Mint, 0),
+            redeemer(RedeemerTag::Cert, 0),
+            redeemer(RedeemerTag::Reward, 0),
+            redeemer(RedeemerTag::Vote, 0),
+        ]);
+
+        let witness_set = WitnessSet {
+            vkeywitness: None,
+            native_script: None,
+            bootstrap_witness: None,
+            plutus_v1_script: None,
+            plutus_data: None,
+            redeemer: Some(KeepRaw::from(redeemers)),
+            plutus_v2_script: None,
+            plutus_v3_script: None,
+        };
+
+        let body_cbor = minicbor::to_vec(&body).expect("failed to encode body");
+        let body = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+            .expect("failed to decode body")
+            .to_owned();
+
+        let tx = Tx {
+            transaction_body: body,
+            transaction_witness_set: KeepRaw::from(witness_set),
+            success: true,
+            auxiliary_data: Nullable::Null,
+        };
+
+        minicbor::to_vec(tx).expect("failed to encode tx")
+    }
+
+    fn shelley_address(payment: ShelleyPaymentPart) -> Address {
+        Address::Shelley(ShelleyAddress::new(
+            Network::Testnet,
+            payment,
+            ShelleyDelegationPart::Null,
+        ))
+    }
+
+    #[test]
+    fn redeemer_script_hash_resolves_every_purpose() {
+        let bytes = tx_with_redeemers();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        let script = Hash::<28>::from(SCRIPT_HASH);
+        let redeemers = tx.redeemers();
+        assert_eq!(redeemers.len(), 5);
+
+        for redeemer in &redeemers {
+            let resolved = redeemer_script_hash(&tx, redeemer, &mut |input| {
+                assert_eq!(input.hash().as_slice(), [9u8; 32].as_slice());
+                Ok(Some(shelley_address(ShelleyPaymentPart::Script(script))))
+            })
+            .expect("resolution failed");
+
+            let expected = match redeemer.tag() {
+                // the schema cannot represent vote and propose
+                RedeemerTag::Vote | RedeemerTag::Propose => None,
+                _ => Some(script),
+            };
+
+            assert_eq!(resolved, expected, "purpose {:?}", redeemer.tag());
+        }
+    }
+
+    #[test]
+    fn redeemer_script_hash_ignores_key_held_inputs() {
+        let bytes = tx_with_redeemers();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        let redeemers = tx.redeemers();
+        let spend = redeemers
+            .iter()
+            .find(|x| matches!(x.tag(), RedeemerTag::Spend))
+            .expect("spend redeemer");
+
+        let resolved = redeemer_script_hash(&tx, spend, &mut |_| {
+            Ok(Some(shelley_address(ShelleyPaymentPart::key_hash(
+                Hash::from([0xBBu8; 28]),
+            ))))
+        })
+        .expect("resolution failed");
+
+        assert_eq!(resolved, None, "a key-held input names no script");
+
+        let resolved = redeemer_script_hash(&tx, spend, &mut |_| Ok(None)).expect("resolution");
+
+        assert_eq!(resolved, None, "an unresolvable input names no script");
+    }
+
+    #[test]
+    fn redeemer_fee_charges_ceiled_price() {
+        let units = ExUnits {
+            mem: 10,
+            steps: 100,
+        };
+
+        let prices = ExUnitPrices {
+            mem_price: alonzo::RationalNumber {
+                numerator: 577,
+                denominator: 10_000,
+            },
+            step_price: alonzo::RationalNumber {
+                numerator: 721,
+                denominator: 10_000_000,
+            },
+        };
+
+        // 10 * 577/10000 + 100 * 721/10000000 = 0.584... — the fee rounds up
+        assert_eq!(redeemer_fee(&units, &prices).expect("fee"), 1);
     }
 }
