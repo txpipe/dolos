@@ -136,11 +136,13 @@ pub use oci_client::Reference;
 
 use crate::{
     digest::{LayerDigests, LayerWriter},
-    frame::{CanonicalCbor, LayerHeader, Limits, SeqWriter},
+    frame::{CanonicalCbor, Limits, SeqWriter},
     inscription::{canonical_json, Inscription, LayerDescriptor},
     layer::LayerReader,
-    profile::{checked_layer_media_type, checked_tag_for_sequence, validate_tag, Profile},
-    transport::{BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer},
+    profile::{checked_tag_for_sequence, validate_tag, Profile},
+    transport::{
+        open_layer, BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer,
+    },
     Digest, Error, ARTIFACT_TYPE, INSCRIPTION_MEDIA_TYPE, MANIFEST_SIZE_LIMIT,
 };
 
@@ -871,23 +873,15 @@ impl SteleWriter for Registry {
         spec: &LayerSpec,
         level: i32,
     ) -> Result<RegistrySink, Error> {
-        let media_type = checked_layer_media_type(profile, &spec.kind)?;
-        let header = LayerHeader::new(profile.name(), &spec.kind, spec.header_scope.clone());
+        let (sequence, media_type) = open_layer(profile, spec, level, || self.shared.scratch())?;
 
-        let mut sink = RegistrySink {
+        Ok(RegistrySink {
             shared: Arc::clone(&self.shared),
-            sequence: SeqWriter::with_max_record(
-                LayerWriter::new(self.shared.scratch()?, level)?,
-                profile.max_record(),
-            ),
+            sequence,
             kind: spec.kind.clone(),
             media_type,
             scope: spec.scope.clone(),
-        };
-
-        sink.write_record(&header.encode()?)?;
-
-        Ok(sink)
+        })
     }
 
     /// Publish the manifest, and with it the stele.
