@@ -735,11 +735,9 @@ fn is_absent(error: &oci_client::errors::OciDistributionError) -> bool {
 /// A staged file, created where [`Options::scratch_dir`] said.
 ///
 /// Both calls that can fail against a *named* directory raise
-/// [`Error::Scratch`] rather than falling through `#[from]` into
-/// [`Error::Io`]: this directory came from an operator — `--scratch-dir`, or
-/// the default a host derives for them — and an errno with no path in it
-/// leaves them nothing to correct. The unnamed case keeps the catch-all,
-/// because the platform temporary directory is not a path anybody chose.
+/// [`Error::Scratch`], whose docstring carries the reason. The unnamed case
+/// keeps the catch-all [`Error::Io`], because the platform temporary
+/// directory is not a path anybody chose.
 ///
 /// Creating the directory lazily, here, is load-bearing elsewhere: it is what
 /// makes a staging directory that exists after a run evidence that the run
@@ -1715,9 +1713,6 @@ mod tests {
     }
 
     /// The unnamed case keeps the catch-all, and still works.
-    ///
-    /// `None` is the platform temporary directory — nothing an operator chose,
-    /// so nothing [`Error::Scratch`] could usefully name.
     #[test]
     fn an_unnamed_staging_directory_still_stages() {
         scratch_in(None).expect("the platform temporary directory is unusable");

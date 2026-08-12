@@ -1652,23 +1652,14 @@ fn staging_stays_in_the_scratch_directory_and_leaves_nothing() {
 
 /// A staging directory that cannot be used says which one, in both directions.
 ///
-/// The operator this is for has just been told, by `--scratch-dir`'s own help,
-/// to point the tool at a volume with room on it — so the paths that arrive
-/// here are typos, unmounted volumes, and directories owned by somebody else.
-/// What they used to get was `io error: File exists (os error 17)`, three
-/// times over and naming neither the path nor what it was for, because
-/// `std::io::Error` carries the errno and not the path that produced it.
-///
 /// Both directions, because one [`Options::scratch_dir`] serves both — a sink
 /// on the way up and a pulled blob on the way down — and fixing the direction
 /// somebody happened to test first is how this defect would come back.
 ///
-/// The unusable directory is an existing regular file: `create_dir_all` cannot
-/// turn one into a directory for anybody, `root` included, so it reproduces on
-/// every platform and under whatever user CI runs as.
 /// `an_unusable_staging_directory_names_itself` in `src/oci.rs` makes the same
-/// claim without a container; this one makes it through a real publish and a
-/// real pull.
+/// claim without a container, and says why the unusable directory is an
+/// existing regular file; this one makes it through a real publish and a real
+/// pull.
 #[test]
 #[ignore = "spawns a registry"]
 fn a_staging_directory_that_cannot_be_used_names_itself() {
