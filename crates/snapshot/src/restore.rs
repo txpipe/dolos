@@ -125,7 +125,7 @@ use tracing::info;
 
 use crate::{
     layers::{blocks, indexes, logs, state},
-    read_position, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, LOGS, STATE,
+    preflight, read_position, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, LOGS, STATE,
     STATE_SHARDS, UTXOS,
 };
 
@@ -266,47 +266,69 @@ impl Plan {
 
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
-    /// The comparison is deliberately against the *uncompressed* size of the
-    /// selected layers rather than against a prediction of what the stores will
-    /// occupy. It is the only number the inscription carries, it is an
-    /// underestimate for every backend (a store keeps indexes and slack of its
-    /// own), and an underestimate is the safe direction for a check whose job
-    /// is to catch the obviously-doomed run.
-    pub fn preflight(&self, path: &Path) -> Result<(), Error> {
-        let required = self.uncompressed_size();
+    /// Two needs, one policy ([`crate::preflight`]): the stores this restore
+    /// will write, and — for a transport that stages — the one layer it holds
+    /// on disk while it drains it. Both are handed to the same check rather
+    /// than compared separately, because whenever the scratch directory sits on
+    /// the storage filesystem they are two claims on one pool of free bytes,
+    /// and the default `<storage.path>/scratch` makes that the ordinary case.
+    ///
+    /// The destination comparison is deliberately against the *uncompressed*
+    /// size of the selected layers rather than against a prediction of what the
+    /// stores will occupy. It is the only number the inscription carries, it is
+    /// an underestimate for every backend (a store keeps indexes and slack of
+    /// its own), and an underestimate is the safe direction for a check whose
+    /// job is to catch the obviously-doomed run.
+    pub fn preflight(&self, path: &Path, staging: Option<Staging<'_>>) -> Result<(), Error> {
+        let mut needs = vec![preflight::Need::of(
+            "restoring it",
+            path,
+            self.uncompressed_size(),
+        )];
 
-        // The storage root may not exist yet on a fresh node, in which case the
-        // filesystem to ask about is the nearest ancestor that does.
-        let mut probe = path;
-
-        let available = loop {
-            match fs4::available_space(probe) {
-                Ok(available) => break available,
-                Err(e) => match probe.parent() {
-                    Some(parent) => probe = parent,
-                    // Nothing left to ask. A restore that cannot measure the
-                    // disk is not a restore that should refuse to run, but it
-                    // is one whose operator should hear about it.
-                    None => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "could not determine free space; skipping the restore preflight: {e}"
-                        );
-                        return Ok(());
-                    }
-                },
+        if let Some(staging) = staging {
+            if staging.unsized_layers > 0 {
+                tracing::warn!(
+                    unsized_layers = staging.unsized_layers,
+                    "this stele's transport states no compressed size for some of the layers it \
+                     would pull; the staging estimate is a floor"
+                );
             }
-        };
 
-        if available < required {
-            return Err(Error::IncompleteStele(format!(
-                "restoring it needs at least {required} bytes at {}, which has {available} free",
-                path.display(),
-            )));
+            needs.push(preflight::Need::or_unsized(
+                "staging the layers it pulls",
+                staging.dir,
+                staging.largest_layer,
+                "this stele's transport states no compressed size for the layers it would pull",
+            ));
         }
 
-        Ok(())
+        preflight::check(&needs)
     }
+}
+
+/// Where a restore stages a pulled layer, and how big the biggest one is.
+///
+/// Absent for a directory restore, which stages nothing: a `SteleDir` reads
+/// its blobs where they already are. A registry restore pulls each layer to a
+/// file first, one at a time — layers are pulled, staged, drained and dropped
+/// in sequence — so the peak it has to fit is the single largest layer and not
+/// the download.
+#[derive(Debug, Clone, Copy)]
+pub struct Staging<'a> {
+    /// The transport's scratch directory, as the operator or the default named
+    /// it. Need not exist yet; the transport creates it lazily.
+    pub dir: &'a Path,
+    /// The largest layer this run will stage, compressed. `None` when the
+    /// transport could size none of them, which warns rather than refuses.
+    pub largest_layer: Option<u64>,
+    /// How many of the layers it will stage the transport could not size.
+    ///
+    /// Carried beside `largest_layer` rather than folded into it: a run where
+    /// one layer is sized and another is not has a `largest_layer` that is a
+    /// floor, and a floor that says so is worth more than a `None` that
+    /// abandons the check. The count is what makes it say so.
+    pub unsized_layers: usize,
 }
 
 /// Read a stele's inscription and decide what restoring it into this node
@@ -809,9 +831,17 @@ pub struct Outlook {
 /// [`crate::registry::restore_registry`] are the two transports' spellings of
 /// it, and they share this body so a directory restore and a registry one
 /// cannot come to differ in anything but where the bytes came from.
+///
+/// `scratch_dir` is the one thing they legitimately differ in, and it comes
+/// from the transport rather than from the caller: a directory stele reads its
+/// blobs where they already are and stages nothing, so it passes `None`, while
+/// a registry hands over the directory it was opened with. Asking the
+/// transport is what keeps the volume the preflight sizes and the volume the
+/// transport writes to the same volume.
 pub(crate) fn restore_stele<R, A, S, I>(
     stele: &R,
     node: Restoring<'_>,
+    scratch_dir: Option<&Path>,
     target: Target<'_, A, S, I>,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
@@ -821,7 +851,6 @@ where
     I: IndexStore,
 {
     let plan = plan(stele, node.network_magic, node.max_history)?;
-    plan.preflight(node.storage_path)?;
 
     let identity = stele.read_inscription()?.digest()?;
     let mut checkpoint = Checkpoint::open(node.storage_path, identity, node.resume)?;
@@ -832,6 +861,21 @@ where
         remaining: plan.remaining(stele, &index, checkpoint.resume())?,
         inherited: checkpoint.resume().len(),
     };
+
+    // Below the sizes rather than above them, and still ADR-004's step 2:
+    // what the staging volume has to hold is the largest layer this run will
+    // *actually* pull, which is a question about the resume and so cannot be
+    // asked before the checkpoint is open. Nothing between the plan and here
+    // writes — `Checkpoint::open` only reads the progress file and
+    // `blob_index` only reads blobs — so the preflight still refuses before
+    // the first byte is written, which is the whole of its promise.
+    let staging = scratch_dir.map(|dir| Staging {
+        dir,
+        largest_layer: outlook.remaining.largest_compressed,
+        unsized_layers: outlook.remaining.unsized_layers,
+    });
+
+    plan.preflight(node.storage_path, staging)?;
 
     let summary = restore(
         stele,
@@ -863,7 +907,7 @@ where
 {
     let stele = stelae::dir::SteleDir::open(root)?;
 
-    restore_stele(&stele, node, target)
+    restore_stele(&stele, node, None, target)
 }
 
 /// The stele a restore is reading, and the terms it reads under.
@@ -1447,18 +1491,71 @@ mod tests {
             skipped_epochs: 0,
         };
 
-        plan.preflight(temp.path()).unwrap();
+        plan.preflight(temp.path(), None).unwrap();
 
         // A directory that does not exist yet is measured through its parent,
         // which is the shape a fresh node's storage path has.
-        plan.preflight(&temp.path().join("not").join("created").join("yet"))
+        plan.preflight(&temp.path().join("not").join("created").join("yet"), None)
             .unwrap();
 
         for descriptor in &mut plan.state {
             descriptor.uncompressed_size = u64::MAX / STATE_SHARDS;
         }
 
-        let err = plan.preflight(temp.path()).unwrap_err();
-        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+        let err = plan.preflight(temp.path(), None).unwrap_err();
+        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+    }
+
+    /// The staging half: a scratch volume that cannot hold the largest layer
+    /// this run will pull is refused, and one nothing could size is not.
+    ///
+    /// The destination need is nil here — no layers, so nothing to write — so
+    /// what the refusal is about is unambiguous. That the two needs are
+    /// *summed* when they share a volume is the policy's own property and is
+    /// tested where the policy lives, in [`crate::preflight`].
+    #[test]
+    fn the_preflight_refuses_a_scratch_volume_that_cannot_hold_a_layer() {
+        let temp = tempfile::tempdir().unwrap();
+        let scratch = temp.path().join("scratch");
+
+        let plan = Plan {
+            position: read_position(&inscription(vec![]).position).unwrap(),
+            sequence: 3,
+            epochs: Vec::new(),
+            state: Vec::new(),
+            skipped_epochs: 0,
+        };
+
+        let staging = |largest_layer, unsized_layers| {
+            plan.preflight(
+                temp.path(),
+                Some(Staging {
+                    dir: &scratch,
+                    largest_layer,
+                    unsized_layers,
+                }),
+            )
+        };
+
+        staging(Some(0), 0).unwrap();
+
+        // Nothing could size the layers, so nothing refuses: what cannot be
+        // measured warns and proceeds. Nor does a partial sizing, where the
+        // number is a floor and the warning says so.
+        staging(None, 3).unwrap();
+        staging(Some(0), 1).unwrap();
+
+        let err = staging(Some(u64::MAX), 0).unwrap_err();
+
+        let Error::NotEnoughSpace(message) = &err else {
+            panic!("{err:?}");
+        };
+
+        assert!(message.contains("staging the layers it pulls"), "{message}");
+        assert!(
+            message.contains(&scratch.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("short"), "{message}");
     }
 }

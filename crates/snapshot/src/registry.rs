@@ -129,7 +129,7 @@ use crate::{
     export::{self, history_for, same_network, Plan, Predecessor, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
-    DolosProfile, Error, Scope as _, EPOCH_KINDS, STATE_SHARDS,
+    DolosProfile, Error, Scope as _, EPOCH_KINDS, STATE, STATE_SHARDS,
 };
 
 /// Which stele in a repository a restore wants.
@@ -228,7 +228,7 @@ where
 {
     let stele = point.pull(registry)?;
 
-    crate::restore::restore_stele(&stele, node, target)
+    crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target)
 }
 
 /// Open a repository in a registry.
@@ -495,6 +495,134 @@ pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
         inscription,
         compressed,
     })
+}
+
+/// What a publish holds staged on disk at its peak.
+///
+/// Not the size of the stele: a publish never has the whole document on disk at
+/// once. What it does have at once is the state pass, which keeps all sixteen
+/// shard sinks open across a single walk of the store — see
+/// [`crate::export`] for why sixteen passes is the alternative — plus whatever
+/// epoch layer is in flight beside it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StagingPeak {
+    /// The sixteen state shards, which are staged concurrently.
+    pub state_bytes: u64,
+    /// The largest single non-state layer, which is staged alongside them.
+    pub largest_other_bytes: u64,
+    /// Layers the predecessor's manifest stated no size for. Non-zero makes
+    /// every number here a floor rather than an estimate.
+    pub unsized_layers: usize,
+}
+
+impl StagingPeak {
+    /// Compressed bytes the scratch volume has to hold at once.
+    pub fn bytes(&self) -> u64 {
+        self.state_bytes.saturating_add(self.largest_other_bytes)
+    }
+}
+
+/// Size the staging peak of the next publish from the stele before it.
+///
+/// A proxy, and deliberately so: the numbers are the *predecessor's* layers,
+/// not this publish's, because this publish's layers do not exist until it
+/// builds them and sizing them would mean building them. One epoch of drift is
+/// what the proxy costs, against a check that otherwise cannot exist at all —
+/// and the refuse/warn split is what keeps it honest, since a shortfall against
+/// last epoch's sizes is still a measured shortfall.
+///
+/// Off the manifest the pull already fetched, and no per-layer `HEAD`: the
+/// promise [`preview`] makes about a dry run holds here too.
+///
+/// `Ok(None)` is a first publish — no predecessor, nothing to size from — which
+/// [`preflight`] turns into a warning rather than a refusal.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
+    let Some(previous) = registry.latest(&DolosProfile)? else {
+        return Ok(None);
+    };
+
+    let inscription = previous.read_inscription()?;
+    let blobs = previous.blob_index()?;
+
+    let mut peak = StagingPeak::default();
+
+    for descriptor in &inscription.layers {
+        match previous.compressed_size(&blobs, descriptor)? {
+            None => peak.unsized_layers += 1,
+            // Every shard is open at once, so they add. Everything else is one
+            // layer at a time beside them, so only the biggest counts.
+            //
+            // Saturating because these are a manifest's numbers and a manifest
+            // is not this node's document: a wrapped sum would be a *small*
+            // need, which is the one direction a refusal must never be wrong
+            // in.
+            Some(bytes) if descriptor.kind == STATE => {
+                peak.state_bytes = peak.state_bytes.saturating_add(bytes)
+            }
+            Some(bytes) => peak.largest_other_bytes = peak.largest_other_bytes.max(bytes),
+        }
+    }
+
+    Ok(Some(peak))
+}
+
+/// Refuse a publish whose scratch volume cannot hold what it stages at once.
+///
+/// The publish side of [`crate::preflight`]'s one policy, which
+/// [`crate::restore::Plan::preflight`] is the other side of: a measured
+/// shortfall refuses, naming the volume and the shortfall, and what cannot be
+/// sized warns and proceeds.
+///
+/// The volume is the transport's own — [`stelae::oci::Registry::scratch_dir`] —
+/// so the directory sized here and the directory written to cannot come apart.
+/// A transport opened without one stages in the platform temporary directory,
+/// which it does not name, so there is nothing to size and nothing to refuse;
+/// [`open`] always sets one, so no `dolos` command reaches that case.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn preflight(registry: &Registry) -> Result<(), Error> {
+    let Some(scratch_dir) = registry.scratch_dir() else {
+        tracing::warn!(
+            "this transport stages in the platform temporary directory, which it does not name; \
+             skipping the free-space check for {STAGING}"
+        );
+
+        return Ok(());
+    };
+
+    crate::preflight::check(&[staging_need(staging_peak(registry)?, scratch_dir)])
+}
+
+/// What the staging asks of its volume, as [`crate::preflight`] takes it.
+///
+/// Split out of [`preflight`] so the demand and the transport that produced it
+/// can be tested apart: sizing a peak needs a registry, and deciding what a
+/// peak means for a volume needs none.
+const STAGING: &str = "staging this publish";
+
+fn staging_need(
+    peak: Option<StagingPeak>,
+    scratch_dir: &std::path::Path,
+) -> crate::preflight::Need {
+    let Some(peak) = peak else {
+        return crate::preflight::Need::unsized_because(
+            STAGING,
+            scratch_dir,
+            "this repository holds no stele to size the staging from",
+        );
+    };
+
+    if peak.unsized_layers > 0 {
+        tracing::warn!(
+            unsized_layers = peak.unsized_layers,
+            "the predecessor's manifest states no size for some of its layers; the staging \
+             estimate is a floor"
+        );
+    }
+
+    crate::preflight::Need::of(STAGING, scratch_dir, peak.bytes())
 }
 
 /// Publish `plan` into `registry`, chained to whatever is already there.
@@ -934,5 +1062,43 @@ mod tests {
             uncompressed_size: 1,
             scope,
         }
+    }
+
+    /// The publish half of the one policy, over a peak this test supplies.
+    ///
+    /// The other half of the chain — that the peak is the predecessor's
+    /// sixteen shards plus its largest other layer — needs a registry to state
+    /// a manifest and is in `tests/publish.rs`. Between them the composition
+    /// `preflight` performs is covered: this end decides, that end measures.
+    #[test]
+    fn a_measured_staging_shortfall_refuses_and_a_first_publish_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let check = |peak| crate::preflight::check(&[staging_need(peak, temp.path())]);
+
+        // No predecessor, so nothing sized it, so nothing refuses.
+        check(None).unwrap();
+
+        check(Some(StagingPeak::default())).unwrap();
+
+        // A peak no volume holds. Both halves are set, so the refusal is on
+        // their sum and not on either alone.
+        let err = check(Some(StagingPeak {
+            state_bytes: u64::MAX / 2,
+            largest_other_bytes: u64::MAX / 2,
+            unsized_layers: 0,
+        }))
+        .unwrap_err();
+
+        let Error::NotEnoughSpace(message) = &err else {
+            panic!("{err:?}");
+        };
+
+        assert!(message.contains(STAGING), "{message}");
+        assert!(
+            message.contains(&temp.path().display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("short"), "{message}");
     }
 }

@@ -157,6 +157,16 @@ fn to_repository(
         return Ok(());
     }
 
+    // And on the same terms, for the same reason. A dry run that reported the
+    // layers and said nothing about the volume they would be staged on would be
+    // the one rehearsal a publisher does, missing the failure it exists to find.
+    // After `standing`, because a repository holding another network's chain is
+    // refused there and sizing against it would be sizing against the wrong
+    // stele.
+    registry::preflight(&registry)
+        .into_diagnostic()
+        .context("sizing the staging directory")?;
+
     if args.dry_run {
         // `None` here and `None` at the `publish` below are one decision: a dry
         // run describes the publish that follows it, so the two calls are

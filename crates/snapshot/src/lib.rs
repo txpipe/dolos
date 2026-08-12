@@ -47,12 +47,15 @@
 //!   to the protocol in the order above.
 //! - [`restore`] — its inverse: the driver that reads a stele back into an
 //!   empty store set, in the order ADR-004 specifies.
+//! - [`preflight`] — the free-space policy both drivers refuse under, so a run
+//!   that cannot fit its volume says so at minute zero.
 //! - `registry` (feature `oci`) — publishing into an OCI repository: the
 //!   history chain, and the layers a publish inherits instead of rebuilding.
 
 pub mod export;
 pub mod layers;
 pub mod namespaces;
+pub mod preflight;
 #[cfg(feature = "oci")]
 pub mod registry;
 pub mod restore;
@@ -203,6 +206,17 @@ pub enum Error {
     /// The stele is well-formed but does not carry enough to rebuild a node.
     #[error("this stele cannot restore a node: {0}")]
     IncompleteStele(String),
+
+    /// A volume that cannot hold what the run is about to put on it, refused
+    /// before the run starts.
+    ///
+    /// Raised only from a number that was actually measured against free space
+    /// that was actually read — everything else warns and proceeds. One
+    /// variant for both directions because it is one policy; see
+    /// [`crate::preflight`]. There is deliberately no flag that overrides it:
+    /// `--scratch-dir` pointed at a bigger volume is the escape hatch.
+    #[error("not enough space: {0}")]
+    NotEnoughSpace(String),
 
     /// A publish that would not extend the repository's chain.
     ///
