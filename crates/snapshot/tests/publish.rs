@@ -768,7 +768,6 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
             .len()
     };
 
-    // A record for `ignored-a`, five layers deep.
     let dying = fixture.repository("dolos/ignored-a");
     assert_eq!(interrupt(&dying), 5);
 

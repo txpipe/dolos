@@ -1225,10 +1225,6 @@ impl Predecessor for Chained<'_> {
             return Ok(None);
         };
 
-        // The one place the record's standing differs from a manifest's: a blob
-        // the registry no longer holds costs this layer its skip and nothing
-        // more. Whatever reclaimed it, the publish is still correct — it builds
-        // the layer and uploads it again.
         if !self.registry.adopt_carried(recorded.clone())? {
             tracing::warn!(
                 kind,
@@ -1253,8 +1249,6 @@ impl Predecessor for Chained<'_> {
             return Ok(());
         }
 
-        // The transport's own measurement, not a reconstruction of it: what
-        // goes in the record is what the manifest is about to say.
         let Some(written) = self.registry.carried(&descriptor.diff_id) else {
             tracing::warn!(
                 kind = descriptor.kind,

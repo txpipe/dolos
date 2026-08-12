@@ -573,8 +573,7 @@ where
         )?;
     }
 
-    // Not offered to the predecessor: a shard is the tip, and a restart rebuilds
-    // it. See [`Predecessor::landed`].
+    // Not offered to the predecessor: see [`Predecessor::landed`].
     layers.extend(write_state(stele, plan, state)?);
 
     if let Some(records) = digest_records {
