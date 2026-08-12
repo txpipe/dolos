@@ -83,13 +83,13 @@ fn stake_address_from_cip_19_credential(address: &str, network: Network) -> Opti
     Some(StakeAddress::new(network, payload))
 }
 
-fn parse_account_key_param(address: &str, network: Network) -> Result<AccountKeyParam, StatusCode> {
+fn parse_account_key_param(address: &str, network: Network) -> Result<AccountKeyParam, Error> {
     let address =
         if let Some(stake_address) = stake_address_from_cip_19_credential(address, network) {
             stake_address
         } else {
             let parsed = pallas::ledger::addresses::Address::from_bech32(address)
-                .map_err(|_| StatusCode::BAD_REQUEST)?;
+                .map_err(|_| Error::InvalidStakeAddress)?;
 
             let stake_address = match parsed {
                 Address::Shelley(x) => pallas_extras::shelley_address_to_stake_address(&x),
@@ -97,7 +97,7 @@ fn parse_account_key_param(address: &str, network: Network) -> Result<AccountKey
                 _ => None,
             };
 
-            stake_address.ok_or(StatusCode::BAD_REQUEST)?
+            stake_address.ok_or(Error::InvalidStakeAddress)?
         };
 
     let stake_cred = dolos_cardano::pallas_extras::stake_address_to_cred(&address);
@@ -193,7 +193,7 @@ impl<'a> IntoModel<Vec<AccountAddressesContentInner>> for AccountModelBuilder<'a
 pub async fn by_stake<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<AccountContent>, StatusCode>
+) -> Result<Json<AccountContent>, Error>
 where
     Option<AccountState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
@@ -1223,7 +1223,7 @@ mod tests {
 
         let assert_bad_request = |address: String| {
             let result = parse_account_key_param(&address, network).err();
-            assert_eq!(result, Some(StatusCode::BAD_REQUEST));
+            assert!(matches!(result, Some(Error::InvalidStakeAddress)));
         };
 
         // `stake_vk` requires a 32-byte key.
