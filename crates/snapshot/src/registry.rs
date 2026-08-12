@@ -78,6 +78,39 @@
 //! to the previous stele, which is a stele, and restores. Publishing again
 //! re-uploads nothing it already sent, because the blob check finds them.
 //!
+//! ## A restarted publish skips the layers that finished
+//!
+//! The blob check makes that retry cheap in *bytes* and not in *work*: a
+//! `diffId` is the digest of bytes that do not exist until they are built, so
+//! rediscovering that the registry already has a layer costs the whole walk of
+//! the stores that produced it. For an interrupted mainnet publish that is the
+//! same hours again, and nothing in the format asks for it — the manifest is
+//! written last precisely so an interrupted publish is safe to repeat.
+//!
+//! [`PublishRecord`] closes it, and it is the mirror of the restore's progress
+//! file: a host-local note beside the stores, naming each **epoch layer** whose
+//! upload succeeded. A restart reads it and adopts those layers through
+//! [`Registry::adopt_carried`] — the same move an inherited layer makes, one
+//! `HEAD` and no store read. The sixteen state shards are never in it, for the
+//! reason they are never inherited.
+//!
+//! The record is **a stand-in for the predecessor manifest an unfinished
+//! publish never got to write, and nothing more.** Four properties keep it from
+//! becoming a second source of truth:
+//!
+//! - **a skip is gated on the registry's own blob check**, so the record alone
+//!   can never place a digest in a manifest the registry cannot serve. Where a
+//!   manifest naming a reclaimed blob is a refusal, a record naming one is a
+//!   rebuild;
+//! - **a recorded digest equals a rebuilt one**, because an epoch layer is
+//!   deterministic for a closed epoch — the property the export golden and the
+//!   two-backend determinism test already pin — and the record refuses itself
+//!   if anything the bytes depend on has moved ([`Origin`]);
+//! - **`--rebuild` ignores it wholesale**, exactly as it already ignores
+//!   inheritance, and overwrites it rather than reading it;
+//! - **the manifest remains the only statement of what the repository holds.**
+//!   A stale or deleted record costs a rebuild, never a wrong publish.
+//!
 //! ## Reading one back
 //!
 //! [`restore_registry`] is the other half, and almost all of it is
@@ -100,16 +133,22 @@
 //! configuration and its own environment and hands the answer to [`open`]. The
 //! same goes for where the layers are staged on the way through.
 
-use std::{cell::Cell, collections::BTreeMap, path::PathBuf};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeMap,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 
 use dolos_core::{ArchiveStore, IndexStore, StateStore};
+use serde::{Deserialize, Serialize};
 use stelae::{
     digest::LayerDigests,
     frame::Limits,
-    inscription::{HistoryEntry, Inscription, LayerDescriptor},
+    inscription::{Compression, HistoryEntry, Inscription, LayerDescriptor},
     oci::{Options, Stele, Transfer},
-    transport::BlobIndex,
-    Digest, SteleReader as _,
+    transport::{BlobIndex, WrittenLayer},
+    Digest, SteleReader as _, SteleWriter,
 };
 
 /// How a repository is named, re-exported so the binary can take one from an
@@ -266,6 +305,252 @@ pub fn open(
             auth,
         },
     )?)
+}
+
+/// Where a publish is going, and what the host running it knows about itself.
+///
+/// The publish-side counterpart of [`crate::restore::Restoring`], and it holds
+/// the transport for the same reason that one holds `storage_path`: these are
+/// the facts a publish is *given*, as against the ones it derives. Threading
+/// them separately is what took [`publish`] to the edge of its signature, and
+/// they have never been supplied from different places.
+#[derive(Clone, Copy)]
+pub struct Publishing<'a> {
+    /// The repository being published into, already opened.
+    pub registry: &'a Registry,
+
+    /// `storage.path` — where the stores live, and with them the resumption
+    /// record. `None` for a caller with no node behind it, which records
+    /// nothing and resumes nothing.
+    pub storage_path: Option<&'a Path>,
+
+    /// The operator's `--rebuild`: build every layer, inherit none, and start
+    /// the record over.
+    pub rebuild: bool,
+}
+
+impl<'a> Publishing<'a> {
+    /// A publish into `registry` that keeps no record and rebuilds nothing.
+    pub fn new(registry: &'a Registry) -> Self {
+        Self {
+            registry,
+            storage_path: None,
+            rebuild: false,
+        }
+    }
+
+    /// The same publish, recording what it finishes beside the stores at
+    /// `storage_path`.
+    pub fn recording_in(self, storage_path: &'a Path) -> Self {
+        Self {
+            storage_path: Some(storage_path),
+            ..self
+        }
+    }
+
+    /// The same publish, with the operator's `--rebuild`.
+    pub fn rebuilding(self, rebuild: bool) -> Self {
+        Self { rebuild, ..self }
+    }
+}
+
+/// Name of the resumption record inside a node's storage directory.
+///
+/// Beside [`crate::restore::PROGRESS_FILE`] and spelled the same way, because
+/// they are the same kind of thing: host-local state about a run in flight,
+/// inside `storage.path` so that anything clearing a node's storage clears it
+/// too. "Snapshot" is this profile's word for a stele.
+pub const PUBLISH_RECORD_FILE: &str = ".snapshot-publish.json";
+
+/// Where a node with storage at `storage_path` keeps its resumption record.
+pub fn record_path_in(storage_path: &Path) -> PathBuf {
+    storage_path.join(PUBLISH_RECORD_FILE)
+}
+
+/// What a record has to agree with before a single layer in it is adopted.
+///
+/// Everything a recorded layer's bytes and address depend on that is *not* in
+/// the layer's own key. The key is the kind plus the descriptor scope, and that
+/// scope names an epoch and a slot window and nothing else — so:
+///
+/// - **the repository**, because a blob digest is an address in one repository
+///   and means nothing in another;
+/// - **the network magic**, because two chains' epoch 500 are different bytes
+///   under one key. The descriptor scope deliberately carries no magic — the
+///   layer's own header record does — so this is the only place the record can
+///   hold it;
+/// - **the parameters and the compression**, which are the inscription's own
+///   statement of how its layers were built. A binary that changed either would
+///   rebuild a recorded layer into different bytes, and the record would be
+///   offering an answer to a question nobody is asking any more.
+///
+/// A mismatch in any of them makes the record a fresh one for the origin at
+/// hand. Nothing is repaired and nothing is merged: the layers it named are
+/// still in the registry, and the publish that wants them will build them
+/// again and find them there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Origin {
+    /// The repository the layers were uploaded to, as the transport names it.
+    pub repository: String,
+    /// The network the stores stood on.
+    pub network_magic: u64,
+    /// The inscription parameters the layers were built under.
+    pub parameters: serde_json::Value,
+    /// The compression they were built with.
+    pub compression: Compression,
+}
+
+impl Origin {
+    /// What a publish of `plan` into `registry` would record under.
+    fn of(registry: &Registry, plan: &Plan) -> Self {
+        Self {
+            repository: registry.repository().to_string(),
+            network_magic: plan.network.magic(),
+            parameters: crate::parameters(),
+            compression: crate::compression(),
+        }
+    }
+}
+
+/// The epoch layers an interrupted publish got as far as uploading.
+///
+/// Written after each layer's upload succeeds and deleted once the stele is
+/// sealed, so a record that exists describes a publish that did not finish. See
+/// the module documentation for what it is and — more to the point — what it is
+/// not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PublishRecord {
+    pub origin: Origin,
+
+    /// The layers whose blobs are up, each as the transport measured it.
+    ///
+    /// The whole [`WrittenLayer`] rather than the digest pair the adoption
+    /// needs: the descriptor is what the new manifest has to state about the
+    /// layer, and a record that held only its identity would have to invent the
+    /// rest. In the canonical order of their keys, so the same progress is the
+    /// same bytes.
+    pub layers: Vec<WrittenLayer>,
+}
+
+impl PublishRecord {
+    /// Read the record at `path`, or `None` if there is none.
+    ///
+    /// **Only absence is `None`**, on [`crate::restore::PROGRESS_FILE`]'s
+    /// reasoning turned around: a file that exists and does not parse is an
+    /// error rather than an empty resume, because reading it as "nothing has
+    /// been uploaded" silently costs the rebuild this file exists to avoid.
+    /// `--rebuild` is how an operator asks for that outcome on purpose.
+    pub fn load(path: &Path) -> Result<Option<Self>, Error> {
+        let raw = match read_file(path) {
+            Ok(raw) => raw,
+            Err(e) => return Err(Error::Stelae(e)),
+        };
+
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+
+        Ok(Some(
+            serde_json::from_slice(&raw).map_err(|e| Error::Stelae(e.into()))?,
+        ))
+    }
+
+    /// Delete the record at `path`. A file that is not there is not an error.
+    pub fn remove(path: &Path) -> Result<(), Error> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::Stelae(e.into())),
+        }
+    }
+
+    /// Write the record at `path`, atomically.
+    ///
+    /// Through a temporary sibling and a rename, for the reason
+    /// `stelae::plan::RestoreProgress::save` states on its side: the failure
+    /// this file exists to survive is a process that stops mid-write, and a
+    /// half-written record would be refused by [`PublishRecord::load`] —
+    /// correctly, and uselessly, since the publish it described would then have
+    /// to start over.
+    pub fn save(&self, path: &Path) -> Result<(), Error> {
+        save_atomically(
+            path,
+            &serde_json::to_vec(self).map_err(stelae::Error::from)?,
+        )
+        .map_err(Error::Stelae)
+    }
+
+    /// The layers this record offers, keyed the way [`Chained`] looks them up.
+    ///
+    /// An [`Origin`] the caller is not publishing under offers nothing: see
+    /// [`Origin`] for why a mismatch is a fresh start rather than a merge.
+    fn table(&self, origin: &Origin) -> Result<BTreeMap<(String, String), WrittenLayer>, Error> {
+        if &self.origin != origin {
+            tracing::info!(
+                recorded = %self.origin.repository,
+                publishing = %origin.repository,
+                "a resumption record was left by a publish this one does not continue; \
+                 every layer will be rebuilt"
+            );
+
+            return Ok(BTreeMap::new());
+        }
+
+        let mut table = BTreeMap::new();
+
+        for layer in &self.layers {
+            // The same filter `inheritable_layers` applies to a predecessor's
+            // manifest, applied again on the way in: a record naming a state
+            // shard is a record nothing wrote, and honouring one would carry a
+            // stale tip into a manifest.
+            if !EPOCH_KINDS.contains(&layer.descriptor.kind.as_str()) {
+                continue;
+            }
+
+            table.insert(
+                key(&layer.descriptor.kind, &layer.descriptor.scope)?,
+                layer.clone(),
+            );
+        }
+
+        Ok(table)
+    }
+}
+
+fn read_file(path: &Path) -> Result<Option<Vec<u8>>, stelae::Error> {
+    match std::fs::read(path) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn save_atomically(path: &Path, bytes: &[u8]) -> Result<(), stelae::Error> {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let staging = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+
+    // Scoped so the handle is closed before the rename: Windows refuses to
+    // rename a file that is still open.
+    {
+        let mut file = std::fs::File::create(&staging)?;
+
+        file.write_all(bytes)?;
+
+        // Before the rename, not after: a rename that lands pointing at bytes
+        // the page cache has not written yet is the same truncated file by
+        // another route.
+        file.sync_all()?;
+    }
+
+    std::fs::rename(&staging, path)?;
+
+    Ok(())
 }
 
 /// What a publish into a repository did.
@@ -625,36 +910,76 @@ fn staging_need(
     crate::preflight::Need::of(STAGING, scratch_dir, peak.bytes())
 }
 
-/// Publish `plan` into `registry`, chained to whatever is already there.
+/// Publish `plan` into the repository `publishing` names, chained to whatever
+/// is already there.
 ///
 /// Reads the repository's moving tag first: an absent one starts a history, a
 /// predecessor at `sequence - 1` extends it, and anything else is refused
-/// before a single layer is built. `rebuild` reproduces every layer instead of
-/// inheriting the ones whose scope is unchanged — see the module
-/// documentation.
+/// before a single layer is built. [`Publishing::rebuild`] reproduces every
+/// layer instead of inheriting the ones whose scope is unchanged, and
+/// [`Publishing::storage_path`] is where the resumption record lives — see the
+/// module documentation for both.
 pub fn publish<A, S, I>(
-    registry: &Registry,
+    publishing: Publishing<'_>,
     plan: &Plan,
     archive: &A,
     state: &S,
     indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
-    rebuild: bool,
 ) -> Result<Published, Error>
 where
     A: ArchiveStore,
     S: StateStore,
     I: IndexStore,
 {
+    publish_into(
+        publishing.registry,
+        publishing,
+        plan,
+        archive,
+        state,
+        indexes,
+        digest_records,
+    )
+}
+
+/// The same publish, through a writer the caller supplies.
+///
+/// The generic half of [`publish`], as [`crate::restore::restore`] is of
+/// [`restore_registry`], and for the same kind of caller: one that has to
+/// observe or interrupt the writes rather than only their result. The resume
+/// suite's transport, which fails at a layer the test chose, is what this
+/// exists for.
+///
+/// **`stele` must write into `publishing.registry`.** The manifest is built
+/// from what that transport is carrying, so a writer that puts the layers
+/// somewhere else would seal a manifest with holes in it. A decorator over the
+/// registry is the shape this takes; anything else is a caller misusing it.
+pub fn publish_into<W, A, S, I>(
+    stele: &W,
+    publishing: Publishing<'_>,
+    plan: &Plan,
+    archive: &A,
+    state: &S,
+    indexes: &I,
+    digest_records: Option<&[digests::ImmutableDigests]>,
+) -> Result<Published, Error>
+where
+    W: SteleWriter,
+    A: ArchiveStore,
+    S: StateStore,
+    I: IndexStore,
+{
+    let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let previous = Chained::new(latest.as_ref(), registry, plan, rebuild)?;
+    let previous = Chained::new(publishing, latest.as_ref(), plan)?;
 
     // Reset before the export, so what comes back is this publish's cost and
     // not a total carried over from an earlier one through the same transport.
     registry.take_transfer();
 
     let inscription = export::export(
-        registry,
+        stele,
         plan,
         archive,
         state,
@@ -662,6 +987,11 @@ where
         digest_records,
         &previous,
     )?;
+
+    // Only here: the stele is sealed, so the note about what was uploaded on the
+    // way to it has nothing left to say. Before the seal it would be a record
+    // that outlived neither the run nor its usefulness.
+    previous.forget_record()?;
 
     let identity = inscription.digest()?;
     let layers_reused = previous.adopted.get();
@@ -684,13 +1014,13 @@ where
 /// read the same input so they cannot drift when Phase 4 gives the records a
 /// source.
 pub fn preview(
-    registry: &Registry,
+    publishing: Publishing<'_>,
     plan: &Plan,
     digest_records: Option<&[digests::ImmutableDigests]>,
-    rebuild: bool,
 ) -> Result<Preview, Error> {
+    let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
-    let previous = Chained::new(latest.as_ref(), registry, plan, rebuild)?;
+    let previous = Chained::new(publishing, latest.as_ref(), plan)?;
 
     // Every epoch selected contributes one layer per epoch kind, the state tip
     // contributes its sixteen shards however the epochs were restricted, and
@@ -713,7 +1043,7 @@ pub fn preview(
         for kind in EPOCH_KINDS {
             let spec = scope.layer_spec(kind)?;
 
-            if previous.inheritable(kind, &spec.scope)?.is_some() {
+            if previous.carried_forward(kind, &spec.scope)? {
                 layers_reused += 1;
             }
         }
@@ -728,27 +1058,55 @@ pub fn preview(
     })
 }
 
-/// The stele this publish follows, in a repository.
+/// The publish this one follows, in a repository — which may be itself.
 ///
-/// Holds the history it hands to the new inscription and the table of layers it
-/// is willing to let the new stele inherit, keyed by the pair that decides it:
-/// the layer's kind and the canonical encoding of its profile-owned scope.
+/// Holds the history it hands to the new inscription and the two tables of
+/// layers it is willing to let the new stele carry forward rather than build,
+/// both keyed by the pair that decides it: the layer's kind and the canonical
+/// encoding of its profile-owned scope.
+///
+/// The tables answer the same question from different standing. `inheritable`
+/// is the *predecessor's manifest* — a stele the repository serves, so a layer
+/// missing from it is a fault. `resumable` is *this publish's own record* of an
+/// attempt that died before it could write a manifest — a note, so a layer
+/// missing from the registry is only a rebuild. The manifest is consulted
+/// first, because a repository that states it holds a layer needs no note to
+/// say so.
 struct Chained<'a> {
     registry: &'a Registry,
     source: Option<&'a Stele>,
     predecessor: Option<(u64, Digest)>,
     history: Vec<HistoryEntry>,
     inheritable: BTreeMap<(String, String), LayerDescriptor>,
+    resumable: BTreeMap<(String, String), WrittenLayer>,
+    record: Option<Recording>,
     adopted: Cell<usize>,
+}
+
+/// The resumption record this publish is writing, open.
+///
+/// Seeded with what it inherits, so the file is the whole of what is up rather
+/// than the whole of what *this attempt* put up: an attempt that adopts twenty
+/// layers and adds one, then dies, has to leave twenty-one behind or the third
+/// attempt pays for the difference.
+struct Recording {
+    path: PathBuf,
+    origin: Origin,
+    layers: RefCell<BTreeMap<(String, String), WrittenLayer>>,
 }
 
 impl<'a> Chained<'a> {
     fn new(
+        publishing: Publishing<'a>,
         latest: Option<&'a Stele>,
-        registry: &'a Registry,
         plan: &Plan,
-        rebuild: bool,
     ) -> Result<Self, Error> {
+        let Publishing {
+            registry,
+            storage_path,
+            rebuild,
+        } = publishing;
+
         let inscription = latest.map(|stele| stele.read_inscription()).transpose()?;
 
         if let Some(previous) = &inscription {
@@ -770,22 +1128,73 @@ impl<'a> Chained<'a> {
             _ => BTreeMap::new(),
         };
 
+        let origin = Origin::of(registry, plan);
+
+        // Read on the same terms, and it is the *honouring* that `rebuild`
+        // gates rather than the reading — the asymmetry
+        // `crate::restore::Checkpoint::open` states, for the same reason. A
+        // publisher that asked to rebuild gets a record that starts empty and
+        // overwrites whatever was there, so nothing an earlier attempt believed
+        // can survive the run that was meant to settle it.
+        let resumable = match (rebuild, storage_path) {
+            (false, Some(storage_path)) => {
+                match PublishRecord::load(&record_path_in(storage_path))? {
+                    Some(record) => record.table(&origin)?,
+                    None => BTreeMap::new(),
+                }
+            }
+            _ => BTreeMap::new(),
+        };
+
+        if !resumable.is_empty() {
+            tracing::info!(
+                layers = resumable.len(),
+                "an interrupted publish left epoch layers in this repository; \
+                 they will be carried forward rather than rebuilt"
+            );
+        }
+
+        let record = storage_path.map(|storage_path| Recording {
+            path: record_path_in(storage_path),
+            origin,
+            layers: RefCell::new(resumable.clone()),
+        });
+
         Ok(Self {
             registry,
             source: latest.filter(|_| !rebuild),
             predecessor,
             history,
             inheritable,
+            resumable,
+            record,
             adopted: Cell::new(0),
         })
     }
 
-    fn inheritable(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<Option<&LayerDescriptor>, Error> {
-        Ok(self.inheritable.get(&key(kind, scope)?))
+    /// Whether a layer of `kind` at `scope` would be carried forward rather
+    /// than built.
+    ///
+    /// What [`preview`] reports, and it spends no `HEAD`: the promise a dry run
+    /// makes is about what the scopes permit. The record's own gate — that the
+    /// registry still holds the blob — runs in [`Predecessor::adopt`] and can
+    /// turn one of these into a rebuild, which is the direction a dry run is
+    /// allowed to be wrong in.
+    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
+        let key = key(kind, scope)?;
+
+        Ok(self.inheritable.contains_key(&key) || self.resumable.contains_key(&key))
+    }
+
+    /// Delete the resumption record.
+    ///
+    /// Called once the stele is sealed and never before it. See
+    /// [`publish_into`].
+    fn forget_record(&self) -> Result<(), Error> {
+        match &self.record {
+            Some(record) => PublishRecord::remove(&record.path),
+            None => Ok(()),
+        }
     }
 }
 
@@ -799,17 +1208,73 @@ impl Predecessor for Chained<'_> {
         kind: &str,
         scope: &serde_json::Value,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        let (Some(source), Some(descriptor)) = (self.source, self.inheritable(kind, scope)?) else {
+        let key = key(kind, scope)?;
+
+        // The arrangement and the answer are one act, in both branches: by the
+        // time this returns a descriptor, the transport is already carrying the
+        // blob, and the `HEAD` that proves the registry still has it has already
+        // happened.
+        if let (Some(source), Some(descriptor)) = (self.source, self.inheritable.get(&key)) {
+            self.registry.adopt_layer(source, descriptor.clone())?;
+            self.adopted.set(self.adopted.get() + 1);
+
+            return Ok(Some(descriptor.clone()));
+        }
+
+        let Some(recorded) = self.resumable.get(&key) else {
             return Ok(None);
         };
 
-        // The arrangement and the answer are one act: by the time this returns
-        // a descriptor, the transport is already carrying the blob, and the
-        // `HEAD` that proves the registry still has it has already happened.
-        self.registry.adopt_layer(source, descriptor.clone())?;
+        // The one place the record's standing differs from a manifest's: a blob
+        // the registry no longer holds costs this layer its skip and nothing
+        // more. Whatever reclaimed it, the publish is still correct — it builds
+        // the layer and uploads it again.
+        if !self.registry.adopt_carried(recorded.clone())? {
+            tracing::warn!(
+                kind,
+                %scope,
+                "a recorded layer's blob is no longer in the repository; rebuilding it"
+            );
+
+            return Ok(None);
+        }
+
         self.adopted.set(self.adopted.get() + 1);
 
-        Ok(Some(descriptor.clone()))
+        Ok(Some(recorded.descriptor.clone()))
+    }
+
+    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), Error> {
+        let Some(record) = &self.record else {
+            return Ok(());
+        };
+
+        if !EPOCH_KINDS.contains(&descriptor.kind.as_str()) {
+            return Ok(());
+        }
+
+        // The transport's own measurement, not a reconstruction of it: what
+        // goes in the record is what the manifest is about to say.
+        let Some(written) = self.registry.carried(&descriptor.diff_id) else {
+            tracing::warn!(
+                kind = descriptor.kind,
+                scope = %descriptor.scope,
+                "this layer is not in the transport, so nothing was recorded for it; \
+                 an interrupted publish will rebuild it"
+            );
+
+            return Ok(());
+        };
+
+        let mut layers = record.layers.borrow_mut();
+
+        layers.insert(key(&descriptor.kind, &descriptor.scope)?, written);
+
+        PublishRecord {
+            origin: record.origin.clone(),
+            layers: layers.values().cloned().collect(),
+        }
+        .save(&record.path)
     }
 }
 
@@ -1050,6 +1515,143 @@ mod tests {
             "",
         ] {
             assert!(raw.parse::<Point>().is_err(), "{raw:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // The resumption record
+    // -----------------------------------------------------------------------
+    //
+    // What a record decides on its own, which is everything except whether the
+    // registry still holds a blob. That last question needs a registry and is
+    // in `tests/publish.rs`, with the interruption that raises it.
+
+    fn origin(repository: &str) -> Origin {
+        Origin {
+            repository: repository.to_owned(),
+            network_magic: 2,
+            parameters: crate::parameters(),
+            compression: crate::compression(),
+        }
+    }
+
+    fn written(kind: &str, scope: serde_json::Value, identity: u8) -> WrittenLayer {
+        WrittenLayer {
+            descriptor: layer(kind, scope, identity),
+            digests: LayerDigests {
+                diff_id: Digest::compute([identity]),
+                blob_digest: Digest::compute([identity, 0xff]),
+                uncompressed_size: 1,
+                compressed_size: 1,
+            },
+        }
+    }
+
+    fn record(origin: Origin) -> PublishRecord {
+        PublishRecord {
+            origin,
+            layers: vec![
+                written(
+                    crate::BLOCKS,
+                    json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
+                    1,
+                ),
+                written(crate::STATE, json!({"shard": 0}), 2),
+            ],
+        }
+    }
+
+    /// The record round-trips, and only absence reads as a fresh start.
+    ///
+    /// The second half is the one that matters: a record read as "nothing has
+    /// been uploaded" costs the rebuild the file exists to avoid, and does it
+    /// without anything looking wrong.
+    #[test]
+    fn a_record_round_trips_and_a_corrupt_one_is_not_an_absent_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = record_path_in(temp.path());
+
+        assert_eq!(path.file_name().unwrap(), PUBLISH_RECORD_FILE);
+        assert_eq!(PublishRecord::load(&path).unwrap(), None);
+
+        let record = record(origin("oci://example.test/dolos"));
+        record.save(&path).unwrap();
+
+        assert_eq!(PublishRecord::load(&path).unwrap(), Some(record));
+
+        // The staging sibling is renamed, not left for the next reader.
+        let found: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+
+        assert_eq!(found, vec![PUBLISH_RECORD_FILE.to_owned()]);
+
+        std::fs::write(&path, b"{\"origin\": ").unwrap();
+        assert!(PublishRecord::load(&path).is_err());
+
+        PublishRecord::remove(&path).unwrap();
+        assert_eq!(PublishRecord::load(&path).unwrap(), None);
+
+        // Removing what is not there is what the end of every publish does.
+        PublishRecord::remove(&path).unwrap();
+    }
+
+    /// Only the epoch kinds come out of a record, whatever went into one.
+    #[test]
+    fn a_record_offers_epoch_layers_and_nothing_else() {
+        let origin = origin("oci://example.test/dolos");
+        let table = record(origin.clone()).table(&origin).unwrap();
+
+        assert_eq!(table.len(), 1);
+        assert!(table.contains_key(
+            &key(
+                crate::BLOCKS,
+                &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
+            )
+            .unwrap()
+        ));
+    }
+
+    /// Done criterion 2's second half, decided without a registry: a record
+    /// left by a publish this one does not continue offers nothing.
+    ///
+    /// Four ways to not be that publish, and each one alone is enough. The
+    /// repository is the one an operator will meet; the other three are what
+    /// stops a recorded digest from being adopted into a manifest whose layers
+    /// a rebuild would compute differently.
+    #[test]
+    fn a_record_from_another_publish_offers_nothing() {
+        let mine = origin("oci://example.test/dolos");
+
+        for theirs in [
+            origin("oci://example.test/dolos-preprod"),
+            Origin {
+                network_magic: 1,
+                ..mine.clone()
+            },
+            Origin {
+                parameters: json!({"stateShards": 1}),
+                ..mine.clone()
+            },
+            Origin {
+                compression: Compression {
+                    algo: "zstd".to_owned(),
+                    level: 1,
+                },
+                ..mine.clone()
+            },
+        ] {
+            assert_ne!(theirs, mine);
+
+            let table = record(theirs.clone()).table(&mine).unwrap();
+
+            assert!(table.is_empty(), "{theirs:?}");
+
+            // And the same layers under the origin they were written for are
+            // offered, so what the guard refuses is the mismatch and not the
+            // record.
+            assert_eq!(record(theirs.clone()).table(&theirs).unwrap().len(), 1);
         }
     }
 

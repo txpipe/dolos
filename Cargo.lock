@@ -1679,6 +1679,7 @@ dependencies = [
  "hex",
  "minicbor 0.26.4",
  "rustls",
+ "serde",
  "serde_json",
  "stelae",
  "tempfile",

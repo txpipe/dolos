@@ -23,6 +23,7 @@ dolos-cardano = { path = "../cardano" }
 fs4.workspace = true
 hex.workspace = true
 minicbor.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

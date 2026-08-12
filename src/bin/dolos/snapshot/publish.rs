@@ -151,6 +151,14 @@ fn to_repository(
         .into_diagnostic()
         .context("opening the repository")?;
 
+    // The resumption record sits beside the stores, so an interrupted publish
+    // restarted against this repository carries forward the epoch layers it
+    // already uploaded instead of rebuilding them. `--rebuild` starts it over
+    // along with everything else.
+    let publishing = registry::Publishing::new(&registry)
+        .recording_in(&config.storage.path)
+        .rebuilding(args.rebuild);
+
     // Before anything is built, and before the dry run too: a publisher asking
     // what a publish would do wants the same answer the publish gives.
     if !standing(&registry, plan, args)? {
@@ -171,7 +179,7 @@ fn to_repository(
         // `None` here and `None` at the `publish` below are one decision: a dry
         // run describes the publish that follows it, so the two calls are
         // handed the same digest records or the number is about something else.
-        let preview = registry::preview(&registry, plan, None, args.rebuild)
+        let preview = registry::preview(publishing, plan, None)
             .into_diagnostic()
             .context("planning the publish")?;
 
@@ -189,13 +197,12 @@ fn to_repository(
     }
 
     let published = registry::publish(
-        &registry,
+        publishing,
         plan,
         &stores.archive,
         &stores.state,
         &stores.indexes,
         None,
-        args.rebuild,
     )
     .into_diagnostic()
     .context("publishing the stele")?;

@@ -216,6 +216,12 @@ pub fn plan<S: StateStore>(state: &S, network_magic: u64) -> Result<Plan, Error>
 /// together is what lets a publisher rebuild everything while still chaining —
 /// the `--rebuild` case, which suppresses [`Predecessor::adopt`] and leaves
 /// [`Predecessor::history`] exactly as it was.
+///
+/// The publish this one follows can be **this publish, interrupted**, which is
+/// what [`Predecessor::landed`] is for: a stele that never got sealed left
+/// layers behind that a restart may carry forward on exactly the terms a
+/// predecessor's do. Nothing here decides where that is written down — that is
+/// the implementor's, as `adopt` already is.
 pub trait Predecessor {
     /// The history the new inscription carries: every prior publication,
     /// contiguous and ascending, ending at `sequence - 1`.
@@ -246,6 +252,28 @@ pub trait Predecessor {
         let _ = (kind, scope);
 
         Ok(None)
+    }
+
+    /// Note that `descriptor`'s layer is in the transport and will be in the
+    /// manifest, whether it was built here or adopted.
+    ///
+    /// Called once per epoch layer, as it lands and before the next one starts,
+    /// so an implementor writing it down leaves a record that means "this layer
+    /// is up" rather than "this layer was attempted" — the same boundary
+    /// [`crate::restore::Checkpoint`] records on its side. The state shards are
+    /// deliberately never offered: they describe a moving tip, and a restart
+    /// must rebuild them.
+    ///
+    /// A failure here **fails the publish**. Recording is not a courtesy: a
+    /// record that silently stopped being written would cost the hours it
+    /// exists to save, at the moment nobody is watching.
+    ///
+    /// The default does nothing, which is what a publish with no host behind it
+    /// — a directory, a reproduction — wants.
+    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), Error> {
+        let _ = descriptor;
+
+        Ok(())
     }
 }
 
@@ -522,17 +550,31 @@ where
     let mut layers = Vec::new();
 
     for window in &plan.epochs {
-        layers.push(write_blocks(stele, plan, archive, window, previous)?);
+        landed(
+            write_blocks(stele, plan, archive, window, previous)?,
+            previous,
+            &mut layers,
+        )?;
     }
 
     for window in &plan.epochs {
-        layers.push(write_indexes(stele, plan, indexes, window, previous)?);
+        landed(
+            write_indexes(stele, plan, indexes, window, previous)?,
+            previous,
+            &mut layers,
+        )?;
     }
 
     for window in &plan.epochs {
-        layers.push(write_logs(stele, plan, archive, window, previous)?);
+        landed(
+            write_logs(stele, plan, archive, window, previous)?,
+            previous,
+            &mut layers,
+        )?;
     }
 
+    // Not offered to the predecessor: a shard is the tip, and a restart rebuilds
+    // it. See [`Predecessor::landed`].
     layers.extend(write_state(stele, plan, state)?);
 
     if let Some(records) = digest_records {
@@ -824,6 +866,23 @@ fn layers_by_scope(
 
 fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
+}
+
+/// One epoch layer is in the transport: tell the predecessor before counting
+/// it.
+///
+/// In that order, and one layer at a time, because the two together are what
+/// make the note honest — a record written after the loop would describe a
+/// publish that finished, which is the one case it is no use in.
+fn landed(
+    descriptor: LayerDescriptor,
+    previous: &dyn Predecessor,
+    layers: &mut Vec<LayerDescriptor>,
+) -> Result<(), Error> {
+    previous.landed(&descriptor)?;
+    layers.push(descriptor);
+
+    Ok(())
 }
 
 /// The layer spec for one epoch window, and what the predecessor says about it.

@@ -13,7 +13,7 @@
 //! same knob `crates/stelae/tests/oci.rs` uses, so this suite can be pointed at
 //! another implementation.
 //!
-//! ## The four properties
+//! ## The properties
 //!
 //! 1. **A second publish builds and uploads only what is new.** Both numbers
 //!    come from counters the code keeps, not from a duration and not from
@@ -36,6 +36,10 @@
 //! 6. **A repository already at this node's sequence is not a fault.** The
 //!    detection a publisher on a timer needs, read off the same moving tag a
 //!    publish reads.
+//! 7. **A restarted publish never rebuilds an epoch layer it already uploaded**
+//!    — and produces the manifest an uninterrupted publish would have, byte for
+//!    byte. The interruption is real: a transport that dies at a layer the test
+//!    named, leaving blobs up that no manifest references.
 //!
 //! ## Why the two cursors sit where they do
 //!
@@ -59,7 +63,8 @@ mod registry_fixture;
 use dolos_core::Domain as _;
 use dolos_snapshot::{
     export::{self, Following, Predecessor as _, Standing},
-    registry, DolosProfile, Error, BLOCKS, INDEXES, LOGS, STATE_SHARDS,
+    registry::{self, Publishing},
+    DolosProfile, Error, BLOCKS, INDEXES, LOGS, STATE_SHARDS,
 };
 use stelae::SteleReader as _;
 
@@ -166,7 +171,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     let repository = fixture.repository("dolos/dry-run");
 
     // Against an empty repository: nothing to follow, nothing to inherit.
-    let empty = registry::preview(&repository, &node.first, None, false).unwrap();
+    let empty = registry::preview(Publishing::new(&repository), &node.first, None).unwrap();
 
     assert_eq!(empty.predecessor, None);
     assert_eq!(empty.history, 0);
@@ -179,7 +184,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     assert_eq!(first.layers_reused, empty.layers_reused);
 
     // And against the stele that is now there.
-    let next = registry::preview(&repository, &node.second, None, false).unwrap();
+    let next = registry::preview(Publishing::new(&repository), &node.second, None).unwrap();
 
     assert_eq!(next.predecessor, Some((1, first.identity)));
     assert_eq!(next.history, 1);
@@ -188,7 +193,12 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     // here, while sequence 2 is still unpublished: a preview reads the chain
     // through the same rule a publish does, so asking after the fact would be
     // refused as a republish.
-    let rebuilding = registry::preview(&repository, &node.second, None, true).unwrap();
+    let rebuilding = registry::preview(
+        Publishing::new(&repository).rebuilding(true),
+        &node.second,
+        None,
+    )
+    .unwrap();
 
     assert_eq!(rebuilding.layers_reused, 0);
     assert_eq!(rebuilding.layers_built, PER_PUBLISH + 3);
@@ -210,7 +220,7 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
 
     // A preview reaches the chain refusal too, which is what makes `--dry-run`
     // the cheap way to find out that a publisher has skipped an epoch.
-    let refused = registry::preview(&repository, &node.second, None, false).unwrap_err();
+    let refused = registry::preview(Publishing::new(&repository), &node.second, None).unwrap_err();
 
     assert!(matches!(refused, Error::HistoryBreak { .. }), "{refused:?}");
 }
@@ -589,4 +599,290 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
         peak.bytes(),
         inspected.total_compressed,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Resuming an interrupted publish
+// ---------------------------------------------------------------------------
+
+/// Done criterion 1: a restarted publish never rebuilds an epoch layer it
+/// already uploaded.
+///
+/// The interruption lands at a layer this test names rather than after a
+/// wall-clock delay, for the reason `tests/restore_registry.rs` states about
+/// its own: a kill on a timer over a loopback registry sometimes interrupts
+/// nothing. Here it is `logs` for epoch 1, which is the last of the six epoch
+/// layers sequence 2 writes — so the interrupted run got five of them up, and
+/// two of those five are ones no manifest in the repository mentions.
+///
+/// That last part is what makes the record load-bearing rather than decorative.
+/// Epoch 0's three layers would be inherited from sequence 1's manifest with or
+/// without a record; epoch 1's `blocks` and `indexes` exist only as blobs
+/// nothing references, and only the record knows they are there.
+#[test]
+#[ignore]
+fn a_restarted_publish_carries_forward_the_layers_it_finished() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let storage = tempfile::tempdir().unwrap();
+
+    let first = fixture.repository("dolos/resume");
+
+    node.publish_as(publishing(&first, &storage), &node.first)
+        .unwrap();
+
+    assert_eq!(
+        registry::PublishRecord::load(&record_path(&storage)).unwrap(),
+        None,
+        "a publish that sealed left its record behind",
+    );
+
+    // The interruption. A fresh transport each time, because the process this
+    // stands in for is a fresh process.
+    let dying = fixture.repository("dolos/resume");
+
+    let killed = node
+        .publish_through(
+            &Interrupted {
+                inner: &dying,
+                kind: LOGS,
+                epoch: 1,
+            },
+            publishing(&dying, &storage),
+            &node.second,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(killed, Error::Stelae(stelae::Error::Io(_))),
+        "{killed:?}"
+    );
+
+    let record = registry::PublishRecord::load(&record_path(&storage))
+        .unwrap()
+        .expect("an interrupted publish left no record");
+
+    assert_eq!(
+        record.layers.len(),
+        5,
+        "every epoch layer ahead of the one that died, and only those",
+    );
+
+    assert!(
+        record
+            .layers
+            .iter()
+            .all(|layer| layer.descriptor.kind != dolos_snapshot::STATE),
+        "a state shard is the tip, and is never recorded",
+    );
+
+    // The restart, against the same repository and the same storage.
+    let resumed_into = fixture.repository("dolos/resume");
+
+    let resumed = node
+        .publish_as(publishing(&resumed_into, &storage), &node.second)
+        .unwrap();
+
+    assert_eq!(
+        resumed.layers_reused, 5,
+        "epoch 0's three off the manifest, epoch 1's blocks and indexes off the record",
+    );
+
+    assert_eq!(
+        resumed.layers_built,
+        1 + STATE_SHARDS as usize,
+        "epoch 1's logs and the sixteen state shards, and nothing else",
+    );
+
+    // The claim in the counters the transport keeps: the two layers the record
+    // carried moved no bytes at all, and the shards it never carried did.
+    assert_eq!(resumed.transfer.layers_reused, 5);
+    assert_eq!(resumed.transfer.layers_uploaded, 1 + STATE_SHARDS);
+    assert_eq!(
+        resumed.transfer.layers_skipped, 0,
+        "a layer skipped by the blob check is one that was built first, which is \
+         the cost this record exists to remove",
+    );
+
+    assert_eq!(
+        registry::PublishRecord::load(&record_path(&storage)).unwrap(),
+        None,
+        "a resumed publish that sealed left its record behind",
+    );
+
+    // Done criterion 1's other half: the stele is the one an uninterrupted
+    // publish would have produced, down to the manifest bytes. A second
+    // repository published into identically is the only thing that can say so —
+    // a repository's identity is path-dependent, so the comparison has to be
+    // against a chain built the same way rather than against a literal.
+    let clean = fixture.repository("dolos/uninterrupted");
+
+    node.publish(&clean, &node.first, false);
+    let uninterrupted = node.publish(&clean, &node.second, false);
+
+    assert_eq!(resumed.identity, uninterrupted.identity);
+    assert_eq!(resumed.inscription, uninterrupted.inscription);
+    assert_eq!(manifest_of(&resumed_into), manifest_of(&clean));
+
+    eprintln!(
+        "resumed: {} layers carried forward, {} built, {} bytes not moved — and the same manifest",
+        resumed.layers_reused, resumed.layers_built, resumed.transfer.bytes_reused,
+    );
+}
+
+/// Done criterion 2, both halves: the two ways a record is not honoured.
+///
+/// `--rebuild` is the publisher choosing to reproduce, and it ignores the
+/// record exactly as it already ignores inheritance. A record naming another
+/// repository is ignored because a blob digest is an address in one repository
+/// and means nothing in another — and this is the case a record could get
+/// silently wrong, since the layers it names would be adopted into a manifest
+/// the registry cannot serve.
+#[test]
+#[ignore]
+fn a_rebuild_and_another_repository_both_ignore_the_record() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let storage = tempfile::tempdir().unwrap();
+
+    let first = fixture.repository("dolos/ignored-a");
+    node.publish_as(publishing(&first, &storage), &node.first)
+        .unwrap();
+
+    let other = fixture.repository("dolos/ignored-b");
+    node.publish_as(publishing(&other, &storage), &node.first)
+        .unwrap();
+
+    let interrupt = |repository: &registry::Registry| {
+        node.publish_through(
+            &Interrupted {
+                inner: repository,
+                kind: LOGS,
+                epoch: 1,
+            },
+            publishing(repository, &storage),
+            &node.second,
+        )
+        .unwrap_err();
+
+        registry::PublishRecord::load(&record_path(&storage))
+            .unwrap()
+            .expect("an interrupted publish left no record")
+            .layers
+            .len()
+    };
+
+    // A record for `ignored-a`, five layers deep.
+    let dying = fixture.repository("dolos/ignored-a");
+    assert_eq!(interrupt(&dying), 5);
+
+    // The other repository's publish reaches the same record and takes nothing
+    // from it: epoch 0's three layers come off *its own* manifest, and epoch
+    // 1's come out of the stores.
+    let elsewhere = fixture.repository("dolos/ignored-b");
+
+    let published = node
+        .publish_as(publishing(&elsewhere, &storage), &node.second)
+        .unwrap();
+
+    assert_eq!(
+        published.layers_reused, 3,
+        "epoch 0's three, off this repository's own manifest and nothing else",
+    );
+    assert_eq!(
+        published.layers_built, PER_PUBLISH,
+        "epoch 1's three layers and the sixteen state shards, exactly as if no \
+         record existed",
+    );
+
+    // Back to the first repository, now with `--rebuild`. The record is there
+    // and describes layers this publish could carry; it is ignored wholesale,
+    // and overwritten rather than read.
+    let dying = fixture.repository("dolos/ignored-a");
+    assert_eq!(interrupt(&dying), 5);
+
+    let rebuilt_into = fixture.repository("dolos/ignored-a");
+
+    let rebuilt = node
+        .publish_as(
+            publishing(&rebuilt_into, &storage).rebuilding(true),
+            &node.second,
+        )
+        .unwrap();
+
+    assert_eq!(
+        rebuilt.layers_reused, 0,
+        "a rebuild carries nothing forward"
+    );
+    assert_eq!(rebuilt.layers_built, PER_PUBLISH + 3);
+
+    // And it is the same stele either way, which is the point of being allowed
+    // to ignore the record: reproducing what you published is not the same act
+    // as forgetting that you published it.
+    assert_eq!(
+        rebuilt.inscription.history.len(),
+        1,
+        "a rebuild still chains",
+    );
+}
+
+/// A publish into `repository`, recording beside the stores at `storage`.
+fn publishing<'a>(
+    repository: &'a registry::Registry,
+    storage: &'a tempfile::TempDir,
+) -> registry::Publishing<'a> {
+    registry::Publishing::new(repository).recording_in(storage.path())
+}
+
+fn record_path(storage: &tempfile::TempDir) -> std::path::PathBuf {
+    registry::record_path_in(storage.path())
+}
+
+/// The manifest a repository's moving tag resolves to, as bytes.
+fn manifest_of(repository: &registry::Registry) -> Vec<u8> {
+    let stele = repository.pull_latest(&DolosProfile).unwrap();
+
+    stelae::oci::manifest_bytes(stele.manifest()).unwrap()
+}
+
+/// A transport that stops at a layer the test chose.
+///
+/// The publish-side twin of `tests/restore_registry.rs`'s interrupted reader:
+/// it refuses the moment a sink is asked for the named layer, so the
+/// interrupted run uploaded exactly the layers ahead of that one and nothing of
+/// it. Everything else goes straight through to the registry, which is what
+/// `registry::publish_into` requires of a writer it is handed.
+struct Interrupted<'a> {
+    inner: &'a registry::Registry,
+    kind: &'static str,
+    epoch: u64,
+}
+
+impl stelae::SteleWriter for Interrupted<'_> {
+    type Sink = stelae::oci::RegistrySink;
+
+    fn layer_sink(
+        &self,
+        profile: &dyn stelae::Profile,
+        spec: &stelae::transport::LayerSpec,
+        level: i32,
+    ) -> Result<Self::Sink, stelae::Error> {
+        let epoch = spec.scope.get("epoch").and_then(serde_json::Value::as_u64);
+
+        if spec.kind == self.kind && epoch == Some(self.epoch) {
+            return Err(stelae::Error::Io(std::io::Error::other(
+                "the machine went away",
+            )));
+        }
+
+        self.inner.layer_sink(profile, spec, level)
+    }
+
+    fn seal(
+        &self,
+        profile: &dyn stelae::Profile,
+        inscription: &stelae::inscription::Inscription,
+    ) -> Result<stelae::Digest, stelae::Error> {
+        self.inner.seal(profile, inscription)
+    }
 }

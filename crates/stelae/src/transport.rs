@@ -50,6 +50,8 @@
 //! needs to ask a repository what is in it is asking a transport-specific
 //! question and should hold the transport-specific type.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     digest::{LayerDigests, LayerWriter},
     frame::{CanonicalCbor, LayerHeader, Limits, SeqWriter},
@@ -89,7 +91,15 @@ impl LayerSpec {
 
 /// A written layer: the descriptor to put in the inscription, plus the
 /// transport facts that do not belong there.
-#[derive(Debug, Clone)]
+///
+/// Serializable so that a host can *hold one across a process*. Nothing in the
+/// protocol reads such a file — it is not a stele and never becomes one — but a
+/// publisher that wants to carry a layer it already uploaded into a later
+/// attempt has to write down what the transport told it, and writing down a
+/// half of the pair is what makes a descriptor and a blob able to disagree. See
+/// [`crate::oci::Registry::adopt_carried`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WrittenLayer {
     pub descriptor: LayerDescriptor,
     pub digests: LayerDigests,

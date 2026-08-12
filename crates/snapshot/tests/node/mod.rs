@@ -121,7 +121,7 @@ mod registry_node {
     use dolos_core::{BlockHash, ChainPoint, Domain as _};
     use dolos_snapshot::{
         export::Plan,
-        registry::{self, Published, Registry},
+        registry::{self, Published, Publishing, Registry},
         Error, Network,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
@@ -176,29 +176,50 @@ mod registry_node {
         }
 
         pub fn publish(&self, repository: &Registry, plan: &Plan, rebuild: bool) -> Published {
+            self.publish_as(Publishing::new(repository).rebuilding(rebuild), plan)
+                .unwrap()
+        }
+
+        /// A publish with the whole of [`Publishing`] chosen by the caller —
+        /// what the resume suite needs, since a resumption record is the one
+        /// input a publish takes from the host rather than from the repository.
+        pub fn publish_as(
+            &self,
+            publishing: Publishing<'_>,
+            plan: &Plan,
+        ) -> Result<Published, Error> {
             registry::publish(
-                repository,
+                publishing,
                 plan,
                 self.domain.archive(),
                 self.domain.state(),
                 self.domain.indexes(),
                 None,
-                rebuild,
             )
-            .unwrap()
+        }
+
+        /// The same publish, through a writer of the caller's — the interrupted
+        /// transport the resume suite kills at a layer it chose.
+        pub fn publish_through<W: stelae::SteleWriter>(
+            &self,
+            stele: &W,
+            publishing: Publishing<'_>,
+            plan: &Plan,
+        ) -> Result<Published, Error> {
+            registry::publish_into(
+                stele,
+                publishing,
+                plan,
+                self.domain.archive(),
+                self.domain.state(),
+                self.domain.indexes(),
+                None,
+            )
         }
 
         pub fn refuse(&self, repository: &Registry, plan: &Plan) -> Error {
-            registry::publish(
-                repository,
-                plan,
-                self.domain.archive(),
-                self.domain.state(),
-                self.domain.indexes(),
-                None,
-                false,
-            )
-            .unwrap_err()
+            self.publish_as(Publishing::new(repository), plan)
+                .unwrap_err()
         }
     }
 }
