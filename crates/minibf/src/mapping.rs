@@ -35,6 +35,7 @@ use blockfrost_openapi::models::{
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    script_redeemers_inner::Purpose as ScriptRedeemerPurpose,
     script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
@@ -1445,6 +1446,34 @@ where
     }
 }
 
+/// The Blockfrost purpose of a tx-content redeemer, or `None` for vote and
+/// propose.
+///
+/// The Blockfrost schema predates the conway purposes.
+// TODO: discuss with BF team if the schema should be extended to include
+// vote and propose
+pub fn tx_redeemer_purpose(tag: RedeemerTag) -> Option<Purpose> {
+    match tag {
+        RedeemerTag::Spend => Some(Purpose::Spend),
+        RedeemerTag::Mint => Some(Purpose::Mint),
+        RedeemerTag::Cert => Some(Purpose::Cert),
+        RedeemerTag::Reward => Some(Purpose::Reward),
+        _ => None,
+    }
+}
+
+/// The Blockfrost purpose of a script redeemer, or `None` for vote and
+/// propose. Same policy as [`tx_redeemer_purpose`], distinct generated enum.
+pub fn script_redeemer_purpose(tag: RedeemerTag) -> Option<ScriptRedeemerPurpose> {
+    match tag {
+        RedeemerTag::Spend => Some(ScriptRedeemerPurpose::Spend),
+        RedeemerTag::Mint => Some(ScriptRedeemerPurpose::Mint),
+        RedeemerTag::Cert => Some(ScriptRedeemerPurpose::Cert),
+        RedeemerTag::Reward => Some(ScriptRedeemerPurpose::Reward),
+        _ => None,
+    }
+}
+
 /// The fee to run a redeemer. The inputs are the redeemer's execution units
 /// and the era's execution prices.
 pub fn redeemer_fee(units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
@@ -1521,14 +1550,8 @@ impl TxModelBuilder<'_> {
         let fee = redeemer_fee(&units, prices)?;
 
         let out = TxContentRedeemersInner {
-            purpose: match redeemer.tag() {
-                RedeemerTag::Spend => Purpose::Spend,
-                RedeemerTag::Mint => Purpose::Mint,
-                RedeemerTag::Cert => Purpose::Cert,
-                RedeemerTag::Reward => Purpose::Reward,
-                // TODO: discuss with BF team if schema should be extended to include these
-                _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-            },
+            purpose: tx_redeemer_purpose(redeemer.tag())
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
             tx_index: redeemer.index() as i32,
             // TODO: we should change this in Pallas to ensure that we have a KeepRaw wrapping the
             // redeemer data
