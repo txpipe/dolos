@@ -45,18 +45,19 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   deny:
-    name: cargo deny (advisories)
+    name: cargo deny (advisories, bans)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       # Fails the build on any RustSec advisory affecting the locked
-      # dependency tree. Config lives in deny.toml (advisories only). The
+      # dependency tree, and on any dependency that would put a cmake
+      # requirement back into the build. Config lives in deny.toml. The
       # action installs cargo-deny and caches the advisory database.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check advisories
+          command: check advisories bans
 
   test:
     name: Test (${{ matrix.os }})
