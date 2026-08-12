@@ -2,9 +2,14 @@
 //! Cardano-specific async query helpers for `AsyncQueryFacade`.
 
 use pallas::{
+    codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        primitives::conway::{DatumOption, PlutusData, ScriptRef},
+        addresses::{Network, StakeAddress, StakePayload},
+        primitives::{
+            conway::{DatumOption, PlutusData, ScriptRef},
+            StakeCredential,
+        },
         traverse::{ComputeHash, MultiEraBlock, OriginalHash},
     },
 };
@@ -111,6 +116,27 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
     fn blocks_by_metadata_stream(
         &self,
         label: u64,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
+    /// Stream blocks that can involve the given script, in slot order.
+    ///
+    /// A script leaves traces in more than one index dimension. The SCRIPT
+    /// dimension tags blocks where the script bytes appear. That covers
+    /// witness sets and reference-script outputs. An execution through a
+    /// reference script does not carry the script bytes. Such blocks show
+    /// only the side effects of the execution. The side effects are: a spend
+    /// from the script's payment credential, an asset movement under its
+    /// policy, and certs or withdrawals against its stake credential. This
+    /// stream is the union of all these dimensions.
+    ///
+    /// The result is a superset. The caller must match each tx against the
+    /// script hash.
+    fn blocks_by_script_activity_stream(
+        &self,
+        script_hash: &Hash<28>,
         start_slot: BlockSlot,
         end_slot: BlockSlot,
         order: SlotOrder,
@@ -349,6 +375,40 @@ where
             end_slot,
             order,
         )
+    }
+
+    fn blocks_by_script_activity_stream(
+        &self,
+        script_hash: &Hash<28>,
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        let hash = script_hash.as_slice().to_vec();
+
+        // the cert index keys the stake credential by its cbor encoding (see
+        // `CardanoIndexDeltaBuilder::add_cert`). the withdrawal index keys
+        // the raw reward account bytes. the account header carries the
+        // network id, so we build both variants. the wrong variant has no
+        // entries.
+        let cred = minicbor::to_vec(StakeCredential::ScriptHash(*script_hash)).unwrap_or_default();
+
+        let reward_accounts = [Network::Testnet, Network::Mainnet]
+            .map(|network| StakeAddress::new(network, StakePayload::Script(*script_hash)).to_vec());
+
+        let [testnet_account, mainnet_account] = reward_accounts;
+
+        let tags = vec![
+            (archive::SCRIPT, hash.clone()),
+            (archive::PAYMENT, hash.clone()),
+            (archive::POLICY, hash),
+            (archive::ACCOUNT_CERTS, cred),
+            (archive::ACCOUNT_WITHDRAWALS, testnet_account),
+            (archive::ACCOUNT_WITHDRAWALS, mainnet_account),
+        ];
+
+        blocks_by_tags_stream((*self).clone(), tags, start_slot, end_slot, order)
     }
 
     async fn blocks_by_address(
@@ -755,6 +815,93 @@ where
                 yield (slot, block);
 
                 // update bounds to avoid re-fetching same slots in next iteration
+                match order {
+                    SlotOrder::Asc => start_slot = slot + 1,
+                    SlotOrder::Desc => {
+                        if slot == 0 {
+                            return;
+                        }
+                        end_slot = slot - 1;
+                    }
+                }
+            }
+
+            match order {
+                SlotOrder::Asc if start_slot > end_slot => break,
+                SlotOrder::Desc if end_slot < start_slot => break,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Like [`blocks_by_tag_stream`], but for the ordered union of several
+/// (dimension, key) tags. A slot shared by more than one tag comes out once.
+///
+/// Each round fetches up to [`SLOT_CHUNK_SIZE`] slots per tag from the
+/// remaining window. It then emits only the first [`SLOT_CHUNK_SIZE`] slots
+/// of the merged order. Every tag contributed its closest slots, so the
+/// merged closest chunk is complete. The next round re-fetches the cut-off
+/// rest from the advanced window.
+fn blocks_by_tags_stream<D>(
+    facade: AsyncQueryFacade<D>,
+    tags: Vec<(TagDimension, Vec<u8>)>,
+    mut start_slot: BlockSlot,
+    mut end_slot: BlockSlot,
+    order: SlotOrder,
+) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    async_stream::try_stream! {
+        loop {
+            let slots: Vec<BlockSlot> = facade
+                .run_blocking({
+                    let tags = tags.clone();
+                    move |domain| {
+                        let mut merged = std::collections::BTreeSet::new();
+
+                        for (dimension, key) in &tags {
+                            let iter = domain
+                                .indexes()
+                                .slots_by_tag(dimension, key, start_slot, end_slot)?;
+
+                            match order {
+                                SlotOrder::Asc => {
+                                    for slot in iter.take(SLOT_CHUNK_SIZE) {
+                                        merged.insert(slot?);
+                                    }
+                                }
+                                SlotOrder::Desc => {
+                                    for slot in iter.rev().take(SLOT_CHUNK_SIZE) {
+                                        merged.insert(slot?);
+                                    }
+                                }
+                            }
+                        }
+
+                        let slots = match order {
+                            SlotOrder::Asc => {
+                                merged.iter().take(SLOT_CHUNK_SIZE).copied().collect()
+                            }
+                            SlotOrder::Desc => {
+                                merged.iter().rev().take(SLOT_CHUNK_SIZE).copied().collect()
+                            }
+                        };
+
+                        Ok(slots)
+                    }
+                })
+                .await?;
+
+            if slots.is_empty() {
+                break;
+            }
+
+            for slot in slots {
+                let block = facade.block_by_slot(slot).await?;
+                yield (slot, block);
+
                 match order {
                     SlotOrder::Asc => start_slot = slot + 1,
                     SlotOrder::Desc => {
