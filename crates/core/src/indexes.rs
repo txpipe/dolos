@@ -477,9 +477,10 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
 
     /// Query slots by tag dimension and key within a slot range.
     ///
-    /// Returns an iterator over slots that contain data tagged with the given
-    /// dimension and key. The iterator is lazy and supports bidirectional
-    /// iteration for efficient pagination.
+    /// This method returns a lazy iterator over the slots that contain data
+    /// with the given dimension and key. Forward iteration gives the slots
+    /// in ascending order. Reverse iteration gives the slots in descending
+    /// order.
     ///
     /// Both `start` and `end` are **inclusive** — unlike the record traversal
     /// methods below, which take a half-open [`Range`]. Reusing one `(start,

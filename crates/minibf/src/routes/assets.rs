@@ -769,16 +769,17 @@ where
         return Err(Error::InvalidPolicy);
     }
 
-    // Pagination depends on first-mint order. The scan collects all asset names
-    // before it selects a page because one name can occur in many blocks. It
-    // scans the blocks in ascending slot order and reverses the result for
-    // `desc`.
+    // Pagination depends on first-mint order. An ascending scan stops after it
+    // collects the requested prefix. A descending scan reads all asset names and
+    // then reverses them, because one name can occur in many blocks.
     let end_slot = domain.get_tip_slot()?;
     let stream = domain
         .query()
         .blocks_by_policy_stream(&policy, 0, end_slot, SlotOrder::Asc);
     let mut stream = Box::pin(stream);
 
+    let needed_unique =
+        matches!(pagination.order, Order::Asc).then(|| pagination.from() + pagination.count);
     let mut subjects: Vec<Vec<u8>> = Vec::new();
     while let Some(res) = stream.next().await {
         let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -786,6 +787,9 @@ where
             continue;
         };
         collect_minted_subjects(&block, &policy, &mut subjects);
+        if needed_unique.is_some_and(|needed| subjects.len() >= needed) {
+            break;
+        }
     }
 
     // Blockfrost returns 404 when the policy has no mint operations.
