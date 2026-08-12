@@ -72,7 +72,7 @@ zstd.workspace = true
 #
 # `test-registry` is dropped for its own reason: it exists for the crate's own
 # test suite.
-oci-client = { version = "0.17", optional = true, default-features = false, features = ["rustls-tls"] }
+oci-client = { version = "0.17", optional = true, default-features = false }
 # Named for `oci-client`, not for this crate: nothing here calls it. Cargo
 # unifies features across the graph, so declaring it chooses the TLS `reqwest`
 # that `oci-client` is built against without this crate ever naming the
