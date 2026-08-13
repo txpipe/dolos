@@ -31,6 +31,7 @@ pub mod archive;
 pub mod async_query;
 pub mod bootstrap;
 pub mod builtin;
+pub mod cbor;
 pub mod config;
 pub mod crawl;
 pub mod import;
