@@ -147,6 +147,7 @@ use stelae::{
     frame::Limits,
     inscription::{Compression, HistoryEntry, Inscription, LayerDescriptor},
     oci::{Options, Stele, Transfer},
+    progress::Observer,
     transport::{BlobIndex, WrittenLayer},
     Digest, SteleReader as _, SteleWriter,
 };
@@ -259,6 +260,7 @@ pub fn restore_registry<A, S, I>(
     point: Point,
     node: Restoring<'_>,
     target: Target<'_, A, S, I>,
+    observer: &Observer,
 ) -> Result<(crate::restore::Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
@@ -267,7 +269,7 @@ where
 {
     let stele = point.pull(registry)?;
 
-    crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target)
+    crate::restore::restore_stele(&stele, node, registry.scratch_dir(), target, observer)
 }
 
 /// Open a repository in a registry.
@@ -940,6 +942,9 @@ fn staging_need(
 /// layer instead of inheriting the ones whose scope is unchanged, and
 /// [`Publishing::storage_path`] is where the resumption record lives — see the
 /// module documentation for both.
+///
+/// `observer` is who hears about it while it runs, and [`Observer::silent`] is
+/// what a caller with nothing to render passes.
 pub fn publish<A, S, I>(
     publishing: Publishing<'_>,
     plan: &Plan,
@@ -947,6 +952,7 @@ pub fn publish<A, S, I>(
     state: &S,
     indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
+    observer: &Observer,
 ) -> Result<Published, Error>
 where
     A: ArchiveStore,
@@ -961,6 +967,7 @@ where
         state,
         indexes,
         digest_records,
+        observer,
     )
 }
 
@@ -976,6 +983,7 @@ where
 /// from what that transport is carrying, so a writer that puts the layers
 /// somewhere else would seal a manifest with holes in it. A decorator over the
 /// registry is the shape this takes; anything else is a caller misusing it.
+#[allow(clippy::too_many_arguments)]
 pub fn publish_into<W, A, S, I>(
     stele: &W,
     publishing: Publishing<'_>,
@@ -984,6 +992,7 @@ pub fn publish_into<W, A, S, I>(
     state: &S,
     indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
+    observer: &Observer,
 ) -> Result<Published, Error>
 where
     W: SteleWriter,
@@ -1007,6 +1016,7 @@ where
         indexes,
         digest_records,
         &previous,
+        observer,
     )?;
 
     // Only here: the stele is sealed, so the note about what was uploaded on the

@@ -58,7 +58,13 @@ pub mod namespaces;
 pub mod preflight;
 #[cfg(feature = "oci")]
 pub mod registry;
+mod reporting;
 pub mod restore;
+
+/// The observer seam both drivers report through, re-exported so a binary
+/// rendering one never has to name the protocol crate — the same property
+/// [`export::publish`] and [`restore::restore_dir`] hold for the transports.
+pub use stelae::progress;
 
 use dolos_core::ChainPoint;
 use serde_json::json;

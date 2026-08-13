@@ -140,6 +140,7 @@ use crate::{
     inscription::{canonical_json, Inscription, LayerDescriptor},
     layer::LayerReader,
     profile::{checked_tag_for_sequence, validate_tag, Profile},
+    progress::{Event, Observer},
     transport::{
         open_layer, BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer,
     },
@@ -436,6 +437,14 @@ struct Shared {
     auth: RegistryAuth,
     scratch_dir: Option<PathBuf>,
     state: Mutex<PushState>,
+    /// Who is watching this connection, in either direction.
+    ///
+    /// Beside the push state rather than inside it, because a [`Stele`] shares
+    /// this value and only ever reads: attaching an observer to the
+    /// [`Registry`] is what makes the pull it resolves report too, which is the
+    /// property a restore depends on — the reader is created inside the driver
+    /// and there is no other moment to wire it.
+    observer: Mutex<Observer>,
 }
 
 #[derive(Default)]
@@ -508,6 +517,7 @@ impl Registry {
                 auth,
                 scratch_dir: options.scratch_dir,
                 state: Mutex::new(PushState::default()),
+                observer: Mutex::new(Observer::silent()),
             }),
         })
     }
@@ -841,6 +851,26 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// A handle on whoever is watching, taken once per operation.
+    ///
+    /// Cloned out from under the lock rather than emitted through it: a blob
+    /// download reports a delta per write, and holding a mutex across a
+    /// renderer's call would put this transport's byte loop behind whatever the
+    /// binary does with the event.
+    fn observer(&self) -> Observer {
+        self.observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn watch(&self, observer: Observer) {
+        *self
+            .observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = observer;
+    }
+
     fn tagged(&self, tag: &str) -> Reference {
         Reference::with_tag(
             self.repository.registry().to_owned(),
@@ -867,8 +897,18 @@ impl Shared {
     fn put_layer(&self, layer: &WrittenLayer, staged: File) -> Result<(), Error> {
         let digest = layer.digests.blob_digest;
         let size = layer.digests.compressed_size;
+        let observer = self.observer();
 
         if self.blob_exists(&digest)? {
+            // Announced even though nothing moves: "the registry already had
+            // this one" is the blob-skip working, and a watcher that only heard
+            // about uploads would read the whole point of a content-addressed
+            // registry as a stall.
+            observer.emit(Event::Blob {
+                moved: false,
+                bytes: size,
+            });
+
             let mut state = self.locked();
             state.transfer.layers_skipped += 1;
             state.transfer.bytes_skipped += size;
@@ -877,9 +917,16 @@ impl Shared {
             return Ok(());
         }
 
+        // Before the upload rather than after it, so a watcher knows how big
+        // the transfer it is about to see is while it is still happening.
+        observer.emit(Event::Blob {
+            moved: true,
+            bytes: size,
+        });
+
         self.runtime.block_on(self.client.push_blob_stream(
             &self.repository,
-            blob_stream(staged),
+            blob_stream(staged, observer),
             &digest.to_string(),
         ))?;
 
@@ -919,10 +966,18 @@ impl Shared {
     ) -> Result<Vec<u8>, Error> {
         let mut buffer = Vec::with_capacity(descriptor.size.max(0) as usize);
 
+        // No observer: the config blob is the inscription, not a layer, and a
+        // watcher summing byte deltas against a layer total would find them
+        // disagreeing by however large the document is.
         self.runtime.block_on(self.client.pull_blob(
             reference,
             descriptor,
-            Blocking::new(&mut buffer, descriptor.size, &descriptor.digest),
+            Blocking::new(
+                &mut buffer,
+                descriptor.size,
+                &descriptor.digest,
+                Observer::silent(),
+            ),
         ))?;
 
         Ok(buffer)
@@ -939,11 +994,20 @@ impl Shared {
         descriptor: &OciDescriptor,
     ) -> Result<File, Error> {
         let mut file = self.scratch()?;
+        let observer = self.observer();
+
+        // The whole layer lands here before `stream_layer` yields one record,
+        // so this loop is where a restore spends nearly all of its time and the
+        // only place it can report from.
+        observer.emit(Event::Blob {
+            moved: true,
+            bytes: descriptor.size.max(0) as u64,
+        });
 
         self.runtime.block_on(self.client.pull_blob(
             reference,
             descriptor,
-            Blocking::new(&mut file, descriptor.size, &descriptor.digest),
+            Blocking::new(&mut file, descriptor.size, &descriptor.digest, observer),
         ))?;
 
         file.seek(SeekFrom::Start(0))?;
@@ -1024,6 +1088,15 @@ impl SteleWriter for Registry {
         self.shared.locked().pending.clear();
 
         Ok(identity)
+    }
+
+    /// Report every blob this connection uploads.
+    ///
+    /// One of the two implementations that override the default — the other is
+    /// [`Stele`], and it shares this connection's state, so an observer
+    /// attached here is also attached to whatever this registry pulls.
+    fn observe(&self, observer: Observer) {
+        self.shared.watch(observer);
     }
 }
 
@@ -1212,6 +1285,16 @@ impl SteleReader for Stele {
         let file = self.shared.pull_blob_file(&self.reference, oci)?;
 
         LayerReader::new(file, profile, descriptor, limits)
+    }
+
+    /// Report every blob this connection pulls.
+    ///
+    /// A restore resolves its [`Stele`] inside the driver, so this is the
+    /// spelling a caller reaches when it holds the reader; attaching to the
+    /// [`Registry`] the stele came from does the same thing, because both write
+    /// the same connection state.
+    fn observe(&self, observer: Observer) {
+        self.shared.watch(observer);
     }
 }
 
@@ -1447,27 +1530,38 @@ pub fn read_manifest(
 ///
 /// One chunk is allocated at a time and handed over, so what the upload holds
 /// is [`UPLOAD_CHUNK`] and not the layer.
-fn blob_stream(file: File) -> impl Stream<Item = oci_client::errors::Result<bytes::Bytes>> {
-    futures_util::stream::unfold(Some(file), |state| async move {
-        let mut file = state?;
-        let mut chunk = vec![0u8; UPLOAD_CHUNK];
-        let mut filled = 0usize;
+/// Each chunk is reported as it is handed over, which is the only resolution
+/// this loop has: a `PATCH` either went out or it did not, and the client does
+/// not say how much of one has reached the wire.
+fn blob_stream(
+    file: File,
+    observer: Observer,
+) -> impl Stream<Item = oci_client::errors::Result<bytes::Bytes>> {
+    futures_util::stream::unfold(Some(file), move |state| {
+        let observer = observer.clone();
 
-        while filled < chunk.len() {
-            match file.read(&mut chunk[filled..]) {
-                Ok(0) => break,
-                Ok(read) => filled += read,
-                Err(e) => return Some((Err(e.into()), None)),
+        async move {
+            let mut file = state?;
+            let mut chunk = vec![0u8; UPLOAD_CHUNK];
+            let mut filled = 0usize;
+
+            while filled < chunk.len() {
+                match file.read(&mut chunk[filled..]) {
+                    Ok(0) => break,
+                    Ok(read) => filled += read,
+                    Err(e) => return Some((Err(e.into()), None)),
+                }
             }
+
+            if filled == 0 {
+                return None;
+            }
+
+            chunk.truncate(filled);
+            observer.emit(Event::Bytes(filled as u64));
+
+            Some((Ok(bytes::Bytes::from(chunk)), Some(file)))
         }
-
-        if filled == 0 {
-            return None;
-        }
-
-        chunk.truncate(filled);
-
-        Some((Ok(bytes::Bytes::from(chunk)), Some(file)))
     })
 }
 
@@ -1495,15 +1589,17 @@ struct Blocking<'a, W: Write> {
     written: u64,
     limit: u64,
     digest: String,
+    observer: Observer,
 }
 
 impl<'a, W: Write> Blocking<'a, W> {
-    fn new(inner: &'a mut W, limit: i64, digest: &str) -> Self {
+    fn new(inner: &'a mut W, limit: i64, digest: &str, observer: Observer) -> Self {
         Self {
             inner,
             written: 0,
             limit: limit.max(0) as u64,
             digest: digest.to_owned(),
+            observer,
         }
     }
 }
@@ -1535,6 +1631,10 @@ impl<W: Write + Unpin> tokio::io::AsyncWrite for Blocking<'_, W> {
         match this.inner.write(&buf[..buf.len().min(room)]) {
             Ok(written) => {
                 this.written += written as u64;
+                // On what was written, for the same reason the ceiling is: a
+                // partial write's remainder is offered again, and reporting the
+                // offer would count those bytes twice.
+                this.observer.emit(Event::Bytes(written as u64));
                 Poll::Ready(Ok(written))
             }
             Err(e) => Poll::Ready(Err(e)),

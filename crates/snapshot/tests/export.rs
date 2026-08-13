@@ -27,6 +27,7 @@
 
 mod common;
 mod node;
+mod watcher;
 
 use common::read_both_ways;
 use dolos_cardano::{
@@ -45,7 +46,13 @@ use dolos_snapshot::{
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, plan_for};
-use stelae::{dir::SteleDir, Discarding, SteleReader};
+use stelae::{
+    dir::SteleDir,
+    progress::{Observer, Outcome},
+    Discarding, SteleReader,
+};
+
+use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
@@ -134,6 +141,7 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
         &index,
         None,
         &export::First,
+        &Observer::silent(),
     )
     .unwrap();
 
@@ -610,6 +618,7 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
         domain.indexes(),
         None,
         &export::First,
+        &Observer::silent(),
     )
     .unwrap();
 
@@ -663,6 +672,7 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         domain.state(),
         domain.indexes(),
         None,
+        &Observer::silent(),
     )
     .unwrap();
 
@@ -674,6 +684,7 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         domain.indexes(),
         None,
         &export::First,
+        &Observer::silent(),
     )
     .unwrap();
 
@@ -696,6 +707,7 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         domain.indexes(),
         None,
         &export::First,
+        &Observer::silent(),
     )
     .unwrap();
 
@@ -711,4 +723,123 @@ fn distinct_layers(inscription: &stelae::Inscription) -> usize {
         .map(|layer| layer.diff_id)
         .collect::<std::collections::BTreeSet<_>>()
         .len()
+}
+
+// --------------------------------------------------------------------------
+// The progress seam
+// --------------------------------------------------------------------------
+
+/// Every layer a publish writes is announced once and closed once, and the
+/// records it reports are the records the document says it wrote.
+///
+/// Cross-checked against the inscription rather than against the stream: the
+/// descriptor's `records` counts the header record the protocol writes and the
+/// driver never sees, so the arithmetic below is a claim about two independent
+/// counts agreeing and not a recording compared with itself.
+///
+/// A directory is the interesting transport for this half precisely because it
+/// implements none of the byte reporting: `SteleDir` inherits the default no-op
+/// attach, so what comes back here is exactly the profile driver's own stream,
+/// with nothing from a transport mixed into it.
+#[test]
+fn a_directory_publish_reports_every_layer_and_record() {
+    let domain: ToyDomain = harness();
+    let plan = plan_for(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let watcher = std::sync::Arc::new(Watcher::default());
+
+    let inscription = export::publish(
+        temp.path(),
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    watcher.assert_well_formed(inscription.layers.len());
+
+    // A directory publish has no predecessor to inherit from and no registry to
+    // find a blob already in, so every layer is built.
+    assert_eq!(
+        watcher.ended(Outcome::Transferred),
+        inscription.layers.len(),
+        "every layer of a directory publish is built"
+    );
+    assert_eq!(watcher.ended(Outcome::Inherited), 0);
+    assert_eq!(watcher.ended(Outcome::Skipped), 0);
+
+    // One header record per layer is the protocol's, written by `open_layer`
+    // before the driver has a record of its own to write.
+    let content: u64 = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.records - 1)
+        .sum();
+
+    assert!(
+        content > 0,
+        "the fixture has to carry records for this to prove anything"
+    );
+
+    assert_eq!(
+        watcher.records(),
+        content,
+        "records reported, against what the document says was written"
+    );
+
+    // And nothing was invented on the transport's behalf: the default no-op
+    // attach is what keeps the seam an offer rather than a tax, and this is the
+    // assertion that it stayed one.
+    assert_eq!(watcher.bytes(), 0);
+    assert!(watcher.blobs(true).is_empty());
+    assert!(watcher.blobs(false).is_empty());
+}
+
+/// A run nobody is watching is the run this crate has always made.
+///
+/// The seam's whole claim of being free when unused, checked where it can be:
+/// the same plan exported twice, once watched and once silent, has to produce
+/// the same document byte for byte.
+#[test]
+fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
+    let domain: ToyDomain = harness();
+    let plan = plan_for(&domain);
+
+    let watched = tempfile::tempdir().unwrap();
+    let silent = tempfile::tempdir().unwrap();
+
+    let watcher = std::sync::Arc::new(Watcher::default());
+
+    let with = export::publish(
+        watched.path(),
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    let without = export::publish(
+        silent.path(),
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &Observer::silent(),
+    )
+    .unwrap();
+
+    assert!(watcher.layers() > 0, "the watched run reported nothing");
+
+    assert_eq!(
+        with.canonicalize().unwrap(),
+        without.canonicalize().unwrap(),
+    );
 }

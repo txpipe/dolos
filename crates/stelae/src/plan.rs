@@ -43,9 +43,9 @@
 //! profile knows which epochs a node wants.
 //!
 //! Not a renderer either. [`Remaining`] is a pair of numbers. Turning them into
-//! a progress bar is a caller's business, and adding an observer here would put
-//! a second one beside the seam the export and restore commands are going to
-//! share.
+//! a progress bar is a caller's business, and an observer here would be a
+//! second one beside [`crate::progress`], which is the seam the export and
+//! restore commands share and the only one either of them reports through.
 
 use std::{
     collections::BTreeSet,
