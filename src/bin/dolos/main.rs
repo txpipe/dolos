@@ -8,6 +8,7 @@ mod doctor;
 mod eval;
 mod feedback;
 mod serve;
+mod snapshot;
 mod sync;
 
 #[cfg(feature = "utils")]
@@ -50,6 +51,9 @@ enum Command {
     /// Commands to fix problems
     Doctor(doctor::Args),
 
+    /// Commands to publish this node's data as a Stelae snapshot
+    Snapshot(snapshot::Args),
+
     /// Bootstrap the node using Mithril
     #[cfg(feature = "mithril")]
     Bootstrap(bootstrap::Args),
@@ -76,6 +80,10 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // reqwest 0.13 (via mithril-client) uses `rustls-no-provider`: it reads the
+    // process-default provider and panics if none is installed.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let args = Cli::parse();
 
     let config = crate::common::load_config(&args.config)
@@ -90,6 +98,7 @@ fn main() -> Result<()> {
         (Ok(config), Command::Serve(args)) => serve::run(config, &args),
         (Ok(config), Command::Eval(args)) => eval::run(&config, &args),
         (Ok(config), Command::Doctor(args)) => doctor::run(&config, &args, &feedback),
+        (Ok(config), Command::Snapshot(args)) => snapshot::run(&config, &args),
 
         // the init command is special because it knows how to execute with or without a valid
         // configuration, that is why we pass the whole result and let the command logic decide what

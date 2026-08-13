@@ -8,14 +8,14 @@ mod common;
 
 use common::*;
 
-fn daemon_syncs(scenario: &Scenario) {
-    println!("e2e sync start: {}", scenario.name);
+fn daemon_syncs(workspace: &ScenarioWorkspace) {
+    println!("e2e sync start: {}", workspace.name());
 
-    reset_and_bootstrap(scenario);
+    reset_and_bootstrap(workspace);
 
-    let before = fetch_summary(scenario);
+    let before = fetch_summary(workspace);
 
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
 
     let handle = cmd
         .args(["daemon"])
@@ -35,7 +35,7 @@ fn daemon_syncs(scenario: &Scenario) {
 
     shutdown_gracefully(&mut guard);
 
-    let after = fetch_summary(scenario);
+    let after = fetch_summary(workspace);
 
     let before_tip = before
         .wal
@@ -59,7 +59,7 @@ fn daemon_syncs(scenario: &Scenario) {
     assert!(
         after_tip > before_tip,
         "expected tip to advance slots for {}, before={before_tip}, after={after_tip}",
-        scenario.name
+        workspace.name()
     );
 }
 
@@ -68,7 +68,7 @@ macro_rules! test_for_scenario {
         #[test]
         #[ignore]
         fn $name() {
-            $func(&SCENARIOS[$scenario]);
+            $func(&ScenarioWorkspace::new(&SCENARIOS[$scenario]));
         }
     };
 }

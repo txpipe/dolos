@@ -1,0 +1,125 @@
+[package]
+name = "stelae"
+description = "Stelae: a deterministic, content-addressed snapshot protocol"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# OCI registry transport (`src/oci.rs`). Default-off, so a build that does not
+# publish or restore over a registry keeps the dependency tree it had: the
+# protocol's format, framing and digests need no HTTP client and no async
+# runtime, and the two are a large part of this tree when they are pulled in.
+#
+# The boundary check does not relax for a feature: `cargo tree -p stelae -e
+# normal --all-features` must still match nothing `^dolos(-|$)`.
+oci = [
+    "dep:bytes",
+    "dep:futures-util",
+    "dep:http",
+    "dep:oci-client",
+    "dep:reqwest",
+    "dep:tempfile",
+    "dep:tokio",
+]
+
+# This crate is the Stelae protocol. It must never depend on a `dolos-*`
+# package, so that extracting it later is a directory move rather than a
+# refactor. `cargo tree -p stelae -e normal` shows the boundary holding.
+# See adrs/004_stelae_snapshots.md, "Code layout".
+[dependencies]
+hex.workspace = true
+minicbor.workspace = true
+serde.workspace = true
+serde_jcs.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+# --- feature `oci` ---------------------------------------------------------
+#
+# `oci-client` is the oras-project registry client, taken with none of its own
+# TLS features. Both of them are pure feature-forwarding — `rustls-tls =
+# ["reqwest/rustls", "jsonwebtoken/aws_lc_rs"]`, `native-tls =
+# ["reqwest/native-tls", "jsonwebtoken/rust_crypto"]` — and no line of the
+# crate is `#[cfg]`-gated on `rustls-tls` at all. So the feature does not
+# decide whether the client speaks TLS; it decides which crypto backend two of
+# its dependencies are built with, and that choice is made below instead.
+#
+# It has to be made somewhere, because `rustls-tls` reaches `aws-lc-sys`
+# twice over — through `jsonwebtoken/aws_lc_rs` for registry auth tokens and
+# through `reqwest 0.13`'s `rustls`, which fans out to `rustls/aws-lc-rs` —
+# and `aws-lc-sys` requires `cmake` to build, the very dependency the root
+# package's `mithril-client` entry goes out of its way to avoid. Defeating one
+# path leaves the other, so both are answered here — the `reqwest` one by
+# naming a different feature, the `jsonwebtoken` one by needing nothing.
+#
+# The `jsonwebtoken` half needs nothing to replace it. `oci-client` reaches
+# for that crate in exactly one place outside its own tests —
+# `dangerous::insecure_decode`, reading a bearer token's `exp` claim to decide
+# when the token cache should refetch — and that call is base64 and serde. It
+# never signs and never verifies, so it never asks for a crypto provider, and
+# the backend `rustls-tls` was selecting was paying for capability the client
+# does not use. Leaving `jsonwebtoken` with no backend is a configuration
+# `oci-client` supports rather than a hole punched in it: nothing in the crate
+# is `#[cfg]`-gated on having one.
+#
+# The alternative the mithril precedent suggests, `jsonwebtoken/rust_crypto`,
+# was tried first and rejected on evidence: it pulls `rsa 0.9`, which carries
+# RUSTSEC-2023-0071 with no fixed version, so `cargo deny check advisories`
+# fails from that commit onward — a standing tax on every later PR, bought for
+# an RSA implementation that no reachable line calls.
+#
+# `test-registry` is dropped for its own reason: it exists for the crate's own
+# test suite.
+oci-client = { version = "0.17", optional = true, default-features = false }
+# Named for `oci-client`, not for this crate: nothing here calls it. Cargo
+# unifies features across the graph, so declaring it chooses the TLS `reqwest`
+# that `oci-client` is built against without this crate ever naming the
+# aws-lc-rs one. `default-features = false`, matching what `oci-client` itself
+# asks for, so this adds one capability and no surface.
+#
+# `rustls-no-provider` is rustls with no crypto provider wired in — the same
+# trade the root package already makes for `mithril-client`. It buys a smaller
+# tree by moving a compile-time guarantee to a runtime one: a process that
+# opens a `Registry` must have installed a process-default provider first.
+# That precondition is stated in `oci.rs`'s module documentation, beside the
+# async-context rule, and the tests here install `ring` rather than inheriting
+# one.
+reqwest = { version = "0.13", optional = true, default-features = false, features = [
+    "rustls-no-provider",
+] }
+# One current-thread runtime, owned by the transport and entered with
+# `block_on` at each call, so the protocol stays synchronous. See `oci.rs`.
+tokio = { workspace = true, optional = true }
+# `push_blob_stream` takes a `Stream`, which is how a layer is uploaded from
+# its staging file without ever being held.
+futures-util = { workspace = true, optional = true }
+bytes = { version = "1", optional = true }
+# Solely to name the manifest's `Content-Type`. The manifest is pushed as the
+# exact canonical bytes this crate produced — the ones the golden freezes and
+# the size ceiling measured — which means `push_manifest_raw`, which takes a
+# `HeaderValue`. `http` is the same one `reqwest` re-exports.
+http = { version = "1", optional = true }
+# Staging on the way up, and the pulled blob on the way down. Both are files
+# for the same reason: a blob's digest is only known once its last byte has
+# gone past, in either direction.
+tempfile = { version = "3.20.0", optional = true }
+
+[dev-dependencies]
+# The peak-allocation test instruments the global allocator, the same idiom the
+# root package's tests/memory.rs uses for store iteration. A dev-dependency, so
+# it does not appear in `cargo tree -p stelae -e normal` and the boundary check
+# above is unaffected.
+stats_alloc = "0.1"
+tempfile = "3.20.0"
+# The registry tests install `ring` as the process-default crypto provider,
+# which is the precondition `oci.rs` puts on a caller and the reason `ring` is
+# named here and nowhere else in this manifest: choosing a provider is the
+# program's job, and under `cargo test` this crate's test binary is the
+# program. A dev-dependency, so `cargo tree -p stelae -e normal
+# --all-features` still matches no provider at all.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }

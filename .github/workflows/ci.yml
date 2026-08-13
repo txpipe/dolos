@@ -45,18 +45,18 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   deny:
-    name: cargo deny (advisories)
+    name: cargo deny (advisories, bans)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       # Fails the build on any RustSec advisory affecting the locked
-      # dependency tree. Config lives in deny.toml (advisories only). The
-      # action installs cargo-deny and caches the advisory database.
+      # dependency tree. Config lives in deny.toml. The action installs
+      # cargo-deny and caches the advisory database.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check advisories
+          command: check advisories bans
 
   test:
     name: Test (${{ matrix.os }})
@@ -75,6 +75,21 @@ jobs:
 
       - name: Run unit tests
         run: cargo test --workspace --all-targets
+
+      # AGENTS.md prescribes verifying with `--all-features`, which enables
+      # feature-gated code (notably the `strict` epoch-coherence assertions in
+      # dolos-cardano) that the default-features run above never exercises.
+      # Keep it green here so the prescribed verification and CI cannot drift
+      # apart. The three service crates are excluded because their test
+      # fixtures import synthetic chains that jump from genesis straight to
+      # epoch 2, tripping the strict assertions inside the fixture itself;
+      # they keep full coverage in the default-features run above. Remove the
+      # exclusions once the fixtures build epoch-coherent domains (see
+      # AGENTS.md, "Code Verification Requirements"). Feature-gated code is
+      # platform-independent, so one OS keeps the cost bounded.
+      - name: Run unit tests (all features)
+        if: runner.os == 'Linux'
+        run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
       - name: Run e2e smoke tests
         if: runner.os != 'Windows'

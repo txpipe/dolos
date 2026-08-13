@@ -329,6 +329,29 @@ pub(crate) mod testing {
     use crate::model::testing as root;
     use proptest::prelude::*;
 
+    /// Rebase a generated `EpochValue` onto a specific epoch position,
+    /// keeping every slot as-is.
+    ///
+    /// The `strict` feature asserts that deltas target the entity's current
+    /// epoch and that entities rotate their epoch values in lockstep (ESTART
+    /// transitions every entity each boundary). Strategies that draw several
+    /// `EpochValue`s — or an entity and a delta — independently violate that
+    /// invariant almost surely; rebasing them onto one drawn epoch restores
+    /// it without giving up randomized slot contents.
+    pub fn rebase<T>(value: EpochValue<T>, epoch: Epoch) -> EpochValue<T>
+    where
+        T: Clone + std::fmt::Debug,
+    {
+        EpochValue::from_parts(
+            epoch,
+            value.live().cloned(),
+            value.next().cloned(),
+            value.mark().cloned(),
+            value.set().cloned(),
+            value.go().cloned(),
+        )
+    }
+
     /// Generate an `EpochValue<T>` where `live` is always populated (most
     /// deltas require it) and the other slots are independently randomized.
     ///

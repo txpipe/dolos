@@ -1,0 +1,47 @@
+[package]
+name = "dolos-snapshot"
+description = "The io.txpipe.dolos.cardano Stelae profile"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# Publishing into an OCI registry (`src/registry.rs`). Default-off, and it
+# forwards to `stelae/oci` rather than adding anything of its own: a build that
+# only writes steles to a directory keeps the dependency tree it had, which is
+# the whole reason the protocol's transport is behind a feature in the first
+# place. `dolos`'s own `registry` feature is what turns this on.
+oci = ["stelae/oci"]
+
+# This crate is the *profile* half of the Stelae boundary: it may depend on
+# `stelae` and on `dolos-*`, never the other way around. See
+# adrs/004_stelae_snapshots.md, "Code layout".
+[dependencies]
+stelae = { path = "../stelae" }
+dolos-core = { path = "../core" }
+dolos-cardano = { path = "../cardano" }
+
+fs4.workspace = true
+hex.workspace = true
+minicbor.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+# The registry suites install `ring` as the process-default crypto provider —
+# the precondition `stelae::oci` puts on whatever process opens a `Registry`.
+# The `dolos` binary does it in `main()`; under `cargo test` the test binary
+# is the program, so it does it in the fixture. Mirrors the same
+# dev-dependency in `crates/stelae`.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }
+
+# The export tests drive real store sets: `dolos-testing` for the harness
+# domain and its two backend bindings, `dolos-redb3` for the archive, which is
+# the one store with no builtin backend.
+dolos-testing = { path = "../testing" }
+dolos-redb3 = { path = "../redb3" }

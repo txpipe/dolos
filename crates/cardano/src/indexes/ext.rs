@@ -95,6 +95,17 @@ pub trait CardanoIndexExt: IndexStore {
         self.slots_by_tag(archive::ASSET, asset, start, end)
     }
 
+    /// Iterate over slots of blocks that contain transactions for assets of a
+    /// policy.
+    fn slots_by_policy(
+        &self,
+        policy: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, IndexError> {
+        self.slots_by_tag(archive::POLICY, policy, start, end)
+    }
+
     /// Iterate over slots of blocks containing a datum hash.
     fn slots_by_datum(
         &self,
@@ -154,6 +165,26 @@ pub trait CardanoIndexExt: IndexStore {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
         self.slots_by_tag(archive::METADATA, &label.to_be_bytes(), start, end)
+    }
+
+    // ============ Bulk Export ============
+
+    /// Iterate every archive tag record in `slots`, across every Cardano
+    /// archive dimension.
+    ///
+    /// [`IndexStore::iter_archive_tags`] takes the dimension list because the
+    /// storage layer is chain-agnostic and cannot know it — stores keep a hash
+    /// of the dimension name, not the name. That makes `archive::ALL` the
+    /// caller's to supply, and every export call site a place the list can
+    /// drift out of.
+    ///
+    /// This is that list, once. `slots` is half-open, as it is on the method
+    /// underneath.
+    fn iter_all_archive_tags(
+        &self,
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        self.iter_archive_tags(&archive::ALL, slots)
     }
 }
 

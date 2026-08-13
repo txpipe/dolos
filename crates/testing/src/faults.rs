@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use dolos_core::{
+    builtin::{MemoryIndexStore, MemoryStateStore},
     ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexError,
     IndexStore, LogEntry, LogKey, LogValue, Namespace, StateError, StateStore, TagDimension,
     TipEvent, WalError, WalStore,
@@ -56,12 +57,12 @@ impl FaultyToyDomain {
 
 #[derive(Clone)]
 pub struct FaultyStateStore {
-    inner: dolos_redb3::state::StateStore,
+    inner: MemoryStateStore,
     fault: TestFault,
 }
 
 impl FaultyStateStore {
-    pub fn new(inner: dolos_redb3::state::StateStore, fault: TestFault) -> Self {
+    pub fn new(inner: MemoryStateStore, fault: TestFault) -> Self {
         Self { inner, fault }
     }
 
@@ -79,9 +80,10 @@ impl FaultyStateStore {
 }
 
 impl StateStore for FaultyStateStore {
-    type EntityIter = <dolos_redb3::state::StateStore as StateStore>::EntityIter;
-    type EntityValueIter = <dolos_redb3::state::StateStore as StateStore>::EntityValueIter;
-    type Writer = <dolos_redb3::state::StateStore as StateStore>::Writer;
+    type EntityIter = <MemoryStateStore as StateStore>::EntityIter;
+    type EntityValueIter = <MemoryStateStore as StateStore>::EntityValueIter;
+    type UtxoIter = <MemoryStateStore as StateStore>::UtxoIter;
+    type Writer = <MemoryStateStore as StateStore>::Writer;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         if self.should_fault() {
@@ -135,6 +137,13 @@ impl StateStore for FaultyStateStore {
             return Err(self.fault_err());
         }
         self.inner.get_utxos(refs)
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_utxos()
     }
 }
 
@@ -248,12 +257,12 @@ impl ArchiveStore for FaultyArchiveStore {
 
 #[derive(Clone)]
 pub struct FaultyIndexStore {
-    inner: dolos_redb3::indexes::IndexStore,
+    inner: MemoryIndexStore,
     fault: TestFault,
 }
 
 impl FaultyIndexStore {
-    pub fn new(inner: dolos_redb3::indexes::IndexStore, fault: TestFault) -> Self {
+    pub fn new(inner: MemoryIndexStore, fault: TestFault) -> Self {
         Self { inner, fault }
     }
 
@@ -267,8 +276,10 @@ impl FaultyIndexStore {
 }
 
 impl IndexStore for FaultyIndexStore {
-    type Writer = <dolos_redb3::indexes::IndexStore as IndexStore>::Writer;
-    type SlotIter = <dolos_redb3::indexes::IndexStore as IndexStore>::SlotIter;
+    type Writer = <MemoryIndexStore as IndexStore>::Writer;
+    type SlotIter = <MemoryIndexStore as IndexStore>::SlotIter;
+    type TagIter = <MemoryIndexStore as IndexStore>::TagIter;
+    type ExactIter = <MemoryIndexStore as IndexStore>::ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         if self.should_fault() {
@@ -341,6 +352,27 @@ impl IndexStore for FaultyIndexStore {
             return Err(self.fault_err());
         }
         self.inner.slots_by_tag(dimension, key, start, end)
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_archive_tags(dimensions, slots)
+    }
+
+    fn iter_exact_records(
+        &self,
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::ExactIter, IndexError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_exact_records(slots)
     }
 }
 

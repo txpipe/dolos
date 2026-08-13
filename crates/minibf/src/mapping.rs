@@ -22,8 +22,9 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Deref,
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,6 +34,7 @@ use blockfrost_openapi::models::{
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
+    block_content_txs_cbor_inner::BlockContentTxsCborInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
@@ -210,44 +212,60 @@ where
     }
 }
 
-pub fn aggregate_assets<'a>(
-    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
-) -> Vec<TxContentOutputAmountInner> {
-    let mut lovelace = 0;
-    let mut by_asset: HashMap<String, u64> = HashMap::new();
+#[derive(Default)]
+pub struct AssetTotals {
+    lovelace: u128,
+    by_asset: HashMap<String, u128>,
+}
 
-    for txout in txouts {
+impl AssetTotals {
+    pub fn add_output(&mut self, txout: &MultiEraOutput) {
         let value = txout.value();
 
         // Add lovelace amount
-        lovelace += value.coin();
+        self.lovelace += value.coin() as u128;
 
         // Add other assets
         for ma in value.assets() {
             for asset in ma.assets() {
                 let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
-                let amount = asset.output_coin().unwrap_or_default();
-                *by_asset.entry(unit).or_insert(0) += amount;
+                let amount = asset.output_coin().unwrap_or_default() as u128;
+                *self.by_asset.entry(unit).or_insert(0) += amount;
             }
         }
     }
 
-    let lovelace = TxContentOutputAmountInner {
-        unit: "lovelace".to_string(),
-        quantity: lovelace.to_string(),
-    };
+    pub fn into_amounts(self) -> Vec<TxContentOutputAmountInner> {
+        let lovelace = TxContentOutputAmountInner {
+            unit: "lovelace".to_string(),
+            quantity: self.lovelace.to_string(),
+        };
 
-    let mut assets: Vec<_> = by_asset
-        .into_iter()
-        .map(|(unit, quantity)| TxContentOutputAmountInner {
-            unit,
-            quantity: quantity.to_string(),
-        })
-        .collect();
+        let mut assets: Vec<_> = self
+            .by_asset
+            .into_iter()
+            .map(|(unit, quantity)| TxContentOutputAmountInner {
+                unit,
+                quantity: quantity.to_string(),
+            })
+            .collect();
 
-    assets.sort_by_key(|a| a.unit.clone());
+        assets.sort_by_key(|a| a.unit.clone());
 
-    std::iter::once(lovelace).chain(assets).collect()
+        std::iter::once(lovelace).chain(assets).collect()
+    }
+}
+
+pub fn aggregate_assets<'a>(
+    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
+) -> Vec<TxContentOutputAmountInner> {
+    let mut totals = AssetTotals::default();
+
+    for txout in txouts {
+        totals.add_output(txout);
+    }
+
+    totals.into_amounts()
 }
 
 pub fn list_assets<'a>(
@@ -283,6 +301,54 @@ pub fn list_assets<'a>(
     assets.sort_by_key(|a| a.unit.clone());
 
     std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub struct AssetAggregate {
+    pub quantity: u128,
+    pub oldest: Option<(u64, usize, TxoIdx)>,
+    pub newest: Option<(u64, usize, TxoIdx)>,
+}
+
+/// Aggregates asset quantities per unit over a set of utxos, tracking the
+/// chain position of the oldest and newest utxo holding each asset —
+/// Blockfrost orders account assets by these. The BTreeMap keeps units
+/// sorted, providing the tie-break order for assets sharing a position.
+pub fn aggregate_account_assets(
+    utxos: &HashMap<TxoRef, Arc<EraCbor>>,
+    block_deps: &HashMap<TxHash, BlockRefMeta>,
+) -> Result<BTreeMap<String, AssetAggregate>, StatusCode> {
+    let mut by_unit: BTreeMap<String, AssetAggregate> = BTreeMap::new();
+
+    for (txo_ref, cbor) in utxos.iter() {
+        let output = MultiEraOutput::try_from(cbor.as_ref())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let position = block_deps
+            .get(&txo_ref.0)
+            .map(|meta| (meta.slot, meta.tx_index, txo_ref.1));
+
+        for ma in output.value().assets() {
+            for asset in ma.assets() {
+                let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
+                let quantity = asset.output_coin().unwrap_or_default() as u128;
+
+                let agg = by_unit.entry(unit).or_insert(AssetAggregate {
+                    quantity: 0,
+                    oldest: None,
+                    newest: None,
+                });
+
+                agg.quantity += quantity;
+
+                if let Some(position) = position {
+                    agg.oldest = Some(agg.oldest.map_or(position, |x| x.min(position)));
+                    agg.newest = Some(agg.newest.map_or(position, |x| x.max(position)));
+                }
+            }
+        }
+    }
+
+    Ok(by_unit)
 }
 
 pub enum AddressKind {
@@ -1583,8 +1649,14 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
                     }
                 }),
                 ipv6: ipv6.map(|ipv6| {
-                    if let Ok(slice) = <[u8; 16]>::try_from(ipv6.as_slice()) {
-                        std::net::Ipv6Addr::from(slice).to_string()
+                    if let Ok(mut bytes) = <[u8; 16]>::try_from(ipv6.as_slice()) {
+                        // cardano-ledger serializes relay IPv6 addresses as
+                        // four 32-bit words in little-endian order; swap each
+                        // word back to network order (same as dbsync).
+                        for word in bytes.chunks_exact_mut(4) {
+                            word.reverse();
+                        }
+                        std::net::Ipv6Addr::from(bytes).to_string()
                     } else {
                         Default::default()
                     }
@@ -1603,8 +1675,8 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
             alonzo::Relay::MultiHostName(dns) => TxContentPoolCertsInnerRelaysInner {
                 ipv4: None,
                 ipv6: None,
-                dns: Some(dns.to_string()),
-                dns_srv: None,
+                dns: None,
+                dns_srv: Some(dns.to_string()),
                 port: Default::default(),
             },
         };
@@ -1969,6 +2041,7 @@ pub struct BlockModelBuilder<'a> {
     previous: Option<MultiEraBlock<'a>>,
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
+    deps: HashMap<TxHash, MultiEraTx<'a>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -1981,7 +2054,31 @@ impl<'a> BlockModelBuilder<'a> {
             next: None,
             tip: None,
             chain: None,
+            deps: HashMap::new(),
         })
+    }
+
+    pub fn required_input_deps(&self) -> Vec<TxHash> {
+        let mut seen_tx_hashes = HashSet::new();
+
+        self.block
+            .txs()
+            .iter()
+            .flat_map(|tx| tx.consumes())
+            .map(|input| *input.hash())
+            .filter(|hash| seen_tx_hashes.insert(*hash))
+            .collect()
+    }
+
+    pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
+        let era = try_into_or_500!(cbor.era());
+
+        let tx = MultiEraTx::decode_for_era(era, cbor.cbor())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        self.deps.insert(key, tx);
+
+        Ok(())
     }
 
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
@@ -2270,26 +2367,82 @@ impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
     }
 }
 
+impl<'a> IntoModel<Vec<BlockContentTxsCborInner>> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<BlockContentTxsCborInner>, StatusCode> {
+        let block = &self.block;
+
+        let txs = block
+            .txs()
+            .iter()
+            .map(|tx| BlockContentTxsCborInner {
+                tx_hash: tx.hash().to_string(),
+                cbor: hex::encode(tx.encode()),
+            })
+            .collect();
+
+        Ok(txs)
+    }
+}
+
 impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
         let block = &self.block;
-        let addresses = block
-            .txs()
-            .iter()
-            .flat_map(|tx| {
-                tx.produces()
-                    .iter()
-                    .map(|(_, output)| BlockContentAddressesInner {
-                        address: output.address().unwrap().to_string(),
-                        transactions: vec![BlockContentAddressesInnerTransactionsInner {
-                            tx_hash: tx.hash().to_string(),
-                        }],
-                    })
-                    .collect::<Vec<_>>()
+
+        // BTreeMap keeps entries sorted alphabetically by address, matching
+        // Blockfrost. Tx hashes are appended in block order and deduped per
+        // address by collecting each tx's touched addresses into a set first.
+        let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        // Phase-2-failed txs are deliberately NOT skipped here, diverging
+        // from Blockfrost: their collateral inputs and collateral-return
+        // outputs move funds, so those addresses are affected in ledger
+        // terms - considered a bug in BF, not behavior worth reproducing
+        for tx in block.txs() {
+            let mut touched = BTreeSet::new();
+
+            for (_, output) in tx.produces() {
+                let address = output
+                    .address()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                touched.insert(address.to_string());
+            }
+
+            for input in tx.consumes() {
+                let as_output = self
+                    .deps
+                    .get(input.hash())
+                    .and_then(|dep| dep.produces_at(input.index() as usize));
+
+                if let Some(output) = as_output {
+                    let address = output
+                        .address()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                    touched.insert(address.to_string());
+                }
+            }
+
+            let tx_hash = tx.hash().to_string();
+
+            for address in touched {
+                by_address.entry(address).or_default().push(tx_hash.clone());
+            }
+        }
+
+        let addresses = by_address
+            .into_iter()
+            .map(|(address, tx_hashes)| BlockContentAddressesInner {
+                address,
+                transactions: tx_hashes
+                    .into_iter()
+                    .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
+                    .collect(),
             })
-            .sorted_by(|x, y| x.address.cmp(&y.address))
             .collect();
 
         Ok(addresses)

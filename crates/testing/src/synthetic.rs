@@ -8,7 +8,7 @@ use dolos_core::{
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::MemberRewardLog;
+use dolos_cardano::model::{AccountStakeLog, MemberRewardLog};
 use dolos_cardano::rupd::credential_to_key;
 use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
@@ -26,7 +26,7 @@ use pallas::{
                 Certificate, DatumOption, PlutusData, PostAlonzoTransactionOutput, ScriptRef,
                 TransactionBody, TransactionOutput, Value, WitnessSet,
             },
-            AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Set, StakeCredential,
+            AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
         },
         traverse::ComputeHash,
@@ -46,11 +46,13 @@ pub struct SyntheticBlockConfig {
     pub metadata_entries: Vec<(u64, alonzo::Metadatum)>,
     pub policy_id: [u8; 28],
     pub asset_name: String,
+    pub asset_names_by_block: Vec<String>,
     pub lovelace: u64,
     pub asset_amount: u64,
     pub mint_amount: i64,
     pub seed_amount: u64,
     pub pool_id: String,
+    pub pool_relays: Vec<Relay>,
     pub drep_keyhash: [u8; 28],
     pub drep_deposit: u64,
 }
@@ -99,12 +101,14 @@ impl Default for SyntheticBlockConfig {
             metadata_entries: vec![],
             policy_id: [1u8; 28],
             asset_name: "SYNTH".to_string(),
+            asset_names_by_block: vec![],
             lovelace: crate::MIN_UTXO_AMOUNT,
             asset_amount: 1,
             mint_amount: 1,
             seed_amount: crate::MIN_UTXO_AMOUNT,
             pool_id: "pool1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
                 .to_string(),
+            pool_relays: vec![],
             drep_keyhash: [7u8; 28],
             drep_deposit: 1000,
         }
@@ -221,9 +225,19 @@ pub fn build_synthetic_blocks(
         .unwrap_or(cfg.metadata_label);
 
     let policy_id = Hash::from(cfg.policy_id);
-    let asset_name = Bytes::from(cfg.asset_name.as_bytes().to_vec());
+    let block_count = cfg.block_count.max(1);
+    let asset_names = if cfg.asset_names_by_block.is_empty() {
+        vec![cfg.asset_name.clone(); block_count]
+    } else {
+        assert_eq!(
+            cfg.asset_names_by_block.len(),
+            block_count,
+            "asset_names_by_block must contain one name per block"
+        );
+        cfg.asset_names_by_block.clone()
+    };
     let policy_id_hex = hex::encode(cfg.policy_id);
-    let asset_name_hex = hex::encode(cfg.asset_name.as_bytes());
+    let asset_name_hex = hex::encode(asset_names[0].as_bytes());
     let fixture_extras = Some(build_datum_and_script_fixture());
 
     let stake_cred = Address::from_bech32(&cfg.address)
@@ -251,7 +265,6 @@ pub fn build_synthetic_blocks(
         std::collections::HashMap::new();
     let mut account_withdrawals = Vec::new();
 
-    let block_count = cfg.block_count.max(1);
     let txs_per_block = cfg.txs_per_block.max(1);
     let submit_tx_hash = tx_sequence_to_hash(block_count as u64 * txs_per_block as u64 + 1);
     let submit_ref = TxoRef(submit_tx_hash, 0);
@@ -264,9 +277,10 @@ pub fn build_synthetic_blocks(
     });
     let mut prev_block_hash: Option<Hash<32>> = None;
 
-    for offset in 0..block_count {
+    for (offset, asset_name) in asset_names.iter().enumerate() {
         let slot = cfg.slot + offset as u64;
         let block_number = cfg.start_block + offset as u64;
+        let asset_name = Bytes::from(asset_name.as_bytes().to_vec());
         let mut tx_specs = Vec::with_capacity(txs_per_block);
         let mut tx_hashes = Vec::with_capacity(txs_per_block);
         let mut withdrawal_amounts = Vec::with_capacity(txs_per_block);
@@ -335,6 +349,7 @@ pub fn build_synthetic_blocks(
                 cfg.mint_amount,
                 stake_cred.clone(),
                 pool_keyhash,
+                cfg.pool_relays.clone(),
                 cfg.drep_keyhash,
                 cfg.drep_deposit,
                 withdrawal_amount,
@@ -383,7 +398,7 @@ pub fn build_synthetic_blocks(
     let asset_unit = format!(
         "{}{}",
         hex::encode(cfg.policy_id),
-        hex::encode(cfg.asset_name.as_bytes())
+        hex::encode(asset_names[0].as_bytes())
     );
 
     let stake_address = match Address::from_bech32(&cfg.address).expect("invalid synthetic address")
@@ -502,6 +517,56 @@ pub fn seed_reward_logs<D: Domain>(
     Ok(())
 }
 
+/// Seed per-account `AccountStakeLog` entries for the given epochs.
+///
+/// Writes one row for `stake_address` and one for a fixed synthetic script
+/// credential, both delegated to `pool_id` — two distinct keys so pagination
+/// over the epoch's stake distribution is testable. A third credential is
+/// seeded with zero stake, which endpoints must exclude (Blockfrost's
+/// epoch_stake has no zero-amount rows).
+pub fn seed_account_stake_logs<D: Domain>(
+    domain: &D,
+    stake_address: &str,
+    pool_id: &str,
+    epochs: &[u64],
+) -> Result<(), ChainError> {
+    let address = Address::from_bech32(stake_address)?;
+    let (stake_cred, _) = dolos_cardano::pallas_extras::address_as_stake_cred(&address)
+        .ok_or(ChainError::InvalidPoolParams)?;
+    let pool_keyhash =
+        pool_keyhash_from_bech32(pool_id).map_err(|_| ChainError::InvalidPoolParams)?;
+
+    let extra_cred = StakeCredential::ScriptHash(Hash::from([0xAA; 28]));
+    let zero_cred = StakeCredential::ScriptHash(Hash::from([0xBB; 28]));
+
+    let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
+    let writer = domain.archive().start_writer()?;
+
+    for epoch in epochs {
+        let slot = summary.epoch_start(*epoch);
+
+        let entries = [
+            (&stake_cred, 7_000_000u64),
+            (&extra_cred, 3_000_000),
+            (&zero_cred, 0),
+        ];
+
+        for (credential, amount) in entries {
+            let log_key: LogKey = (TemporalKey::from(slot), credential_to_key(credential)).into();
+            let log = AccountStakeLog {
+                amount,
+                pool_id: pool_keyhash.as_ref().to_vec(),
+            };
+            writer
+                .write_log_typed(&log_key, &log)
+                .map_err(ChainError::from)?;
+        }
+    }
+
+    writer.commit().map_err(ChainError::from)?;
+    Ok(())
+}
+
 pub fn seed_epoch_logs<D: Domain>(domain: &D, epochs: &[u64]) -> Result<(), ChainError> {
     let summary = dolos_cardano::eras::load_era_summary::<D>(domain.state())?;
     let base = dolos_cardano::load_epoch::<D>(domain.state())?;
@@ -546,6 +611,7 @@ fn sample_transaction(
     mint_amount: i64,
     stake_cred: StakeCredential,
     pool_keyhash: Hash<28>,
+    pool_relays: Vec<Relay>,
     drep_keyhash: [u8; 28],
     drep_deposit: u64,
     withdrawal_amount: Option<u64>,
@@ -604,7 +670,7 @@ fn sample_transaction(
         },
         reward_account: Bytes::from(reward_account.to_vec()),
         pool_owners: Set::from(vec![pool_owner]),
-        relays: vec![],
+        relays: pool_relays,
         pool_metadata,
     };
 
@@ -830,6 +896,85 @@ fn build_submit_tx_cbor(
     };
 
     minicbor::to_vec(tx).expect("failed to encode submit tx")
+}
+
+/// A phase-2-invalid (`success: false`) Conway tx. It has no regular outputs;
+/// the only output it produces is the collateral return. Collateral returns
+/// are indexed after the regular outputs, so here it sits at index 0. Use it
+/// to inject phase-2-invalid txs into scenarios that exercise collateral
+/// handling.
+pub fn build_phase2_invalid_tx_cbor(
+    input: TxoRef,
+    collateral: TxoRef,
+    collateral_return_address: impl Into<crate::TestAddress>,
+    collateral_return_amount: u64,
+) -> Vec<u8> {
+    let input = TransactionInput {
+        transaction_id: input.0,
+        index: input.1.into(),
+    };
+
+    let collateral = TransactionInput {
+        transaction_id: collateral.0,
+        index: collateral.1.into(),
+    };
+
+    let collateral_return = PostAlonzoTransactionOutput {
+        address: Bytes::from(collateral_return_address.into().to_bytes()),
+        value: Value::Coin(collateral_return_amount),
+        datum_option: None,
+        script_ref: None,
+    };
+
+    let body = TransactionBody {
+        inputs: Set::from(vec![input]),
+        outputs: vec![],
+        fee: 200_000,
+        ttl: None,
+        certificates: None,
+        withdrawals: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: Some(NonEmptySet::try_from(vec![collateral]).expect("non-empty collateral")),
+        required_signers: None,
+        network_id: None,
+        collateral_return: Some(TransactionOutput::PostAlonzo(KeepRaw::from(
+            collateral_return,
+        ))),
+        total_collateral: Some(500_000),
+        reference_inputs: None,
+        voting_procedures: None,
+        proposal_procedures: None,
+        treasury_value: None,
+        donation: None,
+    };
+
+    let body_cbor = minicbor::to_vec(&body).expect("failed to encode phase-2-invalid tx body");
+    let body_keep = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+        .expect("failed to decode phase-2-invalid tx body")
+        .to_owned();
+
+    let witness_set = WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_v1_script: None,
+        plutus_data: None,
+        redeemer: None,
+        plutus_v2_script: None,
+        plutus_v3_script: None,
+    };
+
+    let tx = pallas::ledger::primitives::conway::Tx {
+        transaction_body: body_keep,
+        transaction_witness_set: KeepRaw::from(witness_set),
+        success: false,
+        auxiliary_data: Nullable::Null,
+    };
+
+    minicbor::to_vec(tx).expect("failed to encode phase-2-invalid tx")
 }
 
 #[cfg(test)]

@@ -42,7 +42,8 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 ├── wal      # Write-Ahead Log database
 ├── state    # Ledger state database
 ├── chain    # Archive/block storage database
-└── index    # Consolidated index database
+├── index    # Consolidated index database
+└── scratch  # not a store: stele layers staged in flight by a registry transfer
 ```
 
 Each database is a separate Redb or Fjall file with independent configuration for cache size and durability, depending on the chosen storage backend.
@@ -313,8 +314,40 @@ All agents working on this repository must verify their modifications by running
 
 3. **Testing**: Run tests to verify functionality
    ```bash
-   cargo test --workspace --all-features
+   cargo test --workspace --all-targets
+   cargo test --workspace --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
    ```
+
+   The first command is what CI runs on every platform. The second adds the
+   feature-gated code the default run never exercises — most importantly the
+   `strict` feature, dolos-cardano's epoch-coherence assertions. The three
+   service crates are excluded from the all-features run because their test
+   fixtures import synthetic chains that jump from a fresh genesis domain
+   straight to epoch 2, which trips those assertions inside the fixture itself
+   (the `EpochState` entity is still at epoch 0 when an epoch-2 block rolls);
+   they keep full coverage under the first command. Remove the exclusions once
+   the fixtures build epoch-coherent domains. CI (`.github/workflows/ci.yml`)
+   runs both commands, so a verification that passes locally cannot drift from
+   what the repository keeps green.
+
+4. **Registry round trip** (requires Docker): the `#[ignore]`d suites that
+   spawn a real OCI registry
+   ```bash
+   cargo test -p stelae --all-features --test oci -- --ignored --test-threads=1
+   cargo test -p dolos-snapshot --features oci --test publish -- --ignored --test-threads=1
+   cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --test-threads=1
+   ```
+
+   Each test spawns its own registry container via `docker run` and tears it
+   down on the way out; the suites are `#[ignore]`d so plain `cargo test`
+   stays green without a container runtime. Run them when touching
+   `crates/stelae/src/oci.rs`, the manifest shape, or `crates/snapshot`'s
+   registry publish/restore paths. `STELAE_TEST_REGISTRY_IMAGE` selects the
+   server; the `Registry` workflow (`.github/workflows/registry.yml` — its
+   own workflow, so the gate can travel with a future extraction of
+   `crates/stelae`) runs these suites on Linux (with `--nocapture`) against
+   `registry:2`, `registry:3` and a pinned `zot`, so the round trip against a
+   real registry never depends on someone remembering to run it.
 
 ### Code Quality Standards
 

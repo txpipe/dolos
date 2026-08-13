@@ -72,6 +72,9 @@ genesis_key = "5b3...45d" # redacted
 [snapshot]
 download_url = "https://example.com/snapshot.tar.zst"
 
+[stelae.registry]
+user = "dolos"
+
 ```
 
 Each section of the toml controls a different aspect of Dolos' processes. The rest of this document describes in detail each of these sections.
@@ -108,6 +111,12 @@ The `storage` section controls how Dolos stores data in the local file system. E
 - `path`: root directory where all data will be stored.
 - `version`: storage schema version (`v0` - `v3`).
 
+Besides the stores, this directory holds `scratch/`: where `dolos snapshot
+publish`, `dolos bootstrap stelae` and `dolos snapshot verify` stage the layers
+they move over an OCI registry. It defaults here because this volume is already
+sized for the data; a mainnet transfer stages gigabytes. The first two take
+`--scratch-dir` to point somewhere else.
+
 ### `storage.wal` section
 
 | property    | type    | example  |
@@ -134,10 +143,10 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `redb`, `fjall`, or `in_memory` (defaults to `fjall`).
+- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
-- `cache`: size (MB) of the state cache (Redb/Fjall only).
-- `max_history`: maximum number of slots to keep before pruning (Redb/Fjall only).
+- `cache`: size (MB) of the state cache.
+- `max_history`: maximum number of slots to keep before pruning.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
 ### `storage.archive` section
@@ -167,9 +176,9 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | worker_threads   | integer | 8       |
 | memtable_size_mb | integer | 128     |
 
-- `backend`: `redb`, `fjall`, `in_memory`, or `no_op` (defaults to `fjall`).
+- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole index in process memory: ephemeral — everything is lost on restart — and RAM-resident, so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the index layer entirely. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
 - `path`: optional override for the index path (defaults to `<storage.path>/index`).
-- `cache`: size (MB) of the index cache (Redb/Fjall only).
+- `cache`: size (MB) of the index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
 ### `storage.mempool` section
@@ -393,6 +402,55 @@ The `snapshot` section controls bootstrap from a snapshot archive.
 | download_url | string | "https://example.com/snapshot.tar.zst" |
 
 - `download_url`: URL of the snapshot archive to download.
+
+## `stelae` section
+
+The `stelae` section controls how this node reaches a **stele registry** — the OCI
+repositories `dolos bootstrap stelae --source oci://…` restores from and
+`dolos snapshot publish --repo oci://…` publishes into.
+
+### `stelae.registry` section
+
+| property | type   | example |
+| -------- | ------ | ------- |
+| user     | string | "dolos" |
+| password | string | "a-private-registry-credential" |
+| token    | string | "ghp_…" |
+
+- `user`: the identity the registry is read as, sent as HTTP Basic.
+- `password`: optional. Omitted, Dolos uses the official registry's published
+  read-only password, which is compiled into the binary.
+- `token`: a bearer token, for a registry that issues them rather than accepting
+  a pair. Mutually exclusive with `user`.
+
+A registry may charge nothing for reads and still refuse an unidentified one. The
+credential the official registry hands out is not a secret — it is what makes
+free, identity-less access possible without leaving the registry unrestricted —
+but it is not written into your config either: `dolos init` seeds the `user` and
+leaves the password to the binary, so a rotation reaches every node that takes a
+release instead of having to be found again in every generated file. Set
+`password` to point at a registry of your own. Omit the section entirely to
+connect anonymously, which is what a genuinely public repository wants.
+
+Setting `token` and `user` at the same time is an error rather than a precedence
+puzzle — Dolos refuses to open the registry and names both — and so is setting
+`password` with no `user`.
+
+#### A publisher's credentials
+
+Those are real secrets and never belong in this file. Export them instead, using
+the same `DOLOS_` environment overrides that apply to [every other
+setting](./introduction#environmental-variables):
+
+```sh
+export DOLOS_STELAE_REGISTRY_USER=publisher
+export DOLOS_STELAE_REGISTRY_PASSWORD=…
+dolos snapshot publish --repo oci://…
+```
+
+There is nothing registry-specific about that: the environment layer overrides
+the file for every field, so a node that carries the read-only `user` in
+`dolos.toml` can publish with nothing to remove first.
 
 ## `logging` section
 

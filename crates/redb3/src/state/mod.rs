@@ -1,8 +1,8 @@
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
-    config::RedbStateConfig, ChainPoint, EntityKey, EntityValue, Namespace, StateError,
-    StateSchema, TxoRef, UtxoMap,
+    config::RedbStateConfig, ChainPoint, EmptyUtxoIter, EntityKey, EntityValue, Namespace,
+    StateError, StateSchema, TxoRef, UtxoMap,
 };
 
 use redb::{
@@ -239,6 +239,7 @@ impl dolos_core::StateWriter for StateWriter {
 impl dolos_core::StateStore for StateStore {
     type EntityIter = EntityIter;
     type EntityValueIter = EntityValueIter;
+    type UtxoIter = EmptyUtxoIter;
     type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
@@ -325,5 +326,13 @@ impl dolos_core::StateStore for StateStore {
         let out = utxoset::UtxosTable::get_sparse(&rx, refs)?;
 
         Ok(out)
+    }
+
+    /// Not implemented on this backend.
+    ///
+    /// Full UTxO-set iteration exists for the snapshot export and live-UTxO
+    /// index rebuild paths, which run against the live state backend (fjall).
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        Err(StateError::Unsupported("iter_utxos"))
     }
 }

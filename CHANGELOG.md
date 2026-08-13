@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.6.0] - 2026-07-27
+
+### 🚀 Features
+
+- *(minibf)* Implement `/pools/retiring` endpoint (#1122)
+- *(cardano)* Capture governance votes and full proposal state (#1129)
+- *(minibf)* Add block txs CBOR endpoints (#1123)
+- *(minibf)* Implement `/addresses/{address}/total` endpoint (#1133)
+- *(minibf)* Implement `/pools/{pool_id}/relays` endpoint (#1132)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Stop dropping StakeVoteDeleg drep leg and drep anchors (#1128)
+- *(bootstrap)* Install rustls crypto provider for mithril client (#1131)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Bump openapi crate to 1.90 (#1125)
+
 ## [1.5.0] - 2026-07-16
 
 ### 🚀 Features

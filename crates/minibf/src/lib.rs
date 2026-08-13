@@ -28,6 +28,7 @@ use dolos_core::{
 mod cache;
 mod error;
 pub(crate) mod hacks;
+pub(crate) mod inputs;
 pub(crate) mod mapping;
 mod pagination;
 mod routes;
@@ -335,6 +336,10 @@ where
             get(routes::accounts::by_stake_addresses::<D>),
         )
         .route(
+            "/accounts/{stake_address}/addresses/assets",
+            get(routes::accounts::by_stake_addresses_assets::<D>),
+        )
+        .route(
             "/accounts/{stake_address}/utxos",
             get(routes::accounts::by_stake_utxos::<D>),
         )
@@ -345,6 +350,10 @@ where
         .route(
             "/accounts/{stake_address}/withdrawals",
             get(routes::accounts::by_stake_withdrawals::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/transactions",
+            get(routes::accounts::by_stake_transactions::<D>),
         )
         .route(
             "/addresses/{address}",
@@ -362,9 +371,17 @@ where
             "/addresses/{address}/transactions",
             get(routes::addresses::transactions::<D>),
         )
+        .route(
+            "/addresses/{address}/total",
+            get(routes::addresses::total::<D>),
+        )
         .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
         .route("/blocks/latest", get(routes::blocks::latest::<D>))
         .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
+        .route(
+            "/blocks/latest/txs/cbor",
+            get(routes::blocks::latest_txs_cbor::<D>),
+        )
         .route(
             "/blocks/{hash_or_number}",
             get(routes::blocks::by_hash_or_number::<D>),
@@ -382,6 +399,10 @@ where
             get(routes::blocks::by_hash_or_number_txs::<D>),
         )
         .route(
+            "/blocks/{hash_or_number}/txs/cbor",
+            get(routes::blocks::by_hash_or_number_txs_cbor::<D>),
+        )
+        .route(
             "/blocks/{hash_or_number}/addresses",
             get(routes::blocks::by_hash_or_number_addresses::<D>),
         )
@@ -396,6 +417,14 @@ where
         .route(
             "/epochs/{epoch}/parameters",
             get(routes::epochs::by_number_parameters::<D>),
+        )
+        .route(
+            "/epochs/{epoch}/stakes",
+            get(routes::epochs::by_number_stakes::<D>),
+        )
+        .route(
+            "/epochs/{epoch}/stakes/{pool_id}",
+            get(routes::epochs::by_number_stakes_pool::<D>),
         )
         .route(
             "/epochs/latest/parameters",
@@ -455,6 +484,10 @@ where
             "/txs/{tx_hash}/stakes",
             get(routes::txs::by_hash_stakes::<D>),
         )
+        .route(
+            "/assets/policy/{policy_id}",
+            get(routes::assets::by_policy::<D>),
+        )
         .route("/assets/{subject}", get(routes::assets::by_subject::<D>))
         .route(
             "/assets/{subject}/addresses",
@@ -484,8 +517,10 @@ where
             "/pools/{id}/metadata",
             get(routes::pools::by_id_metadata::<D>),
         )
+        .route("/pools/{id}/relays", get(routes::pools::by_id_relays::<D>))
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route("/pools/retiring", get(routes::pools::all_retiring::<D>))
+        .route("/pools", get(routes::pools::all::<D>))
         .route("/pools/{id}", get(routes::pools::by_id::<D>))
         .route(
             "/governance/dreps/{drep_id}",

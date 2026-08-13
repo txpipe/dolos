@@ -12,6 +12,7 @@ use blockfrost_openapi::models::{
     dreps_inner_metadata_error::Code, pool::Pool, pool_calidus_key::PoolCalidusKey,
     pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
     pool_list_extended_inner::PoolListExtendedInner, pool_list_retire_inner::PoolListRetireInner,
+    tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     DrepsInnerMetadataError, PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{
@@ -236,7 +237,7 @@ where
     Ok(metrics)
 }
 
-fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     if pool_id.starts_with("pool1") {
         let (_, operator) = bech32::decode(pool_id).map_err(|_| Error::InvalidPoolId)?;
         return Ok(operator);
@@ -658,6 +659,58 @@ async fn fetch_pool_metadata_with_error(
     }
 }
 
+fn select_pools(
+    pools: impl IntoIterator<Item = (BlockSlot, PoolHash)>,
+    pagination: &Pagination,
+) -> Vec<PoolHash> {
+    let mut pools: Vec<(BlockSlot, PoolHash)> = pools.into_iter().collect();
+
+    pools.sort_unstable_by_key(|(slot, operator)| (*slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    pools
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(_, operator)| operator)
+        .collect()
+}
+
+pub async fn all<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|x| {
+            let (_, state) = match x {
+                Ok(item) => item,
+                Err(_) => return Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+            };
+            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
+                return None;
+            }
+            Some(Ok((state.register_slot, state.operator)))
+        })
+        .collect::<Result<Vec<(BlockSlot, PoolHash)>, StatusCode>>()?;
+
+    let out = select_pools(pools, &pagination)
+        .into_iter()
+        .map(bech32_pool)
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 pub async fn all_extended<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -699,7 +752,7 @@ where
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let pools = domain
+    let mut pools = domain
         .iter_cardano_entities::<PoolState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .flat_map(|x| {
@@ -709,11 +762,18 @@ where
             if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
                 return None;
             }
-            Some(Ok((state.register_slot, (key, state))))
+            Some(Ok(((state.register_slot, state.operator), (key, state))))
         })
-        .collect::<Result<Vec<(BlockSlot, (EntityKey, PoolState))>, StatusCode>>()?
+        .collect::<Result<Vec<((BlockSlot, PoolHash), (EntityKey, PoolState))>, StatusCode>>()?;
+
+    pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    let pools = pools
         .into_iter()
-        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
         .map(|(_, x)| x)
         .skip(pagination.skip())
         .take(pagination.count)
@@ -852,6 +912,34 @@ where
     Ok(Json(build_pool_metadata_response(
         operator, onchain, offchain, error,
     )?))
+}
+
+pub async fn by_id_relays<D: Domain>(
+    Path(id): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentPoolCertsInnerRelaysInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let operator = decode_pool_id(&id)?;
+    let pool = domain
+        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let relays = pool
+        .snapshot
+        .live()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .params
+        .relays
+        .clone();
+
+    let out = relays
+        .into_iter()
+        .map(|relay| relay.into_model())
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
 }
 
 struct PoolDelegatorModelBuilder {
@@ -1025,7 +1113,7 @@ mod tests {
     use pallas::{
         codec::utils::Bytes,
         crypto::hash::Hash,
-        ledger::primitives::{alonzo, Int, PoolMetadata, StakeCredential},
+        ledger::primitives::{alonzo, Int, PoolMetadata, Relay, StakeCredential},
     };
     use serde_json::Value;
 
@@ -1439,6 +1527,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pools_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+
+        let pool_id = app.vectors().pool_id.as_str();
+        assert!(
+            pools.iter().any(|candidate| candidate == pool_id),
+            "expected pool {pool_id} in list, got {pools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_matches_extended_ids() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?page=1&count=100").await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?page=1&count=100").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
+
+        assert_eq!(pools, extended_ids);
+    }
+
+    #[tokio::test]
+    async fn pools_order_desc_reverses_asc() {
+        let app = TestApp::new();
+        let (asc_status, asc_bytes) = app.get_bytes("/pools?order=asc&count=100").await;
+        let (desc_status, desc_bytes) = app.get_bytes("/pools?order=desc&count=100").await;
+
+        assert_eq!(asc_status, StatusCode::OK);
+        assert_eq!(desc_status, StatusCode::OK);
+
+        let asc: Vec<String> =
+            serde_json::from_slice(&asc_bytes).expect("failed to parse asc pool list");
+        let mut desc: Vec<String> =
+            serde_json::from_slice(&desc_bytes).expect("failed to parse desc pool list");
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_matches_extended_ids_desc() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?order=desc&count=100").await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?order=desc&count=100").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
+
+        assert_eq!(pools, extended_ids);
+    }
+
+    #[tokio::test]
+    async fn pools_empty_out_of_range_page() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?page=694269").await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/pools?count=invalid", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
     async fn pools_retiring_happy_path() {
         let app = TestApp::new();
         let (status, bytes) = app.get_bytes("/pools/retiring").await;
@@ -1491,6 +1679,54 @@ mod tests {
             retiring_epoch,
             deposit: 0,
         }
+    }
+
+    #[test]
+    fn select_pools_orders_and_paginates() {
+        let pools = vec![
+            (30, Hash::from([3u8; 28])),
+            (10, Hash::from([1u8; 28])),
+            (20, Hash::from([2u8; 28])),
+            // same register slot as [2u8; 28]: stable tie-break on operator
+            (20, Hash::from([9u8; 28])),
+        ];
+
+        let asc = select_pools(pools.clone(), &Pagination::default());
+        assert_eq!(
+            asc,
+            vec![
+                Hash::from([1u8; 28]),
+                Hash::from([2u8; 28]),
+                Hash::from([9u8; 28]),
+                Hash::from([3u8; 28]),
+            ]
+        );
+
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let ordered_desc = select_pools(pools.clone(), &desc);
+        assert_eq!(
+            ordered_desc,
+            vec![
+                Hash::from([3u8; 28]),
+                Hash::from([9u8; 28]),
+                Hash::from([2u8; 28]),
+                Hash::from([1u8; 28]),
+            ]
+        );
+
+        let paged = Pagination {
+            count: 2,
+            page: 2,
+            ..Pagination::default()
+        };
+        let second_page = select_pools(pools, &paged);
+        assert_eq!(
+            second_page,
+            vec![Hash::from([9u8; 28]), Hash::from([3u8; 28])]
+        );
     }
 
     #[test]
@@ -1719,6 +1955,121 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/metadata");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[test]
+    fn relay_ipv6_words_swapped_to_network_order() {
+        // On-chain bytes of a real preview relay (pool1drrylt...): the ledger
+        // serializes relay IPv6 as four little-endian 32-bit words, so the
+        // mapped address must match what dbsync/Blockfrost display.
+        let onchain: [u8; 16] = [
+            0x61, 0x08, 0x01, 0x20, 0x80, 0x2b, 0x00, 0x40, 0xff, 0x3e, 0x16, 0x02, 0x09, 0x90,
+            0x05, 0xfe,
+        ];
+
+        let relay = Relay::SingleHostAddr(Some(3001), None, Some(Bytes::from(onchain.to_vec())));
+        let model = relay.into_model().expect("relay model");
+
+        assert_eq!(
+            model.ipv6.as_deref(),
+            Some("2001:861:4000:2b80:216:3eff:fe05:9009")
+        );
+        assert_eq!(model.ipv4, None);
+        assert_eq!(model.port, 3001);
+    }
+
+    #[tokio::test]
+    async fn pools_relays_happy_path() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_relays: vec![
+                Relay::SingleHostAddr(Some(3001), Some(Bytes::from(vec![192, 168, 0, 1])), None),
+                Relay::SingleHostName(Some(3002), "relay.example.com".to_string()),
+                Relay::MultiHostName("_relays._tcp.example.com".to_string()),
+            ],
+            ..Default::default()
+        });
+
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/relays");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let relays: Vec<TxContentPoolCertsInnerRelaysInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool relays");
+
+        assert_eq!(
+            relays,
+            vec![
+                TxContentPoolCertsInnerRelaysInner {
+                    ipv4: Some("192.168.0.1".to_string()),
+                    ipv6: None,
+                    dns: None,
+                    dns_srv: None,
+                    port: 3001,
+                },
+                TxContentPoolCertsInnerRelaysInner {
+                    ipv4: None,
+                    ipv6: None,
+                    dns: Some("relay.example.com".to_string()),
+                    dns_srv: None,
+                    port: 3002,
+                },
+                TxContentPoolCertsInnerRelaysInner {
+                    ipv4: None,
+                    ipv6: None,
+                    dns: None,
+                    dns_srv: Some("_relays._tcp.example.com".to_string()),
+                    port: 0,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_relays_empty_without_registered_relays() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/relays");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let relays: Vec<TxContentPoolCertsInnerRelaysInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool relays");
+        assert!(relays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_relays_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/relays", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_relays_not_found() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/relays", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_relays_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/relays");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 

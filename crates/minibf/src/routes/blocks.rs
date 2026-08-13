@@ -3,7 +3,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::block_content::BlockContent;
+use blockfrost_openapi::models::{
+    block_content::BlockContent, block_content_addresses_inner::BlockContentAddressesInner,
+    block_content_txs_cbor_inner::BlockContentTxsCborInner,
+};
 use dolos_cardano::ChainSummary;
 use dolos_core::{archive::Skippable as _, ArchiveStore as _, BlockBody, Domain};
 use futures::future::try_join_all;
@@ -401,11 +404,11 @@ where
     ))
 }
 
-pub async fn by_hash_or_number_addresses<D>(
+pub async fn by_hash_or_number_txs_cbor<D>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Vec<String>>, Error>
+) -> Result<Json<Vec<BlockContentTxsCborInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -415,7 +418,7 @@ where
 
     let model = BlockModelBuilder::new(&block)?;
 
-    let txs: Vec<String> = model.into_model()?;
+    let txs: Vec<BlockContentTxsCborInner> = model.into_model()?;
     let txs = match pagination.order {
         Order::Asc => txs,
         Order::Desc => txs.into_iter().rev().collect(),
@@ -423,6 +426,45 @@ where
 
     Ok(Json(
         txs.into_iter()
+            .skip(pagination.skip())
+            .take(pagination.count)
+            .collect(),
+    ))
+}
+
+pub async fn by_hash_or_number_addresses<D>(
+    Path(hash_or_number): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<BlockContentAddressesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
+    let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
+
+    let mut builder = BlockModelBuilder::new(&block)?;
+
+    let deps = builder.required_input_deps();
+    let deps = domain.get_tx_batch(deps).await?;
+
+    // deps missing from the archive (possible on nodes without full history)
+    // are skipped, omitting their addresses from the response — the same
+    // graceful degradation as /txs/{hash}/utxos
+    for (key, cbor) in deps.iter() {
+        if let Some(cbor) = cbor {
+            builder.load_dep(*key, cbor)?;
+        }
+    }
+
+    let addresses: Vec<BlockContentAddressesInner> = builder.into_model()?;
+
+    // Blockfrost sorts this endpoint alphabetically by address and ignores
+    // the `order` param; only count/page apply.
+    Ok(Json(
+        addresses
+            .into_iter()
             .skip(pagination.skip())
             .take(pagination.count)
             .collect(),
@@ -446,6 +488,36 @@ where
     let model = BlockModelBuilder::new(&tip)?;
 
     let txs: Vec<String> = model.into_model()?;
+    let txs = match pagination.order {
+        Order::Asc => txs,
+        Order::Desc => txs.into_iter().rev().collect(),
+    };
+
+    Ok(Json(
+        txs.into_iter()
+            .skip(pagination.skip())
+            .take(pagination.count)
+            .collect(),
+    ))
+}
+
+pub async fn latest_txs_cbor<D>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<BlockContentTxsCborInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    let (_, tip) = domain
+        .archive()
+        .get_tip()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let model = BlockModelBuilder::new(&tip)?;
+
+    let txs: Vec<BlockContentTxsCborInner> = model.into_model()?;
     let txs = match pagination.order {
         Order::Asc => txs,
         Order::Desc => txs.into_iter().rev().collect(),
@@ -571,6 +643,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_happy_path() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/blocks/{}/txs/cbor", block.block_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse txs cbor");
+
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        assert_eq!(hashes, block.tx_hashes);
+
+        for tx in txs {
+            let cbor = hex::decode(&tx.cbor).expect("cbor is not valid hex");
+            let decoded = pallas::ledger::traverse::MultiEraTx::decode(&cbor)
+                .expect("cbor is not a decodable tx");
+            assert_eq!(decoded.hash().to_string(), tx.tx_hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_order_desc() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/blocks/{}/txs/cbor?order=desc", block.block_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse desc txs cbor");
+
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        let mut reversed = block.tx_hashes.clone();
+        reversed.reverse();
+        assert_eq!(hashes, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_paginated() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!("/blocks/{}/txs/cbor?count=1&page=2", block.block_hash);
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse paginated txs cbor");
+
+        let expected: Vec<String> = block.tx_hashes.iter().skip(1).take(1).cloned().collect();
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        assert_eq!(hashes, expected);
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/txs/cbor", invalid_block());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_not_found() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/txs/cbor", missing_block());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_txs_cbor_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(
+            &app,
+            "/blocks/1/txs/cbor",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn blocks_latest_txs_order_asc() {
         let app = TestApp::new();
         let block = app.vectors().blocks.last().expect("missing block vectors");
@@ -594,5 +752,264 @@ mod tests {
         let mut reversed = block.tx_hashes.clone();
         reversed.reverse();
         assert_eq!(txs, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_cbor_happy_path() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app.get_bytes("/blocks/latest/txs/cbor").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse latest txs cbor");
+
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        assert_eq!(hashes, block.tx_hashes);
+
+        for tx in txs {
+            let cbor = hex::decode(&tx.cbor).expect("cbor is not valid hex");
+            let decoded = pallas::ledger::traverse::MultiEraTx::decode(&cbor)
+                .expect("cbor is not a decodable tx");
+            assert_eq!(decoded.hash().to_string(), tx.tx_hash);
+        }
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_cbor_order_desc() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app.get_bytes("/blocks/latest/txs/cbor?order=desc").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse desc latest txs cbor");
+
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        let mut reversed = block.tx_hashes.clone();
+        reversed.reverse();
+        assert_eq!(hashes, reversed);
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_cbor_paginated() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app
+            .get_bytes("/blocks/latest/txs/cbor?count=1&page=2")
+            .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let txs: Vec<BlockContentTxsCborInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse paginated latest txs cbor");
+
+        let expected: Vec<String> = block.tx_hashes.iter().skip(1).take(1).cloned().collect();
+        let hashes: Vec<String> = txs.iter().map(|tx| tx.tx_hash.clone()).collect();
+        assert_eq!(hashes, expected);
+    }
+
+    #[tokio::test]
+    async fn blocks_latest_txs_cbor_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(
+            &app,
+            "/blocks/latest/txs/cbor",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    async fn get_addresses(app: &TestApp, path: &str) -> Vec<BlockContentAddressesInner> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("failed to parse block addresses")
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_happy_path() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let address = app.vectors().address.clone();
+
+        let path = format!("/blocks/{}/addresses", block.block_hash);
+        let addresses = get_addresses(&app, &path).await;
+
+        // entries are sorted alphabetically by address
+        let sorted: Vec<_> = addresses.iter().map(|a| a.address.clone()).collect();
+        let mut expected = sorted.clone();
+        expected.sort();
+        assert_eq!(sorted, expected, "addresses must be sorted alphabetically");
+
+        // the first tx of each fixture block pays the fixture address; its
+        // entry must reference that tx exactly once even though the address
+        // can appear in multiple outputs of it (dedup per address per tx)
+        let entry = addresses
+            .iter()
+            .find(|a| a.address == address)
+            .expect("fixture address missing from block addresses");
+
+        let tx_hashes: Vec<_> = entry
+            .transactions
+            .iter()
+            .map(|t| t.tx_hash.clone())
+            .collect();
+        assert_eq!(tx_hashes, vec![block.tx_hashes[0].clone()]);
+
+        // every tx must contribute at least its own output address
+        assert!(addresses.len() >= block.tx_hashes.len());
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_ignores_order_param() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+
+        let asc = get_addresses(
+            &app,
+            &format!("/blocks/{}/addresses?order=asc", block.block_hash),
+        )
+        .await;
+        let desc = get_addresses(
+            &app,
+            &format!("/blocks/{}/addresses?order=desc", block.block_hash),
+        )
+        .await;
+
+        // Blockfrost sorts alphabetically regardless of the order param
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_paginated() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+
+        let all = get_addresses(&app, &format!("/blocks/{}/addresses", block.block_hash)).await;
+        assert!(all.len() > 1, "fixture must produce multiple addresses");
+
+        let page = get_addresses(
+            &app,
+            &format!("/blocks/{}/addresses?count=1&page=2", block.block_hash),
+        )
+        .await;
+
+        assert_eq!(page, vec![all[1].clone()]);
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_past_the_end_page() {
+        let app = TestApp::new();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+
+        let path = format!("/blocks/{}/addresses?count=100&page=99", block.block_hash);
+        let addresses = get_addresses(&app, &path).await;
+
+        assert!(
+            addresses.is_empty(),
+            "past-the-end page must be an empty 200"
+        );
+    }
+
+    /// Exercises the `produces_at` edge for input-side address resolution.
+    /// Invalid script txs don't produce their regular outputs, but they can
+    /// produce a collateral return at the next output index. When a later tx
+    /// spends that collateral return, block-address mapping must resolve the
+    /// collateral-return address from the dependency tx CBOR.
+    #[test]
+    fn block_addresses_resolves_spent_collateral_return_address() {
+        use dolos_core::{EraCbor, TxoRef};
+        use dolos_testing::{
+            synthetic::{
+                build_phase2_invalid_tx_cbor, build_synthetic_blocks, SyntheticBlockConfig,
+            },
+            TestAddress,
+        };
+        use pallas::ledger::traverse::{Era, MultiEraBlock};
+
+        // Phase-2-invalid dep tx with no regular outputs. A collateral return
+        // is indexed after the regular outputs, so with none it sits at
+        // index 0.
+        let collateral_return_address = TestAddress::Alice;
+        let dep_tx_cbor = build_phase2_invalid_tx_cbor(
+            // arbitrary, never resolved in this test
+            TxoRef([1u8; 32].into(), 0),
+            // arbitrary, never resolved in this test
+            TxoRef([2u8; 32].into(), 16),
+            collateral_return_address.clone(), // what the spender's input must resolve to
+            1_500_000,
+        );
+
+        let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+        let raw = blocks.first().expect("missing synthetic block");
+
+        let block = MultiEraBlock::decode(raw).expect("failed to decode block");
+        let txs = block.txs();
+        let spender = txs.get(1).expect("fixture needs a second tx");
+        let consumed = spender.consumes();
+        let input = consumed.first().expect("spender must consume");
+        // check test wiring
+        assert_eq!(
+            input.index(),
+            0,
+            "the spender's input index must match the index of the dep's collateral return (0)"
+        );
+
+        let mut builder = BlockModelBuilder::new(raw).expect("failed to build block model");
+        let dep_cbor = EraCbor(Era::Conway.into(), dep_tx_cbor);
+        builder
+            .load_dep(*input.hash(), &dep_cbor)
+            .expect("failed to load dep");
+        let addresses: Vec<BlockContentAddressesInner> =
+            builder.into_model().expect("failed to map block addresses");
+
+        let entry = addresses
+            .iter()
+            .find(|entry| entry.address == collateral_return_address.as_str())
+            .expect("collateral-return address missing from response");
+
+        assert!(
+            entry
+                .transactions
+                .iter()
+                .any(|tx| tx.tx_hash == spender.hash().to_string()),
+            "spender tx must be attributed to the consumed collateral-return address"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/addresses", invalid_block());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_not_found() {
+        let app = TestApp::new();
+        let path = format!("/blocks/{}/addresses", missing_block());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_hash_or_number_addresses_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(
+            &app,
+            "/blocks/1/addresses",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
     }
 }

@@ -265,6 +265,7 @@ impl CoreStateWriter for StateWriter {
 impl CoreStateStore for StateStore {
     type EntityIter = entities::EntityIterator;
     type EntityValueIter = entities::EmptyEntityValueIterator;
+    type UtxoIter = utxos::UtxosIterator;
     type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
@@ -312,20 +313,29 @@ impl CoreStateStore for StateStore {
             .map_err(StateError::from)
     }
 
+    /// Multi-value namespaces have no encoding in this store: its entity
+    /// keyspace is one value per key, with no multimap to walk (#1036).
+    ///
+    /// Refusing is the convention the trait's newer methods already use, and
+    /// what the builtin memory store answers. A panic here would take down a
+    /// caller that has an error path anyway.
     fn iter_entity_values(
         &self,
         _ns: Namespace,
         _key: impl AsRef<[u8]>,
     ) -> Result<Self::EntityValueIter, StateError> {
-        // Multimap not supported - panic if called
-        unimplemented!(
-            "iter_entity_values is not supported in fjall state store (no multimap support) (#1036)"
-        )
+        Err(StateError::Unsupported("iter_entity_values"))
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         utxos::get_utxos(&snapshot, &self.utxos, &refs).map_err(StateError::from)
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
     }
 }

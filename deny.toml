@@ -1,8 +1,19 @@
 # cargo-deny configuration — https://embarkstudios.github.io/cargo-deny/
 #
-# Scoped to RustSec security advisories. CI runs `cargo deny check advisories`,
-# so the licenses/bans/sources sections are intentionally omitted for now; add
-# them in a follow-up if we want to gate those too.
+# Scoped to RustSec security advisories and the C-toolchain ban. CI runs
+# `cargo deny check advisories bans`, so the licenses/sources sections are
+# intentionally omitted for now; add them in a follow-up if we want to gate
+# those too.
+
+# The refusal this file enforces is stated against the build a contributor
+# runs with every feature on, so resolve the graph the same way. Feature
+# unification is additive, which makes the all-features graph a superset of
+# the default one: one resolution covers both trees.
+[graph]
+all-features = true
+# Dev-dependencies count. Contributors build the tests too, and a test-only
+# crate that drags in cmake costs them the same toolchain as a normal one.
+exclude-dev = false
 
 [advisories]
 version = 2
@@ -33,4 +44,31 @@ unmaintained = "none"
 # acceptance, so justify it.
 ignore = [
     # "RUSTSEC-0000-0000", # reason — <issue link>
+]
+
+# Building Dolos must not require a C toolchain beyond what `cc` gives you.
+# The root Cargo.toml has documented that refusal in prose since mithril-client
+# was added (see the `rustls-no-provider` comment there) and it regressed
+# anyway: a feature enabled for unrelated reasons let oci-client's default
+# rustls-tls fan aws-lc-rs into the rustls the workspace pins to ring, and the
+# default build grew a cmake requirement no reviewer could see. Prose does not
+# fail CI; this section does.
+#
+# This is a ban on *cmake*, not on C. zstd, ring and every other cc-built
+# dependency are untouched, and widening this list to "no new C dependencies"
+# would make it a check people learn to bypass.
+[bans]
+# Non-blocking on purpose. Dolos currently compiles two majors of reqwest —
+# a real finding with a plan of its own — and this guard is not the place to
+# force that consolidation. Duplicates stay visible in the job's logs.
+multiple-versions = "warn"
+
+deny = [
+    # Any sys crate that builds through cmake requires the toolchain by
+    # definition, so banning the build-dependency itself catches the next
+    # vector whichever dependency imports it.
+    { crate = "cmake", reason = "requires a cmake toolchain to build dolos; the workspace refuses that (root Cargo.toml, `rustls-no-provider` comment)" },
+    # The vector that actually regressed, named so the failure points at the
+    # recorded history rather than only at a transitive build-dependency.
+    { crate = "aws-lc-sys", reason = "pulls cmake in; use ring as the rustls crypto provider (root Cargo.toml, `rustls-no-provider` comment)" },
 ]
