@@ -21,8 +21,8 @@
 use dolos_cardano::{
     indexes::archive_dimensions,
     model::{
-        EpochState, FixedNamespace, LeaderRewardLog, MemberRewardLog, PoolDepositRefundLog,
-        StakeLog,
+        AccountStakeLog, EpochState, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+        PoolDepositRefundLog, StakeLog,
     },
 };
 use dolos_core::{
@@ -153,6 +153,7 @@ pub fn indexes() -> Vec<IndexRecord> {
 /// One log per namespace the ledger actually writes logs under.
 pub fn logs() -> Vec<LogRecord> {
     [
+        AccountStakeLog::NS,
         EpochState::NS,
         LeaderRewardLog::NS,
         MemberRewardLog::NS,
@@ -169,7 +170,7 @@ pub fn logs() -> Vec<LogRecord> {
 ///
 /// Every namespace appears in every shard, which no real stele would do — real
 /// keys are hash-derived and land where they land. It is what makes the golden
-/// freeze all fifteen namespace strings twice over.
+/// freeze all sixteen namespace strings twice over.
 pub fn state(shard: u8) -> Vec<StateRecord> {
     NAMESPACES
         .into_iter()
