@@ -52,8 +52,8 @@ use crate::{
     frame::{CanonicalCbor, LayerHeader, Limits, SeqReader, SeqWriter},
     inscription::LayerDescriptor,
     layer::{check_header, check_identity, check_record_count, LayerReader},
-    profile::{checked_layer_media_type, Profile},
-    transport::{RecordSink, SteleReader, SteleWriter},
+    profile::Profile,
+    transport::{open_layer, RecordSink, SteleReader, SteleWriter},
     Digest, Error, Inscription,
 };
 
@@ -340,9 +340,6 @@ impl SteleWriter for SteleDir {
         spec: &LayerSpec,
         level: i32,
     ) -> Result<LayerSink, Error> {
-        let media_type = checked_layer_media_type(profile, &spec.kind)?;
-        let header = LayerHeader::new(profile.name(), &spec.kind, spec.header_scope.clone());
-
         // A layer's file name is its digest, which is not known until the last
         // byte is written, so it is staged first. The counter keeps two writers
         // of the same kind apart — a profile sharding one logical layer into
@@ -359,23 +356,18 @@ impl SteleWriter for SteleDir {
 
         // From here on every `?` unwinds through `staging`, which removes the
         // file it named.
-        let file = fs::File::create(&staging.path)?;
+        let (sequence, media_type) = open_layer(profile, spec, level, || {
+            Ok(fs::File::create(&staging.path)?)
+        })?;
 
-        let mut sink = LayerSink {
-            sequence: SeqWriter::with_max_record(
-                LayerWriter::new(file, level)?,
-                profile.max_record(),
-            ),
+        Ok(LayerSink {
+            sequence,
             staging,
             root: self.root.clone(),
             kind: spec.kind.clone(),
             media_type,
             scope: spec.scope.clone(),
-        };
-
-        sink.write_record(&header.encode()?)?;
-
-        Ok(sink)
+        })
     }
 
     /// Write the inscription in canonical form and return its digest — the

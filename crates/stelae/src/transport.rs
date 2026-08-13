@@ -237,6 +237,43 @@ pub trait SteleWriter {
     }
 }
 
+/// Open a layer: everything every [`SteleWriter::layer_sink`] does before its
+/// own sink struct exists.
+///
+/// The media type is resolved through the profile and validated against the
+/// naming rules, the framing is wrapped at the profile's record ceiling, and
+/// the encoded [`LayerHeader`] goes in as the layer's first record. All three
+/// are inside the layer's identity, so a transport that skipped any of them
+/// would produce blobs that hash cleanly and are refused on read — a failure
+/// that would be that transport's alone, invisible to every test exercising
+/// the others. It lives here, once, so the next transport cannot open a layer
+/// wrongly by omission.
+///
+/// The byte destination arrives as a closure rather than a value because the
+/// order matters: a profile claiming a media type it does not own is refused
+/// *before* `sink` runs, so nothing is created — no staging file, no scratch
+/// file — for a layer that was never going to be written.
+pub(crate) fn open_layer<W, F>(
+    profile: &dyn Profile,
+    spec: &LayerSpec,
+    level: i32,
+    sink: F,
+) -> Result<(SeqWriter<LayerWriter<W>>, String), Error>
+where
+    W: std::io::Write,
+    F: FnOnce() -> Result<W, Error>,
+{
+    let media_type = checked_layer_media_type(profile, &spec.kind)?;
+    let header = LayerHeader::new(profile.name(), &spec.kind, spec.header_scope.clone());
+
+    let mut sequence =
+        SeqWriter::with_max_record(LayerWriter::new(sink()?, level)?, profile.max_record());
+
+    sequence.write_record(&header.encode()?)?;
+
+    Ok((sequence, media_type))
+}
+
 /// A stele that computes its identity and stores nothing.
 ///
 /// The write half of the seam with the storing taken out. Every field of a
@@ -345,22 +382,14 @@ impl SteleWriter for Discarding {
         spec: &LayerSpec,
         level: i32,
     ) -> Result<DiscardingSink, Error> {
-        let media_type = checked_layer_media_type(profile, &spec.kind)?;
-        let header = LayerHeader::new(profile.name(), &spec.kind, spec.header_scope.clone());
+        let (sequence, media_type) = open_layer(profile, spec, level, || Ok(std::io::sink()))?;
 
-        let mut sink = DiscardingSink {
-            sequence: SeqWriter::with_max_record(
-                LayerWriter::new(std::io::sink(), level)?,
-                profile.max_record(),
-            ),
+        Ok(DiscardingSink {
+            sequence,
             kind: spec.kind.clone(),
             media_type,
             scope: spec.scope.clone(),
-        };
-
-        sink.write_record(&header.encode()?)?;
-
-        Ok(sink)
+        })
     }
 
     /// Return the stele's identity without writing it down.
