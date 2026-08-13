@@ -20,7 +20,7 @@ use dolos_testing::{
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{ToyDomain, ToyStores},
 };
-use stelae::{dir::SteleDir, inscription::Inscription};
+use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
 
 /// Preview genesis, synthetic blocks and seeded logs, all inside epoch zero.
 ///
@@ -125,6 +125,7 @@ mod registry_node {
         Error, Network,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
+    use stelae::progress::Observer;
 
     use super::harness;
 
@@ -188,6 +189,20 @@ mod registry_node {
             publishing: Publishing<'_>,
             plan: &Plan,
         ) -> Result<Published, Error> {
+            self.publish_watched(publishing, plan, &Observer::silent())
+        }
+
+        /// The same publish, with somebody listening.
+        ///
+        /// Separate from [`Node::publish_as`] so the suites that are not about
+        /// progress stay unchanged and keep proving what they proved: an
+        /// observer is meant to change nothing but what is said.
+        pub fn publish_watched(
+            &self,
+            publishing: Publishing<'_>,
+            plan: &Plan,
+            observer: &Observer,
+        ) -> Result<Published, Error> {
             registry::publish(
                 publishing,
                 plan,
@@ -195,6 +210,7 @@ mod registry_node {
                 self.domain.state(),
                 self.domain.indexes(),
                 None,
+                observer,
             )
         }
 
@@ -214,6 +230,7 @@ mod registry_node {
                 self.domain.state(),
                 self.domain.indexes(),
                 None,
+                &Observer::silent(),
             )
         }
 
@@ -239,6 +256,7 @@ pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) ->
         domain.indexes(),
         None,
         &First,
+        &Observer::silent(),
     )
     .unwrap()
 }

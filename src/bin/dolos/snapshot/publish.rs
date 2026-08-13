@@ -11,6 +11,7 @@ use dolos_snapshot::{
 };
 
 use super::EpochRange;
+use crate::feedback::{Feedback, SteleProgress};
 
 /// Where a stele goes, and it goes to exactly one place.
 ///
@@ -68,7 +69,7 @@ pub struct Args {
     require_new: bool,
 }
 
-pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     let stores = crate::common::open_data_stores(config)
         .into_diagnostic()
         .context("opening the data stores")?;
@@ -84,8 +85,8 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     super::report_plan(&plan)?;
 
     match (&args.repo, &args.output_dir) {
-        (Some(repo), _) => to_repository(config, args, repo, &plan, &stores),
-        (None, Some(dir)) => to_directory(args, dir, &plan, &stores),
+        (Some(repo), _) => to_repository(config, args, repo, &plan, &stores, feedback),
+        (None, Some(dir)) => to_directory(args, dir, &plan, &stores, feedback),
         // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
     }
@@ -96,11 +97,17 @@ fn to_directory(
     dir: &std::path::Path,
     plan: &export::Plan,
     stores: &crate::common::Stores,
+    feedback: &Feedback,
 ) -> miette::Result<()> {
     if args.dry_run {
         println!("dry run: nothing written to {}", dir.display());
         return Ok(());
     }
+
+    // A directory publish moves no bytes over a network, so the blob bar stays
+    // empty here — but the layer and record bars are the same hours of store
+    // walking a repository publish pays, and they are what this reports.
+    let progress = SteleProgress::publishing(feedback);
 
     let inscription = export::publish(
         dir,
@@ -109,9 +116,12 @@ fn to_directory(
         &stores.state,
         &stores.indexes,
         None,
+        &progress.observer(),
     )
     .into_diagnostic()
     .context("exporting the stele")?;
+
+    progress.finish();
 
     let digest = inscription.digest().into_diagnostic()?;
 
@@ -137,6 +147,7 @@ fn to_repository(
     repo: &Repository,
     plan: &export::Plan,
     stores: &crate::common::Stores,
+    feedback: &Feedback,
 ) -> miette::Result<()> {
     // A publisher's credentials come from `STELAE_REGISTRY_USER` /
     // `STELAE_REGISTRY_PASSWORD`, which override anything configured. The
@@ -196,6 +207,11 @@ fn to_repository(
         return Ok(());
     }
 
+    // Built here rather than above the dry run: the dry run prints and returns,
+    // and a renderer for a publish that never happens would draw an empty bar
+    // under the report.
+    let progress = SteleProgress::publishing(feedback);
+
     let published = registry::publish(
         publishing,
         plan,
@@ -203,9 +219,12 @@ fn to_repository(
         &stores.state,
         &stores.indexes,
         None,
+        &progress.observer(),
     )
     .into_diagnostic()
     .context("publishing the stele")?;
+
+    progress.finish();
 
     let transfer = published.transfer;
 
@@ -284,5 +303,106 @@ fn standing(registry: &Registry, plan: &export::Plan, args: &Args) -> miette::Re
              stele, and this one would leave a gap no later stele could close",
             plan.sequence,
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_snapshot::progress::{Event, Outcome, Progress as _};
+
+    use crate::feedback::{Feedback, SteleProgress};
+
+    /// One epoch's three layers plus the sixteen state shards — the fixture
+    /// suites' `PER_PUBLISH`, and the smallest publish this profile makes.
+    const PER_PUBLISH: usize = 3 + 16;
+
+    /// The wiring `run` uses, driven over a fixture-scale publish.
+    ///
+    /// Named for what it is protecting: [#1191]'s squash dropped the CLI's
+    /// rendering layer outright and nothing noticed, because nothing under
+    /// `src/bin/dolos/` had anything to say about it. This exercises the same
+    /// constructor `to_repository` and `to_directory` call, feeds it the event
+    /// stream a one-epoch publish produces, and holds the bars to where that
+    /// run actually ended.
+    ///
+    /// [#1191]: https://github.com/txpipe/dolos/pull/1191
+    #[test]
+    fn the_publish_renderer_tracks_a_fixture_scale_run() {
+        let progress = SteleProgress::publishing(&Feedback::hidden());
+
+        let epoch = serde_json::json!({"networkMagic": 2, "epoch": 0});
+        let shard = serde_json::json!({"networkMagic": 2, "epoch": 0, "shard": 0});
+
+        let mut moved = 0u64;
+
+        for (index, kind) in ["blocks", "indexes", "logs"].into_iter().enumerate() {
+            progress.on(Event::LayerStarted {
+                index,
+                total: PER_PUBLISH,
+                kind,
+                scope: &epoch,
+            });
+
+            progress.on(Event::Records(1_000));
+
+            // The transport's half: staged, then uploaded in chunks.
+            progress.on(Event::Blob {
+                moved: true,
+                bytes: 4_096,
+            });
+
+            for _ in 0..4 {
+                progress.on(Event::Bytes(1_024));
+                moved += 1_024;
+            }
+
+            progress.on(Event::LayerFinished {
+                index,
+                total: PER_PUBLISH,
+                kind,
+                outcome: Outcome::Transferred,
+            });
+        }
+
+        // The state pass: sixteen layers open at once, closed in order, with one
+        // record stream feeding all of them.
+        for index in 3..PER_PUBLISH {
+            progress.on(Event::LayerStarted {
+                index,
+                total: PER_PUBLISH,
+                kind: "state",
+                scope: &shard,
+            });
+        }
+
+        progress.on(Event::Records(50_000));
+
+        for index in 3..PER_PUBLISH {
+            progress.on(Event::Blob {
+                moved: false,
+                bytes: 512,
+            });
+
+            progress.on(Event::LayerFinished {
+                index,
+                total: PER_PUBLISH,
+                kind: "state",
+                outcome: Outcome::Transferred,
+            });
+        }
+
+        assert_eq!(progress.layers_position(), PER_PUBLISH as u64);
+        assert_eq!(progress.layers_length(), Some(PER_PUBLISH as u64));
+        assert_eq!(progress.records_position(), 53_000);
+
+        // The last blob was one the registry already held, so the byte bar sits
+        // at zero over its stated size rather than carrying the previous
+        // layer's total forward.
+        assert_eq!(progress.blob_position(), 0);
+        assert_eq!(progress.blob_length(), Some(512));
+
+        assert_eq!(moved, 3 * 4_096);
+
+        progress.finish();
     }
 }

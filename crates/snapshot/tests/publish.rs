@@ -59,6 +59,7 @@
 
 mod node;
 mod registry_fixture;
+mod watcher;
 
 use dolos_core::Domain as _;
 use dolos_snapshot::{
@@ -66,7 +67,9 @@ use dolos_snapshot::{
     registry::{self, Publishing},
     DolosProfile, Error, BLOCKS, INDEXES, LOGS, STATE_SHARDS,
 };
-use stelae::SteleReader as _;
+use stelae::{progress::Outcome, SteleReader as _};
+
+use watcher::Watcher;
 
 use node::Node;
 use registry_fixture::Fixture;
@@ -880,4 +883,139 @@ impl stelae::SteleWriter for Interrupted<'_> {
     ) -> Result<stelae::Digest, stelae::Error> {
         self.inner.seal(profile, inscription)
     }
+}
+
+/// The publish half of the observer's cross-check: what the stream said moved,
+/// against what the transport counted.
+///
+/// Three publishes rather than one, because a single publish into an empty
+/// repository produces only one of the three things a layer can end as, and the
+/// third takes a second repository to reach:
+///
+/// 1. **built and uploaded** — every layer of a first stele;
+/// 2. **inherited** — epoch 0's three layers when the second stele chains onto
+///    the first;
+/// 3. **built and then skipped** — the same three layers under `--rebuild`,
+///    which suppresses inheritance and so builds them, at which point the
+///    registry turns out to hold their blobs already. It needs its own
+///    repository: `--rebuild` does not let a publisher republish a sequence the
+///    chain has already reached, so the skip has to come from a repository
+///    standing one sequence back.
+///
+/// Every tally is held against `Transfer`, which the transport keeps for the
+/// publisher's report and not for this test, so nothing here is the recording
+/// agreeing with itself.
+#[test]
+#[ignore]
+fn a_publish_reports_what_the_transfer_counted() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/progress");
+
+    let watcher = std::sync::Arc::new(Watcher::default());
+    let first = node
+        .publish_watched(
+            Publishing::new(&repository),
+            &node.first,
+            &watcher.observer(),
+        )
+        .unwrap();
+
+    watcher.assert_well_formed(first.inscription.layers.len());
+
+    assert_eq!(
+        watcher.ended(Outcome::Transferred),
+        PER_PUBLISH,
+        "every layer of a first publish is built"
+    );
+    assert_eq!(watcher.ended(Outcome::Inherited), 0);
+
+    assert_eq!(
+        watcher.blobs(true).len() as u64,
+        first.transfer.layers_uploaded,
+        "blobs announced as moving, against the uploads the transport counted"
+    );
+    assert_eq!(
+        watcher.blobs(false).len() as u64,
+        first.transfer.layers_skipped,
+        "blobs announced as already present, against the skips the transport counted"
+    );
+    assert_eq!(
+        watcher.bytes(),
+        first.transfer.bytes_uploaded,
+        "byte deltas summed, against the bytes the transport counted"
+    );
+    assert!(
+        first.transfer.bytes_uploaded > 0,
+        "a publish that moved nothing proves nothing about byte reporting"
+    );
+
+    let watcher = std::sync::Arc::new(Watcher::default());
+    let second = node
+        .publish_watched(
+            Publishing::new(&repository),
+            &node.second,
+            &watcher.observer(),
+        )
+        .unwrap();
+
+    watcher.assert_well_formed(second.inscription.layers.len());
+
+    assert_eq!(
+        watcher.ended(Outcome::Inherited) as u64,
+        second.transfer.layers_reused,
+        "layers announced as carried forward, against the transport's count"
+    );
+    assert_eq!(
+        watcher.blobs(true).len() as u64,
+        second.transfer.layers_uploaded,
+    );
+    assert_eq!(watcher.bytes(), second.transfer.bytes_uploaded);
+
+    // An inherited layer moves no blob at all — it is not built, so nothing is
+    // staged and nothing is offered to the registry. That is what makes it a
+    // different outcome from a skip rather than a spelling of one.
+    assert_eq!(
+        watcher.blobs(true).len() + watcher.blobs(false).len() + watcher.ended(Outcome::Inherited),
+        second.inscription.layers.len(),
+    );
+
+    let rebuilt_into = fixture.repository("dolos/progress-rebuild");
+    node.publish(&rebuilt_into, &node.first, false);
+
+    let watcher = std::sync::Arc::new(Watcher::default());
+    let again = node
+        .publish_watched(
+            Publishing::new(&rebuilt_into).rebuilding(true),
+            &node.second,
+            &watcher.observer(),
+        )
+        .unwrap();
+
+    watcher.assert_well_formed(again.inscription.layers.len());
+
+    assert_eq!(
+        watcher.ended(Outcome::Inherited),
+        0,
+        "a rebuild carries nothing forward"
+    );
+    assert_eq!(
+        watcher.blobs(false).len() as u64,
+        again.transfer.layers_skipped,
+        "blobs announced as already present, against the skips the transport counted"
+    );
+    assert!(
+        again.transfer.layers_skipped > 0,
+        "a rebuild over a repository that already holds those blobs has to skip some"
+    );
+    assert_eq!(
+        watcher.blob_bytes(false),
+        again.transfer.bytes_skipped,
+        "the sizes of the skipped blobs, against what the transport counted them as"
+    );
+    assert_eq!(
+        watcher.blobs(true).len() as u64,
+        again.transfer.layers_uploaded,
+    );
+    assert_eq!(watcher.bytes(), again.transfer.bytes_uploaded);
 }

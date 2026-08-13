@@ -38,6 +38,7 @@
 //! the resume has left to do is known before it runs.
 
 mod node;
+mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, index_delta_from_utxo_delta};
 use dolos_core::{
@@ -55,9 +56,12 @@ use stelae::{
     frame::Limits,
     inscription::{Inscription, LayerDescriptor},
     plan::RestoreProgress,
+    progress::{Observer, Outcome},
     transport::BlobIndex,
     Digest, LayerReader, Profile, SteleReader,
 };
+
+use watcher::Watcher;
 
 /// Every layer read through a window far below one record and every write
 /// batch committed after a single record.
@@ -121,6 +125,7 @@ fn restore_into<B: ToyStores>(
         target(blank),
         budget,
         &mut Checkpoint::none(),
+        &Observer::silent(),
     )
 }
 
@@ -303,6 +308,7 @@ fn roundtrip<B: ToyStores>() {
             blank.indexes(),
             None,
             &dolos_snapshot::export::First,
+            &Observer::silent(),
         )
         .unwrap()
     };
@@ -591,6 +597,32 @@ fn restore_checkpointed<B: ToyStores>(
     resume: bool,
     stop_at: Option<Digest>,
 ) -> Result<restore::Summary, Error> {
+    restore_watched(
+        root,
+        storage,
+        magic,
+        blank,
+        resume,
+        stop_at,
+        &Observer::silent(),
+    )
+}
+
+/// The same restore, with somebody listening.
+///
+/// Separate so every suite above stays exactly as it was: an observer is meant
+/// to change nothing but what is said, and the tests that prove a restore
+/// correct should not be the ones that prove it talks.
+#[allow(clippy::too_many_arguments)]
+fn restore_watched<B: ToyStores>(
+    root: &std::path::Path,
+    storage: &std::path::Path,
+    magic: u64,
+    blank: &Blank<B>,
+    resume: bool,
+    stop_at: Option<Digest>,
+    observer: &Observer,
+) -> Result<restore::Summary, Error> {
     let stele = SteleDir::open(root)?;
     let identity = stele.read_inscription()?.digest()?;
 
@@ -610,6 +642,7 @@ fn restore_checkpointed<B: ToyStores>(
             target(blank),
             Budget::default(),
             &mut checkpoint,
+            observer,
         ),
         None => restore::restore(
             &stele,
@@ -618,6 +651,7 @@ fn restore_checkpointed<B: ToyStores>(
             target(blank),
             Budget::default(),
             &mut checkpoint,
+            observer,
         ),
     }
 }
@@ -902,6 +936,7 @@ fn export_standing_at<B: ToyStores>(
         domain.indexes(),
         None,
         &dolos_snapshot::export::First,
+        &Observer::silent(),
     )
     .unwrap()
 }
@@ -1077,4 +1112,145 @@ fn max_history_selects_epochs_and_never_the_tip() {
         assert_eq!(plan.skipped_epochs, 0, "{max_history:?}");
         assert_eq!(plan.epochs.len(), 1, "{max_history:?}");
     }
+}
+
+/// A restore announces every layer its plan names, and says which of them a
+/// resume skipped.
+///
+/// The scenario is [`kill_and_resume`]'s, because that is the only one in which
+/// the two outcomes a restore can report both occur — and the tallies are held
+/// against `Summary`'s own counters, which the driver keeps for its report and
+/// not for this. A stream asserted against itself would pass with the skip
+/// reported as a fetch.
+fn a_resumed_restore_reports_what_it_skipped<B: ToyStores>() {
+    let domain: ToyDomain<B> = harness();
+    let magic = magic_of(&domain);
+
+    let stele = tempfile::tempdir().unwrap();
+    let inscription = export_to(stele.path(), &domain);
+
+    let (epoch_layers, _) = layers_in_driver_order(stele.path(), magic);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<B>::open();
+
+    restore_checkpointed(
+        stele.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(epoch_layers[1]),
+    )
+    .unwrap_err();
+
+    let watcher = std::sync::Arc::new(Watcher::default());
+
+    let resumed = restore_watched(
+        stele.path(),
+        storage.path(),
+        magic,
+        &blank,
+        true,
+        None,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    // The plan is every layer the restore will consider, skipped ones included,
+    // and it is what a bar's length has to be for the bar to be honest.
+    watcher.assert_well_formed(inscription.layers.len());
+
+    assert_eq!(
+        watcher.ended(Outcome::Skipped),
+        resumed.layers_skipped,
+        "layers reported as skipped, against the driver's own count"
+    );
+    assert_eq!(
+        watcher.ended(Outcome::Transferred),
+        resumed.layers_fetched,
+        "layers reported as fetched, against the driver's own count"
+    );
+    assert_eq!(
+        watcher.ended(Outcome::Inherited),
+        0,
+        "a restore inherits nothing; that is the publish side's word"
+    );
+
+    assert_eq!(
+        resumed.layers_skipped, 1,
+        "the scenario has to produce a skip, or the tally above proves nothing"
+    );
+
+    // Records are the ones that reached a store, so a skipped layer contributes
+    // none of them — which is what makes the total below smaller than the
+    // document's and not equal to it.
+    let content: u64 = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.records - 1)
+        .sum();
+
+    assert!(watcher.records() > 0);
+    assert!(
+        watcher.records() < content,
+        "a resumed restore reported as many records as a whole one"
+    );
+
+    // A directory reader stages nothing and reports no bytes: it inherits the
+    // default no-op attach, exactly as the writer half does.
+    assert_eq!(watcher.bytes(), 0);
+    assert!(watcher.blobs(true).is_empty());
+}
+
+#[test]
+fn a_resumed_restore_reports_what_it_skipped_on_memory() {
+    a_resumed_restore_reports_what_it_skipped::<MemoryStores>();
+}
+
+/// A whole restore reports every record the stele carries.
+///
+/// The unresumed half of the pair above, and the one that pins the record
+/// stream exactly rather than as an inequality: nothing is skipped, so the
+/// records that reach the stores are the records the document says the layers
+/// hold.
+#[test]
+fn a_whole_restore_reports_every_record_the_document_carries() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = magic_of(&domain);
+
+    let stele = tempfile::tempdir().unwrap();
+    let inscription = export_to(stele.path(), &domain);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+    let watcher = std::sync::Arc::new(Watcher::default());
+
+    let summary = restore_watched(
+        stele.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        None,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    watcher.assert_well_formed(inscription.layers.len());
+
+    assert_eq!(watcher.ended(Outcome::Transferred), summary.layers_fetched);
+    assert_eq!(watcher.ended(Outcome::Skipped), 0);
+
+    let content: u64 = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.records - 1)
+        .sum();
+
+    assert_eq!(
+        watcher.records(),
+        content,
+        "records reported, against what the document says the layers hold"
+    );
 }
