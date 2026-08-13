@@ -411,6 +411,26 @@ impl Origin {
             compression: crate::compression(),
         }
     }
+
+    /// The fields `self` and `other` disagree on, in the order [`Origin`]
+    /// states them.
+    ///
+    /// One of the four ways to differ changes the repository, so a refusal
+    /// that reported the two repository names alone would read, in the other
+    /// three, as though the two publishes matched. Names rather than values:
+    /// `parameters` is arbitrary JSON, and what an operator needs from the
+    /// event is which knob moved between the two runs.
+    fn differences_from(&self, other: &Self) -> Vec<&'static str> {
+        [
+            (self.repository != other.repository, "repository"),
+            (self.network_magic != other.network_magic, "network magic"),
+            (self.parameters != other.parameters, "parameters"),
+            (self.compression != other.compression, "compression"),
+        ]
+        .into_iter()
+        .filter_map(|(differs, field)| differs.then_some(field))
+        .collect()
+    }
 }
 
 /// The epoch layers an interrupted publish got as far as uploading.
@@ -489,6 +509,7 @@ impl PublishRecord {
     fn table(&self, origin: &Origin) -> Result<BTreeMap<(String, String), WrittenLayer>, Error> {
         if &self.origin != origin {
             tracing::info!(
+                differs = %self.origin.differences_from(origin).join(", "),
                 recorded = %self.origin.repository,
                 publishing = %origin.repository,
                 "a resumption record was left by a publish this one does not continue; \
@@ -1609,30 +1630,42 @@ mod tests {
     /// Four ways to not be that publish, and each one alone is enough. The
     /// repository is the one an operator will meet; the other three are what
     /// stops a recorded digest from being adopted into a manifest whose layers
-    /// a rebuild would compute differently.
+    /// a rebuild would compute differently. Each case also pins the field the
+    /// refusal names, because in three of the four the two repository names
+    /// the event carries are identical.
     #[test]
     fn a_record_from_another_publish_offers_nothing() {
         let mine = origin("oci://example.test/dolos");
 
-        for theirs in [
-            origin("oci://example.test/dolos-preprod"),
-            Origin {
-                network_magic: 1,
-                ..mine.clone()
-            },
-            Origin {
-                parameters: json!({"stateShards": 1}),
-                ..mine.clone()
-            },
-            Origin {
-                compression: Compression {
-                    algo: "zstd".to_owned(),
-                    level: 1,
+        for (theirs, named) in [
+            (origin("oci://example.test/dolos-preprod"), "repository"),
+            (
+                Origin {
+                    network_magic: 1,
+                    ..mine.clone()
                 },
-                ..mine.clone()
-            },
+                "network magic",
+            ),
+            (
+                Origin {
+                    parameters: json!({"stateShards": 1}),
+                    ..mine.clone()
+                },
+                "parameters",
+            ),
+            (
+                Origin {
+                    compression: Compression {
+                        algo: "zstd".to_owned(),
+                        level: 1,
+                    },
+                    ..mine.clone()
+                },
+                "compression",
+            ),
         ] {
             assert_ne!(theirs, mine);
+            assert_eq!(theirs.differences_from(&mine), vec![named]);
 
             let table = record(theirs.clone()).table(&mine).unwrap();
 
@@ -1643,6 +1676,22 @@ mod tests {
             // record.
             assert_eq!(record(theirs.clone()).table(&theirs).unwrap().len(), 1);
         }
+
+        // An origin that matches names nothing, and one that differs in every
+        // field names them all rather than stopping at the first.
+        assert!(mine.differences_from(&mine).is_empty());
+        assert_eq!(
+            origin("oci://example.test/other").differences_from(&Origin {
+                network_magic: 1,
+                parameters: json!({"stateShards": 1}),
+                compression: Compression {
+                    algo: "zstd".to_owned(),
+                    level: 1,
+                },
+                ..mine.clone()
+            }),
+            vec!["repository", "network magic", "parameters", "compression"]
+        );
     }
 
     fn layer(kind: &str, scope: serde_json::Value, identity: u8) -> LayerDescriptor {
