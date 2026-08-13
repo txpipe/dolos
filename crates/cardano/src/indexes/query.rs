@@ -2,14 +2,9 @@
 //! Cardano-specific async query helpers for `AsyncQueryFacade`.
 
 use pallas::{
-    codec::minicbor,
     crypto::hash::Hash,
     ledger::{
-        addresses::{Network, StakeAddress, StakePayload},
-        primitives::{
-            conway::{DatumOption, PlutusData, ScriptRef},
-            StakeCredential,
-        },
+        primitives::conway::{DatumOption, PlutusData, ScriptRef},
         traverse::{ComputeHash, MultiEraBlock, OriginalHash},
     },
 };
@@ -121,20 +116,16 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
 
-    /// Stream blocks that can involve the given script, in slot order.
+    /// Stream blocks holding redeemers that executed the given script, in
+    /// slot order.
     ///
-    /// The SCRIPT_REDEEMERS dimension tags executions exactly, but only
-    /// blocks indexed after the dimension shipped carry it. The other
-    /// dimensions keep the union complete on older stores: SCRIPT tags
-    /// blocks where the script bytes appear (witness sets, reference-script
-    /// outputs), and executions through reference scripts show up through
-    /// their side effects — a spend from the script's payment credential, an
-    /// asset movement under its policy, and certs or withdrawals against its
-    /// stake credential.
-    ///
-    /// The result is a superset. The caller must match each tx against the
-    /// script hash.
-    fn blocks_by_script_activity_stream(
+    /// Backed by the SCRIPT_REDEEMERS dimension, which the indexer resolves
+    /// at block-application time. The tag is exact but block-level: the
+    /// caller still matches each redeemer against the script hash to pick
+    /// rows. A store synced before the dimension shipped carries tags only
+    /// from its upgrade point; full history needs a store synced from
+    /// scratch.
+    fn blocks_by_script_redeemers_stream(
         &self,
         script_hash: &Hash<28>,
         start_slot: BlockSlot,
@@ -377,7 +368,7 @@ where
         )
     }
 
-    fn blocks_by_script_activity_stream(
+    fn blocks_by_script_redeemers_stream(
         &self,
         script_hash: &Hash<28>,
         start_slot: BlockSlot,
@@ -385,31 +376,14 @@ where
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
     {
-        let hash = script_hash.as_slice().to_vec();
-
-        // the cert index keys the stake credential by its cbor encoding (see
-        // `CardanoIndexDeltaBuilder::add_cert`). the withdrawal index keys
-        // the raw reward account bytes. the account header carries the
-        // network id, so we build both variants. the wrong variant has no
-        // entries.
-        let cred = minicbor::to_vec(StakeCredential::ScriptHash(*script_hash)).unwrap_or_default();
-
-        let reward_accounts = [Network::Testnet, Network::Mainnet]
-            .map(|network| StakeAddress::new(network, StakePayload::Script(*script_hash)).to_vec());
-
-        let [testnet_account, mainnet_account] = reward_accounts;
-
-        let tags = vec![
-            (archive::SCRIPT_REDEEMERS, hash.clone()),
-            (archive::SCRIPT, hash.clone()),
-            (archive::PAYMENT, hash.clone()),
-            (archive::POLICY, hash),
-            (archive::ACCOUNT_CERTS, cred),
-            (archive::ACCOUNT_WITHDRAWALS, testnet_account),
-            (archive::ACCOUNT_WITHDRAWALS, mainnet_account),
-        ];
-
-        blocks_by_tags_stream((*self).clone(), tags, start_slot, end_slot, order)
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::SCRIPT_REDEEMERS,
+            script_hash.as_slice().to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
     }
 
     async fn blocks_by_address(
@@ -778,29 +752,6 @@ fn blocks_by_tag_stream<D>(
     facade: AsyncQueryFacade<D>,
     dimension: TagDimension,
     key: Vec<u8>,
-    start_slot: BlockSlot,
-    end_slot: BlockSlot,
-    order: SlotOrder,
-) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    blocks_by_tags_stream(facade, vec![(dimension, key)], start_slot, end_slot, order)
-}
-
-/// Stream blocks tagged by any of the given (dimension, key) tags, in slot
-/// order. A slot shared by more than one tag comes out once.
-///
-/// Slots come in chunks, so no round holds the index read transaction for
-/// long or loads a full slot list into memory. Each round fetches up to
-/// [`SLOT_CHUNK_SIZE`] slots per tag from the remaining window. It then
-/// emits only the first [`SLOT_CHUNK_SIZE`] slots of the merged order.
-/// Every tag contributed its closest slots, so the merged closest chunk is
-/// complete. The next round re-fetches the cut-off rest from the advanced
-/// window.
-fn blocks_by_tags_stream<D>(
-    facade: AsyncQueryFacade<D>,
-    tags: Vec<(TagDimension, Vec<u8>)>,
     mut start_slot: BlockSlot,
     mut end_slot: BlockSlot,
     order: SlotOrder,
@@ -810,38 +761,19 @@ where
 {
     async_stream::try_stream! {
         loop {
+            // we fetch slots in chunks to avoid holding the index read transaction for too long
+            // and to avoid loading all slots into memory at once
             let slots: Vec<BlockSlot> = facade
                 .run_blocking({
-                    let tags = tags.clone();
+                    let key = key.clone();
                     move |domain| {
-                        let mut merged = std::collections::BTreeSet::new();
-
-                        for (dimension, key) in &tags {
-                            let iter = domain
-                                .indexes()
-                                .slots_by_tag(dimension, key, start_slot, end_slot)?;
-
-                            match order {
-                                SlotOrder::Asc => {
-                                    for slot in iter.take(SLOT_CHUNK_SIZE) {
-                                        merged.insert(slot?);
-                                    }
-                                }
-                                SlotOrder::Desc => {
-                                    for slot in iter.rev().take(SLOT_CHUNK_SIZE) {
-                                        merged.insert(slot?);
-                                    }
-                                }
-                            }
-                        }
+                        let iter = domain
+                            .indexes()
+                            .slots_by_tag(dimension, &key, start_slot, end_slot)?;
 
                         let slots = match order {
-                            SlotOrder::Asc => {
-                                merged.iter().take(SLOT_CHUNK_SIZE).copied().collect()
-                            }
-                            SlotOrder::Desc => {
-                                merged.iter().rev().take(SLOT_CHUNK_SIZE).copied().collect()
-                            }
+                            SlotOrder::Asc => iter.take(SLOT_CHUNK_SIZE).collect::<Result<Vec<_>, _>>()?,
+                            SlotOrder::Desc => iter.rev().take(SLOT_CHUNK_SIZE).collect::<Result<Vec<_>, _>>()?,
                         };
 
                         Ok(slots)
@@ -857,6 +789,7 @@ where
                 let block = facade.block_by_slot(slot).await?;
                 yield (slot, block);
 
+                // update bounds to avoid re-fetching same slots in next iteration
                 match order {
                     SlotOrder::Asc => start_slot = slot + 1,
                     SlotOrder::Desc => {
