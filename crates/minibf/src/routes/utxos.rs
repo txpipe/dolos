@@ -1,6 +1,6 @@
 use axum::http::StatusCode;
 use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::{HashMap, HashSet};
@@ -13,6 +13,8 @@ use crate::{
     pagination::{Order, Pagination},
     Facade,
 };
+
+const BLOCK_LOOKUP_CONCURRENCY: usize = 64;
 
 pub async fn load_utxo_models<D>(
     domain: &Facade<D>,
@@ -35,20 +37,20 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let tx_deps: Vec<_> = utxos.keys().map(|txoref| txoref.0).unique().collect();
-    let block_deps: HashMap<TxHash, BlockRefMeta> = join_all(tx_deps.iter().map(|tx| {
-        let tx = *tx;
-        async move {
+    let block_deps: HashMap<TxHash, BlockRefMeta> = stream::iter(tx_deps.iter().copied())
+        .map(|tx| async move {
             match domain.query().block_meta_by_tx_hash(tx.to_vec()).await {
                 Ok(Some(block_data)) => Some(Ok((tx, block_data))),
                 Ok(None) => None,
                 Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
             }
-        }
-    }))
-    .await
-    .into_iter()
-    .flatten()
-    .collect::<Result<_, _>>()?;
+        })
+        .buffer_unordered(BLOCK_LOOKUP_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Result<_, _>>()?;
 
     let mut models: Vec<_> = utxos
         .into_iter()
