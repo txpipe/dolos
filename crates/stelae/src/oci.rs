@@ -734,6 +734,35 @@ fn is_absent(error: &oci_client::errors::OciDistributionError) -> bool {
     }
 }
 
+/// A staged file, created where [`Options::scratch_dir`] said.
+///
+/// Both calls that can fail against a *named* directory raise
+/// [`Error::Scratch`], whose docstring carries the reason. The unnamed case
+/// keeps the catch-all [`Error::Io`], because the platform temporary
+/// directory is not a path anybody chose.
+///
+/// Creating the directory lazily, here, is load-bearing elsewhere: it is what
+/// makes a staging directory that exists after a run evidence that the run
+/// staged in it. Nothing else creates it.
+///
+/// A free function rather than a method so it can be tested against an
+/// unusable directory without standing up a registry client — see
+/// `an_unusable_staging_directory_names_itself`.
+fn scratch_in(dir: Option<&Path>) -> Result<File, Error> {
+    let Some(dir) = dir else {
+        return Ok(tempfile::tempfile()?);
+    };
+
+    let staged = |source| Error::Scratch {
+        dir: dir.to_path_buf(),
+        source,
+    };
+
+    std::fs::create_dir_all(dir).map_err(staged)?;
+
+    tempfile::tempfile_in(dir).map_err(staged)
+}
+
 impl Shared {
     fn locked(&self) -> std::sync::MutexGuard<'_, PushState> {
         // A poisoned lock means a push panicked while holding it. The counters
@@ -754,15 +783,7 @@ impl Shared {
     }
 
     fn scratch(&self) -> Result<File, Error> {
-        let file = match &self.scratch_dir {
-            Some(dir) => {
-                std::fs::create_dir_all(dir)?;
-                tempfile::tempfile_in(dir)?
-            }
-            None => tempfile::tempfile()?,
-        };
-
-        Ok(file)
+        scratch_in(self.scratch_dir.as_deref())
     }
 
     fn blob_exists(&self, digest: &Digest) -> Result<bool, Error> {
@@ -1647,5 +1668,47 @@ mod tests {
             }
         );
         assert!(!printed.contains("hunter2"), "{printed}");
+    }
+
+    /// A staging directory that cannot be used says which one, and why.
+    ///
+    /// The registry suite covers the same ground through a real publish, but
+    /// it needs a container and is `#[ignore]`d for it; this is the claim
+    /// under plain `cargo test`. The path names an existing regular file,
+    /// which `create_dir_all` cannot turn into a directory for anybody, `root`
+    /// included — so it is the one unusable directory that reproduces on every
+    /// platform and under every user the suite might run as.
+    #[test]
+    fn an_unusable_staging_directory_names_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let occupied = root.path().join("not-a-directory");
+        std::fs::write(&occupied, b"").unwrap();
+
+        let error = scratch_in(Some(&occupied)).expect_err("staged in a regular file");
+
+        assert!(
+            matches!(&error, Error::Scratch { dir, .. } if dir == &occupied),
+            "fell through to the catch-all: {error:?}",
+        );
+
+        // The two halves the old `io error: File exists (os error 17)` had
+        // neither of: which directory, and that it was the staging one.
+        let message = error.to_string();
+        assert!(
+            message.contains(&occupied.display().to_string()),
+            "{message}",
+        );
+        assert!(message.contains("staging directory"), "{message}");
+
+        // And what the operating system said, exactly once, one line down the
+        // chain rather than repeated into the message above it.
+        let source = std::error::Error::source(&error).expect("no cause to render");
+        assert!(!message.contains(&source.to_string()), "{message}");
+    }
+
+    /// The unnamed case keeps the catch-all, and still works.
+    #[test]
+    fn an_unnamed_staging_directory_still_stages() {
+        scratch_in(None).expect("the platform temporary directory is unusable");
     }
 }
