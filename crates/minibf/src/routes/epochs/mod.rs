@@ -4,7 +4,8 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    epoch_param_content::EpochParamContent, epoch_stake_content_inner::EpochStakeContentInner,
+    epoch_content::EpochContent, epoch_param_content::EpochParamContent,
+    epoch_stake_content_inner::EpochStakeContentInner,
     epoch_stake_pool_content_inner::EpochStakePoolContentInner,
 };
 use pallas::{
@@ -15,7 +16,11 @@ use pallas::{
     },
 };
 
-use dolos_cardano::model::{AccountStakeLog, FixedNamespace as _, PoolState};
+use dolos_cardano::{
+    model::{AccountStakeLog, EpochState, FixedNamespace as _, PoolState},
+    rupd::StakeSnapshot,
+    ChainSummary, EraProtocol,
+};
 use dolos_core::{archive::Skippable as _, ArchiveStore, Domain, EntityKey, LogKey, TemporalKey};
 
 use crate::{
@@ -28,6 +33,263 @@ use crate::{
 
 pub mod cost_models;
 pub mod mapping;
+
+const MAX_EPOCH_NUMBER: Epoch = i32::MAX as Epoch;
+
+fn ensure_epoch_in_range(epoch: Epoch) -> Result<(), Error> {
+    if epoch > MAX_EPOCH_NUMBER {
+        return Err(Error::InvalidEpochNumber);
+    }
+
+    Ok(())
+}
+
+fn build_epoch_content<D: Domain>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    epoch: Epoch,
+    mut state: EpochState,
+    active_stake: Option<u64>,
+) -> Result<mapping::EpochContentModelBuilder, StatusCode> {
+    // Use the epoch from the caller, not `state.number`. The live `EpochState`
+    // of the current epoch can hold a number that differs from the number that
+    // the tip resolves.
+    state.number = epoch;
+
+    let start_time = chain.slot_time(chain.epoch_start(epoch));
+    let end_time = chain.slot_time(chain.epoch_start(epoch + 1));
+
+    // The roll pipeline precomputes the block aggregates on `RollingStats`, so
+    // this request needs no block scan. The first and last block times are
+    // slots, and this function converts them here. A zero slot means the epoch
+    // had no block.
+    //
+    // A Byron epoch boundary block (EBB) does not pass through the roll
+    // pipeline. So `first_block_slot` is the first *regular* block of the epoch.
+    // Every Byron epoch opens with an EBB. For these epochs, Blockfrost reports
+    // the time of the EBB, so `first_block_time` differs. See the systemic EBB
+    // omission tracked for `/epochs/{n}/blocks` and `/blocks/{block}`.
+    let rolling = state.rolling.live().cloned().unwrap_or_default();
+    let first_block_time = if rolling.first_block_slot == 0 {
+        0
+    } else {
+        chain.slot_time(rolling.first_block_slot)
+    };
+    let last_block_time = if rolling.last_block_slot == 0 {
+        0
+    } else {
+        chain.slot_time(rolling.last_block_slot)
+    };
+
+    let active_stake = match active_stake {
+        Some(active_stake) => Some(active_stake),
+        None => domain.sum_active_stake_for_epoch(epoch, chain)?,
+    };
+
+    Ok(mapping::EpochContentModelBuilder {
+        state,
+        start_time,
+        end_time,
+        first_block_time,
+        last_block_time,
+        tx_count: rolling.tx_count,
+        output: rolling.output,
+        active_stake,
+    })
+}
+
+async fn derive_current_active_stake<D: Domain>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    current: Epoch,
+) -> Result<u64, StatusCode> {
+    // A stake distribution becomes active three epoch boundaries after it is
+    // live (live -> mark -> set -> go). So the active stake for epoch E is the
+    // stake that was live at E-2. RUPD applies this same offset one epoch back
+    // (it scores E-1 from the snapshot at E-3); here we target the current
+    // epoch, so we read the snapshot at `current - 2`.
+    let stake_epoch = current.saturating_sub(2);
+    let protocol = EraProtocol::from(chain.era_for_epoch(stake_epoch.saturating_add(1)).protocol);
+    let domain = domain.clone();
+
+    tokio::task::spawn_blocking(move || {
+        StakeSnapshot::load_globals::<D>(domain.state(), current, stake_epoch, protocol)
+            .map(|snapshot| snapshot.active_stake_sum)
+    })
+    .await
+    .map_err(crate::log_and_500(
+        "failed to join current active stake scan",
+    ))?
+    .map_err(crate::log_and_500("failed to derive current active stake"))
+}
+
+fn load_epoch_state<D: Domain>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    current: Epoch,
+    epoch: Epoch,
+) -> Result<EpochState, StatusCode>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    if epoch == current {
+        dolos_cardano::load_epoch::<D>(domain.state())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    } else {
+        domain
+            .get_epoch_log(epoch, chain)?
+            .ok_or(StatusCode::NOT_FOUND)
+    }
+}
+
+pub async fn latest<D: Domain>(State(domain): State<Facade<D>>) -> Result<Json<EpochContent>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (current, _) = chain.slot_epoch(tip);
+
+    // The current epoch always has a live `EpochState`, so this never returns a
+    // 404 error.
+    let state = load_epoch_state(&domain, &chain, current, current)?;
+    let active_stake = derive_current_active_stake(&domain, &chain, current).await?;
+    let model = build_epoch_content(&domain, &chain, current, state, Some(active_stake))?;
+
+    Ok(model.into_response()?)
+}
+
+pub async fn by_number<D: Domain>(
+    State(domain): State<Facade<D>>,
+    Path(epoch): Path<Epoch>,
+) -> Result<Json<EpochContent>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    ensure_epoch_in_range(epoch)?;
+
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (current, _) = chain.slot_epoch(tip);
+
+    if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let state = load_epoch_state(&domain, &chain, current, epoch)?;
+    let active_stake = if epoch == current {
+        Some(derive_current_active_stake(&domain, &chain, current).await?)
+    } else {
+        None
+    };
+    let model = build_epoch_content(&domain, &chain, epoch, state, active_stake)?;
+
+    Ok(model.into_response()?)
+}
+
+pub async fn by_number_next<D: Domain>(
+    State(domain): State<Facade<D>>,
+    Path(epoch): Path<Epoch>,
+    Query(params): Query<PaginationParameters>,
+) -> Result<Json<Vec<EpochContent>>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+    ensure_epoch_in_range(epoch)?;
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (current, _) = chain.slot_epoch(tip);
+
+    // The reference epoch must exist for the listing to be valid.
+    if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    // Collect the epochs after `epoch`, up to and including the current epoch,
+    // in ascending order. The pagination selects the window.
+    let epochs: Vec<Epoch> = ((epoch + 1)..=current)
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
+
+    collect_epoch_contents(&domain, &chain, current, epochs).await
+}
+
+pub async fn by_number_previous<D: Domain>(
+    State(domain): State<Facade<D>>,
+    Path(epoch): Path<Epoch>,
+    Query(params): Query<PaginationParameters>,
+) -> Result<Json<Vec<EpochContent>>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+    ensure_epoch_in_range(epoch)?;
+    let tip = domain.get_tip_slot()?;
+    let chain = domain.get_chain_summary()?;
+    let (current, _) = chain.slot_epoch(tip);
+
+    if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    // Collect the epochs before `epoch`, from `epoch - 1` backward. The result
+    // is always in ascending order, the same as the reference implementation.
+    let count = pagination.count as u64;
+    let skip = pagination.skip() as u64;
+
+    // The highest and lowest epoch in the page. Both bounds are inclusive.
+    let high = epoch.saturating_sub(1 + skip);
+    let low = high.saturating_sub(count.saturating_sub(1));
+
+    let epochs: Vec<Epoch> = if epoch == 0 || epoch.saturating_sub(1) < skip {
+        Vec::new()
+    } else {
+        (low..=high).collect()
+    };
+
+    collect_epoch_contents(&domain, &chain, current, epochs).await
+}
+
+async fn collect_epoch_contents<D: Domain>(
+    domain: &Facade<D>,
+    chain: &ChainSummary,
+    current: Epoch,
+    epochs: Vec<Epoch>,
+) -> Result<Json<Vec<EpochContent>>, Error>
+where
+    Option<EpochState>: From<D::Entity>,
+{
+    let current_active_stake = if epochs.contains(&current) {
+        Some(derive_current_active_stake(domain, chain, current).await?)
+    } else {
+        None
+    };
+
+    let mut out = Vec::with_capacity(epochs.len());
+    for epoch in epochs {
+        let state = if epoch == current {
+            dolos_cardano::load_epoch::<D>(domain.state())
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            match domain.get_epoch_log(epoch, chain)? {
+                Some(state) => state,
+                None => continue,
+            }
+        };
+
+        let active_stake = if epoch == current {
+            current_active_stake
+        } else {
+            None
+        };
+        let model = build_epoch_content(domain, chain, epoch, state, active_stake)?;
+        out.push(model.into_model()?);
+    }
+
+    Ok(Json(out))
+}
 
 pub async fn latest_parameters<D: Domain>(
     State(domain): State<Facade<D>>,
@@ -539,5 +801,204 @@ mod tests {
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn epochs_latest_happy_path() {
+        let app = TestApp::new();
+        let path = "/epochs/latest";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: EpochContent =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        // The tip of the synthetic chain is in epoch 2, so `latest` resolves to
+        // epoch 2.
+        assert_eq!(content.epoch, 2);
+        assert!(content.start_time < content.end_time);
+        assert!(content.active_stake.is_some());
+    }
+
+    #[tokio::test]
+    async fn epochs_latest_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = "/epochs/latest";
+        assert_status(&app, path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_happy_path() {
+        let app = TestApp::new();
+        let path = "/epochs/1";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: EpochContent =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        assert_eq!(content.epoch, 1);
+        // The synthetic chain puts all blocks in epoch 2, so epoch 1 has no
+        // block. Its aggregates and rolling stats are zero.
+        assert!(content.start_time < content.end_time);
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_current_has_active_stake() {
+        let app = TestApp::new();
+        let path = "/epochs/2";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: EpochContent =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content");
+        assert!(content.active_stake.is_some());
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_bad_request() {
+        let app = TestApp::new();
+        let path = "/epochs/not-a-number";
+        assert_status(&app, path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_not_found() {
+        let app = TestApp::new();
+        let path = "/epochs/999999";
+        assert_status(&app, path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_out_of_range() {
+        // An epoch number greater than the `i32` range of the reference API gets a
+        // bad-request error, not a 404 error for a missing epoch.
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/696969696969", StatusCode::BAD_REQUEST).await;
+        assert_status(&app, "/epochs/696969696969/next", StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            "/epochs/696969696969/previous",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = "/epochs/1";
+        assert_status(&app, path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_next_happy_path() {
+        let app = TestApp::new();
+        let path = "/epochs/0/next";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: Vec<EpochContent> =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
+
+        // The result is in strict ascending order. Every epoch is greater than the
+        // requested epoch.
+        let mut prev = None;
+        for item in &content {
+            assert!(item.epoch > 0);
+            if let Some(prev) = prev {
+                assert!(item.epoch > prev);
+            }
+            prev = Some(item.epoch);
+        }
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_next_bad_request() {
+        let app = TestApp::new();
+        let path = "/epochs/0/next?count=0";
+        assert_status(&app, path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_next_not_found() {
+        let app = TestApp::new();
+        let path = "/epochs/999999/next";
+        assert_status(&app, path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_previous_happy_path() {
+        let app = TestApp::new();
+        let path = "/epochs/2/previous";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: Vec<EpochContent> =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
+
+        // Every epoch in the result is before the requested epoch, in ascending
+        // order.
+        let mut prev = None;
+        for item in &content {
+            assert!(item.epoch < 2);
+            if let Some(prev) = prev {
+                assert!(item.epoch > prev);
+            }
+            prev = Some(item.epoch);
+        }
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_previous_of_zero_is_empty() {
+        let app = TestApp::new();
+        let path = "/epochs/0/previous";
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let content: Vec<EpochContent> =
+            serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
+        assert!(content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn epochs_by_number_previous_bad_request() {
+        let app = TestApp::new();
+        let path = "/epochs/2/previous?page=0";
+        assert_status(&app, path, StatusCode::BAD_REQUEST).await;
     }
 }
