@@ -220,7 +220,7 @@ where
 
     let stream = domain
         .query()
-        .blocks_by_script_activity_stream(&hash, 0, end_slot, order);
+        .blocks_by_script_redeemers_stream(&hash, 0, end_slot, order);
 
     let mut stream = Box::pin(stream);
 
