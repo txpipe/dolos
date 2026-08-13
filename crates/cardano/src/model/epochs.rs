@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use dolos_core::{BlockSlot, EntityKey, Genesis, NsKey};
+use dolos_core::{BlockSlot, Genesis, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::{
@@ -16,7 +16,7 @@ use super::{
     eras::EraTransition,
     pools::PoolHash,
     pparams::PParamsSet,
-    FixedNamespace as _,
+    SingletonEntity,
 };
 use crate::pots::{EpochIncentives, Pots};
 
@@ -368,6 +368,10 @@ impl Default for EpochState {
 
 entity_boilerplate!(EpochState, "epochs");
 
+impl SingletonEntity for EpochState {
+    const KEY: &'static [u8] = CURRENT_EPOCH_KEY;
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -521,7 +525,7 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -640,7 +644,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -686,7 +690,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -745,7 +749,7 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -817,7 +821,7 @@ impl dolos_core::EntityDelta for EpochWrapUpV2 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -880,7 +884,7 @@ impl dolos_core::EntityDelta for EpochWrapUpV3 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -953,7 +957,7 @@ impl dolos_core::EntityDelta for EWrapProgress {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1092,7 +1096,7 @@ impl dolos_core::EntityDelta for EStartProgress {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1200,7 +1204,7 @@ impl dolos_core::EntityDelta for RupdProgress {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1292,7 +1296,7 @@ impl dolos_core::EntityDelta for NonceTransition {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1375,7 +1379,7 @@ impl dolos_core::EntityDelta for EpochTransition {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1483,7 +1487,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1569,7 +1573,7 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EntityKey::from(CURRENT_EPOCH_KEY)))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {

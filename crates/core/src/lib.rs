@@ -31,6 +31,7 @@ pub mod archive;
 pub mod async_query;
 pub mod bootstrap;
 pub mod builtin;
+pub mod cbor;
 pub mod config;
 pub mod crawl;
 pub mod import;
@@ -444,6 +445,9 @@ pub enum ChainError {
 
     #[error("no active epoch")]
     NoActiveEpoch,
+
+    #[error("CARDANO-007: governance state missing from store; storage is corrupt or the startup migration did not run")]
+    MissingGovState,
 
     #[error("era not found")]
     EraNotFound,

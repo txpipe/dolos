@@ -76,6 +76,13 @@ impl EraTransition {
     pub fn entering_allegra(&self) -> bool {
         self.prev_version == 2 && self.new_version == 3
     }
+
+    /// Check if this boundary is transitioning into Conway (the Chang hard
+    /// fork). At this boundary, the governance singleton is seeded from the
+    /// Conway genesis (initial constitution + committee).
+    pub fn entering_conway(&self) -> bool {
+        self.prev_version < 9 && self.new_version >= 9
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize)]
@@ -126,5 +133,31 @@ pub(crate) mod testing {
                 new_version: EraProtocol::from(new),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transition(prev: u16, new: u16) -> EraTransition {
+        EraTransition {
+            prev_version: EraProtocol::from(prev),
+            new_version: EraProtocol::from(new),
+        }
+    }
+
+    #[test]
+    fn entering_conway_detects_chang_boundary() {
+        // the Chang hard fork proper
+        assert!(transition(8, 9).entering_conway());
+
+        // a jump over protocol 9 still enters Conway
+        assert!(transition(8, 10).entering_conway());
+
+        // intra-Conway bumps and earlier boundaries don't re-seed
+        assert!(!transition(9, 10).entering_conway());
+        assert!(!transition(7, 8).entering_conway());
+        assert!(!transition(2, 3).entering_conway());
     }
 }

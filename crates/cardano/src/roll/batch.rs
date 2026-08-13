@@ -10,12 +10,15 @@ use rayon::prelude::*;
 
 use crate::consensus::ConsensusError;
 use crate::indexes::CardanoIndexDeltaBuilder;
-use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
+use crate::{
+    CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput,
+    SingletonEntity,
+};
 use dolos_core::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError, ChainPoint, Domain,
     DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _, LogValue,
-    NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
-    UtxoSetDelta, WalStore as _,
+    NsKey, RawBlock, RawUtxoMap, StateError, StateStore, StateWriter as _, TxoRef, UtxoSetDelta,
+    WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -30,6 +33,42 @@ impl WorkDeltas {
         let key = delta.key();
         let group = self.entities.entry(key).or_default();
         group.push(delta);
+    }
+
+    /// Apply queued deltas for a singleton entity and write the result.
+    ///
+    /// Namespace streams only visit rows that already exist, so a delta
+    /// that must *create* its entity (e.g. `GovGenesisInit` at the Conway
+    /// boundary) would be dropped silently. This path reads the fixed key
+    /// directly and applies against `None` when the row is absent.
+    ///
+    /// Returns the post-apply entity so callers can refresh cached
+    /// copies; `None` when no deltas were queued.
+    pub fn apply_singleton<E, S>(
+        &mut self,
+        state: &S,
+        writer: &S::Writer,
+    ) -> Result<Option<E>, ChainError>
+    where
+        E: SingletonEntity + Into<CardanoEntity>,
+        CardanoEntity: Into<Option<E>>,
+        S: StateStore,
+    {
+        let Some(to_apply) = self.entities.remove(&E::ns_key()) else {
+            return Ok(None);
+        };
+
+        let mut entity: Option<CardanoEntity> = state
+            .read_entity_typed::<E>(E::NS, &E::singleton_key())?
+            .map(Into::into);
+
+        for mut delta in to_apply {
+            delta.apply(&mut entity);
+        }
+
+        writer.save_entity_typed(E::NS, &E::singleton_key(), entity.as_ref())?;
+
+        Ok(entity.and_then(Into::into))
     }
 }
 

@@ -42,7 +42,7 @@ use crate::{
     rupd::credential_to_key,
     shard::{shard_key_ranges, ACCOUNT_SHARDS},
     AccountStakeLog, CardanoLogic, ChainPoint, EpochState, FixedNamespace, PendingRewardState,
-    PoolHash, StakeLog,
+    PoolHash, SingletonEntity as _, StakeLog,
 };
 
 use super::{RupdWork, StakeSnapshot};
@@ -296,7 +296,7 @@ impl RupdWorkUnit {
         // current EpochState, apply the delta, and write back. The
         // delta's idempotency / ordering / total-mismatch guards make
         // this safe to repeat on crash recovery.
-        let epoch_key = dolos_core::EntityKey::from(crate::model::CURRENT_EPOCH_KEY);
+        let epoch_key = EpochState::singleton_key();
         let mut epoch_entity: Option<EpochState> =
             state.read_entity_typed::<EpochState>(EpochState::NS, &epoch_key)?;
         let mut progress_delta = crate::RupdProgress::new(shard_index, self.total_shards);
@@ -519,7 +519,7 @@ where
         // shard commits can't race on this field.
         let writer = domain.state().start_writer()?;
 
-        let epoch_key = dolos_core::EntityKey::from(crate::model::CURRENT_EPOCH_KEY);
+        let epoch_key = EpochState::singleton_key();
         if let Some(mut epoch_state) = domain
             .state()
             .read_entity_typed::<crate::EpochState>(crate::EpochState::NS, &epoch_key)?

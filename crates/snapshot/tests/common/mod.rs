@@ -170,7 +170,7 @@ pub fn logs() -> Vec<LogRecord> {
 ///
 /// Every namespace appears in every shard, which no real stele would do — real
 /// keys are hash-derived and land where they land. It is what makes the golden
-/// freeze all sixteen namespace strings twice over.
+/// freeze all seventeen namespace strings twice over.
 pub fn state(shard: u8) -> Vec<StateRecord> {
     NAMESPACES
         .into_iter()
