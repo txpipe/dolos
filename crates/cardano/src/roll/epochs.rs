@@ -171,7 +171,7 @@ impl BlockVisitor for EpochStateVisitor {
         // The driver iterates `tx.produces()`. So this sum includes the regular
         // outputs of valid transactions and the collateral-return outputs of
         // phase-2 failures.
-        stats.output += amount as u128;
+        stats.output += amount;
 
         Ok(())
     }

@@ -8,7 +8,7 @@ use blockfrost_openapi::models::{
     epoch_content::EpochContent, epoch_param_content::EpochParamContent,
 };
 use dolos_cardano::{model::EpochState, PParamsSet};
-use dolos_core::Genesis;
+use dolos_core::{cbor, Genesis};
 use pallas::ledger::primitives::{conway::CostModels, Epoch};
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
@@ -206,7 +206,7 @@ pub struct EpochContentModelBuilder {
     pub first_block_time: u64,
     pub last_block_time: u64,
     pub tx_count: u64,
-    pub output: u128,
+    pub output: cbor::U128,
     pub active_stake: Option<u64>,
 }
 

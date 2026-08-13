@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use dolos_core::{BlockSlot, Genesis, NsKey};
+use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::{
@@ -23,32 +23,6 @@ use crate::pots::{EpochIncentives, Pots};
 pub type Lovelace = u64;
 
 pub const CURRENT_EPOCH_KEY: &[u8] = b"0";
-
-/// CBOR codec for `u128` fields. This version of minicbor has no `u128` type.
-/// The codec stores the value as a 16-byte big-endian byte string.
-mod cbor_u128 {
-    use pallas::codec::minicbor::{
-        decode::{Decoder, Error as DecodeError},
-        encode::{Encoder, Error as EncodeError, Write},
-    };
-
-    pub fn encode<C, W: Write>(
-        v: &u128,
-        e: &mut Encoder<W>,
-        _ctx: &mut C,
-    ) -> Result<(), EncodeError<W::Error>> {
-        e.bytes(&v.to_be_bytes())?;
-        Ok(())
-    }
-
-    pub fn decode<C>(d: &mut Decoder<'_>, _ctx: &mut C) -> Result<u128, DecodeError> {
-        let bytes = d.bytes()?;
-        let arr: [u8; 16] = bytes
-            .try_into()
-            .map_err(|_| DecodeError::message("expected 16-byte u128"))?;
-        Ok(u128::from_be_bytes(arr))
-    }
-}
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Nonces {
@@ -173,12 +147,12 @@ pub struct RollingStats {
     pub tx_count: u64,
 
     /// Gross sum of all lovelace in transaction outputs this epoch (matches
-    /// db-sync's `epoch.out_sum`). The type is u128 because the sum for one
-    /// epoch can be more than u64 allows, although the outputs of one
+    /// db-sync's `epoch.out_sum`). The type is [`cbor::U128`] because the sum
+    /// for one epoch can be more than u64 allows, although the outputs of one
     /// transaction always fit in u64.
     #[n(23)]
-    #[cbor(default, with = "cbor_u128")]
-    pub output: u128,
+    #[cbor(default)]
+    pub output: cbor::U128,
 
     /// Slot of the first block minted this epoch (0 if the epoch has no block).
     /// The reader converts this slot to a wall-clock time with `ChainSummary`.
@@ -409,7 +383,7 @@ pub(crate) mod testing {
                 gathered_fees,
                 blocks_minted,
                 tx_count,
-                output,
+                output: cbor::U128(output),
                 first_block_slot,
                 last_block_slot,
                 ..Default::default()
@@ -506,7 +480,7 @@ pub struct EpochStatsUpdate {
     pub(crate) treasury_mirs: Lovelace,
     pub(crate) non_overlay_blocks_minted: u32,
     pub(crate) tx_count: u64,
-    pub(crate) output: u128,
+    pub(crate) output: cbor::U128,
     pub(crate) block_slot: u64,
 
     // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
@@ -1649,7 +1623,7 @@ mod prop_tests {
             EpochStatsUpdate {
                 epoch, block_fees, utxo_delta,
                 new_accounts, removed_accounts, withdrawals,
-                tx_count, output, block_slot,
+                tx_count, output: cbor::U128(output), block_slot,
                 ..EpochStatsUpdate::default()
             }
         }
