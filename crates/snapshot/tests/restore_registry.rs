@@ -824,10 +824,6 @@ fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
     found
 }
 
-// ---------------------------------------------------------------------------
-// The progress seam
-// ---------------------------------------------------------------------------
-
 /// The restore half of the observer's cross-check: what the stream said came
 /// down, against what the manifest says the layers weigh.
 ///

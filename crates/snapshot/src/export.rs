@@ -1149,9 +1149,6 @@ fn write_state<W: SteleWriter, S: StateStore>(
 
     let mut sinks = Vec::with_capacity(shards.len());
     let mut orders = Vec::with_capacity(shards.len());
-    // All sixteen are announced before the walk begins, because all sixteen are
-    // genuinely in flight from that moment: one pass over the store feeds every
-    // one of them, so there is no honest way to report them one at a time.
     let mut positions = Vec::with_capacity(shards.len());
 
     for shard in shards {

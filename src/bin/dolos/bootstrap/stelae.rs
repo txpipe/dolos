@@ -467,7 +467,6 @@ mod progress_tests {
         assert_eq!(progress.layers_position(), PER_RESTORE as u64);
         assert_eq!(progress.layers_length(), Some(PER_RESTORE as u64));
 
-        // The last blob came down whole.
         assert_eq!(progress.blob_position(), 8_192);
         assert_eq!(progress.blob_length(), Some(8_192));
 

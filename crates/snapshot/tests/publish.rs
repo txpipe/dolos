@@ -885,10 +885,6 @@ impl stelae::SteleWriter for Interrupted<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The progress seam
-// ---------------------------------------------------------------------------
-
 /// The publish half of the observer's cross-check: what the stream said moved,
 /// against what the transport counted.
 ///
@@ -916,7 +912,6 @@ fn a_publish_reports_what_the_transfer_counted() {
     let node = Node::build();
     let repository = fixture.repository("dolos/progress");
 
-    // The first stele: nothing to inherit, nothing already in the registry.
     let watcher = std::sync::Arc::new(Watcher::default());
     let first = node
         .publish_watched(
@@ -955,7 +950,6 @@ fn a_publish_reports_what_the_transfer_counted() {
         "a publish that moved nothing proves nothing about byte reporting"
     );
 
-    // The second stele: three layers inherited from the first.
     let watcher = std::sync::Arc::new(Watcher::default());
     let second = node
         .publish_watched(
@@ -986,9 +980,6 @@ fn a_publish_reports_what_the_transfer_counted() {
         second.inscription.layers.len(),
     );
 
-    // A second repository, one sequence behind, so the third stele can be a
-    // rebuild rather than a republish: `--rebuild` suppresses inheritance, it
-    // does not suspend the chain.
     let rebuilt_into = fixture.repository("dolos/progress-rebuild");
     node.publish(&rebuilt_into, &node.first, false);
 
@@ -1003,10 +994,6 @@ fn a_publish_reports_what_the_transfer_counted() {
 
     watcher.assert_well_formed(again.inscription.layers.len());
 
-    // Nothing carried forward, and epoch 0's three layers built out of the
-    // stores a second time — at which point the registry answers that it has
-    // them. That is the skip, and it is a different fact from the inheritance
-    // above: the publisher paid for these layers and saved only the upload.
     assert_eq!(
         watcher.ended(Outcome::Inherited),
         0,

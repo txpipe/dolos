@@ -1114,10 +1114,6 @@ fn max_history_selects_epochs_and_never_the_tip() {
     }
 }
 
-// --------------------------------------------------------------------------
-// The progress seam
-// --------------------------------------------------------------------------
-
 /// A restore announces every layer its plan names, and says which of them a
 /// resume skipped.
 ///

@@ -725,10 +725,6 @@ fn distinct_layers(inscription: &stelae::Inscription) -> usize {
         .len()
 }
 
-// --------------------------------------------------------------------------
-// The progress seam
-// --------------------------------------------------------------------------
-
 /// Every layer a publish writes is announced once and closed once, and the
 /// records it reports are the records the document says it wrote.
 ///
