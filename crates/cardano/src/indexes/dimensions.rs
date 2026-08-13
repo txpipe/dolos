@@ -110,6 +110,12 @@ pub mod archive {
         /// stores keep verbatim instead of hashing (see
         /// [`dolos_core::key_hash`]).
         METADATA = dolos_core::VERBATIM_KEY_DIMENSION;
+
+        /// Script hash of every script that a redeemer executed, resolved at
+        /// index time. Unlike SCRIPT, this tags executions that carry no
+        /// script bytes (reference scripts) and covers all purposes,
+        /// including vote and propose.
+        SCRIPT_REDEEMERS = "script_redeemers";
     }
 }
 
@@ -148,6 +154,7 @@ mod tests {
                 "pool_certs",
                 "account_withdrawals",
                 "metadata",
+                "script_redeemers",
             ]
         );
     }

@@ -123,14 +123,14 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
 
     /// Stream blocks that can involve the given script, in slot order.
     ///
-    /// A script leaves traces in more than one index dimension. The SCRIPT
-    /// dimension tags blocks where the script bytes appear. That covers
-    /// witness sets and reference-script outputs. An execution through a
-    /// reference script does not carry the script bytes. Such blocks show
-    /// only the side effects of the execution. The side effects are: a spend
-    /// from the script's payment credential, an asset movement under its
-    /// policy, and certs or withdrawals against its stake credential. This
-    /// stream is the union of all these dimensions.
+    /// The SCRIPT_REDEEMERS dimension tags executions exactly, but only
+    /// blocks indexed after the dimension shipped carry it. The other
+    /// dimensions keep the union complete on older stores: SCRIPT tags
+    /// blocks where the script bytes appear (witness sets, reference-script
+    /// outputs), and executions through reference scripts show up through
+    /// their side effects — a spend from the script's payment credential, an
+    /// asset movement under its policy, and certs or withdrawals against its
+    /// stake credential.
     ///
     /// The result is a superset. The caller must match each tx against the
     /// script hash.
@@ -400,6 +400,7 @@ where
         let [testnet_account, mainnet_account] = reward_accounts;
 
         let tags = vec![
+            (archive::SCRIPT_REDEEMERS, hash.clone()),
             (archive::SCRIPT, hash.clone()),
             (archive::PAYMENT, hash.clone()),
             (archive::POLICY, hash),
