@@ -228,8 +228,6 @@ mod tests {
                 "unexpected root updates for {action:?}"
             );
 
-            // Info is the one action that ratifies with no state effect at
-            // all; everything else emits at least its own effect.
             let effects = deltas.len() - roots;
 
             if is_info {
@@ -279,7 +277,6 @@ mod tests {
             guardrail_script: Some([2u8; 28].into()),
         };
 
-        // epoch 541: the Cardano Constitution replaces the interim one
         let id = ProposalId::from(constitution_tx.to_vec());
         state = apply_gov(
             state,
@@ -296,7 +293,6 @@ mod tests {
             ),
         );
 
-        // epoch 580: the interim committee is replaced
         let id = ProposalId::from(committee_tx.to_vec());
         state = apply_gov(
             state,
@@ -327,7 +323,6 @@ mod tests {
         );
         assert!(!enacted_committee.members.contains_key(&interim_member));
 
-        // both lineage trees now root at the action that was enacted
         assert_eq!(
             state.prev_gov_action_ids.constitution,
             Some(GovActionId {
@@ -343,7 +338,6 @@ mod tests {
             })
         );
 
-        // untouched purposes stay empty
         assert_eq!(state.prev_gov_action_ids.hard_fork, None);
         assert_eq!(state.prev_gov_action_ids.pparam_update, None);
     }

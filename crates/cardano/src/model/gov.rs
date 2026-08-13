@@ -1145,7 +1145,6 @@ mod prop_tests {
             CommitteeUpdate::update(vec![], vec![(fresh.clone(), 700)], threshold.clone());
         rebuild.apply(&mut entity);
 
-        // the dissolved members do not come back
         assert_eq!(
             entity.as_ref().unwrap().committee.as_ref().unwrap().members,
             BTreeMap::from([(fresh, 700)])
