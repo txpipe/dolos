@@ -2041,7 +2041,7 @@ pub struct BlockModelBuilder<'a> {
     previous: Option<MultiEraBlock<'a>>,
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
-    deps: HashMap<TxHash, MultiEraTx<'a>>,
+    touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -2054,31 +2054,30 @@ impl<'a> BlockModelBuilder<'a> {
             next: None,
             tip: None,
             chain: None,
-            deps: HashMap::new(),
+            touched_addresses: None,
         })
     }
 
-    pub fn required_input_deps(&self) -> Vec<TxHash> {
-        let mut seen_tx_hashes = HashSet::new();
-
-        self.block
-            .txs()
-            .iter()
-            .flat_map(|tx| tx.consumes())
-            .map(|input| *input.hash())
-            .filter(|hash| seen_tx_hashes.insert(*hash))
-            .collect()
+    pub fn txs(&self) -> Vec<MultiEraTx<'_>> {
+        self.block.txs()
     }
 
-    pub fn load_dep(&mut self, key: TxHash, cbor: &'a EraCbor) -> Result<(), StatusCode> {
-        let era = try_into_or_500!(cbor.era());
+    /// Collect the addresses each tx touches by asking `collect` for every tx
+    /// of the block, in block order. The builder drives the walk itself, so
+    /// the sets cannot fall out of sync with the txs they describe.
+    pub fn collect_touched_addresses_with<F>(mut self, mut collect: F) -> Result<Self, StatusCode>
+    where
+        F: FnMut(&MultiEraTx<'_>) -> Result<BTreeSet<String>, StatusCode>,
+    {
+        self.touched_addresses = Some(
+            self.block
+                .txs()
+                .iter()
+                .map(|tx| collect(tx).map(|addresses| (tx.hash().to_string(), addresses)))
+                .try_collect()?,
+        );
 
-        let tx = MultiEraTx::decode_for_era(era, cbor.cbor())
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        self.deps.insert(key, tx);
-
-        Ok(())
+        Ok(self)
     }
 
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
@@ -2390,46 +2389,18 @@ impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
-        let block = &self.block;
+        let touched_addresses = self.touched_addresses.ok_or_else(|| {
+            tracing::error!("touched addresses not collected for block");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         // BTreeMap keeps entries sorted alphabetically by address, matching
         // Blockfrost. Tx hashes are appended in block order and deduped per
-        // address by collecting each tx's touched addresses into a set first.
+        // address because each tx's touched addresses arrive as a set.
         let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
-        // Phase-2-failed txs are deliberately NOT skipped here, diverging
-        // from Blockfrost: their collateral inputs and collateral-return
-        // outputs move funds, so those addresses are affected in ledger
-        // terms - considered a bug in BF, not behavior worth reproducing
-        for tx in block.txs() {
-            let mut touched = BTreeSet::new();
-
-            for (_, output) in tx.produces() {
-                let address = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                touched.insert(address.to_string());
-            }
-
-            for input in tx.consumes() {
-                let as_output = self
-                    .deps
-                    .get(input.hash())
-                    .and_then(|dep| dep.produces_at(input.index() as usize));
-
-                if let Some(output) = as_output {
-                    let address = output
-                        .address()
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                    touched.insert(address.to_string());
-                }
-            }
-
-            let tx_hash = tx.hash().to_string();
-
-            for address in touched {
+        for (tx_hash, touched_by_tx) in touched_addresses {
+            for address in touched_by_tx {
                 by_address.entry(address).or_default().push(tx_hash.clone());
             }
         }

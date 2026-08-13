@@ -326,6 +326,65 @@ mod tests {
         );
     }
 
+    /// Exercises the `produces_at` edge. Invalid script txs don't produce
+    /// their regular outputs, but they can produce a collateral return at the
+    /// next output index. Resolution must reach it — `output_at` would not.
+    #[test]
+    fn resolves_spent_collateral_return_output() {
+        use dolos_core::TxoRef;
+        use dolos_testing::{synthetic::build_phase2_invalid_tx_cbor, TestAddress};
+
+        let (blocks, _, _) = build_synthetic_blocks(synthetic_cfg());
+        let raw = blocks.first().expect("missing synthetic block");
+
+        let block = MultiEraBlock::decode(raw).expect("failed to decode block");
+        let txs = block.txs();
+        let spender = txs.get(1).expect("fixture needs a second tx");
+        let inputs = spender.consumes();
+        let input = inputs.first().expect("spender must consume");
+
+        // Phase-2-invalid dep tx with no regular outputs. A collateral return
+        // is indexed after the regular outputs, so with none it sits at
+        // index 0.
+        let collateral_return_address = TestAddress::Alice;
+        let dep_tx_cbor = build_phase2_invalid_tx_cbor(
+            // arbitrary, never resolved in this test
+            TxoRef([1u8; 32].into(), 0),
+            // arbitrary, never resolved in this test
+            TxoRef([2u8; 32].into(), 16),
+            collateral_return_address.clone(), // what the input must resolve to
+            1_500_000,
+        );
+
+        // check test wiring
+        assert_eq!(
+            input.index(),
+            0,
+            "the spender's input index must match the index of the dep's collateral return (0)"
+        );
+
+        // pretend the input's source is the phase-2-invalid tx
+        let mut store = TxMap::new();
+        store.insert(
+            *input.hash(),
+            Some(EraCbor(Era::Conway.into(), dep_tx_cbor)),
+        );
+
+        let mut resolver = InputResolver::new(&store);
+
+        let output = resolver
+            .resolve(input)
+            .expect("resolve failed")
+            .expect("spent collateral return must resolve");
+
+        let address = output
+            .address()
+            .expect("collateral return must have an address")
+            .to_string();
+
+        assert_eq!(address, collateral_return_address.as_str());
+    }
+
     #[test]
     fn records_misses() {
         let vectors = vectors();
