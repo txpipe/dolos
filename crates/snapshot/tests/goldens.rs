@@ -16,7 +16,7 @@
 //! never a re-pin.
 //!
 //! Between them these freeze: the twenty-six media types, the tag string, the
-//! twelve archive dimension names, the three exact-record kind literals, the
+//! thirteen archive dimension names, the three exact-record kind literals, the
 //! six `log-{ns}` and seventeen `state-{ns}` kind strings — which is where the
 //! twenty-three namespace strings live now that neither record names one — the
 //! layer header and scope shapes, and the `position`/`parameters` key

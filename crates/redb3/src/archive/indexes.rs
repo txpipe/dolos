@@ -353,6 +353,27 @@ impl ScriptHashApproxIndexTable {
     }
 }
 
+pub struct ScriptRedeemersApproxIndexTable;
+
+impl ScriptRedeemersApproxIndexTable {
+    pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
+        MultimapTableDefinition::new("archive-byscriptredeemers");
+
+    pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
+        xxh3_64(script_hash.as_slice())
+    }
+
+    pub fn iter_by_script_redeemers(
+        rx: &ReadTransaction,
+        script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        let key = Self::compute_key(&script_hash.to_vec());
+        slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
+    }
+}
+
 pub struct SpentTxoApproxIndexTable;
 
 impl SpentTxoApproxIndexTable {
@@ -489,6 +510,7 @@ impl Indexes {
         wx.open_multimap_table(DatumHashApproxIndexTable::DEF)?;
         wx.open_multimap_table(PolicyApproxIndexTable::DEF)?;
         wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
+        wx.open_multimap_table(ScriptRedeemersApproxIndexTable::DEF)?;
         wx.open_multimap_table(SpentTxoApproxIndexTable::DEF)?;
         wx.open_multimap_table(AccountCertsApproxIndexTable::DEF)?;
         wx.open_multimap_table(PoolCertsApproxIndexTable::DEF)?;
@@ -609,6 +631,20 @@ impl Indexes {
         ScriptHashApproxIndexTable::iter_by_script(rx, script_hash, start_slot, end_slot)
     }
 
+    pub fn iter_by_script_redeemers(
+        rx: &ReadTransaction,
+        script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+    ) -> Result<SlotKeyIterator, Error> {
+        ScriptRedeemersApproxIndexTable::iter_by_script_redeemers(
+            rx,
+            script_hash,
+            start_slot,
+            end_slot,
+        )
+    }
+
     pub fn get_by_address_payment_part(
         rx: &ReadTransaction,
         address_payment_part: &[u8],
@@ -722,6 +758,7 @@ impl Indexes {
         Self::copy_table(DatumHashApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PolicyApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(ScriptHashApproxIndexTable::DEF, rx, wx)?;
+        Self::copy_table(ScriptRedeemersApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(SpentTxoApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(AccountCertsApproxIndexTable::DEF, rx, wx)?;
         Self::copy_table(PoolCertsApproxIndexTable::DEF, rx, wx)?;

@@ -223,6 +223,14 @@ impl CardanoIndexDeltaBuilder {
             .push(Tag::new(archive::SCRIPT, hash));
     }
 
+    /// Add the hash of a script that a redeemer executed to the current
+    /// block.
+    pub fn add_redeemer_script(&mut self, hash: Vec<u8>) {
+        self.current_block()
+            .tags
+            .push(Tag::new(archive::SCRIPT_REDEEMERS, hash));
+    }
+
     /// Add certificate tags to the current block.
     pub fn add_cert(&mut self, cert: &MultiEraCert) {
         if let Some(cred) = pallas_extras::cert_as_stake_registration(cert) {
@@ -369,6 +377,29 @@ impl CardanoIndexDeltaBuilder {
 
             for redeemer in tx.redeemers() {
                 self.add_datum_hash(redeemer.data().compute_hash().to_vec());
+            }
+
+            // tags are candidates, not response rows: phase-2-failed txs get
+            // tagged like every other dimension does, and the Blockfrost
+            // rule (db-sync stores no redeemers for failed txs) stays a
+            // query-time filter. resolution is best effort — a spend
+            // redeemer only tags when its declared input is in
+            // `resolved_inputs`.
+            for redeemer in tx.redeemers() {
+                let resolved =
+                    crate::pallas_extras::redeemer_script_hash(&tx, &redeemer, &mut |input| {
+                        let txo_ref: TxoRef = input.into();
+                        let address = resolved_inputs.get(&txo_ref).and_then(|resolved| {
+                            resolved.with_dependent(|_, output| output.address().ok())
+                        });
+                        Ok::<_, std::convert::Infallible>(address)
+                    });
+
+                let Ok(Some(hash)) = resolved else {
+                    continue;
+                };
+
+                self.add_redeemer_script(hash.to_vec());
             }
         }
     }
@@ -551,6 +582,9 @@ mod tests {
 
         // SCRIPT
         builder.add_script_hash(vec![0x44; 28]);
+
+        // SCRIPT_REDEEMERS
+        builder.add_redeemer_script(vec![0x88; 28]);
 
         // ACCOUNT_CERTS
         let registration =
