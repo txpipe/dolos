@@ -131,6 +131,15 @@ impl StakeSnapshot {
             .and_modify(|x| *x += stake)
             .or_insert(stake);
 
+        // Same reasoning for the delegator count, which `finalize` reports in
+        // the per-pool `StakeLog`: counting it here (the globals pass sees
+        // every account) keeps it correct after a mid-RUPD restart, which a
+        // per-shard tally would not be.
+        self.pool_delegator_counts
+            .entry(pool_id)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
+
         self.active_stake_sum += stake;
 
         // The per-account map is shard-scoped: only credentials in this

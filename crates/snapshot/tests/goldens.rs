@@ -16,8 +16,8 @@
 //! never a re-pin.
 //!
 //! Between them these freeze: the five media types, the tag string, the twelve
-//! archive dimension names, the three exact-record kind literals, the fifteen
-//! state namespace strings, the five log namespace strings, the layer header
+//! archive dimension names, the three exact-record kind literals, the sixteen
+//! state namespace strings, the six log namespace strings, the layer header
 //! and scope shapes, and the `position`/`parameters` key spellings.
 
 mod common;
@@ -53,21 +53,21 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 6] = [
     ),
     (
         LOGS,
-        "sha256:bbe98e028f2842eafdf570035ec3b27b9f6c8f465e827da31339217ed184d042",
-        6,
-        337,
+        "sha256:b9b246e1b2510b399d7515c58e6ecaaa2516ddccf7783fc9f03b29cac71eab46",
+        7,
+        398,
     ),
     (
         STATE,
-        "sha256:24782c03c7d1e11045425cedad200a2759991f767869f409e05cefaf6743d816",
-        16,
-        767,
+        "sha256:273510dd8d6527e4123c07283b9eb3e5debd9cbc6a45e0ca172f2dcc8387f988",
+        17,
+        820,
     ),
     (
         STATE,
-        "sha256:f9e9f22a50f267cda7a0c31d879a8bae9e77fddc335dbb4ae8ca4d24be7c52ea",
-        16,
-        767,
+        "sha256:e1a4ab65b432f745dd41653cacc2ba3255167911f46fe2df10114db288940fb3",
+        17,
+        820,
     ),
     (
         DIGESTS,
@@ -79,7 +79,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 6] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:811c29403a58a0984fc8e576feedbf24c79120733bbc95c9731f255fd6322d9e";
+    "sha256:6930cf1861163992286e8554f2abaa3ef806fb7c1adafafb46ca6a64946c8497";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -286,15 +286,15 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:557948cad9dec8605fbde96912db9b6421b47f2ded4c00886ed59f1638b4678c","kind":"indexes","#,
     r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":16,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":431},"#,
-    r#"{"diffId":"sha256:bbe98e028f2842eafdf570035ec3b27b9f6c8f465e827da31339217ed184d042","kind":"logs","#,
-    r#""mediaType":"application/vnd.dolos.stele.logs.v1+zstd","records":6,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":337},"#,
-    r#"{"diffId":"sha256:24782c03c7d1e11045425cedad200a2759991f767869f409e05cefaf6743d816","kind":"state","#,
-    r#""mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":16,"#,
-    r#""scope":{"shard":0},"uncompressedSize":767},"#,
-    r#"{"diffId":"sha256:f9e9f22a50f267cda7a0c31d879a8bae9e77fddc335dbb4ae8ca4d24be7c52ea","kind":"state","#,
-    r#""mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":16,"#,
-    r#""scope":{"shard":1},"uncompressedSize":767},"#,
+    r#"{"diffId":"sha256:b9b246e1b2510b399d7515c58e6ecaaa2516ddccf7783fc9f03b29cac71eab46","kind":"logs","#,
+    r#""mediaType":"application/vnd.dolos.stele.logs.v1+zstd","records":7,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":398},"#,
+    r#"{"diffId":"sha256:273510dd8d6527e4123c07283b9eb3e5debd9cbc6a45e0ca172f2dcc8387f988","kind":"state","#,
+    r#""mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":17,"#,
+    r#""scope":{"shard":0},"uncompressedSize":820},"#,
+    r#"{"diffId":"sha256:e1a4ab65b432f745dd41653cacc2ba3255167911f46fe2df10114db288940fb3","kind":"state","#,
+    r#""mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":17,"#,
+    r#""scope":{"shard":1},"uncompressedSize":820},"#,
     r#"{"diffId":"sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80","kind":"digests","#,
     r#""mediaType":"application/vnd.dolos.stele.digests.v1+zstd","records":3,"#,
     r#""scope":{"lastImmutable":3},"uncompressedSize":250}],"#,

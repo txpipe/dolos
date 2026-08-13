@@ -6,7 +6,7 @@
 //! ## One record shape, including for UTxOs
 //!
 //! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
-//! fourteen entity namespaces, rather than as a special layer kind. That is
+//! fifteen entity namespaces, rather than as a special layer kind. That is
 //! what keeps the format's state vocabulary to a single record, and it makes
 //! the planned refactor folding UTxOs into the entity system (#1042) invisible
 //! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
