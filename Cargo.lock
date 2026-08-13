@@ -1605,6 +1605,7 @@ dependencies = [
  "futures-util",
  "hex",
  "http-body-util",
+ "indexmap 2.9.0",
  "itertools 0.14.0",
  "num-bigint",
  "num-rational",

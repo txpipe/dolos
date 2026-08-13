@@ -294,6 +294,20 @@ impl Backend for Memory {
     }
 }
 
+struct Redb;
+
+impl Backend for Redb {
+    type Store = dolos_redb3::indexes::IndexStore;
+    type Guard = ();
+
+    fn open() -> (Self::Store, Self::Guard) {
+        (
+            dolos_redb3::indexes::IndexStore::in_memory().expect("failed to open redb index store"),
+            (),
+        )
+    }
+}
+
 /// Declare the whole suite for one backend. Adding a backend is one line.
 macro_rules! conformance_suite {
     ($module:ident, $backend:ty) => {
@@ -334,12 +348,22 @@ macro_rules! conformance_suite {
             fn malformed_exact_queries_miss() {
                 super::malformed_exact_queries_miss::<$backend>();
             }
+
+            #[test]
+            fn slots_by_tag_are_ordered_in_both_directions() {
+                super::slots_by_tag_are_ordered_in_both_directions::<$backend>();
+            }
         }
     };
 }
 
 conformance_suite!(fjall, Fjall);
 conformance_suite!(memory, Memory);
+
+#[test]
+fn redb_slots_by_tag_are_ordered_in_both_directions() {
+    slots_by_tag_are_ordered_in_both_directions::<Redb>();
+}
 
 fn epoch_slots(epoch: u64) -> Range<BlockSlot> {
     (epoch * EPOCH_LEN)..((epoch + 1) * EPOCH_LEN)
@@ -416,6 +440,46 @@ fn apply<S: CoreIndexStore>(store: &S, delta: &IndexDelta) {
     let writer = store.start_writer().expect("start_writer failed");
     writer.apply(delta).expect("apply failed");
     writer.commit().expect("commit failed");
+}
+
+fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
+    let (store, _guard) = B::open();
+    let policy = vec![0xAA; 28];
+    let slots = [30, 10, 20];
+    let archive = slots
+        .into_iter()
+        .map(|slot| ArchiveIndexDelta {
+            slot,
+            block_hash: hash32(0x0A, slot, 0),
+            block_number: Some(slot),
+            tx_hashes: Vec::new(),
+            tags: vec![Tag::new(archive_dimensions::POLICY, policy.clone())],
+        })
+        .collect();
+
+    apply(
+        &store,
+        &IndexDelta {
+            cursor: ChainPoint::Slot(30),
+            utxo: Default::default(),
+            archive,
+        },
+    );
+
+    let forward = store
+        .slots_by_tag(archive_dimensions::POLICY, &policy, 0, 40)
+        .expect("slots_by_tag failed")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("forward slot iteration failed");
+    assert_eq!(forward, vec![10, 20, 30]);
+
+    let reverse = store
+        .slots_by_tag(archive_dimensions::POLICY, &policy, 0, 40)
+        .expect("slots_by_tag failed")
+        .rev()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("reverse slot iteration failed");
+    assert_eq!(reverse, vec![30, 20, 10]);
 }
 
 /// Populate a store through the regular delta path, the same one the sync
