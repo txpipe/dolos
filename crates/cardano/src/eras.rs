@@ -212,6 +212,22 @@ impl ChainSummary {
         }
         0
     }
+
+    /// Epoch at which the chain entered Conway — the first era with
+    /// protocol >= 9 (a hard fork can jump over 9, mirroring
+    /// `EraTransition::entering_conway`). `None` when no known era has
+    /// reached Conway.
+    pub fn first_conway_epoch(&self) -> Option<u64> {
+        for (protocol, era) in self.iter_past_with_protocol() {
+            if *protocol >= 9 {
+                return Some(era.start.epoch);
+            }
+        }
+        match self.protocols.last() {
+            Some(last) if *last >= 9 => Some(self.edge().start.epoch),
+            _ => None,
+        }
+    }
 }
 
 pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, ChainError> {
@@ -310,5 +326,45 @@ mod tests {
         assert_eq!(sc.slot_length, 1_000);
         assert_eq!(sc.zero_slot, 4_492_800);
         assert_eq!(sc.zero_time, 1_596_059_091_000);
+    }
+
+    fn era(protocol: u16, start_epoch: u64) -> EraSummary {
+        EraSummary {
+            start: EraBoundary {
+                epoch: start_epoch,
+                slot: start_epoch * 100,
+                timestamp: 0,
+            },
+            end: None,
+            epoch_length: 100,
+            slot_length: 1,
+            protocol,
+        }
+    }
+
+    #[test]
+    fn first_conway_epoch_finds_conway_entry() {
+        // empty summary
+        assert_eq!(ChainSummary::default().first_conway_epoch(), None);
+
+        // no era reached Conway
+        let mut summary = ChainSummary::default();
+        summary.append_era(2, era(2, 0));
+        summary.append_era(8, era(8, 300));
+        assert_eq!(summary.first_conway_epoch(), None);
+
+        // Conway at the edge
+        summary.append_era(9, era(9, 507));
+        assert_eq!(summary.first_conway_epoch(), Some(507));
+
+        // Conway in the past with a later intra-Conway edge
+        summary.append_era(10, era(10, 600));
+        assert_eq!(summary.first_conway_epoch(), Some(507));
+
+        // a fork that jumps over protocol 9 still enters Conway
+        let mut jumped = ChainSummary::default();
+        jumped.append_era(8, era(8, 300));
+        jumped.append_era(10, era(10, 480));
+        assert_eq!(jumped.first_conway_epoch(), Some(480));
     }
 }

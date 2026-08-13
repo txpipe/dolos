@@ -445,6 +445,9 @@ pub enum ChainError {
     #[error("no active epoch")]
     NoActiveEpoch,
 
+    #[error("CARDANO-007: governance state missing from store; storage is corrupt or the startup migration did not run")]
+    MissingGovState,
+
     #[error("era not found")]
     EraNotFound,
 

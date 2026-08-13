@@ -16,7 +16,7 @@ use pallas::ledger::primitives::StakeCredential;
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_era_summary, pallas_extras,
+    load_era_summary, load_gov, pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
     rupd::credential_to_key,
@@ -37,6 +37,8 @@ impl BoundaryWork {
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
         let incentives = ending_state.incentives.clone().unwrap_or_default();
 
+        let num_dormant_epochs = load_gov::<D>(state)?.num_dormant_epochs;
+
         Ok(BoundaryWork {
             ending_state,
             chain_summary,
@@ -48,6 +50,7 @@ impl BoundaryWork {
             expiring_dreps: Default::default(),
             retiring_dreps: Default::default(),
             reregistrating_dreps: Default::default(),
+            num_dormant_epochs,
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
             deltas: WorkDeltas::default(),
@@ -266,6 +269,19 @@ impl BoundaryWork {
             return Ok(false);
         }
 
+        // Epoch-based expiry, Haskell-style: the stored value carries no
+        // dormancy credit, so add the counter back. A DRep is active while
+        // `epoch <= expiry + dormant`, i.e. it expires entering the first
+        // epoch strictly greater.
+        if let Some(expiry) = &drep.expiry {
+            let actual = expiry.current + self.num_dormant_epochs;
+
+            return Ok(actual < self.starting_epoch_no());
+        }
+
+        // Legacy fallback for rows written before the epoch-based expiry
+        // field existed: the old slot-arithmetic heuristic. Self-heals as
+        // activity repopulates the field.
         let last_activity_slot = drep
             .last_active_slot
             .unwrap_or(drep.registered_at.map(|x| x.0).unwrap_or_default());

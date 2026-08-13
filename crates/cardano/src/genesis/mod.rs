@@ -4,9 +4,9 @@ use dolos_core::{
 };
 
 use crate::{
-    indexes::index_delta_from_utxo_delta, pots::Pots, utils::nonce_stability_window, EndStats,
-    EpochState, EpochValue, EraBoundary, EraSummary, Lovelace, Nonces, PParamsSet, RollingStats,
-    CURRENT_EPOCH_KEY,
+    gov_from_conway_genesis, indexes::index_delta_from_utxo_delta, pots::Pots,
+    utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraSummary,
+    GovState, Lovelace, Nonces, PParamsSet, RollingStats, SingletonEntity as _,
 };
 
 mod staking;
@@ -89,7 +89,7 @@ pub fn bootstrap_epoch<D: Domain>(
     };
 
     let writer = state.start_writer()?;
-    writer.write_entity_typed(&EntityKey::from(CURRENT_EPOCH_KEY), &epoch)?;
+    writer.write_entity_typed(&EpochState::singleton_key(), &epoch)?;
     writer.commit()?;
 
     Ok(epoch)
@@ -119,6 +119,26 @@ pub fn bootstrap_eras<D: Domain>(state: &D::State, epoch: &EpochState) -> Result
 
     let writer = state.start_writer()?;
     writer.write_entity_typed(&EntityKey::from(&key), &era)?;
+    writer.commit()?;
+
+    Ok(())
+}
+
+/// Create the governance singleton. Its existence is an invariant that
+/// starts here: every store carries the row regardless of era. Networks
+/// that force-start at Conway (protocol >= 9, e.g. devnets) get it
+/// activated with the genesis enact-state; everyone else gets the
+/// inactive row, activated later at the Chang boundary (`GovGenesisInit`).
+pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(), ChainError> {
+    let mut gov = GovState::default();
+
+    if genesis.force_protocol.is_some_and(|protocol| protocol >= 9) {
+        let (constitution, committee) = gov_from_conway_genesis(&genesis.conway)?;
+        gov.seed_genesis(constitution, committee, 0);
+    }
+
+    let writer = state.start_writer()?;
+    writer.write_entity_typed(&GovState::singleton_key(), &gov)?;
     writer.commit()?;
 
     Ok(())
@@ -163,6 +183,8 @@ pub fn execute<D: Domain>(
 
     bootstrap_eras::<D>(state, &epoch)?;
 
+    bootstrap_gov::<D>(state, genesis)?;
+
     bootstrap_utxos::<D>(state, indexes, genesis, config)?;
 
     staking::bootstrap::<D>(state, genesis)?;
@@ -177,4 +199,50 @@ pub fn execute<D: Domain>(
     writer.commit()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::{Domain as _, StateStore as _};
+    use dolos_testing::toy_domain::ToyDomain;
+    use std::sync::Arc;
+
+    use crate::{FixedNamespace as _, GovState};
+
+    use super::*;
+
+    fn read_gov(domain: &ToyDomain) -> Option<GovState> {
+        domain
+            .state()
+            .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
+            .unwrap()
+    }
+
+    #[test]
+    fn bootstrap_seeds_gov_singleton_for_forced_conway() {
+        // the devnet genesis force-starts at protocol 9
+        let domain = ToyDomain::new(None, None);
+
+        let (constitution, committee) = gov_from_conway_genesis(&domain.genesis().conway).unwrap();
+
+        let gov = read_gov(&domain).expect("gov singleton seeded at bootstrap");
+
+        assert_eq!(gov.constitution, Some(constitution));
+        assert_eq!(gov.committee, Some(committee));
+        assert_eq!(gov.num_dormant_epochs, 0);
+        assert_eq!(gov.active_since, Some(0));
+    }
+
+    #[test]
+    fn bootstrap_seeds_inactive_gov_singleton_before_conway() {
+        let mut genesis = crate::include::devnet::load();
+        genesis.force_protocol = Some(8);
+
+        let domain = ToyDomain::new_with_genesis(Arc::new(genesis), None, None);
+
+        // the row exists on every store — governance just isn't active yet
+        let gov = read_gov(&domain).expect("gov singleton exists pre-Conway");
+        assert_eq!(gov, GovState::default());
+        assert_eq!(gov.active_since, None);
+    }
 }

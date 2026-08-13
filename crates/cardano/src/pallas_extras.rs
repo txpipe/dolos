@@ -176,6 +176,42 @@ pub fn cert_as_drep_unregistration(cert: &MultiEraCert) -> Option<MultiEraDRepUn
     }
 }
 
+pub struct MultiEraCommitteeAuth {
+    pub cold: StakeCredential,
+    pub hot: StakeCredential,
+}
+
+pub fn cert_as_committee_auth(cert: &MultiEraCert) -> Option<MultiEraCommitteeAuth> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::AuthCommitteeHot(cold, hot) => Some(MultiEraCommitteeAuth {
+                cold: cold.clone(),
+                hot: hot.clone(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub struct MultiEraCommitteeResign {
+    pub cold: StakeCredential,
+    pub anchor: Option<pallas::ledger::primitives::conway::Anchor>,
+}
+
+pub fn cert_as_committee_resign(cert: &MultiEraCert) -> Option<MultiEraCommitteeResign> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::ResignCommitteeCold(cold, anchor) => Some(MultiEraCommitteeResign {
+                cold: cold.clone(),
+                anchor: anchor.clone(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[derive(Debug)]
 pub struct MultiEraStakeDelegation {
     pub delegator: StakeCredential,

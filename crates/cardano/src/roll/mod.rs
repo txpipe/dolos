@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc};
 
-use dolos_core::{ChainError, Domain, Genesis, InvariantViolation, StateError, TxOrder, TxoRef};
+use dolos_core::{
+    ChainError, Domain, EntityKey, Genesis, InvariantViolation, StateError, StateStore as _,
+    TxOrder, TxoRef,
+};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
@@ -14,8 +17,8 @@ use pallas::{
 use tracing::{debug, instrument};
 
 use crate::{
-    load_effective_pparams, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor, utxoset,
-    Cache, PParamsSet,
+    load_effective_pparams, load_gov, owned::OwnedMultiEraOutput, roll::proposals::ProposalVisitor,
+    utxoset, Cache, DRepState, FixedNamespace as _, PParamsSet,
 };
 
 // Sub-modules
@@ -37,7 +40,7 @@ pub use work_unit::RollWorkUnit;
 use accounts::AccountVisitor;
 use assets::AssetStateVisitor;
 use datums::DatumVisitor;
-use dreps::DRepStateVisitor;
+use dreps::{DRepStateVisitor, DormancyContext};
 use epochs::EpochStateVisitor;
 use pools::PoolStateVisitor;
 use txs::TxLogVisitor;
@@ -210,6 +213,7 @@ impl<'a> DeltaBuilder<'a> {
         epoch_start: u64,
         work: &'a mut WorkBlock,
         utxos: &'a HashMap<TxoRef, OwnedMultiEraOutput>,
+        dormancy: DormancyContext,
     ) -> Self {
         Self {
             genesis,
@@ -222,12 +226,20 @@ impl<'a> DeltaBuilder<'a> {
             account_state: Default::default(),
             asset_state: Default::default(),
             datum_state: Default::default(),
-            drep_state: Default::default(),
+            drep_state: DRepStateVisitor::new(dormancy),
             epoch_state: Default::default(),
             pool_state: Default::default(),
             tx_logs: Default::default(),
             proposal_logs: Default::default(),
         }
+    }
+
+    /// The dormancy context after this block's deltas — a release inside
+    /// the block zeroes the counter; registrations seen while the counter
+    /// was non-zero extend the fan-out key set. `compute_delta` threads
+    /// the context into the next block's builder.
+    pub fn take_dormancy(&mut self) -> DormancyContext {
+        self.drep_state.take_dormancy()
     }
 
     pub fn crawl(&mut self) -> Result<(), ChainError> {
@@ -554,6 +566,29 @@ pub(crate) fn compute_delta<D: Domain>(
 
     let active_params = load_effective_pparams::<D>(state)?;
 
+    // Governance dormancy context for the DRep visitor: the dormant-epoch
+    // counter and — only when it's non-zero, which is rare — the dreps key
+    // set for the release fan-out. The context evolves across blocks of
+    // the batch (a release zeroes the counter, registrations extend the
+    // key set), so it's taken back after each crawl.
+    let mut dormancy = DormancyContext {
+        dormant_epochs: load_gov::<D>(state)?.num_dormant_epochs,
+        drep_keys: Default::default(),
+        batch_registrations: Default::default(),
+    };
+
+    if dormancy.dormant_epochs > 0 {
+        let mut keys = Vec::new();
+
+        // raw iteration: only the keys matter, skip the CBOR decode
+        for record in state.iter_entities(DRepState::NS, EntityKey::full_range())? {
+            let (key, _) = record?;
+            keys.push(key);
+        }
+
+        dormancy.drep_keys = Arc::new(keys);
+    }
+
     for block in batch.blocks.iter_mut() {
         let mut builder = DeltaBuilder::new(
             genesis.clone(),
@@ -563,9 +598,12 @@ pub(crate) fn compute_delta<D: Domain>(
             epoch_start,
             block,
             &batch.utxos_decoded,
+            std::mem::take(&mut dormancy),
         );
 
         builder.crawl()?;
+
+        dormancy = builder.take_dormancy();
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
         // this into the entity system. (#1042)

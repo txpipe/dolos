@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the fifteen entity
+//! ADR-004 defines state as one uniform key-value space: the sixteen entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Fifteen of them are read off the entity
+//! The names are not spelled here. Sixteen of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -15,8 +15,8 @@
 
 use dolos_cardano::model::{
     AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, LeaderRewardLog, MemberRewardLog, PendingMirState, PendingRewardState,
-    PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
+    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
+    PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
 };
 use dolos_core::Namespace;
 
@@ -34,7 +34,7 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 16] = [
+pub const NAMESPACES: [Namespace; 17] = [
     AccountStakeLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -42,6 +42,7 @@ pub const NAMESPACES: [Namespace; 16] = [
     DRepState::NS,
     EpochState::NS,
     EraSummary::NS,
+    GovState::NS,
     LeaderRewardLog::NS,
     MemberRewardLog::NS,
     PendingMirState::NS,
