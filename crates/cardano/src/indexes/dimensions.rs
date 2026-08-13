@@ -118,6 +118,12 @@ pub mod archive {
 
         /// Pool hash of the block issuer.
         POOL_BLOCKS = "pool_blocks";
+
+        /// Script hash of every script that a redeemer executed, resolved at
+        /// index time. Unlike SCRIPT, this tags executions that carry no
+        /// script bytes (reference scripts) and covers all purposes,
+        /// including vote and propose.
+        SCRIPT_REDEEMERS = "script_redeemers";
     }
 }
 
@@ -158,6 +164,7 @@ mod tests {
                 "metadata",
                 "drep_certs",
                 "pool_blocks",
+                "script_redeemers",
             ]
         );
     }
