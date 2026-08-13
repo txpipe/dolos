@@ -107,7 +107,12 @@ impl<'de> serde::Deserialize<'de> for Digest {
 }
 
 /// What one pass over a layer blob establishes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serializable for the reason [`crate::transport::WrittenLayer`] is: the two
+/// digests and the two sizes are one measurement, and a host writing part of it
+/// down is a host that can read back a pair that never described one layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LayerDigests {
     /// sha256 over the uncompressed CBOR sequence — the layer's identity.
     pub diff_id: Digest,

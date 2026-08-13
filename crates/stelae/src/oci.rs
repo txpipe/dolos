@@ -250,7 +250,9 @@ pub struct Transfer {
     /// Layer blobs the registry already had, and that were not.
     pub layers_skipped: u64,
     /// Layer blobs that were never built, because [`Registry::adopt_layer`]
-    /// took them from a stele already in this repository.
+    /// took them from a stele already in this repository — or because
+    /// [`Registry::adopt_carried`] took them from an earlier attempt of this
+    /// same publish.
     ///
     /// Deliberately not folded into `layers_skipped`. A skipped layer was
     /// built, hashed and then found to be present already, so the publisher
@@ -262,8 +264,8 @@ pub struct Transfer {
     pub bytes_uploaded: u64,
     /// Compressed bytes the skip saved.
     pub bytes_skipped: u64,
-    /// Compressed bytes an adopted layer did not move, as the manifest it came
-    /// from reports them.
+    /// Compressed bytes an adopted layer did not move, as the manifest or the
+    /// record it came from reports them.
     pub bytes_reused: u64,
 }
 
@@ -428,6 +430,9 @@ struct Shared {
     /// Registry and repository. The tag is a placeholder — blob operations do
     /// not use one, and manifest operations build their own.
     repository: Reference,
+    /// The same repository in the spelling it was opened with, for a caller
+    /// that has to write down where this transport publishes.
+    name: Repository,
     auth: RegistryAuth,
     scratch_dir: Option<PathBuf>,
     state: Mutex<PushState>,
@@ -499,6 +504,7 @@ impl Registry {
                 runtime,
                 client,
                 repository: reference,
+                name: repository.clone(),
                 auth,
                 scratch_dir: options.scratch_dir,
                 state: Mutex::new(PushState::default()),
@@ -516,6 +522,17 @@ impl Registry {
     /// [`Shared::scratch`] never names one either.
     pub fn scratch_dir(&self) -> Option<&Path> {
         self.shared.scratch_dir.as_deref()
+    }
+
+    /// The repository this transport was opened on.
+    ///
+    /// Here for the reason [`Registry::scratch_dir`] is: a caller that has to
+    /// write down where its layers went asks the transport that sent them,
+    /// rather than carrying the name alongside the handle. Two spellings of one
+    /// destination is one more than can be kept in step, and the one that
+    /// drifts is the one a later run compares against.
+    pub fn repository(&self) -> &Repository {
+        &self.shared.name
     }
 
     /// What has been pushed through this transport since it was opened, or
@@ -682,14 +699,6 @@ impl Registry {
             ))
         })?;
 
-        if !self.shared.blob_exists(&blob)? {
-            return Err(Error::BlobMissing {
-                kind: descriptor.kind,
-                diff_id: descriptor.diff_id.to_string(),
-                blob: named,
-            });
-        }
-
         let adopted = WrittenLayer {
             digests: LayerDigests {
                 diff_id: descriptor.diff_id,
@@ -700,12 +709,70 @@ impl Registry {
             descriptor,
         };
 
-        let mut state = self.shared.locked();
-        state.transfer.layers_reused += 1;
-        state.transfer.bytes_reused += compressed_size;
-        state.pending.push(adopted);
+        let kind = adopted.descriptor.kind.clone();
+        let diff_id = adopted.descriptor.diff_id;
+
+        // A manifest naming a blob the registry no longer has is a refusal and
+        // not a miss: the stele that named it is published, and something has
+        // reclaimed underneath it. See [`Registry::adopt_carried`] for the case
+        // where the same absence is merely a rebuild.
+        if !self.adopt_carried(adopted)? {
+            return Err(Error::BlobMissing {
+                kind,
+                diff_id: diff_id.to_string(),
+                blob: named,
+            });
+        }
 
         Ok(())
+    }
+
+    /// Carry a layer that is already in this repository, named in full.
+    ///
+    /// [`Registry::adopt_layer`] with the lookup already done — for a caller
+    /// holding a [`WrittenLayer`] this transport produced earlier rather than a
+    /// stele to read one out of. The pair is still not assembled by hand: it is
+    /// the measurement [`RecordSink::finish`] returned when the blob went up,
+    /// carried across whatever interruption the caller survived.
+    ///
+    /// **The blob check is a verdict, not an assertion.** `Ok(false)` means the
+    /// registry does not hold it and nothing was carried, which is a caller's
+    /// cue to build the layer after all. That is the difference from
+    /// [`Registry::adopt_layer`], where the same answer is an error: a
+    /// published manifest that names a reclaimed blob is a stele nobody can
+    /// restore, while a caller's own note that has gone stale costs a rebuild
+    /// and nothing else.
+    ///
+    /// Nothing here checks that the descriptor describes those bytes, for the
+    /// reason [`Registry::adopt_layer`] gives: checking would mean reading
+    /// them, which is the cost being avoided.
+    pub fn adopt_carried(&self, layer: WrittenLayer) -> Result<bool, Error> {
+        if !self.shared.blob_exists(&layer.digests.blob_digest)? {
+            return Ok(false);
+        }
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_reused += 1;
+        state.transfer.bytes_reused += layer.digests.compressed_size;
+        state.pending.push(layer);
+
+        Ok(true)
+    }
+
+    /// The layer this transport is carrying for the next seal under `diff_id`.
+    ///
+    /// What [`SteleWriter::seal`] would put in the manifest, asked for one
+    /// layer at a time — so a caller recording what it has finished records
+    /// the transport's own measurement rather than a reconstruction of it.
+    /// `None` once the layers have been spent by a seal, and for a `diffId`
+    /// this transport never wrote.
+    pub fn carried(&self, diff_id: &Digest) -> Option<WrittenLayer> {
+        self.shared
+            .locked()
+            .pending
+            .iter()
+            .find(|layer| layer.digests.diff_id == *diff_id)
+            .cloned()
     }
 }
 

@@ -118,13 +118,12 @@ impl Node {
 
     fn publish(&self, repository: &Registry, plan: &Plan) {
         registry::publish(
-            repository,
+            registry::Publishing::new(repository),
             plan,
             self.domain.archive(),
             self.domain.state(),
             self.domain.indexes(),
             None,
-            false,
         )
         .unwrap();
     }
