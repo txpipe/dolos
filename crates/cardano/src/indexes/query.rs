@@ -116,6 +116,16 @@ pub trait AsyncCardanoQueryExt<D: Domain> {
         order: SlotOrder,
     ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
 
+    /// Stream the blocks tagged with the script hash. The tag covers witness
+    /// scripts and outputs that publish the script as a reference script.
+    fn blocks_by_script_stream(
+        &self,
+        script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static;
+
     async fn blocks_by_address(
         &self,
         address: &[u8],
@@ -345,6 +355,24 @@ where
             (*self).clone(),
             archive::METADATA,
             label.to_be_bytes().to_vec(),
+            start_slot,
+            end_slot,
+            order,
+        )
+    }
+
+    fn blocks_by_script_stream(
+        &self,
+        script_hash: &[u8],
+        start_slot: BlockSlot,
+        end_slot: BlockSlot,
+        order: SlotOrder,
+    ) -> impl Stream<Item = Result<(BlockSlot, Option<BlockBody>), DomainError>> + Send + 'static
+    {
+        blocks_by_tag_stream(
+            (*self).clone(),
+            archive::SCRIPT,
+            script_hash.to_vec(),
             start_slot,
             end_slot,
             order,

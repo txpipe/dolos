@@ -35,6 +35,7 @@ use blockfrost_openapi::models::{
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
@@ -583,6 +584,56 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
         Ok(out)
     }
 }
+
+impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = (u64, usize, u32);
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block_data
+            .as_ref()
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
+    }
+
+    fn into_model(self) -> Result<ScriptUtxosInner, StatusCode> {
+        let out = ScriptUtxosInner {
+            address: self.output.address().into_model()?,
+            // source the tx_hash from the UTxO's own TxoRef (always present),
+            // not the archive block_data lookup which is None for blocks older
+            // than `max_history` and would yield an empty hash.
+            tx_hash: self.txo_ref.0.to_string(),
+            block: self
+                .block_data
+                .as_ref()
+                .map(|b| b.hash.to_string())
+                .unwrap_or_default(),
+            output_index: try_into_or_500!(self.txo_ref.1),
+            amount: self.output.value().into_model()?,
+            data_hash: self.output.datum().map(|x| match x {
+                DatumOption::Hash(x) => x.to_string(),
+                DatumOption::Data(x) => x.original_hash().to_string(),
+            }),
+            inline_datum: self
+                .output
+                .datum()
+                .and_then(|x| match x {
+                    DatumOption::Hash(_) => None,
+                    DatumOption::Data(x) => Some(minicbor::to_vec(&x.0).unwrap()),
+                })
+                .map(hex::encode),
+            // the model requires the hash; callers only build this model for
+            // outputs that carry a reference script.
+            reference_script_hash: self
+                .output
+                .script_ref()
+                .map(|h| h.into_model())
+                .transpose()?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+        };
+
+        Ok(out)
+    }
+}
+
 pub struct UtxoInputModelBuilder<'a> {
     input: MultiEraInput<'a>,
     as_output: Option<MultiEraOutput<'a>>,

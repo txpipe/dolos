@@ -506,6 +506,10 @@ where
             get(routes::scripts::by_hash_cbor::<D>),
         )
         .route(
+            "/scripts/{script_hash}/utxos",
+            get(routes::scripts::by_hash_utxos::<D>),
+        )
+        .route(
             "/scripts/datum/{datum_hash}",
             get(routes::scripts::by_datum_hash::<D>),
         )
