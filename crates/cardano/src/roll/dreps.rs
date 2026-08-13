@@ -16,7 +16,7 @@ use crate::{
     pallas_extras::{self, stake_cred_to_drep},
     roll::BlockVisitor,
     DRepActivity, DRepAnchorUpdate, DRepDormancyRelease, DRepExpiryUpdate, DRepRegistration,
-    DRepUnRegistration, GovDormancyReset, PParamsSet,
+    DRepSeen, DRepUnRegistration, GovDormancyReset, PParamsSet,
 };
 
 fn cert_drep(cert: &MultiEraCert) -> Option<DRep> {
@@ -224,9 +224,15 @@ impl BlockVisitor for DRepStateVisitor {
             }
         }
 
+        if let Some(cert) = pallas_extras::cert_as_vote_delegation(cert) {
+            deltas.add_for_entity(DRepSeen::new(cert.drep, block.slot(), *order));
+        }
+
         let Some(drep) = cert_drep(cert) else {
             return Ok(());
         };
+
+        deltas.add_for_entity(DRepSeen::new(drep.clone(), block.slot(), *order));
 
         if let MultiEraCert::Conway(conway) = &cert {
             match conway.deref().deref() {
