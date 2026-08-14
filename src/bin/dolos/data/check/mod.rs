@@ -142,15 +142,20 @@ pub fn run(
         let started = Instant::now();
 
         let found = match check {
-            CheckKind::Cursors => cursors::run(&stores)?,
-            CheckKind::ArchiveContinuity => archive::run(&stores, &progress)?,
-            CheckKind::AccountEpochs => accounts::run(&stores, &progress)?,
-            CheckKind::EpochLog => epoch_log::run(&stores)?,
-            CheckKind::Totals => totals::run(&stores, &genesis, &progress)?,
+            CheckKind::Cursors => cursors::run(&stores),
+            CheckKind::ArchiveContinuity => archive::run(&stores, &progress),
+            CheckKind::AccountEpochs => accounts::run(&stores, &progress),
+            CheckKind::EpochLog => epoch_log::run(&stores),
+            CheckKind::Totals => totals::run(&stores, &genesis, &progress),
         };
 
         let elapsed = started.elapsed();
+
+        // Before `?`, so a check that fails outright does not leave its
+        // spinner running underneath the error report.
         progress.finish_and_clear();
+
+        let found = found?;
 
         for issue in &found {
             eprintln!("{issue}");
