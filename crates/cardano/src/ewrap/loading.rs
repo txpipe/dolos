@@ -193,8 +193,11 @@ impl BoundaryWork {
 
     /// Accumulate one account's contribution to the boundary stake
     /// distributions, reading the `snapshot_epoch` (live) position of its
-    /// `EpochValue`s. The delegated weight is the era-correct stake total
-    /// plus the account's share of the snapshot proposal deposits. The
+    /// `EpochValue`s. The delegated weight is the era-correct stake total,
+    /// plus `boundary_reward` — the reward this same EWRAP pass is assigning
+    /// to the account, which lands in `live` before the rotation and so is
+    /// inside the snapshot even though the copy we hold predates it — plus
+    /// the account's share of the snapshot proposal deposits. The
     /// DRep leg skips delegations to targets not registered as of the
     /// snapshot; `AlwaysAbstain` / `AlwaysNoConfidence` accumulate under
     /// their own keys. The pool leg feeds both the per-pool map and the
@@ -203,6 +206,7 @@ impl BoundaryWork {
         &self,
         snapshot_epoch: Epoch,
         account: &AccountState,
+        boundary_reward: u64,
         drep_distr: &mut BTreeMap<DRep, u64>,
         pool_distr: &mut BTreeMap<PoolHash, u64>,
         pool_total: &mut u64,
@@ -217,7 +221,7 @@ impl BoundaryWork {
             .copied()
             .unwrap_or_default();
 
-        let weight = stake.total_for_era(self.active_protocol) + deposits;
+        let weight = stake.total_for_era(self.active_protocol) + boundary_reward + deposits;
 
         if weight == 0 {
             return;
@@ -304,13 +308,29 @@ impl BoundaryWork {
                 // values with rewards already applied.
                 // TODO: move retires to ESTART (after the snapshot has been taken)
                 // and drop this ordering hack. (#1037)
+                let rewards_before = visitor_rewards.deltas.len();
                 visitor_rewards.visit_account(self, &account_id, &account)?;
                 visitor_drops.visit_account(self, &account_id, &account)?;
 
                 if let Some(epoch) = snapshot_epoch {
+                    // The snapshot is post-reward — that is what the comment
+                    // above means by "rewards update the live value before
+                    // the snapshot". The visitor expresses the update as a
+                    // delta instead of mutating `account`, so the copy we
+                    // hold still predates it; take the assigned amount off
+                    // the delta it just emitted.
+                    let boundary_reward: u64 = visitor_rewards.deltas[rewards_before..]
+                        .iter()
+                        .filter_map(|delta| match delta {
+                            crate::CardanoDelta::AssignRewards(x) => Some(x.reward),
+                            _ => None,
+                        })
+                        .sum();
+
                     self.accumulate_gov_distr(
                         epoch,
                         &account,
+                        boundary_reward,
                         &mut drep_distr,
                         &mut pool_distr,
                         &mut pool_total,
@@ -996,6 +1016,20 @@ mod tests {
                 .unwrap();
         }
 
+        // a pending reward for bob, which this same EWRAP pass assigns: it
+        // lands in `live` before the rotation, so the snapshot includes it
+        // even though the account copy the accumulation reads predates it
+        let bob_reward = crate::PendingRewardState {
+            credential: bob.credential.clone(),
+            is_spendable: true,
+            as_leader: vec![],
+            as_delegator: vec![(pool_a(), 11)],
+        };
+
+        writer
+            .write_entity_typed(&credential_to_key(&bob.credential), &bob_reward)
+            .unwrap();
+
         // registered before the boundary; power seeded with the deposit,
         // to be overwritten by the accumulated stake
         let registered = drep_row(reg_drep(), Some(boundary_slot - 10), None, 500);
@@ -1115,12 +1149,13 @@ mod tests {
 
         // alice: 100 snapshot stake + 40 + 7 proposal deposits (the second
         // submitted during the closing epoch, still inside the snapshot);
-        // carol's delegation targets an unregistered drep and stays out;
-        // bob tallies under the abstain key
-        let expected_dreps = BTreeMap::from([(reg_drep(), 147u64), (DRep::Abstain, 50u64)]);
+        // bob: 50 + the 11 reward this pass assigns him, under the abstain
+        // key; carol's delegation targets an unregistered drep and stays out
+        let expected_dreps = BTreeMap::from([(reg_drep(), 147u64), (DRep::Abstain, 61u64)]);
         assert_eq!(distr.drep_distr, expected_dreps);
 
-        // the pool leg counts alice and carol regardless of drep status
+        // the pool leg counts alice and carol regardless of drep status;
+        // bob has no pool, so his reward shows up only on the drep leg
         assert_eq!(distr.pool_distr, BTreeMap::from([(pool_a(), 217u64)]));
         assert_eq!(distr.pool_total, 217);
 
