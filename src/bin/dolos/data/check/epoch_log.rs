@@ -87,9 +87,8 @@ pub fn check_epoch_log<E: std::fmt::Display>(
                 ));
             }
 
-            // Total supply is invariant across a boundary — ESTART only moves
-            // value between pots. A hand-off that does not conserve it means
-            // one of the two snapshots is not what the ledger produced.
+            // A hand-off that does not conserve supply means one of the two
+            // snapshots is not what the ledger produced.
             let expected = previous.initial_pots.max_supply();
 
             if !snapshot.initial_pots.is_consistent(expected) {
