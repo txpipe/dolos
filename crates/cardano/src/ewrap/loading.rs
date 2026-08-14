@@ -128,27 +128,36 @@ impl BoundaryWork {
 
     /// The epoch whose end-of-epoch account snapshot the stake-distribution
     /// accumulation reads, or `None` when the accumulation doesn't run
-    /// (governance inactive, or the closing epoch has no previous
-    /// boundary).
+    /// (governance inactive).
     ///
-    /// EWRAP runs before ESTART's rotation, so for an account in lockstep
-    /// (`EpochValue` at the closing epoch) `snapshot_at` of this epoch is
-    /// the `mark` position — the value frozen at the previous boundary's
-    /// rotation, which already includes that boundary's post-enactment
-    /// effects. This is the pulser-snapshot-equivalent read; the timing
-    /// assumption is pinned by `mark_position_is_the_boundary_snapshot`.
+    /// The closing epoch itself. EWRAP runs before ESTART's rotation, so for
+    /// an account in lockstep (`EpochValue` at the closing epoch)
+    /// `snapshot_at` of this epoch is the `live` position — the end-of-epoch
+    /// value that the rotation about to run freezes into `mark`. That is the
+    /// snapshot governing the epoch now opening, and it is the alignment
+    /// db-sync publishes: db-sync writes `drep_distr` for epoch N at the
+    /// boundary *into* N, so the boundary closing epoch n owes the row for
+    /// n + 1.
+    ///
+    /// Reading one rotation further back (`n - 1`, the `mark` position) was
+    /// the original pin; a preview replay measured it a full epoch stale
+    /// against db-sync and the position moved forward (`org/founder`,
+    /// 2026-08-14). The timing assumption is pinned by
+    /// `live_position_is_the_boundary_snapshot`.
     fn distr_snapshot_epoch(&self) -> Option<Epoch> {
         self.gov_active_since?;
 
-        self.ending_state.number.checked_sub(1)
+        Some(self.ending_state.number)
     }
 
     /// Build the proposal-deposit share of the boundary snapshot: deposits
-    /// of the still-live proposals submitted before the closing epoch,
-    /// summed per return credential — the pulser's `proposalDeposits`
-    /// field. Rows missing `proposed_in`, the deposit, or the return
-    /// credential predate the tracking fields and cannot be attributed;
-    /// they are excluded (the accepted design-§6 degradation).
+    /// of the still-live proposals submitted no later than the closing
+    /// epoch, summed per return credential — the pulser's `proposalDeposits`
+    /// field. The snapshot is the end-of-closing-epoch position, so a
+    /// proposal submitted *during* that epoch has its deposit locked in it.
+    /// Rows missing `proposed_in`, the deposit, or the return credential
+    /// predate the tracking fields and cannot be attributed; they are
+    /// excluded (the accepted design-§6 degradation).
     fn load_proposal_deposits<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
@@ -161,7 +170,7 @@ impl BoundaryWork {
 
             let in_snapshot = proposal
                 .proposed_in
-                .is_some_and(|epoch| epoch < self.ending_state.number);
+                .is_some_and(|epoch| epoch <= self.ending_state.number);
 
             if !in_snapshot {
                 continue;
@@ -183,7 +192,7 @@ impl BoundaryWork {
     }
 
     /// Accumulate one account's contribution to the boundary stake
-    /// distributions, reading the `snapshot_epoch` (mark) position of its
+    /// distributions, reading the `snapshot_epoch` (live) position of its
     /// `EpochValue`s. The delegated weight is the era-correct stake total
     /// plus the account's share of the snapshot proposal deposits. The
     /// DRep leg skips delegations to targets not registered as of the
@@ -458,12 +467,12 @@ impl BoundaryWork {
         None
     }
 
-    /// Whether `drep` was registered as of the previous epoch boundary —
-    /// the boundary the distribution snapshot corresponds to. Events at or
-    /// after `boundary_slot` happened during the closing epoch and postdate
-    /// the snapshot: a DRep unregistered mid-epoch still counts (the
-    /// Haskell snapshot predates the unregistration), one registered
-    /// mid-epoch doesn't yet.
+    /// Whether `drep` was registered as of the boundary the distribution
+    /// snapshot corresponds to — the one closing this epoch. Events at or
+    /// after `boundary_slot` happen in the epoch now opening and postdate the
+    /// snapshot; everything that happened during the closing epoch is in it,
+    /// so a DRep registered mid-epoch counts and one unregistered mid-epoch
+    /// does not.
     fn is_drep_registered_as_of(drep: &DRepState, boundary_slot: BlockSlot) -> bool {
         let registered = drep.registered_at.filter(|(slot, _)| *slot < boundary_slot);
         let unregistered = drep
@@ -478,7 +487,7 @@ impl BoundaryWork {
     }
 
     pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number);
+        let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number + 1);
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
@@ -667,9 +676,8 @@ impl BoundaryWork {
 
     /// Emit the boundary `DRepPowerUpdate` for one DRep: registered DReps
     /// get the stake the accumulation attributed to them (zero when absent
-    /// from the distribution — including DReps registered during the
-    /// closing epoch, which postdate the snapshot). No-op writes are
-    /// elided.
+    /// from the distribution — including DReps registered after the
+    /// boundary, which postdate the snapshot). No-op writes are elided.
     fn emit_drep_power_update(
         &mut self,
         distr: &BTreeMap<DRep, u64>,
@@ -793,15 +801,21 @@ mod tests {
     /// Pins the rotation-timing assumption behind the distribution snapshot
     /// read: EWRAP runs before ESTART's rotation (ordering pinned by
     /// `epoch_boundary_emits_ewrap_then_estart` in `work.rs`), so during
-    /// EWRAP closing epoch n+1 the account `EpochValue`s still sit at
-    /// live-epoch n+1 and the `mark` position holds the value frozen at the
-    /// n/n+1 rotation — already including EWRAP(n)'s post-enactment effects
-    /// (applied to `live` before that rotation) and excluding every epoch-n+1
-    /// mutation. `snapshot_at(n)`, the read the accumulation performs, must
-    /// resolve to exactly that `mark` value; a boundary reordering that
-    /// rotated first would desynchronize the two and break this test.
+    /// EWRAP closing epoch n the account `EpochValue`s still sit at live-epoch
+    /// n and the `live` position holds the end-of-epoch-n value — every
+    /// epoch-n mutation included, and it is what the rotation about to run
+    /// freezes into `mark`. `snapshot_at(n)`, the read the accumulation
+    /// performs, must resolve to exactly that `live` value: it is the snapshot
+    /// that governs epoch n + 1, which is the epoch db-sync labels the
+    /// resulting `drep_distr` row with. A boundary reordering that rotated
+    /// first would desynchronize the two and break this test.
+    ///
+    /// The `mark` position — one rotation back, governing epoch n rather than
+    /// n + 1 — was the original pin, measured a full epoch stale against
+    /// db-sync on a preview replay (`org/founder`, 2026-08-14). Both positions
+    /// are asserted here so the distinction stays legible.
     #[test]
-    fn mark_position_is_the_boundary_snapshot() {
+    fn live_position_is_the_boundary_snapshot() {
         let credential = StakeCredential::AddrKeyhash([1u8; 28].into());
         let key = credential_to_key(&credential);
 
@@ -832,15 +846,21 @@ mod tests {
 
         let stake = &account.as_ref().unwrap().stake;
 
-        // the EWRAP(n+1) read: end-of-n snapshot == the mark position ==
-        // the post-enactment value at the n/n+1 rotation
+        // the EWRAP(n+1) read: `snapshot_at(n+1)` is the live position, the
+        // end-of-epoch-n+1 value — this is the distribution that governs
+        // epoch n+2, the row db-sync labels n+2
         assert!(stake.is_at_epoch(6));
+        assert_eq!(stake.snapshot_at(6), stake.live());
+        assert_eq!(stake.snapshot_at(6).unwrap().total(), 200);
+
+        // one rotation back is the mark position — the end-of-epoch-n value,
+        // governing epoch n+1. Reading it here is what made the distribution
+        // a full epoch stale against db-sync.
         assert_eq!(stake.snapshot_at(5), stake.mark());
         assert_eq!(stake.snapshot_at(5).unwrap().total(), 125);
-        assert_eq!(stake.unwrap_live().total(), 200);
 
-        // after the n+1/n+2 rotation — which EWRAP(n+1) must precede — the
-        // mark position moves on to the epoch-n+1 value
+        // after the n+1/n+2 rotation — which EWRAP(n+1) must precede — what
+        // this pass read as `live` is exactly what lands in `mark`
         AccountTransition::new(key, 7).apply(&mut account);
         let stake = &account.as_ref().unwrap().stake;
         assert_eq!(stake.mark().unwrap().total(), 200);
@@ -867,24 +887,27 @@ mod tests {
 
     fn snapshot_account(
         byte: u8,
-        mark_utxo: u64,
+        snapshot_utxo: u64,
         drep: Option<DRep>,
         pool: Option<crate::PoolHash>,
     ) -> crate::AccountState {
         let credential = StakeCredential::AddrKeyhash([byte; 28].into());
 
-        // live values differ from mark so a wrong-position read shows up
+        // The accumulation reads the live position — the end-of-closing-epoch
+        // value. `mark` carries a different value and no delegations at all,
+        // so a read that slipped one rotation back shows up as a wrong total
+        // and an empty distribution rather than as a near-miss.
         let live_stake = Stake {
-            utxo_sum: mark_utxo * 10,
+            utxo_sum: snapshot_utxo,
             ..Default::default()
         };
         let mark_stake = Stake {
-            utxo_sum: mark_utxo,
+            utxo_sum: snapshot_utxo * 10,
             ..Default::default()
         };
 
-        let mark_drep = drep.map_or(DRepDelegation::NotDelegated, DRepDelegation::Delegated);
-        let mark_pool = pool.map_or(PoolDelegation::NotDelegated, PoolDelegation::Pool);
+        let live_drep = drep.map_or(DRepDelegation::NotDelegated, DRepDelegation::Delegated);
+        let live_pool = pool.map_or(PoolDelegation::NotDelegated, PoolDelegation::Pool);
 
         crate::AccountState {
             registered_at: Some(0),
@@ -898,17 +921,17 @@ mod tests {
             ),
             pool: EpochValue::from_parts(
                 CLOSING_EPOCH,
-                Some(PoolDelegation::NotDelegated),
+                Some(live_pool),
                 None,
-                Some(mark_pool),
+                Some(PoolDelegation::NotDelegated),
                 None,
                 None,
             ),
             drep: EpochValue::from_parts(
                 CLOSING_EPOCH,
-                Some(DRepDelegation::NotDelegated),
+                Some(live_drep),
                 None,
-                Some(mark_drep),
+                Some(DRepDelegation::NotDelegated),
                 None,
                 None,
             ),
@@ -949,14 +972,16 @@ mod tests {
         epoch.number = CLOSING_EPOCH;
 
         let chain = load_era_summary::<ToyDomain>(state).unwrap();
-        let boundary_slot = chain.epoch_start(CLOSING_EPOCH);
+        // the snapshot boundary is the one closing this epoch, so the
+        // registration cutoff sits at the *start of the next* epoch
+        let boundary_slot = chain.epoch_start(CLOSING_EPOCH + 1);
 
         let writer = state.start_writer().unwrap();
         writer
             .write_entity_typed(&EpochState::singleton_key(), &epoch)
             .unwrap();
 
-        // alice: 100 mark stake + 40 proposal deposit, delegated to the
+        // alice: 100 snapshot stake + 40 proposal deposit, delegated to the
         // registered drep and to pool_a
         let alice = snapshot_account(0xa1, 100, Some(reg_drep()), Some(pool_a()));
         // bob: 50, delegated to AlwaysAbstain, no pool
@@ -981,7 +1006,8 @@ mod tests {
             Some(boundary_slot - 5),
             0,
         );
-        // registered during the closing epoch — postdates the snapshot
+        // registered after the boundary, i.e. in the epoch now opening —
+        // postdates the snapshot
         let fresh = drep_row(fresh_drep(), Some(boundary_slot), None, 500);
 
         for drep in [&registered, &unregistered, &fresh] {
@@ -1011,8 +1037,24 @@ mod tests {
             spo_votes: Default::default(),
         };
 
+        // a second live proposal, submitted *during* the closing epoch: the
+        // snapshot is the end-of-closing-epoch position, so its deposit is
+        // locked in it too
+        let same_epoch_proposal = ProposalState {
+            tx: [8u8; 32].into(),
+            deposit: Some(7),
+            proposed_in: Some(CLOSING_EPOCH),
+            ..proposal.clone()
+        };
+
         writer
             .write_entity_typed(&EntityKey::from(b"proposal-1".to_vec()), &proposal)
+            .unwrap();
+        writer
+            .write_entity_typed(
+                &EntityKey::from(b"proposal-2".to_vec()),
+                &same_epoch_proposal,
+            )
             .unwrap();
 
         writer.commit().unwrap();
@@ -1054,7 +1096,7 @@ mod tests {
     }
 
     /// End-to-end shard pass over a seeded store: the accumulated
-    /// distributions read the mark position, include proposal deposits in
+    /// distributions read the live position, include proposal deposits in
     /// the delegated weight (done criterion 3), track the abstain
     /// pseudo-DRep separately, skip delegations to DReps outside the
     /// snapshot's registered set, survive shard replays unchanged (done
@@ -1071,15 +1113,16 @@ mod tests {
         let distr = read_distr(&domain);
         assert!(distr.is_complete_for(CLOSING_EPOCH));
 
-        // alice: 100 mark stake + 40 proposal deposit; carol's delegation
-        // targets an unregistered drep and stays out; bob tallies under
-        // the abstain key
-        let expected_dreps = BTreeMap::from([(reg_drep(), 140u64), (DRep::Abstain, 50u64)]);
+        // alice: 100 snapshot stake + 40 + 7 proposal deposits (the second
+        // submitted during the closing epoch, still inside the snapshot);
+        // carol's delegation targets an unregistered drep and stays out;
+        // bob tallies under the abstain key
+        let expected_dreps = BTreeMap::from([(reg_drep(), 147u64), (DRep::Abstain, 50u64)]);
         assert_eq!(distr.drep_distr, expected_dreps);
 
         // the pool leg counts alice and carol regardless of drep status
-        assert_eq!(distr.pool_distr, BTreeMap::from([(pool_a(), 210u64)]));
-        assert_eq!(distr.pool_total, 210);
+        assert_eq!(distr.pool_distr, BTreeMap::from([(pool_a(), 217u64)]));
+        assert_eq!(distr.pool_total, 217);
 
         // a crash-resume replay of every shard leaves the accumulator
         // untouched
@@ -1090,15 +1133,15 @@ mod tests {
 
         // finalize writes the accumulated powers: the registered drep gets
         // its delegated stake (replacing the deposit seed), the drep
-        // registered mid-epoch is zeroed (absent from the snapshot), the
-        // unregistered one is left alone
+        // registered after the boundary is zeroed (absent from the
+        // snapshot), the unregistered one is left alone
         let mut boundary =
             BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
         boundary
             .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
             .unwrap();
 
-        assert_eq!(read_drep_power(&domain, &reg_drep()), 140);
+        assert_eq!(read_drep_power(&domain, &reg_drep()), 147);
         assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
         assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
     }
