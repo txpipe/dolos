@@ -205,16 +205,14 @@ impl Referents {
 /// `PoolDelegatorRetire` records for exactly this case, so an absence it
 /// accounts for is legitimate history, not a dangling pointer.
 ///
-/// **Vote delegations are deliberately not swept.** The plan asked for the
-/// symmetric rule — every `DRepDelegation::Delegated` names a `DRepState` —
-/// and a preprod store disproves it: two accounts there delegate to DRep
-/// credentials that have no row, and the ledger permits exactly that. A
-/// `VoteDeleg` certificate naming an unregistered DRep is valid; the
-/// delegation simply carries no voting power until (and unless) that DRep
-/// registers, which is why `DRepExpiryUpdate` carries an `only_if_registered`
-/// branch for a missing entity rather than treating it as impossible. Whether
-/// there is a narrower rule worth asserting here is a ledger question and is
-/// escalated on the plan, not guessed at as a tolerance.
+/// **Vote delegations are deliberately not swept.** The symmetric rule — every
+/// `DRepDelegation::Delegated` names a `DRepState` — is disproved by a preprod
+/// store: two accounts there delegate to DRep credentials that have no row, and
+/// the ledger permits exactly that. A `VoteDeleg` certificate naming an
+/// unregistered DRep is valid; the delegation simply carries no voting power
+/// until (and unless) that DRep registers, which is why `DRepExpiryUpdate`
+/// carries an `only_if_registered` branch for a missing entity rather than
+/// treating it as impossible.
 fn dangling_referents(account: &AccountState, referents: &Referents) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -245,8 +243,7 @@ fn dangling_referents(account: &AccountState, referents: &Referents) -> Vec<Stri
 }
 
 /// One pass over every account: count the registered ones and check their
-/// delegations. Both halves of the plan's "full-scan pair" that need the
-/// account namespace, so they share the walk.
+/// delegations. Both need the account namespace, so they share the walk.
 pub fn scan_accounts<E: std::fmt::Display>(
     accounts: impl Iterator<Item = Result<(EntityKey, AccountState), E>>,
     referents: &Referents,
