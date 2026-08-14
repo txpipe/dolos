@@ -82,11 +82,16 @@ fn check_slot_increase(slot: BlockSlot, tip: &ChainPoint) -> Result<(), Consensu
 /// Check that a block at `slot` whose header declares `prev_hash` as its
 /// parent validly extends the chain at `tip`.
 ///
-/// Single source of truth for both enforcement layers: the pull stage
+/// Single source of truth for the enforcement layers: the pull stage
 /// ([`ChainFragment`], per-header vs. the in-memory tip, failure → peer
-/// reconnect) and the apply stage (`WorkBatch::check_continuity`,
-/// per-batch vs. the persisted cursor, failure → abort before any commit).
-pub(crate) fn check_extension(
+/// reconnect), the apply stage (`WorkBatch::check_continuity`, per-batch vs.
+/// the persisted cursor, failure → abort before any commit), and the at-rest
+/// audit (`dolos data check`, per-block vs. the previous block in the
+/// archive, failure → a reported issue). The audit reads the same rules
+/// rather than restating them, so era history the write path tolerates —
+/// above all a Byron end-of-epoch boundary block sharing its slot with the
+/// block that follows it — is tolerated identically on both sides.
+pub fn check_extension(
     tip: &ChainPoint,
     slot: BlockSlot,
     prev_hash: Option<BlockHash>,

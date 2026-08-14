@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 
 mod cardinality_stats;
+mod check;
 mod clear_state;
 mod compute_nonce;
 mod compute_spdd;
@@ -31,6 +32,8 @@ pub enum OutputFormat {
 pub enum Command {
     /// shows a summary of managed data
     Summary(summary::Args),
+    /// checks the consistency of the managed data
+    Check(check::Args),
     /// dumps data from the WAL
     DumpWal(dump_wal::Args),
     /// dumps data from the state
@@ -80,6 +83,7 @@ pub fn run(
 ) -> miette::Result<()> {
     match &args.command {
         Command::Summary(x) => summary::run(config, x)?,
+        Command::Check(x) => check::run(config, x, feedback)?,
         Command::DumpWal(x) => dump_wal::run(config, x)?,
         Command::DumpState(x) => dump_state::run(config, x)?,
         Command::DumpEntity(x) => dump_entity::run(config, x)?,
