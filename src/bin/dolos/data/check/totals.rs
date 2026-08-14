@@ -68,19 +68,26 @@ const MAX_REPORTED_REFERENTS: usize = 20;
 /// The delta carries only the components `RollingStats` records exactly; the
 /// boundary-only fields stay neutral, which is what they are worth mid-epoch.
 /// See the module docs for which pots that leaves comparable.
-pub fn live_pots(epoch: &EpochState) -> Pots {
+///
+/// `None` means the pots cannot be placed at the tip at all, and the caller
+/// must report that rather than compare against a figure it knows is stale.
+pub fn live_pots(epoch: &EpochState) -> Option<Pots> {
+    // `rolling.live` is created lazily by the first block of an epoch, so its
+    // absence is the healthy state of a store parked on a boundary: nothing
+    // has moved since ESTART wrote `initial_pots`, which makes those pots
+    // exact rather than stale.
     let Some(rolling) = epoch.rolling.live() else {
-        return epoch.initial_pots.clone();
+        return Some(epoch.initial_pots.clone());
     };
 
-    // The protocol version chooses the Byron or the Shelley delta path, and
-    // the Byron one forces treasury, fees, rewards and both deposit counts to
-    // zero. Guessing it from an absent pparams set would therefore not be a
-    // conservative default but a different set of pots — so an epoch with no
-    // live pparams is left where it is rather than rolled forward wrongly.
-    let Some(pparams) = epoch.pparams.live() else {
-        return epoch.initial_pots.clone();
-    };
+    // Past that point blocks have moved the pots, and the protocol version
+    // chooses the Byron or the Shelley delta path — the Byron one forces
+    // treasury, fees, rewards and both deposit counts to zero. Guessing it
+    // from an absent pparams set would not be a conservative default but a
+    // different set of pots, and comparing the un-rolled epoch-start pots
+    // against a live scan would report deltas the node applied correctly as
+    // corruption. Neither is an answer; the caller reports the gap instead.
+    let pparams = epoch.pparams.live()?;
 
     let protocol = pparams.protocol_major_or_default();
 
@@ -100,11 +107,11 @@ pub fn live_pots(epoch: &EpochState) -> Pots {
         ..PotDelta::neutral(protocol, protocol)
     };
 
-    apply_delta(
+    Some(apply_delta(
         epoch.initial_pots.clone(),
         &EpochIncentives::default(),
         &delta,
-    )
+    ))
 }
 
 /// What one pass over the state's entity namespaces recomputed.
@@ -406,11 +413,22 @@ pub fn run(
         }
     })?;
 
-    issues.extend(check_pots(
-        &live_pots(&epoch),
-        &found,
-        genesis.shelley.max_lovelace_supply,
-    ));
+    match live_pots(&epoch) {
+        Some(claimed) => issues.extend(check_pots(
+            &claimed,
+            &found,
+            genesis.shelley.max_lovelace_supply,
+        )),
+        None => issues.push(Issue::new(
+            CHECK,
+            format!(
+                "epoch {} has accumulated this epoch's deltas but carries no live protocol \
+                 parameters, so its pots cannot be placed at the tip; the pot comparison did not \
+                 run",
+                epoch.number,
+            ),
+        )),
+    }
 
     Ok(issues)
 }
@@ -594,7 +612,7 @@ mod tests {
             ..EpochState::default()
         };
 
-        let live = live_pots(&epoch);
+        let live = live_pots(&epoch).expect("rolled forward");
 
         assert_eq!(live.utxos, 800);
         assert_eq!(live.fees, 200);
@@ -602,11 +620,13 @@ mod tests {
         assert!(live.is_consistent(MAX_SUPPLY));
     }
 
-    /// An epoch with no live pparams cannot say which delta path applies, and
-    /// the Byron one would zero half the pots. Leaving the epoch-start pots
-    /// alone is the only answer that is not a different set of figures.
+    /// An epoch with deltas but no live pparams cannot say which delta path
+    /// applies, and the Byron one would zero half the pots. Comparing the
+    /// un-rolled epoch-start pots instead would report the blocks the node
+    /// applied correctly as a missing 700 lovelace, so the pots are reported
+    /// as unplaceable rather than compared.
     #[test]
-    fn an_epoch_without_pparams_is_not_rolled_forward() {
+    fn an_epoch_without_pparams_cannot_be_placed_at_the_tip() {
         let rolling = dolos_cardano::model::RollingStats {
             produced_utxos: 700,
             ..Default::default()
@@ -619,6 +639,21 @@ mod tests {
             ..EpochState::default()
         };
 
-        assert_eq!(live_pots(&epoch), epoch.initial_pots);
+        assert_eq!(live_pots(&epoch), None);
+    }
+
+    /// A store parked on a boundary has no live `RollingStats` yet — nothing
+    /// has moved since ESTART wrote `initial_pots`, so those pots are exact
+    /// and the comparison must still run.
+    #[test]
+    fn an_epoch_with_no_deltas_yet_compares_against_the_epoch_start_pots() {
+        let epoch = EpochState {
+            number: 42,
+            initial_pots: pots(1_000, 3),
+            pparams: EpochValue::with_live(42, shelley_pparams()),
+            ..EpochState::default()
+        };
+
+        assert_eq!(live_pots(&epoch), Some(epoch.initial_pots.clone()));
     }
 }

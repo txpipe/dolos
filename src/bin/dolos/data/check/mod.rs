@@ -263,7 +263,7 @@ mod tests {
         let (found, referent_issues) = totals::recompute(domain.state(), |_, _| {}).unwrap();
         issues.extend(referent_issues);
         issues.extend(totals::check_pots(
-            &totals::live_pots(&epoch),
+            &totals::live_pots(&epoch).expect("harness epoch can be placed at the tip"),
             &found,
             domain.genesis().shelley.max_lovelace_supply,
         ));
