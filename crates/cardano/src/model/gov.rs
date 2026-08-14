@@ -31,7 +31,7 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::SingletonEntity;
+use super::{GovPurpose, SingletonEntity};
 
 /// Key of the single `GovState` entity inside the `"gov"` namespace.
 pub const GOV_STATE_KEY: &[u8] = b"0";
@@ -98,6 +98,19 @@ pub struct GovRoots {
 
     #[n(3)]
     pub constitution: Option<GovActionId>,
+}
+
+impl GovRoots {
+    /// The root slot of a single lineage tree, for read-modify-write by the
+    /// enactment deltas.
+    pub fn root_mut(&mut self, purpose: GovPurpose) -> &mut Option<GovActionId> {
+        match purpose {
+            GovPurpose::PParamUpdate => &mut self.pparam_update,
+            GovPurpose::HardFork => &mut self.hard_fork,
+            GovPurpose::Committee => &mut self.committee,
+            GovPurpose::Constitution => &mut self.constitution,
+        }
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -435,6 +448,193 @@ impl dolos_core::EntityDelta for CommitteeResign {
     }
 }
 
+/// The committee effect an enacted governance action carries.
+///
+/// Variant order is part of the WAL format (bincode positional encoding) —
+/// append only, never reorder.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CommitteeChange {
+    /// `NoConfidence` — the committee is dissolved outright.
+    NoConfidence,
+
+    /// `UpdateCommittee` — the surviving members are the current ones minus
+    /// `to_remove` plus `to_add`, under the new `threshold`.
+    Update {
+        to_remove: Vec<StakeCredential>,
+        to_add: Vec<(StakeCredential, Epoch)>,
+        threshold: RationalNumber,
+    },
+}
+
+/// A ratified committee action reached enactment. Rewrites
+/// `GovState.committee`; undo restores the pre-image wholesale, which also
+/// covers the `None` (no-confidence) pre-state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitteeUpdate {
+    pub(crate) change: CommitteeChange,
+
+    // undo
+    pub(crate) prev: Option<Committee>,
+}
+
+impl CommitteeUpdate {
+    pub fn no_confidence() -> Self {
+        Self {
+            change: CommitteeChange::NoConfidence,
+            prev: None,
+        }
+    }
+
+    pub fn update(
+        to_remove: Vec<StakeCredential>,
+        to_add: Vec<(StakeCredential, Epoch)>,
+        threshold: RationalNumber,
+    ) -> Self {
+        Self {
+            change: CommitteeChange::Update {
+                to_remove,
+                to_add,
+                threshold,
+            },
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for CommitteeUpdate {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        self.prev = state.committee.clone();
+
+        state.committee = match &self.change {
+            CommitteeChange::NoConfidence => None,
+            CommitteeChange::Update {
+                to_remove,
+                to_add,
+                threshold,
+            } => {
+                // An update enacted out of the no-confidence state starts from
+                // an empty member set, as in the Haskell ledger.
+                let mut members = state
+                    .committee
+                    .as_ref()
+                    .map(|committee| committee.members.clone())
+                    .unwrap_or_default();
+
+                for cold in to_remove {
+                    members.remove(cold);
+                }
+
+                for (cold, term) in to_add {
+                    members.insert(cold.clone(), *term);
+                }
+
+                Some(Committee {
+                    members,
+                    threshold: threshold.clone(),
+                })
+            }
+        };
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.committee = self.prev.clone();
+    }
+}
+
+/// A ratified `NewConstitution` action reached enactment. Replaces
+/// `GovState.constitution`; undo restores the pre-image.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConstitutionUpdate {
+    pub(crate) constitution: Constitution,
+
+    // undo
+    pub(crate) prev: Option<Constitution>,
+}
+
+impl ConstitutionUpdate {
+    pub fn new(constitution: Constitution) -> Self {
+        Self {
+            constitution,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for ConstitutionUpdate {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        self.prev = state.constitution.clone();
+        state.constitution = Some(self.constitution.clone());
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.constitution = self.prev.clone();
+    }
+}
+
+/// An enacted action becomes the new root of its purpose's lineage tree
+/// (`prevGovActionIds` in the Haskell ledger). Emitted alongside whatever
+/// state effect the action carries, for every action that has a purpose —
+/// `TreasuryWithdrawal` and `Info` have none and emit nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovRootsUpdate {
+    pub(crate) purpose: GovPurpose,
+    pub(crate) action: GovActionId,
+
+    // undo
+    pub(crate) prev: Option<GovActionId>,
+}
+
+impl GovRootsUpdate {
+    pub fn new(purpose: GovPurpose, action: GovActionId) -> Self {
+        Self {
+            purpose,
+            action,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for GovRootsUpdate {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+        let root = state.prev_gov_action_ids.root_mut(self.purpose);
+
+        self.prev = root.replace(self.action.clone());
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        *state.prev_gov_action_ids.root_mut(self.purpose) = self.prev.clone();
+    }
+}
+
 /// Reset the dormant-epoch counter to zero. Emitted together with the
 /// per-DRep [`crate::DRepDormancyRelease`] fan-out when the first proposal
 /// after a dormant stretch shows up (research §3.3.1).
@@ -705,6 +905,45 @@ mod prop_tests {
         }
     }
 
+    prop_compose! {
+        fn any_committee_update()(
+            change in prop_oneof![
+                Just(CommitteeChange::NoConfidence),
+                (
+                    prop::collection::vec(root::any_stake_credential(), 0..3),
+                    prop::collection::vec(
+                        (root::any_stake_credential(), root::any_epoch()),
+                        0..3,
+                    ),
+                    root::any_rational(),
+                ).prop_map(|(to_remove, to_add, threshold)| CommitteeChange::Update {
+                    to_remove,
+                    to_add,
+                    threshold,
+                }),
+            ],
+        ) -> CommitteeUpdate {
+            CommitteeUpdate { change, prev: None }
+        }
+    }
+
+    prop_compose! {
+        fn any_constitution_update()(
+            constitution in any_constitution(),
+        ) -> ConstitutionUpdate {
+            ConstitutionUpdate::new(constitution)
+        }
+    }
+
+    prop_compose! {
+        fn any_gov_roots_update()(
+            purpose in crate::model::proposals::testing::any_gov_purpose(),
+            action in root::any_gov_action_id(),
+        ) -> GovRootsUpdate {
+            GovRootsUpdate::new(purpose, action)
+        }
+    }
+
     proptest! {
         #[test]
         fn entity_cbor_roundtrip(entity in any_gov_state()) {
@@ -774,6 +1013,176 @@ mod prop_tests {
         ) {
             root::assert_delta_serde_roundtrip(entity, delta);
         }
+
+        #[test]
+        fn committee_update_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_committee_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn committee_update_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_committee_update(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn constitution_update_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_constitution_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn constitution_update_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_constitution_update(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn gov_roots_update_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_gov_roots_update(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn gov_roots_update_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_gov_roots_update(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+    }
+
+    /// The member set an `UpdateCommittee` enacts is the current one minus
+    /// `to_remove` plus `to_add`, under the action's threshold — and undo puts
+    /// the previous committee back exactly.
+    #[test]
+    fn committee_update_edits_the_member_set() {
+        use dolos_core::EntityDelta as _;
+
+        let staying = StakeCredential::ScriptHash([1u8; 28].into());
+        let leaving = StakeCredential::ScriptHash([2u8; 28].into());
+        let joining = StakeCredential::AddrKeyhash([3u8; 28].into());
+
+        let before = Committee {
+            members: BTreeMap::from([(staying.clone(), 500), (leaving.clone(), 500)]),
+            threshold: RationalNumber {
+                numerator: 2,
+                denominator: 3,
+            },
+        };
+
+        let mut entity = Some(GovState {
+            committee: Some(before.clone()),
+            ..Default::default()
+        });
+
+        let mut delta = CommitteeUpdate::update(
+            vec![leaving.clone()],
+            vec![(joining.clone(), 620)],
+            RationalNumber {
+                numerator: 3,
+                denominator: 5,
+            },
+        );
+
+        delta.apply(&mut entity);
+
+        let committee = entity.as_ref().unwrap().committee.as_ref().unwrap();
+        assert_eq!(
+            committee.members,
+            BTreeMap::from([(staying, 500), (joining, 620)])
+        );
+        assert_eq!(
+            committee.threshold,
+            RationalNumber {
+                numerator: 3,
+                denominator: 5,
+            }
+        );
+
+        delta.undo(&mut entity);
+        assert_eq!(entity.unwrap().committee, Some(before));
+    }
+
+    /// `NoConfidence` dissolves the committee; a later `UpdateCommittee`
+    /// rebuilds it from an empty member set.
+    #[test]
+    fn no_confidence_dissolves_then_rebuilds() {
+        use dolos_core::EntityDelta as _;
+
+        let sitting = StakeCredential::ScriptHash([1u8; 28].into());
+        let fresh = StakeCredential::AddrKeyhash([2u8; 28].into());
+
+        let threshold = RationalNumber {
+            numerator: 2,
+            denominator: 3,
+        };
+
+        let mut entity = Some(GovState {
+            committee: Some(Committee {
+                members: BTreeMap::from([(sitting.clone(), 500)]),
+                threshold: threshold.clone(),
+            }),
+            ..Default::default()
+        });
+
+        let mut dissolve = CommitteeUpdate::no_confidence();
+        dissolve.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().committee, None);
+
+        let mut rebuild =
+            CommitteeUpdate::update(vec![], vec![(fresh.clone(), 700)], threshold.clone());
+        rebuild.apply(&mut entity);
+
+        assert_eq!(
+            entity.as_ref().unwrap().committee.as_ref().unwrap().members,
+            BTreeMap::from([(fresh, 700)])
+        );
+
+        rebuild.undo(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().committee, None);
+
+        dissolve.undo(&mut entity);
+        assert_eq!(
+            entity.unwrap().committee.unwrap().members,
+            BTreeMap::from([(sitting, 500)])
+        );
+    }
+
+    /// Each purpose writes its own root slot and leaves the others alone.
+    #[test]
+    fn gov_roots_update_targets_one_purpose() {
+        use dolos_core::EntityDelta as _;
+
+        let action = GovActionId {
+            transaction_id: [7u8; 32].into(),
+            action_index: 3,
+        };
+
+        let mut entity = Some(GovState::default());
+
+        let mut delta = GovRootsUpdate::new(GovPurpose::Constitution, action.clone());
+        delta.apply(&mut entity);
+
+        let roots = &entity.as_ref().unwrap().prev_gov_action_ids;
+        assert_eq!(roots.constitution, Some(action));
+        assert_eq!(roots.committee, None);
+        assert_eq!(roots.hard_fork, None);
+        assert_eq!(roots.pparam_update, None);
+
+        delta.undo(&mut entity);
+        assert_eq!(entity.unwrap().prev_gov_action_ids, GovRoots::default());
     }
 
     #[test]

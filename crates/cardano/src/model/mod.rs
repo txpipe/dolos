@@ -272,6 +272,9 @@ pub enum CardanoDelta {
     CommitteeAuth(Box<CommitteeAuth>),
     CommitteeResign(Box<CommitteeResign>),
     GovDormancyReset(Box<GovDormancyReset>),
+    CommitteeUpdate(Box<CommitteeUpdate>),
+    ConstitutionUpdate(Box<ConstitutionUpdate>),
+    GovRootsUpdate(Box<GovRootsUpdate>),
 }
 
 impl CardanoDelta {
@@ -366,6 +369,9 @@ delta_from!(GovGenesisInit);
 delta_from!(CommitteeAuth);
 delta_from!(CommitteeResign);
 delta_from!(GovDormancyReset);
+delta_from!(CommitteeUpdate);
+delta_from!(ConstitutionUpdate);
+delta_from!(GovRootsUpdate);
 
 #[allow(deprecated)]
 impl dolos_core::EntityDelta for CardanoDelta {
@@ -402,6 +408,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeAuth(x) => x.key(),
             Self::CommitteeResign(x) => x.key(),
             Self::GovDormancyReset(x) => x.key(),
+            Self::CommitteeUpdate(x) => x.key(),
+            Self::ConstitutionUpdate(x) => x.key(),
+            Self::GovRootsUpdate(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
             Self::PoolTransition(x) => x.key(),
@@ -461,6 +470,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeAuth(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeResign(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDormancyReset(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::CommitteeUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::ConstitutionUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovRootsUpdate(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::PoolTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -520,6 +532,9 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::CommitteeAuth(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeResign(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDormancyReset(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::CommitteeUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::ConstitutionUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovRootsUpdate(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::PoolTransition(x) => Self::downcast_undo(x.as_ref(), entity),

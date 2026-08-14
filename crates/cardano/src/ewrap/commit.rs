@@ -18,7 +18,8 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     ewrap::BoundaryWork, rupd::credential_to_key, AccountState, CardanoEntity, DRepState,
-    EpochState, FixedNamespace, PendingMirState, PendingRewardState, PoolState, ProposalState,
+    EpochState, FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState,
+    ProposalState,
 };
 
 impl BoundaryWork {
@@ -179,6 +180,11 @@ impl BoundaryWork {
         {
             self.ending_state = applied;
         }
+
+        // Gov isn't streamed by namespace; the enactment deltas on the
+        // governance singleton (committee, constitution, per-purpose lineage
+        // roots) go through the singleton path, as they do in ESTART's commit.
+        self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
         // Delete processed pending MIRs.
         debug!(
