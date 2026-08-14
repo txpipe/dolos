@@ -345,6 +345,12 @@ impl PParamsSet {
         self.values.iter().find(|value| value.kind() == kind)
     }
 
+    /// The values present in the set — for consumers that classify an
+    /// update's touched parameters (e.g. ratification threshold groups).
+    pub fn iter(&self) -> impl Iterator<Item = &PParamValue> {
+        self.values.iter()
+    }
+
     pub fn get_mut(&mut self, kind: PParamKind) -> Option<&mut PParamValue> {
         self.values.iter_mut().find(|value| value.kind() == kind)
     }

@@ -46,7 +46,7 @@ impl BoundaryWork {
         let gov = load_gov::<D>(state)?;
         let num_dormant_epochs = gov.num_dormant_epochs;
         let gov_active_since = gov.active_since;
-        let gov_distr = gov.distr;
+        let gov_distr = gov.distr.clone();
 
         Ok(BoundaryWork {
             ending_state,
@@ -62,6 +62,10 @@ impl BoundaryWork {
             num_dormant_epochs,
             gov_active_since,
             gov_distr,
+            gov,
+            pv10_migration: false,
+            ratify_dreps: Default::default(),
+            shadow_mismatches: 0,
             proposal_deposits: Default::default(),
             snapshot_registered_dreps: Default::default(),
             enacting_proposals: Default::default(),
@@ -246,6 +250,39 @@ impl BoundaryWork {
         }
     }
 
+    /// Whether this boundary enacts the hard fork into protocol major 10
+    /// — the one that carries the account-delegation repair migration
+    /// (research §5.5 step 9). Under shadow mode the hack-stamped
+    /// enactment is what marks the boundary.
+    fn detect_pv10_migration<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        let live_major = self
+            .ending_state
+            .pparams
+            .unwrap_live()
+            .protocol_major_or_default();
+
+        if live_major != 9 {
+            return Ok(());
+        }
+
+        let starting = self.starting_epoch_no();
+
+        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+
+        for record in proposals {
+            let (_, proposal) = record?;
+
+            if proposal.should_enact(starting)
+                && matches!(proposal.action, crate::ProposalAction::HardFork((10, _)))
+            {
+                self.pv10_migration = true;
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Load + compute for a per-shard run of the close half:
     ///   * reload the small classifications that drops.visit_account needs
     ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
@@ -268,6 +305,7 @@ impl BoundaryWork {
         // re-classifying them per shard is cheap.
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
+        boundary.detect_pv10_migration::<D>(state)?;
 
         if boundary.distr_snapshot_epoch().is_some() {
             boundary.load_proposal_deposits::<D>(state)?;
@@ -294,6 +332,7 @@ impl BoundaryWork {
         let mut drep_distr: BTreeMap<DRep, u64> = BTreeMap::new();
         let mut pool_distr: BTreeMap<PoolHash, u64> = BTreeMap::new();
         let mut pool_total: u64 = 0;
+        let mut migration_drops: Vec<crate::DRepDelegatorDrop> = Vec::new();
 
         for range in ranges {
             let accounts =
@@ -301,6 +340,27 @@ impl BoundaryWork {
 
             for record in accounts {
                 let (account_id, account) = record?;
+
+                // PV10 hard-fork migration (research §5.5 step 9): drop
+                // delegations pointing at DReps that are not registered
+                // at this boundary. Delegations to a DRep unregistering
+                // right now are already dropped by the drops visitor.
+                if self.pv10_migration {
+                    if let Some(drep) = account.delegated_drep_at(self.ending_state.number) {
+                        let dangling = matches!(drep, DRep::Key(_) | DRep::Script(_))
+                            && !self
+                                .snapshot_registered_dreps
+                                .contains(&drep_to_entity_key(drep))
+                            && !self.retiring_dreps.contains(drep);
+
+                        if dangling {
+                            migration_drops.push(crate::DRepDelegatorDrop::new(
+                                account_id.clone(),
+                                self.ending_state.number,
+                            ));
+                        }
+                    }
+                }
                 // HACK: rewards must apply before drops. Rewards update the live
                 // value before the snapshot; drops schedule refunds for after the
                 // snapshot. If reordered, the rewards would be overwritten by the
@@ -341,6 +401,10 @@ impl BoundaryWork {
 
         visitor_rewards.flush(self)?;
         visitor_drops.flush(self)?;
+
+        for drop in migration_drops {
+            self.add_delta(drop);
+        }
 
         // Emitted whenever the accumulation ran, even with empty maps — the
         // shard cursor must advance for the accumulator to report complete.
@@ -509,6 +573,13 @@ impl BoundaryWork {
     pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number + 1);
 
+        // The ratification snapshot sits one boundary back: the pulser
+        // ratified while closing epoch n was created when epoch n opened,
+        // so its registered set and expiries cut off at the start of the
+        // closing epoch.
+        let ratify_slot = self.chain_summary.epoch_start(self.ending_state.number);
+        let ratify_expiry_epoch = self.ending_state.number.saturating_sub(1);
+
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for record in dreps {
@@ -516,6 +587,23 @@ impl BoundaryWork {
 
             if Self::is_drep_registered_as_of(&drep, boundary_slot) {
                 self.snapshot_registered_dreps.insert(id);
+            }
+
+            if Self::is_drep_registered_as_of(&drep, ratify_slot) {
+                let credential = match &drep.identifier {
+                    DRep::Key(hash) => Some(StakeCredential::AddrKeyhash(*hash)),
+                    DRep::Script(hash) => Some(StakeCredential::ScriptHash(*hash)),
+                    DRep::Abstain | DRep::NoConfidence => None,
+                };
+
+                if let Some(credential) = credential {
+                    let expiry = drep
+                        .expiry
+                        .as_ref()
+                        .and_then(|expiry| expiry.as_of(ratify_expiry_epoch));
+
+                    self.ratify_dreps.insert(credential, expiry);
+                }
             }
 
             if self.should_retire_drep(&drep) {
@@ -715,6 +803,284 @@ impl BoundaryWork {
         }
     }
 
+    /// Slot cutoff of the ratification snapshot: the last slot before the
+    /// boundary that opened the closing epoch. Votes, committee
+    /// authorizations, and DRep registrations after it belong to the
+    /// closing epoch and tally at the *next* boundary.
+    fn ratify_cutoff_slot(&self) -> BlockSlot {
+        self.chain_summary
+            .epoch_start(self.ending_state.number)
+            .saturating_sub(1)
+    }
+
+    /// Assemble the pure ratification input for the boundary closing this
+    /// epoch, or `None` when the engine cannot run: governance inactive,
+    /// or the previous boundary's distributions missing/incomplete (the
+    /// degraded case warns and self-heals one boundary later).
+    fn build_ratify_input<D: Domain>(
+        &self,
+        state: &D::State,
+    ) -> Result<Option<super::ratify::RatifyInput>, ChainError> {
+        use super::ratify;
+
+        let closing = self.ending_state.number;
+
+        let gov_active = self.gov_active_since.is_some_and(|since| since <= closing);
+
+        if !gov_active || closing == 0 {
+            return Ok(None);
+        }
+
+        let Some(prev_distr) = self
+            .gov
+            .prev_distr
+            .as_ref()
+            .filter(|distr| distr.is_complete_for(closing - 1))
+        else {
+            tracing::warn!(
+                epoch = closing,
+                "previous boundary's stake distributions missing or incomplete; \
+                 skipping shadow ratification"
+            );
+            return Ok(None);
+        };
+
+        let cutoff = self.ratify_cutoff_slot();
+
+        // committee authorizations as of the snapshot boundary
+        let committee_auths = self
+            .gov
+            .committee_auths
+            .keys()
+            .filter_map(|cold| {
+                self.gov
+                    .committee_auth_as_of(cold, cutoff)
+                    .map(|auth| (cold.clone(), auth.clone()))
+            })
+            .collect();
+
+        // the snapshot proposal set: still in the live forest, submitted
+        // before the closing epoch, with votes resolved as of the boundary
+        let mut proposals = Vec::new();
+
+        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+
+        for record in records {
+            let (key, proposal) = record?;
+
+            if !proposal.is_unresolved_at_close(closing) {
+                continue;
+            }
+
+            let in_snapshot = proposal
+                .proposed_in
+                .is_some_and(|proposed| proposed < closing);
+
+            if !in_snapshot {
+                continue;
+            }
+
+            if matches!(proposal.action, crate::ProposalAction::Other) {
+                tracing::warn!(
+                    proposal = %key,
+                    "legacy proposal without tracked action content; \
+                     excluded from shadow ratification"
+                );
+                continue;
+            }
+
+            let Some(expires_after) = proposal.max_epoch else {
+                tracing::warn!(
+                    proposal = %key,
+                    "proposal without expiry bound; excluded from shadow ratification"
+                );
+                continue;
+            };
+
+            proposals.push(ratify::RatifyProposal {
+                key,
+                id: proposal.gov_action_id(),
+                action: proposal.action.clone(),
+                parent: proposal.parent.clone(),
+                expires_after,
+                order: (proposal.slot, proposal.tx, proposal.idx),
+                cc_votes: proposal.cc_votes_as_of(cutoff),
+                drep_votes: proposal.drep_votes_as_of(cutoff),
+                spo_votes: proposal.spo_votes_as_of(cutoff),
+            });
+        }
+
+        // per-pool default votes from the reward account's DRep
+        // delegation, read at the snapshot position; only the non-No
+        // defaults are recorded
+        let mut pool_default_votes = BTreeMap::new();
+
+        for pool in prev_distr.pool_distr.keys() {
+            let pool_state: Option<PoolState> =
+                state.read_entity_typed(PoolState::NS, &EntityKey::from(pool.as_slice()))?;
+
+            let Some(pool_state) = pool_state else {
+                continue;
+            };
+
+            let account = match self.load_pool_reward_account::<D>(state, &pool_state) {
+                Ok(account) => account,
+                Err(error) => {
+                    tracing::warn!(
+                        pool = %hex::encode(pool),
+                        %error,
+                        "unreadable pool reward account; default vote falls back to No"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(account) = account else {
+                continue;
+            };
+
+            let default = match account.delegated_drep_at(closing - 1) {
+                Some(DRep::Abstain) => ratify::DefaultVote::Abstain,
+                Some(DRep::NoConfidence) => ratify::DefaultVote::NoConfidence,
+                _ => continue,
+            };
+
+            pool_default_votes.insert(*pool, default);
+        }
+
+        Ok(Some(ratify::RatifyInput {
+            current_epoch: closing,
+            pparams: self.ending_state.pparams.unwrap_live().clone(),
+            treasury: self.ending_state.initial_pots.treasury,
+            committee: self.gov.committee.clone(),
+            roots: self.gov.prev_gov_action_ids.clone(),
+            committee_auths,
+            drep_distr: prev_distr.drep_distr.clone(),
+            pool_distr: prev_distr.pool_distr.clone(),
+            pool_total: prev_distr.pool_total,
+            dreps: self.ratify_dreps.clone(),
+            pool_default_votes,
+            proposals,
+        }))
+    }
+
+    /// Run the ratification engine in shadow mode: compute the verdicts
+    /// for real and log every disagreement with the hack-stamped
+    /// outcomes, which remain authoritative for state effects.
+    fn run_shadow_ratification<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        use super::ratify;
+
+        let Some(input) = self.build_ratify_input::<D>(state)? else {
+            return Ok(());
+        };
+
+        if input.proposals.is_empty() {
+            return Ok(());
+        }
+
+        let outcome = ratify::ratify(&input);
+        let pruned = ratify::pruned_by_enactment(&input.proposals, &outcome.enacted);
+
+        let starting = self.starting_epoch_no();
+
+        for verdict in &outcome.verdicts {
+            let proposal: Option<ProposalState> =
+                state.read_entity_typed(ProposalState::NS, &verdict.key)?;
+
+            let Some(proposal) = proposal else {
+                continue;
+            };
+
+            let hack_enacts = proposal.should_enact(starting);
+            let hack_drops = proposal.should_drop(starting);
+
+            let engine_enacts = verdict.verdict == ratify::Verdict::Accepted;
+            let engine_drops = verdict.verdict == ratify::Verdict::Expired
+                || (verdict.verdict == ratify::Verdict::Continuing
+                    && pruned.contains(&verdict.key));
+
+            if engine_enacts == hack_enacts && engine_drops == hack_drops {
+                continue;
+            }
+
+            self.shadow_mismatches += 1;
+
+            tracing::warn!(
+                proposal = %proposal.id_as_string(),
+                epoch = self.ending_state.number,
+                engine = ?verdict.verdict,
+                engine_pruned = pruned.contains(&verdict.key),
+                hack_enacts,
+                hack_drops,
+                ratified_epoch = ?proposal.ratified_epoch,
+                canceled_epoch = ?proposal.canceled_epoch,
+                tallies = ?verdict.tallies,
+                "shadow ratification disagrees with hack-stamped outcome"
+            );
+        }
+
+        tracing::info!(
+            epoch = self.ending_state.number,
+            proposals = outcome.verdicts.len(),
+            enacted = outcome.enacted.len(),
+            mismatches = self.shadow_mismatches,
+            "shadow ratification complete"
+        );
+
+        Ok(())
+    }
+
+    /// Queue the governance bookkeeping the EPOCH rule applies
+    /// unconditionally at every boundary (research §5.5 steps 6–7) plus
+    /// the distribution rotation the next boundary's tally reads. Must
+    /// run after the enactment visitor flushed: the committee GC reads
+    /// the post-enactment committee at apply time.
+    fn emit_governance_boundary_deltas<D: Domain>(
+        &mut self,
+        state: &D::State,
+    ) -> Result<(), ChainError> {
+        let closing = self.ending_state.number;
+
+        if self.gov_active_since.is_none_or(|since| since > closing) {
+            return Ok(());
+        }
+
+        let starting = self.starting_epoch_no();
+
+        // dormancy (step 6): does any proposal survive this boundary's
+        // application still votable in the starting epoch?
+        let mut any_votable_survivor = false;
+
+        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+
+        for record in records {
+            let (_, proposal) = record?;
+
+            let survives = proposal.is_unresolved_at_close(closing)
+                && !proposal.should_enact(starting)
+                && !proposal.should_drop(starting);
+
+            if survives && proposal.max_epoch.is_some_and(|max| max >= starting) {
+                any_votable_survivor = true;
+                break;
+            }
+        }
+
+        if !any_votable_survivor {
+            self.add_delta(crate::GovDormancyTick::new());
+        }
+
+        // committee-state GC (step 7) — reads the post-enactment
+        // committee when the delta applies
+        self.add_delta(crate::CommitteeGc::new());
+
+        // rotate this boundary's completed distributions where the next
+        // boundary's ratification tally will read them
+        self.add_delta(crate::GovDistrRotate::new(closing));
+
+        Ok(())
+    }
+
     /// Drive the global visitors (enactment / refunds / drops / wrapup)
     /// over pools, dreps, and proposals; the wrapup visitor's flush emits
     /// `EpochWrapUp` carrying the final `EndStats`.
@@ -793,6 +1159,14 @@ impl BoundaryWork {
         visitor_enactment.flush(self)?;
         visitor_drops.flush(self)?;
         visitor_refunds.flush(self)?;
+
+        // Shadow ratification: compute the boundary's outcomes for real
+        // and log disagreements with the hack table, which stays
+        // authoritative for state effects. Then queue the unconditional
+        // governance bookkeeping — after the enactment flush, so the
+        // committee GC applies over the post-enactment committee.
+        self.run_shadow_ratification::<D>(state)?;
+        self.emit_governance_boundary_deltas::<D>(state)?;
 
         // wrapup.flush emits the final `EpochWrapUp` delta carrying the
         // assembled `EndStats` (prepare-time fields + shard accumulators).
