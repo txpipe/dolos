@@ -8,20 +8,26 @@
 //! state (ending_state + chain summary + active protocol + genesis +
 //! incentives) is built by `new_empty`.
 
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ops::Range,
+    sync::Arc,
+};
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder};
 use pallas::codec::minicbor;
-use pallas::ledger::primitives::StakeCredential;
+use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
-    load_era_summary, load_gov, pallas_extras,
+    load_era_summary, load_gov,
+    model::drep_to_entity_key,
+    pallas_extras,
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
     rupd::credential_to_key,
     AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
-    PoolState, ProposalState,
+    PoolHash, PoolState, ProposalState,
 };
 
 impl BoundaryWork {
@@ -37,7 +43,10 @@ impl BoundaryWork {
         let active_protocol = EraProtocol::from(chain_summary.edge().protocol);
         let incentives = ending_state.incentives.clone().unwrap_or_default();
 
-        let num_dormant_epochs = load_gov::<D>(state)?.num_dormant_epochs;
+        let gov = load_gov::<D>(state)?;
+        let num_dormant_epochs = gov.num_dormant_epochs;
+        let gov_active_since = gov.active_since;
+        let gov_distr = gov.distr;
 
         Ok(BoundaryWork {
             ending_state,
@@ -51,6 +60,10 @@ impl BoundaryWork {
             retiring_dreps: Default::default(),
             reregistrating_dreps: Default::default(),
             num_dormant_epochs,
+            gov_active_since,
+            gov_distr,
+            proposal_deposits: Default::default(),
+            snapshot_registered_dreps: Default::default(),
             enacting_proposals: Default::default(),
             dropping_proposals: Default::default(),
             deltas: WorkDeltas::default(),
@@ -113,13 +126,121 @@ impl BoundaryWork {
         Ok(())
     }
 
+    /// The epoch whose end-of-epoch account snapshot the stake-distribution
+    /// accumulation reads, or `None` when the accumulation doesn't run
+    /// (governance inactive, or the closing epoch has no previous
+    /// boundary).
+    ///
+    /// EWRAP runs before ESTART's rotation, so for an account in lockstep
+    /// (`EpochValue` at the closing epoch) `snapshot_at` of this epoch is
+    /// the `mark` position — the value frozen at the previous boundary's
+    /// rotation, which already includes that boundary's post-enactment
+    /// effects. This is the pulser-snapshot-equivalent read; the timing
+    /// assumption is pinned by `mark_position_is_the_boundary_snapshot`.
+    fn distr_snapshot_epoch(&self) -> Option<Epoch> {
+        self.gov_active_since?;
+
+        self.ending_state.number.checked_sub(1)
+    }
+
+    /// Build the proposal-deposit share of the boundary snapshot: deposits
+    /// of the still-live proposals submitted before the closing epoch,
+    /// summed per return credential — the pulser's `proposalDeposits`
+    /// field. Rows missing `proposed_in`, the deposit, or the return
+    /// credential predate the tracking fields and cannot be attributed;
+    /// they are excluded (the accepted design-§6 degradation).
+    fn load_proposal_deposits<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+
+        for record in proposals {
+            let (_, proposal) = record?;
+
+            if !proposal.is_active(self.ending_state.number) {
+                continue;
+            }
+
+            let in_snapshot = proposal
+                .proposed_in
+                .is_some_and(|epoch| epoch < self.ending_state.number);
+
+            if !in_snapshot {
+                continue;
+            }
+
+            let (Some(deposit), Some(credential)) =
+                (proposal.deposit, proposal.reward_account.as_ref())
+            else {
+                continue;
+            };
+
+            *self
+                .proposal_deposits
+                .entry(credential.clone())
+                .or_default() += deposit;
+        }
+
+        Ok(())
+    }
+
+    /// Accumulate one account's contribution to the boundary stake
+    /// distributions, reading the `snapshot_epoch` (mark) position of its
+    /// `EpochValue`s. The delegated weight is the era-correct stake total
+    /// plus the account's share of the snapshot proposal deposits. The
+    /// DRep leg skips delegations to targets not registered as of the
+    /// snapshot; `AlwaysAbstain` / `AlwaysNoConfidence` accumulate under
+    /// their own keys. The pool leg feeds both the per-pool map and the
+    /// running total.
+    fn accumulate_gov_distr(
+        &self,
+        snapshot_epoch: Epoch,
+        account: &AccountState,
+        drep_distr: &mut BTreeMap<DRep, u64>,
+        pool_distr: &mut BTreeMap<PoolHash, u64>,
+        pool_total: &mut u64,
+    ) {
+        let Some(stake) = account.stake.snapshot_at(snapshot_epoch) else {
+            return;
+        };
+
+        let deposits = self
+            .proposal_deposits
+            .get(&account.credential)
+            .copied()
+            .unwrap_or_default();
+
+        let weight = stake.total_for_era(self.active_protocol) + deposits;
+
+        if weight == 0 {
+            return;
+        }
+
+        if let Some(drep) = account.delegated_drep_at(snapshot_epoch) {
+            let in_snapshot = match drep {
+                DRep::Abstain | DRep::NoConfidence => true,
+                _ => self
+                    .snapshot_registered_dreps
+                    .contains(&drep_to_entity_key(drep)),
+            };
+
+            if in_snapshot {
+                *drep_distr.entry(drep.clone()).or_default() += weight;
+            }
+        }
+
+        if let Some(pool) = account.delegated_pool_at(snapshot_epoch) {
+            *pool_distr.entry(*pool).or_default() += weight;
+            *pool_total += weight;
+        }
+    }
+
     /// Load + compute for a per-shard run of the close half:
     ///   * reload the small classifications that drops.visit_account needs
     ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
     ///   * range-load pending rewards for this shard's key range,
-    ///   * iterate accounts in range, applying rewards+drops visitors, and
-    ///   * emit an `EWrapProgress` delta carrying the shard's reward
-    ///     contribution.
+    ///   * iterate accounts in range, applying rewards+drops visitors and
+    ///     accumulating the boundary stake distributions, and
+    ///   * emit `EWrapProgress` and (governance active) `GovDistrAccumulate`
+    ///     deltas carrying the shard's contributions.
     pub fn load_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
@@ -134,6 +255,10 @@ impl BoundaryWork {
         // re-classifying them per shard is cheap.
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
+
+        if boundary.distr_snapshot_epoch().is_some() {
+            boundary.load_proposal_deposits::<D>(state)?;
+        }
 
         boundary.load_pending_rewards_ranges::<D>(state, ranges.clone())?;
 
@@ -152,6 +277,11 @@ impl BoundaryWork {
         let mut visitor_rewards = super::rewards::BoundaryVisitor::default();
         let mut visitor_drops = super::drops::BoundaryVisitor::default();
 
+        let snapshot_epoch = self.distr_snapshot_epoch();
+        let mut drep_distr: BTreeMap<DRep, u64> = BTreeMap::new();
+        let mut pool_distr: BTreeMap<PoolHash, u64> = BTreeMap::new();
+        let mut pool_total: u64 = 0;
+
         for range in ranges {
             let accounts =
                 state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range))?;
@@ -167,11 +297,34 @@ impl BoundaryWork {
                 // and drop this ordering hack. (#1037)
                 visitor_rewards.visit_account(self, &account_id, &account)?;
                 visitor_drops.visit_account(self, &account_id, &account)?;
+
+                if let Some(epoch) = snapshot_epoch {
+                    self.accumulate_gov_distr(
+                        epoch,
+                        &account,
+                        &mut drep_distr,
+                        &mut pool_distr,
+                        &mut pool_total,
+                    );
+                }
             }
         }
 
         visitor_rewards.flush(self)?;
         visitor_drops.flush(self)?;
+
+        // Emitted whenever the accumulation ran, even with empty maps — the
+        // shard cursor must advance for the accumulator to report complete.
+        if snapshot_epoch.is_some() {
+            self.add_delta(crate::GovDistrAccumulate::new(
+                self.ending_state.number,
+                shard_index,
+                total_shards,
+                drep_distr,
+                pool_distr,
+                pool_total,
+            ));
+        }
 
         // Snapshot the reward-map counters for this shard and emit the
         // accumulator delta. The RewardMap's applied_* counters reflect only
@@ -305,11 +458,36 @@ impl BoundaryWork {
         None
     }
 
+    /// Whether `drep` was registered as of the previous epoch boundary —
+    /// the boundary the distribution snapshot corresponds to. Events at or
+    /// after `boundary_slot` happened during the closing epoch and postdate
+    /// the snapshot: a DRep unregistered mid-epoch still counts (the
+    /// Haskell snapshot predates the unregistration), one registered
+    /// mid-epoch doesn't yet.
+    fn is_drep_registered_as_of(drep: &DRepState, boundary_slot: BlockSlot) -> bool {
+        let registered = drep.registered_at.filter(|(slot, _)| *slot < boundary_slot);
+        let unregistered = drep
+            .unregistered_at
+            .filter(|(slot, _)| *slot < boundary_slot);
+
+        match (registered, unregistered) {
+            (Some(registered), Some(unregistered)) => registered > unregistered,
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn load_drep_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        let boundary_slot = self.chain_summary.epoch_start(self.ending_state.number);
+
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
 
         for record in dreps {
-            let (_, drep) = record?;
+            let (id, drep) = record?;
+
+            if Self::is_drep_registered_as_of(&drep, boundary_slot) {
+                self.snapshot_registered_dreps.insert(id);
+            }
 
             if self.should_retire_drep(&drep) {
                 self.retiring_dreps.push(drep.identifier);
@@ -463,6 +641,52 @@ impl BoundaryWork {
         Ok(boundary)
     }
 
+    /// The completed DRep distribution for the boundary being closed, or
+    /// `None` when there is nothing sound to write: governance inactive, no
+    /// snapshot epoch, or an accumulator that is missing, incomplete, or
+    /// belongs to another boundary (e.g. earlier shards ran under a binary
+    /// that didn't accumulate). The degraded cases warn and self-heal at
+    /// the next boundary.
+    fn completed_drep_distr(&self) -> Option<BTreeMap<DRep, u64>> {
+        self.distr_snapshot_epoch()?;
+
+        match self.gov_distr.as_ref() {
+            Some(distr) if distr.is_complete_for(self.ending_state.number) => {
+                Some(distr.drep_distr.clone())
+            }
+            _ => {
+                tracing::warn!(
+                    epoch = self.ending_state.number,
+                    "boundary stake distributions missing or incomplete; \
+                     skipping DRep voting-power updates"
+                );
+                None
+            }
+        }
+    }
+
+    /// Emit the boundary `DRepPowerUpdate` for one DRep: registered DReps
+    /// get the stake the accumulation attributed to them (zero when absent
+    /// from the distribution — including DReps registered during the
+    /// closing epoch, which postdate the snapshot). No-op writes are
+    /// elided.
+    fn emit_drep_power_update(
+        &mut self,
+        distr: &BTreeMap<DRep, u64>,
+        id: &EntityKey,
+        drep: &DRepState,
+    ) {
+        if drep.registered_at.is_none() || drep.is_unregistered() {
+            return;
+        }
+
+        let power = distr.get(&drep.identifier).copied().unwrap_or_default();
+
+        if power != drep.voting_power {
+            self.add_delta(crate::DRepPowerUpdate::new(id.clone(), power));
+        }
+    }
+
     /// Drive the global visitors (enactment / refunds / drops / wrapup)
     /// over pools, dreps, and proposals; the wrapup visitor's flush emits
     /// `EpochWrapUp` carrying the final `EndStats`.
@@ -492,7 +716,11 @@ impl BoundaryWork {
             visitor_wrapup.visit_retiring_pool(self, pool_hash, &pool, account.as_ref())?;
         }
 
-        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps.
+        // DReps — drops.visit_drep emits DRepExpiration for expiring dreps;
+        // registered dreps additionally get their boundary voting power
+        // written from the completed distribution accumulator.
+        let drep_power = self.completed_drep_distr();
+
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
         for record in dreps {
             let (drep_id, drep) = record?;
@@ -500,6 +728,10 @@ impl BoundaryWork {
             visitor_drops.visit_drep(self, &drep_id, &drep)?;
             visitor_refunds.visit_drep(self, &drep_id, &drep)?;
             visitor_wrapup.visit_drep(self, &drep_id, &drep)?;
+
+            if let Some(distr) = drep_power.as_ref() {
+                self.emit_drep_power_update(distr, &drep_id, &drep);
+            }
         }
 
         // Active proposals + enacting + dropping.
@@ -539,5 +771,335 @@ impl BoundaryWork {
         visitor_wrapup.flush(self)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use dolos_core::{Domain as _, EntityDelta as _, StateStore as _, StateWriter as _};
+    use dolos_testing::toy_domain::ToyDomain;
+    use pallas::ledger::primitives::StakeCredential;
+
+    use super::*;
+    use crate::{
+        model::{credential_to_key, drep_to_entity_key},
+        shard::shard_key_ranges,
+        AccountTransition, AssignRewards, ControlledAmountInc, DRepDelegation, EpochState,
+        EpochValue, PoolDelegation, SingletonEntity as _, Stake,
+    };
+
+    /// Pins the rotation-timing assumption behind the distribution snapshot
+    /// read: EWRAP runs before ESTART's rotation (ordering pinned by
+    /// `epoch_boundary_emits_ewrap_then_estart` in `work.rs`), so during
+    /// EWRAP closing epoch n+1 the account `EpochValue`s still sit at
+    /// live-epoch n+1 and the `mark` position holds the value frozen at the
+    /// n/n+1 rotation — already including EWRAP(n)'s post-enactment effects
+    /// (applied to `live` before that rotation) and excluding every epoch-n+1
+    /// mutation. `snapshot_at(n)`, the read the accumulation performs, must
+    /// resolve to exactly that `mark` value; a boundary reordering that
+    /// rotated first would desynchronize the two and break this test.
+    #[test]
+    fn mark_position_is_the_boundary_snapshot() {
+        let credential = StakeCredential::AddrKeyhash([1u8; 28].into());
+        let key = credential_to_key(&credential);
+
+        // epoch n = 5: account holds 100 lovelace of live stake
+        let mut account = Some(crate::AccountState {
+            registered_at: Some(0),
+            stake: EpochValue::with_live(5, Stake::default()),
+            pool: EpochValue::new(5),
+            drep: EpochValue::new(5),
+            vote_delegated_at: None,
+            deregistered_at: None,
+            credential: credential.clone(),
+            retired_pool: None,
+        });
+
+        ControlledAmountInc::new(credential.clone(), false, 100, 5).apply(&mut account);
+
+        // EWRAP(n) applies a reward — a post-enactment effect of the n/n+1
+        // boundary, mutating `live` before the rotation
+        AssignRewards::new(key.clone(), 25).apply(&mut account);
+
+        // ESTART's rotation into epoch n+1 = 6 freezes the post-enactment
+        // value in `mark`
+        AccountTransition::new(key.clone(), 6).apply(&mut account);
+
+        // activity during epoch n+1 mutates `live` only
+        ControlledAmountInc::new(credential.clone(), false, 75, 6).apply(&mut account);
+
+        let stake = &account.as_ref().unwrap().stake;
+
+        // the EWRAP(n+1) read: end-of-n snapshot == the mark position ==
+        // the post-enactment value at the n/n+1 rotation
+        assert!(stake.is_at_epoch(6));
+        assert_eq!(stake.snapshot_at(5), stake.mark());
+        assert_eq!(stake.snapshot_at(5).unwrap().total(), 125);
+        assert_eq!(stake.unwrap_live().total(), 200);
+
+        // after the n+1/n+2 rotation — which EWRAP(n+1) must precede — the
+        // mark position moves on to the epoch-n+1 value
+        AccountTransition::new(key, 7).apply(&mut account);
+        let stake = &account.as_ref().unwrap().stake;
+        assert_eq!(stake.mark().unwrap().total(), 200);
+    }
+
+    const CLOSING_EPOCH: u64 = 5;
+    const TOTAL_SHARDS: u32 = 2;
+
+    fn reg_drep() -> DRep {
+        DRep::Key([1u8; 28].into())
+    }
+
+    fn unreg_drep() -> DRep {
+        DRep::Key([2u8; 28].into())
+    }
+
+    fn fresh_drep() -> DRep {
+        DRep::Key([3u8; 28].into())
+    }
+
+    fn pool_a() -> crate::PoolHash {
+        [9u8; 28].into()
+    }
+
+    fn snapshot_account(
+        byte: u8,
+        mark_utxo: u64,
+        drep: Option<DRep>,
+        pool: Option<crate::PoolHash>,
+    ) -> crate::AccountState {
+        let credential = StakeCredential::AddrKeyhash([byte; 28].into());
+
+        // live values differ from mark so a wrong-position read shows up
+        let live_stake = Stake {
+            utxo_sum: mark_utxo * 10,
+            ..Default::default()
+        };
+        let mark_stake = Stake {
+            utxo_sum: mark_utxo,
+            ..Default::default()
+        };
+
+        let mark_drep = drep.map_or(DRepDelegation::NotDelegated, DRepDelegation::Delegated);
+        let mark_pool = pool.map_or(PoolDelegation::NotDelegated, PoolDelegation::Pool);
+
+        crate::AccountState {
+            registered_at: Some(0),
+            stake: EpochValue::from_parts(
+                CLOSING_EPOCH,
+                Some(live_stake),
+                None,
+                Some(mark_stake),
+                None,
+                None,
+            ),
+            pool: EpochValue::from_parts(
+                CLOSING_EPOCH,
+                Some(PoolDelegation::NotDelegated),
+                None,
+                Some(mark_pool),
+                None,
+                None,
+            ),
+            drep: EpochValue::from_parts(
+                CLOSING_EPOCH,
+                Some(DRepDelegation::NotDelegated),
+                None,
+                Some(mark_drep),
+                None,
+                None,
+            ),
+            vote_delegated_at: None,
+            deregistered_at: None,
+            credential,
+            retired_pool: None,
+        }
+    }
+
+    fn drep_row(
+        identifier: DRep,
+        registered_at: Option<u64>,
+        unregistered_at: Option<u64>,
+        voting_power: u64,
+    ) -> crate::DRepState {
+        crate::DRepState {
+            registered_at: registered_at.map(|slot| (slot, 0)),
+            voting_power,
+            last_active_slot: None,
+            unregistered_at: unregistered_at.map(|slot| (slot, 0)),
+            expired: false,
+            deposit: voting_power,
+            identifier,
+            anchor: None,
+            expiry: None,
+        }
+    }
+
+    /// Seed a ToyDomain (devnet: governance active since epoch 0) with a
+    /// closing-epoch EpochState, snapshot-position accounts, DRep rows and
+    /// a live proposal whose deposit returns to the first account.
+    fn seed_domain() -> ToyDomain {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        let mut epoch = crate::load_epoch::<ToyDomain>(state).unwrap();
+        epoch.number = CLOSING_EPOCH;
+
+        let chain = load_era_summary::<ToyDomain>(state).unwrap();
+        let boundary_slot = chain.epoch_start(CLOSING_EPOCH);
+
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&EpochState::singleton_key(), &epoch)
+            .unwrap();
+
+        // alice: 100 mark stake + 40 proposal deposit, delegated to the
+        // registered drep and to pool_a
+        let alice = snapshot_account(0xa1, 100, Some(reg_drep()), Some(pool_a()));
+        // bob: 50, delegated to AlwaysAbstain, no pool
+        let bob = snapshot_account(0xb2, 50, Some(DRep::Abstain), None);
+        // carol: 70, delegated to a drep unregistered before the boundary,
+        // and to pool_a
+        let carol = snapshot_account(0xc3, 70, Some(unreg_drep()), Some(pool_a()));
+
+        for account in [&alice, &bob, &carol] {
+            writer
+                .write_entity_typed(&credential_to_key(&account.credential), account)
+                .unwrap();
+        }
+
+        // registered before the boundary; power seeded with the deposit,
+        // to be overwritten by the accumulated stake
+        let registered = drep_row(reg_drep(), Some(boundary_slot - 10), None, 500);
+        // registered then unregistered before the boundary
+        let unregistered = drep_row(
+            unreg_drep(),
+            Some(boundary_slot - 10),
+            Some(boundary_slot - 5),
+            0,
+        );
+        // registered during the closing epoch — postdates the snapshot
+        let fresh = drep_row(fresh_drep(), Some(boundary_slot), None, 500);
+
+        for drep in [&registered, &unregistered, &fresh] {
+            writer
+                .write_entity_typed(&drep_to_entity_key(&drep.identifier), drep)
+                .unwrap();
+        }
+
+        // live proposal submitted before the closing epoch; its deposit
+        // returns to alice's credential
+        let proposal = ProposalState {
+            slot: 0,
+            tx: [7u8; 32].into(),
+            idx: 0,
+            action: crate::ProposalAction::Info,
+            max_epoch: None,
+            ratified_epoch: None,
+            canceled_epoch: None,
+            deposit: Some(40),
+            reward_account: Some(alice.credential.clone()),
+            proposed_in: Some(CLOSING_EPOCH - 2),
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        };
+
+        writer
+            .write_entity_typed(&EntityKey::from(b"proposal-1".to_vec()), &proposal)
+            .unwrap();
+
+        writer.commit().unwrap();
+
+        domain
+    }
+
+    fn run_shard(domain: &ToyDomain, shard: u32) {
+        let ranges = shard_key_ranges(shard, TOTAL_SHARDS);
+
+        let mut boundary = BoundaryWork::load_shard::<ToyDomain>(
+            domain.state(),
+            domain.genesis(),
+            shard,
+            TOTAL_SHARDS,
+            ranges.clone(),
+        )
+        .unwrap();
+
+        boundary
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .unwrap();
+    }
+
+    fn read_distr(domain: &ToyDomain) -> crate::GovDistr {
+        crate::load_gov::<ToyDomain>(domain.state())
+            .unwrap()
+            .distr
+            .expect("accumulator present")
+    }
+
+    fn read_drep_power(domain: &ToyDomain, drep: &DRep) -> u64 {
+        domain
+            .state()
+            .read_entity_typed::<crate::DRepState>(crate::DRepState::NS, &drep_to_entity_key(drep))
+            .unwrap()
+            .expect("drep row present")
+            .voting_power
+    }
+
+    /// End-to-end shard pass over a seeded store: the accumulated
+    /// distributions read the mark position, include proposal deposits in
+    /// the delegated weight (done criterion 3), track the abstain
+    /// pseudo-DRep separately, skip delegations to DReps outside the
+    /// snapshot's registered set, survive shard replays unchanged (done
+    /// criterion 1 through the real commit path), and land on
+    /// `DRepState.voting_power` at finalize.
+    #[test]
+    fn shard_accumulation_builds_boundary_distributions() {
+        let domain = seed_domain();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let distr = read_distr(&domain);
+        assert!(distr.is_complete_for(CLOSING_EPOCH));
+
+        // alice: 100 mark stake + 40 proposal deposit; carol's delegation
+        // targets an unregistered drep and stays out; bob tallies under
+        // the abstain key
+        let expected_dreps = BTreeMap::from([(reg_drep(), 140u64), (DRep::Abstain, 50u64)]);
+        assert_eq!(distr.drep_distr, expected_dreps);
+
+        // the pool leg counts alice and carol regardless of drep status
+        assert_eq!(distr.pool_distr, BTreeMap::from([(pool_a(), 210u64)]));
+        assert_eq!(distr.pool_total, 210);
+
+        // a crash-resume replay of every shard leaves the accumulator
+        // untouched
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+        assert_eq!(read_distr(&domain), distr);
+
+        // finalize writes the accumulated powers: the registered drep gets
+        // its delegated stake (replacing the deposit seed), the drep
+        // registered mid-epoch is zeroed (absent from the snapshot), the
+        // unregistered one is left alone
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+
+        assert_eq!(read_drep_power(&domain, &reg_drep()), 140);
+        assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
+        assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
     }
 }

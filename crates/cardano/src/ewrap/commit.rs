@@ -91,6 +91,11 @@ impl BoundaryWork {
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
 
+        // GovState gets the shard's GovDistrAccumulate delta (governance
+        // active only). Committing it in the same transaction as
+        // EWrapProgress keeps the two shard cursors in lockstep.
+        self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
+
         // Delete applied pending rewards.
         debug!(
             count = self.applied_reward_credentials.len(),
