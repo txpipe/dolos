@@ -1109,9 +1109,23 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// The pre-Conway branch of [`Self::run_ratification`]: every proposal
-    /// still live at a boundary that predates governance is a legacy
-    /// update proposal, and enacts.
+    /// The pre-Conway branch of [`Self::run_ratification`]: a legacy update
+    /// proposal submitted during epoch `n` enacts at the boundary closing
+    /// `n`, taking effect at the start of `n + 1`.
+    ///
+    /// `proposed_in <= closing` is the whole rule, and it is load-bearing.
+    /// The boundary work runs *after* the block that crossed into the new
+    /// epoch has been applied, so a proposal carried by that first block is
+    /// already in state when the previous epoch's boundary rules — and
+    /// enacting it there would apply it a full epoch early. On preprod that
+    /// moved the Byron→Shelley transition from epoch 4 to epoch 3 and
+    /// shifted every epoch number after it by one.
+    ///
+    /// The Conway branch draws the same line one epoch tighter
+    /// (`proposed_in < closing`, in `build_ratify_input`): an action must
+    /// have been submitted before the closing epoch to be in its
+    /// ratification snapshot, where a legacy update needs no snapshot at
+    /// all.
     ///
     /// Enactment order is submission order — the only order these carry,
     /// and the one under which a later update in the same epoch overwrites
@@ -1129,7 +1143,11 @@ impl BoundaryWork {
         for record in records {
             let (key, proposal) = record?;
 
-            if proposal.is_unresolved_at_close(closing) {
+            // rows written before `proposed_in` existed can't be placed;
+            // they are the accepted in-place-upgrade degradation
+            let submitted = proposal.proposed_in.is_some_and(|epoch| epoch <= closing);
+
+            if submitted && proposal.is_unresolved_at_close(closing) {
                 live.push((key, (proposal.slot, proposal.idx)));
             }
         }
@@ -2034,14 +2052,61 @@ mod ratification_tests {
     /// tally. This is how every pre-Conway parameter change lands on a
     /// replay, and it used to ride on the outcome table's
     /// `protocol <= 8` fallthrough.
-    #[test]
-    fn pre_conway_updates_enact_without_a_tally() {
-        let mut update = withdrawal(0x01, None, CLOSING + 10);
-        update.action =
-            ProposalAction::ParamChange(PParamsSet::default().with(PParamValue::MinFeeA(44)));
+    fn legacy_update(tx: u8, min_fee_a: u64, proposed_in: Epoch) -> ProposalState {
+        let mut update = withdrawal(tx, None, CLOSING + 10);
+        update.action = ProposalAction::ParamChange(
+            PParamsSet::default().with(PParamValue::MinFeeA(min_fee_a)),
+        );
         update.deposit = None;
         update.reward_account = None;
-        update.proposed_in = Some(CLOSING);
+        update.proposed_in = Some(proposed_in);
+        update
+    }
+
+    /// A legacy update submitted during the epoch the boundary *opens* is
+    /// not this boundary's to enact — it belongs to the next one.
+    ///
+    /// The boundary work runs after the block that crossed into the new
+    /// epoch has been applied, so such a proposal is already in state here.
+    /// Enacting it would apply the parameter change a full epoch early; on
+    /// a preprod replay that moved the Byron→Shelley transition from epoch
+    /// 4 to epoch 3 and shifted every epoch number after it.
+    #[test]
+    fn a_pre_conway_update_waits_for_its_own_boundary() {
+        let mine = legacy_update(0x01, 44, CLOSING);
+        let next = legacy_update(0x02, 99, CLOSING + 1);
+
+        let domain = seed(&[mine.clone(), next.clone()]);
+
+        let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+        gov.active_since = None;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &gov)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let boundary = finalize(&domain);
+        let ratification = boundary.ratification.as_ref().unwrap();
+
+        assert_eq!(ratification.enactment_order.len(), 1);
+        assert_eq!(read(&domain, &mine).ratified_epoch, Some(CLOSING));
+        assert_eq!(read(&domain, &next).ratified_epoch, None);
+
+        assert_eq!(
+            crate::load_epoch::<ToyDomain>(domain.state())
+                .unwrap()
+                .pparams
+                .unwrap_live()
+                .min_fee_a(),
+            Some(44),
+            "the next epoch's update must not have landed"
+        );
+    }
+
+    #[test]
+    fn pre_conway_updates_enact_without_a_tally() {
+        let update = legacy_update(0x01, 44, CLOSING);
 
         let domain = seed(&[update.clone()]);
 
