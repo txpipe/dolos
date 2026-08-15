@@ -1,4 +1,7 @@
-use dolos_cardano::{model::AccountState, EpochState, FixedNamespace, PoolState, ProposalState};
+use dolos_cardano::{
+    model::AccountState, DRepState, EpochState, FixedNamespace, GovState, PoolState, ProposalState,
+    SingletonEntity,
+};
 use miette::IntoDiagnostic;
 
 use dolos::prelude::*;
@@ -46,6 +49,19 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "accounts" => run_typed::<AccountState, _>(&state, args)?,
         "pools" => run_typed::<PoolState, _>(&state, args)?,
         "proposals" => run_typed::<ProposalState, _>(&state, args)?,
+        "dreps" => run_typed::<DRepState, _>(&state, args)?,
+        // the governance singleton has one key and it isn't the caller's to
+        // remember, so `--key` is ignored here
+        "gov" => {
+            let entity = state
+                .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
+                .into_diagnostic()?;
+
+            match entity {
+                Some(entity) => println!("{entity:#?}"),
+                None => println!("entity not found"),
+            }
+        }
         _ => return Err(miette::Error::msg("invalid namespace")),
     };
 
