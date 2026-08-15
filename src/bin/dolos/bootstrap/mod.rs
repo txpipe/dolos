@@ -175,16 +175,13 @@ fn dispatch(
         Command::Relay(args) => relay::run(config, args, feedback),
         Command::Mithril(args) => mithril::run(config, args, feedback),
         Command::Snapshot(args) => snapshot::run(config, args, feedback),
-        // No `feedback`: a stele restore has no progress reporting yet, which
-        // is a stated gap rather than an oversight — see the follow-up plan.
-        //
         // `resume` is `--continue`, and this is the only subcommand that does
         // anything with it. For the others it has always meant no more than
         // "proceed even though there is data here"; for a stele restore it is
         // also the instruction to read the progress file an interrupted attempt
         // left behind. Passing it rather than re-reading `args` keeps that one
         // flag with one meaning per subcommand instead of two spellings.
-        Command::Stelae(args) => stelae::run(config, args, resume),
+        Command::Stelae(args) => stelae::run(config, args, feedback, resume),
     }
 }
 

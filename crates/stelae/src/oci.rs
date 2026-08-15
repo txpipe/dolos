@@ -140,6 +140,7 @@ use crate::{
     inscription::{canonical_json, Inscription, LayerDescriptor},
     layer::LayerReader,
     profile::{checked_tag_for_sequence, validate_tag, Profile},
+    progress::{Event, Observer},
     transport::{
         open_layer, BlobIndex, LayerSpec, RecordSink, SteleReader, SteleWriter, WrittenLayer,
     },
@@ -250,7 +251,9 @@ pub struct Transfer {
     /// Layer blobs the registry already had, and that were not.
     pub layers_skipped: u64,
     /// Layer blobs that were never built, because [`Registry::adopt_layer`]
-    /// took them from a stele already in this repository.
+    /// took them from a stele already in this repository — or because
+    /// [`Registry::adopt_carried`] took them from an earlier attempt of this
+    /// same publish.
     ///
     /// Deliberately not folded into `layers_skipped`. A skipped layer was
     /// built, hashed and then found to be present already, so the publisher
@@ -262,8 +265,8 @@ pub struct Transfer {
     pub bytes_uploaded: u64,
     /// Compressed bytes the skip saved.
     pub bytes_skipped: u64,
-    /// Compressed bytes an adopted layer did not move, as the manifest it came
-    /// from reports them.
+    /// Compressed bytes an adopted layer did not move, as the manifest or the
+    /// record it came from reports them.
     pub bytes_reused: u64,
 }
 
@@ -428,9 +431,20 @@ struct Shared {
     /// Registry and repository. The tag is a placeholder — blob operations do
     /// not use one, and manifest operations build their own.
     repository: Reference,
+    /// The same repository in the spelling it was opened with, for a caller
+    /// that has to write down where this transport publishes.
+    name: Repository,
     auth: RegistryAuth,
     scratch_dir: Option<PathBuf>,
     state: Mutex<PushState>,
+    /// Who is watching this connection, in either direction.
+    ///
+    /// Beside the push state rather than inside it, because a [`Stele`] shares
+    /// this value and only ever reads: attaching an observer to the
+    /// [`Registry`] is what makes the pull it resolves report too, which is the
+    /// property a restore depends on — the reader is created inside the driver
+    /// and there is no other moment to wire it.
+    observer: Mutex<Observer>,
 }
 
 #[derive(Default)]
@@ -499,9 +513,11 @@ impl Registry {
                 runtime,
                 client,
                 repository: reference,
+                name: repository.clone(),
                 auth,
                 scratch_dir: options.scratch_dir,
                 state: Mutex::new(PushState::default()),
+                observer: Mutex::new(Observer::silent()),
             }),
         })
     }
@@ -516,6 +532,17 @@ impl Registry {
     /// [`Shared::scratch`] never names one either.
     pub fn scratch_dir(&self) -> Option<&Path> {
         self.shared.scratch_dir.as_deref()
+    }
+
+    /// The repository this transport was opened on.
+    ///
+    /// Here for the reason [`Registry::scratch_dir`] is: a caller that has to
+    /// write down where its layers went asks the transport that sent them,
+    /// rather than carrying the name alongside the handle. Two spellings of one
+    /// destination is one more than can be kept in step, and the one that
+    /// drifts is the one a later run compares against.
+    pub fn repository(&self) -> &Repository {
+        &self.shared.name
     }
 
     /// What has been pushed through this transport since it was opened, or
@@ -682,14 +709,6 @@ impl Registry {
             ))
         })?;
 
-        if !self.shared.blob_exists(&blob)? {
-            return Err(Error::BlobMissing {
-                kind: descriptor.kind,
-                diff_id: descriptor.diff_id.to_string(),
-                blob: named,
-            });
-        }
-
         let adopted = WrittenLayer {
             digests: LayerDigests {
                 diff_id: descriptor.diff_id,
@@ -700,12 +719,70 @@ impl Registry {
             descriptor,
         };
 
-        let mut state = self.shared.locked();
-        state.transfer.layers_reused += 1;
-        state.transfer.bytes_reused += compressed_size;
-        state.pending.push(adopted);
+        let kind = adopted.descriptor.kind.clone();
+        let diff_id = adopted.descriptor.diff_id;
+
+        // A manifest naming a blob the registry no longer has is a refusal and
+        // not a miss: the stele that named it is published, and something has
+        // reclaimed underneath it. See [`Registry::adopt_carried`] for the case
+        // where the same absence is merely a rebuild.
+        if !self.adopt_carried(adopted)? {
+            return Err(Error::BlobMissing {
+                kind,
+                diff_id: diff_id.to_string(),
+                blob: named,
+            });
+        }
 
         Ok(())
+    }
+
+    /// Carry a layer that is already in this repository, named in full.
+    ///
+    /// [`Registry::adopt_layer`] with the lookup already done — for a caller
+    /// holding a [`WrittenLayer`] this transport produced earlier rather than a
+    /// stele to read one out of. The pair is still not assembled by hand: it is
+    /// the measurement [`RecordSink::finish`] returned when the blob went up,
+    /// carried across whatever interruption the caller survived.
+    ///
+    /// **The blob check is a verdict, not an assertion.** `Ok(false)` means the
+    /// registry does not hold it and nothing was carried, which is a caller's
+    /// cue to build the layer after all. That is the difference from
+    /// [`Registry::adopt_layer`], where the same answer is an error: a
+    /// published manifest that names a reclaimed blob is a stele nobody can
+    /// restore, while a caller's own note that has gone stale costs a rebuild
+    /// and nothing else.
+    ///
+    /// Nothing here checks that the descriptor describes those bytes, for the
+    /// reason [`Registry::adopt_layer`] gives: checking would mean reading
+    /// them, which is the cost being avoided.
+    pub fn adopt_carried(&self, layer: WrittenLayer) -> Result<bool, Error> {
+        if !self.shared.blob_exists(&layer.digests.blob_digest)? {
+            return Ok(false);
+        }
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_reused += 1;
+        state.transfer.bytes_reused += layer.digests.compressed_size;
+        state.pending.push(layer);
+
+        Ok(true)
+    }
+
+    /// The layer this transport is carrying for the next seal under `diff_id`.
+    ///
+    /// What [`SteleWriter::seal`] would put in the manifest, asked for one
+    /// layer at a time — so a caller recording what it has finished records
+    /// the transport's own measurement rather than a reconstruction of it.
+    /// `None` once the layers have been spent by a seal, and for a `diffId`
+    /// this transport never wrote.
+    pub fn carried(&self, diff_id: &Digest) -> Option<WrittenLayer> {
+        self.shared
+            .locked()
+            .pending
+            .iter()
+            .find(|layer| layer.digests.diff_id == *diff_id)
+            .cloned()
     }
 }
 
@@ -734,6 +811,35 @@ fn is_absent(error: &oci_client::errors::OciDistributionError) -> bool {
     }
 }
 
+/// A staged file, created where [`Options::scratch_dir`] said.
+///
+/// Both calls that can fail against a *named* directory raise
+/// [`Error::Scratch`], whose docstring carries the reason. The unnamed case
+/// keeps the catch-all [`Error::Io`], because the platform temporary
+/// directory is not a path anybody chose.
+///
+/// Creating the directory lazily, here, is load-bearing elsewhere: it is what
+/// makes a staging directory that exists after a run evidence that the run
+/// staged in it. Nothing else creates it.
+///
+/// A free function rather than a method so it can be tested against an
+/// unusable directory without standing up a registry client — see
+/// `an_unusable_staging_directory_names_itself`.
+fn scratch_in(dir: Option<&Path>) -> Result<File, Error> {
+    let Some(dir) = dir else {
+        return Ok(tempfile::tempfile()?);
+    };
+
+    let staged = |source| Error::Scratch {
+        dir: dir.to_path_buf(),
+        source,
+    };
+
+    std::fs::create_dir_all(dir).map_err(staged)?;
+
+    tempfile::tempfile_in(dir).map_err(staged)
+}
+
 impl Shared {
     fn locked(&self) -> std::sync::MutexGuard<'_, PushState> {
         // A poisoned lock means a push panicked while holding it. The counters
@@ -745,6 +851,26 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// A handle on whoever is watching, taken once per operation.
+    ///
+    /// Cloned out from under the lock rather than emitted through it: a blob
+    /// download reports a delta per write, and holding a mutex across a
+    /// renderer's call would put this transport's byte loop behind whatever the
+    /// binary does with the event.
+    fn observer(&self) -> Observer {
+        self.observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn watch(&self, observer: Observer) {
+        *self
+            .observer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = observer;
+    }
+
     fn tagged(&self, tag: &str) -> Reference {
         Reference::with_tag(
             self.repository.registry().to_owned(),
@@ -754,15 +880,7 @@ impl Shared {
     }
 
     fn scratch(&self) -> Result<File, Error> {
-        let file = match &self.scratch_dir {
-            Some(dir) => {
-                std::fs::create_dir_all(dir)?;
-                tempfile::tempfile_in(dir)?
-            }
-            None => tempfile::tempfile()?,
-        };
-
-        Ok(file)
+        scratch_in(self.scratch_dir.as_deref())
     }
 
     fn blob_exists(&self, digest: &Digest) -> Result<bool, Error> {
@@ -779,8 +897,18 @@ impl Shared {
     fn put_layer(&self, layer: &WrittenLayer, staged: File) -> Result<(), Error> {
         let digest = layer.digests.blob_digest;
         let size = layer.digests.compressed_size;
+        let observer = self.observer();
 
         if self.blob_exists(&digest)? {
+            // Announced even though nothing moves: "the registry already had
+            // this one" is the blob-skip working, and a watcher that only heard
+            // about uploads would read the whole point of a content-addressed
+            // registry as a stall.
+            observer.emit(Event::Blob {
+                moved: false,
+                bytes: size,
+            });
+
             let mut state = self.locked();
             state.transfer.layers_skipped += 1;
             state.transfer.bytes_skipped += size;
@@ -789,9 +917,16 @@ impl Shared {
             return Ok(());
         }
 
+        // Before the upload rather than after it, so a watcher knows how big
+        // the transfer it is about to see is while it is still happening.
+        observer.emit(Event::Blob {
+            moved: true,
+            bytes: size,
+        });
+
         self.runtime.block_on(self.client.push_blob_stream(
             &self.repository,
-            blob_stream(staged),
+            blob_stream(staged, observer),
             &digest.to_string(),
         ))?;
 
@@ -831,10 +966,18 @@ impl Shared {
     ) -> Result<Vec<u8>, Error> {
         let mut buffer = Vec::with_capacity(descriptor.size.max(0) as usize);
 
+        // No observer: the config blob is the inscription, not a layer, and a
+        // watcher summing byte deltas against a layer total would find them
+        // disagreeing by however large the document is.
         self.runtime.block_on(self.client.pull_blob(
             reference,
             descriptor,
-            Blocking::new(&mut buffer, descriptor.size, &descriptor.digest),
+            Blocking::new(
+                &mut buffer,
+                descriptor.size,
+                &descriptor.digest,
+                Observer::silent(),
+            ),
         ))?;
 
         Ok(buffer)
@@ -851,11 +994,20 @@ impl Shared {
         descriptor: &OciDescriptor,
     ) -> Result<File, Error> {
         let mut file = self.scratch()?;
+        let observer = self.observer();
+
+        // The whole layer lands here before `stream_layer` yields one record,
+        // so this loop is where a restore spends nearly all of its time and the
+        // only place it can report from.
+        observer.emit(Event::Blob {
+            moved: true,
+            bytes: descriptor.size.max(0) as u64,
+        });
 
         self.runtime.block_on(self.client.pull_blob(
             reference,
             descriptor,
-            Blocking::new(&mut file, descriptor.size, &descriptor.digest),
+            Blocking::new(&mut file, descriptor.size, &descriptor.digest, observer),
         ))?;
 
         file.seek(SeekFrom::Start(0))?;
@@ -936,6 +1088,15 @@ impl SteleWriter for Registry {
         self.shared.locked().pending.clear();
 
         Ok(identity)
+    }
+
+    /// Report every blob this connection uploads.
+    ///
+    /// One of the two implementations that override the default — the other is
+    /// [`Stele`], and it shares this connection's state, so an observer
+    /// attached here is also attached to whatever this registry pulls.
+    fn observe(&self, observer: Observer) {
+        self.shared.watch(observer);
     }
 }
 
@@ -1124,6 +1285,16 @@ impl SteleReader for Stele {
         let file = self.shared.pull_blob_file(&self.reference, oci)?;
 
         LayerReader::new(file, profile, descriptor, limits)
+    }
+
+    /// Report every blob this connection pulls.
+    ///
+    /// A restore resolves its [`Stele`] inside the driver, so this is the
+    /// spelling a caller reaches when it holds the reader; attaching to the
+    /// [`Registry`] the stele came from does the same thing, because both write
+    /// the same connection state.
+    fn observe(&self, observer: Observer) {
+        self.shared.watch(observer);
     }
 }
 
@@ -1359,27 +1530,38 @@ pub fn read_manifest(
 ///
 /// One chunk is allocated at a time and handed over, so what the upload holds
 /// is [`UPLOAD_CHUNK`] and not the layer.
-fn blob_stream(file: File) -> impl Stream<Item = oci_client::errors::Result<bytes::Bytes>> {
-    futures_util::stream::unfold(Some(file), |state| async move {
-        let mut file = state?;
-        let mut chunk = vec![0u8; UPLOAD_CHUNK];
-        let mut filled = 0usize;
+/// Each chunk is reported as it is handed over, which is the only resolution
+/// this loop has: a `PATCH` either went out or it did not, and the client does
+/// not say how much of one has reached the wire.
+fn blob_stream(
+    file: File,
+    observer: Observer,
+) -> impl Stream<Item = oci_client::errors::Result<bytes::Bytes>> {
+    futures_util::stream::unfold(Some(file), move |state| {
+        let observer = observer.clone();
 
-        while filled < chunk.len() {
-            match file.read(&mut chunk[filled..]) {
-                Ok(0) => break,
-                Ok(read) => filled += read,
-                Err(e) => return Some((Err(e.into()), None)),
+        async move {
+            let mut file = state?;
+            let mut chunk = vec![0u8; UPLOAD_CHUNK];
+            let mut filled = 0usize;
+
+            while filled < chunk.len() {
+                match file.read(&mut chunk[filled..]) {
+                    Ok(0) => break,
+                    Ok(read) => filled += read,
+                    Err(e) => return Some((Err(e.into()), None)),
+                }
             }
+
+            if filled == 0 {
+                return None;
+            }
+
+            chunk.truncate(filled);
+            observer.emit(Event::Bytes(filled as u64));
+
+            Some((Ok(bytes::Bytes::from(chunk)), Some(file)))
         }
-
-        if filled == 0 {
-            return None;
-        }
-
-        chunk.truncate(filled);
-
-        Some((Ok(bytes::Bytes::from(chunk)), Some(file)))
     })
 }
 
@@ -1407,15 +1589,17 @@ struct Blocking<'a, W: Write> {
     written: u64,
     limit: u64,
     digest: String,
+    observer: Observer,
 }
 
 impl<'a, W: Write> Blocking<'a, W> {
-    fn new(inner: &'a mut W, limit: i64, digest: &str) -> Self {
+    fn new(inner: &'a mut W, limit: i64, digest: &str, observer: Observer) -> Self {
         Self {
             inner,
             written: 0,
             limit: limit.max(0) as u64,
             digest: digest.to_owned(),
+            observer,
         }
     }
 }
@@ -1447,6 +1631,10 @@ impl<W: Write + Unpin> tokio::io::AsyncWrite for Blocking<'_, W> {
         match this.inner.write(&buf[..buf.len().min(room)]) {
             Ok(written) => {
                 this.written += written as u64;
+                // On what was written, for the same reason the ceiling is: a
+                // partial write's remainder is offered again, and reporting the
+                // offer would count those bytes twice.
+                this.observer.emit(Event::Bytes(written as u64));
                 Poll::Ready(Ok(written))
             }
             Err(e) => Poll::Ready(Err(e)),
@@ -1647,5 +1835,47 @@ mod tests {
             }
         );
         assert!(!printed.contains("hunter2"), "{printed}");
+    }
+
+    /// A staging directory that cannot be used says which one, and why.
+    ///
+    /// The registry suite covers the same ground through a real publish, but
+    /// it needs a container and is `#[ignore]`d for it; this is the claim
+    /// under plain `cargo test`. The path names an existing regular file,
+    /// which `create_dir_all` cannot turn into a directory for anybody, `root`
+    /// included — so it is the one unusable directory that reproduces on every
+    /// platform and under every user the suite might run as.
+    #[test]
+    fn an_unusable_staging_directory_names_itself() {
+        let root = tempfile::tempdir().unwrap();
+        let occupied = root.path().join("not-a-directory");
+        std::fs::write(&occupied, b"").unwrap();
+
+        let error = scratch_in(Some(&occupied)).expect_err("staged in a regular file");
+
+        assert!(
+            matches!(&error, Error::Scratch { dir, .. } if dir == &occupied),
+            "fell through to the catch-all: {error:?}",
+        );
+
+        // The two halves the old `io error: File exists (os error 17)` had
+        // neither of: which directory, and that it was the staging one.
+        let message = error.to_string();
+        assert!(
+            message.contains(&occupied.display().to_string()),
+            "{message}",
+        );
+        assert!(message.contains("staging directory"), "{message}");
+
+        // And what the operating system said, exactly once, one line down the
+        // chain rather than repeated into the message above it.
+        let source = std::error::Error::source(&error).expect("no cause to render");
+        assert!(!message.contains(&source.to_string()), "{message}");
+    }
+
+    /// The unnamed case keeps the catch-all, and still works.
+    #[test]
+    fn an_unnamed_staging_directory_still_stages() {
+        scratch_in(None).expect("the platform temporary directory is unusable");
     }
 }

@@ -118,6 +118,7 @@ use stelae::{
     frame::Limits,
     inscription::{Inscription, LayerDescriptor},
     plan::{Remaining, RestoreProgress, Resume},
+    progress::{Event, Observer, Outcome},
     transport::{BlobIndex, SteleReader},
     Digest, LayerHeader,
 };
@@ -125,8 +126,9 @@ use tracing::info;
 
 use crate::{
     layers::{blocks, indexes, logs, state},
-    preflight, read_position, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, LOGS, STATE,
-    STATE_SHARDS, UTXOS,
+    preflight, read_position,
+    reporting::Cursor,
+    DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, LOGS, STATE, STATE_SHARDS, UTXOS,
 };
 
 /// What a restore holds at once.
@@ -236,8 +238,9 @@ impl Plan {
     /// of the original total. The tip is always in it; the epoch layers a
     /// `resume` accounts for are not.
     ///
-    /// Numbers only. Rendering them is a caller's, and belongs with the
-    /// observer seam the export and restore commands are going to share.
+    /// Numbers only. Rendering them is a caller's, and belongs with
+    /// [`stelae::progress`] — the seam the export and restore commands share,
+    /// and the one [`restore`] reports this run's own byte deltas through.
     pub fn remaining<R: SteleReader>(
         &self,
         stele: &R,
@@ -616,12 +619,16 @@ impl Checkpoint {
     /// per-kind driver below commits before it returns — and only then is the
     /// layer recorded, which is what makes the record mean "committed" rather
     /// than "attempted".
+    /// Returns the outcome alongside the count, rather than leaving a caller to
+    /// ask the resume the same question a second time: this method is the one
+    /// place a layer is decided about, and what an observer reports has to be
+    /// that decision and not a re-derivation of it.
     fn fetch<T: Default>(
         &mut self,
         descriptor: &LayerDescriptor,
         summary: &mut Summary,
         fetch: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<T, Error> {
+    ) -> Result<(T, Outcome), Error> {
         if self.resume.is_done(&descriptor.diff_id) {
             info!(
                 kind = descriptor.kind,
@@ -631,7 +638,7 @@ impl Checkpoint {
 
             summary.layers_skipped += 1;
 
-            return Ok(T::default());
+            return Ok((T::default(), Outcome::Skipped));
         }
 
         let out = fetch()?;
@@ -639,7 +646,7 @@ impl Checkpoint {
         summary.layers_fetched += 1;
         self.record(descriptor.diff_id)?;
 
-        Ok(out)
+        Ok((out, Outcome::Transferred))
     }
 
     fn record(&mut self, diff_id: Digest) -> Result<(), Error> {
@@ -719,6 +726,12 @@ pub struct Restoring<'a> {
 /// is, and one carrying what an interrupted attempt left behind is exactly what
 /// a [`Checkpoint`] opened with `resume` describes. Deciding between them is
 /// `bootstrap`'s, and it already owns `--force` and `--continue`.
+///
+/// `observer` hears about it as it happens, and is forwarded to `stele`:
+/// this loop knows which layer of how many and whether the resume skipped it,
+/// while the download that dominates a registry restore is only visible to the
+/// transport. [`Observer::silent`] is what a caller with nothing to render
+/// passes, and a silent run is byte-for-byte the run this was before the seam.
 pub fn restore<R, A, S, I>(
     stele: &R,
     index: &BlobIndex,
@@ -726,6 +739,7 @@ pub fn restore<R, A, S, I>(
     target: Target<'_, A, S, I>,
     budget: Budget,
     checkpoint: &mut Checkpoint,
+    observer: &Observer,
 ) -> Result<Summary, Error>
 where
     R: SteleReader,
@@ -739,13 +753,17 @@ where
         indexes,
     } = target;
 
+    stele.observe(observer.clone());
+
     let reader = Reader {
         stele,
         index,
         magic: plan.position.network.magic(),
         budget,
+        observer,
     };
 
+    let mut cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
 
     indexes.initialize_schema()?;
@@ -758,26 +776,35 @@ where
         );
 
         if let Some(descriptor) = &epoch.blocks {
-            let count = checkpoint.fetch(descriptor, &mut summary, || {
+            let at = cursor.open(BLOCKS, &descriptor.scope);
+
+            let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
                 restore_blocks(&reader, descriptor, archive)
             })?;
 
+            cursor.close(at, BLOCKS, outcome);
             summary.blocks += count;
         }
 
         if let Some(descriptor) = &epoch.logs {
-            let count = checkpoint.fetch(descriptor, &mut summary, || {
+            let at = cursor.open(LOGS, &descriptor.scope);
+
+            let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
                 restore_logs(&reader, descriptor, archive)
             })?;
 
+            cursor.close(at, LOGS, outcome);
             summary.logs += count;
         }
 
         if let Some(descriptor) = &epoch.indexes {
-            let count = checkpoint.fetch(descriptor, &mut summary, || {
+            let at = cursor.open(INDEXES, &descriptor.scope);
+
+            let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
                 restore_indexes(&reader, descriptor, indexes)
             })?;
 
+            cursor.close(at, INDEXES, outcome);
             summary.index_records += count;
         }
     }
@@ -785,7 +812,11 @@ where
     info!(shards = plan.state.len(), "restoring the state tip");
 
     for descriptor in &plan.state {
+        let at = cursor.open(STATE, &descriptor.scope);
+
         let (entities, utxos) = restore_state(&reader, descriptor, state)?;
+
+        cursor.close(at, STATE, Outcome::Transferred);
 
         summary.entities += entities;
         summary.utxos += utxos;
@@ -843,6 +874,7 @@ pub(crate) fn restore_stele<R, A, S, I>(
     node: Restoring<'_>,
     scratch_dir: Option<&Path>,
     target: Target<'_, A, S, I>,
+    observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     R: SteleReader,
@@ -884,6 +916,7 @@ where
         target,
         Budget::default(),
         &mut checkpoint,
+        observer,
     )?;
 
     Ok((plan, outlook, summary))
@@ -899,6 +932,7 @@ pub fn restore_dir<A, S, I>(
     root: impl Into<std::path::PathBuf>,
     node: Restoring<'_>,
     target: Target<'_, A, S, I>,
+    observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
@@ -907,7 +941,7 @@ where
 {
     let stele = stelae::dir::SteleDir::open(root)?;
 
-    restore_stele(&stele, node, None, target)
+    restore_stele(&stele, node, None, target, observer)
 }
 
 /// The stele a restore is reading, and the terms it reads under.
@@ -923,6 +957,7 @@ struct Reader<'a, R: SteleReader> {
     /// checking a layer against it checks the layer against the node.
     magic: u64,
     budget: Budget,
+    observer: &'a Observer,
 }
 
 impl<R: SteleReader> Reader<'_, R> {
@@ -958,15 +993,25 @@ impl<R: SteleReader> Reader<'_, R> {
             chunk.push(record);
 
             if chunk.len() >= self.budget.commit_records || bytes >= self.budget.commit_bytes {
+                let committed = chunk.len() as u64;
+
                 flush(std::mem::take(&mut chunk))?;
                 bytes = 0;
+
+                // On the commit boundary rather than on a cadence of its own:
+                // what a watcher of a restore wants to see move is records that
+                // have reached a store, and this is where they do.
+                self.observer.emit(Event::Records(committed));
             }
         }
 
         layer.finish()?;
 
         if !chunk.is_empty() {
+            let committed = chunk.len() as u64;
+
             flush(chunk)?;
+            self.observer.emit(Event::Records(committed));
         }
 
         Ok(count)

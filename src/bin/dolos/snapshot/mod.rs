@@ -25,6 +25,8 @@ use dolos_core::config::RootConfig;
 use dolos_snapshot::export::Plan;
 use miette::IntoDiagnostic as _;
 
+use crate::feedback::Feedback;
+
 mod digest;
 mod inspect;
 mod publish;
@@ -53,9 +55,12 @@ pub struct Args {
     command: Command,
 }
 
-pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
     match &args.command {
-        Command::Publish(x) => publish::run(config, x),
+        // `feedback` reaches `publish` alone: it is the only one of the four
+        // that waits on a store walk and a network, and the other three are
+        // over in the time it takes to print what they found.
+        Command::Publish(x) => publish::run(config, x, feedback),
         Command::Digest(x) => digest::run(config, x),
         Command::Verify(x) => verify::run(config, x),
         Command::Inspect(x) => inspect::run(config, x),

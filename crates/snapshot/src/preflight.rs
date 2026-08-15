@@ -268,20 +268,17 @@ fn same_volume(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Every need here is a proportion of the free space the test measured, and
+/// deliberately a coarse one: `check()` takes its own measurement of the same
+/// volume, so an assertion pinned within a few bytes of what the test read is a
+/// race against whatever else the machine is doing — under `cargo test`'s
+/// threads, that includes the other tests in this module creating and dropping
+/// temporary directories. A fixed byte cushion would not do: runner free space
+/// differs by orders of magnitude across hosts, and only a proportion is
+/// generous on all of them.
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Every need here is a proportion of the free space the test measured, and
-    // deliberately a coarse one: `check()` takes its own measurement of the
-    // same volume, so an assertion pinned within a few bytes of what the test
-    // read is a race against whatever else the machine is doing — under
-    // `cargo test`'s threads, that includes the other tests in this module
-    // creating and dropping temporary directories. A need asserted to fit
-    // stays a fraction of the pool so a sharp fall still leaves room; a need
-    // asserted to refuse stays well over it so a sharp rise still refuses. A
-    // fixed byte cushion would not do: runner free space differs by orders of
-    // magnitude across hosts, and only a proportion is generous on all of them.
 
     /// The whole of the free-space policy, over needs that share one volume.
     ///
@@ -332,8 +329,8 @@ mod tests {
         std::fs::create_dir(&beside).unwrap();
 
         let available = fs4::available_space(&storage).unwrap();
-        // Three quarters of the pool: one fits with a quarter to spare, and the
-        // pair asks half again as much as the whole of it.
+        // One of these fits with a quarter of the pool to spare; the pair asks
+        // half again as much as the whole of it.
         let each = available / 4 * 3;
 
         for scratch in [storage.join("scratch"), beside] {

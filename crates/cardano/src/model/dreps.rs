@@ -703,6 +703,54 @@ impl dolos_core::EntityDelta for DRepDormancyRelease {
     }
 }
 
+/// Write a DRep's computed voting power — the delegated stake accumulated by
+/// the EWRAP boundary scan (`GovState.distr.drep_distr`) — into
+/// `voting_power`. Emitted at EWRAP finalize for every registered DRep whose
+/// stored value differs from the accumulated one.
+///
+/// The field stays `u64` at its existing CBOR index — its type is frozen; a
+/// per-epoch history, if APIs ever want one, is a new field at a higher
+/// index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepPowerUpdate {
+    pub(crate) drep_id: EntityKey,
+    pub(crate) power: u64,
+
+    // undo
+    pub(crate) prev_power: u64,
+}
+
+impl DRepPowerUpdate {
+    pub fn new(drep_id: EntityKey, power: u64) -> Self {
+        Self {
+            drep_id,
+            power,
+            prev_power: 0,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepPowerUpdate {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, self.drep_id.clone()))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        let entity = entity.as_mut().expect("existing drep");
+
+        self.prev_power = entity.voting_power;
+        entity.voting_power = self.power;
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        let entity = entity.as_mut().expect("existing drep");
+
+        entity.voting_power = self.prev_power;
+    }
+}
+
 #[cfg(test)]
 mod prop_tests {
     use super::testing::any_drep_state;
@@ -766,6 +814,15 @@ mod prop_tests {
             only_if_registered in any::<bool>(),
         ) -> DRepExpiryUpdate {
             DRepExpiryUpdate::new(drep, expiry, epoch, only_if_registered)
+        }
+    }
+
+    prop_compose! {
+        fn any_drep_power_update()(
+            drep in root::any_drep(),
+            power in root::any_lovelace(),
+        ) -> DRepPowerUpdate {
+            DRepPowerUpdate::new(drep_to_entity_key(&drep), power)
         }
     }
 
@@ -836,6 +893,22 @@ mod prop_tests {
             delta in any_drep_expiration(),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn drep_power_update_roundtrip(
+            entity in any_drep_state(),
+            delta in any_drep_power_update(),
+        ) {
+            assert_delta_roundtrip(Some(entity), delta);
+        }
+
+        #[test]
+        fn drep_power_update_serde_roundtrip(
+            entity in any_drep_state(),
+            delta in any_drep_power_update(),
+        ) {
+            root::assert_delta_serde_roundtrip(Some(entity), delta);
         }
 
         #[test]

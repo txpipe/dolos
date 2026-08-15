@@ -17,11 +17,11 @@ use std::{
 };
 
 use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
-use pallas::ledger::primitives::{conway::DRep, StakeCredential};
+use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
-    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, PoolHash, PoolState,
+    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr, PoolHash, PoolState,
     ProposalState,
 };
 
@@ -158,6 +158,26 @@ pub struct BoundaryWork {
     /// carry no dormancy credit, so the expiry check adds the counter back
     /// (`actual = stored + dormant`, Haskell-style).
     pub num_dormant_epochs: u64,
+
+    /// `GovState::active_since` at the boundary. The stake-distribution
+    /// accumulation only runs while governance is active.
+    pub gov_active_since: Option<Epoch>,
+
+    /// `GovState::distr` at the boundary — the stake-distribution
+    /// accumulator as of this phase's load. The finalize pass reads the
+    /// completed distributions from here to write DRep voting powers.
+    pub gov_distr: Option<GovDistr>,
+
+    /// Deposits of the snapshot proposal set (live, `proposed_in` before the
+    /// closing epoch), summed per return credential. Added to the delegated
+    /// weight of the matching account during the distribution accumulation,
+    /// as the pulser's `proposalDeposits` snapshot field is.
+    pub proposal_deposits: HashMap<StakeCredential, u64>,
+
+    /// Entity keys of the DReps registered as of the previous boundary — the
+    /// distribution accumulation skips delegations to any other target
+    /// (`AlwaysAbstain` / `AlwaysNoConfidence` excepted).
+    pub snapshot_registered_dreps: HashSet<EntityKey>,
 
     // computed via visitors
     pub deltas: WorkDeltas,

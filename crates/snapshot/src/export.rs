@@ -61,14 +61,16 @@ use dolos_core::{
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
+    progress::{Observer, Outcome},
     transport::{LayerSpec, RecordSink, SteleWriter},
 };
 
 use crate::{
     layers::{blocks, digests, indexes, logs, state},
     namespaces::NAMESPACES,
+    reporting::Cursor,
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS,
-    COMPRESSION_LEVEL, DIGESTS, INDEXES, LOGS, STATE, STATE_SHARDS, UTXOS,
+    COMPRESSION_LEVEL, DIGESTS, EPOCH_KINDS, INDEXES, LOGS, STATE, STATE_SHARDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -216,6 +218,12 @@ pub fn plan<S: StateStore>(state: &S, network_magic: u64) -> Result<Plan, Error>
 /// together is what lets a publisher rebuild everything while still chaining —
 /// the `--rebuild` case, which suppresses [`Predecessor::adopt`] and leaves
 /// [`Predecessor::history`] exactly as it was.
+///
+/// The publish this one follows can be **this publish, interrupted**, which is
+/// what [`Predecessor::landed`] is for: a stele that never got sealed left
+/// layers behind that a restart may carry forward on exactly the terms a
+/// predecessor's do. Nothing here decides where that is written down — that is
+/// the implementor's, as `adopt` already is.
 pub trait Predecessor {
     /// The history the new inscription carries: every prior publication,
     /// contiguous and ascending, ending at `sequence - 1`.
@@ -246,6 +254,28 @@ pub trait Predecessor {
         let _ = (kind, scope);
 
         Ok(None)
+    }
+
+    /// Note that `descriptor`'s layer is in the transport and will be in the
+    /// manifest, whether it was built here or adopted.
+    ///
+    /// Called once per epoch layer, as it lands and before the next one starts,
+    /// so an implementor writing it down leaves a record that means "this layer
+    /// is up" rather than "this layer was attempted" — the same boundary
+    /// [`crate::restore::Checkpoint`] records on its side. The state shards are
+    /// deliberately never offered: they describe a moving tip, and a restart
+    /// must rebuild them.
+    ///
+    /// A failure here **fails the publish**. Recording is not a courtesy: a
+    /// record that silently stopped being written would cost the hours it
+    /// exists to save, at the moment nobody is watching.
+    ///
+    /// The default does nothing, which is what a publish with no host behind it
+    /// — a directory, a reproduction — wants.
+    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), Error> {
+        let _ = descriptor;
+
+        Ok(())
     }
 }
 
@@ -504,6 +534,15 @@ impl Standing {
 /// A layer it adopts is *attested without being reproduced*: this function
 /// never opens a sink for it and never touches a store on its behalf, which is
 /// the whole saving and the whole risk. See [`Predecessor::adopt`].
+///
+/// `observer` is who hears about it while it happens, and
+/// [`Observer::silent`] is what every caller that does not care passes: a
+/// silent run does exactly what this function did before the seam existed,
+/// byte for byte. The observer is forwarded to `stele` as well as reported
+/// through here, because the two halves of what an operator wants to see live
+/// in two places — this loop knows which layer of how many, and only the
+/// transport knows how much of it has moved.
+#[allow(clippy::too_many_arguments)]
 pub fn export<W, A, S, I>(
     stele: &W,
     plan: &Plan,
@@ -512,6 +551,7 @@ pub fn export<W, A, S, I>(
     indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
+    observer: &Observer,
 ) -> Result<Inscription, Error>
 where
     W: SteleWriter,
@@ -519,25 +559,54 @@ where
     S: StateStore,
     I: IndexStore,
 {
+    stele.observe(observer.clone());
+
+    // The same arithmetic `crate::registry::preview` reports a dry run with, so
+    // "layer 12 of 52" and "build: 52 layers" cannot disagree.
+    let total = plan.epochs.len() * EPOCH_KINDS.len()
+        + STATE_SHARDS as usize
+        + usize::from(digest_records.is_some());
+
+    let mut cursor = Cursor::new(observer, total);
+
     let mut layers = Vec::new();
 
     for window in &plan.epochs {
-        layers.push(write_blocks(stele, plan, archive, window, previous)?);
+        landed(
+            write_blocks(stele, plan, archive, window, previous, &mut cursor)?,
+            previous,
+            &mut layers,
+        )?;
     }
 
     for window in &plan.epochs {
-        layers.push(write_indexes(stele, plan, indexes, window, previous)?);
+        landed(
+            write_indexes(stele, plan, indexes, window, previous, &mut cursor)?,
+            previous,
+            &mut layers,
+        )?;
     }
 
     for window in &plan.epochs {
-        layers.push(write_logs(stele, plan, archive, window, previous)?);
+        landed(
+            write_logs(stele, plan, archive, window, previous, &mut cursor)?,
+            previous,
+            &mut layers,
+        )?;
     }
 
-    layers.extend(write_state(stele, plan, state)?);
+    // Not offered to the predecessor: see [`Predecessor::landed`].
+    layers.extend(write_state(stele, plan, state, &mut cursor)?);
 
     if let Some(records) = digest_records {
-        layers.push(write_digests(stele, plan, records)?);
+        layers.push(write_digests(stele, plan, records, &mut cursor)?);
     }
+
+    debug_assert_eq!(
+        cursor.opened(),
+        layers.len(),
+        "every layer this export writes has to have been announced exactly once",
+    );
 
     let mut inscription = Inscription::new(
         &DolosProfile,
@@ -571,6 +640,7 @@ pub fn publish<A, S, I>(
     state: &S,
     indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
+    observer: &Observer,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
@@ -587,6 +657,7 @@ where
         indexes,
         digest_records,
         &First,
+        observer,
     )
 }
 
@@ -619,6 +690,11 @@ where
     S: StateStore,
     I: IndexStore,
 {
+    // Silent, and not for want of a caller to thread one through: a
+    // reproduction stores nothing and moves nothing, so the only thing it could
+    // report is the store walk — which `dolos snapshot digest` and `verify`
+    // already print around. The seam is for the two commands that wait on a
+    // network.
     export(
         &stelae::Discarding,
         plan,
@@ -627,6 +703,7 @@ where
         indexes,
         digest_records,
         previous,
+        &Observer::silent(),
     )
 }
 
@@ -691,6 +768,7 @@ where
         indexes,
         digest_records,
         &Attested::of(published),
+        &Observer::silent(),
     )?;
 
     compare(published, &reproduced)?;
@@ -826,6 +904,23 @@ fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
 }
 
+/// One epoch layer is in the transport: tell the predecessor before counting
+/// it.
+///
+/// In that order, and one layer at a time, because the two together are what
+/// make the note honest — a record written after the loop would describe a
+/// publish that finished, which is the one case it is no use in.
+fn landed(
+    descriptor: LayerDescriptor,
+    previous: &dyn Predecessor,
+    layers: &mut Vec<LayerDescriptor>,
+) -> Result<(), Error> {
+    previous.landed(&descriptor)?;
+    layers.push(descriptor);
+
+    Ok(())
+}
+
 /// The layer spec for one epoch window, and what the predecessor says about it.
 ///
 /// The lookup happens **before the store is touched**, which is the entire
@@ -853,17 +948,22 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
     archive: &A,
     window: &EpochWindow,
     previous: &dyn Predecessor,
+    cursor: &mut Cursor<'_>,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
 
     let (spec, adopted) = inherit(&scope, BLOCKS, previous)?;
+    let at = cursor.open(BLOCKS, &spec.scope);
 
     if let Some(descriptor) = adopted {
+        cursor.close(at, BLOCKS, Outcome::Inherited);
+
         return Ok(descriptor);
     }
 
     let mut sink = sink(stele, &spec)?;
     let mut order = blocks::OrderCheck::default();
+    let mut records = cursor.records();
 
     let slots = window.slots();
 
@@ -877,9 +977,15 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
 
         order.check(&record)?;
         sink.write_record(&blocks::encode(&record)?)?;
+        records.tick();
     }
 
-    Ok(sink.finish()?.descriptor)
+    records.flush();
+
+    let descriptor = sink.finish()?.descriptor;
+    cursor.close(at, BLOCKS, Outcome::Transferred);
+
+    Ok(descriptor)
 }
 
 /// One epoch's ledger logs, ordered by `(ns, log_key)`.
@@ -893,17 +999,22 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
     archive: &A,
     window: &EpochWindow,
     previous: &dyn Predecessor,
+    cursor: &mut Cursor<'_>,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
 
     let (spec, adopted) = inherit(&scope, LOGS, previous)?;
+    let at = cursor.open(LOGS, &spec.scope);
 
     if let Some(descriptor) = adopted {
+        cursor.close(at, LOGS, Outcome::Inherited);
+
         return Ok(descriptor);
     }
 
     let mut sink = sink(stele, &spec)?;
     let mut order = logs::OrderCheck::default();
+    let mut records = cursor.records();
 
     let slots = window.slots();
     let range = log_key_range(&slots);
@@ -919,10 +1030,16 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
 
             order.check(&record)?;
             sink.write_record(&logs::encode(&record)?)?;
+            records.tick();
         }
     }
 
-    Ok(sink.finish()?.descriptor)
+    records.flush();
+
+    let descriptor = sink.finish()?.descriptor;
+    cursor.close(at, LOGS, Outcome::Transferred);
+
+    Ok(descriptor)
 }
 
 /// A log key range covering every log whose slot falls in `slots`.
@@ -954,6 +1071,7 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
     store: &I,
     window: &EpochWindow,
     previous: &dyn Predecessor,
+    cursor: &mut Cursor<'_>,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
 
@@ -961,13 +1079,17 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
     // index layer skips a whole pass over the index store, which is the cost
     // the doc comment above measures.
     let (spec, adopted) = inherit(&scope, INDEXES, previous)?;
+    let at = cursor.open(INDEXES, &spec.scope);
 
     if let Some(descriptor) = adopted {
+        cursor.close(at, INDEXES, Outcome::Inherited);
+
         return Ok(descriptor);
     }
 
     let mut sink = sink(stele, &spec)?;
     let mut order = indexes::OrderCheck::default();
+    let mut records = cursor.records();
 
     let slots = window.slots();
 
@@ -976,6 +1098,7 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
 
         order.check(&record)?;
         sink.write_record(&indexes::encode(&record)?)?;
+        records.tick();
     }
 
     for exact in store.iter_exact_records(slots)? {
@@ -983,9 +1106,15 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
 
         order.check(&record)?;
         sink.write_record(&indexes::encode(&record)?)?;
+        records.tick();
     }
 
-    Ok(sink.finish()?.descriptor)
+    records.flush();
+
+    let descriptor = sink.finish()?.descriptor;
+    cursor.close(at, INDEXES, Outcome::Transferred);
+
+    Ok(descriptor)
 }
 
 /// The state tip, as sixteen shards written in one pass.
@@ -1014,16 +1143,23 @@ fn write_state<W: SteleWriter, S: StateStore>(
     stele: &W,
     plan: &Plan,
     store: &S,
+    cursor: &mut Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
     let shards = 0..STATE_SHARDS as u8;
 
     let mut sinks = Vec::with_capacity(shards.len());
     let mut orders = Vec::with_capacity(shards.len());
+    let mut positions = Vec::with_capacity(shards.len());
 
     for shard in shards {
-        sinks.push(sink(stele, &plan.state_scope(shard).layer_spec(STATE)?)?);
+        let spec = plan.state_scope(shard).layer_spec(STATE)?;
+
+        positions.push(cursor.open(STATE, &spec.scope));
+        sinks.push(sink(stele, &spec)?);
         orders.push(state::OrderCheck::for_shard(shard));
     }
+
+    let mut records = cursor.records();
 
     // `NAMESPACES` is sorted and `utxos` is its last entry, so one walk in
     // registry order yields `(ns, key)` ascending within every shard — the
@@ -1044,6 +1180,7 @@ fn write_state<W: SteleWriter, S: StateStore>(
             let (key, value) = entry?;
 
             route(&mut sinks, &mut orders, state::entity(ns, &key, &value)?)?;
+            records.tick();
         }
     }
 
@@ -1051,11 +1188,20 @@ fn write_state<W: SteleWriter, S: StateStore>(
         let (txo, value) = entry?;
 
         route(&mut sinks, &mut orders, state::utxo(&txo, &value)?)?;
+        records.tick();
     }
+
+    records.flush();
 
     sinks
         .into_iter()
-        .map(|sink| Ok(sink.finish()?.descriptor))
+        .zip(positions)
+        .map(|(sink, at)| {
+            let descriptor = sink.finish()?.descriptor;
+            cursor.close(at, STATE, Outcome::Transferred);
+
+            Ok(descriptor)
+        })
         .collect()
 }
 
@@ -1087,6 +1233,7 @@ fn write_digests<W: SteleWriter>(
     stele: &W,
     plan: &Plan,
     records: &[digests::ImmutableDigests],
+    cursor: &mut Cursor<'_>,
 ) -> Result<LayerDescriptor, Error> {
     let mut order = digests::OrderCheck::default();
 
@@ -1110,13 +1257,23 @@ fn write_digests<W: SteleWriter>(
         last_immutable,
     };
 
-    let mut sink = sink(stele, &scope.layer_spec(DIGESTS)?)?;
+    let spec = scope.layer_spec(DIGESTS)?;
+    let at = cursor.open(DIGESTS, &spec.scope);
+
+    let mut sink = sink(stele, &spec)?;
+    let mut ticks = cursor.records();
 
     for record in records {
         sink.write_record(&digests::encode(record)?)?;
+        ticks.tick();
     }
 
-    Ok(sink.finish()?.descriptor)
+    ticks.flush();
+
+    let descriptor = sink.finish()?.descriptor;
+    cursor.close(at, DIGESTS, Outcome::Transferred);
+
+    Ok(descriptor)
 }
 
 #[cfg(test)]

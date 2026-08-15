@@ -18,6 +18,7 @@ pub enum Error {
     InvalidPoolId,
     InvalidBlockNumber,
     InvalidBlockHash,
+    InvalidEpochNumber,
 }
 
 #[derive(Serialize)]
@@ -116,6 +117,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Missing or malformed block hash.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidEpochNumber => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Missing, out of range or malformed epoch_number.",
                 )),
             )
                 .into_response(),

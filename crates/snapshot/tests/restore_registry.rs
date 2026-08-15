@@ -45,6 +45,7 @@
 
 mod node;
 mod registry_fixture;
+mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, index_delta_from_utxo_delta};
 use dolos_core::{
@@ -65,9 +66,12 @@ use stelae::{
     inscription::LayerDescriptor,
     oci::{Auth, Registry, Stele},
     plan::RestoreProgress,
+    progress::{Observer, Outcome},
     transport::BlobIndex,
     Digest, LayerReader, Profile, SteleReader,
 };
+
+use watcher::Watcher;
 
 /// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
 const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
@@ -118,13 +122,13 @@ impl Node {
 
     fn publish(&self, repository: &Registry, plan: &Plan) {
         registry::publish(
-            repository,
+            registry::Publishing::new(repository),
             plan,
             self.domain.archive(),
             self.domain.state(),
             self.domain.indexes(),
             None,
-            false,
+            &Observer::silent(),
         )
         .unwrap();
     }
@@ -139,13 +143,40 @@ fn restore_from(
     blank: &Blank<MemoryStores>,
     resume: bool,
 ) -> Result<restore::Summary, Error> {
+    restore_watched(
+        repository,
+        point,
+        storage,
+        magic,
+        blank,
+        resume,
+        &Observer::silent(),
+    )
+    .map(|(_, _, summary)| summary)
+}
+
+/// The same restore, with somebody listening, and the outlook the summary alone
+/// does not carry.
+///
+/// Separate so every suite above stays exactly as it was: an observer is meant
+/// to change nothing but what is said.
+#[allow(clippy::too_many_arguments)]
+fn restore_watched(
+    repository: &Registry,
+    point: Point,
+    storage: &std::path::Path,
+    magic: u64,
+    blank: &Blank<MemoryStores>,
+    resume: bool,
+    observer: &Observer,
+) -> Result<(restore::Plan, restore::Outlook, restore::Summary), Error> {
     registry::restore_registry(
         repository,
         point,
         restoring(storage, magic, resume),
         target(blank),
+        observer,
     )
-    .map(|(_, _, summary)| summary)
 }
 
 /// What the node reading a stele knows about itself.
@@ -201,6 +232,7 @@ fn a_registry_restore_is_a_directory_restore() {
             node.domain.indexes(),
             None,
             &dolos_snapshot::export::First,
+            &Observer::silent(),
         )
         .unwrap();
     }
@@ -211,6 +243,7 @@ fn a_registry_restore_is_a_directory_restore() {
         dir.path(),
         restoring(dir_storage.path(), node.magic, false),
         target(&from_dir),
+        &Observer::silent(),
     )
     .unwrap();
 
@@ -316,6 +349,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
         target(&blank),
         Budget::default(),
         &mut checkpoint,
+        &Observer::silent(),
     )
     .unwrap_err();
 
@@ -426,6 +460,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         target(&blank),
         Budget::default(),
         &mut checkpoint,
+        &Observer::silent(),
     )
     .unwrap_err();
 
@@ -787,4 +822,159 @@ fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
 
     found.sort_by_key(|record| (record.kind, record.key().to_vec()));
     found
+}
+
+/// The restore half of the observer's cross-check: what the stream said came
+/// down, against what the manifest says the layers weigh.
+///
+/// This is the direction the seam exists for. A registry reader pulls a whole
+/// blob into scratch before `stream_layer` yields its first record, so an
+/// observer wired only to the profile driver would report nothing for the
+/// entire download — which on a restore is the entire operation. What proves
+/// the bytes are genuinely being reported *during* the pull, rather than
+/// announced once at the end, is that the deltas sum to the same number the
+/// manifest states independently.
+#[test]
+#[ignore]
+fn a_registry_restore_reports_every_byte_it_pulls() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/progress-restore");
+
+    node.publish(&repository, &node.first);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+    let watcher = std::sync::Arc::new(Watcher::default());
+
+    let (plan, outlook, summary) = restore_watched(
+        &repository,
+        Point::Latest,
+        storage.path(),
+        node.magic,
+        &blank,
+        false,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    watcher.assert_well_formed(plan.layers().count());
+
+    assert_eq!(watcher.ended(Outcome::Transferred), summary.layers_fetched);
+    assert_eq!(watcher.ended(Outcome::Skipped), summary.layers_skipped);
+    assert_eq!(watcher.ended(Outcome::Skipped), 0, "nothing to resume here");
+
+    // Every layer the plan names was pulled, and each was announced with the
+    // size the manifest states for it.
+    assert_eq!(watcher.blobs(true).len(), summary.layers_fetched);
+    assert!(watcher.blobs(false).is_empty(), "a pull never skips a blob");
+
+    assert_eq!(
+        watcher.blob_bytes(true),
+        outlook.remaining.compressed_bytes,
+        "the blobs announced, against what the plan said was left to fetch"
+    );
+
+    // And the deltas — reported as the bytes were written, one `poll_write` at a
+    // time — sum to the same total.
+    assert_eq!(
+        watcher.bytes(),
+        outlook.remaining.compressed_bytes,
+        "byte deltas summed, against the compressed total the manifest states"
+    );
+
+    assert!(
+        outlook.remaining.compressed_bytes > 0,
+        "a restore that moved nothing proves nothing about byte reporting"
+    );
+    assert_eq!(outlook.remaining.unsized_layers, 0);
+
+    eprintln!(
+        "restored {} layers, {} compressed bytes reported in {} blob(s)",
+        summary.layers_fetched,
+        watcher.bytes(),
+        watcher.blobs(true).len(),
+    );
+}
+
+/// A resumed restore over the wire reports the layers it did not have to pull.
+///
+/// The skip is the driver's, decided before the transport is asked for
+/// anything, so what this pins is that the two emitters do not disagree: a
+/// layer the resume skipped contributes no blob and no bytes, and the counts
+/// still add up to the plan's.
+#[test]
+#[ignore]
+fn a_resumed_registry_restore_reports_what_it_skipped() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/progress-resume");
+
+    node.publish(&repository, &node.first);
+
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    // The interruption, at the second epoch layer the driver reaches — the same
+    // deterministic placement `a_killed_registry_restore_resumes_where_it_stopped`
+    // uses, and for the same reason: a wall-clock kill against a loopback
+    // registry holding a kilobyte-scale stele interrupts nothing.
+    {
+        let stele = Point::Latest.pull(&repository).unwrap();
+        let identity = stele.read_inscription().unwrap().digest().unwrap();
+        let plan = restore::plan(&stele, node.magic, None).unwrap();
+        let index = stele.blob_index().unwrap();
+
+        let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
+        assert!(epoch_layers.len() >= 2);
+
+        let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+
+        restore::restore(
+            &Interrupted {
+                inner: &stele,
+                stop_at: epoch_layers[1],
+            },
+            &index,
+            &plan,
+            target(&blank),
+            Budget::default(),
+            &mut checkpoint,
+            &Observer::silent(),
+        )
+        .unwrap_err();
+    }
+
+    let watcher = std::sync::Arc::new(Watcher::default());
+
+    let (plan, outlook, summary) = restore_watched(
+        &repository,
+        Point::Latest,
+        storage.path(),
+        node.magic,
+        &blank,
+        true,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    watcher.assert_well_formed(plan.layers().count());
+
+    assert!(
+        summary.layers_skipped > 0,
+        "the scenario has to produce a skip, or the tallies below prove nothing"
+    );
+
+    assert_eq!(watcher.ended(Outcome::Skipped), summary.layers_skipped);
+    assert_eq!(watcher.ended(Outcome::Transferred), summary.layers_fetched);
+
+    // A skipped layer is never asked of the transport, so it contributes no
+    // blob — which is why the blob count is the fetch count and not the plan's.
+    assert_eq!(watcher.blobs(true).len(), summary.layers_fetched);
+
+    assert_eq!(
+        watcher.bytes(),
+        outlook.remaining.compressed_bytes,
+        "a resumed run reports the bytes it still had to move, not the original total"
+    );
 }

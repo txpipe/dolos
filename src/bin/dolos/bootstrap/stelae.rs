@@ -41,6 +41,8 @@ use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::registry::{self, Point, Repository};
 
+use crate::feedback::{Feedback, SteleProgress};
+
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
     /// Where to restore from, as a URL: `file://DIR` naming a stele directory,
@@ -190,13 +192,25 @@ impl Node {
     }
 }
 
-fn restore_dir(config: &RootConfig, dir: &std::path::Path, resume: bool) -> miette::Result<()> {
+fn restore_dir(
+    config: &RootConfig,
+    dir: &std::path::Path,
+    feedback: &Feedback,
+    resume: bool,
+) -> miette::Result<()> {
     let node = Node::open(config)?;
+    let progress = SteleProgress::restoring(feedback);
 
-    let (plan, outlook, summary) =
-        dolos_snapshot::restore::restore_dir(dir, node.restoring(resume), node.target())
-            .into_diagnostic()
-            .context("restoring the stele")?;
+    let (plan, outlook, summary) = dolos_snapshot::restore::restore_dir(
+        dir,
+        node.restoring(resume),
+        node.target(),
+        &progress.observer(),
+    )
+    .into_diagnostic()
+    .context("restoring the stele")?;
+
+    progress.finish();
 
     report(&plan, &outlook, &summary);
 
@@ -209,6 +223,7 @@ fn restore_repo(
     point: Point,
     insecure: bool,
     scratch_dir: Option<&std::path::Path>,
+    feedback: &Feedback,
     resume: bool,
 ) -> miette::Result<()> {
     // First: `Node::open` runs `ensure_storage_path`, so the default of
@@ -229,10 +244,19 @@ fn restore_repo(
 
     println!("source:   {repo} ({point})");
 
-    let (plan, outlook, summary) =
-        registry::restore_registry(&registry, point, node.restoring(resume), node.target())
-            .into_diagnostic()
-            .context("restoring the stele")?;
+    let progress = SteleProgress::restoring(feedback);
+
+    let (plan, outlook, summary) = registry::restore_registry(
+        &registry,
+        point,
+        node.restoring(resume),
+        node.target(),
+        &progress.observer(),
+    )
+    .into_diagnostic()
+    .context("restoring the stele")?;
+
+    progress.finish();
 
     report(&plan, &outlook, &summary);
 
@@ -241,12 +265,11 @@ fn restore_repo(
 
 /// What the run did, in the numbers an operator checks.
 ///
-/// The remaining-download figures are printed *after* the restore rather than
-/// before it, and that is a gap rather than a choice: rendering progress while
-/// it runs is the observer seam this command shares with `snapshot publish`,
-/// and it belongs to whichever of the two follow-up slices lands first. What is
-/// here is the arithmetic that seam will read, and a report that at least says
-/// what a resumed run cost rather than what an unresumed one would have.
+/// Still printed after the restore, and now that is a choice rather than a gap:
+/// the run itself is drawn while it happens, through the observer seam this
+/// command shares with `snapshot publish`, so what is left for the end is the
+/// arithmetic a bar cannot carry — what a resumed run cost rather than what an
+/// unresumed one would have.
 fn report(
     plan: &dolos_snapshot::restore::Plan,
     outlook: &dolos_snapshot::restore::Outlook,
@@ -288,15 +311,21 @@ fn report(
     );
 }
 
-pub fn run(config: &RootConfig, args: &Args, resume: bool) -> miette::Result<()> {
+pub fn run(
+    config: &RootConfig,
+    args: &Args,
+    feedback: &Feedback,
+    resume: bool,
+) -> miette::Result<()> {
     match &args.source {
-        Source::Dir(dir) => restore_dir(config, dir, resume),
+        Source::Dir(dir) => restore_dir(config, dir, feedback, resume),
         Source::Repo(repo) => restore_repo(
             config,
             repo,
             args.point,
             args.insecure,
             args.scratch_dir.as_deref(),
+            feedback,
             resume,
         ),
     }
@@ -356,5 +385,97 @@ mod tests {
         ] {
             assert!(raw.parse::<Source>().is_err(), "{raw:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use dolos_snapshot::progress::{Event, Outcome, Progress as _};
+
+    use crate::feedback::{Feedback, SteleProgress};
+
+    const PER_RESTORE: usize = 3 + 16;
+
+    /// The wiring `restore_dir` and `restore_repo` use, driven over a
+    /// fixture-scale restore that resumes.
+    ///
+    /// The resume is the case worth rendering and the one worth testing: a
+    /// skipped layer moves no blob and no bytes, so a bar that advanced only on
+    /// bytes would stall on exactly the layers a resumed run gets for free.
+    #[test]
+    fn the_restore_renderer_tracks_a_resumed_fixture_scale_run() {
+        let progress = SteleProgress::restoring(&Feedback::hidden());
+
+        let epoch = serde_json::json!({"networkMagic": 2, "epoch": 0});
+        let shard = serde_json::json!({"networkMagic": 2, "epoch": 0, "shard": 0});
+
+        // The layer an earlier attempt had already committed: announced, closed,
+        // nothing pulled for it.
+        progress.on(Event::LayerStarted {
+            index: 0,
+            total: PER_RESTORE,
+            kind: "blocks",
+            scope: &epoch,
+        });
+
+        progress.on(Event::LayerFinished {
+            index: 0,
+            total: PER_RESTORE,
+            kind: "blocks",
+            outcome: Outcome::Skipped,
+        });
+
+        assert_eq!(
+            progress.layers_position(),
+            1,
+            "a skip still advances the run"
+        );
+        assert_eq!(progress.blob_position(), 0);
+
+        for index in 1..PER_RESTORE {
+            let kind = if index < 3 { "logs" } else { "state" };
+            let scope = if index < 3 { &epoch } else { &shard };
+
+            progress.on(Event::LayerStarted {
+                index,
+                total: PER_RESTORE,
+                kind,
+                scope,
+            });
+
+            // A registry reader pulls the whole blob before a record comes back
+            // out of it, which is the stretch this bar exists for.
+            progress.on(Event::Blob {
+                moved: true,
+                bytes: 8_192,
+            });
+
+            for _ in 0..8 {
+                progress.on(Event::Bytes(1_024));
+            }
+
+            progress.on(Event::Records(2_000));
+
+            progress.on(Event::LayerFinished {
+                index,
+                total: PER_RESTORE,
+                kind,
+                outcome: Outcome::Transferred,
+            });
+        }
+
+        assert_eq!(progress.layers_position(), PER_RESTORE as u64);
+        assert_eq!(progress.layers_length(), Some(PER_RESTORE as u64));
+
+        assert_eq!(progress.blob_position(), 8_192);
+        assert_eq!(progress.blob_length(), Some(8_192));
+
+        assert_eq!(
+            progress.records_position(),
+            2_000 * (PER_RESTORE as u64 - 1),
+            "the skipped layer contributed no records"
+        );
+
+        progress.finish();
     }
 }

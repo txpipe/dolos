@@ -20,7 +20,7 @@ use dolos_testing::{
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{ToyDomain, ToyStores},
 };
-use stelae::{dir::SteleDir, inscription::Inscription};
+use stelae::{dir::SteleDir, inscription::Inscription, progress::Observer};
 
 /// Preview genesis, synthetic blocks and seeded logs, all inside epoch zero.
 ///
@@ -121,10 +121,11 @@ mod registry_node {
     use dolos_core::{BlockHash, ChainPoint, Domain as _};
     use dolos_snapshot::{
         export::Plan,
-        registry::{self, Published, Registry},
+        registry::{self, Published, Publishing, Registry},
         Error, Network,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
+    use stelae::progress::Observer;
 
     use super::harness;
 
@@ -176,29 +177,66 @@ mod registry_node {
         }
 
         pub fn publish(&self, repository: &Registry, plan: &Plan, rebuild: bool) -> Published {
+            self.publish_as(Publishing::new(repository).rebuilding(rebuild), plan)
+                .unwrap()
+        }
+
+        /// A publish with the whole of [`Publishing`] chosen by the caller —
+        /// what the resume suite needs, since a resumption record is the one
+        /// input a publish takes from the host rather than from the repository.
+        pub fn publish_as(
+            &self,
+            publishing: Publishing<'_>,
+            plan: &Plan,
+        ) -> Result<Published, Error> {
+            self.publish_watched(publishing, plan, &Observer::silent())
+        }
+
+        /// The same publish, with somebody listening.
+        ///
+        /// Separate from [`Node::publish_as`] so the suites that are not about
+        /// progress stay unchanged and keep proving what they proved: an
+        /// observer is meant to change nothing but what is said.
+        pub fn publish_watched(
+            &self,
+            publishing: Publishing<'_>,
+            plan: &Plan,
+            observer: &Observer,
+        ) -> Result<Published, Error> {
             registry::publish(
-                repository,
+                publishing,
                 plan,
                 self.domain.archive(),
                 self.domain.state(),
                 self.domain.indexes(),
                 None,
-                rebuild,
+                observer,
             )
-            .unwrap()
+        }
+
+        /// The same publish, through a writer of the caller's — the interrupted
+        /// transport the resume suite kills at a layer it chose.
+        pub fn publish_through<W: stelae::SteleWriter>(
+            &self,
+            stele: &W,
+            publishing: Publishing<'_>,
+            plan: &Plan,
+        ) -> Result<Published, Error> {
+            registry::publish_into(
+                stele,
+                publishing,
+                plan,
+                self.domain.archive(),
+                self.domain.state(),
+                self.domain.indexes(),
+                None,
+                &Observer::silent(),
+            )
         }
 
         pub fn refuse(&self, repository: &Registry, plan: &Plan) -> Error {
-            registry::publish(
-                repository,
-                plan,
-                self.domain.archive(),
-                self.domain.state(),
-                self.domain.indexes(),
-                None,
-                false,
-            )
-            .unwrap_err()
+            self.publish_as(Publishing::new(repository), plan)
+                .unwrap_err()
         }
     }
 }
@@ -218,6 +256,7 @@ pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) ->
         domain.indexes(),
         None,
         &First,
+        &Observer::silent(),
     )
     .unwrap()
 }

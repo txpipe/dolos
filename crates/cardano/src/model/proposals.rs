@@ -63,6 +63,23 @@ pub enum ProposalAction {
     Info,
 }
 
+impl ProposalAction {
+    /// The lineage tree this action belongs to. Derived from the action
+    /// itself rather than read off `ProposalState.purpose`, so rows written
+    /// before the field existed still resolve their purpose at enactment.
+    /// `None` for the actions that have no lineage — `TreasuryWithdrawal`,
+    /// `Info`, and the legacy `Other` catch-all.
+    pub fn purpose(&self) -> Option<GovPurpose> {
+        match self {
+            Self::ParamChange(_) => Some(GovPurpose::PParamUpdate),
+            Self::HardFork(_) => Some(GovPurpose::HardFork),
+            Self::NoConfidence | Self::UpdateCommittee { .. } => Some(GovPurpose::Committee),
+            Self::NewConstitution { .. } => Some(GovPurpose::Constitution),
+            Self::TreasuryWithdrawal(_) | Self::Info | Self::Other => None,
+        }
+    }
+}
+
 /// The four independent lineage trees a governance action can belong to.
 ///
 /// `TreasuryWithdrawal` and `Info` actions have no lineage (no parent field,

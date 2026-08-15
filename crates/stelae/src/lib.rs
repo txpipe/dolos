@@ -35,6 +35,9 @@
 //!   identity without storing it.
 //! - [`plan`] — what a restore has already done and what it has left to fetch:
 //!   the progress file, the resume rule, and remaining-bytes accounting.
+//! - [`progress`] — the one seam a publish and a restore report through while
+//!   they run: an observer a caller passes in, callbacks only, silent by
+//!   default.
 //! - [`dir`] — a minimal on-disk stele: the first implementation of that seam,
 //!   and the one a stele is inspectable by hand through.
 //! - [`oci`] — (feature `oci`) an OCI registry as the other implementation:
@@ -58,6 +61,7 @@ pub mod layer;
 pub mod oci;
 pub mod plan;
 pub mod profile;
+pub mod progress;
 pub mod transport;
 
 pub use digest::{Digest, LayerDigests, LayerWriter};
@@ -68,6 +72,7 @@ pub use inscription::{
 pub use layer::LayerReader;
 pub use plan::{Remaining, RestoreProgress, Resume};
 pub use profile::{MediaType, Profile};
+pub use progress::{Event, Observer, Outcome, Progress};
 pub use transport::{
     BlobIndex, Discarding, DiscardingSink, LayerSpec, RecordSink, SteleReader, SteleWriter,
     WrittenLayer,
@@ -282,6 +287,29 @@ pub enum Error {
     #[cfg(feature = "oci")]
     #[error("{value:?} is not an OCI repository: {reason}")]
     InvalidRepository { value: String, reason: String },
+
+    /// A staging directory the transport could not use.
+    ///
+    /// Distinct from [`Error::Io`], which is the catch-all every other bare
+    /// `?` in this crate falls through, because this is the one path an
+    /// operator types on a command line — `dolos snapshot publish
+    /// --scratch-dir`, `dolos bootstrap stelae --scratch-dir`, or the default
+    /// the binary derives from `storage.path`. A typo, an unmounted volume, a
+    /// directory owned by somebody else and a path that is already a regular
+    /// file all arrive here, and `std::io::Error` carries none of them: it
+    /// knows the errno and not the path that produced it. So the path is
+    /// captured where it is still in scope, which is the only place it can be.
+    ///
+    /// The message deliberately does *not* repeat what the operating system
+    /// said — that stays on the source, one line further down the chain, so a
+    /// rendered report says each thing once.
+    #[cfg(feature = "oci")]
+    #[error("cannot use {} as the staging directory", dir.display())]
+    Scratch {
+        dir: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     /// Anything the registry client reported.
     #[cfg(feature = "oci")]

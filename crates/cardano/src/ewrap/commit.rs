@@ -18,7 +18,8 @@ use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     ewrap::BoundaryWork, rupd::credential_to_key, AccountState, CardanoEntity, DRepState,
-    EpochState, FixedNamespace, PendingMirState, PendingRewardState, PoolState, ProposalState,
+    EpochState, FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState,
+    ProposalState,
 };
 
 impl BoundaryWork {
@@ -89,6 +90,11 @@ impl BoundaryWork {
         // EpochState gets the EWrapProgress delta.
         self.deltas
             .apply_singleton::<EpochState, _>(state, &writer)?;
+
+        // GovState gets the shard's GovDistrAccumulate delta (governance
+        // active only). Committing it in the same transaction as
+        // EWrapProgress keeps the two shard cursors in lockstep.
+        self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
         // Delete applied pending rewards.
         debug!(
@@ -179,6 +185,11 @@ impl BoundaryWork {
         {
             self.ending_state = applied;
         }
+
+        // Gov isn't streamed by namespace; the enactment deltas on the
+        // governance singleton (committee, constitution, per-purpose lineage
+        // roots) go through the singleton path, as they do in ESTART's commit.
+        self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
         // Delete processed pending MIRs.
         debug!(

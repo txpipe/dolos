@@ -50,12 +50,15 @@
 //! needs to ask a repository what is in it is asking a transport-specific
 //! question and should hold the transport-specific type.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     digest::{LayerDigests, LayerWriter},
     frame::{CanonicalCbor, LayerHeader, Limits, SeqWriter},
     inscription::{Inscription, LayerDescriptor},
     layer::LayerReader,
     profile::{checked_layer_media_type, Profile},
+    progress::Observer,
     Digest, Error,
 };
 
@@ -89,7 +92,15 @@ impl LayerSpec {
 
 /// A written layer: the descriptor to put in the inscription, plus the
 /// transport facts that do not belong there.
-#[derive(Debug, Clone)]
+///
+/// Serializable so that a host can *hold one across a process*. Nothing in the
+/// protocol reads such a file — it is not a stele and never becomes one — but a
+/// publisher that wants to carry a layer it already uploaded into a later
+/// attempt has to write down what the transport told it, and writing down a
+/// half of the pair is what makes a descriptor and a blob able to disagree. See
+/// [`crate::oci::Registry::adopt_carried`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WrittenLayer {
     pub descriptor: LayerDescriptor,
     pub digests: LayerDigests,
@@ -235,6 +246,22 @@ pub trait SteleWriter {
 
         sink.finish()
     }
+
+    /// Report what this transport moves to `observer`, for as long as it is
+    /// attached.
+    ///
+    /// **The default body does nothing, and that is the point.** A transport
+    /// that has no bytes of its own to report — [`crate::dir::SteleDir`] writes
+    /// straight to files a caller can watch, [`Discarding`] moves nothing —
+    /// implements nothing and loses nothing; only [`crate::oci::Registry`],
+    /// whose uploads are the hours a publisher waits through, overrides it. A
+    /// method every implementor must answer would be a tax on every future
+    /// transport for a capability most of them do not have.
+    ///
+    /// The profile driver is what calls this — it is handed the observer as an
+    /// argument and passes it on — so a caller wires one observer once and both
+    /// halves of the stream come back through it.
+    fn observe(&self, _observer: Observer) {}
 }
 
 /// Open a layer: everything every [`SteleWriter::layer_sink`] does before its
@@ -464,4 +491,14 @@ pub trait SteleReader {
         descriptor: &LayerDescriptor,
         limits: Limits,
     ) -> Result<LayerReader<Self::Blob>, Error>;
+
+    /// Report what this transport moves to `observer`, for as long as it is
+    /// attached.
+    ///
+    /// The read half of [`SteleWriter::observe`], with the same default and the
+    /// same reason for it. It matters more here than there: a registry reader
+    /// pulls a whole blob to scratch before it yields its first record, so a
+    /// restore that reported only what the profile driver sees would be silent
+    /// for the download — and on a restore the download *is* the work.
+    fn observe(&self, _observer: Observer) {}
 }
