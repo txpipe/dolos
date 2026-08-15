@@ -15,7 +15,8 @@ pub struct BoundaryVisitor {
 }
 
 /// The state effects an enacted proposal carries: the action's own effect
-/// plus, for every action belonging to a lineage tree, that tree's new root.
+/// plus, for every Conway action belonging to a lineage tree, that tree's
+/// new root.
 ///
 /// Kept apart from the visitor so the mapping is exercisable on its own —
 /// none of it depends on boundary context.
@@ -70,7 +71,21 @@ pub(crate) fn enactment_deltas(id: &ProposalId, proposal: &ProposalState) -> Vec
         }
     }
 
-    if let Some(purpose) = proposal.action.purpose() {
+    // `ensPrevGovActionIds` is Conway enact-state: it names Conway
+    // governance actions and nothing else. The tree membership to read is
+    // the recorded `purpose`, written by `parse_gov_action` when the action
+    // was decoded as a Conway action — not `action.purpose()`, which infers
+    // a tree from the action's *shape* and so fires for any row carrying
+    // parameters, a pre-Conway update proposal included.
+    //
+    // Such a proposal still enacts, which is how its parameter change lands,
+    // but claiming a root leaves a phantom parent that no later action can
+    // match: a first-of-purpose action declares no parent, so it fails
+    // `prevActionAsExpected` forever. Observed on a preview replay, where
+    // legacy `Params` proposals auto-ratified by the protocol <= 8 rule
+    // (`hacks::proposals`) held the pparam-update root and the chain's first
+    // ParameterChange (epoch 735) could never ratify.
+    if let Some(purpose) = proposal.purpose {
         let action = GovActionId {
             transaction_id: proposal.tx,
             action_index: proposal.idx,
@@ -173,6 +188,57 @@ mod tests {
         Option::<GovState>::from(entity.unwrap()).unwrap()
     }
 
+    /// A pre-Conway update proposal enacts its parameter change but claims
+    /// no lineage root. Its row carries no recorded `purpose` — it was never
+    /// decoded as a Conway action — while its `action` still looks like a
+    /// parameter change, so gating on the action's shape would hand it the
+    /// pparam-update root. The phantom parent that leaves can never be
+    /// matched by a first-of-purpose action, which declares none: observed
+    /// on a preview replay, where legacy `Params` proposals auto-ratified by
+    /// the protocol <= 8 rule (`hacks::proposals`) held the root and the
+    /// chain's first ParameterChange (epoch 735) could never ratify.
+    #[test]
+    fn enactment_without_recorded_purpose_claims_no_lineage_root() {
+        let action = ProposalAction::ParamChange(PParamsSet::default());
+        let id = ProposalId::from(b"legacy".to_vec());
+
+        let legacy = proposal([9u8; 32].into(), 0, action.clone());
+        assert_eq!(legacy.purpose, None);
+        assert_eq!(
+            legacy.action.purpose(),
+            Some(GovPurpose::PParamUpdate),
+            "the action's shape alone would claim a tree"
+        );
+
+        let deltas = enactment_deltas(&id, &legacy);
+
+        assert!(
+            deltas
+                .iter()
+                .any(|delta| matches!(delta, CardanoDelta::PParamsUpdate(_))),
+            "the parameter change itself must still land"
+        );
+        assert!(
+            !deltas
+                .iter()
+                .any(|delta| matches!(delta, CardanoDelta::GovRootsUpdate(_))),
+            "a row with no recorded purpose must not claim a lineage root"
+        );
+
+        // The same action decoded as a Conway proposal does claim it.
+        let mut conway = proposal([9u8; 32].into(), 0, action);
+        conway.purpose = Some(GovPurpose::PParamUpdate);
+
+        let deltas = enactment_deltas(&id, &conway);
+
+        assert!(
+            deltas
+                .iter()
+                .any(|delta| matches!(delta, CardanoDelta::GovRootsUpdate(_))),
+            "a Conway action must claim its lineage root"
+        );
+    }
+
     /// Every governance action a Conway chain can carry has an enactment
     /// effect — no variant falls through to an error arm. Only the legacy
     /// `Other` catch-all, which never records the action's content, does.
@@ -215,7 +281,9 @@ mod tests {
         for (action, purpose) in cases {
             let is_info = matches!(action, ProposalAction::Info);
             let id = ProposalId::from(b"proposal".to_vec());
-            let deltas = enactment_deltas(&id, &proposal([7u8; 32].into(), 0, action.clone()));
+            let mut row = proposal([7u8; 32].into(), 0, action.clone());
+            row.purpose = purpose;
+            let deltas = enactment_deltas(&id, &row);
 
             let roots = deltas
                 .iter()
@@ -278,37 +346,29 @@ mod tests {
         };
 
         let id = ProposalId::from(constitution_tx.to_vec());
-        state = apply_gov(
-            state,
-            enactment_deltas(
-                &id,
-                &proposal(
-                    constitution_tx,
-                    0,
-                    ProposalAction::NewConstitution {
-                        anchor: enacted_constitution.anchor.clone(),
-                        guardrail_script: enacted_constitution.guardrail_script,
-                    },
-                ),
-            ),
+        let mut row = proposal(
+            constitution_tx,
+            0,
+            ProposalAction::NewConstitution {
+                anchor: enacted_constitution.anchor.clone(),
+                guardrail_script: enacted_constitution.guardrail_script,
+            },
         );
+        row.purpose = Some(GovPurpose::Constitution);
+        state = apply_gov(state, enactment_deltas(&id, &row));
 
         let id = ProposalId::from(committee_tx.to_vec());
-        state = apply_gov(
-            state,
-            enactment_deltas(
-                &id,
-                &proposal(
-                    committee_tx,
-                    0,
-                    ProposalAction::UpdateCommittee {
-                        to_remove: committee.members.keys().cloned().collect(),
-                        to_add: vec![(new_member.clone(), 620)],
-                        threshold: two_thirds(),
-                    },
-                ),
-            ),
+        let mut row = proposal(
+            committee_tx,
+            0,
+            ProposalAction::UpdateCommittee {
+                to_remove: committee.members.keys().cloned().collect(),
+                to_add: vec![(new_member.clone(), 620)],
+                threshold: two_thirds(),
+            },
         );
+        row.purpose = Some(GovPurpose::Committee);
+        state = apply_gov(state, enactment_deltas(&id, &row));
 
         assert_eq!(state.constitution, Some(enacted_constitution));
         assert_ne!(state.constitution, Some(constitution));

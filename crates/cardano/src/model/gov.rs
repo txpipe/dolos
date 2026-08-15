@@ -171,6 +171,17 @@ impl GovRoots {
             GovPurpose::Constitution => &mut self.constitution,
         }
     }
+
+    /// The root of a single lineage tree — the `prevActionAsExpected`
+    /// read during ratification.
+    pub fn root(&self, purpose: GovPurpose) -> &Option<GovActionId> {
+        match purpose {
+            GovPurpose::PParamUpdate => &self.pparam_update,
+            GovPurpose::HardFork => &self.hard_fork,
+            GovPurpose::Committee => &self.committee,
+            GovPurpose::Constitution => &self.constitution,
+        }
+    }
 }
 
 #[derive(Debug, Encode, Decode, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -221,6 +232,20 @@ pub struct GovState {
     #[n(6)]
     #[cbor(default)]
     pub distr: Option<GovDistr>,
+
+    /// The previous boundary's completed stake distributions — the
+    /// pulser-snapshot equivalent the ratification tally at the *current*
+    /// boundary consumes (the distribution accumulated while closing
+    /// epoch `n` governs the ratification that closes epoch `n + 1`).
+    /// Rotated out of `distr` by [`GovDistrRotate`] at each
+    /// governance-active EWRAP finalize, before the next boundary's
+    /// shard 0 replaces `distr` wholesale. `None` when the previous
+    /// boundary's accumulation was missing or incomplete — consumers
+    /// skip rather than read stale data. Index 7 must not be reused for
+    /// anything else.
+    #[n(7)]
+    #[cbor(default)]
+    pub prev_distr: Option<GovDistr>,
 }
 
 entity_boilerplate!(GovState, "gov");
@@ -898,6 +923,157 @@ impl dolos_core::EntityDelta for GovDistrAccumulate {
     }
 }
 
+/// Increment the dormant-epoch counter — the EPOCH rule's step 6
+/// (research §5.5): emitted at a governance-active boundary whose
+/// post-application live set has no proposal still votable in the
+/// starting epoch. The counter is later folded into DRep expiries and
+/// reset by the roll-side [`GovDormancyReset`] fan-out when a proposal
+/// finally shows up.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovDormancyTick {
+    // undo
+    pub(crate) prev: u64,
+}
+
+impl GovDormancyTick {
+    pub fn new() -> Self {
+        Self { prev: 0 }
+    }
+}
+
+impl Default for GovDormancyTick {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl dolos_core::EntityDelta for GovDormancyTick {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        self.prev = state.num_dormant_epochs;
+        state.num_dormant_epochs += 1;
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.num_dormant_epochs = self.prev;
+    }
+}
+
+/// Committee-state GC — the EPOCH rule's step 7 (`updateCommitteeState`,
+/// research §5.5): drop the authorization histories of cold credentials
+/// that are not members of the post-enactment committee (everything, if
+/// the committee dissolved into the no-confidence state). Reads the
+/// committee at apply time, so it must be queued after the boundary's
+/// enactment deltas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitteeGc {
+    // undo — the removed entries, re-inserted wholesale
+    pub(crate) removed: BTreeMap<StakeCredential, AuthHistory>,
+}
+
+impl CommitteeGc {
+    pub fn new() -> Self {
+        Self {
+            removed: BTreeMap::new(),
+        }
+    }
+}
+
+impl Default for CommitteeGc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl dolos_core::EntityDelta for CommitteeGc {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        let auths = std::mem::take(&mut state.committee_auths);
+
+        let (kept, removed) = match state.committee.as_ref() {
+            Some(committee) => auths
+                .into_iter()
+                .partition(|(cold, _)| committee.members.contains_key(cold)),
+            None => (BTreeMap::new(), auths),
+        };
+
+        state.committee_auths = kept;
+        self.removed = removed;
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        for (cold, history) in &self.removed {
+            state.committee_auths.insert(cold.clone(), history.clone());
+        }
+    }
+}
+
+/// Rotate the boundary stake-distribution accumulator into
+/// `prev_distr`, where the *next* boundary's ratification tally reads it
+/// after that boundary's shard 0 has replaced `distr` wholesale. Emitted
+/// at each governance-active EWRAP finalize. An accumulator that is
+/// missing or incomplete for the closing epoch rotates to `None` — a
+/// visible gap the consumer skips, never stale data.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovDistrRotate {
+    pub(crate) closing_epoch: Epoch,
+
+    // undo — pre-image of `prev_distr`
+    pub(crate) prev: Option<GovDistr>,
+}
+
+impl GovDistrRotate {
+    pub fn new(closing_epoch: Epoch) -> Self {
+        Self {
+            closing_epoch,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for GovDistrRotate {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        self.prev = state.prev_distr.take();
+
+        state.prev_distr = state
+            .distr
+            .clone()
+            .filter(|distr| distr.is_complete_for(self.closing_epoch));
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.prev_distr = self.prev.clone();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -989,6 +1165,7 @@ pub(crate) mod testing {
             num_dormant_epochs in 0u64..32u64,
             active_since in prop::option::of(root::any_epoch()),
             distr in prop::option::of(any_gov_distr()),
+            prev_distr in prop::option::of(any_gov_distr()),
         ) -> GovState {
             GovState {
                 constitution,
@@ -998,6 +1175,7 @@ pub(crate) mod testing {
                 num_dormant_epochs,
                 active_since,
                 distr,
+                prev_distr,
             }
         }
     }
@@ -1058,6 +1236,14 @@ mod tests {
                 ]),
                 pool_distr: BTreeMap::from([([8u8; 28].into(), 6_000_000)]),
                 pool_total: 6_000_000,
+            }),
+            prev_distr: Some(GovDistr {
+                closing_epoch: 508,
+                committed_shards: 32,
+                total_shards: 32,
+                drep_distr: BTreeMap::from([(DRep::Key([7u8; 28].into()), 4_000_000)]),
+                pool_distr: BTreeMap::from([([8u8; 28].into(), 5_000_000)]),
+                pool_total: 5_000_000,
             }),
         };
 
@@ -1231,6 +1417,60 @@ mod prop_tests {
                 pool_distr,
                 pool_total,
             )
+        }
+    }
+
+    prop_compose! {
+        fn any_gov_distr_rotate()(
+            closing_epoch in root::any_epoch(),
+        ) -> GovDistrRotate {
+            GovDistrRotate::new(closing_epoch)
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn dormancy_tick_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            assert_delta_roundtrip(entity, GovDormancyTick::new());
+        }
+
+        #[test]
+        fn dormancy_tick_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, GovDormancyTick::new());
+        }
+
+        #[test]
+        fn committee_gc_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            assert_delta_roundtrip(entity, CommitteeGc::new());
+        }
+
+        #[test]
+        fn committee_gc_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, CommitteeGc::new());
+        }
+
+        #[test]
+        fn distr_rotate_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_gov_distr_rotate(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn distr_rotate_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_gov_distr_rotate(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
         }
     }
 
@@ -1626,6 +1866,136 @@ mod prop_tests {
         let distr = entity.unwrap().distr.unwrap();
         assert_eq!(distr.closing_epoch, 501);
         assert_eq!(distr.pool_total, 7);
+    }
+
+    /// The GC keeps the authorization histories of sitting members,
+    /// drops everyone else's, and clears the whole map when the
+    /// committee dissolved — with undo restoring the removed entries.
+    #[test]
+    fn committee_gc_intersects_with_members() {
+        use dolos_core::EntityDelta as _;
+
+        let member = StakeCredential::ScriptHash([1u8; 28].into());
+        let stranger = StakeCredential::ScriptHash([2u8; 28].into());
+        let hot = StakeCredential::AddrKeyhash([3u8; 28].into());
+
+        let auths: BTreeMap<StakeCredential, AuthHistory> = BTreeMap::from([
+            (
+                member.clone(),
+                vec![(100, CommitteeAuthorization::HotCredential(hot.clone()))],
+            ),
+            (
+                stranger.clone(),
+                vec![(200, CommitteeAuthorization::HotCredential(hot))],
+            ),
+        ]);
+
+        let mut entity = Some(GovState {
+            committee: Some(Committee {
+                members: BTreeMap::from([(member.clone(), 600)]),
+                threshold: RationalNumber {
+                    numerator: 2,
+                    denominator: 3,
+                },
+            }),
+            committee_auths: auths.clone(),
+            ..Default::default()
+        });
+
+        let mut gc = CommitteeGc::new();
+        gc.apply(&mut entity);
+
+        let state = entity.as_ref().unwrap();
+        assert!(state.committee_auths.contains_key(&member));
+        assert!(!state.committee_auths.contains_key(&stranger));
+
+        gc.undo(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().committee_auths, auths);
+
+        // no-confidence state: everything is dropped
+        let mut entity = Some(GovState {
+            committee: None,
+            committee_auths: auths.clone(),
+            ..Default::default()
+        });
+
+        let mut gc = CommitteeGc::new();
+        gc.apply(&mut entity);
+        assert!(entity.as_ref().unwrap().committee_auths.is_empty());
+
+        gc.undo(&mut entity);
+        assert_eq!(entity.unwrap().committee_auths, auths);
+    }
+
+    /// The rotation moves a complete accumulator into `prev_distr`,
+    /// replaces an incomplete one with `None` (never stale data), and
+    /// leaves `distr` itself alone for the next boundary's shard 0.
+    #[test]
+    fn distr_rotate_moves_completed_accumulator() {
+        use dolos_core::EntityDelta as _;
+
+        let complete = GovDistr {
+            closing_epoch: 500,
+            committed_shards: 2,
+            total_shards: 2,
+            drep_distr: BTreeMap::from([(DRep::Key([1u8; 28].into()), 10)]),
+            pool_distr: BTreeMap::new(),
+            pool_total: 0,
+        };
+
+        let stale_prev = GovDistr {
+            closing_epoch: 499,
+            ..complete.clone()
+        };
+
+        let mut entity = Some(GovState {
+            distr: Some(complete.clone()),
+            prev_distr: Some(stale_prev.clone()),
+            ..Default::default()
+        });
+
+        let mut rotate = GovDistrRotate::new(500);
+        rotate.apply(&mut entity);
+
+        let state = entity.as_ref().unwrap();
+        assert_eq!(state.prev_distr, Some(complete.clone()));
+        assert_eq!(state.distr, Some(complete.clone()));
+
+        rotate.undo(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().prev_distr, Some(stale_prev));
+
+        // an incomplete accumulator rotates to a visible gap
+        let incomplete = GovDistr {
+            committed_shards: 1,
+            ..complete
+        };
+
+        let mut entity = Some(GovState {
+            distr: Some(incomplete),
+            prev_distr: None,
+            ..Default::default()
+        });
+
+        let mut rotate = GovDistrRotate::new(500);
+        rotate.apply(&mut entity);
+        assert_eq!(entity.unwrap().prev_distr, None);
+    }
+
+    #[test]
+    fn dormancy_tick_increments() {
+        use dolos_core::EntityDelta as _;
+
+        let mut entity = Some(GovState {
+            num_dormant_epochs: 3,
+            ..Default::default()
+        });
+
+        let mut tick = GovDormancyTick::new();
+        tick.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().num_dormant_epochs, 4);
+
+        tick.undo(&mut entity);
+        assert_eq!(entity.unwrap().num_dormant_epochs, 3);
     }
 
     #[test]

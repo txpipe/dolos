@@ -84,7 +84,9 @@ impl ProposalAction {
 ///
 /// `TreasuryWithdrawal` and `Info` actions have no lineage (no parent field,
 /// never become a root), so their proposals carry no purpose.
-#[derive(Debug, Encode, Decode, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Debug, Encode, Decode, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[cbor(index_only)]
 pub enum GovPurpose {
     #[n(0)]
@@ -270,6 +272,26 @@ pub(crate) mod testing {
     }
 }
 
+/// Effective vote per voter considering only entries at or before `slot` —
+/// the as-of read used by boundary tallies, modeled on
+/// `GovState::committee_auth_as_of`. Voters whose whole history postdates
+/// the cutoff are absent from the result.
+pub fn votes_as_of<K: Ord + Clone>(
+    votes: &BTreeMap<K, VoteHistory>,
+    slot: BlockSlot,
+) -> BTreeMap<K, Vote> {
+    votes
+        .iter()
+        .filter_map(|(voter, history)| {
+            history
+                .iter()
+                .rev()
+                .find(|(at, _)| *at <= slot)
+                .map(|(_, vote)| (voter.clone(), vote.clone()))
+        })
+        .collect()
+}
+
 /// Ensures `key` has a (possibly empty) history in `map`, returning whether
 /// the entry had to be created alongside the history itself.
 fn history_or_default<K: Ord>(
@@ -349,6 +371,49 @@ impl ProposalState {
             ),
             Voter::StakePoolKey(hash) => history_pop(&mut self.spo_votes, hash, created),
         }
+    }
+
+    /// Committee votes as of `slot`, keyed by hot credential.
+    pub fn cc_votes_as_of(&self, slot: BlockSlot) -> BTreeMap<StakeCredential, Vote> {
+        votes_as_of(&self.cc_votes, slot)
+    }
+
+    /// DRep votes as of `slot`, keyed by DRep credential.
+    pub fn drep_votes_as_of(&self, slot: BlockSlot) -> BTreeMap<StakeCredential, Vote> {
+        votes_as_of(&self.drep_votes, slot)
+    }
+
+    /// SPO votes as of `slot`, keyed by pool operator hash.
+    pub fn spo_votes_as_of(&self, slot: BlockSlot) -> BTreeMap<PoolHash, Vote> {
+        votes_as_of(&self.spo_votes, slot)
+    }
+
+    /// Whether the proposal is still in the live governance forest when the
+    /// boundary closing `epoch` begins — no earlier boundary enacted or
+    /// dropped it. Distinct from `is_active`, which keeps resolved
+    /// proposals visible one extra epoch for the drop pass: a proposal
+    /// enacted at the previous boundary is `is_active` here but already
+    /// out of the forest.
+    pub fn is_unresolved_at_close(&self, epoch: Epoch) -> bool {
+        // enacted at the boundary closing `ratified_epoch`
+        if self.ratified_epoch.is_some_and(|ratified| ratified < epoch) {
+            return false;
+        }
+
+        // dropped at the boundary closing `canceled_epoch - 1`
+        if self
+            .canceled_epoch
+            .is_some_and(|canceled| canceled <= epoch)
+        {
+            return false;
+        }
+
+        // expiry-dropped at the boundary closing `max_epoch + 1`
+        if self.max_epoch.is_some_and(|max| max + 1 < epoch) {
+            return false;
+        }
+
+        true
     }
 
     /// Build the ID of the proposal in its string form, as found on explorers.
@@ -1031,6 +1096,67 @@ mod prop_tests {
                 }),
         ) {
             assert_delta_roundtrip(Some(entity), delta);
+        }
+    }
+
+    /// A slot-ordered history, as the roll pipeline appends them.
+    fn any_ordered_history() -> impl Strategy<Value = VoteHistory> {
+        prop::collection::vec((root::any_slot(), root::any_vote()), 0..6).prop_map(|mut entries| {
+            entries.sort_by_key(|(slot, _)| *slot);
+            entries
+        })
+    }
+
+    proptest! {
+        /// Done criterion: the as-of read resolves to the last vote cast
+        /// at or before the boundary — the same answer as filtering the
+        /// history and taking the tail.
+        #[test]
+        fn votes_as_of_is_last_vote_at_or_before_boundary(
+            history in any_ordered_history(),
+            cutoff in root::any_slot(),
+        ) {
+            let map: BTreeMap<StakeCredential, VoteHistory> =
+                [(StakeCredential::AddrKeyhash([5u8; 28].into()), history.clone())]
+                    .into_iter()
+                    .collect();
+
+            let resolved = votes_as_of(&map, cutoff);
+
+            let expected = history
+                .iter()
+                .filter(|(slot, _)| *slot <= cutoff)
+                .next_back()
+                .map(|(_, vote)| vote.clone());
+
+            prop_assert_eq!(
+                resolved.get(&StakeCredential::AddrKeyhash([5u8; 28].into())).cloned(),
+                expected
+            );
+        }
+
+        /// Done criterion: votes cast after the boundary are invisible —
+        /// appending later entries never changes the as-of read.
+        #[test]
+        fn votes_after_boundary_are_invisible(
+            history in any_ordered_history(),
+            cutoff in root::any_slot(),
+            later in prop::collection::vec((1u64..1_000u64, root::any_vote()), 1..4),
+        ) {
+            let key = StakeCredential::AddrKeyhash([5u8; 28].into());
+
+            let map: BTreeMap<StakeCredential, VoteHistory> =
+                [(key.clone(), history.clone())].into_iter().collect();
+            let before = votes_as_of(&map, cutoff);
+
+            let mut extended = history;
+            for (offset, vote) in later {
+                extended.push((cutoff + offset, vote));
+            }
+            let map: BTreeMap<StakeCredential, VoteHistory> =
+                [(key, extended)].into_iter().collect();
+
+            prop_assert_eq!(votes_as_of(&map, cutoff), before);
         }
     }
 

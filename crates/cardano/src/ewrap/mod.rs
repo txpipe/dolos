@@ -12,7 +12,7 @@
 //! in the finalize pass).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -21,12 +21,13 @@ use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
-    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr, PoolHash, PoolState,
-    ProposalState,
+    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr, GovState, PoolHash,
+    PoolState, ProposalState,
 };
 
 pub mod commit;
 pub mod loading;
+pub mod ratify;
 pub mod work_unit;
 
 // visitors
@@ -167,6 +168,28 @@ pub struct BoundaryWork {
     /// accumulator as of this phase's load. The finalize pass reads the
     /// completed distributions from here to write DRep voting powers.
     pub gov_distr: Option<GovDistr>,
+
+    /// The whole governance singleton as of this phase's load — committee,
+    /// authorization histories, roots, and the previous boundary's
+    /// distributions, all consumed by the shadow ratification run.
+    pub gov: GovState,
+
+    /// Whether this boundary enacts the hard fork into protocol 10, which
+    /// carries the one-shot account migration dropping DRep delegations
+    /// that point at never/no-longer-registered DReps (research §5.5
+    /// step 9). Detected from the hack-stamped enactment during the
+    /// shard loads.
+    pub pv10_migration: bool,
+
+    /// DReps registered as of the boundary that *opened* the closing epoch
+    /// — the ratification snapshot's `reDRepState` — keyed by DRep
+    /// credential, with the stored expiry as of the end of the previous
+    /// epoch (`None` on pre-upgrade rows without the epoch-based field).
+    pub ratify_dreps: BTreeMap<StakeCredential, Option<Epoch>>,
+
+    /// Shadow-mode disagreements between the ratification engine and the
+    /// hack-stamped outcomes found by this finalize pass.
+    pub shadow_mismatches: u64,
 
     /// Deposits of the snapshot proposal set (live, `proposed_in` before the
     /// closing epoch), summed per return credential. Added to the delegated
