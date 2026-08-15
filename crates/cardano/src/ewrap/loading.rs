@@ -1109,23 +1109,30 @@ impl BoundaryWork {
         Ok(())
     }
 
-    /// The pre-Conway branch of [`Self::run_ratification`]: a legacy update
-    /// proposal submitted during epoch `n` enacts at the boundary closing
-    /// `n`, taking effect at the start of `n + 1`.
+    /// The pre-Conway branch of [`Self::run_ratification`]: the legacy
+    /// update mechanism, which carried every parameter change and every
+    /// hard fork before Conway and has no votes to tally.
     ///
-    /// `proposed_in <= closing` is the whole rule, and it is load-bearing.
-    /// The boundary work runs *after* the block that crossed into the new
-    /// epoch has been applied, so a proposal carried by that first block is
-    /// already in state when the previous epoch's boundary rules — and
-    /// enacting it there would apply it a full epoch early. On preprod that
-    /// moved the Byron→Shelley transition from epoch 4 to epoch 3 and
-    /// shifted every epoch number after it by one.
+    /// A legacy update enacts at the boundary closing the epoch it names,
+    /// taking effect at the start of the next one. The epoch it names is
+    /// the epoch it was submitted in — except for the proposals
+    /// [`crate::hacks::pre_conway_updates`] carries, whose real timing
+    /// dolos cannot derive (Shelley-era target epochs, Byron endorsement,
+    /// quorum delays).
     ///
-    /// The Conway branch draws the same line one epoch tighter
+    /// Matching on the *closing* epoch rather than taking everything live
+    /// is load-bearing in both directions. The boundary work runs after the
+    /// block that crossed into the new epoch has been applied, so a
+    /// proposal carried by that first block is already in state when the
+    /// previous epoch's boundary rules — and enacting it there applies its
+    /// change a full epoch early. On a preprod replay that moved the
+    /// Byron→Shelley transition from epoch 4 to epoch 3 and shifted every
+    /// epoch number after it.
+    ///
+    /// The Conway branch draws its line one epoch tighter
     /// (`proposed_in < closing`, in `build_ratify_input`): an action must
-    /// have been submitted before the closing epoch to be in its
-    /// ratification snapshot, where a legacy update needs no snapshot at
-    /// all.
+    /// predate the closing epoch to be in its ratification snapshot, where
+    /// a legacy update needs no snapshot at all.
     ///
     /// Enactment order is submission order — the only order these carry,
     /// and the one under which a later update in the same epoch overwrites
@@ -1135,6 +1142,7 @@ impl BoundaryWork {
         state: &D::State,
     ) -> Result<super::Ratification, ChainError> {
         let closing = self.ending_state.number;
+        let magic = self.genesis.network_magic();
 
         let mut live: Vec<(EntityKey, (BlockSlot, u32))> = Vec::new();
 
@@ -1143,11 +1151,18 @@ impl BoundaryWork {
         for record in records {
             let (key, proposal) = record?;
 
-            // rows written before `proposed_in` existed can't be placed;
-            // they are the accepted in-place-upgrade degradation
-            let submitted = proposal.proposed_in.is_some_and(|epoch| epoch <= closing);
+            if !proposal.is_unresolved_at_close(closing) {
+                continue;
+            }
 
-            if submitted && proposal.is_unresolved_at_close(closing) {
+            let curated =
+                crate::hacks::pre_conway_updates::enacts_at(magic, &proposal.id_as_string());
+
+            // rows written before `proposed_in` existed can't be placed on
+            // their own; they are the accepted in-place-upgrade degradation
+            let enacts_at = curated.or(proposal.proposed_in);
+
+            if enacts_at == Some(closing) {
                 live.push((key, (proposal.slot, proposal.idx)));
             }
         }
@@ -2102,6 +2117,33 @@ mod ratification_tests {
             Some(44),
             "the next epoch's update must not have landed"
         );
+    }
+
+    /// The curated pre-Conway timings are the network's, so they are read
+    /// per network and only where the submission epoch is the wrong
+    /// answer. Every other legacy update falls through to its own epoch.
+    #[test]
+    fn curated_pre_conway_timings_are_network_scoped() {
+        use crate::hacks::pre_conway_updates::enacts_at;
+
+        // preprod's Shelley hard fork: submitted in epoch 2, enacted at the
+        // boundary closing 3, so Shelley opens at epoch 4
+        let shelley = "f48fffc65e16c3808720b38110a6d284250360108b6198a44331eb0de8e49817#0";
+        assert_eq!(enacts_at(1, shelley), Some(3));
+        assert_eq!(
+            enacts_at(2, shelley),
+            None,
+            "preprod's answer is not preview's"
+        );
+        assert_eq!(enacts_at(764824073, shelley), None);
+
+        // mainnet's decentralisation schedule, submitted an epoch ahead of
+        // the epoch each row targets
+        let d_param = "a6713824eeef48508bd35e851bcf4021a93b5995127feb9910b1e1b88de2c225#0";
+        assert_eq!(enacts_at(764824073, d_param), Some(214));
+
+        // anything else derives its epoch from its own submission
+        assert_eq!(enacts_at(1, &format!("{}#0", "ab".repeat(32))), None);
     }
 
     #[test]
