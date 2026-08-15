@@ -152,8 +152,14 @@ pub struct BoundaryWork {
     // TODO: we use a vec instead of a HashSet because the Pallas struct doesn't implement Hash. We
     // should turn it into a HashSet once we have the update in Pallas.
     pub expiring_dreps: Vec<DRep>,
-    pub retiring_dreps: Vec<DRep>,
-    pub reregistrating_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
+
+    /// DReps whose latest unregistration certificate falls in the closing
+    /// epoch, each carrying the position of that certificate. The boundary
+    /// sweep runs the ledger's `clearDRepDelegations` late, so it needs the
+    /// certificate's position to reconstruct the delegator set the ledger
+    /// would have seen at cert time — see
+    /// [`BoundaryWork::clears_drep_delegation`].
+    pub retiring_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
     /// `GovState::num_dormant_epochs` at the boundary. Stored DRep expiries
     /// carry no dormancy credit, so the expiry check adds the counter back
@@ -259,5 +265,29 @@ impl BoundaryWork {
 
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
+    }
+
+    /// Whether this boundary clears `account`'s vote delegation to `drep`.
+    ///
+    /// The ledger clears delegations at the unregistration certificate
+    /// (`ConwayUnRegDRep` folding `clearDRepDelegations` over the delegator
+    /// set the DRep holds at that moment), and a later re-registration starts
+    /// the DRep over with an empty set, clearing nothing. Dolos has no reverse
+    /// delegator index on `DRepState`, so it cannot enumerate that set at cert
+    /// time and defers the clear to this boundary; comparing the delegation's
+    /// position against the certificate's reproduces the set the ledger saw.
+    ///
+    /// `unregistered_at` always holds the *latest* unregistration, so this is
+    /// correct under repeated dereg/rereg cycles inside one epoch: only
+    /// delegations predating the last certificate are cleared. A registration
+    /// on its own never clears anything.
+    pub fn clears_drep_delegation(&self, drep: &DRep, account: &AccountState) -> bool {
+        let Some((_, unregistered_at)) = self.retiring_dreps.iter().find(|(x, _)| x == drep) else {
+            return false;
+        };
+
+        account
+            .vote_delegated_at
+            .is_some_and(|delegated_at| delegated_at < *unregistered_at)
     }
 }
