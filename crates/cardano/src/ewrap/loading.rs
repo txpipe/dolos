@@ -1637,8 +1637,8 @@ mod tests {
         match stored.drep.next() {
             Some(DRepDelegation::NotDelegated) => true,
             None => {
-                // not dropped: the live delegation is intact, which is what
-                // the account endpoint serves as `drep_id`
+                // the delegation this asserts intact is what the account
+                // endpoint serves as `drep_id`
                 assert_eq!(
                     stored.delegated_drep_at(CLOSING_EPOCH),
                     account.delegated_drep_at(CLOSING_EPOCH)
@@ -1669,7 +1669,6 @@ mod tests {
         let unregistered_at = closing_epoch_slot(&domain, 100);
         let reregistered_at = closing_epoch_slot(&domain, 200);
 
-        // deregistered and re-registered inside the closing epoch
         let cycled = replay_drep_certs(
             reg_drep(),
             &[
@@ -1679,7 +1678,6 @@ mod tests {
             ],
         );
 
-        // registered inside the closing epoch and never deregistered
         let registered = replay_drep_certs(fresh_drep(), &[Cert::Reg(reregistered_at, 0)]);
 
         // delegated before the unregistration: the ledger cleared it
