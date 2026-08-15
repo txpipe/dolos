@@ -1055,7 +1055,17 @@ impl BoundaryWork {
         };
 
         let outcome = ratify::ratify(&input);
-        let pruned = ratify::pruned_by_enactment(&input.proposals, &outcome.enacted);
+
+        // Sibling pruning reaches further than ratification does. The
+        // snapshot is what gets *tallied* — actions submitted during the
+        // closing epoch are not in it, and cannot ratify at this boundary —
+        // but `removedDueToEnactment` empties the enacted action's tree out
+        // of the whole live forest, this epoch's submissions included.
+        // Preview pruned three `UpdateCommittee` actions proposed in 997 at
+        // the boundary that enacted a fourth; ratifying over the snapshot
+        // alone left them alive for fifteen more epochs.
+        let forest = self.live_forest::<D>(state, &input)?;
+        let pruned = ratify::pruned_by_enactment(&forest, &outcome.enacted);
 
         let mut ratification = super::Ratification::default();
 
@@ -1096,9 +1106,18 @@ impl BoundaryWork {
             ratification.outcomes.insert(verdict.key.clone(), outcome);
         }
 
+        // the pruned members the snapshot never carried
+        for key in pruned {
+            ratification
+                .outcomes
+                .entry(key)
+                .or_insert(ProposalOutcome::PrunedSibling);
+        }
+
         tracing::info!(
             epoch = closing,
-            proposals = outcome.verdicts.len(),
+            snapshot = outcome.verdicts.len(),
+            forest = forest.len(),
             enacted = ratification.enactment_order.len(),
             removed = ratification.outcomes.len(),
             "ratification complete"
@@ -1107,6 +1126,54 @@ impl BoundaryWork {
         self.ratification = Some(ratification);
 
         Ok(())
+    }
+
+    /// Every proposal still in the live governance forest at this
+    /// boundary, as the shape [`ratify::pruned_by_enactment`] walks.
+    ///
+    /// A superset of the ratification snapshot: it adds the actions
+    /// submitted *during* the closing epoch, which cannot ratify here but
+    /// can be pruned here. Only the lineage fields are populated — votes
+    /// and expiry belong to the tally, and nothing tallies over this set.
+    fn live_forest<D: Domain>(
+        &self,
+        state: &D::State,
+        input: &super::ratify::RatifyInput,
+    ) -> Result<Vec<super::ratify::RatifyProposal>, ChainError> {
+        let closing = self.ending_state.number;
+
+        let mut forest = input.proposals.clone();
+
+        let in_snapshot: std::collections::HashSet<&EntityKey> =
+            input.proposals.iter().map(|p| &p.key).collect();
+
+        let mut extra = Vec::new();
+
+        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+
+        for record in records {
+            let (key, proposal) = record?;
+
+            if in_snapshot.contains(&key) || !proposal.is_unresolved_at_close(closing) {
+                continue;
+            }
+
+            extra.push(super::ratify::RatifyProposal {
+                key,
+                id: proposal.gov_action_id(),
+                action: proposal.action.clone(),
+                parent: proposal.parent.clone(),
+                expires_after: proposal.max_epoch.unwrap_or(closing),
+                order: (proposal.slot, proposal.tx, proposal.idx),
+                cc_votes: Default::default(),
+                drep_votes: Default::default(),
+                spo_votes: Default::default(),
+            });
+        }
+
+        forest.append(&mut extra);
+
+        Ok(forest)
     }
 
     /// The pre-Conway branch of [`Self::run_ratification`]: the legacy
@@ -1734,7 +1801,7 @@ mod ratification_tests {
     use dolos_core::{Domain as _, StateStore as _, StateWriter as _};
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::ledger::primitives::{
-        conway::{DRep, DRepVotingThresholds, RationalNumber, Vote},
+        conway::{DRep, DRepVotingThresholds, PoolVotingThresholds, RationalNumber, Vote},
         StakeCredential,
     };
 
@@ -1800,6 +1867,22 @@ mod ratification_tests {
             .with(PParamValue::ProtocolVersion((10, 0)))
             .with(PParamValue::DrepVotingThresholds(thresholds(half())))
             .with(PParamValue::MinCommitteeSize(1))
+            // no pools are seeded, so the SPO leg abstains out of the way
+            // and the committee and DRep tallies carry the decision
+            .with(PParamValue::PoolVotingThresholds(PoolVotingThresholds {
+                motion_no_confidence: zero(),
+                committee_normal: zero(),
+                committee_no_confidence: zero(),
+                hard_fork_initiation: zero(),
+                security_voting_threshold: zero(),
+            }))
+    }
+
+    fn zero() -> RationalNumber {
+        RationalNumber {
+            numerator: 0,
+            denominator: 1,
+        }
     }
 
     fn account(credential: StakeCredential) -> crate::AccountState {
@@ -1863,6 +1946,19 @@ mod ratification_tests {
                 .unwrap_or_default(),
             spo_votes: Default::default(),
         }
+    }
+
+    /// A committee update — a lineage-bearing action, so an enacted one
+    /// prunes the rest of its tree.
+    fn committee_update(tx: u8, votes: Option<Vote>, expires_after: Epoch) -> ProposalState {
+        let mut proposal = withdrawal(tx, votes, expires_after);
+        proposal.action = ProposalAction::UpdateCommittee {
+            to_remove: vec![],
+            to_add: vec![],
+            threshold: half(),
+        };
+        proposal.purpose = Some(crate::GovPurpose::Committee);
+        proposal
     }
 
     /// A governance-active boundary with everything the engine reads: an
@@ -1998,6 +2094,40 @@ mod ratification_tests {
         assert_eq!(live.ratified_epoch, None);
         assert_eq!(live.canceled_epoch, None);
         assert!(live.is_unresolved_at_close(CLOSING + 1));
+    }
+
+    /// An action submitted *during* the closing epoch cannot ratify at
+    /// this boundary — it is not in the snapshot — but it is in the live
+    /// forest, so an enactment of its purpose prunes it here all the same.
+    ///
+    /// Measured on preview: three `UpdateCommittee` actions proposed in
+    /// 997 were dropped by the chain at 998, alongside the committee
+    /// update that enacted there. Pruning over the snapshot alone left
+    /// them alive until 1013. The shadow oracle could not catch it —
+    /// it only compared proposals the snapshot carried.
+    #[test]
+    fn an_enactment_prunes_siblings_the_snapshot_never_carried() {
+        let enacting = committee_update(0x01, Some(Vote::Yes), CLOSING - 1);
+
+        // same purpose, no lineage to the enacted action, submitted in the
+        // epoch this boundary closes
+        let mut sibling = committee_update(0x02, None, CLOSING);
+        sibling.proposed_in = Some(CLOSING);
+
+        let domain = seed(&[enacting.clone(), sibling.clone()]);
+        let boundary = finalize(&domain);
+
+        let ratification = boundary.ratification.as_ref().unwrap();
+        assert_eq!(ratification.enactment_order.len(), 1);
+
+        assert_eq!(read(&domain, &enacting).ratified_epoch, Some(CLOSING));
+
+        let sibling = read(&domain, &sibling);
+        assert_eq!(
+            sibling.canceled_epoch,
+            Some(CLOSING + 1),
+            "a live sibling of an enacted action is pruned even unsnapshotted"
+        );
     }
 
     /// Every removal class refunds the proposal deposit, and a deposit
