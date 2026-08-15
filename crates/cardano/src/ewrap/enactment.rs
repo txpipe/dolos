@@ -82,9 +82,9 @@ pub(crate) fn enactment_deltas(id: &ProposalId, proposal: &ProposalState) -> Vec
     // but claiming a root leaves a phantom parent that no later action can
     // match: a first-of-purpose action declares no parent, so it fails
     // `prevActionAsExpected` forever. Observed on a preview replay, where
-    // legacy `Params` proposals auto-ratified by the protocol <= 8 rule
-    // (`hacks::proposals`) held the pparam-update root and the chain's first
-    // ParameterChange (epoch 735) could never ratify.
+    // legacy `Params` proposals enacted by the pre-Conway update mechanism
+    // held the pparam-update root and the chain's first ParameterChange
+    // (epoch 735) could never ratify.
     if let Some(purpose) = proposal.purpose {
         let action = GovActionId {
             transaction_id: proposal.tx,
@@ -194,9 +194,9 @@ mod tests {
     /// parameter change, so gating on the action's shape would hand it the
     /// pparam-update root. The phantom parent that leaves can never be
     /// matched by a first-of-purpose action, which declares none: observed
-    /// on a preview replay, where legacy `Params` proposals auto-ratified by
-    /// the protocol <= 8 rule (`hacks::proposals`) held the root and the
-    /// chain's first ParameterChange (epoch 735) could never ratify.
+    /// on a preview replay, where legacy `Params` proposals enacted by the
+    /// pre-Conway update mechanism held the root and the chain's first
+    /// ParameterChange (epoch 735) could never ratify.
     #[test]
     fn enactment_without_recorded_purpose_claims_no_lineage_root() {
         let action = ProposalAction::ParamChange(PParamsSet::default());
@@ -308,11 +308,14 @@ mod tests {
 
     /// The mainnet committee replacement (`47a0e7a4…#0`, ratified at epoch
     /// 580) and constitution replacement (`8c653ee5…#0`, ratified at epoch
-    /// 541) — the two enactments the hack table stamps on mainnet — move
-    /// `GovState` off its Conway-genesis values and set their lineage roots.
+    /// 541) move `GovState` off its Conway-genesis values and set their
+    /// lineage roots.
     ///
-    /// The action ids are the real ones; the enacted content is a fixture,
-    /// since the actions' payloads are not in the repository.
+    /// These two ids and epochs are what survives of the curated outcome
+    /// table this suite replaced: the named mainnet enactments, kept as a
+    /// fixture the engine's own output can be read against. The action ids
+    /// and epochs are the real ones; the enacted content is invented, since
+    /// the actions' payloads are not in the repository.
     #[test]
     fn mainnet_gov_enactments_replace_genesis_state() {
         let genesis = crate::load_test_genesis("mainnet");

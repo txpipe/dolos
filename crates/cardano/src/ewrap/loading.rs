@@ -16,7 +16,10 @@ use std::{
 
 use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder};
 use pallas::codec::minicbor;
-use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
+use pallas::ledger::primitives::{
+    conway::{DRep, GovActionId},
+    Epoch, StakeCredential,
+};
 
 use crate::{
     ewrap::{BoundaryVisitor as _, BoundaryWork},
@@ -27,7 +30,7 @@ use crate::{
     roll::WorkDeltas,
     rupd::credential_to_key,
     AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
-    PoolHash, PoolState, ProposalState,
+    PoolHash, PoolState, ProposalOutcome, ProposalState,
 };
 
 impl BoundaryWork {
@@ -65,7 +68,7 @@ impl BoundaryWork {
             gov,
             pv10_migration: false,
             ratify_dreps: Default::default(),
-            shadow_mismatches: 0,
+            ratification: None,
             proposal_deposits: Default::default(),
             snapshot_registered_dreps: Default::default(),
             enacting_proposals: Default::default(),
@@ -252,8 +255,14 @@ impl BoundaryWork {
 
     /// Whether this boundary enacts the hard fork into protocol major 10
     /// — the one that carries the account-delegation repair migration
-    /// (research §5.5 step 9). Under shadow mode the hack-stamped
-    /// enactment is what marks the boundary.
+    /// (research §5.5 step 9).
+    ///
+    /// The shard passes need the answer, and they run before the finalize
+    /// pass that rules on the boundary, so this runs the engine itself.
+    /// Cost is bounded by the two gates it opens with: only while the live
+    /// major is 9, and only when a PV10 hard fork is actually pending —
+    /// a handful of boundaries in a chain's life, all of them behind us on
+    /// every public network.
     fn detect_pv10_migration<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let live_major = self
             .ending_state
@@ -265,20 +274,42 @@ impl BoundaryWork {
             return Ok(());
         }
 
-        let starting = self.starting_epoch_no();
+        let mut pending = false;
 
         let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for record in proposals {
             let (_, proposal) = record?;
 
-            if proposal.should_enact(starting)
+            if proposal.is_unresolved_at_close(self.ending_state.number)
                 && matches!(proposal.action, crate::ProposalAction::HardFork((10, _)))
             {
-                self.pv10_migration = true;
-                return Ok(());
+                pending = true;
+                break;
             }
         }
+
+        if !pending {
+            return Ok(());
+        }
+
+        self.run_ratification::<D>(state)?;
+
+        for id in self.ratification().enactment_order.clone() {
+            let proposal: Option<ProposalState> =
+                state.read_entity_typed(ProposalState::NS, &id)?;
+
+            if proposal
+                .is_some_and(|p| matches!(p.action, crate::ProposalAction::HardFork((10, _))))
+            {
+                self.pv10_migration = true;
+                break;
+            }
+        }
+
+        // The shard pass owns no ruling: only the finalize pass acts on
+        // one, and it computes its own against the state it loads.
+        self.ratification = None;
 
         Ok(())
     }
@@ -635,24 +666,41 @@ impl BoundaryWork {
         Ok(account)
     }
 
+    /// Split the boundary's removals into the two sets the visitors take:
+    /// the accepted actions, whose effects enact, and everything else the
+    /// boundary drops. Both refund their deposit; only the first changes
+    /// governance state.
+    ///
+    /// Reads the ruling [`Self::run_ratification`] computed — the classes
+    /// come from the engine now, not from outcomes stamped at creation.
     fn load_proposal_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
-        let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+        let outcomes = self.ratification().outcomes.clone();
 
-        for record in proposals {
-            let (id, proposal) = record?;
+        for (id, outcome) in outcomes {
+            let proposal: Option<ProposalState> =
+                state.read_entity_typed(ProposalState::NS, &id)?;
 
-            // Skip proposals already processe
-            if !proposal.is_active(self.ending_state.number) {
-                tracing::debug!(proposal=%id, "skipping non-active proposal");
+            let Some(proposal) = proposal else {
+                tracing::warn!(proposal=%id, "resolved proposal is not in state; skipping");
                 continue;
-            }
+            };
 
-            if proposal.should_enact(self.starting_epoch_no()) {
-                let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
-                self.enacting_proposals.insert(id, (proposal, account));
-            } else if proposal.should_drop(self.starting_epoch_no()) {
-                let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
-                self.dropping_proposals.insert(id, (proposal, account));
+            let account = self.load_proposal_reward_account::<D>(state, &proposal)?;
+
+            self.add_delta(crate::ProposalResolved::new(
+                proposal.tx,
+                proposal.idx,
+                outcome,
+                self.ending_state.number,
+            ));
+
+            match outcome {
+                ProposalOutcome::Enacted => {
+                    self.enacting_proposals.insert(id, (proposal, account));
+                }
+                ProposalOutcome::Expired | ProposalOutcome::PrunedSibling => {
+                    self.dropping_proposals.insert(id, (proposal, account));
+                }
             }
         }
 
@@ -751,6 +799,12 @@ impl BoundaryWork {
 
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
+
+        // The ruling first: the proposal classification below, the
+        // `ProposalResolved` stamping it emits, and the dormancy check all
+        // read it. `load_drep_data` must precede it — the engine's
+        // `reDRepState` is the map it populates.
+        boundary.run_ratification::<D>(state)?;
         boundary.load_proposal_data::<D>(state)?;
 
         boundary.compute_ewrap_deltas::<D>(state)?;
@@ -964,70 +1018,150 @@ impl BoundaryWork {
         }))
     }
 
-    /// Run the ratification engine in shadow mode: compute the verdicts
-    /// for real and log every disagreement with the hack-stamped
-    /// outcomes, which remain authoritative for state effects.
-    fn run_shadow_ratification<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+    /// Rule on the live governance forest for this boundary.
+    ///
+    /// Two mechanisms, exact complements of one another and separated by
+    /// the same predicate the rest of the boundary uses — whether the
+    /// governance singleton is active for the closing epoch:
+    ///
+    /// * **Conway**: the RATIFY engine over the boundary's snapshot. Its
+    ///   verdicts, plus the sibling subtrees the accepted actions prune, are
+    ///   the removal set.
+    /// * **Pre-Conway**: the legacy update mechanism, where a parameter update
+    ///   submitted during epoch `n` takes effect at the start of `n + 1` with
+    ///   no vote to tally. Every live proposal at such a boundary is one of
+    ///   those, so all of them enact.
+    ///
+    /// A Conway boundary whose engine input can't be assembled (the
+    /// previous boundary's distributions are missing or incomplete)
+    /// resolves nothing: no proposal enacts, expires, or is pruned, and
+    /// the forest carries to the next boundary, which self-heals. That is
+    /// the accepted degradation of an in-place-upgraded store, and it must
+    /// never fall through to the pre-Conway branch — enacting the whole
+    /// live forest is exactly the wrong answer.
+    fn run_ratification<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         use super::ratify;
 
-        let Some(input) = self.build_ratify_input::<D>(state)? else {
-            return Ok(());
-        };
+        let closing = self.ending_state.number;
 
-        if input.proposals.is_empty() {
+        if self.gov_active_since.is_none_or(|since| since > closing) {
+            self.ratification = Some(self.resolve_pre_conway::<D>(state)?);
             return Ok(());
         }
+
+        let Some(input) = self.build_ratify_input::<D>(state)? else {
+            self.ratification = Some(super::Ratification::default());
+            return Ok(());
+        };
 
         let outcome = ratify::ratify(&input);
         let pruned = ratify::pruned_by_enactment(&input.proposals, &outcome.enacted);
 
-        let starting = self.starting_epoch_no();
+        let mut ratification = super::Ratification::default();
+
+        // `enacted` is the run's own ordering; the verdict vector is not,
+        // so the order is taken from there and only the classes from the
+        // verdicts.
+        let by_id: BTreeMap<&GovActionId, &EntityKey> = input
+            .proposals
+            .iter()
+            .map(|proposal| (&proposal.id, &proposal.key))
+            .collect();
+
+        for id in &outcome.enacted {
+            if let Some(key) = by_id.get(id) {
+                ratification.enactment_order.push((*key).clone());
+            }
+        }
 
         for verdict in &outcome.verdicts {
-            let proposal: Option<ProposalState> =
-                state.read_entity_typed(ProposalState::NS, &verdict.key)?;
-
-            let Some(proposal) = proposal else {
-                continue;
+            let outcome = match verdict.verdict {
+                ratify::Verdict::Accepted => ProposalOutcome::Enacted,
+                ratify::Verdict::Expired => ProposalOutcome::Expired,
+                ratify::Verdict::Continuing if pruned.contains(&verdict.key) => {
+                    ProposalOutcome::PrunedSibling
+                }
+                ratify::Verdict::Continuing => continue,
             };
 
-            let hack_enacts = proposal.should_enact(starting);
-            let hack_drops = proposal.should_drop(starting);
-
-            let engine_enacts = verdict.verdict == ratify::Verdict::Accepted;
-            let engine_drops = verdict.verdict == ratify::Verdict::Expired
-                || (verdict.verdict == ratify::Verdict::Continuing
-                    && pruned.contains(&verdict.key));
-
-            if engine_enacts == hack_enacts && engine_drops == hack_drops {
-                continue;
-            }
-
-            self.shadow_mismatches += 1;
-
-            tracing::warn!(
-                proposal = %proposal.id_as_string(),
-                epoch = self.ending_state.number,
-                engine = ?verdict.verdict,
-                engine_pruned = pruned.contains(&verdict.key),
-                hack_enacts,
-                hack_drops,
-                ratified_epoch = ?proposal.ratified_epoch,
-                canceled_epoch = ?proposal.canceled_epoch,
+            tracing::info!(
+                proposal = %hex::encode(verdict.id.transaction_id),
+                idx = verdict.id.action_index,
+                epoch = closing,
+                ?outcome,
                 tallies = ?verdict.tallies,
-                "shadow ratification disagrees with hack-stamped outcome"
+                "proposal resolved at boundary"
             );
+
+            ratification.outcomes.insert(verdict.key.clone(), outcome);
         }
 
         tracing::info!(
-            epoch = self.ending_state.number,
+            epoch = closing,
             proposals = outcome.verdicts.len(),
-            enacted = outcome.enacted.len(),
-            mismatches = self.shadow_mismatches,
-            "shadow ratification complete"
+            enacted = ratification.enactment_order.len(),
+            removed = ratification.outcomes.len(),
+            "ratification complete"
         );
 
+        self.ratification = Some(ratification);
+
         Ok(())
+    }
+
+    /// The pre-Conway branch of [`Self::run_ratification`]: every proposal
+    /// still live at a boundary that predates governance is a legacy
+    /// update proposal, and enacts.
+    ///
+    /// Enactment order is submission order — the only order these carry,
+    /// and the one under which a later update in the same epoch overwrites
+    /// an earlier one's parameters.
+    fn resolve_pre_conway<D: Domain>(
+        &self,
+        state: &D::State,
+    ) -> Result<super::Ratification, ChainError> {
+        let closing = self.ending_state.number;
+
+        let mut live: Vec<(EntityKey, (BlockSlot, u32))> = Vec::new();
+
+        let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
+
+        for record in records {
+            let (key, proposal) = record?;
+
+            if proposal.is_unresolved_at_close(closing) {
+                live.push((key, (proposal.slot, proposal.idx)));
+            }
+        }
+
+        live.sort_by_key(|(_, order)| *order);
+
+        let mut ratification = super::Ratification::default();
+
+        for (key, _) in live {
+            ratification
+                .outcomes
+                .insert(key.clone(), ProposalOutcome::Enacted);
+            ratification.enactment_order.push(key);
+        }
+
+        if !ratification.enactment_order.is_empty() {
+            tracing::info!(
+                epoch = closing,
+                enacted = ratification.enactment_order.len(),
+                "pre-Conway update proposals enacted at boundary"
+            );
+        }
+
+        Ok(ratification)
+    }
+
+    /// The boundary's ruling, which the finalize pass computes before any
+    /// classification reads it.
+    fn ratification(&self) -> &super::Ratification {
+        self.ratification
+            .as_ref()
+            .expect("ratification runs before the classification that reads it")
     }
 
     /// Queue the governance bookkeeping the EPOCH rule applies
@@ -1054,11 +1188,10 @@ impl BoundaryWork {
         let records = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for record in records {
-            let (_, proposal) = record?;
+            let (id, proposal) = record?;
 
-            let survives = proposal.is_unresolved_at_close(closing)
-                && !proposal.should_enact(starting)
-                && !proposal.should_drop(starting);
+            let survives =
+                proposal.is_unresolved_at_close(closing) && !self.ratification().is_removed(&id);
 
             if survives && proposal.max_epoch.is_some_and(|max| max >= starting) {
                 any_votable_survivor = true;
@@ -1140,12 +1273,19 @@ impl BoundaryWork {
             }
         }
 
+        // Enactment order is the engine's, not the key order the map
+        // iterates in: an action's effects are visible to the ones the run
+        // ratified after it.
         let enacting_proposals = self.enacting_proposals.clone();
-        for (id, (proposal, account)) in enacting_proposals.iter() {
-            visitor_enactment.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_drops.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_refunds.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
-            visitor_wrapup.visit_enacting_proposal(self, id, proposal, account.as_ref())?;
+        for id in self.ratification().enactment_order.clone() {
+            let Some((proposal, account)) = enacting_proposals.get(&id) else {
+                continue;
+            };
+
+            visitor_enactment.visit_enacting_proposal(self, &id, proposal, account.as_ref())?;
+            visitor_drops.visit_enacting_proposal(self, &id, proposal, account.as_ref())?;
+            visitor_refunds.visit_enacting_proposal(self, &id, proposal, account.as_ref())?;
+            visitor_wrapup.visit_enacting_proposal(self, &id, proposal, account.as_ref())?;
         }
 
         let dropping_proposals = self.dropping_proposals.clone();
@@ -1160,12 +1300,9 @@ impl BoundaryWork {
         visitor_drops.flush(self)?;
         visitor_refunds.flush(self)?;
 
-        // Shadow ratification: compute the boundary's outcomes for real
-        // and log disagreements with the hack table, which stays
-        // authoritative for state effects. Then queue the unconditional
-        // governance bookkeeping — after the enactment flush, so the
-        // committee GC applies over the post-enactment committee.
-        self.run_shadow_ratification::<D>(state)?;
+        // Queue the unconditional governance bookkeeping — after the
+        // enactment flush, so the committee GC applies over the
+        // post-enactment committee.
         self.emit_governance_boundary_deltas::<D>(state)?;
 
         // wrapup.flush emits the final `EpochWrapUp` delta carrying the
@@ -1553,5 +1690,391 @@ mod tests {
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147);
         assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
         assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
+    }
+}
+
+/// The flip: the boundary rules on the governance forest itself, and the
+/// per-network table of observed outcomes that used to stamp proposals at
+/// creation is gone.
+#[cfg(test)]
+mod ratification_tests {
+    use dolos_core::{Domain as _, StateStore as _, StateWriter as _};
+    use dolos_testing::toy_domain::ToyDomain;
+    use pallas::ledger::primitives::{
+        conway::{DRep, DRepVotingThresholds, RationalNumber, Vote},
+        StakeCredential,
+    };
+
+    use super::*;
+    use crate::{
+        model::credential_to_key, Committee, CommitteeAuthorization, EpochState, EpochValue,
+        GovDistr, GovState, PParamValue, PParamsSet, ProposalAction, ProposalState,
+        SingletonEntity as _,
+    };
+
+    const CLOSING: Epoch = 100;
+    const TREASURY: u64 = 10_000_000;
+    const WITHDRAWAL: u64 = 1_000_000;
+    const DEPOSIT: u64 = 500;
+
+    fn half() -> RationalNumber {
+        RationalNumber {
+            numerator: 1,
+            denominator: 2,
+        }
+    }
+
+    fn thresholds(value: RationalNumber) -> DRepVotingThresholds {
+        DRepVotingThresholds {
+            motion_no_confidence: value.clone(),
+            committee_normal: value.clone(),
+            committee_no_confidence: value.clone(),
+            update_constitution: value.clone(),
+            hard_fork_initiation: value.clone(),
+            pp_network_group: value.clone(),
+            pp_economic_group: value.clone(),
+            pp_technical_group: value.clone(),
+            pp_governance_group: value.clone(),
+            treasury_withdrawal: value,
+        }
+    }
+
+    fn cold() -> StakeCredential {
+        StakeCredential::AddrKeyhash([0xc0; 28].into())
+    }
+
+    fn hot() -> StakeCredential {
+        StakeCredential::AddrKeyhash([0x40; 28].into())
+    }
+
+    fn drep_cred() -> StakeCredential {
+        StakeCredential::AddrKeyhash([0xd7; 28].into())
+    }
+
+    fn drep() -> DRep {
+        DRep::Key([0xd7; 28].into())
+    }
+
+    fn beneficiary() -> StakeCredential {
+        StakeCredential::AddrKeyhash([0xbe; 28].into())
+    }
+
+    /// The devnet's own live parameters, moved past the bootstrap phase
+    /// and given real DRep thresholds — so the tally is load-bearing
+    /// rather than the all-zero bootstrap default.
+    fn conway_pparams(base: &PParamsSet) -> PParamsSet {
+        base.clone()
+            .with(PParamValue::ProtocolVersion((10, 0)))
+            .with(PParamValue::DrepVotingThresholds(thresholds(half())))
+            .with(PParamValue::MinCommitteeSize(1))
+    }
+
+    fn account(credential: StakeCredential) -> crate::AccountState {
+        crate::AccountState {
+            registered_at: Some(0),
+            stake: EpochValue::from_parts(
+                CLOSING,
+                Some(Default::default()),
+                None,
+                None,
+                None,
+                None,
+            ),
+            pool: EpochValue::from_parts(
+                CLOSING,
+                Some(crate::PoolDelegation::NotDelegated),
+                None,
+                None,
+                None,
+                None,
+            ),
+            drep: EpochValue::from_parts(
+                CLOSING,
+                Some(crate::DRepDelegation::NotDelegated),
+                None,
+                None,
+                None,
+                None,
+            ),
+            vote_delegated_at: None,
+            deregistered_at: None,
+            credential,
+            retired_pool: None,
+        }
+    }
+
+    /// A treasury withdrawal — the action whose acceptance turns purely on
+    /// the committee and DRep tallies (SPOs have no say, and it belongs to
+    /// no lineage tree, so no root has to match).
+    fn withdrawal(tx: u8, votes: Option<Vote>, expires_after: Epoch) -> ProposalState {
+        ProposalState {
+            slot: 1,
+            tx: [tx; 32].into(),
+            idx: 0,
+            action: ProposalAction::TreasuryWithdrawal(vec![(beneficiary(), WITHDRAWAL)]),
+            max_epoch: Some(expires_after),
+            ratified_epoch: None,
+            canceled_epoch: None,
+            deposit: Some(DEPOSIT),
+            reward_account: Some(beneficiary()),
+            proposed_in: Some(CLOSING - 1),
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: votes
+                .clone()
+                .map(|vote| BTreeMap::from([(hot(), vec![(1u64, vote)])]))
+                .unwrap_or_default(),
+            drep_votes: votes
+                .map(|vote| BTreeMap::from([(drep_cred(), vec![(1u64, vote)])]))
+                .unwrap_or_default(),
+            spo_votes: Default::default(),
+        }
+    }
+
+    /// A governance-active boundary with everything the engine reads: an
+    /// authorized committee of one, a registered DRep holding all the
+    /// voting stake, and the previous boundary's completed distributions.
+    fn seed(proposals: &[ProposalState]) -> ToyDomain {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        let mut epoch = crate::load_epoch::<ToyDomain>(state).unwrap();
+        epoch.number = CLOSING;
+        let pparams = conway_pparams(epoch.pparams.unwrap_live());
+        epoch.pparams = EpochValue::from_parts(CLOSING, Some(pparams), None, None, None, None);
+        epoch.initial_pots.treasury = TREASURY;
+
+        let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
+        gov.active_since = Some(0);
+        gov.committee = Some(Committee {
+            members: BTreeMap::from([(cold(), CLOSING + 50)]),
+            threshold: half(),
+        });
+        gov.committee_auths = BTreeMap::from([(
+            cold(),
+            vec![(0u64, CommitteeAuthorization::HotCredential(hot()))],
+        )]);
+
+        let mut distr = GovDistr::new(CLOSING - 1, 1);
+        distr.committed_shards = 1;
+        distr.drep_distr = BTreeMap::from([(drep(), 1_000u64)]);
+        gov.prev_distr = Some(distr);
+
+        let writer = state.start_writer().unwrap();
+
+        writer
+            .write_entity_typed(&EpochState::singleton_key(), &epoch)
+            .unwrap();
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &gov)
+            .unwrap();
+
+        let drep_row = crate::DRepState {
+            registered_at: Some((0, 0)),
+            voting_power: 1_000,
+            last_active_slot: None,
+            unregistered_at: None,
+            expired: false,
+            deposit: 0,
+            identifier: drep(),
+            anchor: None,
+            expiry: None,
+        };
+
+        writer
+            .write_entity_typed(&drep_to_entity_key(&drep()), &drep_row)
+            .unwrap();
+
+        let beneficiary = account(beneficiary());
+        writer
+            .write_entity_typed(&credential_to_key(&beneficiary.credential), &beneficiary)
+            .unwrap();
+
+        for proposal in proposals {
+            writer
+                .write_entity_typed(
+                    &ProposalState::build_entity_key(proposal.tx, proposal.idx),
+                    proposal,
+                )
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        domain
+    }
+
+    fn finalize(domain: &ToyDomain) -> BoundaryWork {
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+
+        boundary
+    }
+
+    fn read(domain: &ToyDomain, proposal: &ProposalState) -> ProposalState {
+        domain
+            .state()
+            .read_entity_typed::<ProposalState>(
+                ProposalState::NS,
+                &ProposalState::build_entity_key(proposal.tx, proposal.idx),
+            )
+            .unwrap()
+            .expect("proposal row present")
+    }
+
+    /// Done criterion 5, the property the whole umbrella exists for: an
+    /// action id no table ever named ratifies out of its votes and the
+    /// stake distribution alone, and one that fails to clear the same
+    /// thresholds expires when its lifetime runs out. No release ships per
+    /// proposal.
+    #[test]
+    fn synthetic_proposals_resolve_from_votes_alone() {
+        let accepted = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
+        let rejected = withdrawal(0x02, Some(Vote::No), CLOSING - 1);
+        let live = withdrawal(0x03, Some(Vote::No), CLOSING + 10);
+
+        let domain = seed(&[accepted.clone(), rejected.clone(), live.clone()]);
+        let boundary = finalize(&domain);
+
+        let ratification = boundary.ratification.as_ref().unwrap();
+        assert_eq!(ratification.outcomes.len(), 2);
+        assert_eq!(ratification.enactment_order.len(), 1);
+
+        // accepted: stamped with the epoch the boundary closed, and its
+        // withdrawal credited to the return account
+        let accepted = read(&domain, &accepted);
+        assert_eq!(accepted.ratified_epoch, Some(CLOSING));
+        assert_eq!(accepted.canceled_epoch, None);
+        assert!(accepted.was_enacted(CLOSING + 2));
+
+        // rejected and out of lifetime: dropped, stamped with the epoch
+        // the boundary opened
+        let rejected = read(&domain, &rejected);
+        assert_eq!(rejected.ratified_epoch, None);
+        assert_eq!(rejected.canceled_epoch, Some(CLOSING + 1));
+        assert!(rejected.was_canceled(CLOSING + 2));
+
+        // rejected but still votable: untouched, and back at the next
+        // boundary
+        let live = read(&domain, &live);
+        assert_eq!(live.ratified_epoch, None);
+        assert_eq!(live.canceled_epoch, None);
+        assert!(live.is_unresolved_at_close(CLOSING + 1));
+    }
+
+    /// Every removal class refunds the proposal deposit, and a deposit
+    /// whose return account is not registered goes to the treasury instead
+    /// of vanishing (research §7 deposit table; design §4).
+    #[test]
+    fn every_removal_class_refunds_its_deposit() {
+        let enacted = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
+        let expired = withdrawal(0x02, Some(Vote::No), CLOSING - 1);
+
+        let domain = seed(&[enacted.clone(), expired.clone()]);
+        let boundary = finalize(&domain);
+
+        let end = boundary.ending_state().end.as_ref().unwrap();
+
+        // both deposits refunded, both to a registered account
+        assert_eq!(end.proposal_refunds, DEPOSIT * 2);
+        assert_eq!(end.proposal_invalid_refunds, 0);
+
+        // the same two boundaries with no account row behind the return
+        // credential: the deposits are still accounted, as the pots'
+        // treasury credit rather than as a reward
+        let domain = seed(&[enacted, expired]);
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .delete_entity(crate::AccountState::NS, &credential_to_key(&beneficiary()))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let boundary = finalize(&domain);
+        let end = boundary.ending_state().end.as_ref().unwrap();
+
+        assert_eq!(end.proposal_refunds, 0);
+        assert_eq!(end.proposal_invalid_refunds, DEPOSIT * 2);
+    }
+
+    /// A boundary the engine cannot rule on — the previous boundary's
+    /// distributions are missing, the in-place-upgrade case — resolves
+    /// nothing. It must not fall through to the pre-Conway branch, which
+    /// would enact the entire live forest.
+    #[test]
+    fn boundary_without_distributions_resolves_nothing() {
+        let proposal = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
+
+        let domain = seed(&[proposal.clone()]);
+
+        let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+        gov.prev_distr = None;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &gov)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let boundary = finalize(&domain);
+
+        assert!(boundary.ratification.as_ref().unwrap().outcomes.is_empty());
+
+        let proposal = read(&domain, &proposal);
+        assert_eq!(proposal.ratified_epoch, None);
+        assert_eq!(proposal.canceled_epoch, None);
+    }
+
+    /// A boundary that predates governance runs the legacy update
+    /// mechanism instead: a parameter update submitted during the closing
+    /// epoch takes effect at the start of the next one, with no vote to
+    /// tally. This is how every pre-Conway parameter change lands on a
+    /// replay, and it used to ride on the outcome table's
+    /// `protocol <= 8` fallthrough.
+    #[test]
+    fn pre_conway_updates_enact_without_a_tally() {
+        let mut update = withdrawal(0x01, None, CLOSING + 10);
+        update.action =
+            ProposalAction::ParamChange(PParamsSet::default().with(PParamValue::MinFeeA(44)));
+        update.deposit = None;
+        update.reward_account = None;
+        update.proposed_in = Some(CLOSING);
+
+        let domain = seed(&[update.clone()]);
+
+        let mut gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+        gov.active_since = None;
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &gov)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let boundary = finalize(&domain);
+
+        assert_eq!(
+            boundary
+                .ratification
+                .as_ref()
+                .unwrap()
+                .enactment_order
+                .len(),
+            1
+        );
+
+        let update = read(&domain, &update);
+        assert_eq!(update.ratified_epoch, Some(CLOSING));
+
+        assert_eq!(
+            crate::load_epoch::<ToyDomain>(domain.state())
+                .unwrap()
+                .pparams
+                .unwrap_live()
+                .min_fee_a(),
+            Some(44),
+        );
     }
 }

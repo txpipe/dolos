@@ -22,7 +22,7 @@ use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 use crate::{
     eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
     CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr, GovState, PoolHash,
-    PoolState, ProposalState,
+    PoolState, ProposalOutcome, ProposalState,
 };
 
 pub mod commit;
@@ -135,6 +135,34 @@ pub type PoolId = EntityKey;
 pub type DRepId = EntityKey;
 pub type ProposalId = EntityKey;
 
+/// One boundary's ruling on the live governance forest: the proposals it
+/// removes, each with the class of removal, plus the order the accepted
+/// ones enact in.
+///
+/// Produced once per finalize pass and consumed by the proposal
+/// classification, the `ProposalResolved` stamping, and the dormancy
+/// check — all of which used to read outcomes stamped at proposal
+/// creation from a per-network table of observed results.
+#[derive(Debug, Clone, Default)]
+pub struct Ratification {
+    /// Removal class per resolved proposal. Proposals absent from the map
+    /// survive the boundary.
+    pub outcomes: HashMap<ProposalId, ProposalOutcome>,
+
+    /// Accepted proposals in enactment order (`actionPriority`, submission
+    /// order within) — the order their state effects must apply in, which
+    /// key order is not.
+    pub enactment_order: Vec<ProposalId>,
+}
+
+impl Ratification {
+    /// Whether this boundary takes the proposal out of the live forest,
+    /// by any of the three routes.
+    pub fn is_removed(&self, id: &ProposalId) -> bool {
+        self.outcomes.contains_key(id)
+    }
+}
+
 pub struct BoundaryWork {
     // loaded
     pub(crate) ending_state: EpochState,
@@ -171,14 +199,14 @@ pub struct BoundaryWork {
 
     /// The whole governance singleton as of this phase's load — committee,
     /// authorization histories, roots, and the previous boundary's
-    /// distributions, all consumed by the shadow ratification run.
+    /// distributions, all consumed by the ratification run.
     pub gov: GovState,
 
     /// Whether this boundary enacts the hard fork into protocol 10, which
     /// carries the one-shot account migration dropping DRep delegations
     /// that point at never/no-longer-registered DReps (research §5.5
-    /// step 9). Detected from the hack-stamped enactment during the
-    /// shard loads.
+    /// step 9). Ratified during the shard loads, which run before the
+    /// finalize pass that rules on the boundary as a whole.
     pub pv10_migration: bool,
 
     /// DReps registered as of the boundary that *opened* the closing epoch
@@ -187,9 +215,10 @@ pub struct BoundaryWork {
     /// epoch (`None` on pre-upgrade rows without the epoch-based field).
     pub ratify_dreps: BTreeMap<StakeCredential, Option<Epoch>>,
 
-    /// Shadow-mode disagreements between the ratification engine and the
-    /// hack-stamped outcomes found by this finalize pass.
-    pub shadow_mismatches: u64,
+    /// The boundary's ruling on the live governance forest: which proposals
+    /// this boundary removes and why. `None` until the finalize pass runs
+    /// the engine — and on the shard passes, which never need it.
+    pub ratification: Option<Ratification>,
 
     /// Deposits of the snapshot proposal set (live, `proposed_in` before the
     /// closing epoch), summed per return credential. Added to the delegated

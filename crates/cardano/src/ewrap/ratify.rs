@@ -7,11 +7,11 @@
 //! over an explicit [`RatifyInput`] snapshot — no store reads — so the
 //! math is testable section by section against the research doc.
 //!
-//! The engine currently runs in **shadow mode**: `loading.rs` builds the
-//! input at the EWRAP finalize pass, runs the engine, and logs any
-//! disagreement with the hack-stamped outcomes, which remain
-//! authoritative for state effects. Flipping the engine to authoritative
-//! is the hacks-oracle-removal plan.
+//! The engine is authoritative: `loading.rs` builds the input at the
+//! EWRAP finalize pass, runs the engine, and applies its verdicts as the
+//! boundary's state effects. It ran in shadow mode against a curated
+//! table of observed per-network outcomes first, and that table was
+//! deleted once full preview and preprod replays reproduced it.
 //!
 //! Timing model (design doc §2): the boundary closing epoch `c` ratifies
 //! the pulser snapshot created at the `(c-1)/c` boundary with
@@ -144,8 +144,8 @@ pub enum Verdict {
     Continuing,
 }
 
-/// The tally numbers and structural checks behind one verdict, kept for
-/// shadow-mode logging.
+/// The tally numbers and structural checks behind one verdict, kept so a
+/// boundary's ruling can be read back from the logs.
 #[derive(Debug, Clone)]
 pub struct Tallies {
     pub prev_action_ok: bool,
@@ -820,9 +820,9 @@ pub fn ratify(input: &RatifyInput) -> RatifyOutcome {
 /// subtrees of the enacted actions (`removedDueToEnactment`, research
 /// §5.5 step 3): for each purpose with an enacted action, every other
 /// snapshot proposal of that purpose survives only if it descends from
-/// the *last* enacted action of the purpose. Shadow mode uses this to
-/// classify hack-stamped cancellations the pure verdicts call
-/// `Continuing`.
+/// the *last* enacted action of the purpose. These are the removals the
+/// pure verdicts alone can't name: the engine calls them `Continuing`,
+/// and the boundary drops them anyway.
 pub fn pruned_by_enactment(
     proposals: &[RatifyProposal],
     enacted: &[GovActionId],

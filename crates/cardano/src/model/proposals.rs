@@ -12,7 +12,6 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 
 use super::{epochs::Lovelace, pools::PoolHash, pparams::PParamsSet, FixedNamespace as _};
-use crate::hacks::{self, proposals::ProposalOutcome};
 
 #[derive(Debug, Encode, Decode, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ProposalAction {
@@ -477,29 +476,6 @@ impl ProposalState {
 
         true
     }
-
-    /// Returns true if the proposal should be enacted at the starting epoch. It
-    /// does a strict comparision with the ratified epoch, it will return false
-    /// if asked at a later epoch.
-    pub fn should_enact(&self, starting_epoch: Epoch) -> bool {
-        self.ratified_epoch.is_some_and(|x| x + 1 == starting_epoch)
-    }
-
-    pub fn should_drop(&self, starting_epoch: Epoch) -> bool {
-        if self.ratified_epoch.is_some() {
-            return false;
-        }
-
-        if let Some(canceled_epoch) = self.canceled_epoch {
-            return starting_epoch == canceled_epoch;
-        }
-
-        if let Some(expires) = self.expires_at() {
-            return starting_epoch == expires + 1;
-        }
-
-        false
-    }
 }
 
 // --- Deltas ---
@@ -563,22 +539,7 @@ impl dolos_core::EntityDelta for NewProposal {
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
         self.prev = entity.clone();
 
-        let id = ProposalState::id(self.tx, self.idx);
-
-        let outcome = hacks::proposals::outcome(self.network_magic, self.protocol, &id);
-
         let max_epoch = self.validity_period.map(|x| self.current_epoch + x);
-
-        let ratified_epoch = match &outcome {
-            ProposalOutcome::Ratified(epoch) => Some(*epoch),
-            ProposalOutcome::RatifiedCurrentEpoch => Some(self.current_epoch),
-            _ => None,
-        };
-
-        let canceled_epoch = match &outcome {
-            ProposalOutcome::Canceled(epoch) => Some(*epoch),
-            _ => None,
-        };
 
         let state = ProposalState {
             slot: self.slot,
@@ -588,8 +549,11 @@ impl dolos_core::EntityDelta for NewProposal {
             reward_account: self.reward_account.clone(),
             deposit: self.deposit,
             max_epoch,
-            ratified_epoch,
-            canceled_epoch,
+            // A proposal is born unresolved: the epoch boundary that
+            // ratifies, expires, or prunes it stamps these through
+            // [`ProposalResolved`].
+            ratified_epoch: None,
+            canceled_epoch: None,
             // `proposed_in` derives from data this legacy delta already
             // carries, so WAL replay of old rows populates it too. The
             // remaining phase-2 fields weren't captured at the time.
@@ -619,9 +583,11 @@ impl dolos_core::EntityDelta for NewProposal {
 /// keep decoding and replaying — its field layout is frozen (bincode) and
 /// can't grow.
 ///
-/// Outcome stamping still consults `hacks::proposals`: ratification isn't
-/// computed for real until the RATIFY engine lands, at which point the hack
-/// table becomes the validation oracle before deletion.
+/// `network_magic` and `protocol` are vestigial on both deltas: they fed the
+/// per-network table that stamped ratification at creation. The epoch
+/// boundary computes outcomes now and stamps them through
+/// [`ProposalResolved`], but the fields stay — the layout is
+/// bincode-positional and can't shrink any more than it can grow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProposalV2 {
     pub(crate) slot: BlockSlot,
@@ -690,22 +656,7 @@ impl dolos_core::EntityDelta for NewProposalV2 {
     fn apply(&mut self, entity: &mut Option<ProposalState>) {
         self.prev = entity.clone();
 
-        let id = ProposalState::id(self.tx, self.idx);
-
-        let outcome = hacks::proposals::outcome(self.network_magic, self.protocol, &id);
-
         let max_epoch = self.validity_period.map(|x| self.current_epoch + x);
-
-        let ratified_epoch = match &outcome {
-            ProposalOutcome::Ratified(epoch) => Some(*epoch),
-            ProposalOutcome::RatifiedCurrentEpoch => Some(self.current_epoch),
-            _ => None,
-        };
-
-        let canceled_epoch = match &outcome {
-            ProposalOutcome::Canceled(epoch) => Some(*epoch),
-            _ => None,
-        };
 
         let state = ProposalState {
             slot: self.slot,
@@ -715,8 +666,9 @@ impl dolos_core::EntityDelta for NewProposalV2 {
             reward_account: self.reward_account.clone(),
             deposit: self.deposit,
             max_epoch,
-            ratified_epoch,
-            canceled_epoch,
+            // Unresolved until a boundary rules on it ([`ProposalResolved`]).
+            ratified_epoch: None,
+            canceled_epoch: None,
             proposed_in: Some(self.current_epoch),
             parent: self.parent.clone(),
             purpose: self.purpose,
@@ -819,6 +771,99 @@ impl dolos_core::EntityDelta for VoteCast {
         };
 
         state.vote_history_pop(&self.voter, self.created_entry);
+    }
+}
+
+/// How the epoch boundary removed a proposal from the live governance
+/// forest — the three removal classes of the Conway `EPOCH` rule
+/// (research §5.5 step 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProposalOutcome {
+    /// Accepted by every body and every structural check: enacts at this
+    /// boundary (`enacted`).
+    Enacted,
+
+    /// Not accepted and past its voting lifetime (`expired`).
+    Expired,
+
+    /// Not accepted and still votable, but removed as a sibling subtree of
+    /// an action enacted at the same boundary (`removedDueToEnactment`).
+    PrunedSibling,
+}
+
+/// The boundary's ruling on one proposal — what replaced outcome stamping
+/// at creation time.
+///
+/// Stamps `ratified_epoch` / `canceled_epoch` on the target
+/// [`ProposalState`] with the epoch conventions the rest of the model
+/// reads: `ratified_epoch` is the epoch the enacting boundary *closes*
+/// (`is_unresolved_at_close`, `was_enacted`), while `canceled_epoch` is
+/// the epoch it *opens*, one later.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalResolved {
+    pub(crate) tx: Hash<32>,
+    pub(crate) idx: u32,
+    pub(crate) outcome: ProposalOutcome,
+
+    /// Epoch being closed by the boundary that ruled.
+    pub(crate) closing_epoch: Epoch,
+
+    // undo
+    pub(crate) prev: Option<(Option<Epoch>, Option<Epoch>)>,
+}
+
+impl ProposalResolved {
+    pub fn new(tx: Hash<32>, idx: u32, outcome: ProposalOutcome, closing_epoch: Epoch) -> Self {
+        Self {
+            tx,
+            idx,
+            outcome,
+            closing_epoch,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for ProposalResolved {
+    type Entity = ProposalState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((
+            ProposalState::NS,
+            ProposalState::build_entity_key(self.tx, self.idx),
+        ))
+    }
+
+    fn apply(&mut self, entity: &mut Option<ProposalState>) {
+        let Some(state) = entity.as_mut() else {
+            // The boundary rules on rows it just read from this same
+            // store, so the target is always present. Tolerate a gap
+            // instead of corrupting state.
+            tracing::warn!(
+                tx = %self.tx,
+                idx = self.idx,
+                "resolution for unknown proposal; skipping"
+            );
+            return;
+        };
+
+        self.prev = Some((state.ratified_epoch, state.canceled_epoch));
+
+        match self.outcome {
+            ProposalOutcome::Enacted => state.ratified_epoch = Some(self.closing_epoch),
+            ProposalOutcome::Expired | ProposalOutcome::PrunedSibling => {
+                state.canceled_epoch = Some(self.closing_epoch + 1)
+            }
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<ProposalState>) {
+        let (Some(state), Some((ratified, canceled))) = (entity.as_mut(), self.prev) else {
+            return;
+        };
+
+        state.ratified_epoch = ratified;
+        state.canceled_epoch = canceled;
     }
 }
 
@@ -1205,5 +1250,98 @@ mod prop_tests {
 
         let state = entity.as_ref().unwrap();
         assert!(state.drep_votes.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use dolos_core::EntityDelta as _;
+
+    use super::*;
+
+    fn proposal() -> ProposalState {
+        ProposalState {
+            slot: 0,
+            tx: [3u8; 32].into(),
+            idx: 1,
+            action: ProposalAction::Info,
+            max_epoch: Some(510),
+            ratified_epoch: None,
+            canceled_epoch: None,
+            deposit: Some(100),
+            reward_account: None,
+            proposed_in: Some(500),
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        }
+    }
+
+    /// The two epoch conventions the rest of the model reads back, and
+    /// which the outcome table encoded by hand: an enactment names the
+    /// epoch its boundary *closed*, a removal the epoch that boundary
+    /// *opened*. Both make the proposal resolved from the next boundary
+    /// on, and neither before it.
+    #[test]
+    fn resolution_stamps_the_epoch_each_consumer_expects() {
+        let cases = [
+            (ProposalOutcome::Enacted, Some(505), None),
+            (ProposalOutcome::Expired, None, Some(506)),
+            (ProposalOutcome::PrunedSibling, None, Some(506)),
+        ];
+
+        for (outcome, ratified, canceled) in cases {
+            let mut entity = Some(proposal());
+
+            let mut delta = ProposalResolved::new([3u8; 32].into(), 1, outcome, 505);
+            delta.apply(&mut entity);
+
+            let state = entity.as_ref().unwrap();
+            assert_eq!(state.ratified_epoch, ratified, "{outcome:?}");
+            assert_eq!(state.canceled_epoch, canceled, "{outcome:?}");
+
+            // still in the forest for the boundary that ruled, out of it
+            // for the next one
+            assert!(state.is_unresolved_at_close(505), "{outcome:?}");
+            assert!(!state.is_unresolved_at_close(506), "{outcome:?}");
+
+            delta.undo(&mut entity);
+            assert_eq!(entity, Some(proposal()), "{outcome:?}");
+        }
+    }
+
+    /// A proposal is born unresolved. Outcome stamping at creation is what
+    /// the per-network table did, and the only thing that could: the
+    /// boundary that rules hadn't run yet.
+    #[test]
+    fn creation_leaves_the_outcome_open() {
+        let mut entity = None;
+
+        let mut delta = NewProposalV2::new(
+            10,
+            [3u8; 32].into(),
+            1,
+            ProposalAction::Info,
+            Some(100),
+            None,
+            Some(10),
+            500,
+            764824073,
+            10,
+            None,
+            None,
+            None,
+        );
+
+        delta.apply(&mut entity);
+
+        let state = entity.as_ref().unwrap();
+        assert_eq!(state.ratified_epoch, None);
+        assert_eq!(state.canceled_epoch, None);
+        assert_eq!(state.max_epoch, Some(510));
+        assert!(state.is_unresolved_at_close(505));
     }
 }
