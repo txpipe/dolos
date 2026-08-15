@@ -978,6 +978,7 @@ mod tests {
             identifier,
             anchor: None,
             expiry: None,
+            first_seen_at: None,
         }
     }
 
