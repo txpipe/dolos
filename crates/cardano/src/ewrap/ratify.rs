@@ -1014,9 +1014,7 @@ mod tests {
         ProposalAction::ParamChange(PParamsSet::default().with(kind_value))
     }
 
-    // ------------------------------------------------------------------
     // §5.3.1 — threshold resolution
-    // ------------------------------------------------------------------
 
     /// Each pparam group resolves to its own DRep threshold; an update
     /// touching several groups takes the max; the security list drives
@@ -1178,9 +1176,7 @@ mod tests {
         assert_eq!(drep_threshold(&bootstrap, &ProposalAction::Info), None);
     }
 
-    // ------------------------------------------------------------------
     // §5.3.2 — committee tally
-    // ------------------------------------------------------------------
 
     /// Expired and resigned members abstain; an authorized member
     /// without a vote counts as No; Abstain leaves the denominator; two
@@ -1242,9 +1238,7 @@ mod tests {
         assert_eq!((yes, total), (2, 3));
     }
 
-    // ------------------------------------------------------------------
     // §5.3.3 — DRep tally
-    // ------------------------------------------------------------------
 
     /// Unregistered and expired DReps are ignored entirely; absent votes
     /// default to No; Abstain and AlwaysAbstain never count; the
@@ -1303,9 +1297,7 @@ mod tests {
         assert_eq!((yes, total), (0, 100));
     }
 
-    // ------------------------------------------------------------------
     // §5.3.4 — SPO tally
-    // ------------------------------------------------------------------
 
     /// The denominator is total minus abstain (No stays in it); absent
     /// votes resolve through the pool's default vote, except HardFork
@@ -1377,9 +1369,7 @@ mod tests {
         assert_eq!((yes, abstain), (100, 25));
     }
 
-    // ------------------------------------------------------------------
     // §5.5 — application order over the evolving enact-state
-    // ------------------------------------------------------------------
 
     /// An accepted proposal whose votes pass every body. DRep leg: one
     /// whale votes yes; SPO leg: one pool votes yes; CC: the sole member
