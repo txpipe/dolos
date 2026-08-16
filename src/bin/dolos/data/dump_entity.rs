@@ -12,16 +12,21 @@ pub struct Args {
     #[arg(long)]
     namespace: String,
 
-    /// key of the entity to update
+    /// key of the entity to update, for namespaces that hold more than one
     #[arg(long)]
-    key: String,
+    key: Option<String>,
 }
 
 pub fn run_typed<E: Entity + FixedNamespace + std::fmt::Debug, S: StateStore>(
     state: &S,
     args: &Args,
 ) -> miette::Result<()> {
-    let key = hex::decode(&args.key).into_diagnostic()?;
+    let key = args
+        .key
+        .as_deref()
+        .ok_or_else(|| miette::Error::msg("--key is required for this namespace"))?;
+
+    let key = hex::decode(key).into_diagnostic()?;
     let key = EntityKey::from(key);
 
     let entity = state
@@ -51,7 +56,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "proposals" => run_typed::<ProposalState, _>(&state, args)?,
         "dreps" => run_typed::<DRepState, _>(&state, args)?,
         // the governance singleton has one key and it isn't the caller's to
-        // remember, so `--key` is ignored here
+        // remember, so `--key` is neither needed nor read here
         "gov" => {
             let entity = state
                 .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())

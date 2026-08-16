@@ -361,7 +361,7 @@ impl TableRow for DRepState {
             self.voting_power.to_string(),
             self.expiry
                 .as_ref()
-                .map(|x| format!("{x:?}"))
+                .map(|x| x.current.to_string())
                 .unwrap_or_default(),
             self.expired.to_string(),
             self.deposit.to_string(),
