@@ -2,8 +2,8 @@ use std::marker::PhantomData;
 
 use comfy_table::Table;
 use dolos_cardano::{
-    model::AccountState, DatumState, EpochState, EpochValue, EraSummary, PendingRewardState,
-    PoolSnapshot, PoolState, ProposalAction, ProposalState,
+    model::AccountState, DRepState, DatumState, EpochState, EpochValue, EraSummary,
+    PendingRewardState, PoolSnapshot, PoolState, ProposalAction, ProposalState,
 };
 use miette::{Context, IntoDiagnostic};
 use tracing_subscriber::{filter::Targets, prelude::*};
@@ -12,7 +12,7 @@ use crate::data::OutputFormat;
 use dolos::prelude::*;
 use dolos_cardano::{network_from_genesis, pallas_extras};
 use pallas::ledger::addresses::Network as AddressNetwork;
-use pallas::ledger::primitives::Epoch;
+use pallas::ledger::primitives::{conway::DRep, Epoch};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -320,6 +320,55 @@ impl TableRow for PoolState {
     }
 }
 
+impl TableRow for DRepState {
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        if matches!(format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for dreps state (#1032)");
+        }
+        vec![
+            "credential",
+            "kind",
+            "registered slot",
+            "unregistered slot",
+            "voting power",
+            "expiry epoch",
+            "expired",
+            "deposit",
+        ]
+    }
+
+    fn row(&self, _key: &EntityKey, _network: AddressNetwork, format: OutputFormat) -> Vec<String> {
+        if matches!(format, OutputFormat::Dbsync) {
+            todo!("dbsync format not supported for dreps state (#1032)");
+        }
+
+        let (credential, kind) = match &self.identifier {
+            DRep::Key(hash) => (hex::encode(hash), "key"),
+            DRep::Script(hash) => (hex::encode(hash), "script"),
+            DRep::Abstain => (String::new(), "abstain"),
+            DRep::NoConfidence => (String::new(), "no-confidence"),
+        };
+
+        vec![
+            credential,
+            kind.to_string(),
+            self.registered_at
+                .map(|(slot, _)| slot.to_string())
+                .unwrap_or_default(),
+            self.unregistered_at
+                .map(|(slot, _)| slot.to_string())
+                .unwrap_or_default(),
+            self.voting_power.to_string(),
+            self.expiry
+                .as_ref()
+                .map(|x| x.current.to_string())
+                .unwrap_or_default(),
+            self.expired.to_string(),
+            self.deposit.to_string(),
+        ]
+    }
+}
+
 impl TableRow for ProposalState {
     fn header(format: OutputFormat) -> Vec<&'static str> {
         if matches!(format, OutputFormat::Dbsync) {
@@ -482,6 +531,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "proposals" => {
             dump_state::<ProposalState>(&state, "proposals", args.count, network, args.format)?
         }
+        "dreps" => dump_state::<DRepState>(&state, "dreps", args.count, network, args.format)?,
         "pending-rewards" => {
             dump_state::<PendingRewardState>(
                 &state,
