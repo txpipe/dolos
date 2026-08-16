@@ -2,6 +2,100 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0-alpha.0] - 2026-08-16
+
+### 🚀 Features
+
+- *(stelae)* Setup a walking skeleton for the Stelae protocol (#1147)
+- *(storage)* Add the export/restore seam Stelae index layers need (#1150)
+- *(storage)* Introduce true memory built-in store for state and indexes (#1158)
+- *(storage)* Make the archive dimension registry enforce itself (#1161)
+- *(stelae)* Read layers as a stream, bounded by one record (#1148)
+- *(snapshot)* Define our custom stelae profile (#1166)
+- *(stelae)* Write layers as a stream, bounded by one record (#1167)
+- *(minibf)* Implement `/accounts/{stake_address}/transactions` endpoint (#1127)
+- *(snapshot)* Export a stele from a live node (#1168)
+- *(snapshot)* Support restoring a node from a stele (#1169)
+- *(stelae)* Push and pull a stele to an OCI registry (#1170)
+- *(minibf)* Implement the `/pools` endpoint (#1137)
+- *(minibf)* Implement `/accounts/{stake_address}/addresses/assets` endpoint (#1126)
+- *(snapshot)* Publish a stele into a registry, and only what is new (#1173)
+- *(snapshot)* Restore from a registry, and survive being interrupted (#1176)
+- *(stelae)* Authenticate a registry with basic credentials (#1184)
+- *(stelae)* Name the official registry's published read-only pair (#1186)
+- *(stelae)* Give a publisher digest, verify and inspect capabilities (#1188)
+- *(stelae)* Introduce scratch dir for publish operations (#1191)
+- *(stelae)* Run preflight rules before publish / restore (#1192)
+- *(cardano)* Introduce log per-account epoch stake distribution (#1151)
+- *(minibf)* Implement `/epochs/{number}/stakes` endpoint (#1152)
+- *(minibf)* Implement `/epochs/{number}/stakes/{pool_id}` endpoint (#1154)
+- *(minibf)* Implement `/assets/policy/{policy_id}` endpoint (#1189)
+- *(cardano)* Introduce committee, constitution and governance singleton state (#1130)
+- *(core)* Introduce cbor::U128 newtype (#1208)
+- *(minibf)* Implement `/epochs/{number}`, `/next` and `/previous` (#1171)
+- *(stelae)* Support resume of interrupted publish (#1200)
+- *(stelae)* Introduce restore / publish progress reports (#1210)
+- *(cardano)* Enact the four missing governance action variants (#1211)
+- *(cli)* Introduce `data check` command to review semantic consistency (#1213)
+- *(cardano)* Compute DRep and SPO stake distributions in the EWRAP pass (#1212)
+- *(cardano)* Governance "ratify" engine in shadow mode (#1214)
+- *(cardano)* Compute proposal outcomes instead of using hacks (#1215)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Render relay IPv6 addresses in network byte order (#1136)
+- *(minibf)* Return affected addresses from `/blocks/{hash_or_number}/addresses` (#1124)
+- *(stelae)* A registry client should not need a C toolchain (#1180)
+- *(stelae)* Hold a publisher to the record ceiling its reader enforces (#1182)
+- *(stelae)* Specify the manifest third parties read, and prove it in CI (#1183)
+- *(stelae)* A blob that already exists is a dedup, not a rename (#1187)
+- *(minibf)* Return a JSON error body for a malformed stake address (#1177)
+- *(stelae)* Improve error messages on staging dir preflight checks (#1202)
+- *(cardano)* Clear a vote delegation only when the ledger cleared it (#1216)
+
+### 🚜 Refactor
+
+- *(storage)* Let append_prehashed take an iterator (#1159)
+- *(storage)* Factor the archive record prefix walk (#1160)
+- *(storage)* Source the stored tag key from one definition (#1162)
+- *(storage)* Refuse unsupported store methods instead of panicking (#1164)
+- *(minibf)* Share input resolution across scan endpoints (#1134)
+- *(minibf)* Share input resolution for the account transactions scan (#1174)
+- *(minibf)* Share input resolution for the block addresses endpoint (#1190)
+- *(stelae)* Improve DRY on layer opening prologue (#1201)
+
+### 📚 Documentation
+
+- Restore lost changelog
+- *(adr)* Rename the snapshot mechanism Stelae (#1146)
+- Fix the Tx3 Rust SDK signer import path (#1181)
+
+### 🔧 Continuous Integration
+
+- Pin git-cliff workdir so changelog survives submodule
+- Ban cmake in deny.toml instead of documenting the refusal (#1196)
+- Don't publish prereleases to homebrew and npm
+
+### ⚡ Performance
+
+- *(storage)* Hold exact record keys inline (#1163)
+
+### 🎨 Styling
+
+- *(snapshot)* Normalize the preflight test comments (#1209)
+
+### 🧪 Testing
+
+- Improve CI coverage with comprehensive all-features workspace testing (#1157)
+- *(storage)* One seeder for the index roundtrip and cost fixtures (#1165)
+- *(stelae)* Point the oci harness at a deployed registry (#1185)
+- *(stelae)* Avoid preflight disk space margins race (#1203)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(storage)* Formalize supported vs deprecated backends (#1155)
+- Add dolos-devs as code owner for `crates/minibf` (#1194)
+
 ## [1.6.0] - 2026-07-27
 
 ### 🚀 Features
@@ -20,6 +114,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - *(minibf)* Bump openapi crate to 1.90 (#1125)
+
+### Release
+
+- V1.6.0
 
 ## [1.5.0] - 2026-07-16
 
@@ -45,6 +143,10 @@ All notable changes to this project will be documented in this file.
 ### 🔧 Continuous Integration
 
 - Add cargo-deny advisories gate (#1059)
+
+### Release
+
+- V1.5.0
 
 ## [1.4.0] - 2026-07-08
 

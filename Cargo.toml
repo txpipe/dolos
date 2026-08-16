@@ -203,7 +203,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.6.0"
+version = "1.7.0-alpha.0"
 edition = "2021"
 repository = "https://github.com/txpipe/dolos"
 homepage = "https://github.com/txpipe/dolos"
