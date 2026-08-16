@@ -1793,9 +1793,6 @@ mod tests {
     }
 }
 
-/// The flip: the boundary rules on the governance forest itself, and the
-/// per-network table of observed outcomes that used to stamp proposals at
-/// creation is gone.
 #[cfg(test)]
 mod ratification_tests {
     use dolos_core::{Domain as _, StateStore as _, StateWriter as _};

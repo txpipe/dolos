@@ -141,8 +141,7 @@ pub type ProposalId = EntityKey;
 ///
 /// Produced once per finalize pass and consumed by the proposal
 /// classification, the `ProposalResolved` stamping, and the dormancy
-/// check — all of which used to read outcomes stamped at proposal
-/// creation from a per-network table of observed results.
+/// check.
 #[derive(Debug, Clone, Default)]
 pub struct Ratification {
     /// Removal class per resolved proposal. Proposals absent from the map

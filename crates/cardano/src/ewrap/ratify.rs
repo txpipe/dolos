@@ -9,9 +9,7 @@
 //!
 //! The engine is authoritative: `loading.rs` builds the input at the
 //! EWRAP finalize pass, runs the engine, and applies its verdicts as the
-//! boundary's state effects. It ran in shadow mode against a curated
-//! table of observed per-network outcomes first, and that table was
-//! deleted once full preview and preprod replays reproduced it.
+//! boundary's state effects.
 //!
 //! Timing model (design doc §2): the boundary closing epoch `c` ratifies
 //! the pulser snapshot created at the `(c-1)/c` boundary with

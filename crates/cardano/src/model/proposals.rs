@@ -791,8 +791,7 @@ pub enum ProposalOutcome {
     PrunedSibling,
 }
 
-/// The boundary's ruling on one proposal — what replaced outcome stamping
-/// at creation time.
+/// The boundary's ruling on one proposal.
 ///
 /// Stamps `ratified_epoch` / `canceled_epoch` on the target
 /// [`ProposalState`] with the epoch conventions the rest of the model
