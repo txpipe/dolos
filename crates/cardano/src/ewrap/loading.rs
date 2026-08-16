@@ -61,7 +61,6 @@ impl BoundaryWork {
             retiring_pools: Default::default(),
             expiring_dreps: Default::default(),
             retiring_dreps: Default::default(),
-            reregistrating_dreps: Default::default(),
             num_dormant_epochs,
             gov_active_since,
             gov_distr,
@@ -316,7 +315,7 @@ impl BoundaryWork {
 
     /// Load + compute for a per-shard run of the close half:
     ///   * reload the small classifications that drops.visit_account needs
-    ///     (retiring_pools, retiring_dreps, reregistrating_dreps),
+    ///     (retiring_pools, retiring_dreps),
     ///   * range-load pending rewards for this shard's key range,
     ///   * iterate accounts in range, applying rewards+drops visitors and
     ///     accumulating the boundary stake distributions, and
@@ -331,9 +330,9 @@ impl BoundaryWork {
     ) -> Result<BoundaryWork, ChainError> {
         let mut boundary = Self::new_empty::<D>(state, genesis)?;
 
-        // drops.visit_account needs retiring_pools + retiring_dreps +
-        // reregistrating_dreps. These sets are small (handful per epoch) so
-        // re-classifying them per shard is cheap.
+        // drops.visit_account needs retiring_pools + retiring_dreps. These
+        // sets are small (handful per epoch) so re-classifying them per shard
+        // is cheap.
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
         boundary.detect_pv10_migration::<D>(state)?;
@@ -374,15 +373,17 @@ impl BoundaryWork {
 
                 // PV10 hard-fork migration (research §5.5 step 9): drop
                 // delegations pointing at DReps that are not registered
-                // at this boundary. Delegations to a DRep unregistering
-                // right now are already dropped by the drops visitor.
+                // at this boundary, unless the drops visitor is already
+                // dropping this one. A delegation made *after* the DRep's
+                // unregistration survives that visitor but is still dangling
+                // — the migration is what clears it.
                 if self.pv10_migration {
                     if let Some(drep) = account.delegated_drep_at(self.ending_state.number) {
                         let dangling = matches!(drep, DRep::Key(_) | DRep::Script(_))
                             && !self
                                 .snapshot_registered_dreps
                                 .contains(&drep_to_entity_key(drep))
-                            && !self.retiring_dreps.contains(drep);
+                            && !self.clears_drep_delegation(drep, &account);
 
                         if dangling {
                             migration_drops.push(crate::DRepDelegatorDrop::new(
@@ -527,14 +528,16 @@ impl BoundaryWork {
         Ok(())
     }
 
-    fn should_retire_drep(&self, drep: &DRepState) -> bool {
-        let Some((unregistered_at, _)) = drep.unregistered_at else {
-            return false;
-        };
+    /// The unregistration certificate this boundary acts on: the DRep's
+    /// latest one, when it falls in the closing epoch. Carried into
+    /// `retiring_dreps` so the drops visitor can tell which delegations
+    /// predate it — see [`BoundaryWork::clears_drep_delegation`].
+    fn is_retiring_drep(&self, drep: &DRepState) -> Option<(BlockSlot, TxOrder)> {
+        let unregistered_at = drep.unregistered_at?;
 
-        let (unregistered_epoch, _) = self.chain_summary.slot_epoch(unregistered_at);
+        let (unregistered_epoch, _) = self.chain_summary.slot_epoch(unregistered_at.0);
 
-        self.starting_epoch_no() == unregistered_epoch + 1
+        (self.starting_epoch_no() == unregistered_epoch + 1).then_some(unregistered_at)
     }
 
     fn should_expire_drep(&self, drep: &DRepState) -> Result<bool, ChainError> {
@@ -570,16 +573,6 @@ impl BoundaryWork {
         let expiring_epoch = last_activity_epoch + pparams.ensure_drep_inactivity_period()?;
 
         Ok(expiring_epoch <= self.starting_epoch_no())
-    }
-
-    fn is_reregistering_drep(&self, drep: &DRepState) -> Option<(BlockSlot, TxOrder)> {
-        let registered_at = drep.registered_at?;
-        let (registered_epoch, _) = self.chain_summary.slot_epoch(registered_at.0);
-
-        if self.starting_epoch_no() == registered_epoch + 1 {
-            return Some(registered_at);
-        }
-        None
     }
 
     /// Whether `drep` was registered as of the boundary the distribution
@@ -637,13 +630,10 @@ impl BoundaryWork {
                 }
             }
 
-            if self.should_retire_drep(&drep) {
-                self.retiring_dreps.push(drep.identifier);
+            if let Some(unregistered_at) = self.is_retiring_drep(&drep) {
+                self.retiring_dreps.push((drep.identifier, unregistered_at));
             } else if self.should_expire_drep(&drep)? {
-                self.expiring_dreps.push(drep.identifier.clone());
-            } else if let Some(registered_at) = self.is_reregistering_drep(&drep) {
-                self.reregistrating_dreps
-                    .push((drep.identifier.clone(), registered_at));
+                self.expiring_dreps.push(drep.identifier);
             }
         }
 
@@ -1425,8 +1415,8 @@ mod tests {
     use crate::{
         model::{credential_to_key, drep_to_entity_key},
         shard::shard_key_ranges,
-        AccountTransition, AssignRewards, ControlledAmountInc, DRepDelegation, EpochState,
-        EpochValue, PoolDelegation, SingletonEntity as _, Stake,
+        AccountTransition, AssignRewards, ControlledAmountInc, DRepDelegation, DRepRegistration,
+        DRepUnRegistration, EpochState, EpochValue, PoolDelegation, SingletonEntity as _, Stake,
     };
 
     /// Pins the rotation-timing assumption behind the distribution snapshot
@@ -1790,6 +1780,210 @@ mod tests {
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147);
         assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
         assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
+    }
+
+    /// A DRep certificate, as the tests below replay it: the position it
+    /// lands at, and whether it registers or unregisters.
+    enum Cert {
+        Reg(BlockSlot, TxOrder),
+        UnReg(BlockSlot, TxOrder),
+    }
+
+    /// Build a DRep row by replaying `certs` through the real registration
+    /// deltas, so the stored `registered_at` / `unregistered_at` pair is
+    /// exactly what a chain replay leaves behind — in particular, each field
+    /// holding only the *latest* certificate of its kind.
+    fn replay_drep_certs(identifier: DRep, certs: &[Cert]) -> crate::DRepState {
+        let mut entity: Option<crate::DRepState> = None;
+
+        for cert in certs {
+            match cert {
+                Cert::Reg(slot, order) => {
+                    DRepRegistration::new(identifier.clone(), *slot, *order, 500, None)
+                        .apply(&mut entity)
+                }
+                Cert::UnReg(slot, order) => {
+                    DRepUnRegistration::new(identifier.clone(), *slot, *order).apply(&mut entity)
+                }
+            }
+        }
+
+        entity.expect("certs registered the drep")
+    }
+
+    fn delegator(
+        byte: u8,
+        drep: DRep,
+        vote_delegated_at: (BlockSlot, TxOrder),
+    ) -> crate::AccountState {
+        crate::AccountState {
+            vote_delegated_at: Some(vote_delegated_at),
+            ..snapshot_account(byte, 100, Some(drep), None)
+        }
+    }
+
+    /// Seed a ToyDomain standing at the closing epoch with nothing but the
+    /// given DRep rows and delegator accounts — no proposals, no rewards, so
+    /// the only deltas the shard pass produces for these accounts are the
+    /// delegation drops under test.
+    fn seed_delegation_domain(
+        dreps: &[crate::DRepState],
+        accounts: &[crate::AccountState],
+    ) -> ToyDomain {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        let mut epoch = crate::load_epoch::<ToyDomain>(state).unwrap();
+        epoch.number = CLOSING_EPOCH;
+
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&EpochState::singleton_key(), &epoch)
+            .unwrap();
+
+        for drep in dreps {
+            writer
+                .write_entity_typed(&drep_to_entity_key(&drep.identifier), drep)
+                .unwrap();
+        }
+
+        for account in accounts {
+            writer
+                .write_entity_typed(&credential_to_key(&account.credential), account)
+                .unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        domain
+    }
+
+    /// Whether the boundary scheduled the account's delegation away. A drop
+    /// schedules `NotDelegated` for the opening epoch; an untouched account
+    /// has nothing scheduled and keeps serving its DRep.
+    fn delegation_dropped(domain: &ToyDomain, account: &crate::AccountState) -> bool {
+        let stored = domain
+            .state()
+            .read_entity_typed::<crate::AccountState>(
+                crate::AccountState::NS,
+                &credential_to_key(&account.credential),
+            )
+            .unwrap()
+            .expect("account row present");
+
+        match stored.drep.next() {
+            Some(DRepDelegation::NotDelegated) => true,
+            None => {
+                // the delegation this asserts intact is what the account
+                // endpoint serves as `drep_id`
+                assert_eq!(
+                    stored.delegated_drep_at(CLOSING_EPOCH),
+                    account.delegated_drep_at(CLOSING_EPOCH)
+                );
+                false
+            }
+            other => panic!("unexpected scheduled delegation: {other:?}"),
+        }
+    }
+
+    fn closing_epoch_slot(domain: &ToyDomain, offset: BlockSlot) -> BlockSlot {
+        load_era_summary::<ToyDomain>(domain.state())
+            .unwrap()
+            .epoch_start(CLOSING_EPOCH)
+            + offset
+    }
+
+    /// The boundary sweep stands in for the ledger's `clearDRepDelegations`,
+    /// which runs at the unregistration certificate over the delegator set the
+    /// DRep holds *at that moment* (`ConwayUnRegDRep`, GovCert rule). So the
+    /// sweep must clear exactly the delegations that predate the certificate:
+    /// a later one was never in the set the ledger folded over, and a
+    /// registration — which starts the DRep over with an empty set — clears
+    /// nothing at all.
+    #[test]
+    fn boundary_clears_only_delegations_predating_the_unregistration() {
+        let domain = ToyDomain::new(None, None);
+        let unregistered_at = closing_epoch_slot(&domain, 100);
+        let reregistered_at = closing_epoch_slot(&domain, 200);
+
+        let cycled = replay_drep_certs(
+            reg_drep(),
+            &[
+                Cert::Reg(closing_epoch_slot(&domain, 10), 0),
+                Cert::UnReg(unregistered_at, 0),
+                Cert::Reg(reregistered_at, 0),
+            ],
+        );
+
+        let registered = replay_drep_certs(fresh_drep(), &[Cert::Reg(reregistered_at, 0)]);
+
+        // delegated before the unregistration: the ledger cleared it
+        let before = delegator(0xa1, reg_drep(), (closing_epoch_slot(&domain, 50), 0));
+        // delegated after it, in a later block: the ledger never saw it
+        let after = delegator(0xb2, reg_drep(), (closing_epoch_slot(&domain, 300), 0));
+        // delegated in the very transaction that re-registered the DRep — the
+        // shape two of the four preprod cases have
+        let same_tx = delegator(0xc3, reg_drep(), (reregistered_at, 0));
+        // delegated long before a DRep that only ever registered: a
+        // registration clears no account state
+        let predates_registration =
+            delegator(0xd4, fresh_drep(), (closing_epoch_slot(&domain, 5), 0));
+
+        let accounts = [&before, &after, &same_tx, &predates_registration];
+        let domain = seed_delegation_domain(&[cycled, registered], &accounts.map(|x| x.clone()));
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        assert!(delegation_dropped(&domain, &before));
+        assert!(!delegation_dropped(&domain, &after));
+        assert!(!delegation_dropped(&domain, &same_tx));
+        assert!(!delegation_dropped(&domain, &predates_registration));
+    }
+
+    /// `DRepState` keeps only the latest certificate of each kind, so a DRep
+    /// that cycles through registration several times inside one epoch is
+    /// indistinguishable from one that cycled once — and the predicate must
+    /// still cut at the *last* unregistration. The shape is the preprod
+    /// `drep1y2v8w5…` case: reg, dereg, reg, dereg, reg, then a delegation.
+    #[test]
+    fn repeated_registration_cycles_cut_at_the_last_unregistration() {
+        let domain = ToyDomain::new(None, None);
+        let first_unregistration = closing_epoch_slot(&domain, 20);
+        let last_unregistration = closing_epoch_slot(&domain, 40);
+
+        let cycled = replay_drep_certs(
+            reg_drep(),
+            &[
+                Cert::Reg(closing_epoch_slot(&domain, 10), 0),
+                Cert::UnReg(first_unregistration, 0),
+                Cert::Reg(closing_epoch_slot(&domain, 30), 0),
+                Cert::UnReg(last_unregistration, 0),
+                Cert::Reg(closing_epoch_slot(&domain, 50), 0),
+            ],
+        );
+
+        assert_eq!(cycled.unregistered_at, Some((last_unregistration, 0)));
+
+        // delegated before the first cycle
+        let oldest = delegator(0xa1, reg_drep(), (closing_epoch_slot(&domain, 5), 0));
+        // delegated between the two unregistrations: still in the set the
+        // last certificate folded over
+        let mid_cycle = delegator(0xb2, reg_drep(), (closing_epoch_slot(&domain, 35), 0));
+        // delegated after the last unregistration
+        let newest = delegator(0xc3, reg_drep(), (closing_epoch_slot(&domain, 60), 0));
+
+        let accounts = [&oldest, &mid_cycle, &newest];
+        let domain = seed_delegation_domain(&[cycled], &accounts.map(|x| x.clone()));
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        assert!(delegation_dropped(&domain, &oldest));
+        assert!(delegation_dropped(&domain, &mid_cycle));
+        assert!(!delegation_dropped(&domain, &newest));
     }
 }
 
