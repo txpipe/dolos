@@ -15,7 +15,7 @@ use crate::feedback::Feedback;
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// UTxOs per applied index batch
-    #[arg(short, long, default_value_t = 10_000)]
+    #[arg(long, default_value_t = 10_000)]
     pub chunk: usize,
 }
 
