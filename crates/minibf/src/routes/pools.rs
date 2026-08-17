@@ -891,6 +891,62 @@ where
     Ok(Json(out))
 }
 
+fn select_retired_pools(
+    pools: impl IntoIterator<Item = PoolState>,
+    pagination: &Pagination,
+) -> Vec<(u64, PoolHash)> {
+    let mut retired: Vec<(u64, BlockSlot, PoolHash)> = pools
+        .into_iter()
+        .filter_map(|pool| {
+            let is_retired = pool.snapshot.live().map(|x| x.is_retired).unwrap_or(false);
+            let retiring_epoch = pool.retiring_epoch?;
+            is_retired.then_some((retiring_epoch, pool.register_slot, pool.operator))
+        })
+        .collect();
+
+    retired.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        retired.reverse();
+    }
+
+    retired
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
+        .collect()
+}
+
+pub async fn all_retired<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolListRetireInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(|item| item.map(|(_, pool)| pool))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let out = select_retired_pools(pools, &pagination)
+        .into_iter()
+        .map(|(retiring_epoch, operator)| {
+            Ok(PoolListRetireInner {
+                pool_id: bech32_pool(operator)?,
+                epoch: retiring_epoch as i32,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 pub async fn by_id_metadata<D: Domain>(
     Path(id): Path<String>,
     State(domain): State<Facade<D>>,
@@ -1808,6 +1864,121 @@ mod tests {
     async fn pools_retiring_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         assert_status(&app, "/pools/retiring", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_retired_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools/retired").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let retired: Vec<PoolListRetireInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool list retire");
+
+        assert!(
+            retired.is_empty(),
+            "the synthetic ledger registers pools but never retires them, so the list is empty"
+        );
+    }
+
+    fn retired_pool(
+        operator: [u8; 28],
+        register_slot: u64,
+        retiring_epoch: Option<u64>,
+        is_retired: bool,
+    ) -> PoolState {
+        let mut pool = retiring_pool(operator, register_slot, retiring_epoch);
+        pool.snapshot.unwrap_live_mut().is_retired = is_retired;
+        pool
+    }
+
+    #[test]
+    fn select_retired_pools_filters_and_orders() {
+        let pools = vec![
+            // These pools are retired. The sort key is
+            // (retiring_epoch, register_slot, operator).
+            retired_pool([1u8; 28], 10, Some(5), true),
+            retired_pool([2u8; 28], 20, Some(10), true),
+            // This pool has the same epoch but a later register_slot.
+            // The register_slot makes the tie-break stable.
+            retired_pool([6u8; 28], 60, Some(10), true),
+            // This pool has a retirement epoch but is not retired. The scan
+            // removes it.
+            retired_pool([3u8; 28], 30, Some(12), false),
+            // This pool has no retirement. The scan removes it.
+            retired_pool([4u8; 28], 40, None, false),
+        ];
+
+        let pagination = Pagination::default();
+        let selected = select_retired_pools(pools.clone(), &pagination);
+
+        assert_eq!(
+            selected,
+            vec![
+                (5, Hash::from([1u8; 28])),
+                (10, Hash::from([2u8; 28])),
+                (10, Hash::from([6u8; 28])),
+            ]
+        );
+
+        // A descending order reverses the list.
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let selected_desc = select_retired_pools(pools, &desc);
+        assert_eq!(
+            selected_desc,
+            vec![
+                (10, Hash::from([6u8; 28])),
+                (10, Hash::from([2u8; 28])),
+                (5, Hash::from([1u8; 28])),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_retired_pools_paginates() {
+        let pools = vec![
+            retired_pool([1u8; 28], 10, Some(11), true),
+            retired_pool([2u8; 28], 20, Some(12), true),
+            retired_pool([3u8; 28], 30, Some(13), true),
+        ];
+
+        let params = PaginationParameters {
+            count: Some("1".to_string()),
+            page: Some("2".to_string()),
+            order: None,
+            from: None,
+            to: None,
+        };
+        let pagination = Pagination::try_from(params).expect("valid pagination");
+
+        let selected = select_retired_pools(pools, &pagination);
+        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
+    }
+
+    #[tokio::test]
+    async fn pools_retired_bad_request() {
+        let app = TestApp::new();
+        assert_status(
+            &app,
+            "/pools/retired?count=invalid",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pools_retired_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools/retired", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[test]
