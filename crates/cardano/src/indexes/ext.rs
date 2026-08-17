@@ -50,6 +50,11 @@ pub trait CardanoIndexExt: IndexStore {
         self.utxos_by_tag(utxo::ASSET, asset)
     }
 
+    /// Get UTxOs that carry a script as their reference script.
+    fn utxos_by_script_ref(&self, script_hash: &[u8]) -> Result<UtxoSet, IndexError> {
+        self.utxos_by_tag(utxo::SCRIPT_REF, script_hash)
+    }
+
     // ============ Archive Slot Queries ============
 
     /// Iterate over slots of blocks containing transactions involving an

@@ -24,6 +24,9 @@ pub mod utxo {
 
     /// Native asset subject (policy ID + asset name)
     pub const ASSET: TagDimension = "asset";
+
+    /// Hash of the reference script carried by the output
+    pub const SCRIPT_REF: TagDimension = "script_ref";
 }
 
 /// Declare a dimension registry: the constants and the `ALL` list that has to

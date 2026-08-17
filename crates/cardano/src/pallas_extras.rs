@@ -7,14 +7,14 @@ use pallas::ledger::addresses::{
 };
 use pallas::ledger::primitives::alonzo::MoveInstantaneousReward;
 use pallas::ledger::primitives::conway::{
-    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds,
+    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ScriptRef,
 };
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::primitives::{Epoch, ExUnitPrices, ExUnits, Nonce, NonceVariant};
-use pallas::ledger::traverse::{MultiEraCert, MultiEraTx};
+use pallas::ledger::traverse::{ComputeHash, MultiEraCert, MultiEraTx, OriginalHash};
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
@@ -433,6 +433,19 @@ pub fn default_cost_models() -> CostModels {
         plutus_v2: None,
         plutus_v3: None,
         unknown: Default::default(),
+    }
+}
+
+/// Compute the on-chain script hash of a reference script.
+///
+/// Each language hashes its own tagged serialization, so the match must stay
+/// per-variant instead of hashing the raw bytes once.
+pub fn script_ref_hash(script_ref: &ScriptRef) -> Hash<28> {
+    match script_ref {
+        ScriptRef::NativeScript(x) => x.original_hash(),
+        ScriptRef::PlutusV1Script(x) => x.compute_hash(),
+        ScriptRef::PlutusV2Script(x) => x.compute_hash(),
+        ScriptRef::PlutusV3Script(x) => x.compute_hash(),
     }
 }
 

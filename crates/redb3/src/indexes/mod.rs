@@ -55,6 +55,7 @@ pub mod utxo_dimensions {
     pub const STAKE: &str = "stake";
     pub const POLICY: &str = "policy";
     pub const ASSET: &str = "asset";
+    pub const SCRIPT_REF: &str = "script_ref";
 }
 
 /// Archive index dimension constants (must match dolos-cardano dimensions).
@@ -94,12 +95,16 @@ impl FilterIndexes {
     pub const BY_ASSET: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
         MultimapTableDefinition::new("byasset");
 
+    pub const BY_SCRIPT_REF: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+        MultimapTableDefinition::new("byscriptref");
+
     pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
         wx.open_multimap_table(Self::BY_ADDRESS)?;
         wx.open_multimap_table(Self::BY_PAYMENT)?;
         wx.open_multimap_table(Self::BY_STAKE)?;
         wx.open_multimap_table(Self::BY_POLICY)?;
         wx.open_multimap_table(Self::BY_ASSET)?;
+        wx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         Ok(())
     }
@@ -114,6 +119,7 @@ impl FilterIndexes {
             utxo_dimensions::STAKE => Some(Self::BY_STAKE),
             utxo_dimensions::POLICY => Some(Self::BY_POLICY),
             utxo_dimensions::ASSET => Some(Self::BY_ASSET),
+            utxo_dimensions::SCRIPT_REF => Some(Self::BY_SCRIPT_REF),
             _ => None,
         }
     }
@@ -206,6 +212,7 @@ impl FilterIndexes {
         let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
         let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
         let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
+        let mut script_ref_table = wx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         // Insert produced UTxOs
         for (txo_ref, tags) in &delta.utxo.produced {
@@ -227,6 +234,9 @@ impl FilterIndexes {
                     }
                     utxo_dimensions::ASSET => {
                         asset_table.insert(tag.key.as_slice(), v)?;
+                    }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.insert(tag.key.as_slice(), v)?;
                     }
                     _ => {} // Ignore unknown dimensions
                 }
@@ -254,6 +264,9 @@ impl FilterIndexes {
                     utxo_dimensions::ASSET => {
                         asset_table.remove(tag.key.as_slice(), v)?;
                     }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.remove(tag.key.as_slice(), v)?;
+                    }
                     _ => {} // Ignore unknown dimensions
                 }
             }
@@ -271,6 +284,7 @@ impl FilterIndexes {
         let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
         let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
         let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
+        let mut script_ref_table = wx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         // Remove produced UTxOs (undo insertion)
         for (txo_ref, tags) in &delta.utxo.produced {
@@ -292,6 +306,9 @@ impl FilterIndexes {
                     }
                     utxo_dimensions::ASSET => {
                         asset_table.remove(tag.key.as_slice(), v)?;
+                    }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.remove(tag.key.as_slice(), v)?;
                     }
                     _ => {}
                 }
@@ -318,6 +335,9 @@ impl FilterIndexes {
                     }
                     utxo_dimensions::ASSET => {
                         asset_table.insert(tag.key.as_slice(), v)?;
+                    }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.insert(tag.key.as_slice(), v)?;
                     }
                     _ => {}
                 }
@@ -354,6 +374,7 @@ impl FilterIndexes {
         Self::copy_table(rx, wx, Self::BY_STAKE)?;
         Self::copy_table(rx, wx, Self::BY_POLICY)?;
         Self::copy_table(rx, wx, Self::BY_ASSET)?;
+        Self::copy_table(rx, wx, Self::BY_SCRIPT_REF)?;
 
         Ok(())
     }
@@ -364,6 +385,7 @@ impl FilterIndexes {
         let stake = rx.open_multimap_table(Self::BY_STAKE)?;
         let policy = rx.open_multimap_table(Self::BY_POLICY)?;
         let asset = rx.open_multimap_table(Self::BY_ASSET)?;
+        let script_ref = rx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         Ok(HashMap::from_iter([
             ("address", address.stats()?),
@@ -371,6 +393,7 @@ impl FilterIndexes {
             ("stake", stake.stats()?),
             ("policy", policy.stats()?),
             ("asset", asset.stats()?),
+            ("script_ref", script_ref.stats()?),
         ]))
     }
 }
