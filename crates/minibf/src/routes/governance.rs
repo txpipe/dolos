@@ -471,8 +471,9 @@ fn parse_tx_hash(tx_hash: &str) -> Result<Hash<32>, StatusCode> {
 }
 
 /// Parse a CIP-0129 governance action id: bech32 payload with the 32-byte tx
-/// hash followed by a 1-byte action index. The minimal encoding omits the
-/// index byte when the index is 0.
+/// hash followed by a 1-byte action index. The 32-byte form is not part of
+/// the CIP: it is an ecosystem shorthand for index 0 (cexplorer emits it,
+/// Blockfrost accepts it).
 fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
     let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -1470,7 +1471,7 @@ mod tests {
 
     #[tokio::test]
     async fn governance_proposal_by_gov_action_id_minimal_encoding() {
-        let app = proposal_app();
+        let app = proposal_lookup_app();
         // CIP-0129 minimal encoding: cert index 0 omits the suffix byte.
         let hrp = Hrp::parse_unchecked("gov_action");
         let id = bech32::encode::<Bech32>(hrp, proposal_tx().as_slice())
@@ -1479,6 +1480,32 @@ mod tests {
         let (status, body) = app.get_bytes(&path).await;
         assert_eq!(status, StatusCode::OK);
         assert_proposal_body(&body);
+    }
+
+    #[test]
+    fn gov_action_id_matches_cip0129_test_vectors() {
+        // Official test vectors from CIP-0129.
+        let vectors = [
+            (
+                "gov_action1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpzklpgpf",
+                [0u8; 32],
+                17u32,
+            ),
+            (
+                "gov_action1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsq6dmejn",
+                [0x11u8; 32],
+                0u32,
+            ),
+        ];
+
+        for (id, tx, idx) in vectors {
+            let (parsed_tx, parsed_idx) = parse_gov_action_id(id).expect("failed to parse vector");
+            assert_eq!(parsed_tx, Hash::from(tx));
+            assert_eq!(parsed_idx, idx);
+
+            let encoded = gov_action_id_bech32(tx.into(), idx).expect("failed to encode vector");
+            assert_eq!(encoded, id);
+        }
     }
 
     #[test]
