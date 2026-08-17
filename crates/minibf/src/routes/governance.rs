@@ -1779,7 +1779,7 @@ mod tests {
 
     #[tokio::test]
     async fn governance_proposal_by_gov_action_id_minimal_encoding() {
-        let app = proposal_app();
+        let app = proposal_lookup_app();
         // CIP-0129 minimal encoding: cert index 0 omits the suffix byte.
         let hrp = Hrp::parse_unchecked("gov_action");
         let id = bech32::encode::<Bech32>(hrp, proposal_tx().as_slice())
@@ -1788,6 +1788,32 @@ mod tests {
         let (status, body) = app.get_bytes(&path).await;
         assert_eq!(status, StatusCode::OK);
         assert_proposal_body(&body);
+    }
+
+    #[test]
+    fn gov_action_id_matches_cip0129_test_vectors() {
+        // Official test vectors from CIP-0129.
+        let vectors = [
+            (
+                "gov_action1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpzklpgpf",
+                [0u8; 32],
+                17u32,
+            ),
+            (
+                "gov_action1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsq6dmejn",
+                [0x11u8; 32],
+                0u32,
+            ),
+        ];
+
+        for (id, tx, idx) in vectors {
+            let (parsed_tx, parsed_idx) = parse_gov_action_id(id).expect("failed to parse vector");
+            assert_eq!(parsed_tx, Hash::from(tx));
+            assert_eq!(parsed_idx, idx);
+
+            let encoded = gov_action_id_bech32(tx.into(), idx).expect("failed to encode vector");
+            assert_eq!(encoded, id);
+        }
     }
 
     #[test]
