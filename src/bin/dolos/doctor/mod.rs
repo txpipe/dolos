@@ -6,6 +6,7 @@ use crate::feedback::Feedback;
 mod catchup_stores;
 mod check;
 mod rebuild_state;
+mod rebuild_utxo_indexes;
 mod reset_wal;
 mod rollback;
 mod update_entity;
@@ -24,6 +25,9 @@ pub enum Command {
 
     /// rebuild the state store by replaying the local archive
     RebuildState(rebuild_state::Args),
+
+    /// rebuilds the live-utxo filter indexes from the state store
+    RebuildUtxoIndexes(rebuild_utxo_indexes::Args),
 
     // Reset WAL position using state cursor
     ResetWal(reset_wal::Args),
@@ -53,6 +57,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         Command::Check(x) => check::run(config, x)?,
         Command::CatchupStores(x) => catchup_stores::run(config, x, feedback)?,
         Command::RebuildState(x) => rebuild_state::run(config, x, feedback)?,
+        Command::RebuildUtxoIndexes(x) => rebuild_utxo_indexes::run(config, x, feedback)?,
         Command::ResetWal(x) => reset_wal::run(config, x, feedback)?,
         Command::WalIntegrity(x) => wal_integrity::run(config, x)?,
         Command::Rollback(x) => rollback::run(config, x)?,
