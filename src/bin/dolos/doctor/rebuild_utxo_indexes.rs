@@ -38,6 +38,24 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         .context("reading state cursor")?
         .ok_or_else(|| miette::miette!("state store has no cursor to rebuild from"))?;
 
+    // Applying a delta stamps its cursor as the index store's cursor, and
+    // bootstrap trusts that cursor to decide how much WAL to replay into the
+    // index store. Rebuilding against a lagging index would falsely mark it
+    // caught up and skip the replay that restores its archive tags, so only
+    // an index that already sits at the state cursor can rebuild in place.
+    let index_cursor = domain
+        .indexes()
+        .cursor()
+        .into_diagnostic()
+        .context("reading index cursor")?;
+
+    if index_cursor.as_ref() != Some(&cursor) {
+        miette::bail!(
+            help = "run `dolos doctor catchup-stores` first so the index store reaches the state cursor",
+            "index cursor ({index_cursor:?}) does not match state cursor ({cursor:?}); refusing to rebuild",
+        );
+    }
+
     let utxos = domain
         .state()
         .iter_utxos()
