@@ -1,5 +1,4 @@
 use axum::http::StatusCode;
-use blockfrost_openapi::models::address_utxo_content_inner::AddressUtxoContentInner;
 use futures::future::join_all;
 use itertools::Itertools;
 use pallas::ledger::traverse::MultiEraOutput;
@@ -14,13 +13,15 @@ use crate::{
     Facade,
 };
 
-pub async fn load_utxo_models<D>(
+pub async fn load_utxo_models<D, T>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
     pagination: Pagination,
-) -> Result<Vec<AddressUtxoContentInner>, StatusCode>
+) -> Result<Vec<T>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
 {
     let utxos = domain
         .state()
@@ -64,7 +65,7 @@ where
         })
         .map(|x| {
             (
-                <UtxoOutputModelBuilder<'_> as IntoModel<AddressUtxoContentInner>>::sort_key(&x),
+                <UtxoOutputModelBuilder<'_> as IntoModel<T>>::sort_key(&x),
                 x,
             )
         })
@@ -99,7 +100,9 @@ where
             builder
         };
 
-        out.push(builder.into_model()?);
+        out.push(<UtxoOutputModelBuilder<'_> as IntoModel<T>>::into_model(
+            builder,
+        )?);
     }
 
     Ok(out)

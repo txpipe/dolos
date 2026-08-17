@@ -432,15 +432,7 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<String, StatusCode> {
-        let out = match self {
-            ScriptRef::NativeScript(x) => x.original_hash(),
-            ScriptRef::PlutusV1Script(x) => x.compute_hash(),
-            ScriptRef::PlutusV2Script(x) => x.compute_hash(),
-            ScriptRef::PlutusV3Script(x) => x.compute_hash(),
-        }
-        .to_string();
-
-        Ok(out)
+        Ok(pallas_extras::script_ref_hash(&self).to_string())
     }
 }
 

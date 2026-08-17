@@ -10,20 +10,17 @@ use blockfrost_openapi::models::{
     script_json::ScriptJson,
     script_utxos_inner::ScriptUtxosInner,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, ScriptLanguage, SlotOrder};
-use dolos_core::{async_query::BlockRefMeta, Domain, StateStore as _, TxoRef};
-use futures_util::StreamExt;
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoIndexExt, ScriptLanguage};
+use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
-use pallas::ledger::primitives::conway::ScriptRef;
-use pallas::ledger::traverse::{ComputeHash, MultiEraBlock, MultiEraOutput, OriginalHash};
 use pallas::{codec::minicbor, ledger::primitives::ToCanonicalJson};
 use reqwest::StatusCode;
 
 use crate::{
     error::Error,
     log_and_500,
-    mapping::{IntoModel, PlutusDataWrapper, UtxoOutputModelBuilder},
+    mapping::{IntoModel, PlutusDataWrapper},
     pagination::{Pagination, PaginationParameters},
     Facade,
 };
@@ -137,134 +134,30 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let hash = parse_script_hash(&script_hash)?;
-
     let pagination = Pagination::try_from(params)?;
-    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
+
+    let refs = domain
+        .indexes()
+        .utxos_by_script_ref(hash.as_slice())
+        .map_err(log_and_500("failed to query script_ref index"))?;
 
     // an unknown script is a 404. a known script that no live UTxO holds as a
-    // reference script is an empty page.
-    domain
-        .query()
-        .script_by_hash(&hash)
-        .await
-        .map_err(log_and_500("failed to query script by hash"))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // reference script is an empty page. the index cannot tell the two apart,
+    // so the archive existence check runs only when the index returns nothing.
+    if refs.is_empty() {
+        domain
+            .query()
+            .script_by_hash(&hash)
+            .await
+            .map_err(log_and_500("failed to query script by hash"))?
+            .ok_or(StatusCode::NOT_FOUND)?;
 
-    let matches = scan_script_utxos(&domain, hash, &pagination).await?;
-
-    let items = matches
-        .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .collect();
-
-    Ok(Json(items))
-}
-
-/// Scan the chain for live UTxOs that hold `hash` as a reference script, in
-/// the pagination's order. The scan stops once it has enough matches to fill
-/// the requested page.
-async fn scan_script_utxos<D>(
-    domain: &Facade<D>,
-    hash: Hash<28>,
-    pagination: &Pagination,
-) -> Result<Vec<ScriptUtxosInner>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let end_slot = domain.get_tip_slot()?;
-    let order = SlotOrder::from(pagination.order);
-
-    let stream = domain
-        .query()
-        .blocks_by_script_stream(hash.as_slice(), 0, end_slot, order);
-
-    let mut stream = Box::pin(stream);
-
-    let mut matches: Vec<ScriptUtxosInner> = Vec::new();
-    let target = pagination.from() + pagination.count;
-
-    while let Some(next) = stream.next().await {
-        let (slot, body) = next.map_err(log_and_500("failed to stream script blocks"))?;
-
-        let Some(body) = body else {
-            continue;
-        };
-
-        let block = MultiEraBlock::decode(&body).map_err(log_and_500("failed to decode block"))?;
-
-        // the script tag also fires for witness usage, so a block may publish
-        // no reference script at all.
-        let mut candidates: Vec<(TxoRef, usize)> = Vec::new();
-
-        for (tx_index, tx) in block.txs().iter().enumerate() {
-            for (idx, output) in tx.produces() {
-                let Some(script_ref) = output.script_ref() else {
-                    continue;
-                };
-
-                let ref_hash = match script_ref {
-                    ScriptRef::NativeScript(x) => x.original_hash(),
-                    ScriptRef::PlutusV1Script(x) => x.compute_hash(),
-                    ScriptRef::PlutusV2Script(x) => x.compute_hash(),
-                    ScriptRef::PlutusV3Script(x) => x.compute_hash(),
-                };
-
-                if ref_hash == hash {
-                    candidates.push((TxoRef(tx.hash(), idx as u32), tx_index));
-                }
-            }
-        }
-
-        if candidates.is_empty() {
-            continue;
-        }
-
-        if matches!(order, SlotOrder::Desc) {
-            candidates.reverse();
-        }
-
-        // the state store holds only unspent outputs, so absence means spent.
-        let live = domain
-            .state()
-            .get_utxos(
-                candidates
-                    .iter()
-                    .map(|(txo_ref, _)| txo_ref.clone())
-                    .collect(),
-            )
-            .map_err(log_and_500("failed to fetch utxos"))?;
-
-        let block_hash = block.hash();
-        let block_height = block.number();
-
-        for (txo_ref, tx_index) in candidates {
-            let Some(cbor) = live.get(&txo_ref) else {
-                continue;
-            };
-
-            let output = MultiEraOutput::try_from(cbor.as_ref())
-                .map_err(log_and_500("failed to decode utxo"))?;
-
-            let model = UtxoOutputModelBuilder::from_output(txo_ref.0, txo_ref.1, output)
-                .with_block_data(BlockRefMeta {
-                    slot,
-                    hash: block_hash,
-                    height: block_height,
-                    tx_hash: txo_ref.0,
-                    tx_index,
-                })
-                .into_model()?;
-
-            matches.push(model);
-        }
-
-        if matches.len() >= target {
-            break;
-        }
+        return Ok(Json(vec![]));
     }
 
-    Ok(matches)
+    let items = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
+
+    Ok(Json(items))
 }
 
 pub async fn by_datum_hash<D>(
