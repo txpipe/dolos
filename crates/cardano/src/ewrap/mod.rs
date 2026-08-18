@@ -254,6 +254,15 @@ pub struct BoundaryWork {
     /// withdrawal map to the rewards UMap and discards the rest.
     pub deliverable_withdrawal_targets: HashSet<StakeCredential>,
 
+    /// Boundary-paid amounts that count toward each recipient's snapshot
+    /// DRep in this boundary's stake distribution: enacted treasury
+    /// withdrawals and pool-deposit refunds, both landing in the rewards
+    /// UMap before the ledger takes the fresh DRep pulser snapshot. The
+    /// shard accumulation predates them, so the finalize pass folds them
+    /// in via `GovDistrBoundaryCredit`. The pool leg is unaffected — the
+    /// ledger's pool snapshot (SNAP) is taken before POOLREAP and ENACT.
+    pub boundary_drep_credits: BTreeMap<DRep, u64>,
+
     /// Enacted treasury withdrawals delivered to registered accounts
     /// (moved treasury → rewards at the boundary).
     pub effective_treasury_withdrawals: u64,

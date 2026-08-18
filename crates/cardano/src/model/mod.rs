@@ -280,6 +280,7 @@ pub enum CardanoDelta {
     GovDormancyTick(Box<GovDormancyTick>),
     CommitteeGc(Box<CommitteeGc>),
     GovDistrRotate(Box<GovDistrRotate>),
+    GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     ProposalResolved(Box<ProposalResolved>),
 }
 
@@ -383,6 +384,7 @@ delta_from!(DRepPowerUpdate);
 delta_from!(GovDormancyTick);
 delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
+delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
 
 #[allow(deprecated)]
@@ -428,6 +430,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => x.key(),
             Self::CommitteeGc(x) => x.key(),
             Self::GovDistrRotate(x) => x.key(),
+            Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
@@ -496,6 +499,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeGc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrRotate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -564,6 +568,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeGc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrRotate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),

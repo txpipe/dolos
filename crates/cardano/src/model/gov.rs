@@ -1074,6 +1074,81 @@ impl dolos_core::EntityDelta for GovDistrRotate {
     }
 }
 
+/// Fold the boundary-paid credits into the completed DRep-distribution
+/// accumulator: enacted treasury withdrawals and pool-deposit refunds land
+/// in the rewards UMap before the ledger takes the fresh DRep pulser
+/// snapshot at the same boundary, so their amounts count toward each
+/// recipient's snapshot DRep in the distribution this boundary publishes.
+/// Emitted at a governance-active EWRAP finalize, before [`GovDistrRotate`],
+/// so the rotated copy the next boundary ratifies with carries them. An
+/// accumulator that is missing, incomplete, or belongs to another boundary
+/// is left alone — the same degraded case the rotation turns into a gap.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GovDistrBoundaryCredit {
+    pub(crate) closing_epoch: Epoch,
+    pub(crate) credits: BTreeMap<DRep, u64>,
+
+    // undo — pre-image of `distr`, captured by `apply` only when state
+    // was actually mutated.
+    pub(crate) applied: bool,
+    pub(crate) prev: Option<GovDistr>,
+}
+
+impl GovDistrBoundaryCredit {
+    pub fn new(closing_epoch: Epoch, credits: BTreeMap<DRep, u64>) -> Self {
+        Self {
+            closing_epoch,
+            credits,
+            applied: false,
+            prev: None,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for GovDistrBoundaryCredit {
+    type Entity = GovState;
+
+    fn key(&self) -> NsKey {
+        GovState::ns_key()
+    }
+
+    fn apply(&mut self, entity: &mut Option<GovState>) {
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        if !state
+            .distr
+            .as_ref()
+            .is_some_and(|distr| distr.is_complete_for(self.closing_epoch))
+        {
+            tracing::warn!(
+                closing_epoch = self.closing_epoch,
+                "GovDistrBoundaryCredit without a completed accumulator — skipping"
+            );
+            return;
+        }
+
+        self.prev = state.distr.clone();
+
+        let distr = state.distr.as_mut().expect("checked above");
+
+        for (drep, credit) in &self.credits {
+            *distr.drep_distr.entry(drep.clone()).or_default() += credit;
+        }
+
+        self.applied = true;
+    }
+
+    fn undo(&self, entity: &mut Option<GovState>) {
+        if !self.applied {
+            return;
+        }
+
+        let state = entity.as_mut().expect(GOV_MUST_EXIST);
+
+        state.distr = self.prev.clone();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -1428,6 +1503,19 @@ mod prop_tests {
         }
     }
 
+    prop_compose! {
+        fn any_gov_distr_boundary_credit()(
+            closing_epoch in root::any_epoch(),
+            credits in prop::collection::btree_map(
+                root::any_drep(),
+                root::any_lovelace(),
+                0..4,
+            ),
+        ) -> GovDistrBoundaryCredit {
+            GovDistrBoundaryCredit::new(closing_epoch, credits)
+        }
+    }
+
     proptest! {
         #[test]
         fn dormancy_tick_roundtrip(
@@ -1469,6 +1557,22 @@ mod prop_tests {
         fn distr_rotate_serde_roundtrip(
             entity in any_gov_state().prop_map(Some),
             delta in any_gov_distr_rotate(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn distr_boundary_credit_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_gov_distr_boundary_credit(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn distr_boundary_credit_serde_roundtrip(
+            entity in any_gov_state().prop_map(Some),
+            delta in any_gov_distr_boundary_credit(),
         ) {
             root::assert_delta_serde_roundtrip(entity, delta);
         }
