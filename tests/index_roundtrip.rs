@@ -28,7 +28,7 @@ use dolos_cardano::indexes::{archive_dimensions, CardanoIndexExt};
 use dolos_core::{
     builtin::MemoryIndexStore, config::FjallIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint,
     ExactKind, ExactRecord, IndexDelta, IndexRecord, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, Tag, TagDimension, TagRecord,
+    IndexWriter as CoreIndexWriter, StakeAddressAppearance, Tag, TagDimension, TagRecord,
 };
 
 const EPOCH_LEN: BlockSlot = 432_000;
@@ -212,6 +212,7 @@ fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(IndexDelta)) -> SeedCounts
                 cursor,
                 utxo: Default::default(),
                 archive,
+                stake_addresses: Vec::new(),
             });
 
             block = batch_end;
@@ -353,6 +354,11 @@ macro_rules! conformance_suite {
             fn slots_by_tag_are_ordered_in_both_directions() {
                 super::slots_by_tag_are_ordered_in_both_directions::<$backend>();
             }
+
+            #[test]
+            fn stake_log_round_trips_and_pages() {
+                super::stake_log_round_trips_and_pages::<$backend>();
+            }
         }
     };
 }
@@ -463,6 +469,7 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
             cursor: ChainPoint::Slot(30),
             utxo: Default::default(),
             archive,
+            stake_addresses: Vec::new(),
         },
     );
 
@@ -1112,6 +1119,7 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
                 tx_hashes: vec![vec![0xCD; 32]],
                 tags: Vec::new(),
             }],
+            stake_addresses: Vec::new(),
         };
 
         let writer = store.start_writer().expect("start_writer failed");
@@ -1153,6 +1161,7 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
                 tx_hashes: vec![vec![0xEF; width]],
                 tags: Vec::new(),
             }],
+            stake_addresses: Vec::new(),
         };
 
         let writer = store.start_writer().expect("start_writer failed");
@@ -1201,4 +1210,105 @@ fn seeded_block() -> (Vec<u8>, u64, BlockSlot) {
         .first()
         .expect("the seed writes blocks")
         .clone()
+}
+
+/// The stake address log conformance check: gated by the ready marker,
+/// first-appearance dedup (also inside one writer spanning blocks), ordered
+/// paging in both directions, and undo of only the first appearance.
+fn stake_log_round_trips_and_pages<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let stake_a = vec![0xAA; 29];
+    let stake_b = vec![0xBB; 29];
+    let addr = |b: u8| vec![b; 57];
+
+    let appearance =
+        |slot: BlockSlot, order: u32, stake: &[u8], address: u8| StakeAddressAppearance {
+            slot,
+            order,
+            stake: stake.to_vec(),
+            address: addr(address),
+        };
+
+    let delta = |slot: BlockSlot, items: Vec<StakeAddressAppearance>| IndexDelta {
+        cursor: ChainPoint::Slot(slot),
+        stake_addresses: items,
+        ..Default::default()
+    };
+
+    let apply_one = |d: IndexDelta| {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.apply(&d).expect("apply failed");
+        writer.commit().expect("commit failed");
+    };
+
+    let page = |stake: &[u8], offset: usize, limit: usize, reverse: bool| {
+        store
+            .addresses_by_stake_log(stake, offset, limit, reverse)
+            .expect("addresses_by_stake_log failed")
+    };
+
+    // before the marker the log is not authoritative, but writes still land
+    apply_one(delta(1, vec![appearance(1, 0, &stake_a, 0x01)]));
+    assert_eq!(page(&stake_a, 0, 10, false), None);
+
+    store
+        .mark_stake_log_ready()
+        .expect("mark_stake_log_ready failed");
+
+    // one writer spanning two blocks dedups the pair the later block repeats
+    {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer
+            .apply(&delta(2, vec![appearance(2, 0, &stake_a, 0x02)]))
+            .expect("apply failed");
+        writer
+            .apply(&delta(
+                3,
+                vec![
+                    appearance(3, 0, &stake_a, 0x02),
+                    appearance(3, 1, &stake_b, 0x03),
+                ],
+            ))
+            .expect("apply failed");
+        writer.commit().expect("commit failed");
+    }
+
+    // a repeat in a later writer is deduped against the committed store
+    apply_one(delta(4, vec![appearance(4, 0, &stake_a, 0x01)]));
+
+    let asc = page(&stake_a, 0, 10, false).expect("log should be ready");
+    assert_eq!(asc, vec![addr(0x01), addr(0x02)]);
+
+    // desc is the exact reverse of asc
+    let desc = page(&stake_a, 0, 10, true).expect("log should be ready");
+    assert_eq!(desc, vec![addr(0x02), addr(0x01)]);
+
+    // offset windows work from both ends
+    assert_eq!(page(&stake_a, 1, 1, false).unwrap(), vec![addr(0x02)]);
+    assert_eq!(page(&stake_a, 1, 1, true).unwrap(), vec![addr(0x01)]);
+
+    // stakes are isolated, and an unknown stake is an empty page, not None
+    assert_eq!(page(&stake_b, 0, 10, false).unwrap(), vec![addr(0x03)]);
+    assert_eq!(
+        page(&[0xCC; 29], 0, 10, false).unwrap(),
+        Vec::<Vec<u8>>::new()
+    );
+
+    let undo_one = |d: IndexDelta| {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer.undo(&d).expect("undo failed");
+        writer.commit().expect("commit failed");
+    };
+
+    // undoing the repeat leaves the pair in place
+    undo_one(delta(4, vec![appearance(4, 0, &stake_a, 0x01)]));
+    assert_eq!(
+        page(&stake_a, 0, 10, false).unwrap(),
+        vec![addr(0x01), addr(0x02)]
+    );
+
+    // undoing the first appearance removes it
+    undo_one(delta(1, vec![appearance(1, 0, &stake_a, 0x01)]));
+    assert_eq!(page(&stake_a, 0, 10, false).unwrap(), vec![addr(0x02)]);
 }

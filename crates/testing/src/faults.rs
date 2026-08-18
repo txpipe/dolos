@@ -320,6 +320,27 @@ impl IndexStore for FaultyIndexStore {
         self.inner.utxos_by_tag(dimension, key)
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner
+            .addresses_by_stake_log(stake, offset, limit, reverse)
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.mark_stake_log_ready()
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         if self.should_fault() {
             return Err(self.fault_err());

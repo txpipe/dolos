@@ -8,7 +8,7 @@ use axum::{
 use dolos_core::{
     config::{CardanoConfig, MinibfConfig},
     import::ImportExt as _,
-    Domain, StateStore,
+    Domain, IndexStore as _, StateStore,
 };
 use dolos_testing::{
     synthetic::{
@@ -29,7 +29,17 @@ pub struct TestDomainBuilder {
 }
 
 impl TestDomainBuilder {
-    pub fn new_with_synthetic(mut cfg: SyntheticBlockConfig) -> Self {
+    pub fn new_with_synthetic(cfg: SyntheticBlockConfig) -> Self {
+        Self::new_with_synthetic_and_stake_log(cfg, true)
+    }
+
+    /// `mark_stake_log` controls whether the domain declares its stake
+    /// address log authoritative. Leave it unset to force the archive-scan
+    /// fallback in endpoint tests.
+    pub fn new_with_synthetic_and_stake_log(
+        mut cfg: SyntheticBlockConfig,
+        mark_stake_log: bool,
+    ) -> Self {
         let genesis = Arc::new(dolos_cardano::include::preview::load());
         let min_slot = {
             let temp = ToyDomain::new_with_genesis_and_config(
@@ -84,6 +94,13 @@ impl TestDomainBuilder {
             .expect("failed to seed account stake logs");
         }
 
+        if mark_stake_log {
+            domain
+                .indexes()
+                .mark_stake_log_ready()
+                .expect("failed to mark stake log ready");
+        }
+
         Self { domain, vectors }
     }
 
@@ -119,6 +136,19 @@ impl TestApp {
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         Self::from_domain(domain, vectors, fault)
+    }
+
+    /// Like [`TestApp::new`], but without an authoritative stake address
+    /// log, so account-address requests take the archive-scan fallback.
+    pub fn new_scan_fallback() -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) =
+            TestDomainBuilder::new_with_synthetic_and_stake_log(cfg, false).finish();
+        Self::from_domain(domain, vectors, None)
     }
 
     pub fn new_with_cfg_and_setup(
