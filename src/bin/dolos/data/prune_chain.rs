@@ -38,7 +38,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     // Compaction requires direct redb access
     match &mut stores.archive {
-        ArchiveStoreBackend::Redb(s) => {
+        ArchiveStoreBackend::Redb(s) | ArchiveStoreBackend::LogsOnly(s) => {
             let db = s.db_mut();
 
             while db.compact().into_diagnostic()? {

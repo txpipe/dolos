@@ -105,6 +105,24 @@ impl Node {
             ..Default::default()
         });
 
+        // The synthetic chain's initial UTxOs are seeded through the chain
+        // config's `custom_utxos`, so they are part of this chain's genesis.
+        // Persist them into `dolos.toml`: a separate process replaying from
+        // origin (`doctor rebuild-state`) runs genesis from the file and must
+        // seed the same set.
+        let config_path = self.config_path();
+        let mut document: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        document
+            .get_mut("chain")
+            .and_then(|chain| chain.as_table_mut())
+            .unwrap()
+            .insert(
+                "custom_utxos".to_owned(),
+                toml::Value::try_from(&chain_config.custom_utxos).unwrap(),
+            );
+        std::fs::write(&config_path, toml::to_string(&document).unwrap()).unwrap();
+
         let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
             chain_config,
             &stores.state,
