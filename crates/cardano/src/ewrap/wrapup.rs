@@ -110,6 +110,8 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         reserve_mirs,
         invalid_treasury_mirs,
         invalid_reserve_mirs,
+        treasury_withdrawals: ctx.effective_treasury_withdrawals,
+        invalid_treasury_withdrawals: ctx.invalid_treasury_withdrawals,
         proposal_refunds: proposal_valid_refunds,
         proposal_invalid_refunds,
         // TODO: deprecate

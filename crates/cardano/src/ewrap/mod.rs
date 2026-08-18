@@ -248,6 +248,21 @@ pub struct BoundaryWork {
     /// commit so callers can observe what was credited.
     pub applied_rewards: Vec<AppliedReward>,
 
+    /// Withdrawal target credentials of enacting `TreasuryWithdrawal`
+    /// proposals that can receive the credit — registered at the boundary,
+    /// as the ledger's `applyEnactedWithdrawals` restricts the enacted
+    /// withdrawal map to the rewards UMap and discards the rest.
+    pub deliverable_withdrawal_targets: HashSet<StakeCredential>,
+
+    /// Enacted treasury withdrawals delivered to registered accounts
+    /// (moved treasury → rewards at the boundary).
+    pub effective_treasury_withdrawals: u64,
+
+    /// Enacted treasury withdrawals whose target account cannot receive
+    /// them (unregistered at the boundary) — discarded, the value stays
+    /// in treasury.
+    pub invalid_treasury_withdrawals: u64,
+
     /// Effective MIRs from treasury (applied to registered accounts).
     pub effective_treasury_mirs: u64,
 
