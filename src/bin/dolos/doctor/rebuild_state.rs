@@ -13,6 +13,14 @@
 //! somewhere else, instance untouched), and `--ephemeral` (an in-memory
 //! state store, discarded on exit — a pure validation run).
 //!
+//! `--ephemeral` holds the whole ledger in memory: every entity and the
+//! full UTxO set, uncompressed and unspilled. That is a different order of
+//! magnitude from the same state on disk, where fjall keeps it compressed
+//! in an LSM tree — a public-network state store that occupies a couple of
+//! GB on disk does not fit in the RAM of an ordinary workstation. So the
+//! mode is for bounded replays (`--stop-epoch`) and small chains; a
+//! full-chain validation run on a public network wants `--target` instead.
+//!
 //! The in-place sequence is ordered for crash safety: the WAL is reset to
 //! origin *before* the state store is wiped, and reseeded to the final
 //! cursor only after the replay completes. A crash mid-rebuild therefore
@@ -45,7 +53,8 @@ pub struct Args {
     target: Option<PathBuf>,
 
     /// Rebuild into an in-memory state store and discard it (a validation
-    /// run that writes nothing)
+    /// run that writes nothing). Holds the whole ledger in RAM — pair it
+    /// with --stop-epoch on a public network, or use --target instead
     #[arg(long)]
     ephemeral: bool,
 
