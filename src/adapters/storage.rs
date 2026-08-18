@@ -668,6 +668,12 @@ impl ArchiveStoreBackend {
     /// Clones the handle out of the open store rather than opening the path
     /// again, because redb refuses to open the same file twice. Returns
     /// `None` when there is no redb store to wrap.
+    ///
+    /// The result therefore *aliases* the store it came from: both share one
+    /// `Arc<Database>`. Anything reaching for exclusive database access —
+    /// `db_mut`, and so redb compaction — must refuse a `LogsOnly` value
+    /// rather than treat it as a `Redb` one, because `Arc::get_mut` cannot
+    /// succeed while the original handle is alive.
     pub fn logs_only(&self) -> Option<Self> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => Some(Self::LogsOnly(s.clone())),

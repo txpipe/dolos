@@ -224,6 +224,25 @@ fn without_force_a_non_interactive_rebuild_refuses_before_touching_anything() {
     assert_eq!(InstanceContents::read(&node), before);
 }
 
+/// A zero chunk imports no blocks, so the replay would end instantly. In
+/// place that lands *after* the WAL reset and the wipe, so the refusal has to
+/// come before either — a typo must not cost the operator their instance.
+#[test]
+fn a_zero_chunk_is_refused_before_touching_anything() {
+    let node = Node::new();
+    node.sync();
+
+    let before = InstanceContents::read(&node);
+
+    let output = rebuild(&node, &["--force", "--chunk", "0"]);
+    assert!(!output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--chunk"), "{stderr}");
+
+    assert_eq!(InstanceContents::read(&node), before);
+}
+
 /// `--stop-epoch` in place is refused: a partial in-place state cannot be
 /// reconciled with the live stores.
 #[test]

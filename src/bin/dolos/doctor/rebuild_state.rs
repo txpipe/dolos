@@ -208,11 +208,13 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
         );
     }
 
-    let (tip_slot, tip_body) = archive
+    let Some((tip_slot, tip_body)) = archive
         .get_tip()
         .into_diagnostic()
         .context("reading archive tip")?
-        .expect("archive with a first block has a tip");
+    else {
+        bail!("the archive reported a first block but no tip; it changed under this command");
+    };
 
     let tip = MultiEraBlock::decode(&tip_body)
         .into_diagnostic()
@@ -325,6 +327,10 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             "--stop-epoch needs --target or --ephemeral: a partial in-place state cannot be \
              reconciled with the live stores"
         );
+    }
+
+    if args.chunk == 0 {
+        bail!("--chunk must be at least 1");
     }
 
     let archive = open_store("archive", crate::common::open_archive_store(config))?;

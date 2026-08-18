@@ -160,11 +160,10 @@ pub fn run(
 
     // prepare_archive requires direct redb access
     match &mut stores.archive {
-        ArchiveStoreBackend::Redb(s) | ArchiveStoreBackend::LogsOnly(s)
-            if !args.skip_sanitization =>
-        {
-            prepare_archive(s, &pb)?
+        ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
+            bail!("archive sanitization needs exclusive access to the archive database")
         }
+        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
         ArchiveStoreBackend::Redb(_) | ArchiveStoreBackend::LogsOnly(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
             bail!("export command is not available for noop archive backend")
