@@ -331,10 +331,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let tip = preflight(&archive)?;
 
-    // The domain's archive: writes are discarded, except under --rewrite-logs
-    // where derived-log writes pass through to the already-open store (redb
-    // will not open the same file twice, so the open handle is what gets
-    // wrapped).
     let domain_archive = if args.rewrite_logs {
         archive
             .logs_only()
@@ -357,10 +353,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
             let wal = open_store("wal", crate::common::open_wal_store(config))?;
 
-            // Reset the WAL *before* the wipe: from here until the final
-            // reseed, a crash leaves WAL(origin) behind the state cursor,
-            // which the next startup refuses loudly instead of serving a
-            // half-rebuilt ledger. Re-running this command recovers.
             wal.reset_to(&ChainPoint::Origin)
                 .into_diagnostic()
                 .context("resetting the WAL to origin")?;
