@@ -101,7 +101,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     // This command requires direct redb access
     let archive = match archive {
-        ArchiveStoreBackend::Redb(s) => s,
+        ArchiveStoreBackend::Redb(s) | ArchiveStoreBackend::LogsOnly(s) => s,
         ArchiveStoreBackend::NoOp(_) => {
             bail!("cardinality-stats command is not available for noop archive backend")
         }

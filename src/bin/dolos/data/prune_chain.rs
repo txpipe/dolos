@@ -38,6 +38,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     // Compaction requires direct redb access
     match &mut stores.archive {
+        ArchiveStoreBackend::LogsOnly(_) => {
+            bail!("chain compaction needs exclusive access to the archive database")
+        }
         ArchiveStoreBackend::Redb(s) => {
             let db = s.db_mut();
 
