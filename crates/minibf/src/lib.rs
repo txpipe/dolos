@@ -5,7 +5,10 @@ use axum::{
     Router, ServiceExt,
 };
 use dolos_cardano::{
-    model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
+    model::{
+        AccountActivity, AccountAssetActivity, AccountState, AssetState, DRepState, EpochState,
+        FixedNamespace, PoolState,
+    },
     ChainSummary, PParamsSet, StakeLog,
 };
 use pallas::{
@@ -345,6 +348,8 @@ pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
+    Option<AccountActivity>: From<D::Entity>,
+    Option<AccountAssetActivity>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
@@ -361,6 +366,8 @@ pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
+    Option<AccountActivity>: From<D::Entity>,
+    Option<AccountAssetActivity>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
@@ -394,6 +401,10 @@ where
         .route(
             "/accounts/{stake_address}/addresses/assets",
             get(routes::accounts::by_stake_addresses_assets::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/addresses/total",
+            get(routes::accounts::by_stake_addresses_total::<D>),
         )
         .route(
             "/accounts/{stake_address}/utxos",
@@ -632,6 +643,8 @@ impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
 where
     D: Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
+    Option<AccountActivity>: From<D::Entity>,
+    Option<AccountAssetActivity>: From<D::Entity>,
     Option<PoolState>: From<D::Entity>,
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
