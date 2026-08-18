@@ -566,6 +566,7 @@ where
             "/txs/{tx_hash}/stakes",
             get(routes::txs::by_hash_stakes::<D>),
         )
+        .route("/assets", get(routes::assets::all::<D>))
         .route(
             "/assets/policy/{policy_id}",
             get(routes::assets::by_policy::<D>),
