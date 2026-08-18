@@ -27,8 +27,8 @@ use dolos_cardano::{
     PoolDepositRefundLog,
 };
 use dolos_core::{
-    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _,
-    TemporalKey, TxHash,
+    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, IndexStore as _, LogKey,
+    StateStore as _, TemporalKey, TxHash,
 };
 use futures::future::join_all;
 use futures_util::StreamExt;
@@ -303,6 +303,37 @@ where
         && !account_appears_in_pool_registrations(&domain, &account_key.address)?
     {
         return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    // The stake address log answers both orders with one page read. It only
+    // exists on stores synced since the log was introduced; `None` falls
+    // through to the archive scan below. The scan honors from/to filters,
+    // the log does not, so range-filtered requests always scan.
+    if pagination.from.is_none() && pagination.to.is_none() {
+        let page = domain
+            .indexes()
+            .addresses_by_stake_log(
+                &account_key.address.to_vec(),
+                pagination.skip(),
+                pagination.count,
+                matches!(pagination.order, Order::Desc),
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(addresses) = page {
+            let items = addresses
+                .into_iter()
+                .map(|bytes| {
+                    Address::from_bytes(&bytes)
+                        .map(|address| AccountAddressesContentInner {
+                            address: address.to_string(),
+                        })
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            return Ok(Json(items));
+        }
     }
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
@@ -1699,6 +1730,49 @@ mod tests {
         let addresses: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses");
         assert!(addresses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_log_matches_archive_scan() {
+        // Two identical synthetic chains: one serves from the stake address
+        // log, the other from the archive-scan fallback. Every query shape
+        // must produce identical responses on both.
+        let logged = TestApp::new();
+        let scanned = TestApp::new_scan_fallback();
+
+        let stake_address = logged.vectors().stake_address.clone();
+        assert_eq!(stake_address, scanned.vectors().stake_address);
+
+        let queries = [
+            "order=asc&count=100",
+            "order=desc&count=100",
+            "order=asc&count=2&page=2",
+            "order=desc&count=2&page=2",
+            "count=1&page=3",
+        ];
+
+        for query in queries {
+            let path = format!("/accounts/{stake_address}/addresses?{query}");
+
+            let (status, bytes) = logged.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "log path failed for {query}");
+            let from_log: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse log response");
+
+            let (status, bytes) = scanned.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "scan path failed for {query}");
+            let from_scan: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse scan response");
+
+            let log_addresses: Vec<_> = from_log.iter().map(|x| x.address.clone()).collect();
+            let scan_addresses: Vec<_> = from_scan.iter().map(|x| x.address.clone()).collect();
+
+            assert!(!log_addresses.is_empty(), "empty response for {query}");
+            assert_eq!(
+                log_addresses, scan_addresses,
+                "log and scan disagree for {query}"
+            );
+        }
     }
 
     #[tokio::test]

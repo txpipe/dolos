@@ -217,6 +217,7 @@ mod tests {
             cursor,
             utxo: UtxoIndexDelta { produced, consumed },
             archive: Vec::new(),
+            stake_addresses: Vec::new(),
         }
     }
 

@@ -105,6 +105,20 @@ impl IndexStore for NoOpIndexStore {
         Ok(UtxoSet::default())
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        _stake: &[u8],
+        _offset: usize,
+        _limit: usize,
+        _reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError> {
+        Ok(None)
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+
     fn slot_by_block_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         Ok(None)
     }

@@ -4,8 +4,8 @@
 //! `IndexDelta` structures from Cardano block data.
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, ChainPoint, EraCbor, IndexDelta, Tag, TxoRef, UtxoIndexDelta,
-    UtxoSetDelta,
+    ArchiveIndexDelta, BlockSlot, ChainPoint, EraCbor, IndexDelta, StakeAddressAppearance, Tag,
+    TxoRef, UtxoIndexDelta, UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
@@ -283,6 +283,10 @@ impl CardanoIndexDeltaBuilder {
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
 
+        self.delta
+            .stake_addresses
+            .extend(stake_appearances_from_block(block));
+
         for tx in block.txs() {
             self.add_tx_hash(tx.hash().to_vec());
 
@@ -410,6 +414,49 @@ impl CardanoIndexDeltaBuilder {
         let output = MultiEraOutput::try_from(era_cbor).ok()?;
         Some(Self::extract_utxo_tags(&output))
     }
+}
+
+/// Stake address log candidates in one block: every produced output that
+/// carries a stake credential, ordered by transaction and output index.
+///
+/// Both the apply path (`index_block`) and the rollback path
+/// (`compute_undo`) derive their log entries from this one function, so an
+/// undo removes exactly what an apply inserted.
+pub fn stake_appearances_from_block(
+    block: &pallas::ledger::traverse::MultiEraBlock<'_>,
+) -> Vec<StakeAddressAppearance> {
+    let mut out = Vec::new();
+
+    for (tx_order, tx) in block.txs().iter().enumerate() {
+        for (output_order, output) in tx.produces() {
+            let Ok(address) = output.address() else {
+                continue;
+            };
+
+            let stake = match &address {
+                Address::Shelley(x) => {
+                    pallas_extras::shelley_address_to_stake_address(x).map(|s| s.to_vec())
+                }
+                Address::Stake(x) => Some(x.to_vec()),
+                Address::Byron(_) => None,
+            };
+
+            let Some(stake) = stake else {
+                continue;
+            };
+
+            let order = ((tx_order as u32) << 16) | (output_order as u32 & 0xffff);
+
+            out.push(StakeAddressAppearance {
+                slot: block.slot(),
+                order,
+                stake,
+                address: address.to_vec(),
+            });
+        }
+    }
+
+    out
 }
 
 /// Build an `IndexDelta` from a `UtxoSetDelta` (for genesis/bulk import).

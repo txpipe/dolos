@@ -810,6 +810,23 @@ impl CoreIndexStore for IndexStore {
         self.initialize_schema_internal().map_err(IndexError::from)
     }
 
+    /// This backend is deprecated for real nodes and does not maintain the
+    /// stake address log. `None` sends callers to their archive-scan
+    /// fallback.
+    fn addresses_by_stake_log(
+        &self,
+        _stake: &[u8],
+        _offset: usize,
+        _limit: usize,
+        _reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError> {
+        Ok(None)
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+
     fn copy(&self, target: &Self) -> Result<(), IndexError> {
         let rx = self.db.begin_read().map_err(map_db_error)?;
         let wx = target.db.begin_write().map_err(map_db_error)?;

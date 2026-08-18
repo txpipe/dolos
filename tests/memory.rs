@@ -386,6 +386,7 @@ fn seed_archive_tags<S: CoreIndexStore>(store: &S) {
             cursor,
             utxo: Default::default(),
             archive,
+            stake_addresses: Vec::new(),
         };
 
         let writer = store.start_writer().expect("start_writer failed");

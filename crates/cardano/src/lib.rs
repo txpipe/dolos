@@ -503,7 +503,12 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let utxo_delta = crate::utxoset::compute_undo_delta(blockv, &decoded_inputs)
             .map_err(ChainError::from)?;
 
-        let index_delta = crate::indexes::index_delta_from_utxo_delta(point, &utxo_delta);
+        let mut index_delta = crate::indexes::index_delta_from_utxo_delta(point, &utxo_delta);
+
+        // The undo path never re-runs `index_block`, so the stake address
+        // log entries to remove are derived here from the same function the
+        // apply path used to insert them.
+        index_delta.stake_addresses = crate::indexes::stake_appearances_from_block(blockv);
 
         let tx_hashes = blockv.txs().iter().map(|tx| tx.hash()).collect();
 
