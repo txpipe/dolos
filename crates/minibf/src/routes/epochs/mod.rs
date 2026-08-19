@@ -13,7 +13,7 @@ use pallas::{
     crypto::hash::Hasher,
     ledger::{
         primitives::{Epoch, StakeCredential},
-        traverse::MultiEraBlock,
+        traverse::{MultiEraBlock, MultiEraHeader},
     },
 };
 
@@ -382,6 +382,52 @@ pub async fn by_number_blocks<D: Domain>(
     }))
 }
 
+/// Parses the header of a stored block without decoding the transactions.
+/// Returns `None` for Byron blocks (no issuer).
+fn decode_block_header(body: &[u8]) -> Result<Option<MultiEraHeader<'_>>, StatusCode> {
+    use std::borrow::Cow;
+
+    use pallas::codec::utils::KeepRaw;
+    use pallas::ledger::primitives::{alonzo, babbage};
+    use pallas::ledger::traverse::{probe, Era};
+
+    let era = match probe::block_era(body) {
+        probe::Outcome::Matched(era) => era,
+        probe::Outcome::EpochBoundary => return Ok(None),
+        probe::Outcome::Inconclusive => {
+            return Err(log_and_500("failed to probe block era")("inconclusive"))
+        }
+    };
+
+    if era == Era::Byron {
+        return Ok(None);
+    }
+
+    // A stored block is `[era_tag, [header, tx_bodies, ...]]`. Open the
+    // wrapper array, skip the era tag, open the block array. The next item
+    // is the header.
+    let mut d = minicbor::Decoder::new(body);
+    let header = (|| -> Result<_, minicbor::decode::Error> {
+        d.array()?;
+        d.u8()?;
+        d.array()?;
+
+        match era {
+            Era::Shelley | Era::Allegra | Era::Mary | Era::Alonzo => {
+                let header: KeepRaw<alonzo::Header> = d.decode()?;
+                Ok(MultiEraHeader::ShelleyCompatible(Cow::Owned(header)))
+            }
+            _ => {
+                let header: KeepRaw<babbage::Header> = d.decode()?;
+                Ok(MultiEraHeader::BabbageCompatible(Cow::Owned(header)))
+            }
+        }
+    })()
+    .map_err(log_and_500("failed to decode block header"))?;
+
+    Ok(Some(header))
+}
+
 pub async fn by_number_blocks_pool<D: Domain>(
     Path((epoch, pool_id)): Path<(u64, String)>,
     Query(params): Query<PaginationParameters>,
@@ -427,11 +473,10 @@ where
                 let mut seen = 0usize;
 
                 for (_slot, body) in blocks {
-                    let block = MultiEraBlock::decode(&body)
-                        .map_err(log_and_500("failed to decode block"))?;
+                    let Some(header) = decode_block_header(&body)? else {
+                        continue;
+                    };
 
-                    // Byron blocks carry no issuer, so no pool minted them.
-                    let header = block.header();
                     let Some(key) = header.issuer_vkey() else {
                         continue;
                     };
@@ -443,7 +488,7 @@ where
                     minted_here = true;
 
                     if seen >= skip && page.len() < count {
-                        page.push(block.hash().to_string());
+                        page.push(header.hash().to_string());
                     }
 
                     seen += 1;
