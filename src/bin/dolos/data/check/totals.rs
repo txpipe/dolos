@@ -231,9 +231,6 @@ pub fn handed_off_pots(closing: &EpochState) -> Result<Pots, Unreplayable> {
         treasury_donations: rolling.treasury_donations,
         deposit_per_account: pparams.key_deposit(),
         deposit_per_pool: Some(pparams.pool_deposit_or_default()),
-        // The effective figures, which only the boundary knows: a MIR or a
-        // treasury withdrawal naming an unregistered account is asked for in
-        // `RollingStats` and never paid.
         reserve_mirs: end.reserve_mirs,
         treasury_mirs: end.treasury_mirs,
         treasury_withdrawals: end.treasury_withdrawals,
@@ -1228,8 +1225,6 @@ mod tests {
         assert_eq!(live_pots(&epoch), Some(epoch.initial_pots.clone()));
     }
 
-    // --- the boundary hand-off ------------------------------------------
-
     /// A pparams set carrying just the protocol version, which is what picks
     /// the delta path and — through `era_transition` — the AVVM boundary.
     fn pparams_at(major: u16) -> PParamsSet {
@@ -1439,8 +1434,6 @@ mod tests {
         let before = check_boundaries(log(vec![at(41, 9), at(42, 9)]), None);
         assert_eq!(before.pv10_epoch, None);
     }
-
-    // --- the vote-delegation referents ----------------------------------
 
     fn drep_key(seed: u8) -> DRep {
         DRep::Key(Hash::from([seed; 28]))
