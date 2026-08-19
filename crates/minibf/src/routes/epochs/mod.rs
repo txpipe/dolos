@@ -349,7 +349,9 @@ pub async fn by_number_blocks<D: Domain>(
     let chain = domain.get_chain_summary()?;
     let pagination = Pagination::try_from(params)?;
     let start = chain.epoch_start(epoch);
-    let end = chain.epoch_start(epoch + 1) - 1;
+    // `get_range` treats the upper bound as exclusive, so the next epoch's
+    // start is the bound that still covers this epoch's final slot.
+    let end = chain.epoch_start(epoch + 1);
 
     let mut iter = domain
         .archive()
@@ -402,7 +404,9 @@ where
     }
 
     let start = summary.epoch_start(epoch);
-    let end = summary.epoch_start(epoch + 1) - 1;
+    // `get_range` treats the upper bound as exclusive, so the next epoch's
+    // start is the bound that still covers this epoch's final slot.
+    let end = summary.epoch_start(epoch + 1);
 
     let inner = domain.inner.clone();
     let issuer = operator.clone();
@@ -466,12 +470,10 @@ where
         .await
         .map_err(log_and_500("epoch block scan task failed"))??;
 
-    // db-sync knows a pool once it registers or mints a block, and Blockfrost
-    // 404s pools it doesn't know. The scan proves minting in this epoch; the
-    // entity covers registered pools. A never-registered issuer queried for an
-    // epoch it minted nothing in 404s here where Blockfrost returns `[]` —
-    // that needs a pool from the genesis-delegation era, which never
-    // registered on chain.
+    // Blockfrost 404s a pool that db-sync never saw. The `PoolState` entity
+    // covers every pool that registered on chain, and a pool must register
+    // before it can mint. The scan result acts as a second proof of
+    // existence, for any issuer that has no entity.
     if !minted_here && !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
         return Err(StatusCode::NOT_FOUND.into());
     }
@@ -896,6 +898,44 @@ mod tests {
 
         let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
         assert!(hashes.is_empty());
+    }
+
+    /// Regression test: a block minted on the last slot of an epoch must
+    /// appear when the endpoint lists that epoch's blocks.
+    ///
+    /// The bug: `get_range(from, to)` excludes `to`. The old code passed the
+    /// epoch's last slot as `to`, so a block on that exact slot was dropped.
+    /// A live comparison against Blockfrost caught this (preview, epoch 16).
+    ///
+    /// Setup: build 3 blocks on consecutive slots, placed so the last block
+    /// lands exactly on the last slot of epoch 2.
+    #[tokio::test]
+    async fn epochs_blocks_include_the_epochs_final_slot() {
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+
+        let boundary = TestApp::new().epoch_start(3);
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            slot: boundary - 3,
+            block_count: 3,
+            ..Default::default()
+        });
+
+        let final_slot = boundary - 1;
+        let (status, bytes) = app.get_bytes(&format!("/blocks/slot/{final_slot}")).await;
+        assert_eq!(status, StatusCode::OK, "expected a block on the final slot");
+        let block: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let boundary_hash = block["hash"].as_str().unwrap().to_string();
+
+        let (_, bytes) = app.get_bytes("/epochs/2/blocks?count=100").await;
+        let all: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(all.contains(&boundary_hash));
+
+        let pool = toy_issuer_pool();
+        let (_, bytes) = app
+            .get_bytes(&format!("/epochs/2/blocks/{pool}?count=100"))
+            .await;
+        let by_pool: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(by_pool.contains(&boundary_hash));
     }
 
     #[tokio::test]

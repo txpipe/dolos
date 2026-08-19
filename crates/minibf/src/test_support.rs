@@ -230,4 +230,16 @@ impl TestApp {
 
         summary.slot_epoch(tip).0
     }
+
+    /// First slot of the given epoch. Only usable on fault-free apps — fault
+    /// wrappers make the underlying state reads fail.
+    pub fn epoch_start(&self, epoch: u64) -> u64 {
+        let summary =
+            dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
+                self._domain.state(),
+            )
+            .expect("era summary");
+
+        summary.epoch_start(epoch)
+    }
 }
