@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use dolos_core::{ChainError, EntityKey};
-use pallas::ledger::primitives::conway::GovActionId;
+use pallas::ledger::primitives::{conway::GovActionId, StakeCredential};
 
 use crate::{
     ewrap::{BoundaryWork, ProposalId},
@@ -19,8 +21,16 @@ pub struct BoundaryVisitor {
 /// new root.
 ///
 /// Kept apart from the visitor so the mapping is exercisable on its own —
-/// none of it depends on boundary context.
-pub(crate) fn enactment_deltas(id: &ProposalId, proposal: &ProposalState) -> Vec<CardanoDelta> {
+/// none of it depends on boundary context. `deliverable_withdrawal_targets`
+/// is the boundary's ruling on which withdrawal credentials can receive
+/// their credit (registered at the boundary): the ledger's
+/// `applyEnactedWithdrawals` restricts the enacted withdrawal map to the
+/// rewards UMap and discards the rest, so no delta is emitted for them.
+pub(crate) fn enactment_deltas(
+    id: &ProposalId,
+    proposal: &ProposalState,
+    deliverable_withdrawal_targets: &HashSet<StakeCredential>,
+) -> Vec<CardanoDelta> {
     let mut deltas: Vec<CardanoDelta> = Vec::new();
 
     match &proposal.action {
@@ -34,7 +44,9 @@ pub(crate) fn enactment_deltas(id: &ProposalId, proposal: &ProposalState) -> Vec
         }
         ProposalAction::TreasuryWithdrawal(withdrawals) => {
             for (credential, amount) in withdrawals {
-                deltas.push(TreasuryWithdrawal::new(credential.clone(), *amount).into());
+                if deliverable_withdrawal_targets.contains(credential) {
+                    deltas.push(TreasuryWithdrawal::new(credential.clone(), *amount).into());
+                }
             }
         }
         ProposalAction::NoConfidence => {
@@ -100,14 +112,35 @@ pub(crate) fn enactment_deltas(id: &ProposalId, proposal: &ProposalState) -> Vec
 impl super::BoundaryVisitor for BoundaryVisitor {
     fn visit_enacting_proposal(
         &mut self,
-        _: &mut BoundaryWork,
+        ctx: &mut BoundaryWork,
         id: &ProposalId,
         proposal: &ProposalState,
         _: Option<&AccountState>,
     ) -> Result<(), ChainError> {
         tracing::debug!(proposal=%id, "visiting enacted proposal");
 
-        self.deltas.extend(enactment_deltas(id, proposal));
+        if let ProposalAction::TreasuryWithdrawal(withdrawals) = &proposal.action {
+            for (credential, amount) in withdrawals {
+                if ctx.deliverable_withdrawal_targets.contains(credential) {
+                    ctx.effective_treasury_withdrawals += amount;
+                } else {
+                    ctx.invalid_treasury_withdrawals += amount;
+
+                    tracing::warn!(
+                        proposal=%id,
+                        credential=?credential,
+                        %amount,
+                        "treasury withdrawal not applied (unregistered account) - stays in treasury"
+                    );
+                }
+            }
+        }
+
+        self.deltas.extend(enactment_deltas(
+            id,
+            proposal,
+            &ctx.deliverable_withdrawal_targets,
+        ));
 
         Ok(())
     }
@@ -210,7 +243,7 @@ mod tests {
             "the action's shape alone would claim a tree"
         );
 
-        let deltas = enactment_deltas(&id, &legacy);
+        let deltas = enactment_deltas(&id, &legacy, &HashSet::new());
 
         assert!(
             deltas
@@ -229,7 +262,7 @@ mod tests {
         let mut conway = proposal([9u8; 32].into(), 0, action);
         conway.purpose = Some(GovPurpose::PParamUpdate);
 
-        let deltas = enactment_deltas(&id, &conway);
+        let deltas = enactment_deltas(&id, &conway, &HashSet::new());
 
         assert!(
             deltas
@@ -237,6 +270,37 @@ mod tests {
                 .any(|delta| matches!(delta, CardanoDelta::GovRootsUpdate(_))),
             "a Conway action must claim its lineage root"
         );
+    }
+
+    /// A withdrawal credential outside the deliverable set gets no
+    /// per-account delta — the ledger's `applyEnactedWithdrawals` discards
+    /// withdrawals to credentials absent from the rewards UMap, so neither
+    /// the account nor the pots move for them.
+    #[test]
+    fn undeliverable_withdrawal_emits_no_account_delta() {
+        let registered = StakeCredential::AddrKeyhash([1u8; 28].into());
+        let unregistered = StakeCredential::AddrKeyhash([2u8; 28].into());
+
+        let action = ProposalAction::TreasuryWithdrawal(vec![
+            (registered.clone(), 3_000_000),
+            (unregistered.clone(), 5_000_000),
+        ]);
+
+        let id = ProposalId::from(b"withdrawal".to_vec());
+        let row = proposal([3u8; 32].into(), 0, action);
+
+        let deliverable = HashSet::from([registered.clone()]);
+        let deltas = enactment_deltas(&id, &row, &deliverable);
+
+        let credited: Vec<_> = deltas
+            .iter()
+            .filter_map(|delta| match delta {
+                CardanoDelta::TreasuryWithdrawal(w) => Some((w.account.clone(), w.amount)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(credited, vec![(registered, 3_000_000)]);
     }
 
     /// Every governance action a Conway chain can carry has an enactment
@@ -278,12 +342,14 @@ mod tests {
             (ProposalAction::Info, None),
         ];
 
+        let deliverable = HashSet::from([cred.clone()]);
+
         for (action, purpose) in cases {
             let is_info = matches!(action, ProposalAction::Info);
             let id = ProposalId::from(b"proposal".to_vec());
             let mut row = proposal([7u8; 32].into(), 0, action.clone());
             row.purpose = purpose;
-            let deltas = enactment_deltas(&id, &row);
+            let deltas = enactment_deltas(&id, &row, &deliverable);
 
             let roots = deltas
                 .iter()
@@ -358,7 +424,7 @@ mod tests {
             },
         );
         row.purpose = Some(GovPurpose::Constitution);
-        state = apply_gov(state, enactment_deltas(&id, &row));
+        state = apply_gov(state, enactment_deltas(&id, &row, &HashSet::new()));
 
         let id = ProposalId::from(committee_tx.to_vec());
         let mut row = proposal(
@@ -371,7 +437,7 @@ mod tests {
             },
         );
         row.purpose = Some(GovPurpose::Committee);
-        state = apply_gov(state, enactment_deltas(&id, &row));
+        state = apply_gov(state, enactment_deltas(&id, &row, &HashSet::new()));
 
         assert_eq!(state.constitution, Some(enacted_constitution));
         assert_ne!(state.constitution, Some(constitution));

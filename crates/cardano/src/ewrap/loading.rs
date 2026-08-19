@@ -30,7 +30,7 @@ use crate::{
     roll::WorkDeltas,
     rupd::credential_to_key,
     AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
-    PoolHash, PoolState, ProposalOutcome, ProposalState,
+    PoolHash, PoolState, ProposalAction, ProposalOutcome, ProposalState,
 };
 
 impl BoundaryWork {
@@ -76,6 +76,9 @@ impl BoundaryWork {
             logs: Default::default(),
             applied_reward_credentials: Default::default(),
             applied_rewards: Default::default(),
+            deliverable_withdrawal_targets: Default::default(),
+            effective_treasury_withdrawals: 0,
+            invalid_treasury_withdrawals: 0,
             effective_treasury_mirs: 0,
             effective_reserve_mirs: 0,
             invalid_treasury_mirs: 0,
@@ -656,6 +659,29 @@ impl BoundaryWork {
         Ok(account)
     }
 
+    /// Record which target credentials of an enacting treasury withdrawal
+    /// can receive the credit. The ledger's `applyEnactedWithdrawals`
+    /// restricts the enacted withdrawal map to credentials present in the
+    /// rewards UMap — accounts registered at the boundary — and discards
+    /// the rest: no account credit and no pot movement.
+    fn load_withdrawal_targets<D: Domain>(
+        &mut self,
+        state: &D::State,
+        withdrawals: &[(StakeCredential, u64)],
+    ) -> Result<(), ChainError> {
+        for (credential, _) in withdrawals {
+            let account: Option<AccountState> =
+                state.read_entity_typed(AccountState::NS, &credential_to_key(credential))?;
+
+            if account.is_some_and(|account| account.is_registered()) {
+                self.deliverable_withdrawal_targets
+                    .insert(credential.clone());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Split the boundary's removals into the two sets the visitors take:
     /// the accepted actions, whose effects enact, and everything else the
     /// boundary drops. Both refund their deposit; only the first changes
@@ -686,6 +712,10 @@ impl BoundaryWork {
 
             match outcome {
                 ProposalOutcome::Enacted => {
+                    if let ProposalAction::TreasuryWithdrawal(withdrawals) = &proposal.action {
+                        self.load_withdrawal_targets::<D>(state, withdrawals)?;
+                    }
+
                     self.enacting_proposals.insert(id, (proposal, account));
                 }
                 ProposalOutcome::Expired | ProposalOutcome::PrunedSibling => {
@@ -2163,7 +2193,12 @@ mod ratification_tests {
         epoch.number = CLOSING;
         let pparams = conway_pparams(epoch.pparams.unwrap_live());
         epoch.pparams = EpochValue::from_parts(CLOSING, Some(pparams), None, None, None, None);
+        let rolling = epoch.rolling.unwrap_live().clone();
+        epoch.rolling = EpochValue::from_parts(CLOSING, Some(rolling), None, None, None, None);
         epoch.initial_pots.treasury = TREASURY;
+        // every live proposal's deposit is held by the deposits pot, which
+        // funds the refunds the boundary pays out
+        epoch.initial_pots.proposal_deposits = DEPOSIT * proposals.len() as u64;
 
         let mut gov = crate::load_gov::<ToyDomain>(state).unwrap();
         gov.active_since = Some(0);
@@ -2189,6 +2224,44 @@ mod ratification_tests {
         writer
             .write_entity_typed(&GovState::singleton_key(), &gov)
             .unwrap();
+
+        // the devnet bootstrap leaves its accounts and pools positioned at
+        // epoch 0; the boundary under test rotates every entity into
+        // CLOSING + 1 and the strict transition refuses a jump, so reseat
+        // them at the closing epoch
+        let bootstrapped_accounts: Vec<_> = state
+            .iter_entities_typed::<crate::AccountState>(crate::AccountState::NS, None)
+            .unwrap()
+            .map(|record| record.unwrap())
+            .collect();
+
+        for (key, mut row) in bootstrapped_accounts {
+            row.stake =
+                EpochValue::from_parts(CLOSING, row.stake.live().cloned(), None, None, None, None);
+            row.pool =
+                EpochValue::from_parts(CLOSING, row.pool.live().cloned(), None, None, None, None);
+            row.drep =
+                EpochValue::from_parts(CLOSING, row.drep.live().cloned(), None, None, None, None);
+            writer.write_entity_typed(&key, &row).unwrap();
+        }
+
+        let bootstrapped_pools: Vec<_> = state
+            .iter_entities_typed::<PoolState>(PoolState::NS, None)
+            .unwrap()
+            .map(|record| record.unwrap())
+            .collect();
+
+        for (key, mut row) in bootstrapped_pools {
+            row.snapshot = EpochValue::from_parts(
+                CLOSING,
+                row.snapshot.live().cloned(),
+                None,
+                None,
+                None,
+                None,
+            );
+            writer.write_entity_typed(&key, &row).unwrap();
+        }
 
         let drep_row = crate::DRepState {
             registered_at: Some((0, 0)),
@@ -2285,6 +2358,90 @@ mod ratification_tests {
         assert_eq!(live.ratified_epoch, None);
         assert_eq!(live.canceled_epoch, None);
         assert!(live.is_unresolved_at_close(CLOSING + 1));
+    }
+
+    /// An enacted treasury withdrawal moves the pot pair across the
+    /// boundary: `pots.treasury` is debited and `pots.rewards` credited by
+    /// the effective amount — the enacted deposit's refund rides along on
+    /// the rewards side, funded by the deposits pot — and
+    /// `Pots::is_consistent()` holds over the transition. Before the fix
+    /// the per-account credit landed while both pots stood still, leaving
+    /// treasury long and rewards short by exactly the enacted total (the
+    /// mainnet divergence-B signature).
+    #[test]
+    fn enacted_withdrawal_moves_pots_across_the_boundary() {
+        let accepted = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
+
+        let domain = seed(&[accepted]);
+
+        let before = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
+        let max_supply = before.initial_pots.max_supply();
+
+        // EWRAP: the boundary rules, enacts, and stamps the end stats
+        let boundary = finalize(&domain);
+
+        assert_eq!(boundary.effective_treasury_withdrawals, WITHDRAWAL);
+        assert_eq!(boundary.invalid_treasury_withdrawals, 0);
+
+        let wrapped = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
+        let end = wrapped.end.as_ref().expect("EWRAP stamped end stats");
+        assert_eq!(end.treasury_withdrawals, WITHDRAWAL);
+        assert_eq!(end.invalid_treasury_withdrawals, 0);
+
+        // the beneficiary's live stake got the withdrawal credit (the
+        // deposit refund is scheduled for the opening epoch instead)
+        let account = domain
+            .state()
+            .read_entity_typed::<crate::AccountState>(
+                crate::AccountState::NS,
+                &credential_to_key(&beneficiary()),
+            )
+            .unwrap()
+            .expect("beneficiary row present");
+        assert_eq!(account.stake.unwrap_live().rewards_sum, WITHDRAWAL);
+
+        // ESTART: one account shard, then the finalize pass applying the
+        // epoch transition that carries the new pots
+        let ranges = crate::shard::shard_key_ranges(0, 1);
+        let mut shard = crate::estart::WorkContext::load_shard::<ToyDomain>(
+            domain.state(),
+            domain.genesis(),
+            0,
+            0,
+            1,
+            ranges.clone(),
+        )
+        .unwrap();
+        shard
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .unwrap();
+
+        let mut estart = crate::estart::WorkContext::load_finalize::<ToyDomain>(
+            domain.state(),
+            domain.genesis(),
+        )
+        .unwrap();
+        let slot = estart.chain_summary.epoch_start(estart.starting_epoch_no());
+        estart
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive(), slot)
+            .unwrap();
+
+        let after = crate::load_epoch::<ToyDomain>(domain.state()).unwrap();
+
+        assert_eq!(after.number, CLOSING + 1);
+        assert_eq!(
+            after.initial_pots.treasury,
+            before.initial_pots.treasury - WITHDRAWAL
+        );
+        assert_eq!(
+            after.initial_pots.rewards,
+            before.initial_pots.rewards + WITHDRAWAL + DEPOSIT
+        );
+        assert_eq!(
+            after.initial_pots.proposal_deposits,
+            before.initial_pots.proposal_deposits - DEPOSIT
+        );
+        assert!(after.initial_pots.is_consistent(max_supply));
     }
 
     /// An action submitted *during* the closing epoch cannot ratify at

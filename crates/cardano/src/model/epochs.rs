@@ -220,6 +220,19 @@ pub struct EndStats {
     #[cbor(default)]
     pub invalid_reserve_mirs: Lovelace,
 
+    /// Treasury withdrawals enacted by governance at the boundary and
+    /// delivered to registered accounts (moved treasury → rewards).
+    #[n(15)]
+    #[cbor(default)]
+    pub treasury_withdrawals: Lovelace,
+
+    /// Enacted treasury withdrawals whose target account cannot receive
+    /// them (unregistered at the boundary) — discarded, the value stays
+    /// in treasury.
+    #[n(16)]
+    #[cbor(default)]
+    pub invalid_treasury_withdrawals: Lovelace,
+
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,
 
@@ -411,6 +424,8 @@ pub(crate) mod testing {
                 reserve_mirs: 0,
                 invalid_treasury_mirs: 0,
                 invalid_reserve_mirs: 0,
+                treasury_withdrawals: 0,
+                invalid_treasury_withdrawals: 0,
                 proposal_invalid_refunds: 0,
                 proposal_refunds: 0,
                 __drep_deposits: 0,
