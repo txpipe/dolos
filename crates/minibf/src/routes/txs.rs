@@ -11,6 +11,7 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner::TxContentPoolCertsInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
     tx_content_redeemers_inner::TxContentRedeemersInner,
+    tx_content_required_signers_inner::TxContentRequiredSignersInner,
     tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
     tx_content_withdrawals_inner::TxContentWithdrawalsInner,
 };
@@ -179,6 +180,22 @@ where
     builder.into_response()
 }
 
+pub async fn by_hash_required_signers<D>(
+    Path(tx_hash): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentRequiredSignersInner>>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let hash = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let (raw, order) = domain.get_block_by_tx_hash(&hash).await?;
+
+    let tx = TxModelBuilder::new(&raw, order)?;
+
+    tx.into_response()
+}
+
 pub async fn by_hash_withdrawals<D>(
     Path(tx_hash): Path<String>,
     State(domain): State<Facade<D>>,
@@ -306,6 +323,7 @@ mod tests {
         tx_content_pool_certs_inner::TxContentPoolCertsInner,
         tx_content_pool_retires_inner::TxContentPoolRetiresInner,
         tx_content_redeemers_inner::TxContentRedeemersInner,
+        tx_content_required_signers_inner::TxContentRequiredSignersInner,
         tx_content_stake_addr_inner::TxContentStakeAddrInner, tx_content_utxo::TxContentUtxo,
         tx_content_withdrawals_inner::TxContentWithdrawalsInner,
     };
@@ -756,6 +774,49 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/stakes");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_required_signers_happy_path() {
+        let app = TestApp::new();
+        let tx_hash = app.vectors().tx_hash.as_str();
+        let path = format!("/txs/{tx_hash}/required_signers");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let parsed: Vec<TxContentRequiredSignersInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse tx required signers");
+
+        // the synthetic sample transaction carries a single required signer
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].witness_hash, hex::encode([4u8; 28]));
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_required_signers_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/txs/{}/required_signers", invalid_hash());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_required_signers_not_found() {
+        let app = TestApp::new();
+        let path = format!("/txs/{}/required_signers", missing_hash());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn txs_by_hash_required_signers_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let tx_hash = app.vectors().tx_hash.as_str();
+        let path = format!("/txs/{tx_hash}/required_signers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 

@@ -695,7 +695,10 @@ fn sample_transaction(
         mint: Some(mint),
         script_data_hash: None,
         collateral: None,
-        required_signers: None,
+        required_signers: Some(
+            NonEmptySet::try_from(vec![AddrKeyhash::from([4u8; 28])])
+                .expect("non-empty required signers"),
+        ),
         network_id: None,
         collateral_return: None,
         total_collateral: None,

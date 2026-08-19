@@ -530,6 +530,10 @@ where
             get(routes::txs::by_hash_redeemers::<D>),
         )
         .route(
+            "/txs/{tx_hash}/required_signers",
+            get(routes::txs::by_hash_required_signers::<D>),
+        )
+        .route(
             "/txs/{tx_hash}/withdrawals",
             get(routes::txs::by_hash_withdrawals::<D>),
         )
