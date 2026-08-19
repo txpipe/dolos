@@ -10,6 +10,7 @@ use blockfrost_openapi::models::{
 };
 use pallas::{
     codec::minicbor,
+    crypto::hash::Hasher,
     ledger::{
         primitives::{Epoch, StakeCredential},
         traverse::MultiEraBlock,
@@ -379,6 +380,105 @@ pub async fn by_number_blocks<D: Domain>(
     }))
 }
 
+pub async fn by_number_blocks_pool<D: Domain>(
+    Path((epoch, pool_id)): Path<(u64, String)>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+    let operator = super::pools::decode_pool_id(&pool_id)?;
+    ensure_epoch_in_range(epoch)?;
+
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (current, _) = summary.slot_epoch(tip);
+
+    // Blockfrost 404s epochs that don't exist yet.
+    if epoch > current {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let start = summary.epoch_start(epoch);
+    let end = summary.epoch_start(epoch + 1) - 1;
+
+    let inner = domain.inner.clone();
+    let issuer = operator.clone();
+    let skip = pagination.skip();
+    let count = pagination.count;
+    let order = pagination.order;
+
+    let (page, minted_here) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, bool), StatusCode> {
+            let iter = inner
+                .archive()
+                .get_range(Some(start), Some(end))
+                .map_err(log_and_500("failed to range-scan epoch blocks"))?;
+
+            let scan = |blocks: &mut dyn Iterator<Item = (u64, Vec<u8>)>| {
+                let mut minted_here = false;
+                let mut page = Vec::new();
+                let mut seen = 0usize;
+
+                for (_slot, body) in blocks {
+                    let block = MultiEraBlock::decode(&body)
+                        .map_err(log_and_500("failed to decode block"))?;
+
+                    // Byron blocks carry no issuer, so no pool minted them.
+                    let header = block.header();
+                    let Some(key) = header.issuer_vkey() else {
+                        continue;
+                    };
+
+                    if Hasher::<224>::hash(key).as_slice() != issuer.as_slice() {
+                        continue;
+                    }
+
+                    minted_here = true;
+
+                    if seen >= skip && page.len() < count {
+                        page.push(block.hash().to_string());
+                    }
+
+                    seen += 1;
+
+                    if page.len() >= count {
+                        break;
+                    }
+                }
+
+                Ok::<_, StatusCode>((page, minted_here))
+            };
+
+            match order {
+                Order::Asc => {
+                    let mut blocks = iter.into_iter();
+                    scan(&mut blocks)
+                }
+                Order::Desc => {
+                    let mut blocks = iter.rev();
+                    scan(&mut blocks)
+                }
+            }
+        })
+        .await
+        .map_err(log_and_500("epoch block scan task failed"))??;
+
+    // db-sync knows a pool once it registers or mints a block, and Blockfrost
+    // 404s pools it doesn't know. The scan proves minting in this epoch; the
+    // entity covers registered pools. A never-registered issuer queried for an
+    // epoch it minted nothing in 404s here where Blockfrost returns `[]` —
+    // that needs a pool from the genesis-delegation era, which never
+    // registered on chain.
+    if !minted_here && !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    Ok(Json(page))
+}
+
 pub async fn by_number_stakes<D: Domain>(
     Path(epoch): Path<u64>,
     Query(params): Query<PaginationParameters>,
@@ -696,6 +796,135 @@ mod tests {
     async fn epochs_stakes_archive_error() {
         let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         assert_status(&app, "/epochs/0/stakes", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// Every synthetic block is minted by the same fixed issuer key, so the
+    /// pool derived from it owns the whole epoch (see `issuer_vkey` in
+    /// dolos-testing's synthetic builder).
+    fn toy_issuer_pool() -> String {
+        bech32_pool(Hasher::<224>::hash(&[0x10, 0x11])).unwrap()
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_happy_path() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+        let pool = toy_issuer_pool();
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}"))
+            .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let by_pool: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+
+        // The issuer pool minted every block, so the filtered list equals the
+        // unfiltered sibling endpoint.
+        let (_, bytes) = app.get_bytes(&format!("/epochs/{epoch}/blocks")).await;
+        let all: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse hashes");
+
+        assert!(!by_pool.is_empty());
+        assert_eq!(by_pool, all);
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_paginated() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+        let pool = toy_issuer_pool();
+
+        let (status_1, bytes_1) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?count=1&page=1"))
+            .await;
+        let (status_2, bytes_2) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?count=1&page=2"))
+            .await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<String> = serde_json::from_slice(&bytes_1).unwrap();
+        let page_2: Vec<String> = serde_json::from_slice(&bytes_2).unwrap();
+
+        assert_eq!(page_1.len(), 1);
+        assert_eq!(page_2.len(), 1);
+        assert_ne!(page_1, page_2);
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_desc_is_reversed_asc() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+        let pool = toy_issuer_pool();
+
+        let (_, bytes_asc) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?order=asc"))
+            .await;
+        let (_, bytes_desc) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}?order=desc"))
+            .await;
+
+        let asc: Vec<String> = serde_json::from_slice(&bytes_asc).unwrap();
+        let mut desc: Vec<String> = serde_json::from_slice(&bytes_desc).unwrap();
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_registered_pool_without_blocks_is_empty() {
+        let app = TestApp::new();
+        let epoch = app.tip_epoch();
+        let pool = app.vectors().pool_id.clone();
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/epochs/{epoch}/blocks/{pool}"))
+            .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let hashes: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+        assert!(hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/epochs/0/blocks/notapool", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_unknown_pool_not_found() {
+        let app = TestApp::new();
+        let pool = hex::encode([7u8; 28]);
+        let path = format!("/epochs/{}/blocks/{pool}", app.tip_epoch());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_future_epoch_not_found() {
+        let app = TestApp::new();
+        let pool = toy_issuer_pool();
+        let path = format!("/epochs/{}/blocks/{pool}", app.tip_epoch() + 10);
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn epochs_blocks_pool_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        let path = format!("/epochs/0/blocks/{}", toy_issuer_pool());
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
