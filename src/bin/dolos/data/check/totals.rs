@@ -68,6 +68,15 @@
 //! - **Any boundary at all, on a store whose `epochs` log does not hold both
 //!   sides of it.** A log the node pruned, or never wrote, leaves the pots it
 //!   would have covered unchecked rather than assumed good.
+//! - **The recorded inputs themselves.** The boundary comparison asks whether
+//!   the pots on disk are what the node's own arithmetic produces from the
+//!   figures the node recorded — not whether those figures were right. An
+//!   `EndStats` that understated a MIR would be replayed faithfully into the
+//!   pots that understate it. Catching that needs a second, independent
+//!   recomputation of a pot (summing account reward balances for `rewards`,
+//!   say) and a second reading of when the ledger says the two agree; a wrong
+//!   second reading would report every intact store as broken, so this check
+//!   does not attempt one.
 //!
 //! # The delegation referents
 //!
@@ -401,7 +410,7 @@ pub fn check_boundaries<E: std::fmt::Display>(
         out.issues.push(Issue::new(
             CHECK,
             format!(
-                "{} further epoch boundary/boundaries do not replay, not listed individually",
+                "{} further epoch boundaries do not replay, not listed individually",
                 disagreeing - MAX_REPORTED_BOUNDARIES
             ),
         ));
