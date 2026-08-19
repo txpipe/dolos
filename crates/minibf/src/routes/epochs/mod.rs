@@ -983,6 +983,73 @@ mod tests {
         assert!(by_pool.contains(&boundary_hash));
     }
 
+    #[test]
+    fn decode_block_header_matches_full_decode() {
+        let (_, raw) = dolos_testing::blocks::make_conway_block(1234);
+
+        let header = decode_block_header(&raw).unwrap().expect("conway header");
+        let block = MultiEraBlock::decode(&raw).unwrap();
+
+        assert_eq!(header.hash(), block.hash());
+        assert_eq!(header.issuer_vkey(), block.header().issuer_vkey());
+    }
+
+    #[test]
+    fn decode_block_header_reads_the_shelley_header_shape() {
+        use pallas::ledger::primitives::alonzo;
+
+        let issuer_vkey = vec![0xAA; 32];
+        let header = alonzo::Header {
+            header_body: alonzo::HeaderBody {
+                block_number: 7,
+                slot: 42,
+                prev_hash: None,
+                issuer_vkey: issuer_vkey.clone().into(),
+                vrf_vkey: vec![].into(),
+                nonce_vrf: alonzo::VrfCert(vec![].into(), vec![].into()),
+                leader_vrf: alonzo::VrfCert(vec![].into(), vec![].into()),
+                block_body_size: 0,
+                block_body_hash: pallas::crypto::hash::Hash::from([0u8; 32]),
+                operational_cert_hot_vkey: vec![].into(),
+                operational_cert_sequence_number: 0,
+                operational_cert_kes_period: 0,
+                operational_cert_sigma: vec![].into(),
+                protocol_major: 6,
+                protocol_minor: 0,
+            },
+            body_signature: vec![].into(),
+        };
+        let header_cbor = minicbor::to_vec(&header).unwrap();
+
+        // Wrap as a stored alonzo block: `[5, [header]]`. The helper stops at
+        // the header, so the block needs no transaction sections.
+        let mut body = vec![0x82, 0x05, 0x81];
+        body.extend(&header_cbor);
+
+        let decoded = decode_block_header(&body).unwrap().expect("alonzo header");
+
+        assert!(matches!(decoded, MultiEraHeader::ShelleyCompatible(_)));
+        assert_eq!(decoded.issuer_vkey().unwrap(), issuer_vkey.as_slice());
+        assert_eq!(decoded.hash(), Hasher::<256>::hash(&header_cbor));
+    }
+
+    #[test]
+    fn decode_block_header_skips_byron_blocks() {
+        // `[0, []]` = epoch boundary block, `[1, []]` = byron main block.
+        assert!(decode_block_header(&[0x82, 0x00, 0x80]).unwrap().is_none());
+        assert!(decode_block_header(&[0x82, 0x01, 0x80]).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_block_header_rejects_malformed_bytes() {
+        // Not a block wrapper at all.
+        assert!(decode_block_header(&[0xff, 0x00]).is_err());
+
+        // A real block truncated inside the header.
+        let (_, raw) = dolos_testing::blocks::make_conway_block(1234);
+        assert!(decode_block_header(&raw[..raw.len() / 4]).is_err());
+    }
+
     #[tokio::test]
     async fn epochs_blocks_pool_bad_request() {
         let app = TestApp::new();
