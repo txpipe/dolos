@@ -43,10 +43,10 @@ fn namespace_registry_matches_build_schema() {
         "the profile's state namespaces have drifted from build_schema()"
     );
 
-    // ADR-004 says sixteen entity namespaces plus `utxos`. If that count moves,
+    // ADR-004 says eighteen entity namespaces plus `utxos`. If that count moves,
     // the sentence in the ADR moves with it.
-    assert_eq!(entities.len(), 16);
-    assert_eq!(NAMESPACES.len(), 17);
+    assert_eq!(entities.len(), 18);
+    assert_eq!(NAMESPACES.len(), 19);
 }
 
 #[test]
