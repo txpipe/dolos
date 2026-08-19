@@ -209,9 +209,10 @@ pub fn build_schema() -> StateSchema {
 // --- CardanoDelta ---
 
 // Variant order is part of the on-disk WAL format: bincode encodes enum
-// variants by positional index (no name tags). Indices 0..=38 are frozen
-// to match pre-PR `main` so existing WAL rows decode correctly. New
-// variants must be appended to the end. The `EpochTransition` and
+// variants by positional index (no name tags). The index of every variant
+// a released binary has written is frozen (0..=63 as of v1.7.0-alpha.0)
+// so existing WAL rows decode correctly. New variants must be appended to
+// the end. The `EpochTransition` and
 // `EpochWrapUp` variants point at the *legacy* (deprecated) struct
 // shapes for the same reason; `EpochTransitionV2` / `EpochWrapUpV2` are
 // the live shapes used by all new commit paths.
@@ -280,8 +281,8 @@ pub enum CardanoDelta {
     GovDormancyTick(Box<GovDormancyTick>),
     CommitteeGc(Box<CommitteeGc>),
     GovDistrRotate(Box<GovDistrRotate>),
-    GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
     ProposalResolved(Box<ProposalResolved>),
+    GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
 }
 
 impl CardanoDelta {
