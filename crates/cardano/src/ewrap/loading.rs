@@ -77,6 +77,7 @@ impl BoundaryWork {
             applied_reward_credentials: Default::default(),
             applied_rewards: Default::default(),
             deliverable_withdrawal_targets: Default::default(),
+            boundary_drep_credits: Default::default(),
             effective_treasury_withdrawals: 0,
             invalid_treasury_withdrawals: 0,
             effective_treasury_mirs: 0,
@@ -159,6 +160,27 @@ impl BoundaryWork {
         Some(self.ending_state.number)
     }
 
+    /// The DRep an account's weight counts toward in the boundary stake
+    /// distribution, or `None` when it counts toward none: accumulation
+    /// inactive, the account not delegated as of the snapshot, or the
+    /// target a key/script DRep outside the snapshot's registered set.
+    /// `AlwaysAbstain` / `AlwaysNoConfidence` are always in — the
+    /// ratification tallies need both.
+    fn snapshot_drep_of(&self, account: &AccountState) -> Option<DRep> {
+        let snapshot_epoch = self.distr_snapshot_epoch()?;
+
+        let drep = account.delegated_drep_at(snapshot_epoch)?;
+
+        let in_snapshot = match drep {
+            DRep::Abstain | DRep::NoConfidence => true,
+            _ => self
+                .snapshot_registered_dreps
+                .contains(&drep_to_entity_key(drep)),
+        };
+
+        in_snapshot.then(|| drep.clone())
+    }
+
     /// Build the proposal-deposit share of the boundary snapshot: deposits
     /// of the still-live proposals submitted no later than the closing
     /// epoch, summed per return credential — the pulser's `proposalDeposits`
@@ -167,13 +189,22 @@ impl BoundaryWork {
     /// Rows missing `proposed_in`, the deposit, or the return credential
     /// predate the tracking fields and cannot be attributed; they are
     /// excluded (the accepted design-§6 degradation).
+    ///
+    /// The gate is `is_unresolved_at_close`, not `is_active`: a proposal
+    /// resolved at the *previous* boundary is out of the ledger's live
+    /// forest and its deposit already refunded into the return account's
+    /// live stake, so counting it here again double-counts the deposit for
+    /// one epoch — the mainnet epoch-645 `+100e9` DRep offset. A proposal
+    /// resolved at *this* boundary stays counted: its refund is scheduled
+    /// for the opening epoch, so the deposit is this snapshot's only
+    /// carrier of that value, matching the ledger's pre-snapshot refund.
     fn load_proposal_deposits<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let proposals = state.iter_entities_typed::<ProposalState>(ProposalState::NS, None)?;
 
         for record in proposals {
             let (_, proposal) = record?;
 
-            if !proposal.is_active(self.ending_state.number) {
+            if !proposal.is_unresolved_at_close(self.ending_state.number) {
                 continue;
             }
 
@@ -236,17 +267,8 @@ impl BoundaryWork {
             return;
         }
 
-        if let Some(drep) = account.delegated_drep_at(snapshot_epoch) {
-            let in_snapshot = match drep {
-                DRep::Abstain | DRep::NoConfidence => true,
-                _ => self
-                    .snapshot_registered_dreps
-                    .contains(&drep_to_entity_key(drep)),
-            };
-
-            if in_snapshot {
-                *drep_distr.entry(drep.clone()).or_default() += weight;
-            }
+        if let Some(drep) = self.snapshot_drep_of(account) {
+            *drep_distr.entry(drep).or_default() += weight;
         }
 
         if let Some(pool) = account.delegated_pool_at(snapshot_epoch) {
@@ -664,18 +686,30 @@ impl BoundaryWork {
     /// restricts the enacted withdrawal map to credentials present in the
     /// rewards UMap — accounts registered at the boundary — and discards
     /// the rest: no account credit and no pot movement.
+    ///
+    /// Each deliverable amount also counts toward the recipient's snapshot
+    /// DRep in this boundary's stake distribution — the ledger enacts
+    /// before it takes the fresh pulser snapshot, and the shard
+    /// accumulation ran on pre-enactment positions (the mainnet epoch-645
+    /// `Abstain` shortfall).
     fn load_withdrawal_targets<D: Domain>(
         &mut self,
         state: &D::State,
         withdrawals: &[(StakeCredential, u64)],
     ) -> Result<(), ChainError> {
-        for (credential, _) in withdrawals {
+        for (credential, amount) in withdrawals {
             let account: Option<AccountState> =
                 state.read_entity_typed(AccountState::NS, &credential_to_key(credential))?;
 
-            if account.is_some_and(|account| account.is_registered()) {
-                self.deliverable_withdrawal_targets
-                    .insert(credential.clone());
+            let Some(account) = account.filter(|account| account.is_registered()) else {
+                continue;
+            };
+
+            self.deliverable_withdrawal_targets
+                .insert(credential.clone());
+
+            if let Some(drep) = self.snapshot_drep_of(&account) {
+                *self.boundary_drep_credits.entry(drep).or_default() += amount;
             }
         }
 
@@ -819,6 +853,7 @@ impl BoundaryWork {
 
         boundary.load_pool_data::<D>(state)?;
         boundary.load_drep_data::<D>(state)?;
+        boundary.load_pool_refund_credits()?;
 
         // The ruling first: the proposal classification below, the
         // `ProposalResolved` stamping it emits, and the dormancy check all
@@ -830,6 +865,46 @@ impl BoundaryWork {
         boundary.compute_ewrap_deltas::<D>(state)?;
 
         Ok(boundary)
+    }
+
+    /// Count each retiring pool's deposit refund toward its reward
+    /// account's snapshot DRep in this boundary's stake distribution. The
+    /// ledger pays POOLREAP refunds into the rewards UMap before it takes
+    /// the fresh DRep pulser snapshot, while dolos schedules the refund
+    /// for the opening epoch — after the shard accumulation read its
+    /// positions (the mainnet epoch-645 `-500e6` DRep offset). The pool
+    /// leg is untouched: the ledger's pool snapshot (SNAP) precedes
+    /// POOLREAP. Runs after `load_pool_data` (the retiring set) and
+    /// `load_drep_data` (the registered-DRep gate).
+    fn load_pool_refund_credits(&mut self) -> Result<(), ChainError> {
+        if self.distr_snapshot_epoch().is_none() {
+            return Ok(());
+        }
+
+        let refunded: Vec<_> = self
+            .retiring_pools
+            .values()
+            .filter_map(|(_, account)| account.clone())
+            .filter(|account| account.is_registered())
+            .collect();
+
+        if refunded.is_empty() {
+            return Ok(());
+        }
+
+        let deposit = self
+            .ending_state
+            .pparams
+            .unwrap_live()
+            .ensure_pool_deposit()?;
+
+        for account in refunded {
+            if let Some(drep) = self.snapshot_drep_of(&account) {
+                *self.boundary_drep_credits.entry(drep).or_default() += deposit;
+            }
+        }
+
+        Ok(())
     }
 
     /// The completed DRep distribution for the boundary being closed, or
@@ -1327,6 +1402,17 @@ impl BoundaryWork {
         // committee when the delta applies
         self.add_delta(crate::CommitteeGc::new());
 
+        // fold the boundary-paid credits (enacted withdrawals,
+        // pool-deposit refunds) into the completed accumulator before it
+        // rotates, so the persisted row and the next boundary's tally
+        // both carry them
+        if !self.boundary_drep_credits.is_empty() {
+            self.add_delta(crate::GovDistrBoundaryCredit::new(
+                closing,
+                self.boundary_drep_credits.clone(),
+            ));
+        }
+
         // rotate this boundary's completed distributions where the next
         // boundary's ratification tally will read them
         self.add_delta(crate::GovDistrRotate::new(closing));
@@ -1365,8 +1451,16 @@ impl BoundaryWork {
 
         // DReps — drops.visit_drep emits DRepExpiration for expiring dreps;
         // registered dreps additionally get their boundary voting power
-        // written from the completed distribution accumulator.
-        let drep_power = self.completed_drep_distr();
+        // written from the completed distribution accumulator, with the
+        // boundary-paid credits folded in — the same amounts
+        // `GovDistrBoundaryCredit` persists into the accumulator itself.
+        let drep_power = self.completed_drep_distr().map(|mut distr| {
+            for (drep, credit) in &self.boundary_drep_credits {
+                *distr.entry(drep.clone()).or_default() += credit;
+            }
+
+            distr
+        });
 
         let dreps = state.iter_entities_typed::<DRepState>(DRepState::NS, None)?;
         for record in dreps {
@@ -1810,6 +1904,180 @@ mod tests {
         assert_eq!(read_drep_power(&domain, &reg_drep()), 147);
         assert_eq!(read_drep_power(&domain, &fresh_drep()), 0);
         assert_eq!(read_drep_power(&domain, &unreg_drep()), 0);
+    }
+
+    /// Deposit weight follows the ledger's live forest, not the drop-pass
+    /// grace: a proposal resolved at the *previous* boundary already had
+    /// its deposit refunded into the return account's live stake, so
+    /// counting it again double-counts the deposit for one epoch — the
+    /// mainnet epoch-645 `+100e9` DRep offset. A proposal resolved at
+    /// *this* boundary stays counted: its refund is scheduled for the
+    /// opening epoch, so the deposit is this snapshot's only carrier of
+    /// that value.
+    #[test]
+    fn resolved_proposal_deposit_leaves_the_snapshot() {
+        let domain = seed_domain();
+        let state = domain.state();
+
+        let alice_credential = StakeCredential::AddrKeyhash([0xa1; 28].into());
+
+        let base = ProposalState {
+            slot: 0,
+            tx: [0u8; 32].into(),
+            idx: 0,
+            action: crate::ProposalAction::Info,
+            max_epoch: None,
+            ratified_epoch: None,
+            canceled_epoch: None,
+            deposit: None,
+            reward_account: Some(alice_credential),
+            proposed_in: Some(CLOSING_EPOCH - 2),
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        };
+
+        // ratified at the previous boundary: out of the forest, refunded
+        let enacted_prior = ProposalState {
+            tx: [0xe1u8; 32].into(),
+            deposit: Some(900),
+            ratified_epoch: Some(CLOSING_EPOCH - 1),
+            ..base.clone()
+        };
+
+        // dropped at the previous boundary: same
+        let dropped_prior = ProposalState {
+            tx: [0xe2u8; 32].into(),
+            deposit: Some(300),
+            canceled_epoch: Some(CLOSING_EPOCH),
+            ..base.clone()
+        };
+
+        // ratified at *this* boundary: still counted — its refund is
+        // scheduled for the opening epoch, past the snapshot
+        let enacted_here = ProposalState {
+            tx: [0xe3u8; 32].into(),
+            deposit: Some(70),
+            ratified_epoch: Some(CLOSING_EPOCH),
+            ..base.clone()
+        };
+
+        let writer = state.start_writer().unwrap();
+        for (key, proposal) in [
+            (b"proposal-3".to_vec(), &enacted_prior),
+            (b"proposal-4".to_vec(), &dropped_prior),
+            (b"proposal-5".to_vec(), &enacted_here),
+        ] {
+            writer
+                .write_entity_typed(&EntityKey::from(key), proposal)
+                .unwrap();
+        }
+        writer.commit().unwrap();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let distr = read_distr(&domain);
+        assert!(distr.is_complete_for(CLOSING_EPOCH));
+
+        // alice: 100 stake + 40 + 7 live deposits + 70 resolved-here
+        // deposit; the 900 and 300 resolved-prior deposits stay out
+        let expected_dreps = BTreeMap::from([(reg_drep(), 217u64), (DRep::Abstain, 61u64)]);
+        assert_eq!(distr.drep_distr, expected_dreps);
+    }
+
+    /// A pool retiring at this boundary has its deposit refund counted
+    /// toward the reward account's snapshot DRep: the ledger pays POOLREAP
+    /// refunds into the rewards UMap before it takes the fresh pulser
+    /// snapshot, while dolos schedules the refund for the opening epoch —
+    /// the mainnet epoch-645 `-500e6` DRep offset. The pool leg stays
+    /// untouched (SNAP precedes POOLREAP).
+    #[test]
+    fn retiring_pool_refund_credits_the_boundary_drep_distr() {
+        let domain = seed_domain();
+        let state = domain.state();
+
+        // pool_a retires into the opening epoch; its declared reward
+        // account is alice, delegated to the registered drep
+        let params = crate::PoolParams {
+            vrf_keyhash: [0u8; 32].into(),
+            pledge: 0,
+            cost: 0,
+            margin: crate::pallas_extras::default_rational_number(),
+            reward_account: [&[0xe1u8][..], &[0xa1u8; 28][..]].concat(),
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        };
+
+        let pool = crate::PoolState {
+            operator: pool_a(),
+            snapshot: EpochValue::from_parts(
+                CLOSING_EPOCH,
+                Some(crate::PoolSnapshot {
+                    is_retired: false,
+                    blocks_minted: 0,
+                    params,
+                    is_new: false,
+                }),
+                None,
+                None,
+                None,
+                None,
+            ),
+            blocks_minted_total: 0,
+            register_slot: 0,
+            retiring_epoch: Some(CLOSING_EPOCH + 1),
+            deposit: 0,
+        };
+
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&EntityKey::from(pool_a().as_slice()), &pool)
+            .unwrap();
+        writer.commit().unwrap();
+
+        for shard in 0..TOTAL_SHARDS {
+            run_shard(&domain, shard);
+        }
+
+        let accumulated = read_distr(&domain);
+        assert!(accumulated.is_complete_for(CLOSING_EPOCH));
+        assert_eq!(accumulated.drep_distr.get(&reg_drep()), Some(&147));
+
+        let mut boundary =
+            BoundaryWork::load_finalize::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        boundary
+            .commit_finalize::<ToyDomain>(domain.state(), domain.archive())
+            .unwrap();
+
+        let pool_deposit = crate::load_epoch::<ToyDomain>(state)
+            .unwrap()
+            .pparams
+            .unwrap_live()
+            .ensure_pool_deposit()
+            .unwrap();
+
+        assert_eq!(
+            boundary.boundary_drep_credits,
+            BTreeMap::from([(reg_drep(), pool_deposit)])
+        );
+
+        let distr = read_distr(&domain);
+        assert_eq!(
+            distr.drep_distr.get(&reg_drep()),
+            Some(&(147 + pool_deposit))
+        );
+
+        // the pool leg is not credited
+        assert_eq!(distr.pool_distr, accumulated.pool_distr);
+        assert_eq!(distr.pool_total, accumulated.pool_total);
+
+        assert_eq!(read_drep_power(&domain, &reg_drep()), 147 + pool_deposit);
     }
 
     /// A DRep certificate, as the tests below replay it: the position it
@@ -2442,6 +2710,94 @@ mod ratification_tests {
             before.initial_pots.proposal_deposits - DEPOSIT
         );
         assert!(after.initial_pots.is_consistent(max_supply));
+    }
+
+    /// An enacted treasury withdrawal counts toward the recipient's
+    /// snapshot DRep in the distribution this boundary publishes: the
+    /// ledger enacts before it takes the fresh pulser snapshot, while the
+    /// shard accumulation ran on pre-enactment positions — on mainnet the
+    /// 644→645 boundary's six items left the `Abstain` bucket short by
+    /// exactly their deliverable total. The finalize pass folds the credit
+    /// into the accumulator, the rotated copy the next boundary ratifies
+    /// with, and the published `DRepState.voting_power`.
+    #[test]
+    fn enacted_withdrawal_credits_the_boundary_drep_distr() {
+        let accepted = withdrawal(0x01, Some(Vote::Yes), CLOSING + 10);
+
+        let domain = seed(&[accepted]);
+
+        // delegate the beneficiary to the registered drep as of the
+        // snapshot position
+        let key = credential_to_key(&beneficiary());
+        let mut row = domain
+            .state()
+            .read_entity_typed::<crate::AccountState>(crate::AccountState::NS, &key)
+            .unwrap()
+            .expect("beneficiary row present");
+        row.drep = EpochValue::from_parts(
+            CLOSING,
+            Some(crate::DRepDelegation::Delegated(drep())),
+            None,
+            None,
+            None,
+            None,
+        );
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&key, &row).unwrap();
+        writer.commit().unwrap();
+
+        // EWRAP shard pass: the accumulation reads pre-enactment
+        // positions, so the drep carries only the deposit weight of the
+        // live proposal returning to the beneficiary
+        let ranges = crate::shard::shard_key_ranges(0, 1);
+        let mut shard = BoundaryWork::load_shard::<ToyDomain>(
+            domain.state(),
+            domain.genesis(),
+            0,
+            1,
+            ranges.clone(),
+        )
+        .unwrap();
+        shard
+            .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+            .unwrap();
+
+        let accumulated = crate::load_gov::<ToyDomain>(domain.state())
+            .unwrap()
+            .distr
+            .expect("accumulator present");
+        assert!(accumulated.is_complete_for(CLOSING));
+        assert_eq!(accumulated.drep_distr.get(&drep()), Some(&DEPOSIT));
+
+        // EWRAP finalize: enacts the withdrawal and folds the credit in
+        let boundary = finalize(&domain);
+
+        assert_eq!(
+            boundary.boundary_drep_credits,
+            BTreeMap::from([(drep(), WITHDRAWAL)])
+        );
+
+        let gov = crate::load_gov::<ToyDomain>(domain.state()).unwrap();
+
+        let distr = gov.distr.expect("accumulator present");
+        assert_eq!(distr.drep_distr.get(&drep()), Some(&(DEPOSIT + WITHDRAWAL)));
+
+        let rotated = gov.prev_distr.expect("rotated distribution present");
+        assert!(rotated.is_complete_for(CLOSING));
+        assert_eq!(
+            rotated.drep_distr.get(&drep()),
+            Some(&(DEPOSIT + WITHDRAWAL))
+        );
+
+        let drep_row = domain
+            .state()
+            .read_entity_typed::<crate::DRepState>(
+                crate::DRepState::NS,
+                &crate::model::drep_to_entity_key(&drep()),
+            )
+            .unwrap()
+            .expect("drep row present");
+        assert_eq!(drep_row.voting_power, DEPOSIT + WITHDRAWAL);
     }
 
     /// An action submitted *during* the closing epoch cannot ratify at

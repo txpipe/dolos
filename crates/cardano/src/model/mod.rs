@@ -209,9 +209,10 @@ pub fn build_schema() -> StateSchema {
 // --- CardanoDelta ---
 
 // Variant order is part of the on-disk WAL format: bincode encodes enum
-// variants by positional index (no name tags). Indices 0..=38 are frozen
-// to match pre-PR `main` so existing WAL rows decode correctly. New
-// variants must be appended to the end. The `EpochTransition` and
+// variants by positional index (no name tags). The index of every variant
+// a released binary has written is frozen (0..=63 as of v1.7.0-alpha.0)
+// so existing WAL rows decode correctly. New variants must be appended to
+// the end. The `EpochTransition` and
 // `EpochWrapUp` variants point at the *legacy* (deprecated) struct
 // shapes for the same reason; `EpochTransitionV2` / `EpochWrapUpV2` are
 // the live shapes used by all new commit paths.
@@ -281,6 +282,7 @@ pub enum CardanoDelta {
     CommitteeGc(Box<CommitteeGc>),
     GovDistrRotate(Box<GovDistrRotate>),
     ProposalResolved(Box<ProposalResolved>),
+    GovDistrBoundaryCredit(Box<GovDistrBoundaryCredit>),
 }
 
 impl CardanoDelta {
@@ -383,6 +385,7 @@ delta_from!(DRepPowerUpdate);
 delta_from!(GovDormancyTick);
 delta_from!(CommitteeGc);
 delta_from!(GovDistrRotate);
+delta_from!(GovDistrBoundaryCredit);
 delta_from!(ProposalResolved);
 
 #[allow(deprecated)]
@@ -428,6 +431,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => x.key(),
             Self::CommitteeGc(x) => x.key(),
             Self::GovDistrRotate(x) => x.key(),
+            Self::GovDistrBoundaryCredit(x) => x.key(),
             Self::ProposalResolved(x) => x.key(),
             Self::AssignRewards(x) => x.key(),
             Self::NonceTransition(x) => x.key(),
@@ -496,6 +500,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::CommitteeGc(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::GovDistrRotate(x) => Self::downcast_apply(x.as_mut(), entity),
+            Self::GovDistrBoundaryCredit(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::ProposalResolved(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::AssignRewards(x) => Self::downcast_apply(x.as_mut(), entity),
             Self::NonceTransition(x) => Self::downcast_apply(x.as_mut(), entity),
@@ -564,6 +569,7 @@ impl dolos_core::EntityDelta for CardanoDelta {
             Self::GovDormancyTick(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::CommitteeGc(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::GovDistrRotate(x) => Self::downcast_undo(x.as_ref(), entity),
+            Self::GovDistrBoundaryCredit(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::ProposalResolved(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::AssignRewards(x) => Self::downcast_undo(x.as_ref(), entity),
             Self::NonceTransition(x) => Self::downcast_undo(x.as_ref(), entity),
