@@ -48,6 +48,7 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
     tx_content_redeemers_inner::{Purpose, TxContentRedeemersInner},
+    tx_content_required_signers_inner::TxContentRequiredSignersInner,
     tx_content_stake_addr_inner::TxContentStakeAddrInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
@@ -1448,6 +1449,25 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
             })
             .try_collect()
             .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(items)
+    }
+}
+
+impl IntoModel<Vec<TxContentRequiredSignersInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentRequiredSignersInner>, StatusCode> {
+        let tx = self.tx()?;
+        let signers = tx.required_signers();
+
+        let items = signers
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|hash| TxContentRequiredSignersInner {
+                witness_hash: hash.to_string(),
+            })
+            .collect();
 
         Ok(items)
     }
