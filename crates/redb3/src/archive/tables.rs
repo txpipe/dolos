@@ -135,7 +135,6 @@ impl EbbsTable {
 pub struct BlocksTable;
 
 impl BlocksTable {
-    /// Index table: slot -> BlockLocation (16 bytes packed).
     pub const DEF: IndexDef = TableDefinition::new("blocks");
 
     pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
@@ -343,11 +342,10 @@ impl BlocksTable {
         flatfiles: &FlatFileStore,
         slot: BlockSlot,
     ) -> Result<(), Error> {
-        // Find the earliest entry after `slot` across both indexes to
-        // determine the truncation offset. An EBB opening the first epoch
-        // after the cut sits before that epoch's first main block in the
-        // segment, so taking the minimum is what keeps its bytes from
-        // surviving the truncation.
+        // An EBB opening the first epoch after the cut sits before that
+        // epoch's first main block in the segment, so taking the minimum
+        // across both indexes is what keeps its bytes from surviving the
+        // truncation.
         let mut earliest_after: Option<BlockLocation> = None;
 
         for def in [Self::DEF, EbbsTable::DEF] {

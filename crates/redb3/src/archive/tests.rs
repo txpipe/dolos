@@ -401,10 +401,6 @@ fn test_write_after_undo() {
     assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(new_block));
 }
 
-// ============================================================================
-// Byron epoch-boundary blocks
-// ============================================================================
-//
 // An EBB carries the same absolute slot as the first main block of the epoch
 // it opens. These tests pin the two apart: the sidecar index holds the EBB,
 // the main index holds the block that follows it, and every read that walks
