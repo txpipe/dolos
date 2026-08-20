@@ -5,6 +5,11 @@
 //!
 //! # What the pots are compared against
 //!
+//! Two comparisons with different anchors, because the pot figures do not all
+//! mean the same thing at the same moment.
+//!
+//! ## At the tip
+//!
 //! `EpochState::initial_pots` is the pots **as of the start of the current
 //! epoch** — ESTART writes it once at each boundary and nothing touches it
 //! until the next one. The UTxO set and the account entities, meanwhile, are
@@ -15,11 +20,10 @@
 //! [`dolos_cardano::pots::apply_delta`], the same function ESTART itself uses,
 //! rather than a second copy of the arithmetic.
 //!
-//! # What is deliberately not compared
-//!
-//! Rolling the pots forward is only exact for the pots whose within-epoch
-//! movement is fully recorded in `RollingStats`. Three are not, and this
-//! check stays silent about them rather than encoding a guess as a tolerance:
+//! Rolling forward is only exact for the pots whose within-epoch movement
+//! `RollingStats` records in full, so the tip comparison stays narrow: the
+//! UTxO pot, the account count, the DRep deposits, and total supply
+//! conservation. Three pots have no honest figure at the tip at all:
 //!
 //! - **rewards, reserves, treasury.** Their within-epoch movement includes MIR
 //!   certificates, and `RollingStats` records the amounts the certificates *ask
@@ -30,28 +34,71 @@
 //!   and the pot deliberately disagree mid-epoch.
 //! - **proposal_deposits.** `ProposalState::is_active` keeps an expiring
 //!   proposal active for one epoch past its expiry "to allow for the drop
-//!   epoch", while the deposit leaves the pot at the boundary. Which of the two
-//!   edges the comparison should use is a ledger question, not one this command
-//!   should answer on its own.
+//!   epoch", while the deposit leaves the pot at the boundary.
 //!
-//! What is compared — the UTxO pot, the account count, the DRep deposits, and
-//! total supply conservation — has no boundary-only component, so a
-//! disagreement is a real one.
+//! ## At every boundary
 //!
-//! The delegation half is asymmetric for the same reason: pool delegations are
-//! swept against the `pools` namespace, vote delegations are not swept at all.
-//! See [`dangling_referents`].
+//! Each of those three *does* have an exact figure at every epoch boundary,
+//! and the archive keeps the closing `EpochState` of every epoch the node has
+//! been through. That snapshot carries every input ESTART used to compute the
+//! next epoch's pots: `initial_pots`, the epoch's own `RollingStats`, the
+//! `EndStats` `wrapup.flush` wrote, and the live and mark pparams that pick
+//! the delta path. So [`handed_off_pots`] rebuilds exactly the delta
+//! `dolos_cardano::estart`'s `define_new_pots` builds and runs it through the
+//! same [`apply_delta`], and [`check_boundaries`] compares the result — pot by
+//! pot, every pot — against what the next snapshot claims it started with.
+//!
+//! A disagreement there is a real one: the node's own arithmetic, replayed
+//! over the node's own recorded inputs, did not produce the pots the node
+//! stored. A pot that only ever has a boundary value is therefore checked
+//! where it has one, instead of being given a tolerance at the tip.
+//!
+//! # What is still not compared
+//!
+//! - **`utxos` and `reserves` at the Shelley→Allegra boundary.** ESTART
+//!   reclaims the unredeemed AVVM UTxOs there, moving value from the one to the
+//!   other by an amount it reads out of the UTxO set and never records. Nothing
+//!   on disk reproduces it once those UTxOs are gone, so that single boundary
+//!   compares every pot except those two. Every other pot at it, and both of
+//!   them at every other boundary, are still compared.
+//! - **A hand-off whose closing snapshot is incomplete** — no `EndStats`, or no
+//!   live pparams to say whether the Byron or the Shelley delta path applies.
+//!   The snapshot's completeness is check 4 (`epoch-log`)'s finding; this check
+//!   reports that the hand-off went unreplayed and moves on.
+//! - **Any boundary at all, on a store whose `epochs` log does not hold both
+//!   sides of it.** A log the node pruned, or never wrote, leaves the pots it
+//!   would have covered unchecked rather than assumed good.
+//! - **The recorded inputs themselves.** The boundary comparison asks whether
+//!   the pots on disk are what the node's own arithmetic produces from the
+//!   figures the node recorded — not whether those figures were right. An
+//!   `EndStats` that understated a MIR would be replayed faithfully into the
+//!   pots that understate it. Catching that needs a second, independent
+//!   recomputation of a pot (summing account reward balances for `rewards`,
+//!   say) and a second reading of when the ledger says the two agree; a wrong
+//!   second reading would report every intact store as broken, so this check
+//!   does not attempt one.
+//!
+//! # The delegation referents
+//!
+//! Pool delegations are swept against the `pools` namespace. Vote delegations
+//! are swept under three narrow rules, and deliberately not under the
+//! symmetric one — see [`dangling_vote_referent`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use dolos_cardano::eras::load_chain_summary_from_state;
 use dolos_cardano::model::{
-    AccountState, DRepState, EpochState, PoolDelegation, PoolHash, PoolState, SingletonEntity as _,
+    drep_to_entity_key, AccountState, DRepDelegation, DRepState, EpochState, EraSummary,
+    PoolDelegation, PoolHash, PoolState, SingletonEntity as _,
 };
 use dolos_cardano::pots::{apply_delta, EpochIncentives, PotDelta, Pots};
+use dolos_cardano::ChainSummary;
 use dolos_cardano::FixedNamespace as _;
-use dolos_core::{EntityKey, Genesis, StateStore};
+use dolos_core::{ArchiveStore as _, BlockSlot, EntityKey, Genesis, StateStore, TxOrder};
 use indicatif::ProgressBar;
 use miette::{Context as _, IntoDiagnostic as _};
+use pallas::ledger::primitives::conway::DRep;
+use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::MultiEraOutput;
 
 use super::{CheckKind, Issue};
@@ -61,6 +108,15 @@ const CHECK: CheckKind = CheckKind::Totals;
 /// How many dangling referents to name individually before collapsing the
 /// rest into a count.
 const MAX_REPORTED_REFERENTS: usize = 20;
+
+/// How many disagreeing epoch boundaries to report individually before
+/// collapsing the rest into a count.
+///
+/// A store whose pot arithmetic is broken is usually broken from one epoch
+/// onwards, and every boundary after it disagrees on up to twelve figures.
+/// The first few name the epoch the divergence starts at, which is what an
+/// operator needs; the rest are the same finding restated a thousand times.
+const MAX_REPORTED_BOUNDARIES: usize = 20;
 
 /// Roll `initial_pots` forward to the chain tip with what the node has
 /// accumulated so far this epoch.
@@ -112,6 +168,288 @@ pub fn live_pots(epoch: &EpochState) -> Option<Pots> {
         &EpochIncentives::default(),
         &delta,
     ))
+}
+
+/// Why one logged hand-off cannot be replayed from what is on disk.
+///
+/// Neither reason is corruption on its own — a snapshot's completeness is
+/// check 4 (`epoch-log`)'s finding — so the boundary is reported as
+/// unreplayed rather than as a disagreement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unreplayable {
+    /// `wrapup.flush` never wrote the closing figures.
+    NoEndStats,
+
+    /// Nothing on the snapshot says whether the Byron or the Shelley delta
+    /// path applies, and the two produce different pots.
+    NoPParams,
+}
+
+impl std::fmt::Display for Unreplayable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoEndStats => f.write_str("it carries no end stats"),
+            Self::NoPParams => f.write_str("it carries no live protocol parameters"),
+        }
+    }
+}
+
+/// Replay the pots one epoch hands to the next, from the closing epoch's own
+/// snapshot.
+///
+/// This is `dolos_cardano::estart`'s `define_new_pots` over the same inputs —
+/// the epoch's `RollingStats` for what the blocks moved, the `EndStats` for
+/// the figures only the boundary knows, and the live and mark pparams for the
+/// delta path — through the same [`apply_delta`]. Every one of them is a
+/// field of the snapshot the archive already holds, which is what makes the
+/// comparison possible without replaying a single block.
+///
+/// The one input ESTART does not take from the snapshot is the AVVM
+/// reclamation, which it reads out of the UTxO set. That is zero at every
+/// boundary but the Shelley→Allegra one; [`avvm_boundary`] is what tells the
+/// caller which pots to leave out of the comparison there.
+pub fn handed_off_pots(closing: &EpochState) -> Result<Pots, Unreplayable> {
+    let end = closing.end.as_ref().ok_or(Unreplayable::NoEndStats)?;
+    let pparams = closing.pparams.live().ok_or(Unreplayable::NoPParams)?;
+
+    // `rolling.live` is created lazily by the first block of an epoch, so an
+    // epoch that saw none carries none — and moved nothing.
+    let rolling = closing.rolling.live().cloned().unwrap_or_default();
+
+    let protocol = pparams.protocol_major_or_default();
+
+    let delta = PotDelta {
+        produced_utxos: rolling.produced_utxos,
+        consumed_utxos: rolling.consumed_utxos,
+        gathered_fees: rolling.gathered_fees,
+        new_accounts: rolling.new_accounts,
+        removed_accounts: rolling.removed_accounts,
+        withdrawals: rolling.withdrawals,
+        drep_deposits: rolling.drep_deposits,
+        drep_refunds: rolling.drep_refunds,
+        proposal_deposits: rolling.proposal_deposits,
+        treasury_donations: rolling.treasury_donations,
+        deposit_per_account: pparams.key_deposit(),
+        deposit_per_pool: Some(pparams.pool_deposit_or_default()),
+        reserve_mirs: end.reserve_mirs,
+        treasury_mirs: end.treasury_mirs,
+        treasury_withdrawals: end.treasury_withdrawals,
+        proposal_refunds: end.proposal_refunds,
+        proposal_invalid_refunds: end.proposal_invalid_refunds,
+        effective_rewards: end.effective_rewards,
+        unspendable_to_treasury: end.unspendable_to_treasury,
+        unspendable_to_reserves: end.unspendable_to_reserves,
+        pool_deposit_count: end.pool_deposit_count,
+        pool_refund_count: end.pool_refund_count,
+        pool_invalid_refund_count: end.pool_invalid_refund_count,
+        mark_protocol_version: closing
+            .pparams
+            .mark()
+            .map(|x| x.protocol_major_or_default())
+            .unwrap_or(protocol),
+        ..PotDelta::neutral(protocol, protocol)
+    };
+
+    Ok(apply_delta(
+        closing.initial_pots.clone(),
+        &end.epoch_incentives,
+        &delta,
+    ))
+}
+
+/// Whether this is the Shelley→Allegra boundary, the one where ESTART
+/// reclaims the unredeemed AVVM UTxOs.
+///
+/// The reclamation moves value from `utxos` to `reserves` and touches
+/// nothing else, so those two are the only pots the comparison drops there.
+///
+/// Only ever called on a snapshot [`handed_off_pots`] already accepted, which
+/// is what makes the `unwrap_live` inside `era_transition` safe.
+fn avvm_boundary(closing: &EpochState) -> bool {
+    closing
+        .pparams
+        .era_transition()
+        .is_some_and(|x| x.entering_allegra())
+}
+
+/// The pots the reclamation moves value between — see [`avvm_boundary`].
+const AVVM_POTS: [&str; 2] = ["reserves", "utxos"];
+
+/// Every figure a `Pots` carries, named as an operator reading a
+/// disagreement would name it.
+fn pot_figures(pots: &Pots) -> [(&'static str, u64); 12] {
+    [
+        ("reserves", pots.reserves),
+        ("treasury", pots.treasury),
+        ("utxos", pots.utxos),
+        ("rewards", pots.rewards),
+        ("fees", pots.fees),
+        ("pool-count", pots.pool_count),
+        ("account-count", pots.account_count),
+        ("deposit-per-pool", pots.deposit_per_pool),
+        ("deposit-per-account", pots.deposit_per_account),
+        ("nominal-deposits", pots.nominal_deposits),
+        ("drep-deposits", pots.drep_deposits),
+        ("proposal-deposits", pots.proposal_deposits),
+    ]
+}
+
+/// Replay one hand-off and compare it against the pots the opening epoch
+/// claims it started with.
+pub fn check_hand_off(closing: &EpochState, opening: &EpochState) -> Vec<Issue> {
+    // Not a hand-off at all: a gap in the log, or the live epoch's own
+    // snapshot already archived. Both are check 4's to report, and reporting
+    // them twice would only teach operators to read past this one.
+    if opening.number != closing.number + 1 {
+        return Vec::new();
+    }
+
+    let replayed = match handed_off_pots(closing) {
+        Ok(x) => x,
+        Err(why) => {
+            return vec![Issue::new(
+                CHECK,
+                format!(
+                    "the hand-off from epoch {} to epoch {} could not be replayed because {why}; \
+                     the pots epoch {} claims went unchecked",
+                    closing.number, opening.number, opening.number,
+                ),
+            )]
+        }
+    };
+
+    let skipped: &[&str] = if avvm_boundary(closing) {
+        &AVVM_POTS
+    } else {
+        &[]
+    };
+
+    let mut issues = Vec::new();
+
+    let figures = pot_figures(&replayed)
+        .into_iter()
+        .zip(pot_figures(&opening.initial_pots));
+
+    for ((what, replayed), (_, claimed)) in figures {
+        if skipped.contains(&what) || replayed == claimed {
+            continue;
+        }
+
+        issues.push(Issue::new(
+            CHECK,
+            format!(
+                "replaying the boundary out of epoch {} hands epoch {} a {what} of {replayed}, \
+                 but epoch {} claims {claimed} (off by {}); the ledger's own `apply_delta` over \
+                 the recorded end stats did not reproduce the stored pots",
+                closing.number,
+                opening.number,
+                opening.number,
+                replayed.abs_diff(claimed),
+            ),
+        ));
+    }
+
+    issues
+}
+
+/// What one pass over the `epochs` log found, plus the one anchor the
+/// vote-delegation rules take out of the same walk.
+#[derive(Debug, Default)]
+pub struct Boundaries {
+    pub issues: Vec<Issue>,
+
+    /// The first epoch the log shows running protocol major 10 or later,
+    /// when the log also holds an earlier epoch running 9 or earlier — the
+    /// hard fork that carries the one-shot delegation migration.
+    ///
+    /// `None` when the log does not span that fork, in which case the
+    /// migration rule has nothing to stand on and does not run. See
+    /// [`dangling_vote_referent`].
+    pub pv10_epoch: Option<Epoch>,
+}
+
+/// Replay every hand-off the `epochs` log holds both sides of.
+///
+/// `live` is the state store's own `EpochState`, which is the far side of
+/// the last hand-off whenever its snapshot is not in the log yet.
+///
+/// A row that does not decode is check 4's finding, not this one's, and is
+/// skipped rather than reported twice.
+pub fn check_boundaries<E: std::fmt::Display>(
+    snapshots: impl Iterator<Item = Result<EpochState, E>>,
+    live: Option<&EpochState>,
+) -> Boundaries {
+    let mut out = Boundaries::default();
+    let mut previous: Option<EpochState> = None;
+    let mut seen_pre_pv10 = false;
+    let mut disagreeing = 0usize;
+
+    for record in snapshots.flatten() {
+        note_pv10(&record, &mut seen_pre_pv10, &mut out.pv10_epoch);
+
+        if let Some(previous) = previous.take() {
+            report_boundary(
+                check_hand_off(&previous, &record),
+                &mut out,
+                &mut disagreeing,
+            );
+        }
+
+        previous = Some(record);
+    }
+
+    if let (Some(previous), Some(live)) = (previous, live) {
+        note_pv10(live, &mut seen_pre_pv10, &mut out.pv10_epoch);
+        report_boundary(check_hand_off(&previous, live), &mut out, &mut disagreeing);
+    }
+
+    if disagreeing > MAX_REPORTED_BOUNDARIES {
+        out.issues.push(Issue::new(
+            CHECK,
+            format!(
+                "{} further epoch boundaries do not replay, not listed individually",
+                disagreeing - MAX_REPORTED_BOUNDARIES
+            ),
+        ));
+    }
+
+    out
+}
+
+/// Add one boundary's findings, collapsing everything past
+/// [`MAX_REPORTED_BOUNDARIES`] into the count the caller closes with.
+fn report_boundary(issues: Vec<Issue>, out: &mut Boundaries, disagreeing: &mut usize) {
+    if issues.is_empty() {
+        return;
+    }
+
+    *disagreeing += 1;
+
+    if *disagreeing <= MAX_REPORTED_BOUNDARIES {
+        out.issues.extend(issues);
+    }
+}
+
+/// Track the hard fork into protocol major 10 across the log walk.
+///
+/// The epoch is only taken once an *earlier* snapshot has been seen running
+/// 9 or less: a log that starts after the fork cannot say where it was, and
+/// naming its first entry would put the migration boundary at a slot the
+/// migration never ran at.
+fn note_pv10(snapshot: &EpochState, seen_pre_pv10: &mut bool, pv10_epoch: &mut Option<Epoch>) {
+    let Some(major) = snapshot
+        .pparams
+        .live()
+        .map(|x| x.protocol_major_or_default())
+    else {
+        return;
+    };
+
+    if major < 10 {
+        *seen_pre_pv10 = true;
+    } else if *seen_pre_pv10 && pv10_epoch.is_none() {
+        *pv10_epoch = Some(snapshot.number);
+    }
 }
 
 /// What one pass over the state's entity namespaces recomputed.
@@ -178,8 +516,41 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, max_supply: Option<u64>) -
     issues
 }
 
-/// The pools a delegation can point at, loaded once so the account pass is a
-/// set lookup rather than a read per account.
+/// What one DRep row says, reduced to what the referent rules ask of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DRepFacts {
+    /// The identifier the row carries. [`drep_to_entity_key`] derives the key
+    /// a row is stored under from this, class prefix included, so a row that
+    /// disagrees with its own key was not written by the node.
+    pub identifier: DRep,
+
+    /// Where the retirement happened, on a row that is currently
+    /// unregistered — the position `BoundaryWork::clears_drep_delegation`
+    /// measures a delegation against. `None` on a registered row, including
+    /// one that unregistered and registered again.
+    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
+}
+
+/// The chain positions the vote-delegation rules are measured against.
+///
+/// Each is `None` when the store cannot place it, and a rule without its
+/// anchor does not run: a position that cannot be placed is a reason to stay
+/// silent, never to guess one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Anchors {
+    /// First slot of the epoch the state store is live in. Every boundary
+    /// before it has been crossed, which is what makes a drop the ledger owed
+    /// overdue rather than still pending.
+    pub live_epoch_start: Option<BlockSlot>,
+
+    /// First slot of the epoch protocol major 10 became live — the boundary
+    /// that ran the one-shot migration dropping delegations to DReps that
+    /// were not registered at it.
+    pub pv10_boundary: Option<BlockSlot>,
+}
+
+/// The entities a delegation can point at, loaded once so the account pass is
+/// a map lookup rather than a read per account.
 ///
 /// Keyed by [`EntityKey`] rather than by the raw hash a delegation carries.
 /// An `EntityKey` is a fixed-width, zero-padded 32 bytes, so a 28-byte pool
@@ -190,11 +561,24 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, max_supply: Option<u64>) -
 #[derive(Debug, Default)]
 pub struct Referents {
     pub pools: HashSet<EntityKey>,
+    pub dreps: HashMap<EntityKey, DRepFacts>,
+    pub anchors: Anchors,
 }
 
 impl Referents {
     fn has_pool(&self, pool: &PoolHash) -> bool {
         self.pools.contains(&EntityKey::from(*pool))
+    }
+}
+
+/// How a `DRep` reads in a report: the credential class it names, and the
+/// hash under it.
+fn describe_drep(drep: &DRep) -> String {
+    match drep {
+        DRep::Key(hash) => format!("key {}", hex::encode(hash)),
+        DRep::Script(hash) => format!("script {}", hex::encode(hash)),
+        DRep::Abstain => "abstain".to_owned(),
+        DRep::NoConfidence => "no-confidence".to_owned(),
     }
 }
 
@@ -204,16 +588,7 @@ impl Referents {
 /// before the retirement still name it. `retired_pool` is what
 /// `PoolDelegatorRetire` records for exactly this case, so an absence it
 /// accounts for is legitimate history, not a dangling pointer.
-///
-/// **Vote delegations are deliberately not swept.** The symmetric rule — every
-/// `DRepDelegation::Delegated` names a `DRepState` — is disproved by a preprod
-/// store: two accounts there delegate to DRep credentials that have no row, and
-/// the ledger permits exactly that. A `VoteDeleg` certificate naming an
-/// unregistered DRep is valid; the delegation simply carries no voting power
-/// until (and unless) that DRep registers, which is why `DRepExpiryUpdate`
-/// carries an `only_if_registered` branch for a missing entity rather than
-/// treating it as impossible.
-fn dangling_referents(account: &AccountState, referents: &Referents) -> Vec<String> {
+fn dangling_pool_referents(account: &AccountState, referents: &Referents) -> Vec<String> {
     let mut out = Vec::new();
 
     let snapshots = [
@@ -236,8 +611,118 @@ fn dangling_referents(account: &AccountState, referents: &Referents) -> Vec<Stri
             continue;
         }
 
-        out.push(format!("{name} pool delegation {}", hex::encode(pool)));
+        out.push(format!(
+            "{name} pool delegation {} that names no pool in the state",
+            hex::encode(pool)
+        ));
     }
+
+    out
+}
+
+/// Check one account's live vote delegation against the DReps that exist.
+///
+/// **The symmetric rule is false.** "Every `DRepDelegation::Delegated` names a
+/// `DRepState`" is disproved by a preprod store: two accounts there delegate
+/// to DRep credentials that have no row, and the ledger permits exactly that.
+/// A `VoteDeleg` certificate naming an unregistered DRep is valid; the
+/// delegation simply carries no voting power until (and unless) that DRep
+/// registers, which is why `DRepExpiryUpdate` carries an `only_if_registered`
+/// branch for a missing entity rather than treating it as impossible.
+///
+/// What the ledger does guarantee is narrower, and it is these three rules:
+///
+/// 1. **A row agrees with its own key.** The key is derived from the
+///    identifier, class prefix and all, so a row reached through a `DRep::Key`
+///    that identifies itself as a `DRep::Script` — or as another hash
+///    altogether — was not written by [`drep_to_entity_key`]. There is no
+///    history in which that is legitimate.
+/// 2. **A retirement the boundary owed a drop has had it.** When a DRep
+///    unregisters, the next boundary drops every delegation older than the
+///    retirement: `BoundaryWork::clears_drep_delegation`, applied once, at the
+///    boundary `is_retiring_drep` fires on. A live delegation older than a
+///    retirement in an earlier epoch is that drop missing. A delegation *newer*
+///    than the retirement is not covered — the ledger accepts it and no
+///    boundary clears it — so it is not reported.
+/// 3. **The PV10 migration has run on what it covered.** The hard fork into
+///    protocol major 10 carries a one-shot migration dropping every live
+///    delegation that names a credential not registered at that boundary
+///    (`BoundaryWork::pv10_migration`). A `DRepState` row is never deleted —
+///    retirement and expiry are flags written onto it — so a credential with no
+///    row at all never registered, and a delegation to one made *before* the
+///    migration boundary is a delegation the migration should have cleared. One
+///    made after it is legitimate again, and is not reported: that is the shape
+///    the two preprod accounts have.
+///
+/// Rules 2 and 3 each need a position on the chain the store may not be able
+/// to place; without it the rule does not run. See [`Anchors`].
+///
+/// `DRep::Abstain` and `DRep::NoConfidence` are predefined targets rather
+/// than credentials — they name no row by design — so none of the three
+/// applies to them. Only the live delegation is checked: `vote_delegated_at`
+/// dates that one, and the older snapshot positions have no comparable date.
+fn dangling_vote_referent(account: &AccountState, referents: &Referents) -> Option<String> {
+    let Some(DRepDelegation::Delegated(drep)) = account.drep.live() else {
+        return None;
+    };
+
+    if !matches!(drep, DRep::Key(_) | DRep::Script(_)) {
+        return None;
+    }
+
+    let Some(facts) = referents.dreps.get(&drep_to_entity_key(drep)) else {
+        // Rule 3.
+        let delegated_at = account.vote_delegated_at?;
+        let pv10 = referents.anchors.pv10_boundary?;
+
+        if delegated_at.0 >= pv10 {
+            return None;
+        }
+
+        return Some(format!(
+            "vote delegation to the never-registered drep {} made at slot {}, which the \
+             protocol-10 migration at slot {pv10} drops",
+            describe_drep(drep),
+            delegated_at.0,
+        ));
+    };
+
+    // Rule 1.
+    if facts.identifier != *drep {
+        return Some(format!(
+            "vote delegation to drep {} reaching a row that identifies itself as {}",
+            describe_drep(drep),
+            describe_drep(&facts.identifier),
+        ));
+    }
+
+    // Rule 2.
+    let (Some(unregistered_at), Some(delegated_at), Some(live_epoch_start)) = (
+        facts.unregistered_at,
+        account.vote_delegated_at,
+        referents.anchors.live_epoch_start,
+    ) else {
+        return None;
+    };
+
+    if delegated_at < unregistered_at && unregistered_at.0 < live_epoch_start {
+        return Some(format!(
+            "vote delegation to drep {} made at slot {}, which the boundary after that drep \
+             retired at slot {} owed a drop",
+            describe_drep(drep),
+            delegated_at.0,
+            unregistered_at.0,
+        ));
+    }
+
+    None
+}
+
+/// Every referent finding one account has, pool and vote alike.
+fn dangling_referents(account: &AccountState, referents: &Referents) -> Vec<String> {
+    let mut out = dangling_pool_referents(account, referents);
+
+    out.extend(dangling_vote_referent(account, referents));
 
     out
 }
@@ -277,10 +762,7 @@ pub fn scan_accounts<E: std::fmt::Display>(
             dangling += 1;
 
             if dangling <= MAX_REPORTED_REFERENTS {
-                issues.push(Issue::new(
-                    CHECK,
-                    format!("account {key} has a {detail} that names no entity in the state"),
-                ));
+                issues.push(Issue::new(CHECK, format!("account {key} has a {detail}")));
             }
         }
     }
@@ -298,7 +780,7 @@ pub fn scan_accounts<E: std::fmt::Display>(
     (registered, issues)
 }
 
-pub fn load_referents<S: StateStore>(state: &S) -> miette::Result<Referents> {
+pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Result<Referents> {
     let mut pools = HashSet::new();
 
     for record in state
@@ -310,7 +792,74 @@ pub fn load_referents<S: StateStore>(state: &S) -> miette::Result<Referents> {
         pools.insert(key);
     }
 
-    Ok(Referents { pools })
+    let mut dreps = HashMap::new();
+
+    for record in state
+        .iter_entities_typed::<DRepState>(DRepState::NS, None)
+        .into_diagnostic()
+        .context("iterating dreps")?
+    {
+        let (key, drep) = record.into_diagnostic().context("decoding a drep")?;
+
+        let facts = DRepFacts {
+            identifier: drep.identifier.clone(),
+            // A row that unregistered and registered again is registered, and
+            // the stale `unregistered_at` it still carries is not a position
+            // any boundary owes a drop against.
+            unregistered_at: drep
+                .is_unregistered()
+                .then_some(drep.unregistered_at)
+                .flatten(),
+        };
+
+        dreps.insert(key, facts);
+    }
+
+    Ok(Referents {
+        pools,
+        dreps,
+        anchors,
+    })
+}
+
+/// Place the two positions the vote-delegation rules are measured against.
+///
+/// Both come out of the same `ChainSummary` the node uses to turn an epoch
+/// into the slot it starts at. A state store holding no era summaries can
+/// place neither, and the rules that need them do not run.
+pub fn load_anchors<S: StateStore>(
+    state: &S,
+    live: &EpochState,
+    pv10_epoch: Option<Epoch>,
+) -> miette::Result<Anchors> {
+    let Some(summary) = chain_summary(state)? else {
+        return Ok(Anchors::default());
+    };
+
+    Ok(Anchors {
+        live_epoch_start: Some(summary.epoch_start(live.number)),
+        pv10_boundary: pv10_epoch.map(|epoch| summary.epoch_start(epoch)),
+    })
+}
+
+/// The chain summary, or `None` when the state holds no era summaries at all.
+///
+/// `ChainSummary` panics rather than reporting that — it is a business
+/// invariant everywhere else in the node — and a read-only check run against
+/// a store an operator already suspects must not.
+fn chain_summary<S: StateStore>(state: &S) -> miette::Result<Option<ChainSummary>> {
+    let mut eras = state
+        .iter_entities_typed::<EraSummary>(EraSummary::NS, None)
+        .into_diagnostic()
+        .context("iterating era summaries")?;
+
+    if eras.next().is_none() {
+        return Ok(None);
+    }
+
+    load_chain_summary_from_state(state)
+        .map(Some)
+        .map_err(|err| miette::miette!("loading the chain summary: {err:?}"))
 }
 
 pub fn sum_utxo_lovelace<S: StateStore>(
@@ -366,9 +915,10 @@ pub fn sum_drep_deposits<S: StateStore>(state: &S) -> miette::Result<u64> {
 /// as well as against an open data directory.
 pub fn recompute<S: StateStore>(
     state: &S,
+    anchors: Anchors,
     mut on_progress: impl FnMut(&str, u64),
 ) -> miette::Result<(Recomputed, Vec<Issue>)> {
-    let referents = load_referents(state)?;
+    let referents = load_referents(state, anchors)?;
 
     let accounts = state
         .iter_entities_typed::<AccountState>(AccountState::NS, None)
@@ -404,11 +954,30 @@ pub fn run(
         return Ok(Vec::new());
     };
 
-    let (found, mut issues) = recompute(&stores.state, |what, seen| {
+    let snapshots = stores
+        .archive
+        .iter_logs_typed::<EpochState>(EpochState::NS, None)
+        .into_diagnostic()
+        .context("iterating the `epochs` log")?;
+
+    progress.set_message("totals: replaying the epoch boundaries");
+
+    let boundaries = check_boundaries(
+        snapshots.map(|record| record.map(|(_, snapshot)| snapshot)),
+        Some(&epoch),
+    );
+
+    let anchors = load_anchors(&stores.state, &epoch, boundaries.pv10_epoch)?;
+
+    let mut issues = boundaries.issues;
+
+    let (found, referent_issues) = recompute(&stores.state, anchors, |what, seen| {
         if seen.is_multiple_of(100_000) {
             progress.set_message(format!("totals: {seen} {what}"));
         }
     })?;
+
+    issues.extend(referent_issues);
 
     match live_pots(&epoch) {
         Some(claimed) => issues.extend(check_pots(
@@ -433,10 +1002,11 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_cardano::model::{DRepDelegation, EpochValue, Stake};
+    use dolos_cardano::model::{
+        DRepDelegation, EndStats, EpochValue, PParamValue, PParamsSet, RollingStats, Stake,
+    };
     use pallas::crypto::hash::Hash;
-    use pallas::ledger::primitives::conway::DRep;
-    use pallas::ledger::primitives::{Epoch, StakeCredential};
+    use pallas::ledger::primitives::StakeCredential;
 
     const MAX_SUPPLY: u64 = 45_000_000_000_000_000;
 
@@ -465,6 +1035,7 @@ mod tests {
     fn referents_with_pool(seed: u8) -> Referents {
         Referents {
             pools: HashSet::from([EntityKey::from(pool_hash(seed))]),
+            ..Referents::default()
         }
     }
 
@@ -652,5 +1223,447 @@ mod tests {
         };
 
         assert_eq!(live_pots(&epoch), Some(epoch.initial_pots.clone()));
+    }
+
+    /// A pparams set carrying just the protocol version, which is what picks
+    /// the delta path and — through `era_transition` — the AVVM boundary.
+    fn pparams_at(major: u16) -> PParamsSet {
+        PParamsSet::default().with(PParamValue::ProtocolVersion((major.into(), 0)))
+    }
+
+    /// A closed epoch snapshot: the shape EWRAP archives, with the end stats
+    /// `wrapup.flush` wrote and a live pparams set to pick the delta path.
+    fn closed(number: Epoch, pots: Pots) -> EpochState {
+        EpochState {
+            number,
+            initial_pots: pots,
+            pparams: EpochValue::with_live(number, pparams_at(9)),
+            end: Some(EndStats::default()),
+            ..EpochState::default()
+        }
+    }
+
+    /// The pots a boundary with nothing to move hands on: itself. Every
+    /// figure below builds off this so a disagreement is the doctoring and
+    /// nothing else.
+    fn quiet_pots() -> Pots {
+        Pots {
+            utxos: 500,
+            account_count: 3,
+            // `handed_off_pots` takes both deposit rates from the closing
+            // pparams, and a set carrying only the protocol version reads
+            // zero for the pool one.
+            deposit_per_pool: 0,
+            deposit_per_account: 2_000_000,
+            treasury: 1_000_000,
+            reserves: MAX_SUPPLY - 500 - 3 * 2_000_000 - 1_000_000,
+            ..Pots::default()
+        }
+    }
+
+    fn log(entries: Vec<EpochState>) -> impl Iterator<Item = Result<EpochState, String>> {
+        entries.into_iter().map(Ok)
+    }
+
+    /// An epoch that moved nothing hands the next one exactly what it
+    /// started with — the baseline the corruption fixtures below are
+    /// measured against.
+    #[test]
+    fn a_quiet_boundary_hands_off_the_pots_unchanged() {
+        let replayed = handed_off_pots(&closed(42, quiet_pots())).expect("replayed");
+
+        assert_eq!(replayed, quiet_pots());
+    }
+
+    /// The corruption fixture: the opening epoch's snapshot claims pots the
+    /// closing epoch's own recorded inputs do not produce.
+    #[test]
+    fn a_boundary_that_does_not_reproduce_the_stored_pots_is_reported() {
+        let mut opening = quiet_pots();
+        opening.treasury += 7;
+
+        let issues = check_hand_off(&closed(42, quiet_pots()), &closed(43, opening));
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert_eq!(issues[0].check, CheckKind::Totals);
+        assert!(issues[0].detail.contains("a treasury of 1000000"));
+        assert!(issues[0].detail.contains("claims 1000007"));
+        assert!(issues[0].detail.contains("off by 7"));
+    }
+
+    /// The three pots the tip comparison stays silent about are exactly the
+    /// ones this comparison is here to cover, so each has to fire on its own.
+    #[test]
+    fn the_boundary_only_pots_are_each_compared() {
+        for (what, doctor) in [
+            (
+                "reserves",
+                (|p: &mut Pots| p.reserves += 11) as fn(&mut Pots),
+            ),
+            ("treasury", |p: &mut Pots| p.treasury += 11),
+            ("rewards", |p: &mut Pots| p.rewards += 11),
+            ("pool-count", |p: &mut Pots| p.pool_count += 11),
+            ("proposal-deposits", |p: &mut Pots| {
+                p.proposal_deposits += 11
+            }),
+        ] {
+            let mut opening = quiet_pots();
+            doctor(&mut opening);
+
+            let issues = check_hand_off(&closed(42, quiet_pots()), &closed(43, opening));
+
+            assert_eq!(issues.len(), 1, "{what}: {issues:?}");
+            assert!(issues[0].detail.contains(what), "{what}: {issues:?}");
+        }
+    }
+
+    /// The deltas a closed epoch recorded are the ones that have to show up
+    /// in the pots it hands on — here, the UTxO pot moved by what the blocks
+    /// produced and consumed.
+    #[test]
+    fn a_boundary_replays_the_epochs_recorded_movement() {
+        let mut closing = closed(42, quiet_pots());
+        closing.rolling = EpochValue::with_live(
+            42,
+            RollingStats {
+                produced_utxos: 700,
+                consumed_utxos: 900,
+                gathered_fees: 200,
+                ..Default::default()
+            },
+        );
+
+        let replayed = handed_off_pots(&closing).expect("replayed");
+
+        assert_eq!(replayed.utxos, 300);
+        assert_eq!(replayed.fees, 200);
+        assert!(replayed.is_consistent(MAX_SUPPLY));
+    }
+
+    /// A snapshot EWRAP never closed carries no end stats, so the hand-off
+    /// cannot be replayed at all. That is check 4's finding to explain; this
+    /// check only says which pots went unchecked because of it.
+    #[test]
+    fn an_unclosed_snapshot_leaves_its_hand_off_unreplayed() {
+        let mut closing = closed(42, quiet_pots());
+        closing.end = None;
+
+        assert_eq!(handed_off_pots(&closing), Err(Unreplayable::NoEndStats));
+
+        let issues = check_hand_off(&closing, &closed(43, quiet_pots()));
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].detail.contains("could not be replayed"));
+        assert!(issues[0].detail.contains("no end stats"));
+    }
+
+    /// ESTART reclaims the unredeemed AVVM UTxOs at the Shelley→Allegra
+    /// boundary by an amount it reads out of the UTxO set and never records,
+    /// so the two pots it moves value between cannot be replayed there — and
+    /// reporting them would fire on every intact mainnet store.
+    #[test]
+    fn the_avvm_boundary_drops_only_the_two_pots_the_reclamation_moves() {
+        let mut closing = closed(42, quiet_pots());
+        closing.pparams = EpochValue::with_live(42, pparams_at(2));
+        closing.pparams.schedule(42, Some(pparams_at(3)));
+
+        assert!(
+            avvm_boundary(&closing),
+            "the fixture is the allegra boundary"
+        );
+
+        let mut opening = quiet_pots();
+        opening.utxos -= 400;
+        opening.reserves += 400;
+
+        assert!(
+            check_hand_off(&closing, &closed(43, opening.clone())).is_empty(),
+            "the reclamation itself must not be reported"
+        );
+
+        opening.treasury += 1;
+
+        let issues = check_hand_off(&closing, &closed(43, opening));
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].detail.contains("a treasury of"));
+    }
+
+    /// A gap in the log is check 4's finding. Replaying across it would
+    /// report a hand-off that never happened.
+    #[test]
+    fn a_gap_is_not_replayed_as_a_hand_off() {
+        let mut opening = quiet_pots();
+        opening.treasury += 7;
+
+        assert!(check_hand_off(&closed(42, quiet_pots()), &closed(44, opening)).is_empty());
+    }
+
+    /// The whole log, plus the live epoch as the far side of the last
+    /// hand-off — which is where a store parked mid-epoch keeps it.
+    #[test]
+    fn the_live_epoch_closes_the_last_hand_off() {
+        let mut live = closed(44, quiet_pots());
+        live.initial_pots.treasury += 7;
+
+        let entries = vec![closed(42, quiet_pots()), closed(43, quiet_pots())];
+
+        let found = check_boundaries(log(entries), Some(&live));
+
+        assert_eq!(found.issues.len(), 1, "{:?}", found.issues);
+        assert!(found.issues[0].detail.contains("epoch 44 claims"));
+    }
+
+    /// The migration boundary is only knowable when the log holds an epoch
+    /// from before the fork: a log that starts after it cannot say where the
+    /// fork was, and naming its first entry would put the migration at a
+    /// slot it never ran at.
+    #[test]
+    fn the_migration_boundary_is_taken_only_when_the_log_spans_the_fork() {
+        let at = |number: Epoch, major: u16| EpochState {
+            pparams: EpochValue::with_live(number, pparams_at(major)),
+            ..closed(number, quiet_pots())
+        };
+
+        let spanning = check_boundaries(log(vec![at(41, 9), at(42, 10), at(43, 10)]), None);
+        assert_eq!(spanning.pv10_epoch, Some(42));
+
+        let after = check_boundaries(log(vec![at(42, 10), at(43, 10)]), None);
+        assert_eq!(after.pv10_epoch, None);
+
+        let before = check_boundaries(log(vec![at(41, 9), at(42, 9)]), None);
+        assert_eq!(before.pv10_epoch, None);
+    }
+
+    fn drep_key(seed: u8) -> DRep {
+        DRep::Key(Hash::from([seed; 28]))
+    }
+
+    /// An account whose live vote delegation names `drep`, made at `slot`.
+    fn voter(seed: u8, drep: DRep, slot: BlockSlot) -> (EntityKey, AccountState) {
+        let (key, mut account) = account(42, seed);
+        account.drep = EpochValue::with_live(42, DRepDelegation::Delegated(drep));
+        account.vote_delegated_at = Some((slot, 0));
+
+        (key, account)
+    }
+
+    fn referents_with_drep(drep: &DRep, facts: DRepFacts, anchors: Anchors) -> Referents {
+        Referents {
+            dreps: HashMap::from([(drep_to_entity_key(drep), facts)]),
+            anchors,
+            ..Referents::default()
+        }
+    }
+
+    fn registered(drep: &DRep) -> DRepFacts {
+        DRepFacts {
+            identifier: drep.clone(),
+            unregistered_at: None,
+        }
+    }
+
+    /// Rule 1. The key a row is stored under is derived from the identifier
+    /// it carries, so a row reached through a `DRep::Key` that calls itself a
+    /// `DRep::Script` was not written by the node — there is no history in
+    /// which that is legitimate.
+    #[test]
+    fn a_drep_row_that_disagrees_with_its_own_key_is_reported() {
+        let drep = drep_key(3);
+
+        let referents = referents_with_drep(
+            &drep,
+            DRepFacts {
+                identifier: DRep::Script(Hash::from([3u8; 28])),
+                unregistered_at: None,
+            },
+            Anchors::default(),
+        );
+
+        let (_, issues) = scan(vec![voter(1, drep, 100)], &referents);
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].detail.contains("identifies itself as script"));
+    }
+
+    /// Rule 2. `clears_drep_delegation` drops every delegation older than a
+    /// retirement, once, at the boundary after it. A live delegation that
+    /// still names one is that drop missing.
+    #[test]
+    fn a_retirement_the_boundary_owed_a_drop_is_reported() {
+        let drep = drep_key(3);
+
+        let referents = referents_with_drep(
+            &drep,
+            DRepFacts {
+                identifier: drep.clone(),
+                unregistered_at: Some((200, 0)),
+            },
+            Anchors {
+                live_epoch_start: Some(500),
+                pv10_boundary: None,
+            },
+        );
+
+        let (_, issues) = scan(vec![voter(1, drep, 100)], &referents);
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].detail.contains("owed a drop"));
+        assert!(issues[0].detail.contains("retired at slot 200"));
+    }
+
+    /// The other side of rule 2, and the reason it is stated this narrowly: a
+    /// delegation made *after* the retirement is one the ledger accepts and
+    /// no boundary clears, so reporting it would be reporting valid history.
+    #[test]
+    fn a_delegation_newer_than_the_retirement_is_not_reported() {
+        let drep = drep_key(3);
+
+        let referents = referents_with_drep(
+            &drep,
+            DRepFacts {
+                identifier: drep.clone(),
+                unregistered_at: Some((200, 0)),
+            },
+            Anchors {
+                live_epoch_start: Some(500),
+                pv10_boundary: None,
+            },
+        );
+
+        let (_, issues) = scan(vec![voter(1, drep, 300)], &referents);
+
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// A retirement inside the live epoch has had no boundary yet. The drop
+    /// is pending, not missing.
+    #[test]
+    fn a_retirement_in_the_live_epoch_is_not_yet_overdue() {
+        let drep = drep_key(3);
+
+        let referents = referents_with_drep(
+            &drep,
+            DRepFacts {
+                identifier: drep.clone(),
+                unregistered_at: Some((600, 0)),
+            },
+            Anchors {
+                live_epoch_start: Some(500),
+                pv10_boundary: None,
+            },
+        );
+
+        let (_, issues) = scan(vec![voter(1, drep, 100)], &referents);
+
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Rule 3. A `DRepState` row is never deleted — retirement and expiry are
+    /// flags written onto it — so a credential with no row never registered,
+    /// and the protocol-10 migration drops every delegation to one that
+    /// predates it.
+    #[test]
+    fn a_delegation_the_migration_should_have_dropped_is_reported() {
+        let drep = drep_key(3);
+
+        let referents = Referents {
+            anchors: Anchors {
+                live_epoch_start: Some(900),
+                pv10_boundary: Some(500),
+            },
+            ..Referents::default()
+        };
+
+        let (_, issues) = scan(vec![voter(1, drep, 100)], &referents);
+
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].detail.contains("never-registered drep"));
+        assert!(issues[0].detail.contains("protocol-10 migration"));
+    }
+
+    /// The other side of rule 3, and the shape the two preprod accounts
+    /// have: nothing stops a `VoteDeleg` naming a DRep that has not
+    /// registered, and after the migration boundary nothing clears one.
+    #[test]
+    fn a_delegation_to_an_unregistered_drep_made_after_the_migration_is_not_reported() {
+        let drep = drep_key(3);
+
+        let referents = Referents {
+            anchors: Anchors {
+                live_epoch_start: Some(900),
+                pv10_boundary: Some(500),
+            },
+            ..Referents::default()
+        };
+
+        let (_, issues) = scan(vec![voter(1, drep, 700)], &referents);
+
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Both dated rules need a position on the chain. A store that cannot
+    /// place one stays silent rather than guessing it.
+    #[test]
+    fn an_unplaceable_anchor_silences_the_rule_that_needs_it() {
+        let drep = drep_key(3);
+
+        let retired = referents_with_drep(
+            &drep,
+            DRepFacts {
+                identifier: drep.clone(),
+                unregistered_at: Some((200, 0)),
+            },
+            Anchors::default(),
+        );
+
+        let (_, issues) = scan(vec![voter(1, drep.clone(), 100)], &retired);
+        assert!(issues.is_empty(), "{issues:?}");
+
+        let (_, issues) = scan(vec![voter(1, drep, 100)], &Referents::default());
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// A live delegation to a registered DRep is the ordinary case, and none
+    /// of the three rules may touch it.
+    #[test]
+    fn a_delegation_to_a_registered_drep_passes() {
+        let drep = drep_key(3);
+
+        let referents = referents_with_drep(
+            &drep,
+            registered(&drep),
+            Anchors {
+                live_epoch_start: Some(900),
+                pv10_boundary: Some(500),
+            },
+        );
+
+        let (_, issues) = scan(vec![voter(1, drep, 100)], &referents);
+
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// `DRep::Abstain` and `DRep::NoConfidence` name no row by design, and
+    /// the migration matches neither, so no rule applies to them however the
+    /// anchors are placed.
+    #[test]
+    fn the_predefined_drep_targets_are_never_referents() {
+        let referents = Referents {
+            anchors: Anchors {
+                live_epoch_start: Some(900),
+                pv10_boundary: Some(500),
+            },
+            ..Referents::default()
+        };
+
+        let accounts = vec![
+            voter(1, DRep::Abstain, 100),
+            voter(2, DRep::NoConfidence, 100),
+        ];
+
+        let (_, issues) = scan(accounts, &referents);
+
+        assert!(issues.is_empty(), "{issues:?}");
     }
 }

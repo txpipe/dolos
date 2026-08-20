@@ -204,6 +204,7 @@ mod tests {
     use dolos_core::{ArchiveWriter as _, ChainPoint, EntityKey, StateWriter as _};
     use dolos_testing::blocks::make_conway_block_with_prev;
     use dolos_testing::toy_domain::ToyDomain;
+    use pallas::ledger::primitives::conway::DRep;
     use pallas::ledger::primitives::StakeCredential;
 
     fn live_epoch(domain: &ToyDomain) -> EpochState {
@@ -265,7 +266,21 @@ mod tests {
             epoch.number,
         ));
 
-        let (found, referent_issues) = totals::recompute(domain.state(), |_, _| {}).unwrap();
+        let boundaries = totals::check_boundaries(
+            domain
+                .archive()
+                .iter_logs_typed::<EpochState>(EpochState::NS, None)
+                .unwrap()
+                .map(|record| record.map(|(_, snapshot)| snapshot)),
+            Some(&epoch),
+        );
+
+        issues.extend(boundaries.issues);
+
+        let anchors = totals::load_anchors(domain.state(), &epoch, boundaries.pv10_epoch).unwrap();
+
+        let (found, referent_issues) =
+            totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
         issues.extend(referent_issues);
         issues.extend(totals::check_pots(
             &totals::live_pots(&epoch).expect("harness epoch can be placed at the tip"),
@@ -450,7 +465,7 @@ mod tests {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (_, issues) = totals::recompute(domain.state(), |_, _| {}).unwrap();
+        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
 
         assert!(issues.is_empty(), "{issues:#?}");
     }
@@ -476,13 +491,195 @@ mod tests {
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (_, issues) = totals::recompute(domain.state(), |_, _| {}).unwrap();
+        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
 
         assert_eq!(issues.len(), 1, "{issues:#?}");
         assert!(
             issues[0].detail.contains(&hex::encode(operator)),
             "{}",
             issues[0].detail
+        );
+    }
+
+    /// The `epochs` log entry for one epoch, keyed the way EWRAP keys it.
+    fn write_snapshot(domain: &ToyDomain, slot: u64, snapshot: &EpochState) {
+        let writer = domain.archive().start_writer().unwrap();
+        writer
+            .write_log_typed(
+                &dolos_core::LogKey::from(dolos_core::TemporalKey::from(slot)),
+                snapshot,
+            )
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// A pair of logged snapshots that form one hand-off: an epoch closed
+    /// with end stats, and the epoch after it claiming the pots it was
+    /// handed.
+    ///
+    /// The arithmetic itself is unit-tested in `totals`; what this pair is
+    /// for is the plumbing — the log key EWRAP writes, the typed iterator the
+    /// check reads it back through, and the live epoch on the far end.
+    fn log_a_hand_off(domain: &ToyDomain, doctor: impl Fn(&mut EpochState)) -> Vec<Issue> {
+        let live = live_epoch(domain);
+
+        let mut closing = live.clone();
+        closing.end = Some(dolos_cardano::model::EndStats::default());
+        write_snapshot(domain, 1_000_000, &closing);
+
+        let mut opening = closing.clone();
+        opening.number = closing.number + 1;
+        doctor(&mut opening);
+        write_snapshot(domain, 2_000_000, &opening);
+
+        check_everything(domain)
+    }
+
+    /// An epoch that moved nothing hands on exactly what it started with, and
+    /// replaying it through the store must say so.
+    #[test]
+    fn an_intact_hand_off_in_the_epoch_log_is_not_reported() {
+        let issues = log_a_hand_off(&ToyDomain::new(None, None), |_| {});
+
+        assert!(
+            !issues.iter().any(|x| x.check == CheckKind::Totals),
+            "{issues:#?}"
+        );
+    }
+
+    /// The corruption fixture: an epoch claiming pots the previous epoch's
+    /// own recorded inputs do not produce. This is the treasury — one of the
+    /// three pots the tip comparison has nothing to say about.
+    #[test]
+    fn a_doctored_hand_off_in_the_epoch_log_is_reported() {
+        let issues = log_a_hand_off(&ToyDomain::new(None, None), |opening| {
+            opening.initial_pots.treasury += 1_000_000;
+        });
+
+        assert!(
+            issues
+                .iter()
+                .any(|x| x.check == CheckKind::Totals && x.detail.contains("a treasury of")),
+            "{issues:#?}"
+        );
+    }
+
+    /// Write an account whose live vote delegation names `drep`, the way the
+    /// node writes one.
+    fn write_voter(domain: &ToyDomain, seed: u8, drep: DRep, slot: u64) {
+        let epoch = live_epoch(domain).number;
+
+        let credential = StakeCredential::AddrKeyhash([seed; 28].into());
+        let key = EntityKey::from(pallas::codec::minicbor::to_vec(&credential).unwrap());
+
+        let mut account = AccountState::new(epoch, credential);
+        account.drep = dolos_cardano::model::EpochValue::with_live(
+            epoch,
+            dolos_cardano::model::DRepDelegation::Delegated(drep),
+        );
+        account.vote_delegated_at = Some((slot, 0));
+
+        let writer = domain.state().start_writer().unwrap();
+        writer.write_entity_typed(&key, &account).unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// Write a DRep row under the key `identifier` maps to — which is how
+    /// the node keys one, and what rule 1 checks the row against.
+    fn write_drep(
+        domain: &ToyDomain,
+        key_of: &DRep,
+        identifier: DRep,
+        unregistered_at: Option<(u64, usize)>,
+    ) {
+        let mut drep = dolos_cardano::model::DRepState::new(identifier);
+        drep.registered_at = Some((1, 0));
+        drep.unregistered_at = unregistered_at;
+
+        let writer = domain.state().start_writer().unwrap();
+        writer
+            .write_entity_typed(&dolos_cardano::model::drep_to_entity_key(key_of), &drep)
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    /// A DRep row reached through a `DRep::Key` that identifies itself as a
+    /// `DRep::Script`. The key is derived from the identifier, so no node
+    /// wrote this — and it takes the real store to prove the check reaches
+    /// the row through the same derivation the writers use.
+    #[test]
+    fn a_drep_row_that_disagrees_with_its_own_key_is_reported() {
+        let domain = ToyDomain::new(None, None);
+        let hash = pallas::crypto::hash::Hash::<28>::from([0x51; 28]);
+
+        write_drep(&domain, &DRep::Key(hash), DRep::Script(hash), None);
+        write_voter(&domain, 0x52, DRep::Key(hash), 100);
+
+        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(
+            issues[0].detail.contains("identifies itself as script"),
+            "{}",
+            issues[0].detail
+        );
+    }
+
+    /// A live delegation older than the retirement of the DRep it names: the
+    /// drop `clears_drep_delegation` owed at the boundary after that
+    /// retirement never landed.
+    ///
+    /// The [`totals::Anchors`] are passed rather than read off the store: the
+    /// harness chain is parked on epoch 0, where every chain position it
+    /// could place collapses to slot 0 and no dated rule can be stated at
+    /// all. The store side — the rows, their keys, the iterators — is real.
+    #[test]
+    fn a_vote_delegation_a_retirement_owed_a_drop_is_reported() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x53; 28]));
+
+        write_drep(&domain, &drep, drep.clone(), Some((200, 0)));
+        write_voter(&domain, 0x54, drep, 100);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(500),
+            pv10_boundary: None,
+        };
+
+        let (_, issues) = totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(issues[0].detail.contains("owed a drop"), "{}", issues[0]);
+    }
+
+    /// A live delegation to a credential with no row at all, made before the
+    /// protocol-10 boundary whose migration drops exactly those. A row is
+    /// never deleted, so the absence is not history — it is the migration
+    /// missing, or the row.
+    ///
+    /// The companion case — the same delegation made *after* that boundary,
+    /// which is the shape the two legitimate preprod accounts have — is the
+    /// `totals` unit fixture; see [`totals::Anchors`] for why the anchors are
+    /// passed in here.
+    #[test]
+    fn a_vote_delegation_the_migration_should_have_dropped_is_reported() {
+        let domain = ToyDomain::new(None, None);
+        let drep = DRep::Key(pallas::crypto::hash::Hash::<28>::from([0x55; 28]));
+
+        write_voter(&domain, 0x56, drep, 100);
+
+        let anchors = totals::Anchors {
+            live_epoch_start: Some(900),
+            pv10_boundary: Some(500),
+        };
+
+        let (_, issues) = totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
+
+        assert_eq!(issues.len(), 1, "{issues:#?}");
+        assert!(
+            issues[0].detail.contains("protocol-10 migration"),
+            "{}",
+            issues[0]
         );
     }
 
