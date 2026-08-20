@@ -5,7 +5,9 @@ use axum::{
     Router, ServiceExt,
 };
 use dolos_cardano::{
-    model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
+    model::{
+        AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState, ProposalState,
+    },
     ChainSummary, PParamsSet, StakeLog,
 };
 use pallas::{
@@ -349,6 +351,7 @@ where
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
@@ -365,6 +368,7 @@ where
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
@@ -597,6 +601,14 @@ where
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
         )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}",
+            get(routes::governance::proposal_by_tx_index::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}",
+            get(routes::governance::proposal_by_gov_action_id::<D>),
+        )
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -640,6 +652,7 @@ where
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 
