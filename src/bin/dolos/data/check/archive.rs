@@ -114,6 +114,48 @@ mod tests {
         assert!(issues.is_empty(), "{issues:?}");
     }
 
+    /// A Byron epoch boundary as the archive now yields it: the EBB, then the
+    /// epoch's first main block on the same slot, pointing back at it. The
+    /// walk has to accept both — the slot does not advance and the parent is
+    /// the EBB, not the block before it.
+    #[test]
+    fn a_byron_boundary_passes_when_the_ebb_is_there() {
+        use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb};
+
+        let mut blocks = chain(byron_ebb_slot(1) - 2, 2);
+        let last_hash = MultiEraBlock::decode(&blocks[1].1).unwrap().hash();
+
+        let (ebb_point, ebb_body) = make_byron_ebb(1, last_hash);
+        let slot = ebb_point.slot();
+        blocks.push((slot, ebb_body.as_ref().clone()));
+
+        let (_, first_of_epoch) = make_conway_block_with_prev(slot, ebb_point.hash(), 2);
+        blocks.push((slot, first_of_epoch.as_ref().clone()));
+
+        let issues = check_continuity(blocks.into_iter(), |_| {});
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// The defect this check exists to catch: the same boundary with the EBB
+    /// missing, which is what every pre-fix archive holds. The epoch's first
+    /// block then claims a parent the archive never yields.
+    #[test]
+    fn a_byron_boundary_is_reported_when_the_ebb_is_missing() {
+        use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb};
+
+        let mut blocks = chain(byron_ebb_slot(1) - 2, 2);
+        let last_hash = MultiEraBlock::decode(&blocks[1].1).unwrap().hash();
+
+        let (ebb_point, _) = make_byron_ebb(1, last_hash);
+        let slot = ebb_point.slot();
+
+        let (_, first_of_epoch) = make_conway_block_with_prev(slot, ebb_point.hash(), 2);
+        blocks.push((slot, first_of_epoch.as_ref().clone()));
+
+        let issues = check_continuity(blocks.into_iter(), |_| {});
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
     #[test]
     fn an_empty_archive_passes() {
         let issues = check_continuity(std::iter::empty(), |_| {});

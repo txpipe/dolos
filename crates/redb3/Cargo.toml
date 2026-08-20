@@ -28,4 +28,12 @@ redb-extras = "0.6.1"
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
 
+# The Byron EBB recovery scan is a dev-only target — it is deliberately not
+# reachable from the `dolos` binary — but it writes to a real archive, so its
+# guard is covered by tests that `cargo test` runs like any other.
+[[example]]
+name = "heal-byron-ebbs"
+path = "examples/heal-byron-ebbs.rs"
+test = true
+
 [features]
