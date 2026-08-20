@@ -88,6 +88,9 @@ struct Report {
     already_shared: usize,
     gaps: usize,
     committed: bool,
+    /// How many of `recovered` this run actually wrote. Lower than
+    /// `recovered.len()` only when another run indexed one first.
+    inserted: usize,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -158,7 +161,16 @@ fn main() -> Result<(), BoxError> {
     if report.recovered.is_empty() {
         println!("nothing to recover; the archive already holds every epoch-boundary block");
     } else if report.committed {
-        println!("indexed {} epoch-boundary block(s)", report.recovered.len());
+        // What this run wrote, not what it classified: a run racing this one
+        // may have indexed some of these already, and saying otherwise would
+        // credit this run with writes it skipped.
+        match report.inserted {
+            0 => println!(
+                "nothing written: all {} recovered block(s) were already indexed by another run",
+                report.recovered.len()
+            ),
+            n => println!("indexed {n} epoch-boundary block(s)"),
+        }
     } else {
         println!(
             "{} block(s) would be indexed; re-run with --commit to write them",
@@ -196,12 +208,14 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
         recovered,
         refused,
         committed: false,
+        inserted: 0,
     };
 
     // One bad gap stops the whole run: the point of the guard is that this
     // archive feeds every published stele, so a partial heal under an
     // unexplained gap is worse than no heal at all.
     if commit && report.refused.is_empty() && !report.recovered.is_empty() {
+        let mut inserted = 0;
         let wx = db.begin_write()?;
         {
             let mut table = wx.open_table(BlocksTable::DEF)?;
@@ -227,11 +241,13 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
                 locations.push(block.location);
 
                 table.insert(block.slot, encode_locations(&locations).as_slice())?;
+                inserted += 1;
             }
         }
         wx.commit()?;
 
         report.committed = true;
+        report.inserted = inserted;
     }
 
     Ok(report)
@@ -507,6 +523,7 @@ mod tests {
         assert_eq!(report.recovered.len(), 1);
         assert_eq!(report.recovered[0].slot, ebb.0.slot());
         assert!(report.committed);
+        assert_eq!(report.inserted, 1);
 
         // The archive now yields both blocks of the boundary, in chain order,
         // with no re-import.
@@ -533,6 +550,7 @@ mod tests {
         let report = heal(dir.path(), dir.path(), false).unwrap();
         assert_eq!(report.recovered.len(), 1);
         assert!(!report.committed);
+        assert_eq!(report.inserted, 0);
 
         assert!(!archived_bodies(dir.path()).contains(&ebb.1.as_ref().clone()));
     }
