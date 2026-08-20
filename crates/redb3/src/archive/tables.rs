@@ -164,12 +164,20 @@ impl BlocksTable {
     /// Fold a newly written block into the value already held at its slot.
     ///
     /// The incoming block is compared against what is stored — length first,
-    /// so a body is read only where a match is possible at all. An identical
-    /// body means this block is being written again, as a resumed restore
-    /// rewrites the layer it was in the middle of, and its entry is repointed
-    /// at the new copy. Anything else is a second block at the same slot, and
-    /// it takes position 0: blocks arrive in chain order, so the newcomer is
-    /// the one the slot should resolve to.
+    /// so a body is read only where a match is possible at all.
+    ///
+    /// An identical body means this block is being written again, as a resumed
+    /// restore rewrites the layer it was in the middle of. The entry that
+    /// points at it is then left exactly where it is, and the copy just
+    /// appended is the one nothing points at — which is the dead space restore
+    /// already documents. Repointing at the new copy would move an index entry
+    /// forward in the segment past a block it precedes in the chain, and
+    /// [`Self::undo`] truncates at the offset it removes, so that block's bytes
+    /// would go with the cut.
+    ///
+    /// Anything else is a second block at the same slot, and it takes position
+    /// 0: blocks arrive in chain order, so the newcomer is the one the slot
+    /// should resolve to.
     fn merge_location(
         existing: &[u8],
         incoming: BlockLocation,
@@ -177,9 +185,8 @@ impl BlocksTable {
         flatfiles: &FlatFileStore,
     ) -> Result<Vec<u8>, Error> {
         let mut locations: Vec<BlockLocation> = decode_locations(existing).collect();
-        let mut rewrites = None;
 
-        for (i, loc) in locations.iter().enumerate() {
+        for loc in locations.iter() {
             if loc.length as usize != body.len() {
                 continue;
             }
@@ -189,15 +196,11 @@ impl BlocksTable {
                 .map_err(super::RedbArchiveError::from_io)?;
 
             if stored == body {
-                rewrites = Some(i);
-                break;
+                return Ok(existing.to_vec());
             }
         }
 
-        match rewrites {
-            Some(i) => locations[i] = incoming,
-            None => locations.insert(0, incoming),
-        }
+        locations.insert(0, incoming);
 
         Ok(encode_locations(&locations))
     }

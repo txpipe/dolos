@@ -500,6 +500,40 @@ fn rewriting_a_shared_slot_keeps_both_blocks_in_order() {
 }
 
 #[test]
+fn rewriting_the_older_block_at_a_shared_slot_leaves_undo_sound() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+    writer
+        .apply(&point(100), &Arc::new(second.clone()))
+        .unwrap();
+    writer.commit().unwrap();
+
+    // The older block on its own, written again — what a restore that stops
+    // between the two blocks of a shared slot redoes when it resumes. Its
+    // index entry must not move ahead of the block it precedes.
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+    writer.commit().unwrap();
+
+    // Undo takes the newest block and truncates the segment at its offset, so
+    // an entry that had moved past that offset would lose its bytes to the cut.
+    let writer = store.start_writer().unwrap();
+    writer.undo(&point(100)).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(first.clone()));
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first]
+    );
+}
+
+#[test]
 fn a_shared_slot_resolves_the_way_a_single_location_did() {
     use ::redb::ReadableDatabase as _;
 

@@ -216,6 +216,14 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
                     .map(|bytes| decode_locations(bytes).collect())
                     .unwrap_or_default();
 
+                // The gaps were found before this transaction opened, so the
+                // list is re-read here rather than trusted: a run racing this
+                // one would otherwise have its location appended twice, and the
+                // walk would yield the block twice.
+                if locations.contains(&block.location) {
+                    continue;
+                }
+
                 locations.push(block.location);
 
                 table.insert(block.slot, encode_locations(&locations).as_slice())?;
