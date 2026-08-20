@@ -89,17 +89,31 @@ fn an_epoch_range_selects_the_layers_it_names() {
     for (out, expected) in [(&kept, vec![0u64]), (&dropped, vec![])] {
         let inscription = SteleDir::open(out).unwrap().read_inscription().unwrap();
 
-        for kind in [
-            dolos_snapshot::BLOCKS,
-            dolos_snapshot::INDEXES,
-            dolos_snapshot::LOGS,
-        ] {
+        for kind in [dolos_snapshot::BLOCKS, dolos_snapshot::INDEXES] {
             let scopes: Vec<u64> = inscription
                 .layers_of_kind(kind)
                 .map(|l| l.scope["epoch"].as_u64().unwrap())
                 .collect();
 
             assert_eq!(scopes, expected, "{kind} in {}", out.display());
+        }
+
+        // The log kinds are sparse — a layer exists only where its namespace
+        // has records in the window — so the selection is asserted over what is
+        // there rather than over a count. Every log layer that survives has to
+        // name a kept epoch, and naming an epoch above the cursor has to leave
+        // none at all.
+        for (kind, _) in dolos_snapshot::LOG_KINDS {
+            let scopes: Vec<u64> = inscription
+                .layers_of_kind(kind)
+                .map(|l| l.scope["epoch"].as_u64().unwrap())
+                .collect();
+
+            assert!(
+                scopes.iter().all(|epoch| expected.contains(epoch)),
+                "{kind} in {}: {scopes:?} is not within {expected:?}",
+                out.display()
+            );
         }
 
         // The state tip is not history, so restricting the epochs never touches

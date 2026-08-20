@@ -190,7 +190,7 @@ fn to_repository(
         // `None` here and `None` at the `publish` below are one decision: a dry
         // run describes the publish that follows it, so the two calls are
         // handed the same digest records or the number is about something else.
-        let preview = registry::preview(publishing, plan, None)
+        let preview = registry::preview(publishing, plan, &stores.archive, None)
             .into_diagnostic()
             .context("planning the publish")?;
 
