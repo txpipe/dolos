@@ -121,6 +121,7 @@ impl TestApp {
                 drep_id: String::new(),
                 tx_cbor: vec![],
                 account_withdrawals: vec![],
+                redeemers: None,
             },
         }
     }
