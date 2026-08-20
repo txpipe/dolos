@@ -448,9 +448,66 @@ where
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
+    use blockfrost_openapi::models::script_redeemers_inner::Purpose;
+    use dolos_testing::synthetic::{MintRedeemerConfig, SyntheticBlockConfig};
 
     fn fixture_app() -> TestApp {
         TestApp::new()
+    }
+
+    /// An app whose chain executes one mint script per block, plus one
+    /// phase-2-invalid execution of the same script in the first block.
+    fn redeemer_app() -> TestApp {
+        let cfg = SyntheticBlockConfig {
+            mint_redeemer: Some(MintRedeemerConfig {
+                include_invalid_tx: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg(cfg)
+    }
+
+    /// The exact rows the endpoint must return for the executed script,
+    /// in ascending chain order.
+    fn expected_redeemer_rows(app: &TestApp) -> Vec<ScriptRedeemersInner> {
+        let vectors = app
+            .vectors()
+            .redeemers
+            .as_ref()
+            .expect("missing redeemer vectors");
+
+        vectors
+            .tx_hashes
+            .iter()
+            .map(|tx_hash| ScriptRedeemersInner {
+                tx_hash: tx_hash.clone(),
+                tx_index: vectors.redeemer_index as i32,
+                purpose: Purpose::Mint,
+                redeemer_data_hash: vectors.data_hash.clone(),
+                datum_hash: vectors.data_hash.clone(),
+                unit_mem: vectors.unit_mem.to_string(),
+                unit_steps: vectors.unit_steps.to_string(),
+                // preview prices: mem 577/10000, steps 721/10000000.
+                // fee = ceil(1000000 * 577/10000 + 500000000 * 721/10000000)
+                //     = 57700 + 36050 = 93750.
+                fee: "93750".to_string(),
+            })
+            .collect()
+    }
+
+    async fn get_redeemer_rows(app: &TestApp, path: &str) -> Vec<ScriptRedeemersInner> {
+        let (status, bytes) = app.get_bytes(path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("failed to parse script redeemers")
     }
 
     fn invalid_script_hash() -> &'static str {
@@ -705,24 +762,116 @@ mod tests {
 
     #[tokio::test]
     async fn scripts_by_hash_redeemers_happy_path() {
+        let app = redeemer_app();
+        let script_hash = app
+            .vectors()
+            .redeemers
+            .as_ref()
+            .expect("missing redeemer vectors")
+            .script_hash
+            .clone();
+
+        let path = format!("/scripts/{script_hash}/redeemers");
+        let items = get_redeemer_rows(&app, &path).await;
+
+        // exact rows in ascending chain order: one mint execution per block
+        assert_eq!(items, expected_redeemer_rows(&app));
+        assert!(!items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_empty_for_script_without_executions() {
         let app = fixture_app();
         let script_hash = app.vectors().script_hash.as_str();
         let path = format!("/scripts/{script_hash}/redeemers");
-        let (status, bytes) = app.get_bytes(&path).await;
+        let items = get_redeemer_rows(&app, &path).await;
 
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "unexpected status {status} with body: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-
-        let items: Vec<ScriptRedeemersInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse script redeemers");
-
-        // the synthetic chain executes no scripts. a known script with no
-        // redeemers gives an empty page, not a 404.
+        // the default synthetic chain executes no scripts. a known script
+        // with no redeemers gives an empty page, not a 404.
         assert!(items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_order_desc_reverses_asc() {
+        let app = redeemer_app();
+        let script_hash = app
+            .vectors()
+            .redeemers
+            .as_ref()
+            .expect("missing redeemer vectors")
+            .script_hash
+            .clone();
+
+        let asc =
+            get_redeemer_rows(&app, &format!("/scripts/{script_hash}/redeemers?order=asc")).await;
+        let desc = get_redeemer_rows(
+            &app,
+            &format!("/scripts/{script_hash}/redeemers?order=desc"),
+        )
+        .await;
+
+        let expected = expected_redeemer_rows(&app);
+        assert!(expected.len() >= 2, "ordering needs at least two rows");
+
+        assert_eq!(asc, expected);
+
+        let mut reversed = expected;
+        reversed.reverse();
+        assert_eq!(desc, reversed);
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_paginated() {
+        let app = redeemer_app();
+        let script_hash = app
+            .vectors()
+            .redeemers
+            .as_ref()
+            .expect("missing redeemer vectors")
+            .script_hash
+            .clone();
+
+        let page_1 = get_redeemer_rows(
+            &app,
+            &format!("/scripts/{script_hash}/redeemers?count=1&page=1"),
+        )
+        .await;
+        let page_2 = get_redeemer_rows(
+            &app,
+            &format!("/scripts/{script_hash}/redeemers?count=1&page=2"),
+        )
+        .await;
+
+        let expected = expected_redeemer_rows(&app);
+        assert!(expected.len() >= 2, "pagination needs at least two rows");
+
+        assert_eq!(page_1, expected[0..1]);
+        assert_eq!(page_2, expected[1..2]);
+    }
+
+    #[tokio::test]
+    async fn scripts_by_hash_redeemers_skip_phase2_invalid_tx() {
+        let app = redeemer_app();
+        let vectors = app
+            .vectors()
+            .redeemers
+            .as_ref()
+            .expect("missing redeemer vectors");
+        let script_hash = vectors.script_hash.clone();
+        let invalid_tx_hash = vectors
+            .invalid_tx_hash
+            .clone()
+            .expect("missing invalid tx hash");
+
+        // the chain carries the failed execution
+        assert!(app.vectors().blocks[0].tx_hashes.contains(&invalid_tx_hash));
+
+        let path = format!("/scripts/{script_hash}/redeemers");
+        let items = get_redeemer_rows(&app, &path).await;
+
+        // db-sync stores no redeemers for phase-2-failed txs
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|item| item.tx_hash != invalid_tx_hash));
     }
 
     #[tokio::test]
