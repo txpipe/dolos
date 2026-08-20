@@ -1471,9 +1471,9 @@ fn an_unknown_layer_kind_is_skippable_at_read_and_refused_at_publish() {
     }
 }
 
-/// `required: true` in a layer's scope is a publisher telling older readers that
-/// this layer is not optional: refuse the stele rather than restore a partial
-/// one.
+/// `required: true` in a layer's scope is a publisher telling older readers
+/// that this layer is not optional: refuse the stele rather than restore a
+/// partial one.
 ///
 /// The protocol never reads the flag — a scope is profile-owned and opaque — so
 /// the planner below is the whole of the profile side, written out to show how
