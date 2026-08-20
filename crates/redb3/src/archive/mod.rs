@@ -791,6 +791,19 @@ impl ArchiveStore {
         Ok(done)
     }
 
+    /// Drop everything the archive holds after `after`.
+    ///
+    /// The cut is by slot, so at a slot holding more than one block every one
+    /// of them survives, including any that follow `after` in the chain. That
+    /// is only expressible where two blocks share a slot — a Byron
+    /// epoch-boundary block and the first main block of the epoch it opens —
+    /// and a rollback cannot reach one: `Domain::rollback` walks the WAL back
+    /// to `after`, and the WAL holds `max_rollback` slots behind the tip,
+    /// while epoch-boundary blocks stop at the end of Byron. The behaviour
+    /// also predates the archive keeping both blocks, which is why it is
+    /// recorded here rather than changed: resolving `after` to one block of a
+    /// slot means matching its hash, which is `find_intersect`'s job, not this
+    /// one's.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
         wx.set_quick_repair(true);

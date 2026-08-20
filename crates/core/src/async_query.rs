@@ -40,23 +40,18 @@ impl Default for AsyncQueryOptions {
 /// then the answer without a decode. Where the chain put two blocks on one
 /// slot — a Byron epoch-boundary block and the first main block of the epoch
 /// it opens — the hash is what tells them apart.
-fn pick_by_hash(
-    candidates: Vec<BlockBody>,
-    hash: &[u8],
-) -> Result<Option<BlockBody>, ArchiveError> {
+///
+/// A body that will not decode is not the block the hash names, so it is
+/// passed over rather than failing the lookup: the caller asked for one block,
+/// and the one it asked for may be the sibling.
+fn pick_by_hash(candidates: Vec<BlockBody>, hash: &[u8]) -> Option<BlockBody> {
     if candidates.len() <= 1 {
-        return Ok(candidates.into_iter().next());
+        return candidates.into_iter().next();
     }
 
-    for body in candidates {
-        let decoded = MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
-
-        if decoded.hash().as_ref() == hash {
-            return Ok(Some(body));
-        }
-    }
-
-    Ok(None)
+    candidates.into_iter().find(|body| {
+        MultiEraBlock::decode(body).is_ok_and(|decoded| decoded.hash().as_ref() == hash)
+    })
 }
 
 #[derive(Clone)]
@@ -119,7 +114,7 @@ where
             match slot {
                 Some(slot) => {
                     let candidates = domain.archive().get_blocks_by_slot(&slot)?;
-                    Ok(pick_by_hash(candidates, &hash)?)
+                    Ok(pick_by_hash(candidates, &hash))
                 }
                 None => Ok(None),
             }
@@ -286,13 +281,28 @@ mod tests {
         let main_hash = main_point.hash().unwrap();
 
         assert_eq!(
-            pick_by_hash(candidates.clone(), ebb_hash.as_ref()).unwrap(),
+            pick_by_hash(candidates.clone(), ebb_hash.as_ref()),
             Some(ebb.as_ref().clone())
         );
 
         assert_eq!(
-            pick_by_hash(candidates, main_hash.as_ref()).unwrap(),
+            pick_by_hash(candidates, main_hash.as_ref()),
             Some(main.as_ref().clone())
+        );
+    }
+
+    /// A body that will not decode must not take its sibling down with it: the
+    /// hash asked for here belongs to the block that is fine.
+    #[test]
+    fn an_undecodable_candidate_does_not_hide_its_sibling() {
+        let (ebb_point, ebb) = make_byron_ebb(1, pallas::crypto::hash::Hash::new([7u8; 32]));
+        let ebb_hash = ebb_point.hash().unwrap();
+
+        let candidates = vec![b"not a block".to_vec(), ebb.as_ref().clone()];
+
+        assert_eq!(
+            pick_by_hash(candidates, ebb_hash.as_ref()),
+            Some(ebb.as_ref().clone())
         );
     }
 
@@ -303,9 +313,6 @@ mod tests {
     fn a_lone_candidate_is_returned_undecoded() {
         let body = b"not a block".to_vec();
 
-        assert_eq!(
-            pick_by_hash(vec![body.clone()], &[0u8; 32]).unwrap(),
-            Some(body)
-        );
+        assert_eq!(pick_by_hash(vec![body.clone()], &[0u8; 32]), Some(body));
     }
 }
