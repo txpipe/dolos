@@ -183,18 +183,31 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
+    let scan =
+        scan_script_redeemers(&domain, hash, &pagination, domain.config.max_scan_items()).await?;
+
+    if scan.budget_exhausted {
+        return Err(crate::pagination::PaginationError::ScanLimitExceeded.into());
+    }
+
     // an unknown script is a 404. a known script with no redeemers is an
-    // empty page.
-    domain
-        .query()
-        .script_by_hash(&hash)
-        .await
-        .map_err(log_and_500("failed to query script by hash"))?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // empty page. dimension activity alone proves the script is known, so
+    // the archive existence lookup only runs when there is no activity —
+    // on a pruned node the block that carried the script bytes can age
+    // out while tagged executions stay inside the window.
+    if !scan.saw_candidates {
+        domain
+            .query()
+            .script_by_hash(&hash)
+            .await
+            .map_err(log_and_500("failed to query script by hash"))?
+            .ok_or(StatusCode::NOT_FOUND)?;
 
-    let matches = scan_script_redeemers(&domain, hash, &pagination).await?;
+        return Ok(Json(vec![]));
+    }
 
-    let items = matches
+    let items = scan
+        .rows
         .into_iter()
         .skip(pagination.skip())
         .take(pagination.count)
@@ -203,14 +216,25 @@ where
     Ok(Json(items))
 }
 
+/// The outcome of a dimension scan: the rows found, whether any tagged
+/// block was seen at all, and whether the scan gave up on its block budget.
+struct RedeemerScan {
+    rows: Vec<ScriptRedeemersInner>,
+    saw_candidates: bool,
+    budget_exhausted: bool,
+}
+
 /// Scan the chain for redeemers that point at `hash`, in the pagination's
 /// order. The scan stops once it has enough matches to fill the requested
-/// page.
+/// page, or once it has consumed `max_scan_items` tagged blocks — the
+/// dimension is a superset (failed txs, governance purposes), so a script
+/// whose executions all filter out must not scan its history unbounded.
 async fn scan_script_redeemers<D>(
     domain: &Facade<D>,
     hash: Hash<28>,
     pagination: &Pagination,
-) -> Result<Vec<ScriptRedeemersInner>, StatusCode>
+    max_scan_items: u64,
+) -> Result<RedeemerScan, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
@@ -228,8 +252,18 @@ where
     let mut prices_by_epoch: HashMap<Epoch, ExUnitPrices> = HashMap::new();
     let mut matches: Vec<ScriptRedeemersInner> = Vec::new();
     let target = pagination.from() + pagination.count;
+    let mut scanned: u64 = 0;
 
     while let Some(next) = stream.next().await {
+        if scanned >= max_scan_items {
+            return Ok(RedeemerScan {
+                rows: matches,
+                saw_candidates: true,
+                budget_exhausted: true,
+            });
+        }
+        scanned += 1;
+
         let (slot, body) = next.map_err(log_and_500("failed to stream script activity"))?;
 
         let Some(body) = body else {
@@ -275,6 +309,10 @@ where
             }
 
             for redeemer in redeemers {
+                // resolve() returns None when the producing tx is pruned. On
+                // a history-pruned node, a spend row inside the window drops
+                // when its consumed output predates the window — the same
+                // limit every input-resolving endpoint has.
                 let resolved = redeemer_script_hash(tx, &redeemer, &mut |input| {
                     let Some(output) = resolver.resolve(input)? else {
                         return Ok(None);
@@ -313,13 +351,21 @@ where
                 });
 
                 if matches.len() >= target {
-                    return Ok(matches);
+                    return Ok(RedeemerScan {
+                        rows: matches,
+                        saw_candidates: true,
+                        budget_exhausted: false,
+                    });
                 }
             }
         }
     }
 
-    Ok(matches)
+    Ok(RedeemerScan {
+        saw_candidates: scanned > 0,
+        rows: matches,
+        budget_exhausted: false,
+    })
 }
 
 /// The execution prices of an epoch, memoized: most scanned blocks
@@ -336,7 +382,19 @@ where
     match cache.entry(epoch) {
         Entry::Occupied(entry) => Ok(entry.into_mut()),
         Entry::Vacant(entry) => {
-            let pparams = domain.get_effective_pparams_for_epoch(epoch, chain)?;
+            // the oldest retained epoch's own log is pruned when the history
+            // cutoff falls inside the epoch. the next epoch's log still
+            // carries that epoch's value in its mark (epoch - 1) slot.
+            let pparams = match domain.get_effective_pparams_for_epoch(epoch, chain) {
+                Ok(pparams) => pparams,
+                Err(_) => domain
+                    .get_epoch_log(epoch + 1, chain)?
+                    .and_then(|log| log.pparams.mark().cloned())
+                    .ok_or_else(|| {
+                        tracing::error!(epoch, "no effective pparams for epoch");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?,
+            };
 
             let prices = pparams.execution_costs().ok_or_else(|| {
                 tracing::error!(epoch, "no execution prices in effective pparams");
