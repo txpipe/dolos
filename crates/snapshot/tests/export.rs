@@ -56,7 +56,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:39760ea7fb39fb5f9bb87b279532087bba36ac120e61e0eba1a0c8056372fad7";
+    "sha256:269fcc843a25e97ffdfecee796ca1c4b2e7f3e85575abf5736a640baff8d4fe7";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -581,7 +581,7 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:e6efd8da5e50463a9380ec4600741407ea84ac2baac44917707bb137d1b119d2","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":40},"#,
     r#"{"diffId":"sha256:1953096685ae64ae6f5d1bbc04d8d3678fbb567138809f581bdcdacfa1e1b90b","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":40},"#,
     r#"{"diffId":"sha256:0eb6fed603f60e527eb9622e04d72a74c21dcd7ee88e98b95ae6f8895736d5fd","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":40}"#,
-    r#"],"parameters":{"indexKeyHash":"xxh3-64","stateShards":16},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":3}"#,
+    r#"],"parameters":{"indexKeyHash":"xxh3-64","stateShards":16},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
 
 // --------------------------------------------------------------------------

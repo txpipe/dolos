@@ -129,8 +129,10 @@ mod registry_node {
 
     use super::harness;
 
-    /// The harness ledger and the two plans it publishes: sequence 1 standing
-    /// on the epoch-0 boundary, and sequence 2 one slot past it.
+    /// The harness ledger and the two plans it publishes: sequence 0 standing
+    /// on the last slot of epoch 0, and sequence 1 one slot past it — the
+    /// first block of epoch 1 (decision 0025: `sequence` is the epoch the
+    /// cursor stands in).
     ///
     /// That the first cursor sits on the boundary is not a convenience: a
     /// stele cut mid-epoch clamps its last window to the cursor, so the same
@@ -161,8 +163,8 @@ mod registry_node {
             let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
             let second = Plan::new(&summary, network, point(boundary)).unwrap();
 
-            assert_eq!(first.sequence, 1);
-            assert_eq!(second.sequence, 2);
+            assert_eq!(first.sequence, 0);
+            assert_eq!(second.sequence, 1);
             assert_eq!(
                 first.epochs,
                 second.epochs[..1],

@@ -787,8 +787,8 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     // the first staying true under the second, and that says nothing unless
     // the second is a different document.
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
-    assert_eq!(first.sequence, 1);
-    assert_eq!(second.sequence, 2);
+    assert_eq!(first.sequence, 0, "the cursor stands in epoch 0");
+    assert_eq!(second.sequence, 1, "and one slot later, in epoch 1");
 
     // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
     // every state shard is new.

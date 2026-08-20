@@ -45,9 +45,9 @@
 //!
 //! The harness ledger lives inside epoch zero, so the two publishes are made by
 //! standing at two synthetic chain points and letting `Plan::new` derive
-//! everything: one at the last slot of epoch 0, which publishes sequence 1 with
+//! everything: one at the last slot of epoch 0, which publishes sequence 0 with
 //! epoch 0's window **unclamped**, and one at the first slot of epoch 1, which
-//! publishes sequence 2 with an identical epoch-0 window plus an empty epoch 1.
+//! publishes sequence 1 with an identical epoch-0 window plus an empty epoch 1.
 //!
 //! That the first cursor has to sit on the boundary is not a convenience. A
 //! stele cut mid-epoch clamps its last window to the cursor, so the same epoch
@@ -137,7 +137,7 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
 
     // Done criterion 2: the chain, and that it validates.
     assert_eq!(second.inscription.history.len(), 1);
-    assert_eq!(second.inscription.history[0].sequence, 1);
+    assert_eq!(second.inscription.history[0].sequence, 0);
     assert_eq!(
         second.inscription.history[0].inscription_digest,
         first.identity
@@ -189,11 +189,11 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     // And against the stele that is now there.
     let next = registry::preview(Publishing::new(&repository), &node.second, None).unwrap();
 
-    assert_eq!(next.predecessor, Some((1, first.identity)));
+    assert_eq!(next.predecessor, Some((0, first.identity)));
     assert_eq!(next.history, 1);
 
     // `--rebuild` is visible in the preview, not only in the publish. Asked
-    // here, while sequence 2 is still unpublished: a preview reads the chain
+    // here, while sequence 1 is still unpublished: a preview reads the chain
     // through the same rule a publish does, so asking after the fact would be
     // refused as a republish.
     let rebuilding = registry::preview(
@@ -310,15 +310,15 @@ fn a_publish_that_does_not_follow_latest_is_refused() {
     let second = node.publish(&repository, &node.second, false);
 
     // A republish of the sequence already there.
-    expect_break(node.refuse(&repository, &node.second), 2, 2);
+    expect_break(node.refuse(&repository, &node.second), 1, 1);
 
     // And one behind it.
-    expect_break(node.refuse(&repository, &node.first), 2, 1);
+    expect_break(node.refuse(&repository, &node.first), 1, 0);
 
-    // A gap: the repository is at 2 and this stele is sequence 4.
+    // A gap: the repository is at 1 and this stele is sequence 4.
     let mut skipped = node.second.clone();
     skipped.sequence = 4;
-    expect_break(node.refuse(&repository, &skipped), 2, 4);
+    expect_break(node.refuse(&repository, &skipped), 1, 4);
 
     // Every refusal happened before anything was written, so the repository is
     // exactly where it was.
@@ -474,22 +474,22 @@ fn a_publisher_can_ask_where_it_stands() {
     // epoch raises.
     assert_eq!(
         registry::standing(&repository, &node.first).unwrap(),
-        Standing::UpToDate { latest: 1 },
+        Standing::UpToDate { latest: 0 },
     );
 
     assert_eq!(
         registry::standing(&repository, &node.second).unwrap(),
-        Standing::Next { latest: 1 },
+        Standing::Next { latest: 0 },
     );
 
     // A node three epochs ahead of the repository.
     let mut skipped = node.second.clone();
-    skipped.sequence = 4;
+    skipped.sequence = 3;
 
     assert_eq!(
         registry::standing(&repository, &skipped).unwrap(),
         Standing::Ahead {
-            latest: 1,
+            latest: 0,
             distance: 3
         },
     );
@@ -498,8 +498,8 @@ fn a_publisher_can_ask_where_it_stands() {
     // distance.
     let message = node.refuse(&repository, &skipped).to_string();
 
-    assert!(message.contains('1'), "{message}");
-    assert!(message.contains('4'), "{message}");
+    assert!(message.contains('0'), "{message}");
+    assert!(message.contains('3'), "{message}");
     assert!(message.contains("3 sequences ahead"), "{message}");
 }
 
