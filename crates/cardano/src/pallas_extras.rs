@@ -1,7 +1,6 @@
 use std::ops::Deref as _;
 
 use dolos_core::BlockSlot;
-use pallas::codec::minicbor;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
     Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart, StakeAddress,
@@ -390,17 +389,16 @@ pub fn cert_script_hash(cert: &MultiEraCert) -> Option<Hash<28>> {
 /// The script that votes at the given redeemer index, if the voter is a
 /// script.
 ///
-/// The ledger indexes voters by their cbor order. Pallas decodes the voting
-/// procedures into a map ordered by the rust derive, so sort the voters back
-/// by their encoding.
+/// The ledger indexes voters by its `Map Voter` order: committee before
+/// dreps before pools, script credentials before key credentials inside
+/// each group. Pallas declares the `Voter` variants in that order, so the
+/// decoded `BTreeMap` already iterates like the ledger. Do not sort by the
+/// cbor encoding: its tag order puts key credentials first.
 fn vote_script_hash(tx: &MultiEraTx<'_>, index: usize) -> Option<Hash<28>> {
     let body = &tx.as_conway()?.transaction_body;
     let procedures = body.voting_procedures.as_ref()?;
 
-    let mut voters: Vec<&Voter> = procedures.keys().collect();
-    voters.sort_by_key(|voter| minicbor::to_vec(voter).unwrap_or_default());
-
-    match voters.get(index)? {
+    match procedures.keys().nth(index)? {
         Voter::ConstitutionalCommitteeScript(hash) | Voter::DRepScript(hash) => Some(*hash),
         _ => None,
     }
@@ -457,7 +455,7 @@ where
             }
         }
         RedeemerTag::Mint => {
-            let mints = tx.mints();
+            let mints = tx.mints_sorted_set();
             Ok(mints.get(index).map(|x| x.policy()).cloned())
         }
         RedeemerTag::Cert => Ok(tx.certs().get(index).and_then(cert_script_hash)),
@@ -667,6 +665,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use pallas::{
+        codec::minicbor,
         codec::utils::{Bytes, Int, KeepRaw, NonEmptySet, NonZeroInt, Nullable, Set},
         ledger::{
             primitives::{
@@ -872,5 +871,98 @@ mod tests {
         // the fixture carries one voter and one proposal, both at index 0
         assert_eq!(vote_script_hash(&tx, 1), None);
         assert_eq!(propose_script_hash(&tx, 1), None);
+    }
+
+    /// A conway tx whose only content is one voter of every kind.
+    fn tx_with_mixed_voters() -> Vec<u8> {
+        let ballot = BTreeMap::from_iter([(
+            GovActionId {
+                transaction_id: Hash::from([7u8; 32]),
+                action_index: 0,
+            },
+            VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        )]);
+
+        let voting_procedures = BTreeMap::from_iter([
+            (
+                Voter::ConstitutionalCommitteeKey([1u8; 28].into()),
+                ballot.clone(),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript([2u8; 28].into()),
+                ballot.clone(),
+            ),
+            (Voter::DRepKey([3u8; 28].into()), ballot.clone()),
+            (Voter::DRepScript([4u8; 28].into()), ballot.clone()),
+            (Voter::StakePoolKey([5u8; 28].into()), ballot),
+        ]);
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: Some(voting_procedures),
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let witness_set = WitnessSet {
+            vkeywitness: None,
+            native_script: None,
+            bootstrap_witness: None,
+            plutus_v1_script: None,
+            plutus_data: None,
+            redeemer: None,
+            plutus_v2_script: None,
+            plutus_v3_script: None,
+        };
+
+        let body_cbor = minicbor::to_vec(&body).expect("failed to encode body");
+        let body = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+            .expect("failed to decode body")
+            .to_owned();
+
+        let tx = Tx {
+            transaction_body: body,
+            transaction_witness_set: KeepRaw::from(witness_set),
+            success: true,
+            auxiliary_data: Nullable::Null,
+        };
+
+        minicbor::to_vec(tx).expect("failed to encode tx")
+    }
+
+    /// The ledger orders voters by group, then script before key. The cbor
+    /// tag order puts keys first, so an encoding sort resolves the wrong
+    /// voter. This pins the ledger order per index.
+    #[test]
+    fn vote_script_hash_follows_ledger_voter_order() {
+        let bytes = tx_with_mixed_voters();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        // committee script, committee key, drep script, drep key, pool
+        assert_eq!(vote_script_hash(&tx, 0), Some([2u8; 28].into()));
+        assert_eq!(vote_script_hash(&tx, 1), None);
+        assert_eq!(vote_script_hash(&tx, 2), Some([4u8; 28].into()));
+        assert_eq!(vote_script_hash(&tx, 3), None);
+        assert_eq!(vote_script_hash(&tx, 4), None);
+        assert_eq!(vote_script_hash(&tx, 5), None);
     }
 }
