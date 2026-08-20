@@ -359,8 +359,8 @@ impl ScriptRedeemersApproxIndexTable {
     pub const DEF: MultimapTableDefinition<'static, BucketedKey<u64>, u64> =
         MultimapTableDefinition::new("archive-byscriptredeemers");
 
-    pub fn compute_key(script_hash: &Vec<u8>) -> u64 {
-        xxh3_64(script_hash.as_slice())
+    pub fn compute_key(script_hash: &[u8]) -> u64 {
+        xxh3_64(script_hash)
     }
 
     pub fn iter_by_script_redeemers(
@@ -369,7 +369,7 @@ impl ScriptRedeemersApproxIndexTable {
         start_slot: BlockSlot,
         end_slot: BlockSlot,
     ) -> Result<SlotKeyIterator, Error> {
-        let key = Self::compute_key(&script_hash.to_vec());
+        let key = Self::compute_key(script_hash);
         slot_iterator(rx, Self::DEF, key, start_slot, end_slot)
     }
 }
