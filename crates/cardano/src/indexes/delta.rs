@@ -292,10 +292,7 @@ impl CardanoIndexDeltaBuilder {
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
         resolved_inputs: &std::collections::HashMap<TxoRef, crate::OwnedMultiEraOutput>,
     ) {
-        use pallas::ledger::{
-            primitives::conway::ScriptRef,
-            traverse::{ComputeHash as _, OriginalHash as _},
-        };
+        use pallas::ledger::traverse::{ComputeHash as _, OriginalHash as _};
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
 
@@ -333,20 +330,7 @@ impl CardanoIndexDeltaBuilder {
                 }
 
                 if let Some(script_ref) = output.script_ref() {
-                    match script_ref {
-                        ScriptRef::NativeScript(script) => {
-                            self.add_script_hash(script.original_hash().to_vec());
-                        }
-                        ScriptRef::PlutusV1Script(script) => {
-                            self.add_script_hash(script.compute_hash().to_vec());
-                        }
-                        ScriptRef::PlutusV2Script(script) => {
-                            self.add_script_hash(script.compute_hash().to_vec());
-                        }
-                        ScriptRef::PlutusV3Script(script) => {
-                            self.add_script_hash(script.compute_hash().to_vec());
-                        }
-                    }
+                    self.add_script_hash(pallas_extras::script_ref_hash(&script_ref).to_vec());
                 }
             }
 
