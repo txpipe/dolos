@@ -257,8 +257,8 @@ pub fn write_layer(
 ///
 /// `state` appears twice — one layer per populated shard — which is the normal
 /// case for this profile rather than an edge one. Every log kind appears, which
-/// is what makes the goldens freeze all six kind strings: the namespace lives in
-/// the layer header now, and nowhere else on the wire.
+/// is what makes the goldens freeze all six kind strings: the namespace lives
+/// in the layer header now, and nowhere else on the wire.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
         blocks, digests as digests_layer, indexes as indexes_layer, logs,

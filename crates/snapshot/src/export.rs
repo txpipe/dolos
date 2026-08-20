@@ -268,7 +268,8 @@ pub trait Predecessor {
     /// Separate because `adopt` *acts*: it puts the blob in the transport and
     /// counts the layer as reused. Forecasting how many layers a publish will
     /// write has to ask the same question without taking either step, and a
-    /// forecast that called `adopt` would double-count every layer it looked at.
+    /// forecast that called `adopt` would double-count every layer it looked
+    /// at.
     ///
     /// It may answer `true` where `adopt` will later answer `None` — a blob the
     /// repository has since dropped is only discovered by reaching for it — so
@@ -586,6 +587,14 @@ where
 {
     stele.observe(observer.clone());
 
+    // Before a single layer is built, and before the count that would announce
+    // them: a log the format has no layer for is a refusal, and a refusal that
+    // waited until the log kinds were reached would have uploaded most of a
+    // stele — hours on mainnet — before saying so.
+    for window in &plan.epochs {
+        refuse_uncovered_logs(archive, window)?;
+    }
+
     // The same arithmetic `crate::registry::preview` reports a dry run with, so
     // "layer 12 of 52" and "build: 52 layers" cannot disagree. The log kinds are
     // the only ones that have to be counted rather than multiplied — an empty
@@ -634,13 +643,6 @@ where
                 landed(descriptor, previous, &mut layers)?;
             }
         }
-    }
-
-    // After the log layers rather than before them: the walk this replaced
-    // visited every namespace, so nothing may be left behind in one the split
-    // does not name.
-    for window in &plan.epochs {
-        refuse_uncovered_logs(archive, window)?;
     }
 
     // Not offered to the predecessor: see [`Predecessor::landed`].
@@ -1045,9 +1047,9 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
 /// about whether a layer exists because they agree about whether a record does.
 /// Byron alone sheds ~1,200 empty blobs to it.
 ///
-/// `None` is therefore not a failure and not a skip — it is the whole answer for
-/// a window a namespace wrote nothing in, and a restore reads the absence as
-/// normal.
+/// `None` is therefore not a failure and not a skip — it is the whole answer
+/// for a window a namespace wrote nothing in, and a restore reads the absence
+/// as normal.
 #[allow(clippy::too_many_arguments)]
 fn write_logs<W: SteleWriter, A: ArchiveStore>(
     stele: &W,
@@ -1147,10 +1149,11 @@ pub(crate) fn log_layers<A: ArchiveStore>(
 /// Refuse a window holding logs under a namespace no `log-{ns}` kind carries.
 ///
 /// The walk this replaced visited every namespace and would have carried such a
-/// record into the one `logs` layer; the split visits a closed list, so the same
-/// record would now be dropped without a word. It is a publish-time refusal
-/// naming the namespace instead — the loudest place to learn that the ledger
-/// grew a log the format has no layer for.
+/// record into the one `logs` layer; the split visits a closed list, so the
+/// same record would now be dropped without a word. It is a publish-time
+/// refusal naming the namespace instead — the loudest place to learn that the
+/// ledger grew a log the format has no layer for, and taken before anything is
+/// built so the refusal costs a scan rather than an upload.
 ///
 /// `utxos` is excluded because the walk this replaced excluded it: the UTxO set
 /// is state, and no writer puts a log under it.

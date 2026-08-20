@@ -150,8 +150,8 @@ mod tests {
     /// It has to be refused, and refused on the arity: a decoder that read the
     /// first two elements and stopped would take the namespace string for a log
     /// key, and a decoder that tolerated the extra element would restore v1
-    /// records into a namespace decided by the layer rather than by the record —
-    /// silently, and only for the namespaces that happen to agree.
+    /// records into a namespace decided by the layer rather than by the record
+    /// — silently, and only for the namespaces that happen to agree.
     #[test]
     fn the_pre_split_three_element_record_is_refused() {
         let wire = frame::encode(|e| {

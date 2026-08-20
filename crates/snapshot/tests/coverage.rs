@@ -164,11 +164,11 @@ fn the_log_namespaces_are_state_namespaces() {
 /// Done criterion 2: the KIND↔NS table, held to its own rule.
 ///
 /// The table is spelled out rather than composed — house style, and what makes
-/// the wire vocabulary greppable — so the rule that produced the spelling has to
-/// be a test or it is nothing. `_` becomes `-` because a media type's kind token
-/// admits hyphens and not underscores; no log namespace carries an underscore
-/// today, and the mapping is pinned anyway, because the namespace that does will
-/// arrive without anyone reading this comment first.
+/// the wire vocabulary greppable — so the rule that produced the spelling has
+/// to be a test or it is nothing. `_` becomes `-` because a media type's kind
+/// token admits hyphens and not underscores; no log namespace carries an
+/// underscore today, and the mapping is pinned anyway, because the namespace
+/// that does will arrive without anyone reading this comment first.
 #[test]
 fn log_kinds_derive_from_their_namespaces() {
     assert_eq!(LOG_KINDS.len(), LOG_NAMESPACES.len());
