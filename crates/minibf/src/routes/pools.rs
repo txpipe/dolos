@@ -386,8 +386,9 @@ where
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let mut block_updates = scan_pool_updates_in_block(&block, &pool);
 
-        // The stream gives blocks in descending order. Reverse the certs in
-        // each block. Then the full list follows the chain position in reverse.
+        // For descending order, the stream gives blocks from the tip backward.
+        // Reverse the certs in each block. Then the full list follows the
+        // chain position in reverse.
         if matches!(order, SlotOrder::Desc) {
             block_updates.reverse();
         }
