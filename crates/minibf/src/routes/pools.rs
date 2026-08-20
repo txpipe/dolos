@@ -9,9 +9,14 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    dreps_inner_metadata_error::Code, pool::Pool, pool_calidus_key::PoolCalidusKey,
-    pool_delegators_inner::PoolDelegatorsInner, pool_history_inner::PoolHistoryInner,
-    pool_list_extended_inner::PoolListExtendedInner, pool_list_retire_inner::PoolListRetireInner,
+    dreps_inner_metadata_error::Code,
+    pool::Pool,
+    pool_calidus_key::PoolCalidusKey,
+    pool_delegators_inner::PoolDelegatorsInner,
+    pool_history_inner::PoolHistoryInner,
+    pool_list_extended_inner::PoolListExtendedInner,
+    pool_list_retire_inner::PoolListRetireInner,
+    pool_updates_inner::{Action, PoolUpdatesInner},
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     DrepsInnerMetadataError, PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
@@ -322,6 +327,76 @@ where
     }
 
     Ok((registrations, retirements))
+}
+
+fn scan_pool_updates_in_block(
+    block: &MultiEraBlock,
+    target_pool: &PoolHash,
+) -> Vec<(String, i32, Action)> {
+    let mut updates = Vec::new();
+
+    for tx in block.txs() {
+        let tx_hash = tx.hash().to_string();
+
+        for (cert_index, cert) in tx.certs().iter().enumerate() {
+            let action = if pallas_extras::cert_as_pool_registration(cert)
+                .is_some_and(|cert| &cert.operator == target_pool)
+            {
+                Some(Action::Registered)
+            } else if pallas_extras::cert_as_pool_retirement(cert)
+                .is_some_and(|cert| &cert.operator == target_pool)
+            {
+                Some(Action::Deregistered)
+            } else {
+                None
+            };
+
+            if let Some(action) = action {
+                updates.push((tx_hash.clone(), cert_index as i32, action));
+            }
+        }
+    }
+
+    updates
+}
+
+async fn load_pool_updates<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+    order: SlotOrder,
+) -> Result<Vec<(String, i32, Action)>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let tip = domain.get_tip_slot()?;
+    let stream = domain
+        .query()
+        .blocks_by_pool_certs_stream(pool.as_slice(), 0, tip, order);
+
+    let mut stream = Box::pin(stream);
+    let mut updates = Vec::new();
+
+    while let Some(item) = stream.next().await {
+        let (_, block) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(block) = block else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(block.as_slice())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut block_updates = scan_pool_updates_in_block(&block, &pool);
+
+        // For descending order, the stream gives blocks from the tip backward.
+        // Reverse the certs in each block. Then the full list follows the
+        // chain position in reverse.
+        if matches!(order, SlotOrder::Desc) {
+            block_updates.reverse();
+        }
+
+        updates.append(&mut block_updates);
+    }
+
+    Ok(updates)
 }
 
 async fn load_pool_calidus_key<D>(
@@ -1152,6 +1227,51 @@ where
         .collect::<Result<Vec<_>, StatusCode>>()?;
 
     Ok(Json(mapped))
+}
+
+pub async fn by_id_updates<D>(
+    Path(id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolUpdatesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+{
+    let operator = decode_pool_id(&id)?;
+
+    // Make sure that the decoded id is 28 bytes before the existence check.
+    // A short or long bech32 payload pads into a valid EntityKey. The check
+    // then returns a 404 for a malformed id, but the caller expects a 400.
+    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
+        .map_err(|_| Error::InvalidPoolId)?
+        .into();
+
+    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let pagination = Pagination::try_from(params)?;
+
+    let order = match pagination.order {
+        crate::pagination::Order::Asc => SlotOrder::Asc,
+        crate::pagination::Order::Desc => SlotOrder::Desc,
+    };
+
+    let updates = load_pool_updates(&domain, pool, order).await?;
+
+    let out = updates
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(tx_hash, cert_index, action)| PoolUpdatesInner {
+            tx_hash,
+            cert_index,
+            action,
+        })
+        .collect();
+
+    Ok(Json(out))
 }
 
 #[cfg(test)]
@@ -2301,6 +2421,95 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/delegators");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_happy_path() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/updates");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let updates: Vec<PoolUpdatesInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool updates");
+
+        // The synthetic chain registers the pool. The list has one
+        // registration update or more.
+        assert!(!updates.is_empty());
+        assert!(updates
+            .iter()
+            .any(|update| matches!(update.action, Action::Registered)));
+
+        for update in &updates {
+            assert!(!update.tx_hash.is_empty());
+            assert!(update.cert_index >= 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_updates_order_desc_reverses_asc() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+
+        let (asc_status, asc_bytes) = app
+            .get_bytes(&format!("/pools/{pool_id}/updates?order=asc&count=100"))
+            .await;
+        let (desc_status, desc_bytes) = app
+            .get_bytes(&format!("/pools/{pool_id}/updates?order=desc&count=100"))
+            .await;
+
+        assert_eq!(asc_status, StatusCode::OK);
+        assert_eq!(desc_status, StatusCode::OK);
+
+        let asc: Vec<PoolUpdatesInner> =
+            serde_json::from_slice(&asc_bytes).expect("failed to parse asc updates");
+        let mut desc: Vec<PoolUpdatesInner> =
+            serde_json::from_slice(&desc_bytes).expect("failed to parse desc updates");
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_updates_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/updates", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_wrong_length_bech32_is_bad_request() {
+        let app = TestApp::new();
+
+        // A pool1 string that decodes but carries 27 bytes, not 28.
+        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
+        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
+            .expect("failed to encode short pool id");
+
+        let path = format!("/pools/{short}/updates");
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_not_found() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/updates", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/updates");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }
