@@ -1238,7 +1238,15 @@ where
     Option<PoolState>: From<D::Entity>,
 {
     let operator = decode_pool_id(&id)?;
-    if !domain.cardano_entity_exists::<PoolState>(operator.as_slice())? {
+
+    // Make sure that the decoded id is 28 bytes before the existence check.
+    // A short or long bech32 payload pads into a valid EntityKey. The check
+    // then returns a 404 for a malformed id, but the caller expects a 400.
+    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
+        .map_err(|_| Error::InvalidPoolId)?
+        .into();
+
+    if !domain.cardano_entity_exists::<PoolState>(pool)? {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
@@ -1249,9 +1257,6 @@ where
         crate::pagination::Order::Desc => SlotOrder::Desc,
     };
 
-    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
-        .map_err(|_| Error::InvalidPoolId)?
-        .into();
     let updates = load_pool_updates(&domain, pool, order).await?;
 
     let out = updates
@@ -2476,6 +2481,19 @@ mod tests {
     async fn pools_updates_bad_request() {
         let app = TestApp::new();
         let path = format!("/pools/{}/updates", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_wrong_length_bech32_is_bad_request() {
+        let app = TestApp::new();
+
+        // A pool1 string that decodes but carries 27 bytes, not 28.
+        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
+        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
+            .expect("failed to encode short pool id");
+
+        let path = format!("/pools/{short}/updates");
         assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
     }
 
