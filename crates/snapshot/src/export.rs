@@ -178,8 +178,6 @@ impl Plan {
 
     /// The profile's `position` for this plan.
     pub fn position(&self) -> Result<serde_json::Value, Error> {
-        // One number: the epoch just entered is the one the cursor stands in
-        // and the last one the layers cover (decision 0025).
         crate::position(&self.network, &self.cursor, self.sequence)
     }
 
