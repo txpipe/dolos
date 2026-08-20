@@ -1370,6 +1370,11 @@ pub fn redeemer_fee(units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, Statu
         step_price,
     } = prices;
 
+    // BigRational::new panics on a zero denominator
+    if mem_price.denominator == 0 || step_price.denominator == 0 {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
     let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
 
@@ -1473,6 +1478,10 @@ impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
 
         let items = redeemers
             .into_iter()
+            // the generated Purpose enum has no vote or propose variants yet
+            // (blockfrost/openapi#464); skip those rows like the scripts
+            // endpoint does instead of failing the whole response.
+            .filter(|x| tx_redeemer_purpose(x.tag()).is_some())
             .map(|x| self.build_redeemer_inner(&x, &prices))
             .try_collect()
             .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
