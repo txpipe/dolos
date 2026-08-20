@@ -481,6 +481,10 @@ where
             get(routes::epochs::by_number_blocks::<D>),
         )
         .route(
+            "/epochs/{epoch}/blocks/{pool_id}",
+            get(routes::epochs::by_number_blocks_pool::<D>),
+        )
+        .route(
             "/epochs/{epoch}/parameters",
             get(routes::epochs::by_number_parameters::<D>),
         )
