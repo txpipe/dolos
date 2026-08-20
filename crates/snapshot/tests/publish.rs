@@ -65,7 +65,7 @@ use dolos_core::Domain as _;
 use dolos_snapshot::{
     export::{self, Following, Predecessor as _, Standing},
     registry::{self, Publishing},
-    DolosProfile, Error, BLOCKS, INDEXES, LOGS, STATE_SHARDS,
+    DolosProfile, Error, BLOCKS, INDEXES, STATE_SHARDS,
 };
 use stelae::{progress::Outcome, SteleReader as _};
 
@@ -74,8 +74,25 @@ use watcher::Watcher;
 use node::Node;
 use registry_fixture::Fixture;
 
-/// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
-const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
+/// The log kinds epoch 0 carries.
+///
+/// The harness seeds `epochs` and `member-rewards` and nothing else, so those
+/// are the two log layers epoch 0 publishes — the other four log kinds have no
+/// records in the window and therefore no layer at all. Epoch 1 is the boundary
+/// sliver, whose logs key at `epoch_start(0)`, so it carries none.
+const EPOCH_0_LOGS: [&str; 2] = ["log-epochs", "log-member-rewards"];
+
+/// Layers epoch 0 contributes: `blocks`, `indexes` and its two log layers.
+const EPOCH_0: usize = 2 + EPOCH_0_LOGS.len();
+
+/// Layers epoch 1 contributes: `blocks` and `indexes`, and no logs.
+const EPOCH_1: usize = 2;
+
+/// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
+const PER_PUBLISH: usize = EPOCH_0 + STATE_SHARDS as usize;
+
+/// Layers a publish of sequence 1 carries: both epochs plus the state tip.
+const WHOLE_SECOND: usize = EPOCH_0 + EPOCH_1 + STATE_SHARDS as usize;
 
 // ---------------------------------------------------------------------------
 // Done criteria 1 and 2
@@ -101,24 +118,28 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
 
     let second = node.publish(&repository, &node.second, false);
 
-    // Epoch 0's three layers are inherited; epoch 1's three and the sixteen
-    // state shards are built. The state tip is never inherited — it is the tip,
-    // and its scope names no epoch that could distinguish two publishes.
+    // Epoch 0's four layers are inherited; epoch 1's two and the sixteen state
+    // shards are built. The state tip is never inherited — it is the tip, and
+    // its scope names no epoch that could distinguish two publishes.
     assert_eq!(
-        second.layers_reused, 3,
-        "epoch 0's blocks, indexes and logs"
+        second.layers_reused, EPOCH_0,
+        "epoch 0's blocks, indexes and its two log layers"
     );
     assert_eq!(
-        second.layers_built, PER_PUBLISH,
-        "epoch 1's three layers and the sixteen state shards"
+        second.layers_built,
+        EPOCH_1 + STATE_SHARDS as usize,
+        "epoch 1's blocks and indexes, and the sixteen state shards"
     );
-    assert_eq!(second.inscription.layers.len(), PER_PUBLISH + 3);
+    assert_eq!(second.inscription.layers.len(), WHOLE_SECOND);
 
     // Uploaded, not merely "not rebuilt": an inherited layer moves no bytes at
     // all, and every built one here is genuinely new to the registry because a
     // state shard's header record names its epoch.
-    assert_eq!(second.transfer.layers_uploaded, PER_PUBLISH as u64);
-    assert_eq!(second.transfer.layers_reused, 3);
+    assert_eq!(
+        second.transfer.layers_uploaded,
+        (EPOCH_1 + STATE_SHARDS as usize) as u64
+    );
+    assert_eq!(second.transfer.layers_reused, EPOCH_0 as u64);
     assert_eq!(second.transfer.layers_skipped, 0);
 
     eprintln!(
@@ -145,7 +166,7 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
     second.inscription.validate().unwrap();
 
     // And the inherited descriptors are the predecessor's, byte for byte.
-    for kind in [BLOCKS, INDEXES, LOGS] {
+    for kind in [BLOCKS, INDEXES].into_iter().chain(EPOCH_0_LOGS) {
         let before = layer(&first.inscription, kind, 0);
         let after = layer(&second.inscription, kind, 0);
 
@@ -174,7 +195,13 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     let repository = fixture.repository("dolos/dry-run");
 
     // Against an empty repository: nothing to follow, nothing to inherit.
-    let empty = registry::preview(Publishing::new(&repository), &node.first, None).unwrap();
+    let empty = registry::preview(
+        Publishing::new(&repository),
+        &node.first,
+        node.domain.archive(),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(empty.predecessor, None);
     assert_eq!(empty.history, 0);
@@ -187,7 +214,13 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     assert_eq!(first.layers_reused, empty.layers_reused);
 
     // And against the stele that is now there.
-    let next = registry::preview(Publishing::new(&repository), &node.second, None).unwrap();
+    let next = registry::preview(
+        Publishing::new(&repository),
+        &node.second,
+        node.domain.archive(),
+        None,
+    )
+    .unwrap();
 
     assert_eq!(next.predecessor, Some((0, first.identity)));
     assert_eq!(next.history, 1);
@@ -199,12 +232,13 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
     let rebuilding = registry::preview(
         Publishing::new(&repository).rebuilding(true),
         &node.second,
+        node.domain.archive(),
         None,
     )
     .unwrap();
 
     assert_eq!(rebuilding.layers_reused, 0);
-    assert_eq!(rebuilding.layers_built, PER_PUBLISH + 3);
+    assert_eq!(rebuilding.layers_built, WHOLE_SECOND);
     assert_eq!(rebuilding.history, 1, "a rebuild still chains");
 
     let second = node.publish(&repository, &node.second, false);
@@ -223,7 +257,13 @@ fn a_dry_run_agrees_with_the_publish_that_follows_it() {
 
     // A preview reaches the chain refusal too, which is what makes `--dry-run`
     // the cheap way to find out that a publisher has skipped an epoch.
-    let refused = registry::preview(Publishing::new(&repository), &node.second, None).unwrap_err();
+    let refused = registry::preview(
+        Publishing::new(&repository),
+        &node.second,
+        node.domain.archive(),
+        None,
+    )
+    .unwrap_err();
 
     assert!(matches!(refused, Error::HistoryBreak { .. }), "{refused:?}");
 }
@@ -243,13 +283,9 @@ fn reuse_and_a_forced_rebuild_agree_on_the_digest() {
     node.publish(&rebuilt, &node.first, false);
     let rebuilt = node.publish(&rebuilt, &node.second, true);
 
-    assert_eq!(inherited.layers_reused, 3);
+    assert_eq!(inherited.layers_reused, EPOCH_0);
     assert_eq!(rebuilt.layers_reused, 0, "--rebuild inherits nothing");
-    assert_eq!(
-        rebuilt.layers_built,
-        PER_PUBLISH + 3,
-        "and builds everything"
-    );
+    assert_eq!(rebuilt.layers_built, WHOLE_SECOND, "and builds everything");
 
     // A rebuild still chains: reproducing what you published is not the same
     // act as forgetting that you published it.
@@ -365,7 +401,7 @@ fn layer<'a>(
 /// A stele published **with reuse on** is reproduced from the stores alone.
 ///
 /// This is the check the incremental publish deferred. `a_second_publish` shows
-/// that the second stele inherits epoch 0's three layers and never opens the
+/// that the second stele inherits epoch 0's four layers and never opens the
 /// store for them; `reuse_and_a_forced_rebuild_agree_on_the_digest` shows the
 /// same publisher rebuilding them and agreeing. Neither is an *independent*
 /// reproduction: both go through the registry publisher, and one of them is
@@ -393,7 +429,7 @@ fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
     let second = node.publish(&repository, &node.second, false);
 
     assert_eq!(
-        second.layers_reused, 3,
+        second.layers_reused, EPOCH_0,
         "there is nothing to reproduce unless the publish inherited something"
     );
 
@@ -423,7 +459,7 @@ fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
     assert_eq!(reproduced.digest().unwrap(), second.identity);
 
     eprintln!(
-        "published (3 layers inherited) {} == reproduced from stores {}",
+        "published ({EPOCH_0} layers inherited) {} == reproduced from stores {}",
         second.identity,
         reproduced.digest().unwrap(),
     );
@@ -610,14 +646,15 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
 /// The interruption lands at a layer this test names rather than after a
 /// wall-clock delay, for the reason `tests/restore_registry.rs` states about
 /// its own: a kill on a timer over a loopback registry sometimes interrupts
-/// nothing. Here it is `logs` for epoch 1, which is the last of the six epoch
-/// layers sequence 2 writes — so the interrupted run got five of them up, and
-/// two of those five are ones no manifest in the repository mentions.
+/// nothing. Here it is `indexes` for epoch 1 — the last layer sequence 1
+/// *builds* before the state tip, since epoch 1 carries no logs and epoch 0's
+/// log layers are inherited rather than opened. Three epoch layers landed ahead
+/// of it.
 ///
-/// That last part is what makes the record load-bearing rather than decorative.
-/// Epoch 0's three layers would be inherited from sequence 1's manifest with or
-/// without a record; epoch 1's `blocks` and `indexes` exist only as blobs
-/// nothing references, and only the record knows they are there.
+/// One of those three is what makes the record load-bearing rather than
+/// decorative. Epoch 0's layers would be inherited from sequence 0's manifest
+/// with or without a record; epoch 1's `blocks` exists only as a blob nothing
+/// references, and only the record knows it is there.
 #[test]
 #[ignore]
 fn a_restarted_publish_carries_forward_the_layers_it_finished() {
@@ -644,7 +681,7 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
         .publish_through(
             &Interrupted {
                 inner: &dying,
-                kind: LOGS,
+                kind: INDEXES,
                 epoch: 1,
             },
             publishing(&dying, &storage),
@@ -663,7 +700,7 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
 
     assert_eq!(
         record.layers.len(),
-        5,
+        3,
         "every epoch layer ahead of the one that died, and only those",
     );
 
@@ -683,19 +720,20 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
         .unwrap();
 
     assert_eq!(
-        resumed.layers_reused, 5,
-        "epoch 0's three off the manifest, epoch 1's blocks and indexes off the record",
+        resumed.layers_reused,
+        EPOCH_0 + 1,
+        "epoch 0's four off the manifest, epoch 1's blocks off the record",
     );
 
     assert_eq!(
         resumed.layers_built,
         1 + STATE_SHARDS as usize,
-        "epoch 1's logs and the sixteen state shards, and nothing else",
+        "epoch 1's indexes and the sixteen state shards, and nothing else",
     );
 
-    // The claim in the counters the transport keeps: the two layers the record
+    // The claim in the counters the transport keeps: the layers the record
     // carried moved no bytes at all, and the shards it never carried did.
-    assert_eq!(resumed.transfer.layers_reused, 5);
+    assert_eq!(resumed.transfer.layers_reused, (EPOCH_0 + 1) as u64);
     assert_eq!(resumed.transfer.layers_uploaded, 1 + STATE_SHARDS);
     assert_eq!(
         resumed.transfer.layers_skipped, 0,
@@ -756,7 +794,7 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
         node.publish_through(
             &Interrupted {
                 inner: repository,
-                kind: LOGS,
+                kind: INDEXES,
                 epoch: 1,
             },
             publishing(repository, &storage),
@@ -772,11 +810,11 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
     };
 
     let dying = fixture.repository("dolos/ignored-a");
-    assert_eq!(interrupt(&dying), 5);
+    assert_eq!(interrupt(&dying), 3);
 
     // The other repository's publish reaches the same record and takes nothing
-    // from it: epoch 0's three layers come off *its own* manifest, and epoch
-    // 1's come out of the stores.
+    // from it: epoch 0's four layers come off *its own* manifest, and epoch 1's
+    // come out of the stores.
     let elsewhere = fixture.repository("dolos/ignored-b");
 
     let published = node
@@ -784,12 +822,13 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
         .unwrap();
 
     assert_eq!(
-        published.layers_reused, 3,
-        "epoch 0's three, off this repository's own manifest and nothing else",
+        published.layers_reused, EPOCH_0,
+        "epoch 0's four, off this repository's own manifest and nothing else",
     );
     assert_eq!(
-        published.layers_built, PER_PUBLISH,
-        "epoch 1's three layers and the sixteen state shards, exactly as if no \
+        published.layers_built,
+        EPOCH_1 + STATE_SHARDS as usize,
+        "epoch 1's two layers and the sixteen state shards, exactly as if no \
          record existed",
     );
 
@@ -797,7 +836,7 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
     // and describes layers this publish could carry; it is ignored wholesale,
     // and overwritten rather than read.
     let dying = fixture.repository("dolos/ignored-a");
-    assert_eq!(interrupt(&dying), 5);
+    assert_eq!(interrupt(&dying), 3);
 
     let rebuilt_into = fixture.repository("dolos/ignored-a");
 
@@ -812,7 +851,7 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
         rebuilt.layers_reused, 0,
         "a rebuild carries nothing forward"
     );
-    assert_eq!(rebuilt.layers_built, PER_PUBLISH + 3);
+    assert_eq!(rebuilt.layers_built, WHOLE_SECOND);
 
     // And it is the same stele either way, which is the point of being allowed
     // to ignore the record: reproducing what you published is not the same act

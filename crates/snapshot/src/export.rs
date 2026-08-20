@@ -60,7 +60,8 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexStore, LogKey, StateStore, TemporalKey,
+    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexStore, LogKey, Namespace, StateStore,
+    TemporalKey,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -71,9 +72,10 @@ use stelae::{
 use crate::{
     layers::{blocks, digests, indexes, logs, state},
     namespaces::NAMESPACES,
-    reporting::Cursor,
+    reporting::{Cursor, Records},
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS,
-    COMPRESSION_LEVEL, DIGESTS, EPOCH_KINDS, INDEXES, LOGS, STATE, STATE_SHARDS, UTXOS,
+    COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE,
+    STATE_SHARDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -257,6 +259,26 @@ pub trait Predecessor {
         let _ = (kind, scope);
 
         Ok(None)
+    }
+
+    /// Whether a layer of `kind` at `scope` would be carried forward rather
+    /// than built — [`Predecessor::adopt`]'s question, asked without arranging
+    /// anything.
+    ///
+    /// Separate because `adopt` *acts*: it puts the blob in the transport and
+    /// counts the layer as reused. Forecasting how many layers a publish will
+    /// write has to ask the same question without taking either step, and a
+    /// forecast that called `adopt` would double-count every layer it looked at.
+    ///
+    /// It may answer `true` where `adopt` will later answer `None` — a blob the
+    /// repository has since dropped is only discovered by reaching for it — so
+    /// this is the honest forecast and `adopt` is the outcome.
+    ///
+    /// The default reuses nothing, matching [`Predecessor::adopt`]'s.
+    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
+        let _ = (kind, scope);
+
+        Ok(false)
     }
 
     /// Note that `descriptor`'s layer is in the transport and will be in the
@@ -565,8 +587,12 @@ where
     stele.observe(observer.clone());
 
     // The same arithmetic `crate::registry::preview` reports a dry run with, so
-    // "layer 12 of 52" and "build: 52 layers" cannot disagree.
-    let total = plan.epochs.len() * EPOCH_KINDS.len()
+    // "layer 12 of 52" and "build: 52 layers" cannot disagree. The log kinds are
+    // the only ones that have to be counted rather than multiplied — an empty
+    // one produces no layer — and `log_layers` is what both sites count them
+    // with.
+    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
+        + log_layers(plan, archive, previous)?
         + STATE_SHARDS as usize
         + usize::from(digest_records.is_some());
 
@@ -590,12 +616,31 @@ where
         )?;
     }
 
+    // Kind-major, like the two loops above: the inscription lists layers in
+    // `KINDS` order and within a kind by ascending epoch, and the six log kinds
+    // are six kinds.
+    for (kind, ns) in LOG_KINDS {
+        for window in &plan.epochs {
+            if let Some(descriptor) = write_logs(
+                stele,
+                plan,
+                archive,
+                window,
+                kind,
+                ns,
+                previous,
+                &mut cursor,
+            )? {
+                landed(descriptor, previous, &mut layers)?;
+            }
+        }
+    }
+
+    // After the log layers rather than before them: the walk this replaced
+    // visited every namespace, so nothing may be left behind in one the split
+    // does not name.
     for window in &plan.epochs {
-        landed(
-            write_logs(stele, plan, archive, window, previous, &mut cursor)?,
-            previous,
-            &mut layers,
-        )?;
+        refuse_uncovered_logs(archive, window)?;
     }
 
     // Not offered to the predecessor: see [`Predecessor::landed`].
@@ -991,58 +1036,147 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
     Ok(descriptor)
 }
 
-/// One epoch's ledger logs, ordered by `(ns, log_key)`.
+/// One epoch's logs for one namespace, ascending `log_key`, or `None` where the
+/// window has none.
 ///
-/// Walking [`NAMESPACES`] in order *is* that ordering: the registry is sorted
-/// and each namespace's iterator is key-ascending, so no second registry of
-/// "namespaces that have logs" is needed — one with none simply yields nothing.
+/// The sink is opened by the first record and by nothing else, which is what
+/// makes "empty log layers are omitted" a property of the content rather than a
+/// decision the writer takes: two honest publishers over the same window agree
+/// about whether a layer exists because they agree about whether a record does.
+/// Byron alone sheds ~1,200 empty blobs to it.
+///
+/// `None` is therefore not a failure and not a skip — it is the whole answer for
+/// a window a namespace wrote nothing in, and a restore reads the absence as
+/// normal.
+#[allow(clippy::too_many_arguments)]
 fn write_logs<W: SteleWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
     archive: &A,
     window: &EpochWindow,
+    kind: &'static str,
+    ns: Namespace,
     previous: &dyn Predecessor,
     cursor: &mut Cursor<'_>,
-) -> Result<LayerDescriptor, Error> {
+) -> Result<Option<LayerDescriptor>, Error> {
     let scope = window.scope(plan.network.magic());
 
-    let (spec, adopted) = inherit(&scope, LOGS, previous)?;
-    let at = cursor.open(LOGS, &spec.scope);
+    let (spec, adopted) = inherit(&scope, kind, previous)?;
 
     if let Some(descriptor) = adopted {
-        cursor.close(at, LOGS, Outcome::Inherited);
+        let at = cursor.open(kind, &spec.scope);
+        cursor.close(at, kind, Outcome::Inherited);
 
-        return Ok(descriptor);
+        return Ok(Some(descriptor));
     }
 
-    let mut sink = sink(stele, &spec)?;
     let mut order = logs::OrderCheck::default();
-    let mut records = cursor.records();
+    let range = log_key_range(&window.slots());
 
-    let slots = window.slots();
-    let range = log_key_range(&slots);
+    let mut open: Option<(usize, W::Sink, Records<'_>)> = None;
 
-    for ns in NAMESPACES {
-        if ns == UTXOS {
-            continue;
+    for entry in archive.iter_logs(ns, range)? {
+        let (key, value) = entry?;
+        let record = logs::LogRecord::new(key, value);
+
+        order.check(&record)?;
+
+        if open.is_none() {
+            let at = cursor.open(kind, &spec.scope);
+            open = Some((at, sink(stele, &spec)?, cursor.records()));
         }
 
-        for entry in archive.iter_logs(ns, range.clone())? {
-            let (key, value) = entry?;
-            let record = logs::LogRecord::new(ns, key, value);
+        let (_, sink, records) = open
+            .as_mut()
+            .expect("the record that got here opened the layer");
 
-            order.check(&record)?;
-            sink.write_record(&logs::encode(&record)?)?;
-            records.tick();
-        }
+        sink.write_record(&logs::encode(&record)?)?;
+        records.tick();
     }
+
+    let Some((at, sink, mut records)) = open else {
+        return Ok(None);
+    };
 
     records.flush();
 
     let descriptor = sink.finish()?.descriptor;
-    cursor.close(at, LOGS, Outcome::Transferred);
+    cursor.close(at, kind, Outcome::Transferred);
 
-    Ok(descriptor)
+    Ok(Some(descriptor))
+}
+
+/// How many log layers a publish of `plan` will produce.
+///
+/// One per (window, namespace) pair the predecessor carries forward or the
+/// archive holds a record for — the same two questions [`write_logs`] asks, in
+/// the same order, against the same range. The store side is one seek per pair:
+/// the walk's first step, taken and dropped.
+///
+/// It exists because a layer count that multiplied epochs by kinds would be an
+/// upper bound once log layers became sparse, and the number a publisher reads
+/// off a dry run has to be the number the publish then writes.
+pub(crate) fn log_layers<A: ArchiveStore>(
+    plan: &Plan,
+    archive: &A,
+    previous: &dyn Predecessor,
+) -> Result<usize, Error> {
+    let mut total = 0;
+
+    for window in &plan.epochs {
+        let scope = window.scope(plan.network.magic());
+        let range = log_key_range(&window.slots());
+
+        for (kind, ns) in LOG_KINDS {
+            let spec = scope.layer_spec(kind)?;
+
+            let present = previous.carried_forward(kind, &spec.scope)?
+                || archive
+                    .iter_logs(ns, range.clone())?
+                    .next()
+                    .transpose()?
+                    .is_some();
+
+            total += usize::from(present);
+        }
+    }
+
+    Ok(total)
+}
+
+/// Refuse a window holding logs under a namespace no `log-{ns}` kind carries.
+///
+/// The walk this replaced visited every namespace and would have carried such a
+/// record into the one `logs` layer; the split visits a closed list, so the same
+/// record would now be dropped without a word. It is a publish-time refusal
+/// naming the namespace instead — the loudest place to learn that the ledger
+/// grew a log the format has no layer for.
+///
+/// `utxos` is excluded because the walk this replaced excluded it: the UTxO set
+/// is state, and no writer puts a log under it.
+fn refuse_uncovered_logs<A: ArchiveStore>(archive: &A, window: &EpochWindow) -> Result<(), Error> {
+    let range = log_key_range(&window.slots());
+
+    for ns in NAMESPACES {
+        if ns == UTXOS || LOG_NAMESPACES.contains(&ns) {
+            continue;
+        }
+
+        if archive
+            .iter_logs(ns, range.clone())?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Err(Error::UncoveredLogNamespace {
+                epoch: window.epoch,
+                ns: ns.to_owned(),
+                covered: &LOG_NAMESPACES,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// A log key range covering every log whose slot falls in `slots`.

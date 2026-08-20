@@ -11,23 +11,18 @@
 //! the *shape* of a record, and no part of it interprets a block, a hash or a
 //! stored key. What the fixture does have to be is *complete*, because the
 //! golden digests are what freeze the vocabulary: every archive dimension,
-//! every exact-record kind, every state namespace and every log namespace
-//! appears at least once.
+//! every exact-record kind, every state namespace and every log *kind* appears
+//! at least once. Log namespaces are frozen through their kinds now — the
+//! record no longer carries one.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
 #![allow(dead_code)]
 
-use dolos_cardano::{
-    indexes::archive_dimensions,
-    model::{
-        AccountStakeLog, EpochState, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-        PoolDepositRefundLog, StakeLog,
-    },
-};
+use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
     key_hash, BlockHash, EntityKey, EraCbor, ExactKind, ExactRecord, IndexRecord, LogKey,
-    TagRecord, TxoRef, VERBATIM_KEY_DIMENSION,
+    Namespace, TagRecord, TxoRef, VERBATIM_KEY_DIMENSION,
 };
 use dolos_snapshot::{
     layers::{
@@ -37,7 +32,7 @@ use dolos_snapshot::{
         state::{self, StateRecord, ENTITY_KEY_LEN},
     },
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
-    INDEXES, LOGS, NAMESPACES, STATE, UTXOS,
+    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE, UTXOS,
 };
 use stelae::{
     dir::{BlobIndex, SteleDir, WrittenLayer},
@@ -150,20 +145,20 @@ pub fn indexes() -> Vec<IndexRecord> {
     records
 }
 
-/// One log per namespace the ledger actually writes logs under.
-pub fn logs() -> Vec<LogRecord> {
-    [
-        AccountStakeLog::NS,
-        EpochState::NS,
-        LeaderRewardLog::NS,
-        MemberRewardLog::NS,
-        PoolDepositRefundLog::NS,
-        StakeLog::NS,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(i, ns)| LogRecord::new(ns, log_key(START_SLOT, 0x30 + i as u8), vec![0x81, i as u8]))
-    .collect()
+/// One log for `ns`, which is one layer's worth.
+///
+/// The namespace is no longer in the record — it is the layer's kind — so what
+/// distinguishes one log layer from another here is the record's key and value,
+/// and both are derived from the namespace's position in [`LOG_NAMESPACES`].
+/// The six kind strings are frozen by the layer headers instead, which is where
+/// they now live on the wire.
+pub fn logs(ns: Namespace) -> Vec<LogRecord> {
+    let i = LOG_NAMESPACES
+        .iter()
+        .position(|known| *known == ns)
+        .expect("a log namespace") as u8;
+
+    vec![LogRecord::new(log_key(START_SLOT, 0x30 + i), vec![0x81, i])]
 }
 
 /// One record per state namespace, in the requested shard.
@@ -258,10 +253,12 @@ pub fn write_layer(
         .unwrap()
 }
 
-/// The fixture's five kinds, encoded, in inscription order.
+/// The fixture's kinds, encoded, in inscription order.
 ///
 /// `state` appears twice — one layer per populated shard — which is the normal
-/// case for this profile rather than an edge one.
+/// case for this profile rather than an edge one. Every log kind appears, which
+/// is what makes the goldens freeze all six kind strings: the namespace lives in
+/// the layer header now, and nowhere else on the wire.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
         blocks, digests as digests_layer, indexes as indexes_layer, logs,
@@ -278,12 +275,15 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
             Box::new(epoch_scope()),
             encode_all(&self::indexes(), indexes_layer::encode),
         ),
-        (
-            LOGS,
-            Box::new(epoch_scope()),
-            encode_all(&self::logs(), logs::encode),
-        ),
     ];
+
+    for (kind, ns) in LOG_KINDS {
+        layers.push((
+            kind,
+            Box::new(epoch_scope()),
+            encode_all(&self::logs(ns), logs::encode),
+        ));
+    }
 
     for shard in SHARDS {
         layers.push((

@@ -169,7 +169,7 @@ use crate::{
     export::{self, history_for, same_network, Plan, Predecessor, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
-    DolosProfile, Error, Scope as _, EPOCH_KINDS, STATE, STATE_SHARDS,
+    DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS, STATE, STATE_SHARDS,
 };
 
 /// Which stele in a repository a restore wants.
@@ -1044,19 +1044,27 @@ where
 /// follows it is the one number a publisher trusts, wrong. The two entry points
 /// read the same input so they cannot drift when Phase 4 gives the records a
 /// source.
-pub fn preview(
+///
+/// It takes the archive for the same reason again. Log layers are sparse — an
+/// epoch publishes one per namespace that wrote something — so the count is a
+/// property of the store, not arithmetic over the plan, and a dry run that did
+/// not look would report layers the publish then does not write.
+pub fn preview<A: ArchiveStore>(
     publishing: Publishing<'_>,
     plan: &Plan,
+    archive: &A,
     digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Preview, Error> {
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
     let previous = Chained::new(publishing, latest.as_ref(), plan)?;
 
-    // Every epoch selected contributes one layer per epoch kind, the state tip
+    // Every epoch selected contributes one `blocks` and one `indexes` layer and
+    // as many log layers as it has namespaces with logs, the state tip
     // contributes its sixteen shards however the epochs were restricted, and
     // the digests layer is there exactly when its records are.
-    let total = plan.epochs.len() * EPOCH_KINDS.len()
+    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
+        + export::log_layers(plan, archive, &previous)?
         + STATE_SHARDS as usize
         + usize::from(digest_records.is_some());
 
@@ -1079,6 +1087,9 @@ pub fn preview(
             }
         }
     }
+
+    // A layer carried forward is a layer that exists, so `total` counted it
+    // too — see `export::log_layers`, which asks the predecessor first.
 
     Ok(Preview {
         sequence: plan.sequence,
@@ -1211,12 +1222,6 @@ impl<'a> Chained<'a> {
     /// registry still holds the blob — runs in [`Predecessor::adopt`] and can
     /// turn one of these into a rebuild, which is the direction a dry run is
     /// allowed to be wrong in.
-    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
-        let key = key(kind, scope)?;
-
-        Ok(self.inheritable.contains_key(&key) || self.resumable.contains_key(&key))
-    }
-
     /// Delete the resumption record.
     ///
     /// Called once the stele is sealed and never before it. See
@@ -1232,6 +1237,12 @@ impl<'a> Chained<'a> {
 impl Predecessor for Chained<'_> {
     fn history(&self) -> &[HistoryEntry] {
         &self.history
+    }
+
+    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
+        let key = key(kind, scope)?;
+
+        Ok(self.inheritable.contains_key(&key) || self.resumable.contains_key(&key))
     }
 
     fn adopt(

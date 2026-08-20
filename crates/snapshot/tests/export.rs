@@ -36,13 +36,14 @@ use dolos_cardano::{
 };
 use dolos_core::{
     builtin::{MemoryIndexStore, MemoryStateStore},
-    ArchiveStore, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord, IndexRecord, IndexStore,
-    LogKey, StateStore, StateWriter as _, TagRecord, TemporalKey,
+    ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord,
+    IndexRecord, IndexStore, LogKey, StateStore, StateWriter as _, TagRecord, TemporalKey,
 };
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
     layers::{blocks, indexes, logs, state},
-    DolosProfile, Network, BLOCKS, INDEXES, LOGS, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
+    DolosProfile, Network, BLOCKS, INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE,
+    STATE_SHARDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, plan_for};
@@ -56,7 +57,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:269fcc843a25e97ffdfecee796ca1c4b2e7f3e85575abf5736a640baff8d4fe7";
+    "sha256:6eecdf3b910983cc559f35df6246a2920b11fe442a6297d1e673224e25e24dba";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -145,9 +146,19 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
     )
     .unwrap();
 
-    // Three epochs of blocks, indexes and logs, then sixteen state shards. No
-    // `digests` layer: nothing supplies one.
-    assert_eq!(inscription.layers.len(), 3 * 3 + STATE_SHARDS as usize);
+    // Three epochs of blocks and indexes, then sixteen state shards. No
+    // `digests` layer: nothing supplies one — and **no log layers at all**,
+    // which is the omit-if-empty rule seen from the other side: a store with no
+    // logs in it publishes no layer claiming there are none.
+    assert_eq!(inscription.layers.len(), 3 * 2 + STATE_SHARDS as usize);
+
+    for (kind, _) in LOG_KINDS {
+        assert_eq!(
+            inscription.layers_of_kind(kind).count(),
+            0,
+            "{kind}: an empty namespace still produced a layer"
+        );
+    }
 
     let canonical = String::from_utf8(inscription.canonicalize().unwrap()).unwrap();
     assert_eq!(canonical, CANONICAL_SKELETON);
@@ -160,6 +171,59 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
 
     assert_eq!(read, inscription);
     read.check_profile(&DolosProfile).unwrap();
+}
+
+/// Done criterion 2: a log under a namespace no `log-{ns}` kind carries stops
+/// the publish and names the namespace.
+///
+/// The split traded an all-namespace walk for a closed list of six, and this is
+/// the price of that trade paid up front. Written straight into the archive
+/// rather than through a ledger phase, because no ledger phase writes one today
+/// — the point is what happens on the day one does.
+#[test]
+fn a_log_under_an_uncovered_namespace_fails_the_export() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let (archive, state, index) = empty_stores();
+
+    let stray = NAMESPACES
+        .into_iter()
+        .find(|ns| *ns != UTXOS && !LOG_NAMESPACES.contains(ns))
+        .expect("a state namespace that carries no logs");
+
+    let writer = archive.start_writer().unwrap();
+    writer
+        .write_log(stray, &LogKey::from(TemporalKey::from(120u64)), &vec![0xa0])
+        .unwrap();
+    writer.commit().unwrap();
+
+    let plan = Plan::new(
+        &skeleton_summary(),
+        Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
+        skeleton_point(),
+    )
+    .unwrap();
+
+    let err = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        &index,
+        None,
+        &export::First,
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    match err {
+        dolos_snapshot::Error::UncoveredLogNamespace { epoch, ns, .. } => {
+            assert_eq!(epoch, 1, "slot 120 is in epoch 1 under this summary");
+            assert_eq!(ns, stray);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// A magic with no entry in the table renders as `testnet-{magic}`, so a devnet
@@ -202,12 +266,23 @@ fn a_harness_domain_exports_a_complete_stele() {
     inscription.check_profile(&DolosProfile).unwrap();
 
     // Every kind but `digests`, which has no source in this slice.
-    for kind in [BLOCKS, INDEXES, LOGS, STATE] {
+    for kind in [BLOCKS, INDEXES, STATE] {
         assert!(
             inscription.layers_of_kind(kind).next().is_some(),
             "no {kind} layer"
         );
     }
+
+    // Done criterion 3, from the side a real ledger shows it: the harness seeds
+    // `epochs` and `member-rewards` and nothing else, so exactly those two log
+    // kinds travel and the other four are absent — not present and empty.
+    let carried: Vec<&str> = LOG_KINDS
+        .into_iter()
+        .filter(|(kind, _)| inscription.layers_of_kind(kind).next().is_some())
+        .map(|(kind, _)| kind)
+        .collect();
+
+    assert_eq!(carried, ["log-epochs", "log-member-rewards"]);
     assert_eq!(
         inscription.layers_of_kind(dolos_snapshot::DIGESTS).count(),
         0
@@ -275,30 +350,48 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     assert!(any_blocks, "the fixture archived no blocks");
 
     // --- logs -------------------------------------------------------------
-    let written: Vec<_> = inscription.layers_of_kind(LOGS).collect();
-    assert_eq!(written.len(), windows.len());
-
+    //
+    // One layer per (epoch, namespace) pair that has records, and none for the
+    // pairs that do not — so the expectation is built from the store first and
+    // the layer list is checked against it, rather than the other way round.
     let mut any_logs = false;
 
-    for (descriptor, window) in written.iter().zip(&windows) {
-        let found: Vec<logs::LogRecord> = read_both_ways(&stele, &index, descriptor)
+    for (kind, ns) in LOG_KINDS {
+        let written: Vec<_> = inscription.layers_of_kind(kind).collect();
+
+        let populated: Vec<&EpochWindow> = windows
             .iter()
-            .map(|raw| logs::decode(raw).unwrap())
+            .filter(|window| !expected_logs(&domain, window, ns).is_empty())
             .collect();
 
-        any_logs |= !found.is_empty();
-
         assert_eq!(
-            found,
-            expected_logs(&domain, window),
-            "epoch {}",
-            window.epoch
+            written.len(),
+            populated.len(),
+            "{kind}: a layer exists for a window with no records, or the reverse"
         );
+
+        for (descriptor, window) in written.iter().zip(&populated) {
+            assert_eq!(descriptor.scope["epoch"], window.epoch, "{kind}");
+
+            let found: Vec<logs::LogRecord> = read_both_ways(&stele, &index, descriptor)
+                .iter()
+                .map(|raw| logs::decode(raw).unwrap())
+                .collect();
+
+            any_logs |= !found.is_empty();
+
+            assert_eq!(
+                found,
+                expected_logs(&domain, window, ns),
+                "{kind}, epoch {}",
+                window.epoch
+            );
+        }
     }
 
     assert!(
         any_logs,
-        "the fixture produced no logs, so the logs layer proves nothing"
+        "the fixture produced no logs, so the log layers prove nothing"
     );
 
     // --- indexes ----------------------------------------------------------
@@ -390,25 +483,23 @@ fn expected_blocks<B: ToyStores>(
 fn expected_logs<B: ToyStores>(
     domain: &ToyDomain<B>,
     window: &EpochWindow,
+    ns: dolos_core::Namespace,
 ) -> Vec<logs::LogRecord> {
     let slots = window.slots();
     let range =
         LogKey::from(TemporalKey::from(slots.start))..LogKey::from(TemporalKey::from(slots.end));
 
-    let mut found = Vec::new();
-
-    for ns in NAMESPACES {
-        if ns == UTXOS {
-            continue;
-        }
-
-        for entry in domain.archive().iter_logs(ns, range.clone()).unwrap() {
+    let mut found: Vec<logs::LogRecord> = domain
+        .archive()
+        .iter_logs(ns, range)
+        .unwrap()
+        .map(|entry| {
             let (key, value) = entry.unwrap();
-            found.push(logs::LogRecord::new(ns, key, value));
-        }
-    }
+            logs::LogRecord::new(key, value)
+        })
+        .collect();
 
-    found.sort_by(|a, b| (a.ns, &a.key).cmp(&(b.ns, &b.key)));
+    found.sort_by(|a, b| a.key.cmp(&b.key));
 
     found
 }
@@ -562,9 +653,6 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:0517f93e76f9fe6059bcde6218af5c90f51020af09890c5e3a05cc8f3a32e447","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":44},"#,
     r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:a76e2bb47934f8473a232a31da4930db8d50ce90a4cab2c232fc032644fff62e","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":45},"#,
-    r#"{"diffId":"sha256:7e96b5236301816258a02241663524c55b3703deae8e4717111e5b54c0c4c510","kind":"logs","mediaType":"application/vnd.dolos.stele.logs.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":41},"#,
-    r#"{"diffId":"sha256:7cdc802d5922eea2f71c418e8bcd8bec86b3ce377fe7fd91486d638e8dc76a92","kind":"logs","mediaType":"application/vnd.dolos.stele.logs.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":42},"#,
-    r#"{"diffId":"sha256:738494f0de243c845022849602944098676aae8a082323d011bb0228d2665840","kind":"logs","mediaType":"application/vnd.dolos.stele.logs.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":42},"#,
     r#"{"diffId":"sha256:c1d65578a9da3b2453c50a8958bcdf426a59b22873012e51409e8acb732822cc","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":40},"#,
     r#"{"diffId":"sha256:21cb592e80427ce7a6c8a24c0f5d5cf3c51da28a61325f47ffcb900ca629ad8d","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":40},"#,
     r#"{"diffId":"sha256:bf5d5484e7def2851a425f266836c1fc0bfdd67db35acad39a5b488742e32855","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":40},"#,

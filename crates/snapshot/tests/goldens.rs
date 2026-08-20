@@ -15,10 +15,11 @@
 //! a re-run on unchanged code is encoding nondeterminism, which is a finding,
 //! never a re-pin.
 //!
-//! Between them these freeze: the five media types, the tag string, the twelve
+//! Between them these freeze: the ten media types, the tag string, the twelve
 //! archive dimension names, the three exact-record kind literals, the seventeen
-//! state namespace strings, the six log namespace strings, the layer header
-//! and scope shapes, and the `position`/`parameters` key spellings.
+//! state namespace strings, the six `log-{ns}` kind strings — carried in the
+//! layer headers now that the records no longer name a namespace — the layer
+//! header and scope shapes, and the `position`/`parameters` key spellings.
 
 mod common;
 
@@ -26,7 +27,7 @@ use common::*;
 use dolos_core::{BlockHash, ChainPoint};
 use dolos_snapshot::{
     layers::{blocks, digests, indexes, logs, state},
-    DolosProfile, BLOCKS, DIGESTS, INDEXES, LOGS, STATE,
+    log_ns_for, DolosProfile, BLOCKS, DIGESTS, INDEXES, STATE,
 };
 use stelae::{
     dir::SteleDir,
@@ -38,7 +39,7 @@ use stelae::{
 /// `(kind, diffId, records, uncompressedSize)`, in inscription order.
 ///
 /// `records` counts the protocol's header record, as a descriptor does.
-const GOLDEN_LAYERS: [(&str, &str, u64, u64); 6] = [
+const GOLDEN_LAYERS: [(&str, &str, u64, u64); 11] = [
     (
         BLOCKS,
         "sha256:14a05418723da3c0b4117b5f30ef07d96887b3e12eae114988ff299a654ff106",
@@ -52,10 +53,40 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 6] = [
         431,
     ),
     (
-        LOGS,
-        "sha256:b9b246e1b2510b399d7515c58e6ecaaa2516ddccf7783fc9f03b29cac71eab46",
-        7,
-        398,
+        "log-account-stakes",
+        "sha256:defd04bff2ccc95109a5c3c8155b0e5bb4ec42dd996939ca03db0d0db6c08869",
+        2,
+        102,
+    ),
+    (
+        "log-epochs",
+        "sha256:a42213234eaff408cfbf9cde9f43eb782b41726da3e144d497c576f4cabf37c4",
+        2,
+        94,
+    ),
+    (
+        "log-leader-rewards",
+        "sha256:0ac14c9545543b26c4c313ba6c7a97dad7d16eb69dc6879e4fef4adc3535f16d",
+        2,
+        102,
+    ),
+    (
+        "log-member-rewards",
+        "sha256:a0fcb7bb279d584ec384259d89950f683f4585a7fd64791bd4b9c7cd0f7cca3b",
+        2,
+        102,
+    ),
+    (
+        "log-pool-deposit-refunds",
+        "sha256:acb48fa1a3fe5539ba8c10e8f6db63a96b74fc2bc007eb49dcb3c020dc739d1a",
+        2,
+        109,
+    ),
+    (
+        "log-stakes",
+        "sha256:4a38c30b91b4bb4142721f10c74c2c2fbd9cbf5e1efb5a08eb2c330fd204d0bd",
+        2,
+        94,
     ),
     (
         STATE,
@@ -79,7 +110,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 6] = [
 
 /// The stele's identity: sha256 of the canonical inscription.
 const GOLDEN_INSCRIPTION: &str =
-    "sha256:2ece38bffb4409718889e45cd2b69b0a1e68f4296cacdd534318ebb854ab07b7";
+    "sha256:f784cbd63002e8e853a8a4aced5da81c976da65c1538fba662d9d7254447a4d1";
 
 fn history() -> Vec<HistoryEntry> {
     vec![
@@ -94,7 +125,7 @@ fn history() -> Vec<HistoryEntry> {
     ]
 }
 
-/// Write the whole fixture stele into `root`: six layers and an inscription.
+/// Write the whole fixture stele into `root`: eleven layers and an inscription.
 fn write_stele(root: &std::path::Path) -> (Inscription, Digest) {
     let stele = SteleDir::create(root).unwrap();
 
@@ -286,9 +317,24 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#"{"diffId":"sha256:557948cad9dec8605fbde96912db9b6421b47f2ded4c00886ed59f1638b4678c","kind":"indexes","#,
     r#""mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":16,"#,
     r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":431},"#,
-    r#"{"diffId":"sha256:b9b246e1b2510b399d7515c58e6ecaaa2516ddccf7783fc9f03b29cac71eab46","kind":"logs","#,
-    r#""mediaType":"application/vnd.dolos.stele.logs.v1+zstd","records":7,"#,
-    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":398},"#,
+    r#"{"diffId":"sha256:defd04bff2ccc95109a5c3c8155b0e5bb4ec42dd996939ca03db0d0db6c08869","kind":"log-account-stakes","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-account-stakes.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
+    r#"{"diffId":"sha256:a42213234eaff408cfbf9cde9f43eb782b41726da3e144d497c576f4cabf37c4","kind":"log-epochs","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-epochs.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":94},"#,
+    r#"{"diffId":"sha256:0ac14c9545543b26c4c313ba6c7a97dad7d16eb69dc6879e4fef4adc3535f16d","kind":"log-leader-rewards","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-leader-rewards.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
+    r#"{"diffId":"sha256:a0fcb7bb279d584ec384259d89950f683f4585a7fd64791bd4b9c7cd0f7cca3b","kind":"log-member-rewards","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-member-rewards.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":102},"#,
+    r#"{"diffId":"sha256:acb48fa1a3fe5539ba8c10e8f6db63a96b74fc2bc007eb49dcb3c020dc739d1a","kind":"log-pool-deposit-refunds","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-pool-deposit-refunds.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":109},"#,
+    r#"{"diffId":"sha256:4a38c30b91b4bb4142721f10c74c2c2fbd9cbf5e1efb5a08eb2c330fd204d0bd","kind":"log-stakes","#,
+    r#""mediaType":"application/vnd.dolos.stele.log-stakes.v1+zstd","records":2,"#,
+    r#""scope":{"endSlot":101,"epoch":7,"startSlot":100},"uncompressedSize":94},"#,
     r#"{"diffId":"sha256:2dadb9a35b6e89adf01e3c915325b398037b388bafa63da99a6a2f3ce77e6b97","kind":"state","#,
     r#""mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":18,"#,
     r#""scope":{"shard":0},"uncompressedSize":862},"#,
@@ -303,19 +349,23 @@ const CANONICAL_INSCRIPTION: &str = concat!(
     r#""point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":101}},"#,
     r#""profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":7}"#,
 );
-
 /// Decode one record with the codec its layer kind names, so the streaming pass
 /// exercises every codec rather than only the framing underneath them.
 fn decode_one(kind: &str, record: &[u8]) {
+    // One codec for all six log kinds: they differ in which namespace they
+    // carry, never in how a record is written.
+    if log_ns_for(kind).is_some() {
+        logs::decode(record).unwrap();
+
+        return;
+    }
+
     match kind {
         BLOCKS => {
             blocks::decode(record).unwrap();
         }
         INDEXES => {
             indexes::decode(record).unwrap();
-        }
-        LOGS => {
-            logs::decode(record).unwrap();
         }
         STATE => {
             state::decode(record).unwrap();

@@ -18,7 +18,8 @@
 //!    Selection is profile-side by necessity: a layer's `scope` is opaque to
 //!    the protocol, so nothing but this crate can read an epoch out of one.
 //! 3. [`dolos_core::IndexStore::initialize_schema`].
-//! 4. Per epoch: `blocks`, then `logs`, then `indexes`.
+//! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
+//!    `indexes`.
 //! 5. The state tip, sixteen shards, `set_cursor` **last**.
 //! 6. Rebuild the live-UTxO index dimensions from the restored UTxO set. They
 //!    are never shipped — ADR-004's Amendment 2 — so this is where they come
@@ -112,7 +113,7 @@ use std::{
 use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, IndexStore,
-    IndexWriter, StateStore, StateWriter, TxoRef, UtxoSetDelta,
+    IndexWriter, Namespace, StateStore, StateWriter, TxoRef, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -126,9 +127,9 @@ use tracing::info;
 
 use crate::{
     layers::{blocks, indexes, logs, state},
-    preflight, read_position,
+    log_ns_for, preflight, read_position,
     reporting::Cursor,
-    DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, LOGS, STATE, STATE_SHARDS, UTXOS,
+    DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, STATE, STATE_SHARDS, UTXOS,
 };
 
 /// What a restore holds at once.
@@ -175,15 +176,23 @@ pub struct EpochLayers {
     pub start_slot: BlockSlot,
     pub end_slot: BlockSlot,
     pub blocks: Option<LayerDescriptor>,
-    pub logs: Option<LayerDescriptor>,
+    /// The `log-{ns}` layers this epoch carries, by the namespace their kind
+    /// names — at most one per log namespace, and commonly fewer.
+    ///
+    /// A map rather than six fields, and an absent key rather than an empty
+    /// layer: an epoch that wrote nothing under a namespace publishes no layer
+    /// for it, so "not there" is the ordinary case and not a defect to report.
+    /// Ordered by namespace, which is the order the kinds are listed in.
+    pub logs: BTreeMap<Namespace, LayerDescriptor>,
     pub indexes: Option<LayerDescriptor>,
 }
 
 impl EpochLayers {
     fn descriptors(&self) -> impl Iterator<Item = &LayerDescriptor> {
-        [&self.blocks, &self.logs, &self.indexes]
-            .into_iter()
-            .flatten()
+        self.blocks
+            .iter()
+            .chain(self.logs.values())
+            .chain(self.indexes.iter())
     }
 }
 
@@ -380,8 +389,9 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
 
     for descriptor in &inscription.layers {
         let kind = descriptor.kind.as_str();
+        let log_ns = log_ns_for(kind);
 
-        if !matches!(kind, BLOCKS | LOGS | INDEXES) {
+        if log_ns.is_none() && !matches!(kind, BLOCKS | INDEXES) {
             continue;
         }
 
@@ -394,13 +404,13 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
             start_slot,
             end_slot,
             blocks: None,
-            logs: None,
+            logs: BTreeMap::new(),
             indexes: None,
         });
 
-        // One epoch, one window: three kinds describing the same epoch with
-        // different bounds is a stele nobody can reason about, and picking one
-        // of them would be this crate inventing an answer.
+        // One epoch, one window: two of the epoch's kinds describing the same
+        // epoch with different bounds is a stele nobody can reason about, and
+        // picking one of them would be this crate inventing an answer.
         if (entry.start_slot, entry.end_slot) != (start_slot, end_slot) {
             return Err(Error::malformed_inscription(
                 format!("layers[{kind}].scope"),
@@ -411,9 +421,19 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
             ));
         }
 
+        if let Some(ns) = log_ns {
+            if entry.logs.insert(ns, descriptor.clone()).is_some() {
+                return Err(Error::malformed_inscription(
+                    format!("layers[{kind}].scope"),
+                    format!("epoch {epoch} is described twice"),
+                ));
+            }
+
+            continue;
+        }
+
         let slot = match kind {
             BLOCKS => &mut entry.blocks,
-            LOGS => &mut entry.logs,
             _ => &mut entry.indexes,
         };
 
@@ -786,14 +806,15 @@ where
             summary.blocks += count;
         }
 
-        if let Some(descriptor) = &epoch.logs {
-            let at = cursor.open(LOGS, &descriptor.scope);
+        for (ns, descriptor) in &epoch.logs {
+            let kind = descriptor.kind.as_str();
+            let at = cursor.open(kind, &descriptor.scope);
 
             let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
-                restore_logs(&reader, descriptor, archive)
+                restore_logs(&reader, descriptor, archive, ns)
             })?;
 
-            cursor.close(at, LOGS, outcome);
+            cursor.close(at, kind, outcome);
             summary.logs += count;
         }
 
@@ -1081,11 +1102,16 @@ fn restore_blocks<R: SteleReader, A: ArchiveStore>(
     )
 }
 
-/// One epoch's ledger logs.
+/// One epoch's ledger logs for one namespace.
+///
+/// `ns` comes from the layer's kind, not from its records — the split moved it
+/// there — so a layer restores into exactly the namespace the inscription said
+/// it holds.
 fn restore_logs<R: SteleReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     archive: &A,
+    ns: Namespace,
 ) -> Result<u64, Error> {
     reader.drain(
         descriptor,
@@ -1095,7 +1121,7 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
             let writer = archive.start_writer()?;
 
             for record in chunk {
-                writer.write_log(record.ns, &record.key, &record.value)?;
+                writer.write_log(ns, &record.key, &record.value)?;
             }
 
             writer.commit()?;
@@ -1315,7 +1341,8 @@ mod tests {
         let layers = vec![
             epoch_descriptor(BLOCKS, 0, 1),
             epoch_descriptor(BLOCKS, 1, 2),
-            epoch_descriptor(LOGS, 0, 3),
+            epoch_descriptor("log-stakes", 0, 3),
+            epoch_descriptor("log-epochs", 0, 5),
             epoch_descriptor(INDEXES, 1, 4),
         ];
 
@@ -1325,8 +1352,15 @@ mod tests {
 
         assert_eq!(epochs[0].epoch, 0);
         assert!(epochs[0].blocks.is_some());
-        assert!(epochs[0].logs.is_some());
         assert!(epochs[0].indexes.is_none(), "a kind nobody published");
+
+        // Grouped by the namespace the kind names, and only the two kinds that
+        // were published: the other four log kinds are absent, not empty.
+        assert_eq!(
+            epochs[0].logs.keys().copied().collect::<Vec<_>>(),
+            ["epochs", "stakes"]
+        );
+        assert_eq!(epochs[0].logs["stakes"].kind, "log-stakes");
 
         assert_eq!(epochs[1].epoch, 1);
         assert_eq!((epochs[1].start_slot, epochs[1].end_slot), (100, 199));
@@ -1345,7 +1379,7 @@ mod tests {
         // And so is one epoch carrying two different slot windows.
         let mut disagreeing = vec![epoch_descriptor(BLOCKS, 0, 1)];
         disagreeing.push(descriptor(
-            LOGS,
+            "log-stakes",
             json!({"epoch": 0, "startSlot": 0, "endSlot": 50}),
             2,
         ));
@@ -1372,7 +1406,7 @@ mod tests {
                 start_slot: epoch * 100,
                 end_slot: epoch * 100 + 99,
                 blocks: None,
-                logs: None,
+                logs: BTreeMap::new(),
                 indexes: None,
             })
             .collect();

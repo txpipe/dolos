@@ -14,7 +14,7 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     layers::{blocks, digests, indexes, logs, state},
-    DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOGS, STATE,
+    DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS, STATE,
 };
 use stelae::{
     dir::SteleDir,
@@ -138,13 +138,15 @@ fn indexes_round_trip_through_a_layer() {
 }
 
 #[test]
-fn logs_round_trip_through_a_layer() {
-    let records = common::logs();
-    let decoded = roundtrip(LOGS, &epoch_scope(), &records, logs::encode, logs::decode);
+fn logs_round_trip_through_a_layer_per_namespace() {
+    for (kind, ns) in LOG_KINDS {
+        let records = common::logs(ns);
+        let decoded = roundtrip(kind, &epoch_scope(), &records, logs::encode, logs::decode);
 
-    let mut order = logs::OrderCheck::default();
-    for record in &decoded {
-        order.check(record).unwrap();
+        let mut order = logs::OrderCheck::default();
+        for record in &decoded {
+            order.check(record).unwrap();
+        }
     }
 }
 

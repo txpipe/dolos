@@ -3,7 +3,7 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: five layer kinds, their media types,
+//! what a Dolos stele actually contains: ten layer kinds, their media types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
@@ -66,7 +66,11 @@ pub mod restore;
 /// [`export::publish`] and [`restore::restore_dir`] hold for the transports.
 pub use stelae::progress;
 
-use dolos_core::ChainPoint;
+use dolos_cardano::model::{
+    AccountStakeLog, EpochState, FixedNamespace, LeaderRewardLog, MemberRewardLog,
+    PoolDepositRefundLog, StakeLog,
+};
+use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
 use stelae::{
     dir::LayerSpec,
@@ -86,16 +90,104 @@ pub const PROFILE_VERSION: u64 = 1;
 
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
-pub const LOGS: &str = "logs";
 pub const STATE: &str = "state";
 pub const DIGESTS: &str = "digests";
 
-/// The five layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 5] = [BLOCKS, INDEXES, LOGS, STATE, DIGESTS];
+/// The namespaces the ledger writes epoch-boundary logs under, byte-sorted.
+///
+/// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
+/// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
+/// marks an entity as log-bearing, so the six are spelled here and held to the
+/// entity types by `log_kinds_derive_from_their_namespaces` in
+/// `tests/coverage.rs`. A seventh namespace acquiring logs would have no layer
+/// to travel in, which is why [`export`] refuses one rather than dropping it.
+pub const LOG_NAMESPACES: [Namespace; 6] = [
+    AccountStakeLog::NS,
+    EpochState::NS,
+    LeaderRewardLog::NS,
+    MemberRewardLog::NS,
+    PoolDepositRefundLog::NS,
+    StakeLog::NS,
+];
+
+/// The log layer kinds and the namespace each carries, in inscription order.
+///
+/// One kind per namespace, so a change to one namespace's record shape costs a
+/// backfill of that namespace's blobs rather than of every log layer ever
+/// published (decision 0026). The kind is `log-` followed by the namespace with
+/// `_` rewritten to `-`, because a media type's kind token admits hyphens and
+/// not underscores — but it is *spelled out* here rather than composed, so the
+/// wire vocabulary is greppable and a namespace rename cannot silently rename a
+/// published kind. The derivation is a test, not a constructor.
+pub const LOG_KINDS: [(&str, Namespace); 6] = [
+    ("log-account-stakes", AccountStakeLog::NS),
+    ("log-epochs", EpochState::NS),
+    ("log-leader-rewards", LeaderRewardLog::NS),
+    ("log-member-rewards", MemberRewardLog::NS),
+    ("log-pool-deposit-refunds", PoolDepositRefundLog::NS),
+    ("log-stakes", StakeLog::NS),
+];
+
+/// The epoch kinds a window always produces a layer for.
+///
+/// The log kinds are the exception, and the only one: a log layer exists if and
+/// only if its namespace has at least one record in the window, so an epoch
+/// contributes between two and eight layers. Split out because the two arities
+/// are what the layer arithmetic in [`export::export`] and
+/// [`registry::preview`] is made of.
+pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
+
+/// The ten layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 10] = [
+    BLOCKS,
+    INDEXES,
+    LOG_KINDS[0].0,
+    LOG_KINDS[1].0,
+    LOG_KINDS[2].0,
+    LOG_KINDS[3].0,
+    LOG_KINDS[4].0,
+    LOG_KINDS[5].0,
+    STATE,
+    DIGESTS,
+];
 
 /// The kinds whose scope is an epoch range. The remaining two are tip layers
 /// and carry their own scope shapes.
-pub const EPOCH_KINDS: [&str; 3] = [BLOCKS, INDEXES, LOGS];
+///
+/// The namespace lives in the kind rather than in the scope, so a log layer
+/// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
+/// keeps per-(kind, scope) inheritance working across the split.
+pub const EPOCH_KINDS: [&str; 8] = [
+    DENSE_EPOCH_KINDS[0],
+    DENSE_EPOCH_KINDS[1],
+    LOG_KINDS[0].0,
+    LOG_KINDS[1].0,
+    LOG_KINDS[2].0,
+    LOG_KINDS[3].0,
+    LOG_KINDS[4].0,
+    LOG_KINDS[5].0,
+];
+
+/// The kind carrying `ns`'s logs, or `None` where the namespace has no log
+/// layer.
+pub fn log_kind_for(ns: Namespace) -> Option<&'static str> {
+    LOG_KINDS
+        .into_iter()
+        .find(|(_, known)| *known == ns)
+        .map(|(kind, _)| kind)
+}
+
+/// The namespace `kind` carries logs for, or `None` where the kind is not a log
+/// layer.
+///
+/// The reader's half of the split: a restore learns which namespace a layer's
+/// records belong to from its kind, since the records no longer say.
+pub fn log_ns_for(kind: &str) -> Option<Namespace> {
+    LOG_KINDS
+        .into_iter()
+        .find(|(known, _)| *known == kind)
+        .map(|(_, ns)| ns)
+}
 
 /// IANA `vnd.` vendor token for this profile's payload media types. Shorter
 /// than the profile name by custom, and the slot the coexistence rules require
@@ -185,6 +277,24 @@ pub enum Error {
 
     #[error("{0:?} is not a state namespace this profile defines")]
     UnknownNamespace(String),
+
+    /// A log this profile has no layer to carry.
+    ///
+    /// One `log-{ns}` kind per log namespace means the export walks a closed
+    /// list rather than every namespace, so a namespace that starts producing
+    /// logs would simply not be visited. Refusing at publish time is the whole
+    /// point: the all-namespace walk this replaced would have carried the
+    /// record, and a snapshot silently missing a slice of the ledger is the
+    /// failure that costs most and shows least.
+    #[error(
+        "epoch {epoch} has logs under namespace {ns:?}, which no log layer kind carries; \
+         this profile ships logs for {covered:?}"
+    )]
+    UncoveredLogNamespace {
+        epoch: u64,
+        ns: String,
+        covered: &'static [Namespace],
+    },
 
     #[error("{0:?} is not an exact-record kind this profile defines")]
     UnknownExactKind(String),
@@ -865,7 +975,7 @@ mod tests {
             (epoch.layer_spec(STATE), STATE),
             (epoch.layer_spec(DIGESTS), DIGESTS),
             (state.layer_spec(BLOCKS), BLOCKS),
-            (digests.layer_spec(LOGS), LOGS),
+            (digests.layer_spec(LOG_KINDS[0].0), LOG_KINDS[0].0),
         ] {
             let err = spec.unwrap_err();
             assert!(

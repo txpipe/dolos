@@ -49,6 +49,11 @@ use stelae::Digest;
 use node::Node;
 use registry_fixture::Fixture;
 
+/// Layers epoch 0 contributes, and therefore what sequence 1 inherits:
+/// `blocks`, `indexes`, and the two log layers the harness seeds. The other
+/// four log kinds have no records in the window, so they have no layer.
+const EPOCH_0: usize = 4;
+
 // ---------------------------------------------------------------------------
 // Done criterion 3: verify --repo
 // ---------------------------------------------------------------------------
@@ -70,7 +75,7 @@ fn a_freshly_published_stele_verifies_clean() {
     let second = node.publish(&repository, &node.second, false);
 
     assert_eq!(
-        second.layers_reused, 3,
+        second.layers_reused, EPOCH_0,
         "the interesting stele is one with inherited layers"
     );
 
@@ -248,7 +253,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
     let second = node.publish(&repository, &node.second, false);
 
     assert_eq!(
-        second.layers_reused, 3,
+        second.layers_reused, EPOCH_0,
         "there is no trust gap to close unless the publish inherited something"
     );
 

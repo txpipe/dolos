@@ -73,8 +73,17 @@ use stelae::{
 
 use watcher::Watcher;
 
-/// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
-const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
+/// Layers epoch 0 contributes: `blocks`, `indexes`, and the two log layers the
+/// harness seeds — `log-epochs` and `log-member-rewards`. The other four log
+/// kinds have no records in the window, so they have no layer.
+const EPOCH_0: usize = 4;
+
+/// Layers epoch 1 — the boundary sliver — contributes: `blocks` and `indexes`.
+/// Its logs would key at `epoch_start(1)`, and the harness writes none there.
+const EPOCH_1: usize = 2;
+
+/// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
+const PER_PUBLISH: usize = EPOCH_0 + STATE_SHARDS as usize;
 
 // ---------------------------------------------------------------------------
 // The node, and the two chain points it publishes from
@@ -490,8 +499,9 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     );
 
     assert_eq!(
-        resumed.layers_fetched, PER_PUBLISH,
-        "epoch 1's three layers and the sixteen shards, and nothing else"
+        resumed.layers_fetched,
+        EPOCH_1 + STATE_SHARDS as usize,
+        "epoch 1's two layers and the sixteen shards, and nothing else"
     );
 
     // The point resolved to what it claimed. `latest` is sequence 1 here, and
