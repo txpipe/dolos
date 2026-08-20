@@ -84,12 +84,12 @@ fn a_freshly_published_stele_verifies_clean() {
     assert!(verified.compressed_bytes > 0);
 
     // The immutable tag reads the predecessor back just as clean.
-    let predecessor = registry::verify(&repository, Point::Epoch(1)).unwrap();
+    let predecessor = registry::verify(&repository, Point::Epoch(0)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
     eprintln!(
-        "verified latest = {} ({} layers, {} compressed bytes) and epoch-1 = {}",
+        "verified latest = {} ({} layers, {} compressed bytes) and epoch-0 = {}",
         verified.identity,
         verified.inscription.layers.len(),
         verified.compressed_bytes,
@@ -334,7 +334,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     assert_eq!(total, inspected.total_compressed);
 
     // The `--json` output is the canonical document, verbatim.
-    let predecessor = registry::inspect(&repository, Point::Epoch(1)).unwrap();
+    let predecessor = registry::inspect(&repository, Point::Epoch(0)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
@@ -360,7 +360,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     );
 
     eprintln!(
-        "inspected {} layers, {} compressed bytes; epoch-1's document chained to {}",
+        "inspected {} layers, {} compressed bytes; epoch-0's document chained to {}",
         inspected.inscription.layers.len(),
         inspected.total_compressed,
         reproduced.digest().unwrap(),

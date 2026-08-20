@@ -1397,7 +1397,7 @@ mod tests {
         let mut inscription = Inscription::new(
             &DolosProfile,
             sequence,
-            json!({"epoch": sequence.saturating_sub(1)}),
+            json!({"epoch": sequence}),
             crate::parameters(),
             crate::compression(),
         );

@@ -109,8 +109,8 @@ impl Node {
         let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
         let second = Plan::new(&summary, network, point(boundary)).unwrap();
 
-        assert_eq!(first.sequence, 1);
-        assert_eq!(second.sequence, 2);
+        assert_eq!(first.sequence, 0);
+        assert_eq!(second.sequence, 1);
 
         Self {
             domain,
@@ -438,9 +438,9 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    // Sequence 1, interrupted at its first state shard: every epoch layer it
+    // Sequence 0, interrupted at its first state shard: every epoch layer it
     // carries commits, the tip does not.
-    let first = Point::Epoch(1).pull(&repository).unwrap();
+    let first = Point::Epoch(0).pull(&repository).unwrap();
     let identity = first.read_inscription().unwrap().digest().unwrap();
     let plan = restore::plan(&first, node.magic, None).unwrap();
     let index = first.blob_index().unwrap();
@@ -472,7 +472,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     assert_eq!(seeded, epoch_layers, "epoch 0's layers all committed");
 
-    // Now catch up to sequence 2 — which describes epoch 0 with the same
+    // Now catch up to sequence 1 — which describes epoch 0 with the same
     // identities, epoch 1 besides, and a tip of its own.
     let resumed = restore_from(
         &fixture.repository("dolos/delta"),
@@ -494,12 +494,12 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         "epoch 1's three layers and the sixteen shards, and nothing else"
     );
 
-    // The point resolved to what it claimed. `latest` is sequence 2 here, and
-    // `epoch-1` is still the stele the first half of this test read.
+    // The point resolved to what it claimed. `latest` is sequence 1 here, and
+    // `epoch-0` is still the stele the first half of this test read.
     let latest = Point::Latest.pull(&repository).unwrap();
-    assert_eq!(latest.read_inscription().unwrap().sequence, 2);
+    assert_eq!(latest.read_inscription().unwrap().sequence, 1);
     assert_eq!(
-        Point::Epoch(1)
+        Point::Epoch(0)
             .pull(&repository)
             .unwrap()
             .read_inscription()

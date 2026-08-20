@@ -45,9 +45,9 @@
 //!
 //! The harness ledger lives inside epoch zero, so the two publishes are made by
 //! standing at two synthetic chain points and letting `Plan::new` derive
-//! everything: one at the last slot of epoch 0, which publishes sequence 1 with
+//! everything: one at the last slot of epoch 0, which publishes sequence 0 with
 //! epoch 0's window **unclamped**, and one at the first slot of epoch 1, which
-//! publishes sequence 2 with an identical epoch-0 window plus an empty epoch 1.
+//! publishes sequence 1 with an identical epoch-0 window plus an empty epoch 1.
 //!
 //! That the first cursor has to sit on the boundary is not a convenience. A
 //! stele cut mid-epoch clamps its last window to the cursor, so the same epoch
@@ -137,7 +137,7 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
 
     // Done criterion 2: the chain, and that it validates.
     assert_eq!(second.inscription.history.len(), 1);
-    assert_eq!(second.inscription.history[0].sequence, 1);
+    assert_eq!(second.inscription.history[0].sequence, 0);
     assert_eq!(
         second.inscription.history[0].inscription_digest,
         first.identity

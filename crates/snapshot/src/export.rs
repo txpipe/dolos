@@ -8,13 +8,16 @@
 //!
 //! ## The two facts only an exporter can know
 //!
-//! **Epoch geometry.** A stele's `sequence` is the epoch its cursor has just
-//! entered, and its layers cover every epoch below that. [`Plan`] derives both
-//! from a [`ChainSummary`] and a cursor, so two publishers standing at the same
-//! chain point compute the same windows — including for the final, possibly
-//! partial epoch, whose slot window is clamped to the cursor rather than to the
-//! epoch boundary. Landing on a true boundary is the publisher pipeline's job,
-//! not this module's.
+//! **Epoch geometry.** A stele's `sequence` is the epoch its cursor stands in,
+//! and its layers cover every epoch up to and including that one — decision
+//! 0025: `stop_epoch`, the tag, `sequence` and `position.epoch` all name the
+//! same epoch. [`Plan`] derives both from a [`ChainSummary`] and a cursor, so
+//! two publishers standing at the same chain point compute the same windows —
+//! including for the final epoch, whose slot window is clamped to the cursor
+//! rather than to the epoch boundary. That last window is a deliberate sliver,
+//! not an accident: a `stop_epoch = E` sync halts after applying the *first
+//! block of epoch E*, so the window carries that one block together with epoch
+//! E's opening (estart) logs, which key at `epoch_start(E)`.
 //!
 //! **The network name.** It rides inside the canonical JSON, so it is inside
 //! the stele's identity. [`crate::Network::for_magic`] is the only way to build
@@ -111,7 +114,8 @@ pub struct Plan {
     pub network: Network,
     /// The chain point the stele stands at — the state store's cursor.
     pub cursor: ChainPoint,
-    /// The protocol's `sequence`: the epoch the cursor has just entered.
+    /// The protocol's `sequence`: the epoch the cursor stands in, which is
+    /// also the last epoch the layers cover and this stele's `position.epoch`.
     pub sequence: u64,
     /// The epochs whose layers this export writes, ascending.
     pub epochs: Vec<EpochWindow>,
@@ -120,11 +124,12 @@ pub struct Plan {
 impl Plan {
     /// Derive the geometry of a publish standing at `cursor`.
     ///
-    /// The stele's `sequence` is `epoch_of(cursor) + 1` — ADR-004's E, the
-    /// newly started epoch — and its layers cover `0..=epoch_of(cursor)`.
-    /// The last window's `end_slot` is clamped to the cursor, so a stele
-    /// cut mid-epoch is still byte-identical between two publishers
-    /// standing at the same point.
+    /// The stele's `sequence` is `epoch_of(cursor)` — ADR-004's E, the newly
+    /// entered epoch — and its layers cover `0..=epoch_of(cursor)`: epochs
+    /// `0..E-1` complete, plus epoch E's boundary sliver. The last window's
+    /// `end_slot` is clamped to the cursor, so a stele cut on the first block
+    /// of E is still byte-identical between two publishers standing at the
+    /// same point.
     pub fn new(
         summary: &ChainSummary,
         network: Network,
@@ -152,7 +157,7 @@ impl Plan {
         Ok(Self {
             network,
             cursor,
-            sequence: tip_epoch + 1,
+            sequence: tip_epoch,
             epochs,
         })
     }
@@ -173,9 +178,9 @@ impl Plan {
 
     /// The profile's `position` for this plan.
     pub fn position(&self) -> Result<serde_json::Value, Error> {
-        // `sequence` names the epoch just entered; `position.epoch` names the
-        // one the cursor is standing in, which is the last one the layers cover.
-        crate::position(&self.network, &self.cursor, self.sequence - 1)
+        // One number: the epoch just entered is the one the cursor stands in
+        // and the last one the layers cover (decision 0025).
+        crate::position(&self.network, &self.cursor, self.sequence)
     }
 
     /// The immutable tag this stele would publish under.
@@ -189,7 +194,7 @@ impl Plan {
     fn state_scope(&self, shard: u8) -> StateScope {
         StateScope {
             network_magic: self.network.magic(),
-            epoch: self.sequence - 1,
+            epoch: self.sequence,
             shard,
         }
     }
@@ -1253,7 +1258,7 @@ fn write_digests<W: SteleWriter>(
 
     let scope = DigestsScope {
         network_magic: plan.network.magic(),
-        epoch: plan.sequence - 1,
+        epoch: plan.sequence,
         last_immutable,
     };
 
@@ -1311,13 +1316,68 @@ mod tests {
         ChainPoint::Specific(slot, BlockHash::new([0xab; 32]))
     }
 
+    /// Decision 0025's one number: `sequence`, the tag and `position.epoch`
+    /// all name the epoch the cursor stands in, and the layers cover
+    /// `0..=sequence`.
     #[test]
     fn the_sequence_is_the_epoch_the_cursor_has_just_entered() {
         let plan = Plan::new(&summary(), Network::for_magic(2), point(250)).unwrap();
 
-        assert_eq!(plan.sequence, 3);
-        assert_eq!(plan.epochs.len(), 3);
+        assert_eq!(plan.sequence, 2);
+        assert_eq!(plan.tag().unwrap(), "epoch-2");
         assert_eq!(plan.position().unwrap()["epoch"], 2u64);
+        assert_eq!(plan.epochs.len(), 3);
+        assert_eq!(plan.epochs.last().unwrap().epoch, plan.sequence);
+    }
+
+    /// The geometry a `stop_epoch = E` sync actually produces, pinned as
+    /// deliberate rather than tolerated (decision 0025).
+    ///
+    /// The sync halts after applying the *first block of epoch E* — the block
+    /// that gives `position.point` a hash — so the last window is epoch E's
+    /// boundary sliver: it opens at `epoch_start(E)`, where estart writes
+    /// epoch E's opening logs, and closes at that one block. Epochs `0..E-1`
+    /// are complete beneath it.
+    #[test]
+    fn the_last_window_is_the_boundary_sliver_of_the_sequence_epoch() {
+        // Epoch 3 opens at slot 300; the anchoring block lands just inside it.
+        let plan = Plan::new(&summary(), Network::for_magic(2), point(301)).unwrap();
+
+        assert_eq!(plan.sequence, 3);
+        assert_eq!(plan.tag().unwrap(), "epoch-3");
+        assert_eq!(plan.position().unwrap()["epoch"], 3u64);
+
+        assert_eq!(
+            plan.epochs.last().unwrap(),
+            &EpochWindow {
+                epoch: 3,
+                start_slot: 300,
+                end_slot: 301,
+            },
+            "the sliver carries the anchoring block and epoch 3's estart logs"
+        );
+
+        assert_eq!(
+            &plan.epochs[..3],
+            &[
+                EpochWindow {
+                    epoch: 0,
+                    start_slot: 0,
+                    end_slot: 99
+                },
+                EpochWindow {
+                    epoch: 1,
+                    start_slot: 100,
+                    end_slot: 199
+                },
+                EpochWindow {
+                    epoch: 2,
+                    start_slot: 200,
+                    end_slot: 299
+                },
+            ],
+            "every epoch below the sliver is complete"
+        );
     }
 
     /// A stele cut mid-epoch clamps its last window to the cursor, so two
@@ -1386,7 +1446,7 @@ mod tests {
             .restrict_epochs(Some(1), Some(1));
 
         assert_eq!(
-            plan.sequence, 3,
+            plan.sequence, 2,
             "the sequence is the cursor's, not the cut"
         );
         assert_eq!(plan.epochs.len(), 1);
@@ -1407,7 +1467,7 @@ mod chain_tests {
         let mut inscription = Inscription::new(
             &DolosProfile,
             sequence,
-            json!({"epoch": sequence.saturating_sub(1)}),
+            json!({"epoch": sequence}),
             crate::parameters(),
             crate::compression(),
         );

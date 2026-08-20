@@ -156,9 +156,19 @@ State namespaces: the 16 entity namespaces from `dolos_cardano::model::build_sch
 
 The `digests` layer covers the immutable files fully contained in the stele's block range: `lastImmutable` is derived from the boundary slot and the chunk geometry observed in the chain — canonical, never dependent on aggregator state at publish time. Digest values equal Mithril Cardano DB v2's merkle leaves (hex-decoded), so any Mithril certificate whose beacon covers `lastImmutable` can verify them via the aggregator's digest route and a merkle proof. The certificate reference is deliberately *not* part of the inscription: certificates are produced on the aggregator's cadence, so two independent publishers at the same boundary would reference different certificates — including one would break cross-publisher determinism, while the digest values themselves are byte-stable properties of the chain.
 
+### The cut point and the boundary sliver
+
+A stele is cut by syncing with `chain.stop_epoch = E`, and the halt is **one block past the epoch boundary**, not on it. The sync crosses the boundary — Ewrap closes epoch E-1, Estart opens epoch E — and then applies the first block of epoch E before stopping. That block is what makes the stele addressable: after Estart alone the cursor names a slot with no block at it, and `position.point` must carry a block hash for a stele to be verifiable against a chain.
+
+So the epoch windows a stele covers are `0..=E`: epochs `0..E-1` **complete**, plus epoch E's **boundary sliver** — the window that opens at `epoch_start(E)` and closes at the anchoring block. The sliver is normative, not an artifact of where a publisher happened to stop.
+
+It is load-bearing because of how boundary data is keyed. **All of epoch X's boundary logs key at `epoch_start(X)`**: Ewrap writes the *ending* epoch's closing logs and its completed `EpochState` at `epoch_start(X)` when X is the epoch it closes, and Estart writes the *starting* epoch's opening account logs at `epoch_start(X)` when X is the epoch it opens. One temporal key per epoch, and nothing straddles two windows. Epoch E's estart logs therefore live inside the sliver and nowhere else: a stele that dropped the sliver in the name of a clean boundary would ship a state tip whose opening logs are in no layer at all, and a restored node would never regenerate them.
+
+`sequence`, the immutable tag's E, and `position.epoch` are consequently **one number**: the epoch the cursor stands in, which is also the last epoch the layers cover. The operator-facing form of the same rule is *configure the epoch you want the node to start in* — `stop_epoch = E` produces the stele tagged `epoch-E`.
+
 ### OCI layout and the inscription
 
-- Repository per (profile, network) — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`; tags `epoch-E` (E = newly started epoch; layers cover epochs `0..E-1`) and `latest`. The protocol requires an immutable tag per sequence plus a moving `latest`; the profile renders the strings.
+- Repository per (profile, network) — e.g. `ghcr.io/txpipe/dolos-snapshots/mainnet`; tags `epoch-E` (E = the newly started epoch, equal to `sequence` and to `position.epoch`; layers cover epochs `0..E-1` complete plus epoch E's boundary sliver — see "The cut point and the boundary sliver" above) and `latest`. The protocol requires an immutable tag per sequence plus a moving `latest`; the profile renders the strings.
 - `artifactType: application/vnd.stelae.stele.v1`; layer media types per the table above; three annotations per layer, named in "The manifest" below — one of them normative, the other two informational.
 - Config blob (`application/vnd.stelae.inscription.v1+json`), canonical JSON per RFC 8785. Generic keys plus three profile-owned opaque objects — `position`, `parameters` and each layer's `scope`:
 
@@ -167,7 +177,7 @@ The `digests` layer covers the immutable files fully contained in the stele's bl
   "profile": {"name": "io.txpipe.dolos.cardano", "version": 1},
   "sequence": 550,
   "position": { "network": {"magic": 764824073, "name": "mainnet"},
-                "point": {"slot": 133660800, "hash": "…"},
+                "point": {"slot": 152236812, "hash": "…"},
                 "epoch": 550 },
   "parameters": { "stateShards": 16, "indexKeyHash": "xxh3-64" },
   "compression": {"algo": "zstd", "level": 9},
@@ -314,8 +324,8 @@ The resolution is `dolos::common::stele_registry_auth`, a pure function of `[ste
 ### Publisher pipeline
 
 1. Restore the publisher node from the previous stele (self-hosting delta pull; first run via Mithril).
-2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — state lands exactly on the boundary.
-3. `dolos snapshot publish` — only the newly closed epoch's layers upload; fresh state shards + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
+2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash.
+3. `dolos snapshot publish` — only the newly closed epoch's layers and epoch E's boundary sliver upload; fresh state shards + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
 4. Determinism job: an independent runner that synced by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.
 
