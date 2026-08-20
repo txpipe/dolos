@@ -109,6 +109,14 @@ impl CardanoIndexDeltaBuilder {
             }
         }
 
+        // Reference script tag
+        if let Some(script_ref) = output.script_ref() {
+            tags.push(Tag::new(
+                utxo::SCRIPT_REF,
+                pallas_extras::script_ref_hash(&script_ref).to_vec(),
+            ));
+        }
+
         tags
     }
 
@@ -459,6 +467,44 @@ mod tests {
         assert_eq!(delta.archive[0].tx_hashes.len(), 1);
         // Shelley address produces 3 tags: full, payment, stake
         assert_eq!(delta.archive[0].tags.len(), 3);
+    }
+
+    /// An output that carries a reference script gets a `script_ref` tag whose
+    /// key is the script's on-chain hash.
+    #[test]
+    fn reference_script_output_gets_script_ref_tag() {
+        use pallas::codec::minicbor;
+        use pallas::codec::utils::{CborWrap, KeepRaw};
+        use pallas::crypto::hash::Hasher;
+        use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, ScriptRef, Value};
+        use pallas::ledger::traverse::{Era, MultiEraOutput};
+
+        let script = pallas::ledger::primitives::alonzo::NativeScript::InvalidHereafter(500_000);
+
+        let output = PostAlonzoTransactionOutput {
+            address: test_shelley_address().to_vec().into(),
+            value: Value::Coin(1_000_000),
+            datum_option: None,
+            script_ref: Some(CborWrap(ScriptRef::NativeScript(KeepRaw::from(
+                script.clone(),
+            )))),
+        };
+
+        let cbor = minicbor::to_vec(&output).unwrap();
+        let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
+
+        let tags = CardanoIndexDeltaBuilder::extract_utxo_tags(&output);
+
+        // Native scripts hash their CBOR behind a leading 0x00 language tag.
+        let script_cbor = minicbor::to_vec(&script).unwrap();
+        let expected = Hasher::<224>::hash_tagged(&script_cbor, 0);
+
+        let tag = tags
+            .iter()
+            .find(|tag| tag.dimension == utxo::SCRIPT_REF)
+            .expect("output with a reference script must produce a script_ref tag");
+
+        assert_eq!(tag.key, expected.to_vec());
     }
 
     /// Drive every tag-producing method on the builder once.

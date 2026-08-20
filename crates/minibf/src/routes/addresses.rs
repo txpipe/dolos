@@ -357,7 +357,8 @@ where
         return Err(Error::Code(StatusCode::NOT_FOUND));
     }
 
-    let mut utxos = super::utxos::load_utxo_models(&domain, refs, pagination).await?;
+    let mut utxos: Vec<AddressUtxoContentInner> =
+        super::utxos::load_utxo_models(&domain, refs, pagination).await?;
 
     if should_filter {
         utxos.retain(|x| x.amount.iter().all(|x| x.unit == "lovelace"));
