@@ -43,6 +43,9 @@ use crate::{
     Facade,
 };
 
+mod all;
+pub use all::all;
+
 struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,
     metadata: HashMap<String, serde_json::Value>,
