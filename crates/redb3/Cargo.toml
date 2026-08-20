@@ -28,4 +28,16 @@ redb-extras = "0.6.1"
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
 
+# The Byron EBB recovery scan is a dev-only target — it is deliberately not
+# reachable from the `dolos` binary — but it writes to a real archive, so its
+# guard is covered by tests, which the all-features CI run executes like any
+# other. `maintenance` is what opens the archive internals it reads, and
+# nothing else enables it.
+[[example]]
+name = "heal-byron-ebbs"
+path = "examples/heal-byron-ebbs.rs"
+test = true
+required-features = ["maintenance"]
+
 [features]
+maintenance = []

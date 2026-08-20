@@ -1,7 +1,7 @@
 use ::redb::{Database, ReadableDatabase};
 use redb::ReadTransaction;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -25,9 +25,21 @@ use redb_extras::buckets::BucketError;
 
 use crate::{build_tables, Error, Table};
 
+// The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
+// these index definitions and the location packing rather than restating them.
+// It is the only thing that ever enables `maintenance`; the `dolos` binary
+// does not, so the crate's ordinary surface keeps them private.
+#[cfg(not(feature = "maintenance"))]
 pub(crate) mod flatfiles;
+#[cfg(feature = "maintenance")]
+pub mod flatfiles;
+
 pub(crate) mod indexes;
+
+#[cfg(not(feature = "maintenance"))]
 pub(crate) mod tables;
+#[cfg(feature = "maintenance")]
+pub mod tables;
 
 #[cfg(test)]
 mod tests;
@@ -224,6 +236,8 @@ impl ArchiveStore {
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
         Ok(ArchiveRangeIter {
             range,
+            front: VecDeque::new(),
+            back: VecDeque::new(),
             flatfiles: self.flatfiles.clone(),
         })
     }
@@ -252,7 +266,9 @@ impl ArchiveStore {
                 return Ok(Some(ChainPoint::Origin));
             };
 
-            if let Some(body) = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)? {
+            // A slot can hold more than one block, and an intersect names one
+            // of them by hash, so every block recorded there is a candidate.
+            for body in tables::BlocksTable::get_all_by_slot(&rx, &self.flatfiles, *slot)? {
                 let decoded =
                     MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
 
@@ -584,6 +600,16 @@ impl ArchiveStore {
         tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)
     }
 
+    /// Every block recorded at `slot`, in chain order.
+    ///
+    /// [`Self::get_block_by_slot`] answers with the block the slot resolves
+    /// to; this answers with all of them, which is what a caller holding a
+    /// hash needs when the chain put two blocks on one slot.
+    pub fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        tables::BlocksTable::get_all_by_slot(&rx, &self.flatfiles, *slot)
+    }
+
     pub fn get_block_by_hash(
         &self,
         block_hash: &[u8],
@@ -765,6 +791,19 @@ impl ArchiveStore {
         Ok(done)
     }
 
+    /// Drop everything the archive holds after `after`.
+    ///
+    /// The cut is by slot, so at a slot holding more than one block every one
+    /// of them survives, including any that follow `after` in the chain. That
+    /// is only expressible where two blocks share a slot — a Byron
+    /// epoch-boundary block and the first main block of the epoch it opens —
+    /// and a rollback cannot reach one: `Domain::rollback` walks the WAL back
+    /// to `after`, and the WAL holds `max_rollback` slots behind the tip,
+    /// while epoch-boundary blocks stop at the end of Byron. The behaviour
+    /// also predates the archive keeping both blocks, which is why it is
+    /// recorded here rather than changed: resolving `after` to one block of a
+    /// slot means matching its hash, which is `find_intersect`'s job, not this
+    /// one's.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
         wx.set_quick_repair(true);
@@ -884,6 +923,11 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
         Ok(Self::get_block_by_slot(self, slot)?)
     }
+
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        Ok(Self::get_blocks_by_slot(self, slot)?)
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
@@ -957,10 +1001,64 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     }
 }
 
+type IndexEntry = (BlockSlot, flatfiles::BlockLocation);
+
 /// Iterator over a range of blocks, reading lazily from flat files.
+///
+/// A slot can hold more than one block, so an index entry expands to a run of
+/// locations and whatever is left of the entry each end is working through is
+/// buffered here. When one end's range runs dry it drains the other end's
+/// buffer, which is what keeps a forward and a backward walk from yielding a
+/// block twice or dropping one where they meet.
 pub struct ArchiveRangeIter {
     range: redb::Range<'static, BlockSlot, &'static [u8]>,
+    front: VecDeque<IndexEntry>,
+    back: VecDeque<IndexEntry>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
+}
+
+impl ArchiveRangeIter {
+    fn next_entry(&mut self) -> Option<IndexEntry> {
+        loop {
+            if let Some(entry) = self.front.pop_front() {
+                return Some(entry);
+            }
+
+            let Some(next) = self.range.next() else {
+                return self.back.pop_front();
+            };
+
+            let (slot, value) = next.ok()?;
+            let slot = slot.value();
+
+            self.front.extend(
+                flatfiles::decode_locations(value.value())
+                    .rev()
+                    .map(|loc| (slot, loc)),
+            );
+        }
+    }
+
+    fn next_entry_back(&mut self) -> Option<IndexEntry> {
+        loop {
+            if let Some(entry) = self.back.pop_back() {
+                return Some(entry);
+            }
+
+            let Some(next) = self.range.next_back() else {
+                return self.front.pop_back();
+            };
+
+            let (slot, value) = next.ok()?;
+            let slot = slot.value();
+
+            self.back.extend(
+                flatfiles::decode_locations(value.value())
+                    .rev()
+                    .map(|loc| (slot, loc)),
+            );
+        }
+    }
 }
 
 impl Iterator for ArchiveRangeIter {
@@ -968,10 +1066,9 @@ impl Iterator for ArchiveRangeIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (slot, loc_bytes) = self.range.next()?.ok()?;
-            let loc = flatfiles::BlockLocation::from_bytes(loc_bytes.value());
+            let (slot, loc) = self.next_entry()?;
             match self.flatfiles.read(&loc) {
-                Ok(data) => return Some((slot.value(), data)),
+                Ok(data) => return Some((slot, data)),
                 Err(_) => continue, // skip unreadable blocks
             }
         }
@@ -981,10 +1078,9 @@ impl Iterator for ArchiveRangeIter {
 impl DoubleEndedIterator for ArchiveRangeIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
-            let (slot, loc_bytes) = self.range.next_back()?.ok()?;
-            let loc = flatfiles::BlockLocation::from_bytes(loc_bytes.value());
+            let (slot, loc) = self.next_entry_back()?;
             match self.flatfiles.read(&loc) {
-                Ok(data) => return Some((slot.value(), data)),
+                Ok(data) => return Some((slot, data)),
                 Err(_) => continue,
             }
         }
@@ -994,7 +1090,7 @@ impl DoubleEndedIterator for ArchiveRangeIter {
 impl dolos_core::archive::Skippable for ArchiveRangeIter {
     fn skip_forward(&mut self, n: usize) {
         for _ in 0..n {
-            if self.range.next().is_none() {
+            if self.next_entry().is_none() {
                 break;
             }
         }
@@ -1002,7 +1098,7 @@ impl dolos_core::archive::Skippable for ArchiveRangeIter {
 
     fn skip_backward(&mut self, n: usize) {
         for _ in 0..n {
-            if self.range.next_back().is_none() {
+            if self.next_entry_back().is_none() {
                 break;
             }
         }

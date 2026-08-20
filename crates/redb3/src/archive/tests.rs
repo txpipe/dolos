@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use dolos_core::{ArchiveWriter, BlockSlot, ChainPoint, StateSchema};
+use dolos_core::{ArchiveWriter, BlockSlot, ChainPoint, RawBlock, StateSchema};
 
 use super::ArchiveStore;
 
@@ -399,4 +399,466 @@ fn test_write_after_undo() {
     writer.commit().unwrap();
 
     assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(new_block));
+}
+
+// A slot is not a unique chain position, so these tests pin what the archive
+// does when two blocks are written to one: it keeps both, resolves the slot to
+// the one written last, and walks them in the order they arrived. The first
+// group says that with opaque payloads, because nothing in the store needs to
+// know what kind of block causes the collision.
+
+#[test]
+fn a_slot_keeps_every_block_written_to_it() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+    writer
+        .apply(&point(100), &Arc::new(second.clone()))
+        .unwrap();
+    writer.commit().unwrap();
+
+    // The slot resolves to the block written last, which is what the
+    // overwrite this fixes already yielded.
+    assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(second.clone()));
+
+    assert_eq!(
+        store.get_blocks_by_slot(&100).unwrap(),
+        vec![first.clone(), second.clone()]
+    );
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first, second]
+    );
+}
+
+#[test]
+fn a_slot_keeps_blocks_written_in_separate_batches() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    for body in [&first, &second] {
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(100), &Arc::new(body.clone())).unwrap();
+        writer.commit().unwrap();
+    }
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first, second.clone()]
+    );
+
+    assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(second));
+}
+
+#[test]
+fn writing_the_same_block_again_leaves_one_copy() {
+    let store = test_store();
+    let body = fake_block(100);
+
+    // What a resumed restore does to the layer it was in the middle of: the
+    // same records again, over rows that are already committed.
+    for _ in 0..2 {
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(100), &Arc::new(body.clone())).unwrap();
+        writer.commit().unwrap();
+    }
+
+    assert_eq!(store.get_blocks_by_slot(&100).unwrap(), vec![body.clone()]);
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![body]
+    );
+}
+
+#[test]
+fn rewriting_a_shared_slot_keeps_both_blocks_in_order() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    for _ in 0..2 {
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+        writer
+            .apply(&point(100), &Arc::new(second.clone()))
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first, second]
+    );
+}
+
+#[test]
+fn rewriting_the_older_block_at_a_shared_slot_leaves_undo_sound() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+    writer
+        .apply(&point(100), &Arc::new(second.clone()))
+        .unwrap();
+    writer.commit().unwrap();
+
+    // The older block on its own, written again — what a restore that stops
+    // between the two blocks of a shared slot redoes when it resumes. Its
+    // index entry must not move ahead of the block it precedes.
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+    writer.commit().unwrap();
+
+    // Undo takes the newest block and truncates the segment at its offset, so
+    // an entry that had moved past that offset would lose its bytes to the cut.
+    let writer = store.start_writer().unwrap();
+    writer.undo(&point(100)).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(first.clone()));
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first]
+    );
+}
+
+#[test]
+fn a_shared_slot_resolves_the_way_a_single_location_did() {
+    use ::redb::ReadableDatabase as _;
+
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first)).unwrap();
+    writer
+        .apply(&point(100), &Arc::new(second.clone()))
+        .unwrap();
+    writer.commit().unwrap();
+
+    // What a binary that predates multi-block slots reads out of the index
+    // value: the first packed location. It has to be the block the slot
+    // resolves to, or such a binary would start answering with a different
+    // block than it did before.
+    let rx = store.db().begin_read().unwrap();
+    let table = rx.open_table(super::tables::BlocksTable::DEF).unwrap();
+    let value = table.get(100u64).unwrap().unwrap();
+    let loc = super::flatfiles::BlockLocation::from_bytes(value.value());
+
+    assert_eq!(store.flatfiles.read(&loc).unwrap(), second);
+}
+
+// The Byron case the invariant above exists for: an EBB carries the same
+// absolute slot as the first main block of the epoch it opens, and every read
+// that walks the archive puts them back in chain order — EBB first.
+
+use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+
+/// A Byron epoch boundary: the EBB opening `epoch`, then the epoch's first
+/// main block, chained onto it and sharing its slot.
+fn boundary(epoch: u64) -> ((ChainPoint, RawBlock), (ChainPoint, RawBlock)) {
+    let ebb = make_byron_ebb(epoch, pallas::crypto::hash::Hash::new([7u8; 32]));
+    let slot = byron_ebb_slot(epoch);
+    let main = make_conway_block_with_prev(slot, ebb.0.hash(), epoch);
+
+    (ebb, main)
+}
+
+/// Write a whole boundary through one writer, in chain order.
+fn write_boundary(
+    store: &ArchiveStore,
+    epoch: u64,
+) -> ((ChainPoint, RawBlock), (ChainPoint, RawBlock)) {
+    let (ebb, main) = boundary(epoch);
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&ebb.0, &ebb.1).unwrap();
+    writer.apply(&main.0, &main.1).unwrap();
+    writer.commit().unwrap();
+
+    (ebb, main)
+}
+
+fn bodies(items: Vec<(BlockSlot, Vec<u8>)>) -> Vec<Vec<u8>> {
+    items.into_iter().map(|(_, body)| body).collect()
+}
+
+#[test]
+fn an_ebb_survives_the_block_that_shares_its_slot() {
+    let store = test_store();
+    let (ebb, main) = write_boundary(&store, 3);
+    let slot = ebb.0.slot();
+
+    // The point read keeps its old meaning: the main block wins the slot.
+    assert_eq!(
+        store.get_block_by_slot(&slot).unwrap().as_ref(),
+        Some(main.1.as_ref())
+    );
+
+    // The EBB is still there, and the walk yields both, EBB first.
+    let items = bodies(store.get_range(None, None).unwrap().collect());
+    assert_eq!(items, vec![ebb.1.as_ref().clone(), main.1.as_ref().clone()]);
+}
+
+#[test]
+fn a_boundary_slot_reverses_into_chain_order() {
+    let store = test_store();
+    let (ebb, main) = write_boundary(&store, 3);
+
+    let items = bodies(store.get_range(None, None).unwrap().rev().collect());
+    assert_eq!(items, vec![main.1.as_ref().clone(), ebb.1.as_ref().clone()]);
+}
+
+#[test]
+fn several_boundaries_interleave_with_ordinary_blocks() {
+    let store = test_store();
+
+    let (ebb1, main1) = boundary(1);
+    let (ebb2, main2) = boundary(2);
+
+    // One ordinary block between the two epochs, and one after the second.
+    let mid = make_conway_block_with_prev(byron_ebb_slot(1) + 5, main1.0.hash(), 100);
+    let tail = make_conway_block_with_prev(byron_ebb_slot(2) + 5, main2.0.hash(), 200);
+
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&ebb1, &main1, &mid, &ebb2, &main2, &tail] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    let expected: Vec<Vec<u8>> = [&ebb1, &main1, &mid, &ebb2, &main2, &tail]
+        .iter()
+        .map(|(_, body): &&(ChainPoint, RawBlock)| body.as_ref().clone())
+        .collect();
+
+    let forward = bodies(store.get_range(None, None).unwrap().collect());
+    assert_eq!(forward, expected);
+
+    let mut backward = bodies(store.get_range(None, None).unwrap().rev().collect());
+    backward.reverse();
+    assert_eq!(backward, expected);
+}
+
+/// The two ends of the merged iterator meet without yielding a block twice or
+/// dropping one, whichever end consumes the boundary slot.
+#[test]
+fn walking_from_both_ends_covers_every_block_once() {
+    let store = test_store();
+
+    let (ebb1, main1) = boundary(1);
+    let (ebb2, main2) = boundary(2);
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&ebb1, &main1, &ebb2, &main2] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    for front_first in [0usize, 1, 2, 3, 4] {
+        let mut iter = store.get_range(None, None).unwrap();
+        let mut seen = Vec::new();
+
+        for _ in 0..front_first {
+            if let Some((_, body)) = iter.next() {
+                seen.push(body);
+            }
+        }
+
+        let mut back = Vec::new();
+        while let Some((_, body)) = iter.next_back() {
+            back.push(body);
+        }
+        back.reverse();
+        seen.extend(back);
+
+        let expected: Vec<Vec<u8>> = [&ebb1, &main1, &ebb2, &main2]
+            .iter()
+            .map(|(_, body): &&(ChainPoint, RawBlock)| body.as_ref().clone())
+            .collect();
+
+        assert_eq!(seen, expected, "split after {front_first} from the front");
+    }
+}
+
+#[test]
+fn skipping_counts_the_ebb() {
+    use dolos_core::archive::Skippable as _;
+
+    let store = test_store();
+    let (ebb, main) = write_boundary(&store, 3);
+
+    let mut iter = store.get_range(None, None).unwrap();
+    iter.skip_forward(1);
+    assert_eq!(iter.next().map(|(_, b)| b), Some(main.1.as_ref().clone()));
+
+    let mut iter = store.get_range(None, None).unwrap();
+    iter.skip_backward(1);
+    assert_eq!(
+        iter.next_back().map(|(_, b)| b),
+        Some(ebb.1.as_ref().clone())
+    );
+}
+
+#[test]
+fn the_tip_is_the_ebb_until_its_epochs_first_block_arrives() {
+    let store = test_store();
+
+    let earlier = make_conway_block_with_prev(byron_ebb_slot(1) - 10, None, 0);
+    let writer = store.start_writer().unwrap();
+    writer.apply(&earlier.0, &earlier.1).unwrap();
+    writer.commit().unwrap();
+
+    let (ebb, main) = boundary(1);
+
+    // Commit the EBB on its own: for that moment it is the archive's tip.
+    let writer = store.start_writer().unwrap();
+    writer.apply(&ebb.0, &ebb.1).unwrap();
+    writer.commit().unwrap();
+
+    let (tip_slot, tip_body) = store.get_tip().unwrap().unwrap();
+    assert_eq!(tip_slot, ebb.0.slot());
+    assert_eq!(&tip_body, ebb.1.as_ref());
+
+    // Once the epoch's first main block lands, the slot reads as it always did.
+    let writer = store.start_writer().unwrap();
+    writer.apply(&main.0, &main.1).unwrap();
+    writer.commit().unwrap();
+
+    let (tip_slot, tip_body) = store.get_tip().unwrap().unwrap();
+    assert_eq!(tip_slot, main.0.slot());
+    assert_eq!(&tip_body, main.1.as_ref());
+}
+
+#[test]
+fn undo_unwinds_a_boundary_slot_in_reverse_arrival_order() {
+    let store = test_store();
+
+    let earlier = make_conway_block_with_prev(byron_ebb_slot(1) - 10, None, 0);
+    let (ebb, main) = boundary(1);
+
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&earlier, &ebb, &main] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    // First undo at the shared slot takes the main block — the one written
+    // last — and leaves the EBB, which the slot then resolves to.
+    let writer = store.start_writer().unwrap();
+    writer.undo(&main.0).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(
+        store.get_block_by_slot(&main.0.slot()).unwrap().as_ref(),
+        Some(ebb.1.as_ref())
+    );
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![earlier.1.as_ref().clone(), ebb.1.as_ref().clone()]
+    );
+
+    // The second undo at the same slot takes the EBB.
+    let writer = store.start_writer().unwrap();
+    writer.undo(&ebb.0).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![earlier.1.as_ref().clone()]
+    );
+
+    assert_eq!(store.get_block_by_slot(&main.0.slot()).unwrap(), None);
+}
+
+#[test]
+fn truncate_front_drops_an_ebb_past_the_cut() {
+    let store = test_store();
+
+    let earlier = make_conway_block_with_prev(byron_ebb_slot(1) - 10, None, 0);
+    let (ebb, main) = boundary(1);
+
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&earlier, &ebb, &main] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    store.truncate_front(&earlier.0).unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![earlier.1.as_ref().clone()]
+    );
+
+    // The segment was truncated at the EBB's offset, so the archive can be
+    // written forward again from there.
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&ebb, &main] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![
+            earlier.1.as_ref().clone(),
+            ebb.1.as_ref().clone(),
+            main.1.as_ref().clone()
+        ]
+    );
+}
+
+#[test]
+fn remove_before_prunes_every_block_at_a_slot() {
+    let store = test_store();
+
+    let (ebb1, main1) = boundary(1);
+    let (ebb2, main2) = boundary(2);
+
+    let writer = store.start_writer().unwrap();
+    for (point, body) in [&ebb1, &main1, &ebb2, &main2] {
+        writer.apply(point, body).unwrap();
+    }
+    writer.commit().unwrap();
+
+    // Prune everything more than one Byron epoch behind the tip.
+    store.prune_history(1, None).unwrap();
+
+    let slots: Vec<BlockSlot> = store
+        .get_range(None, None)
+        .unwrap()
+        .map(|(slot, _)| slot)
+        .collect();
+
+    assert_eq!(slots, vec![byron_ebb_slot(2), byron_ebb_slot(2)]);
+}
+
+#[test]
+fn find_intersect_resolves_an_ebb_by_its_own_hash() {
+    let store = test_store();
+    let (ebb, main) = write_boundary(&store, 3);
+
+    // The main block still resolves at the shared slot.
+    assert_eq!(
+        store.find_intersect(std::slice::from_ref(&main.0)).unwrap(),
+        Some(main.0.clone())
+    );
+
+    // And so does the EBB, which the slot alone can no longer distinguish.
+    assert_eq!(
+        store.find_intersect(std::slice::from_ref(&ebb.0)).unwrap(),
+        Some(ebb.0.clone())
+    );
 }
