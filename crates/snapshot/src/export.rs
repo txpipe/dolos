@@ -271,9 +271,11 @@ pub trait Predecessor {
     /// forecast that called `adopt` would double-count every layer it looked
     /// at.
     ///
-    /// It may answer `true` where `adopt` will later answer `None` — a blob the
-    /// repository has since dropped is only discovered by reaching for it — so
-    /// this is the honest forecast and `adopt` is the outcome.
+    /// It may answer `true` where `adopt` will later answer `None`, in exactly
+    /// one case: a layer an interrupted publish recorded, whose blob the
+    /// repository has since dropped. That is only discovered by reaching for
+    /// it, which is the step this deliberately does not take — so this is the
+    /// honest forecast and `adopt` is the outcome.
     ///
     /// The default reuses nothing, matching [`Predecessor::adopt`]'s.
     fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
