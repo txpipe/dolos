@@ -530,7 +530,7 @@ fn a_point_that_names_no_stele_is_refused() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    // The repository holds sequence 1 and nothing else.
+    // The repository holds sequence 0 and nothing else.
     let err = restore_from(
         &repository,
         Point::Epoch(97),

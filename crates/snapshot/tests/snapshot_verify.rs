@@ -280,7 +280,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
 
     assert!(matches!(err, Error::ReproductionMismatch { .. }), "{err:?}");
     assert!(
-        message.contains("sequence 2") && message.contains("sequence 1"),
+        message.contains("sequence 1") && message.contains("sequence 0"),
         "{message}"
     );
 
