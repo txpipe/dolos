@@ -589,19 +589,14 @@ where
 {
     stele.observe(observer.clone());
 
-    // Before a single layer is built, and before the count that would announce
-    // them: a log the format has no layer for is a refusal, and a refusal that
-    // waited until the log kinds were reached would have uploaded most of a
-    // stele — hours on mainnet — before saying so.
+    // Ahead of the count as well as of the build: see `refuse_uncovered_logs`.
     for window in &plan.epochs {
         refuse_uncovered_logs(archive, window)?;
     }
 
     // The same arithmetic `crate::registry::preview` reports a dry run with, so
-    // "layer 12 of 52" and "build: 52 layers" cannot disagree. The log kinds are
-    // the only ones that have to be counted rather than multiplied — an empty
-    // one produces no layer — and `log_layers` is what both sites count them
-    // with.
+    // "layer 12 of 52" and "build: 52 layers" cannot disagree — `log_layers` on
+    // both sides, since an empty log kind produces no layer to multiply.
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, previous)?
         + STATE_SHARDS as usize
@@ -628,8 +623,7 @@ where
     }
 
     // Kind-major, like the two loops above: the inscription lists layers in
-    // `KINDS` order and within a kind by ascending epoch, and the six log kinds
-    // are six kinds.
+    // `KINDS` order and within a kind by ascending epoch.
     for (kind, ns) in LOG_KINDS {
         for window in &plan.epochs {
             if let Some(descriptor) = write_logs(

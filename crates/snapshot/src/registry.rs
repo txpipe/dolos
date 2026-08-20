@@ -1090,7 +1090,6 @@ pub fn preview<A: ArchiveStore>(
 
     // A layer carried forward is a layer that exists, so `total` counted it
     // too — see `export::log_layers`, which asks the predecessor first.
-
     Ok(Preview {
         sequence: plan.sequence,
         predecessor: previous.predecessor,
@@ -1214,14 +1213,6 @@ impl<'a> Chained<'a> {
         })
     }
 
-    /// Whether a layer of `kind` at `scope` would be carried forward rather
-    /// than built.
-    ///
-    /// What [`preview`] reports, and it spends no `HEAD`: the promise a dry run
-    /// makes is about what the scopes permit. The record's own gate — that the
-    /// registry still holds the blob — runs in [`Predecessor::adopt`] and can
-    /// turn one of these into a rebuild, which is the direction a dry run is
-    /// allowed to be wrong in.
     /// Delete the resumption record.
     ///
     /// Called once the stele is sealed and never before it. See
@@ -1239,6 +1230,11 @@ impl Predecessor for Chained<'_> {
         &self.history
     }
 
+    /// What [`preview`] reports, and it spends no `HEAD`: the promise a dry run
+    /// makes is about what the scopes permit. The record's own gate — that the
+    /// registry still holds the blob — runs in [`Predecessor::adopt`] and can
+    /// turn one of these into a rebuild, which is the direction a dry run is
+    /// allowed to be wrong in.
     fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
         let key = key(kind, scope)?;
 
