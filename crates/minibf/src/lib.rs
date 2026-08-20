@@ -584,6 +584,10 @@ where
             get(routes::pools::by_id_metadata::<D>),
         )
         .route("/pools/{id}/relays", get(routes::pools::by_id_relays::<D>))
+        .route(
+            "/pools/{id}/updates",
+            get(routes::pools::by_id_updates::<D>),
+        )
         .route("/pools/extended", get(routes::pools::all_extended::<D>))
         .route("/pools/retiring", get(routes::pools::all_retiring::<D>))
         .route("/pools/retired", get(routes::pools::all_retired::<D>))
