@@ -188,10 +188,13 @@ impl Inscription {
 
     /// Refuse an inscription this profile implementation cannot read.
     ///
-    /// Three ways it fails, all clean refusals rather than a partial restore:
-    /// the inscription belongs to a different profile, it needs a profile major
-    /// version above the one implemented here, or one of its layers is not a
-    /// layer this profile defines.
+    /// Two ways it fails, both clean refusals rather than a partial restore:
+    /// the inscription belongs to a different profile, or it needs a profile
+    /// major version above the one implemented here. A layer of a kind this
+    /// implementation does not define is *not* one of them — see
+    /// [`Inscription::unknown_layers`] for why, and
+    /// [`Inscription::check_profile_strict`] for the side that still refuses
+    /// it.
     pub fn check_profile(&self, profile: &dyn Profile) -> Result<(), Error> {
         if self.profile.name != profile.name() {
             return Err(Error::UnknownProfile {
@@ -208,10 +211,20 @@ impl Inscription {
             });
         }
 
+        let kinds = profile.kinds();
+
         for layer in &self.layers {
-            // Refuses a kind the profile does not define, and pins the
-            // profile's own answer to the naming rules before it is used as the
-            // yardstick.
+            // A kind this implementation does not define has no yardstick to be
+            // measured against, so there is nothing to check here and the layer
+            // is left for `unknown_layers` to report. Its media type is not
+            // unchecked: `validate_structure` has already established that it
+            // parses and does not squat the reserved `stelae` vendor.
+            if !kinds.contains(&layer.kind.as_str()) {
+                continue;
+            }
+
+            // Pins the profile's own answer to the naming rules before it is
+            // used as the yardstick.
             let defined = checked_layer_media_type(profile, &layer.kind)?;
             let expected = MediaType::parse(&defined)?;
             let found = MediaType::parse(&layer.media_type)?;
@@ -236,6 +249,48 @@ impl Inscription {
                     ),
                 });
             }
+        }
+
+        Ok(())
+    }
+
+    /// The layers whose kind `profile` does not define, in inscription order.
+    ///
+    /// The client half of an additive change. A profile that gains a kind
+    /// publishes it as a new media type on a new layer, and an older reader
+    /// cannot store what it does not model — but refusing the whole stele over
+    /// it would make every additive change break every deployed reader. So the
+    /// protocol reports the layers rather than refusing them, and the profile
+    /// decides during planning what skipping each one costs.
+    ///
+    /// **Nothing here reads a scope.** Whether a layer is one a reader may skip
+    /// is a profile question, answered from the profile-owned `scope` the
+    /// descriptor carries, and the protocol interprets no field of it.
+    pub fn unknown_layers<'a>(&'a self, profile: &dyn Profile) -> Vec<&'a LayerDescriptor> {
+        let kinds = profile.kinds();
+
+        self.layers
+            .iter()
+            .filter(|layer| !kinds.contains(&layer.kind.as_str()))
+            .collect()
+    }
+
+    /// [`Inscription::check_profile`], plus a refusal of any unknown kind.
+    ///
+    /// What a publisher checks, and the asymmetry is the point: a reader
+    /// consumes the layers it understands, while a publisher *attests* every
+    /// layer it lists — its inscription is the document independent parties
+    /// reproduce and, later, sign. Chaining onto a stele carrying a kind this
+    /// binary cannot build means either dropping that layer from the new stele
+    /// or attesting bytes it never read, and both are worse than stopping.
+    pub fn check_profile_strict(&self, profile: &dyn Profile) -> Result<(), Error> {
+        self.check_profile(profile)?;
+
+        if let Some(layer) = self.unknown_layers(profile).first() {
+            return Err(Error::UnknownLayerKind {
+                profile: profile.name().to_owned(),
+                kind: layer.kind.clone(),
+            });
         }
 
         Ok(())
@@ -614,11 +669,22 @@ mod tests {
         let inscription = sample();
         inscription.check_profile(&Toy).unwrap();
 
-        // A layer kind the profile does not define is refused before any blob is
-        // fetched.
+        // A layer kind the profile does not define is readable — skippable, and
+        // reported — but not publishable.
         let mut inscription = sample();
         inscription.layers[0].kind = "blocks".to_owned();
-        let err = inscription.check_profile(&Toy).unwrap_err();
+        inscription.check_profile(&Toy).unwrap();
+
+        assert_eq!(
+            inscription
+                .unknown_layers(&Toy)
+                .iter()
+                .map(|l| l.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["blocks"],
+        );
+
+        let err = inscription.check_profile_strict(&Toy).unwrap_err();
         assert!(matches!(err, Error::UnknownLayerKind { .. }), "{err:?}");
     }
 

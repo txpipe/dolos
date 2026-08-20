@@ -363,7 +363,11 @@ impl Following {
             ));
         }
 
-        previous.check_profile(&DolosProfile)?;
+        // Strict, because this is the publish side: the stele built on top of
+        // this one attests every layer it lists, and a kind this binary cannot
+        // build would be either dropped from the new document or attested
+        // unread.
+        previous.check_profile_strict(&DolosProfile)?;
 
         Self::new(&previous, plan)
     }
@@ -1856,6 +1860,56 @@ mod chain_tests {
                 "{label}: {err:?}"
             );
         }
+    }
+
+    /// The publish side of decision 0026's unknown-kind rule: a reader may skip
+    /// a kind it does not implement, and a publisher may not.
+    ///
+    /// The two failures this refusal is between are both silent. Chaining onto
+    /// the predecessor and building what this binary knows drops the unknown
+    /// layer out of the repository without anything saying so; carrying its
+    /// descriptor forward attests bytes this binary never read. Stopping is the
+    /// only honest third option, and it is one flag on a `check_profile` call.
+    #[test]
+    fn a_predecessor_carrying_a_kind_this_build_cannot_build_is_refused() {
+        let network = Network::for_magic(crate::PREVIEW_MAGIC);
+
+        let mut previous = inscription(2, vec![entry(1)]);
+        previous.position = crate::position(
+            &network,
+            &ChainPoint::Specific(150, BlockHash::from([0xcd; 32])),
+            1,
+        )
+        .unwrap();
+
+        let plan = plan_at(network);
+
+        // The same document, chained cleanly, before the extra layer.
+        Following::read(&previous.canonicalize().unwrap(), &plan).unwrap();
+
+        previous.layers.push(LayerDescriptor {
+            kind: "log-future".to_owned(),
+            media_type: "application/vnd.dolos.stele.log-future.v1+zstd".to_owned(),
+            diff_id: Digest::compute(b"a layer this build cannot build"),
+            records: 2,
+            uncompressed_size: 128,
+            scope: json!({"epoch": 2, "startSlot": 100, "endSlot": 199}),
+        });
+
+        // A reader takes it: nothing about the document is malformed, and the
+        // layers this build does model are all still there.
+        previous.check_profile(&DolosProfile).unwrap();
+
+        let err = Following::read(&previous.canonicalize().unwrap(), &plan).unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::Stelae(stelae::Error::UnknownLayerKind { kind, .. })
+                    if kind == "log-future"
+            ),
+            "{err:?}"
+        );
     }
 
     /// The four readings of a repository a publisher on a timer meets, and the

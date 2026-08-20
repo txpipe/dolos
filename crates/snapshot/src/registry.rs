@@ -1151,6 +1151,13 @@ impl<'a> Chained<'a> {
         let inscription = latest.map(|stele| stele.read_inscription()).transpose()?;
 
         if let Some(previous) = &inscription {
+            // The pull that fetched this was a reader's, and a reader may skip
+            // a kind it does not implement. A publisher may not: it is about to
+            // attest a document, and inheriting a chain whose newest stele
+            // carries a layer this binary cannot build would drop that layer
+            // from the repository silently. See
+            // `Inscription::check_profile_strict`.
+            previous.check_profile_strict(&DolosProfile)?;
             same_network(previous, plan)?;
         }
 

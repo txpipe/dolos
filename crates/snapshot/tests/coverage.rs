@@ -63,6 +63,15 @@ fn every_namespace_resolves_and_nothing_else_does() {
     }
 }
 
+/// Dimensions stay fail-closed, and that is a carve-out rather than an
+/// oversight (decision 0026).
+///
+/// An unknown layer *kind* is a plan-time choice — the restore sees the layer
+/// in the inscription, decides to skip it, and says so. An unknown *dimension*
+/// is not: `indexes` is one layer, so the dimension only appears mid-stream,
+/// record by record, and skipping there is silent data loss inside a layer the
+/// plan already committed to restoring. Changing the dimension set therefore
+/// remains a media-type-version event.
 #[test]
 fn every_dimension_resolves_and_nothing_else_does() {
     for dimension in archive_dimensions::ALL {
