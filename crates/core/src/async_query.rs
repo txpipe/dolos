@@ -34,6 +34,31 @@ impl Default for AsyncQueryOptions {
     }
 }
 
+/// Pick the block a hash names out of the blocks recorded at one slot.
+///
+/// The index answers with a slot, and a slot usually holds one block, which is
+/// then the answer without a decode. Where the chain put two blocks on one
+/// slot — a Byron epoch-boundary block and the first main block of the epoch
+/// it opens — the hash is what tells them apart.
+fn pick_by_hash(
+    candidates: Vec<BlockBody>,
+    hash: &[u8],
+) -> Result<Option<BlockBody>, ArchiveError> {
+    if candidates.len() <= 1 {
+        return Ok(candidates.into_iter().next());
+    }
+
+    for body in candidates {
+        let decoded = MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
+
+        if decoded.hash().as_ref() == hash {
+            return Ok(Some(body));
+        }
+    }
+
+    Ok(None)
+}
+
 #[derive(Clone)]
 pub struct AsyncQueryFacade<D: Domain> {
     inner: D,
@@ -92,7 +117,10 @@ where
         self.run_blocking(move |domain| {
             let slot = domain.indexes().slot_by_block_hash(&hash)?;
             match slot {
-                Some(slot) => Ok(domain.archive().get_block_by_slot(&slot)?),
+                Some(slot) => {
+                    let candidates = domain.archive().get_blocks_by_slot(&slot)?;
+                    Ok(pick_by_hash(candidates, &hash)?)
+                }
                 None => Ok(None),
             }
         })
@@ -233,5 +261,51 @@ where
     ) -> Result<Option<ChainPoint>, DomainError> {
         self.run_blocking(move |domain| Ok(domain.archive().find_intersect(&intersect)?))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+
+    use super::*;
+
+    /// The case the plural read exists for: a Byron epoch-boundary block and
+    /// the first main block of the epoch it opens share a slot, so resolving a
+    /// hash through the index lands on both and only the hash tells them
+    /// apart.
+    #[test]
+    fn a_shared_slot_is_resolved_by_hash() {
+        let (ebb_point, ebb) = make_byron_ebb(1, pallas::crypto::hash::Hash::new([7u8; 32]));
+        let (main_point, main) =
+            make_conway_block_with_prev(byron_ebb_slot(1), ebb_point.hash(), 1);
+
+        let candidates = vec![ebb.as_ref().clone(), main.as_ref().clone()];
+
+        let ebb_hash = ebb_point.hash().unwrap();
+        let main_hash = main_point.hash().unwrap();
+
+        assert_eq!(
+            pick_by_hash(candidates.clone(), ebb_hash.as_ref()).unwrap(),
+            Some(ebb.as_ref().clone())
+        );
+
+        assert_eq!(
+            pick_by_hash(candidates, main_hash.as_ref()).unwrap(),
+            Some(main.as_ref().clone())
+        );
+    }
+
+    /// The ordinary slot holds one block and the index already named it, so
+    /// the answer costs no decode — which an undecodable body is enough to
+    /// show.
+    #[test]
+    fn a_lone_candidate_is_returned_undecoded() {
+        let body = b"not a block".to_vec();
+
+        assert_eq!(
+            pick_by_hash(vec![body.clone()], &[0u8; 32]).unwrap(),
+            Some(body)
+        );
     }
 }

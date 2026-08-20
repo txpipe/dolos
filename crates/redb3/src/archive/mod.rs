@@ -1,7 +1,7 @@
 use ::redb::{Database, ReadableDatabase};
 use redb::ReadTransaction;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -25,12 +25,20 @@ use redb_extras::buckets::BucketError;
 
 use crate::{build_tables, Error, Table};
 
-// `flatfiles` and `tables` are public so the one-time Byron EBB recovery scan
-// (`examples/heal-byron-ebbs.rs`) can reuse the exact index definitions and
-// location packing rather than restating them. Nothing in the `dolos` binary
-// reaches for them.
+// The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
+// these index definitions and the location packing rather than restating them.
+// It is the only thing that ever enables `maintenance`; the `dolos` binary
+// does not, so the crate's ordinary surface keeps them private.
+#[cfg(not(feature = "maintenance"))]
+pub(crate) mod flatfiles;
+#[cfg(feature = "maintenance")]
 pub mod flatfiles;
+
 pub(crate) mod indexes;
+
+#[cfg(not(feature = "maintenance"))]
+pub(crate) mod tables;
+#[cfg(feature = "maintenance")]
 pub mod tables;
 
 #[cfg(test)]
@@ -225,10 +233,11 @@ impl ArchiveStore {
         to: Option<BlockSlot>,
     ) -> Result<ArchiveRangeIter, RedbArchiveError> {
         let rx = self.db().begin_read()?;
-        let (blocks, ebbs) = tables::BlocksTable::get_range(&rx, from, to)?;
+        let range = tables::BlocksTable::get_range(&rx, from, to)?;
         Ok(ArchiveRangeIter {
-            blocks: PeekRange::new(blocks),
-            ebbs: PeekRange::new(ebbs),
+            range,
+            front: VecDeque::new(),
+            back: VecDeque::new(),
             flatfiles: self.flatfiles.clone(),
         })
     }
@@ -257,17 +266,9 @@ impl ArchiveStore {
                 return Ok(Some(ChainPoint::Origin));
             };
 
-            let main = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)?;
-
-            // A Byron boundary slot holds two blocks. The main block is the
-            // one an intersect normally names, so it is tried first; the EBB
-            // is only consulted when its hash is not the one asked for.
-            let candidates = [
-                main,
-                tables::EbbsTable::get_by_slot(&rx, &self.flatfiles, *slot)?,
-            ];
-
-            for body in candidates.into_iter().flatten() {
+            // A slot can hold more than one block, and an intersect names one
+            // of them by hash, so every block recorded there is a candidate.
+            for body in tables::BlocksTable::get_all_by_slot(&rx, &self.flatfiles, *slot)? {
                 let decoded =
                     MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
 
@@ -599,6 +600,16 @@ impl ArchiveStore {
         tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)
     }
 
+    /// Every block recorded at `slot`, in chain order.
+    ///
+    /// [`Self::get_block_by_slot`] answers with the block the slot resolves
+    /// to; this answers with all of them, which is what a caller holding a
+    /// hash needs when the chain put two blocks on one slot.
+    pub fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        tables::BlocksTable::get_all_by_slot(&rx, &self.flatfiles, *slot)
+    }
+
     pub fn get_block_by_hash(
         &self,
         block_hash: &[u8],
@@ -899,6 +910,11 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
         Ok(Self::get_block_by_slot(self, slot)?)
     }
+
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        Ok(Self::get_blocks_by_slot(self, slot)?)
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
@@ -972,123 +988,62 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     }
 }
 
-/// One index range with a peeked entry at each end.
-///
-/// The merge below needs to compare the next entry of both indexes before
-/// committing to one, and it has to do so from either end. `redb::Range` is a
-/// `DoubleEndedIterator` with no peek, so the peeked entries are buffered
-/// here. When the underlying range runs dry, the buffer at the *other* end
-/// holds the last remaining entry, and the empty end takes it — which is what
-/// keeps a front and a back peek from ever yielding the same entry twice.
-struct PeekRange {
-    inner: tables::IndexRange,
-    front: Option<IndexEntry>,
-    back: Option<IndexEntry>,
-}
-
 type IndexEntry = (BlockSlot, flatfiles::BlockLocation);
-
-/// What `redb::Range` hands back before the location is unpacked.
-type RawIndexEntry = Result<
-    (
-        redb::AccessGuard<'static, BlockSlot>,
-        redb::AccessGuard<'static, &'static [u8]>,
-    ),
-    redb::StorageError,
->;
-
-impl PeekRange {
-    fn new(inner: tables::IndexRange) -> Self {
-        Self {
-            inner,
-            front: None,
-            back: None,
-        }
-    }
-
-    fn peek_front(&mut self) -> Option<IndexEntry> {
-        if self.front.is_none() {
-            self.front = Self::pull(self.inner.next());
-        }
-
-        if self.front.is_none() {
-            self.front = self.back.take();
-        }
-
-        self.front
-    }
-
-    fn peek_back(&mut self) -> Option<IndexEntry> {
-        if self.back.is_none() {
-            self.back = Self::pull(self.inner.next_back());
-        }
-
-        if self.back.is_none() {
-            self.back = self.front.take();
-        }
-
-        self.back
-    }
-
-    fn take_front(&mut self) -> Option<IndexEntry> {
-        self.peek_front();
-        self.front.take()
-    }
-
-    fn take_back(&mut self) -> Option<IndexEntry> {
-        self.peek_back();
-        self.back.take()
-    }
-
-    fn pull(entry: Option<RawIndexEntry>) -> Option<IndexEntry> {
-        let (slot, loc) = entry?.ok()?;
-        Some((
-            slot.value(),
-            flatfiles::BlockLocation::from_bytes(loc.value()),
-        ))
-    }
-}
 
 /// Iterator over a range of blocks, reading lazily from flat files.
 ///
-/// The archive keeps Byron epoch-boundary blocks in a sidecar index, so this
-/// merges two slot-ordered ranges back into one chain-ordered sequence. At a
-/// shared slot the EBB comes first, because it is the block the epoch's first
-/// main block points back at.
+/// A slot can hold more than one block, so an index entry expands to a run of
+/// locations and whatever is left of the entry each end is working through is
+/// buffered here. When one end's range runs dry it drains the other end's
+/// buffer, which is what keeps a forward and a backward walk from yielding a
+/// block twice or dropping one where they meet.
 pub struct ArchiveRangeIter {
-    blocks: PeekRange,
-    ebbs: PeekRange,
+    range: redb::Range<'static, BlockSlot, &'static [u8]>,
+    front: VecDeque<IndexEntry>,
+    back: VecDeque<IndexEntry>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
 }
 
 impl ArchiveRangeIter {
     fn next_entry(&mut self) -> Option<IndexEntry> {
-        match (self.ebbs.peek_front(), self.blocks.peek_front()) {
-            (Some(ebb), Some(block)) => {
-                if ebb.0 <= block.0 {
-                    self.ebbs.take_front()
-                } else {
-                    self.blocks.take_front()
-                }
+        loop {
+            if let Some(entry) = self.front.pop_front() {
+                return Some(entry);
             }
-            (Some(_), None) => self.ebbs.take_front(),
-            (None, Some(_)) => self.blocks.take_front(),
-            (None, None) => None,
+
+            let Some(next) = self.range.next() else {
+                return self.back.pop_front();
+            };
+
+            let (slot, value) = next.ok()?;
+            let slot = slot.value();
+
+            self.front.extend(
+                flatfiles::decode_locations(value.value())
+                    .rev()
+                    .map(|loc| (slot, loc)),
+            );
         }
     }
 
     fn next_entry_back(&mut self) -> Option<IndexEntry> {
-        match (self.ebbs.peek_back(), self.blocks.peek_back()) {
-            (Some(ebb), Some(block)) => {
-                if block.0 >= ebb.0 {
-                    self.blocks.take_back()
-                } else {
-                    self.ebbs.take_back()
-                }
+        loop {
+            if let Some(entry) = self.back.pop_back() {
+                return Some(entry);
             }
-            (Some(_), None) => self.ebbs.take_back(),
-            (None, Some(_)) => self.blocks.take_back(),
-            (None, None) => None,
+
+            let Some(next) = self.range.next_back() else {
+                return self.front.pop_back();
+            };
+
+            let (slot, value) = next.ok()?;
+            let slot = slot.value();
+
+            self.back.extend(
+                flatfiles::decode_locations(value.value())
+                    .rev()
+                    .map(|loc| (slot, loc)),
+            );
         }
     }
 }

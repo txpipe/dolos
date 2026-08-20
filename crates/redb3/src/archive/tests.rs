@@ -401,10 +401,135 @@ fn test_write_after_undo() {
     assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(new_block));
 }
 
-// An EBB carries the same absolute slot as the first main block of the epoch
-// it opens. These tests pin the two apart: the sidecar index holds the EBB,
-// the main index holds the block that follows it, and every read that walks
-// the archive puts them back in chain order — EBB first.
+// A slot is not a unique chain position, so these tests pin what the archive
+// does when two blocks are written to one: it keeps both, resolves the slot to
+// the one written last, and walks them in the order they arrived. The first
+// group says that with opaque payloads, because nothing in the store needs to
+// know what kind of block causes the collision.
+
+#[test]
+fn a_slot_keeps_every_block_written_to_it() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+    writer
+        .apply(&point(100), &Arc::new(second.clone()))
+        .unwrap();
+    writer.commit().unwrap();
+
+    // The slot resolves to the block written last, which is what the
+    // overwrite this fixes already yielded.
+    assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(second.clone()));
+
+    assert_eq!(
+        store.get_blocks_by_slot(&100).unwrap(),
+        vec![first.clone(), second.clone()]
+    );
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first, second]
+    );
+}
+
+#[test]
+fn a_slot_keeps_blocks_written_in_separate_batches() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    for body in [&first, &second] {
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(100), &Arc::new(body.clone())).unwrap();
+        writer.commit().unwrap();
+    }
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first, second.clone()]
+    );
+
+    assert_eq!(store.get_block_by_slot(&100).unwrap(), Some(second));
+}
+
+#[test]
+fn writing_the_same_block_again_leaves_one_copy() {
+    let store = test_store();
+    let body = fake_block(100);
+
+    // What a resumed restore does to the layer it was in the middle of: the
+    // same records again, over rows that are already committed.
+    for _ in 0..2 {
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(100), &Arc::new(body.clone())).unwrap();
+        writer.commit().unwrap();
+    }
+
+    assert_eq!(store.get_blocks_by_slot(&100).unwrap(), vec![body.clone()]);
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![body]
+    );
+}
+
+#[test]
+fn rewriting_a_shared_slot_keeps_both_blocks_in_order() {
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    for _ in 0..2 {
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(100), &Arc::new(first.clone())).unwrap();
+        writer
+            .apply(&point(100), &Arc::new(second.clone()))
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    assert_eq!(
+        bodies(store.get_range(None, None).unwrap().collect()),
+        vec![first, second]
+    );
+}
+
+#[test]
+fn a_shared_slot_resolves_the_way_a_single_location_did() {
+    use ::redb::ReadableDatabase as _;
+
+    let store = test_store();
+
+    let first = b"first_at_slot_100".to_vec();
+    let second = b"second_at_slot_100".to_vec();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply(&point(100), &Arc::new(first)).unwrap();
+    writer
+        .apply(&point(100), &Arc::new(second.clone()))
+        .unwrap();
+    writer.commit().unwrap();
+
+    // What a binary that predates multi-block slots reads out of the index
+    // value: the first packed location. It has to be the block the slot
+    // resolves to, or such a binary would start answering with a different
+    // block than it did before.
+    let rx = store.db().begin_read().unwrap();
+    let table = rx.open_table(super::tables::BlocksTable::DEF).unwrap();
+    let value = table.get(100u64).unwrap().unwrap();
+    let loc = super::flatfiles::BlockLocation::from_bytes(value.value());
+
+    assert_eq!(store.flatfiles.read(&loc).unwrap(), second);
+}
+
+// The Byron case the invariant above exists for: an EBB carries the same
+// absolute slot as the first main block of the epoch it opens, and every read
+// that walks the archive puts them back in chain order — EBB first.
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
 
@@ -596,12 +721,15 @@ fn undo_unwinds_a_boundary_slot_in_reverse_arrival_order() {
     writer.commit().unwrap();
 
     // First undo at the shared slot takes the main block — the one written
-    // last — and leaves the EBB.
+    // last — and leaves the EBB, which the slot then resolves to.
     let writer = store.start_writer().unwrap();
     writer.undo(&main.0).unwrap();
     writer.commit().unwrap();
 
-    assert_eq!(store.get_block_by_slot(&main.0.slot()).unwrap(), None);
+    assert_eq!(
+        store.get_block_by_slot(&main.0.slot()).unwrap().as_ref(),
+        Some(ebb.1.as_ref())
+    );
     assert_eq!(
         bodies(store.get_range(None, None).unwrap().collect()),
         vec![earlier.1.as_ref().clone(), ebb.1.as_ref().clone()]
@@ -616,6 +744,8 @@ fn undo_unwinds_a_boundary_slot_in_reverse_arrival_order() {
         bodies(store.get_range(None, None).unwrap().collect()),
         vec![earlier.1.as_ref().clone()]
     );
+
+    assert_eq!(store.get_block_by_slot(&main.0.slot()).unwrap(), None);
 }
 
 #[test]
@@ -657,7 +787,7 @@ fn truncate_front_drops_an_ebb_past_the_cut() {
 }
 
 #[test]
-fn remove_before_prunes_both_indexes() {
+fn remove_before_prunes_every_block_at_a_slot() {
     let store = test_store();
 
     let (ebb1, main1) = boundary(1);

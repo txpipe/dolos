@@ -877,6 +877,13 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        match self {
+            Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
+            Self::NoOp(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
+        }
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

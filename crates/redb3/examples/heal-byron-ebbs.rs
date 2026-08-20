@@ -1,14 +1,14 @@
 //! One-time recovery scan for Byron epoch-boundary blocks lost to slot-key
 //! overwrite.
 //!
-//! Every archive written before the `ebbs` sidecar landed keyed its block
-//! index by slot alone. A Byron EBB shares its absolute slot with the first
+//! Every archive written before a slot could index more than one block kept
+//! one location per slot. A Byron EBB shares its absolute slot with the first
 //! main block of the epoch it opens, so the main block overwrote the EBB's
 //! index row on every Byron epoch — 208 of them on mainnet, 4 on preprod, none
 //! on preview. The EBB's *bytes* were never lost: segment files are
 //! append-only and the EBB was appended first, so each orphaned block sits in
 //! the offset gap between two indexed blocks. This scan finds those gaps and
-//! inserts the missing `ebbs` rows.
+//! puts the missing locations back into their slots.
 //!
 //! **This is not a product surface.** The shipped `dolos` binary offers no
 //! repair command, no startup hook and no lazy heal: an operator on a pre-fix
@@ -49,8 +49,10 @@ use std::path::{Path, PathBuf};
 use pallas::ledger::traverse::{probe, MultiEraBlock};
 use redb::{Database, ReadableDatabase as _, ReadableTable as _};
 
-use dolos_redb3::archive::flatfiles::{BlockLocation, FlatFileStore};
-use dolos_redb3::archive::tables::{BlocksTable, EbbsTable};
+use dolos_redb3::archive::flatfiles::{
+    decode_locations, encode_locations, BlockLocation, FlatFileStore,
+};
+use dolos_redb3::archive::tables::BlocksTable;
 
 type BoxError = Box<dyn std::error::Error>;
 
@@ -61,7 +63,7 @@ struct Indexed {
     slot: u64,
     hash: pallas::crypto::hash::Hash<32>,
     prev: Option<pallas::crypto::hash::Hash<32>>,
-    is_ebb: bool,
+    shares_slot: bool,
 }
 
 /// A stretch of segment bytes no index row points at.
@@ -83,7 +85,7 @@ struct Report {
     recovered: Vec<Recovered>,
     refused: Vec<(Gap, String)>,
     indexed: usize,
-    already_ebbs: usize,
+    already_shared: usize,
     gaps: usize,
     committed: bool,
 }
@@ -118,8 +120,8 @@ fn main() -> Result<(), BoxError> {
     let report = heal(&archive_dir, &blocks_dir, commit)?;
 
     println!(
-        "indexed blocks: {} ({} epoch-boundary)",
-        report.indexed, report.already_ebbs
+        "indexed blocks: {} ({} sharing a slot)",
+        report.indexed, report.already_shared
     );
     println!("segment gaps: {}", report.gaps);
 
@@ -174,7 +176,7 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
     let flatfiles = FlatFileStore::new(blocks_dir)?;
 
     let indexed = read_index(&db, &flatfiles)?;
-    let already_ebbs = indexed.values().filter(|block| block.is_ebb).count();
+    let already_shared = indexed.values().filter(|block| block.shares_slot).count();
     let gaps = find_gaps(blocks_dir, &indexed)?;
 
     let mut recovered = Vec::new();
@@ -189,7 +191,7 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
 
     let mut report = Report {
         indexed: indexed.len(),
-        already_ebbs,
+        already_shared,
         gaps: recovered.len() + refused.len(),
         recovered,
         refused,
@@ -202,9 +204,21 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
     if commit && report.refused.is_empty() && !report.recovered.is_empty() {
         let wx = db.begin_write()?;
         {
-            let mut table = wx.open_table(EbbsTable::DEF)?;
+            let mut table = wx.open_table(BlocksTable::DEF)?;
+
             for block in &report.recovered {
-                table.insert(block.slot, block.location.to_bytes().as_slice())?;
+                // The list a slot holds is newest first, and a recovered EBB
+                // is the oldest block at its slot — it is what the epoch's
+                // first main block was written over — so it goes last.
+                let stored = table.get(block.slot)?.map(|value| value.value().to_vec());
+                let mut locations: Vec<BlockLocation> = stored
+                    .as_deref()
+                    .map(|bytes| decode_locations(bytes).collect())
+                    .unwrap_or_default();
+
+                locations.push(block.location);
+
+                table.insert(block.slot, encode_locations(&locations).as_slice())?;
             }
         }
         wx.commit()?;
@@ -215,11 +229,12 @@ fn heal(archive_dir: &Path, blocks_dir: &Path, commit: bool) -> Result<Report, B
     Ok(report)
 }
 
-/// Read every index row from both tables and decode the block it points at.
+/// Read every indexed block and decode what it says about its neighbours.
 ///
 /// Keyed by segment position rather than by slot, because what the scan needs
 /// is the order the bytes were written in — which is the order the chain was
 /// applied in, and the only thing that makes a gap's neighbours meaningful.
+/// A slot that already holds more than one block contributes each of them.
 fn read_index(
     db: &Database,
     flatfiles: &FlatFileStore,
@@ -227,17 +242,14 @@ fn read_index(
     let rx = db.begin_read()?;
     let mut out = BTreeMap::new();
 
-    for (def, is_ebb_table) in [(BlocksTable::DEF, false), (EbbsTable::DEF, true)] {
-        let table = match rx.open_table(def) {
-            Ok(table) => table,
-            // A pre-fix archive has no `ebbs` table at all.
-            Err(redb::TableError::TableDoesNotExist(_)) => continue,
-            Err(err) => return Err(err.into()),
-        };
+    let table = rx.open_table(BlocksTable::DEF)?;
 
-        for entry in table.iter()? {
-            let (slot, loc_bytes) = entry?;
-            let location = BlockLocation::from_bytes(loc_bytes.value());
+    for entry in table.iter()? {
+        let (slot, value) = entry?;
+        let locations: Vec<BlockLocation> = decode_locations(value.value()).collect();
+        let shares_slot = locations.len() > 1;
+
+        for location in locations {
             let body = flatfiles.read(&location)?;
             let decoded = MultiEraBlock::decode(&body)?;
 
@@ -248,7 +260,7 @@ fn read_index(
                     slot: slot.value(),
                     hash: decoded.hash(),
                     prev: decoded.header().previous_hash(),
-                    is_ebb: is_ebb_table,
+                    shares_slot,
                 },
             );
         }

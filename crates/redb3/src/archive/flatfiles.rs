@@ -27,6 +27,11 @@ impl BlockLocation {
         buf
     }
 
+    /// Unpack the first location in `bytes`.
+    ///
+    /// An index value holds one location per block recorded at its slot, and
+    /// the first is the canonical one, so this stays the point read it always
+    /// was — including for a binary that predates multi-block slots.
     pub fn from_bytes(bytes: &[u8]) -> Self {
         assert!(bytes.len() >= BLOCK_LOCATION_SIZE);
         let segment_id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
@@ -43,6 +48,29 @@ impl BlockLocation {
     pub fn segment_for_slot(slot: u64) -> u32 {
         (slot / SLOTS_PER_SEGMENT) as u32
     }
+}
+
+/// Read the blocks recorded at one slot out of a packed index value.
+///
+/// The list is newest first: position 0 is the slot's canonical block and the
+/// entries after it are the ones it displaced, so reversing this yields chain
+/// order. A value written before the archive could hold more than one block
+/// per slot is one entry long and reads the same either way.
+pub fn decode_locations(bytes: &[u8]) -> impl DoubleEndedIterator<Item = BlockLocation> + '_ {
+    bytes
+        .chunks_exact(BLOCK_LOCATION_SIZE)
+        .map(BlockLocation::from_bytes)
+}
+
+/// Pack a slot's blocks back into an index value, newest first.
+pub fn encode_locations(locations: &[BlockLocation]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(locations.len() * BLOCK_LOCATION_SIZE);
+
+    for loc in locations {
+        buf.extend_from_slice(&loc.to_bytes());
+    }
+
+    buf
 }
 
 /// Segment file name for a given segment ID.
