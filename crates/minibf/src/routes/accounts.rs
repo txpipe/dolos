@@ -22,13 +22,13 @@ use blockfrost_openapi::models::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
-    model::{AccountState, DRepState},
+    model::{AccountState, DRepState, PoolState},
     pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
     PoolDepositRefundLog,
 };
 use dolos_core::{
-    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _,
-    TemporalKey, TxHash,
+    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, IndexStore as _, LogKey,
+    StateStore as _, TemporalKey, TxHash,
 };
 use futures::future::join_all;
 use futures_util::StreamExt;
@@ -229,6 +229,61 @@ where
     Ok(Json(model))
 }
 
+/// Tell if any pool registration names the account as reward account or
+/// pool owner.
+///
+/// Blockfrost treats these credentials as known accounts even when they
+/// never appear in an address or certificate. The scan runs only on the
+/// 404 path, so the full pool iteration stays off the hot path.
+fn account_appears_in_pool_registrations<D>(
+    domain: &Facade<D>,
+    account: &StakeAddress,
+) -> Result<bool, StatusCode>
+where
+    Option<PoolState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let reward_account = account.to_vec();
+
+    // Pool owners are always key hashes, so a script account can only
+    // match through the reward account.
+    let owner_hash = match account.payload() {
+        StakePayload::Stake(hash) => Some(*hash),
+        StakePayload::Script(_) => None,
+    };
+
+    for item in domain.iter_cardano_entities::<PoolState>(None)? {
+        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Blockfrost knows a credential from the moment its certificate
+        // lands on chain and never forgets it. Check every snapshot slot
+        // the entity still holds to get as close as the state allows:
+        // - `live` is the only slot a brand-new pool writes.
+        // - `next` holds a mid-epoch re-registration until the boundary.
+        // - `mark`/`set`/`go` still hold a credential that a recent re-registration
+        //   replaced.
+        let snapshots = [
+            pool.snapshot.live(),
+            pool.snapshot.next(),
+            pool.snapshot.mark(),
+            pool.snapshot.set(),
+            pool.snapshot.go(),
+        ];
+
+        for snapshot in snapshots.into_iter().flatten() {
+            if snapshot.params.reward_account == reward_account {
+                return Ok(true);
+            }
+
+            if owner_hash.is_some_and(|hash| snapshot.params.pool_owners.contains(&hash)) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -236,35 +291,79 @@ pub async fn by_stake_addresses<D>(
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())?
+        && !account_appears_in_pool_registrations(&domain, &account_key.address)?
+    {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
+    // The stake address log answers both orders with one page read. It only
+    // exists on stores synced since the log was introduced; `None` falls
+    // through to the archive scan below. The scan honors from/to filters,
+    // the log does not, so range-filtered requests always scan.
+    if pagination.from.is_none() && pagination.to.is_none() {
+        let page = domain
+            .indexes()
+            .addresses_by_stake_log(
+                &account_key.address.to_vec(),
+                pagination.skip(),
+                pagination.count,
+                matches!(pagination.order, Order::Desc),
+            )
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        if let Some(addresses) = page {
+            let items = addresses
+                .into_iter()
+                .map(|bytes| {
+                    Address::from_bytes(&bytes)
+                        .map(|address| AccountAddressesContentInner {
+                            address: address.to_string(),
+                        })
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+
+            return Ok(Json(items));
+        }
+    }
+
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+
+    // Blockfrost orders addresses by first on-chain appearance, and `desc`
+    // is the exact reverse of the `asc` list. Scan ascending in both cases;
+    // a descending scan would order reused addresses by their latest
+    // appearance instead of their first one.
     let stream = domain.query().blocks_by_stake_stream(
         &account_key.address.to_vec(),
         start_slot,
         end_slot,
-        SlotOrder::from(pagination.order),
+        SlotOrder::Asc,
     );
 
-    let mut items = vec![];
-    let mut skipped = 0;
+    // `asc` can stop once the requested page is full. `desc` needs the
+    // complete list before the reversal.
+    let scan_target = match pagination.order {
+        Order::Asc => Some(pagination.to()),
+        Order::Desc => None,
+    };
+
+    let account = account_key.address.to_vec();
+
+    let mut ordered = vec![];
     let mut seen = BTreeSet::new();
 
     let mut stream = Box::pin(stream);
 
-    while let Some(res) = stream.next().await {
-        if items.len() >= pagination.count {
-            break;
-        }
-
+    'scan: while let Some(res) = stream.next().await {
         let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let Some(block) = block else {
@@ -272,36 +371,38 @@ where
         };
 
         let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         for (_, utxo) in block.txs().iter().flat_map(|tx| tx.produces()) {
             let address = utxo
                 .address()
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            if match &address {
-                Address::Shelley(shelley) => {
-                    pallas_extras::shelley_address_to_stake_address(shelley)
-                        .map(|x| x.to_vec() == account_key.address.to_vec())
-                        .unwrap_or(false)
-                }
-                Address::Stake(stake) => stake.to_vec() == account_key.address.to_vec(),
-                Address::Byron(_) => false,
-            } && seen.insert(address.to_string())
-            {
-                if skipped < (pagination.page as usize - 1) * pagination.count {
-                    skipped += 1;
-                } else {
-                    items.push(AccountAddressesContentInner {
-                        address: address.to_string(),
-                    });
-                    if items.len() >= pagination.count {
-                        break;
-                    }
+
+            if !address_belongs_to_account(&address, &account) {
+                continue;
+            }
+
+            let address = address.to_string();
+
+            if seen.insert(address.clone()) {
+                ordered.push(address);
+
+                if scan_target.is_some_and(|target| ordered.len() >= target) {
+                    break 'scan;
                 }
             }
         }
-        if items.len() >= pagination.count {
-            break;
-        }
     }
+
+    if matches!(pagination.order, Order::Desc) {
+        ordered.reverse();
+    }
+
+    let items = ordered
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|address| AccountAddressesContentInner { address })
+        .collect();
 
     Ok(Json(items))
 }
@@ -1551,15 +1652,47 @@ mod tests {
     async fn accounts_by_stake_addresses_order_desc() {
         let app = TestApp::new();
         let stake_address = app.vectors().stake_address.as_str();
-        let path = format!("/accounts/{stake_address}/addresses?order=desc&count=5");
-        let (status, bytes) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
 
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=asc&count=100"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let asc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses asc");
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=desc&count=100"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
         let desc: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
-        if desc.is_empty() {
-            return;
-        }
+
+        assert!(!asc.is_empty());
+
+        // The synthetic chain reuses the primary address in every block. A
+        // last-appearance ordering would move that address to the front of
+        // `desc`. Blockfrost defines `desc` as the reverse of `asc`.
+        let mut reversed: Vec<_> = asc.iter().map(|x| x.address.clone()).collect();
+        reversed.reverse();
+        let desc_addresses: Vec<_> = desc.iter().map(|x| x.address.clone()).collect();
+        assert_eq!(desc_addresses, reversed);
+
+        // A `desc` page must be a window into the reversed list.
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=desc&count=2&page=2"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let page: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses desc page");
+        let page_addresses: Vec<_> = page.iter().map(|x| x.address.clone()).collect();
+        assert_eq!(page_addresses, reversed[2..4].to_vec());
+
         let address_bounds = |addr: &str| {
             app.vectors()
                 .account_address_bounds
@@ -1568,9 +1701,78 @@ mod tests {
                 .expect("missing address in vectors")
         };
 
-        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).1).collect();
+        // first on-chain appearance must not increase along `desc`
+        let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).0).collect();
 
         assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_pool_only_account_returns_empty_list() {
+        let app = TestApp::new();
+
+        // The synthetic chain registers a pool owned by key hash [2u8; 28].
+        // That credential never appears in an address or certificate, so no
+        // account state exists for it. Blockfrost still answers with an
+        // empty list because the credential is known through the pool.
+        let owner = StakeAddress::new(Network::Testnet, StakePayload::Stake(Hash::from([2u8; 28])));
+        let owner = owner.to_bech32().expect("failed to encode owner address");
+
+        let path = format!("/accounts/{owner}/addresses");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let addresses: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+        assert!(addresses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_log_matches_archive_scan() {
+        // Two identical synthetic chains: one serves from the stake address
+        // log, the other from the archive-scan fallback. Every query shape
+        // must produce identical responses on both.
+        let logged = TestApp::new();
+        let scanned = TestApp::new_scan_fallback();
+
+        let stake_address = logged.vectors().stake_address.clone();
+        assert_eq!(stake_address, scanned.vectors().stake_address);
+
+        let queries = [
+            "order=asc&count=100",
+            "order=desc&count=100",
+            "order=asc&count=2&page=2",
+            "order=desc&count=2&page=2",
+            "count=1&page=3",
+        ];
+
+        for query in queries {
+            let path = format!("/accounts/{stake_address}/addresses?{query}");
+
+            let (status, bytes) = logged.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "log path failed for {query}");
+            let from_log: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse log response");
+
+            let (status, bytes) = scanned.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "scan path failed for {query}");
+            let from_scan: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse scan response");
+
+            let log_addresses: Vec<_> = from_log.iter().map(|x| x.address.clone()).collect();
+            let scan_addresses: Vec<_> = from_scan.iter().map(|x| x.address.clone()).collect();
+
+            assert!(!log_addresses.is_empty(), "empty response for {query}");
+            assert_eq!(
+                log_addresses, scan_addresses,
+                "log and scan disagree for {query}"
+            );
+        }
     }
 
     #[tokio::test]

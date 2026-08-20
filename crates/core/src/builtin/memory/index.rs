@@ -32,7 +32,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::indexes::{
     key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexDelta, IndexError, IndexRecord,
-    IndexStore, IndexWriter, KeyHash, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
+    IndexStore, IndexWriter, KeyHash, StakeAddressAppearance, TagDimension, TagRecord,
+    MAX_EXACT_KEY_LEN,
 };
 use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
 
@@ -43,6 +44,12 @@ type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
 /// [`ExactRecord`] carries, so a record goes in and comes back out without a
 /// heap allocation on either side.
 type ExactKey = [u8; MAX_EXACT_KEY_LEN];
+
+/// One ordered entry of the stake address log: `(slot, order, address)`.
+type StakeLogEntry = (BlockSlot, u32, Vec<u8>);
+
+/// A `(stake, address)` pair, the membership key of the stake address log.
+type StakeLogPair = (Vec<u8>, Vec<u8>);
 
 /// A key's stored form, or `None` unless it is exactly the width its kind
 /// requires.
@@ -74,6 +81,15 @@ struct Tables {
     /// Keyed on the record's own inline key rather than a `Vec`, so
     /// `iter_exact_records` copies rather than allocates per record.
     exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
+    /// Stake address log: appearances ordered by `(slot, order, address)`
+    /// per stake credential. The set holds only first appearances.
+    stake_log: BTreeMap<Vec<u8>, BTreeSet<StakeLogEntry>>,
+    /// Membership map for the log: each pair's first appearance, which is
+    /// also what an undo has to match before it may remove the pair.
+    stake_log_pairs: BTreeMap<StakeLogPair, (BlockSlot, u32)>,
+    /// Set once the log is complete from genesis; queries answer `None`
+    /// until then.
+    stake_log_ready: bool,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit. See the
@@ -86,6 +102,8 @@ enum Op {
     RemoveArchiveTag(ArchiveTag),
     InsertExact(ExactKind, ExactKey, BlockSlot),
     RemoveExact(ExactKind, ExactKey),
+    InsertStakeAddress(StakeAddressAppearance),
+    RemoveStakeAddress(StakeAddressAppearance),
 }
 
 fn poisoned() -> IndexError {
@@ -206,6 +224,10 @@ impl IndexWriter for MemoryIndexWriter {
             }
         }
 
+        for appearance in &delta.stake_addresses {
+            ops.push(Op::InsertStakeAddress(appearance.clone()));
+        }
+
         ops.push(Op::SetCursor(delta.cursor.clone()));
 
         Ok(())
@@ -248,6 +270,10 @@ impl IndexWriter for MemoryIndexWriter {
             }
         }
 
+        for appearance in &delta.stake_addresses {
+            ops.push(Op::RemoveStakeAddress(appearance.clone()));
+        }
+
         Ok(())
     }
 
@@ -282,6 +308,9 @@ impl IndexWriter for MemoryIndexWriter {
 
         let mut tables = self.store.tables.write().map_err(|_| poisoned())?;
 
+        // Reborrow so the match arms can hold disjoint field borrows.
+        let tables = &mut *tables;
+
         for op in ops {
             match op {
                 Op::SetCursor(cursor) => tables.cursor = Some(cursor),
@@ -313,6 +342,38 @@ impl IndexWriter for MemoryIndexWriter {
                 }
                 Op::RemoveExact(kind, key) => {
                     tables.exact.remove(&(kind, key));
+                }
+                Op::InsertStakeAddress(app) => {
+                    let pair = (app.stake.clone(), app.address.clone());
+                    // Only the first appearance of a pair is kept; the
+                    // membership map is the probe.
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        tables.stake_log_pairs.entry(pair)
+                    {
+                        entry.insert((app.slot, app.order));
+                        tables.stake_log.entry(app.stake).or_default().insert((
+                            app.slot,
+                            app.order,
+                            app.address,
+                        ));
+                    }
+                }
+                Op::RemoveStakeAddress(app) => {
+                    let pair = (app.stake.clone(), app.address.clone());
+                    // Remove only when the undone block is the pair's first
+                    // appearance; a pair seen earlier stays untouched.
+                    let stored = tables.stake_log_pairs.get(&pair).copied();
+                    if let Some((slot, order)) = stored {
+                        if slot == app.slot {
+                            tables.stake_log_pairs.remove(&pair);
+                            if let Some(set) = tables.stake_log.get_mut(&app.stake) {
+                                set.remove(&(slot, order, app.address));
+                                if set.is_empty() {
+                                    tables.stake_log.remove(&app.stake);
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -404,6 +465,14 @@ impl IndexStore for MemoryIndexStore {
         target.archive_tags.extend(source.archive_tags);
         target.exact.extend(source.exact);
 
+        for (stake, set) in source.stake_log {
+            target.stake_log.entry(stake).or_default().extend(set);
+        }
+        for (pair, first) in source.stake_log_pairs {
+            target.stake_log_pairs.entry(pair).or_insert(first);
+        }
+        target.stake_log_ready |= source.stake_log_ready;
+
         Ok(())
     }
 
@@ -422,6 +491,45 @@ impl IndexStore for MemoryIndexStore {
             .unwrap_or_default();
 
         Ok(found)
+    }
+
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        if !tables.stake_log_ready {
+            return Ok(None);
+        }
+
+        let Some(set) = tables.stake_log.get(stake) else {
+            return Ok(Some(Vec::new()));
+        };
+
+        let pick = |entry: &(BlockSlot, u32, Vec<u8>)| entry.2.clone();
+
+        let page = if reverse {
+            set.iter()
+                .rev()
+                .skip(offset)
+                .take(limit)
+                .map(pick)
+                .collect()
+        } else {
+            set.iter().skip(offset).take(limit).map(pick).collect()
+        };
+
+        Ok(Some(page))
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError> {
+        let mut tables = self.tables.write().map_err(|_| poisoned())?;
+        tables.stake_log_ready = true;
+        Ok(())
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
@@ -527,5 +635,132 @@ impl IndexStore for MemoryIndexStore {
             .collect::<Result<_, _>>()?;
 
         Ok(MemoryExactIter(records.into_iter()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn appearance(slot: BlockSlot, order: u32, stake: u8, address: u8) -> StakeAddressAppearance {
+        StakeAddressAppearance {
+            slot,
+            order,
+            stake: vec![stake; 29],
+            address: vec![address; 57],
+        }
+    }
+
+    fn apply_appearances(store: &MemoryIndexStore, items: &[StakeAddressAppearance]) {
+        let writer = store.start_writer().unwrap();
+        let delta = IndexDelta {
+            stake_addresses: items.to_vec(),
+            ..Default::default()
+        };
+        writer.apply(&delta).unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn undo_appearances(store: &MemoryIndexStore, items: &[StakeAddressAppearance]) {
+        let writer = store.start_writer().unwrap();
+        let delta = IndexDelta {
+            stake_addresses: items.to_vec(),
+            ..Default::default()
+        };
+        writer.undo(&delta).unwrap();
+        writer.commit().unwrap();
+    }
+
+    fn page(store: &MemoryIndexStore, stake: u8, reverse: bool) -> Option<Vec<Vec<u8>>> {
+        store
+            .addresses_by_stake_log(&[stake; 29], 0, 100, reverse)
+            .unwrap()
+    }
+
+    #[test]
+    fn stake_log_answers_none_until_marked_ready() {
+        let store = MemoryIndexStore::new();
+        apply_appearances(&store, &[appearance(1, 0, 0xaa, 0x01)]);
+
+        assert_eq!(page(&store, 0xaa, false), None);
+
+        store.mark_stake_log_ready().unwrap();
+
+        assert_eq!(page(&store, 0xaa, false), Some(vec![vec![0x01; 57]]));
+    }
+
+    #[test]
+    fn stake_log_keeps_first_appearance_only() {
+        let store = MemoryIndexStore::new();
+        store.mark_stake_log_ready().unwrap();
+
+        // address 0x01 first at slot 1, reused at slot 3;
+        // address 0x02 first at slot 2
+        apply_appearances(&store, &[appearance(1, 0, 0xaa, 0x01)]);
+        apply_appearances(&store, &[appearance(2, 0, 0xaa, 0x02)]);
+        apply_appearances(&store, &[appearance(3, 0, 0xaa, 0x01)]);
+
+        let asc = page(&store, 0xaa, false).unwrap();
+        assert_eq!(asc, vec![vec![0x01; 57], vec![0x02; 57]]);
+
+        // desc is the exact reverse: the reused address stays last
+        let desc = page(&store, 0xaa, true).unwrap();
+        assert_eq!(desc, vec![vec![0x02; 57], vec![0x01; 57]]);
+    }
+
+    #[test]
+    fn stake_log_undo_removes_only_the_first_appearance() {
+        let store = MemoryIndexStore::new();
+        store.mark_stake_log_ready().unwrap();
+
+        apply_appearances(&store, &[appearance(1, 0, 0xaa, 0x01)]);
+        apply_appearances(&store, &[appearance(2, 0, 0xaa, 0x01)]);
+
+        // rolling back the repeat leaves the pair in place
+        undo_appearances(&store, &[appearance(2, 0, 0xaa, 0x01)]);
+        assert_eq!(page(&store, 0xaa, false), Some(vec![vec![0x01; 57]]));
+
+        // rolling back the first appearance removes it
+        undo_appearances(&store, &[appearance(1, 0, 0xaa, 0x01)]);
+        assert_eq!(page(&store, 0xaa, false), Some(vec![]));
+    }
+
+    #[test]
+    fn stake_log_orders_within_a_block_by_order_field() {
+        let store = MemoryIndexStore::new();
+        store.mark_stake_log_ready().unwrap();
+
+        apply_appearances(
+            &store,
+            &[appearance(1, 7, 0xaa, 0x02), appearance(1, 3, 0xaa, 0x01)],
+        );
+
+        let asc = page(&store, 0xaa, false).unwrap();
+        assert_eq!(asc, vec![vec![0x01; 57], vec![0x02; 57]]);
+    }
+
+    #[test]
+    fn stake_log_pages_and_windows() {
+        let store = MemoryIndexStore::new();
+        store.mark_stake_log_ready().unwrap();
+
+        for i in 0u8..5 {
+            apply_appearances(&store, &[appearance(i as u64 + 1, 0, 0xaa, i + 1)]);
+        }
+
+        let window = store
+            .addresses_by_stake_log(&[0xaa; 29], 2, 2, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(window, vec![vec![3; 57], vec![4; 57]]);
+
+        let reversed = store
+            .addresses_by_stake_log(&[0xaa; 29], 2, 2, true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reversed, vec![vec![3; 57], vec![2; 57]]);
+
+        // an unknown stake answers an empty page, not `None`
+        assert_eq!(page(&store, 0xbb, false), Some(vec![]));
     }
 }

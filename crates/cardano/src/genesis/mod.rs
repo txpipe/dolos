@@ -170,6 +170,11 @@ pub fn bootstrap_utxos<D: Domain>(
     state_writer.commit()?;
     index_writer.commit()?;
 
+    // A genesis bootstrap only happens on a fresh store, so every block the
+    // store will ever index flows through the apply path from here on. That
+    // makes the stake address log complete by construction.
+    indexes.mark_stake_log_ready()?;
+
     Ok(())
 }
 

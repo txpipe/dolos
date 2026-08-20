@@ -69,6 +69,20 @@ pub struct ArchiveIndexDelta {
     pub tags: Vec<Tag>,
 }
 
+/// One address appearing under a stake credential inside a block.
+///
+/// These records feed the stake address log: the per-account list of
+/// addresses ordered by first on-chain appearance. `order` breaks ties
+/// inside one block (transaction index, then output index). Stores keep
+/// only the first appearance of each `(stake, address)` pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StakeAddressAppearance {
+    pub slot: BlockSlot,
+    pub order: u32,
+    pub stake: Vec<u8>,
+    pub address: Vec<u8>,
+}
+
 /// Unified index delta for a batch of operations.
 ///
 /// This structure contains all index changes for a batch of blocks,
@@ -81,6 +95,9 @@ pub struct IndexDelta {
     pub utxo: UtxoIndexDelta,
     /// Archive index changes (one per block in batch).
     pub archive: Vec<ArchiveIndexDelta>,
+    /// First-appearance candidates for the stake address log, one per
+    /// produced output that carries a stake credential.
+    pub stake_addresses: Vec<StakeAddressAppearance>,
 }
 
 impl Default for IndexDelta {
@@ -89,6 +106,7 @@ impl Default for IndexDelta {
             cursor: ChainPoint::Origin,
             utxo: UtxoIndexDelta::default(),
             archive: Vec::new(),
+            stake_addresses: Vec::new(),
         }
     }
 }
@@ -461,6 +479,31 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
     /// Returns all UTxO references that have been tagged with the given
     /// dimension and key and have not been consumed.
     fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError>;
+
+    // ============ Stake Address Log ============
+
+    /// Read one page of the stake address log: the addresses seen under the
+    /// stake credential, ordered by first on-chain appearance.
+    ///
+    /// `offset` and `limit` window the ordered list; `reverse` reads the
+    /// exact reverse of it. Returns `None` when the log is not authoritative
+    /// on this store — the backend does not maintain it, or the store
+    /// predates the log and was never rebuilt. Callers fall back to an
+    /// archive scan in that case.
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError>;
+
+    /// Declare the stake address log complete from genesis.
+    ///
+    /// A genesis bootstrap calls this once on a fresh store. Until it runs,
+    /// [`IndexStore::addresses_by_stake_log`] answers `None`. Backends that
+    /// do not maintain the log treat this as a no-op.
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError>;
 
     // ============ Archive Queries (Exact Lookups) ============
 

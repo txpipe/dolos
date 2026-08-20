@@ -1158,6 +1158,30 @@ impl CoreIndexStore for IndexStoreBackend {
         }
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError> {
+        match self {
+            Self::Redb(s) => s.addresses_by_stake_log(stake, offset, limit, reverse),
+            Self::Fjall(s) => s.addresses_by_stake_log(stake, offset, limit, reverse),
+            Self::Memory(s) => s.addresses_by_stake_log(stake, offset, limit, reverse),
+            Self::NoOp(s) => s.addresses_by_stake_log(stake, offset, limit, reverse),
+        }
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError> {
+        match self {
+            Self::Redb(s) => s.mark_stake_log_ready(),
+            Self::Fjall(s) => s.mark_stake_log_ready(),
+            Self::Memory(s) => s.mark_stake_log_ready(),
+            Self::NoOp(s) => s.mark_stake_log_ready(),
+        }
+    }
+
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
         match self {
             Self::Redb(s) => s.slot_by_block_hash(hash),

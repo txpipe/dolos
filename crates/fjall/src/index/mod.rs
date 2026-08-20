@@ -50,6 +50,7 @@ use fjall::{
 pub mod archive_tags;
 pub mod exact;
 pub mod scan;
+pub mod stake_log;
 pub mod state_tags;
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
@@ -80,10 +81,16 @@ mod keyspace_names {
     pub const UTXO_TAGS: &str = "state-tags";
     /// Archive tags keyspace (append-only, never deleted)
     pub const BLOCK_TAGS: &str = "archive-tags";
+    /// Stake address log keyspace (insert-once pairs, removed on rollback)
+    pub const STAKE_LOG: &str = "stake-log";
 }
 
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
+
+/// Key in the cursor keyspace marking the stake address log as complete
+/// from genesis. Queries answer `None` until it is written.
+const STAKE_LOG_READY_KEY: &[u8] = &[1u8];
 
 /// Fjall-based index store implementation with four keyspaces.
 ///
@@ -104,6 +111,8 @@ pub struct IndexStore {
     utxo_tags: Keyspace,
     /// Block tags keyspace (append-only, never deleted)
     block_tags: Keyspace,
+    /// Stake address log keyspace (insert-once pairs, removed on rollback)
+    stake_log: Keyspace,
     /// Configuration
     flush_on_commit: bool,
 }
@@ -163,11 +172,12 @@ impl IndexStore {
             opts
         };
 
-        // 4 keyspaces: cursor, exact, utxo_tags, block_tags
+        // 5 keyspaces: cursor, exact, utxo_tags, block_tags, stake_log
         let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
         let exact = db.keyspace(keyspace_names::EXACT, build_opts)?;
         let utxo_tags = db.keyspace(keyspace_names::UTXO_TAGS, build_opts)?;
         let block_tags = db.keyspace(keyspace_names::BLOCK_TAGS, build_opts)?;
+        let stake_log = db.keyspace(keyspace_names::STAKE_LOG, build_opts)?;
 
         Ok(Self {
             db,
@@ -175,6 +185,7 @@ impl IndexStore {
             exact,
             utxo_tags,
             block_tags,
+            stake_log,
             flush_on_commit,
         })
     }
@@ -249,6 +260,10 @@ impl IndexStore {
 pub struct IndexStoreWriter {
     batch: Mutex<OwnedWriteBatch>,
     store: IndexStore,
+    /// Pairs already inserted into the stake log by this batch. The batch
+    /// cannot read its own pending writes, so cross-block dedup inside one
+    /// writer lives here.
+    stake_pairs_seen: Mutex<std::collections::HashSet<Vec<u8>>>,
 }
 
 impl CoreIndexWriter for IndexStoreWriter {
@@ -263,6 +278,22 @@ impl CoreIndexWriter for IndexStoreWriter {
 
         // Apply archive tag changes to archive-tags keyspace
         archive_tags::apply(&mut batch, &self.store.block_tags, delta).map_err(IndexError::from)?;
+
+        // Apply stake address log first appearances
+        let mut seen = self
+            .stake_pairs_seen
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let snapshot = self.store.db.snapshot();
+        stake_log::apply(
+            &mut batch,
+            &self.store.stake_log,
+            &snapshot,
+            &mut seen,
+            &delta.stake_addresses,
+        )
+        .map_err(IndexError::from)?;
+        drop(seen);
 
         // Set cursor
         let cursor_bytes =
@@ -283,6 +314,16 @@ impl CoreIndexWriter for IndexStoreWriter {
 
         // Undo archive tag changes
         archive_tags::undo(&mut batch, &self.store.block_tags, delta).map_err(IndexError::from)?;
+
+        // Undo stake address log first appearances
+        let snapshot = self.store.db.snapshot();
+        stake_log::undo(
+            &mut batch,
+            &self.store.stake_log,
+            &snapshot,
+            &delta.stake_addresses,
+        )
+        .map_err(IndexError::from)?;
 
         Ok(())
     }
@@ -369,6 +410,7 @@ impl CoreIndexStore for IndexStore {
         Ok(IndexStoreWriter {
             batch: Mutex::new(batch),
             store: self.clone(),
+            stake_pairs_seen: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -407,6 +449,40 @@ impl CoreIndexStore for IndexStore {
         let snapshot = self.db.snapshot();
         // Pass dimension string directly - chain-agnostic
         state_tags::get_by_key(&snapshot, &self.utxo_tags, dimension, key).map_err(IndexError::from)
+    }
+
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, IndexError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+
+        // Without the ready marker the log is not authoritative: the store
+        // may predate the log entirely. Callers fall back to an archive scan.
+        let ready = snapshot
+            .get(&self.cursor, STAKE_LOG_READY_KEY)
+            .map_err(Error::from)?
+            .is_some();
+
+        if !ready {
+            return Ok(None);
+        }
+
+        let page = stake_log::page(&snapshot, &self.stake_log, stake, offset, limit, reverse)
+            .map_err(IndexError::from)?;
+
+        Ok(Some(page))
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), IndexError> {
+        let mut batch = self.db.batch().durability(Some(PersistMode::Buffer));
+        batch.insert(&self.cursor, STAKE_LOG_READY_KEY, [1u8]);
+        batch.commit().map_err(Error::Fjall)?;
+        Ok(())
     }
 
     fn slot_by_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
