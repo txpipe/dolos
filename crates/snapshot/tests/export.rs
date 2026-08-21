@@ -282,15 +282,15 @@ fn a_harness_domain_exports_a_complete_stele() {
     }
 
     // Done criterion 3, from the side a real ledger shows it: the harness seeds
-    // `epochs` and `member-rewards` and nothing else, so exactly those two log
-    // kinds travel and the other four are absent — not present and empty.
+    // `epochs` and `account-epochs` and nothing else, so exactly those two log
+    // kinds travel and the third is absent — not present and empty.
     let carried: Vec<&str> = LOG_KINDS
         .into_iter()
         .filter(|(kind, _)| inscription.layers_of_kind(kind).next().is_some())
         .map(|(kind, _)| kind)
         .collect();
 
-    assert_eq!(carried, ["log-epochs", "log-member-rewards"]);
+    assert_eq!(carried, ["log-account-epochs", "log-epochs"]);
     assert_eq!(
         inscription.layers_of_kind(dolos_snapshot::DIGESTS).count(),
         0

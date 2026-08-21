@@ -23,8 +23,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::{AccountState, DRepState},
-    pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-    PoolDepositRefundLog,
+    pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
 use dolos_core::{
     async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _,
@@ -777,70 +776,61 @@ where
     Ok(Json(items))
 }
 
-enum AccountRewardWrapper {
-    Leader((Epoch, LeaderRewardLog)),
-    Member((Epoch, MemberRewardLog)),
-    PoolDepositRefund((Epoch, PoolDepositRefundLog)),
-}
+/// The reward entries one epoch's merged row renders as.
+///
+/// A row can hold several: the four namespaces this reads in place of could
+/// carry at most one of each type per account per epoch, and a multi-pool
+/// operator's leader rewards past the first were lost to the shared `LogKey`.
+/// Here each element of `leader_rewards` is its own entry, which is where that
+/// defect stops being possible.
+///
+/// The `> 0` filter is the one the three reward namespaces already applied on
+/// read, kept as it was — and deliberately not extended to `active_stake`,
+/// which this route does not render at all and where zero is meaningful.
+fn reward_entries(
+    epoch: Epoch,
+    log: &AccountEpochLog,
+) -> Result<Vec<AccountRewardContentInner>, StatusCode> {
+    use blockfrost_openapi::models::account_reward_content_inner::Type;
 
-impl From<(Epoch, LeaderRewardLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, LeaderRewardLog)) -> Self {
-        AccountRewardWrapper::Leader(value)
+    fn entry(
+        epoch: Epoch,
+        pool: &PoolHash,
+        amount: u64,
+        r#type: Type,
+    ) -> Result<AccountRewardContentInner, StatusCode> {
+        Ok(AccountRewardContentInner {
+            // Verbatim: the merged row is stored under the stake temporal key,
+            // so the epoch it is filed under is the epoch it describes. The
+            // `- 1` the reward namespaces needed went with their key.
+            epoch: epoch as i32,
+            amount: amount.to_string(),
+            pool_id: mapping::bech32_pool(pool)?,
+            r#type,
+        })
     }
-}
 
-impl From<(Epoch, MemberRewardLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, MemberRewardLog)) -> Self {
-        AccountRewardWrapper::Member(value)
-    }
-}
+    let mut out = Vec::new();
 
-impl From<(Epoch, PoolDepositRefundLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, PoolDepositRefundLog)) -> Self {
-        AccountRewardWrapper::PoolDepositRefund(value)
-    }
-}
-
-impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
-    type Error = StatusCode;
-
-    fn try_from(value: AccountRewardWrapper) -> Result<Self, Self::Error> {
-        match value {
-            AccountRewardWrapper::Leader((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
-                let pool_id = mapping::bech32_pool(operator)?;
-
-                Ok(AccountRewardContentInner {
-                    epoch: epoch as i32 - 1,
-                    amount: x.amount.to_string(),
-                    pool_id,
-                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Leader,
-                })
-            }
-            AccountRewardWrapper::Member((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
-                let pool_id = mapping::bech32_pool(operator)?;
-
-                Ok(AccountRewardContentInner {
-                    epoch: epoch as i32 - 1,
-                    amount: x.amount.to_string(),
-                    pool_id,
-                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Member,
-                })
-            }
-            AccountRewardWrapper::PoolDepositRefund((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
-                let pool_id = mapping::bech32_pool(operator)?;
-
-                Ok(AccountRewardContentInner {
-                    epoch: epoch as i32 - 1,
-                    amount: x.amount.to_string(),
-                    pool_id,
-                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund,
-                })
-            }
+    for (pool, amount) in &log.leader_rewards {
+        if *amount > 0 {
+            out.push(entry(epoch, pool, *amount, Type::Leader)?);
         }
     }
+
+    if let (Some(pool), Some(amount)) = (log.pool_id.as_ref(), log.member_reward) {
+        if amount > 0 {
+            out.push(entry(epoch, pool, amount, Type::Member)?);
+        }
+    }
+
+    for (pool, amount) in &log.deposit_refunds {
+        if *amount > 0 {
+            out.push(entry(epoch, pool, *amount, Type::PoolDepositRefund)?);
+        }
+    }
+
+    Ok(out)
 }
 
 pub async fn by_stake_rewards<D>(
@@ -871,55 +861,26 @@ where
         let slot = summary.epoch_start(reward_epoch);
         let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
 
-        let leader = domain
+        // One point read per epoch, where the four namespaces cost three.
+        let Some(log) = domain
             .archive()
-            .read_log_typed::<LeaderRewardLog>(LeaderRewardLog::NS, &log_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        else {
+            continue;
+        };
 
-        if let Some(reward) = leader.filter(|reward| reward.amount > 0) {
+        for item in reward_entries(reward_epoch, &log)? {
             if skipped < skip {
                 skipped += 1;
-            } else {
-                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+                continue;
             }
-        }
 
-        if items.len() >= pagination.count {
-            break;
-        }
+            items.push(item);
 
-        let member = domain
-            .archive()
-            .read_log_typed::<MemberRewardLog>(MemberRewardLog::NS, &log_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if let Some(reward) = member.filter(|reward| reward.amount > 0) {
-            if skipped < skip {
-                skipped += 1;
-            } else {
-                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            if items.len() >= pagination.count {
+                return Ok(Json(items));
             }
-        }
-
-        if items.len() >= pagination.count {
-            break;
-        }
-
-        let pool_deposit_refund = domain
-            .archive()
-            .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &log_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {
-            if skipped < skip {
-                skipped += 1;
-            } else {
-                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
-            }
-        }
-
-        if items.len() >= pagination.count {
-            break;
         }
     }
 
