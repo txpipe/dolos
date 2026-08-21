@@ -76,9 +76,13 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()))
-        .into_diagnostic()
-        .context("planning the publish")?;
+    let plan = export::plan(
+        &stores.state,
+        u64::from(genesis.network_magic()),
+        super::retained_epochs(config)?,
+    )
+    .into_diagnostic()
+    .context("planning the publish")?;
 
     let plan = super::restrict(plan, args.epochs);
 

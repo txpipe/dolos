@@ -1038,6 +1038,51 @@ impl SteleWriter for Registry {
         })
     }
 
+    /// Put the second descriptor in the list [`SteleWriter::seal`] builds the
+    /// manifest from.
+    ///
+    /// The override the default's documentation asks for: this transport pairs
+    /// every layer the inscription describes against a layer it wrote, and a
+    /// descriptor with nothing beside it fails the seal. Nothing is uploaded
+    /// and nothing is checked — the blob went up when the first descriptor's
+    /// sink finished, in this same publish, so there is no state of the
+    /// registry under which it is there for one name and absent for the other.
+    ///
+    /// Counted as **skipped** rather than reused, by the distinction
+    /// [`Transfer::layers_reused`] draws: these bytes were built out of a
+    /// store, hashed, and then not uploaded again — which is a blob-skip
+    /// exactly, and not a layer that was never read.
+    ///
+    /// ## And silent, unlike the blob-skip on the upload path
+    ///
+    /// That path emits [`Event::Blob`] with `moved: false` because a watcher
+    /// hearing only about uploads would read the skip as a stall. Nothing
+    /// stalls here: the caller closes the second descriptor's layer as
+    /// `Transferred`, so the layer cursor advances on its own, and the blob
+    /// this describes finished uploading moments ago in this same publish.
+    /// The event drives a per-blob bar, so emitting one would reset it to
+    /// "already in the registry" for bytes that had just crossed the wire —
+    /// which reads as a redundant upload rather than as one blob acquiring a
+    /// second name.
+    ///
+    /// The counters above do record it, and there the double count is the
+    /// reading that is wanted: a publisher comparing two publishes wants the
+    /// dump's bytes to appear as bytes it did not pay to move again.
+    fn carry_again(
+        &self,
+        written: &WrittenLayer,
+        scope: serde_json::Value,
+    ) -> Result<WrittenLayer, Error> {
+        let again = crate::transport::again(written, scope);
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_skipped += 1;
+        state.transfer.bytes_skipped += again.digests.compressed_size;
+        state.pending.push(again.clone());
+
+        Ok(again)
+    }
+
     /// Publish the manifest, and with it the stele.
     ///
     /// The order is the whole of the safety argument:
