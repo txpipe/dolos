@@ -314,6 +314,42 @@ fn report(
         );
     }
 
+    // The one line about layers this restore deliberately did not read. A
+    // dump is a past epoch's state, and this run is building a node that
+    // stands at the stele's sequence — so what an operator learns here is what
+    // the stele *carries*, which is the difference between a repository they
+    // can restore an old epoch out of later and one they cannot.
+    //
+    // With the layer count when it is short of a whole one, because a dump may
+    // be. Only the tip is checked for completeness — a publisher whose
+    // predecessor did not carry every shard of an epoch warns and publishes the
+    // short dump anyway — so an epoch listed bare here and an epoch missing
+    // nine of its shards would otherwise read identically, and the second is
+    // not a repository that restores that epoch.
+    if !plan.state_dumps.is_empty() {
+        let epochs: Vec<String> = plan
+            .state_dumps
+            .iter()
+            .map(|(epoch, kinds)| {
+                let carried: usize = kinds.values().map(Vec::len).sum();
+
+                match carried == dolos_snapshot::state_layer_count() {
+                    true => epoch.to_string(),
+                    false => format!(
+                        "{epoch} (partial: {carried} of {} layers)",
+                        dolos_snapshot::state_layer_count(),
+                    ),
+                }
+            })
+            .collect();
+
+        println!(
+            "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
+            plan.state_dumps.len(),
+            epochs.join(", "),
+        );
+    }
+
     if outlook.inherited > 0 {
         println!(
             "resumed:  {} layer(s) an earlier attempt had already committed",

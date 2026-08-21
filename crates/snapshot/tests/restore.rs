@@ -48,11 +48,11 @@ use dolos_core::{
 use dolos_snapshot::{
     is_state_kind,
     restore::{self, Budget, Checkpoint},
-    state_layer_count, DolosProfile, Error, COMPRESSION_LEVEL, KINDS, NAMESPACES, STATE_KINDS,
-    UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
+    NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
-use node::{export_to, harness, Blank};
+use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
     dir::{LayerSpec, SteleDir},
@@ -472,7 +472,9 @@ fn roundtrip<B: ToyStores>() {
 
     let restored = {
         let stele = SteleDir::create(from_restored.path()).unwrap();
-        let plan = dolos_snapshot::export::plan(blank.state(), magic_of(&domain)).unwrap();
+        let plan =
+            dolos_snapshot::export::plan(blank.state(), magic_of(&domain), Default::default())
+                .unwrap();
 
         dolos_snapshot::export::export(
             &stele,
@@ -916,6 +918,162 @@ fn kill_and_resume<B: ToyStores>() {
     assert_stores_match(&blank, &domain);
 }
 
+/// Done criterion 3: a stele carrying retained dumps restores the tip, reports
+/// the dumps, and pays nothing for them.
+///
+/// Two steles over one ledger from one point, differing only in whether the
+/// publisher retained epoch 1 — so anything the restore does differently is
+/// the dumps and nothing else. What it must do differently is *report* them
+/// and nothing more: same layers read, same bytes planned, same node.
+#[test]
+fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = magic_of(&domain);
+
+    let plain_root = tempfile::tempdir().unwrap();
+    let dumped_root = tempfile::tempdir().unwrap();
+
+    export_plan(
+        plain_root.path(),
+        &domain,
+        &plan_at_boundary(&domain, 1, RetainedEpochs::default()),
+    );
+
+    let dumped = export_plan(
+        dumped_root.path(),
+        &domain,
+        &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
+    );
+
+    let plain_plan =
+        restore::plan(&SteleDir::open(plain_root.path()).unwrap(), magic, None).unwrap();
+    let dumped_plan =
+        restore::plan(&SteleDir::open(dumped_root.path()).unwrap(), magic, None).unwrap();
+
+    // Reported: every kind's shards, under the epoch their scope names.
+    assert!(plain_plan.state_dumps.is_empty());
+    assert_eq!(
+        dumped_plan.state_dumps.keys().copied().collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(dumped_plan.dump_layers().count(), state_layer_count());
+
+    // The document carries them; the plan does not consume them.
+    assert_eq!(
+        dumped.layers.len(),
+        plain_plan.layers().count() + state_layer_count(),
+    );
+    assert_eq!(dumped_plan.layers().count(), plain_plan.layers().count());
+    assert_eq!(dumped_plan.tip_layers().count(), state_layer_count());
+    assert_eq!(
+        dumped_plan.uncompressed_size(),
+        plain_plan.uncompressed_size(),
+        "a dump was counted against the disk a restore needs",
+    );
+
+    // Not in the tip either: a dump that leaked into `state` would be restored
+    // *over* the tip, one shard at a time, and the node would still look right.
+    for layers in dumped_plan.state.values() {
+        for layer in layers {
+            assert!(layer.scope.get("epoch").is_none(), "{}", layer.kind);
+        }
+    }
+
+    // And the run itself is the same run.
+    let plain_blank = Blank::<MemoryStores>::open();
+    let dumped_blank = Blank::<MemoryStores>::open();
+
+    let from_plain =
+        restore_into(plain_root.path(), magic, &plain_blank, Budget::default()).unwrap();
+    let from_dumped =
+        restore_into(dumped_root.path(), magic, &dumped_blank, Budget::default()).unwrap();
+
+    assert_eq!(from_plain, from_dumped);
+    assert_state_matches(dumped_blank.state(), plain_blank.state());
+    assert_archive_matches(&dumped_blank.archive, &plain_blank.archive);
+}
+
+/// The resume half of done criterion 3, and the rule the module documentation
+/// states: a dump is checkpointable and the tip is not, and today neither is
+/// checkpointed because neither is read — what a resumed restore records is
+/// the epoch layers alone.
+#[test]
+fn a_resumed_restore_of_a_dumped_stele_records_only_the_epoch_layers() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = magic_of(&domain);
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+
+    let inscription = export_plan(
+        root.path(),
+        &domain,
+        &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
+    );
+
+    let blank = Blank::<MemoryStores>::open();
+
+    // Killed at the first state layer, so every epoch layer has committed and
+    // the tip has not.
+    let first_tip = inscription
+        .layers
+        .iter()
+        .find(|layer| state_ns_for(&layer.kind).is_some())
+        .unwrap();
+
+    let err = restore_checkpointed(
+        root.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(first_tip.diff_id),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Error::Stelae(stelae::Error::Io(_))),
+        "{err:?}"
+    );
+
+    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+        .unwrap()
+        .expect("a killed restore left no progress file");
+
+    // Every recorded layer is an epoch layer. No dump is in it, and neither is
+    // a tip shard — the two for opposite reasons, and the same outcome.
+    for recorded in &progress.completed {
+        let layer = inscription
+            .layers
+            .iter()
+            .find(|layer| layer.diff_id == *recorded)
+            .expect("a recorded diffId this stele does not carry");
+
+        assert!(
+            state_ns_for(&layer.kind).is_none(),
+            "a state layer was checkpointed: {} at {}",
+            layer.kind,
+            layer.scope,
+        );
+    }
+
+    let resumed =
+        restore_checkpointed(root.path(), storage.path(), magic, &blank, true, None).unwrap();
+
+    assert_eq!(resumed.layers_skipped, progress.completed.len());
+    assert_eq!(
+        resumed.layers_fetched + resumed.layers_skipped,
+        inscription.layers.len() - state_layer_count(),
+        "the resume fetched a retained dump, which no restore reads",
+    );
+
+    assert_eq!(
+        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        None,
+        "a finished restore left its progress file behind"
+    );
+}
+
 #[test]
 fn a_killed_restore_resumes_into_the_same_node_on_memory() {
     kill_and_resume::<MemoryStores>();
@@ -1097,6 +1255,7 @@ fn export_standing_at<B: ToyStores>(
         &summary,
         dolos_snapshot::Network::for_magic(magic_of(domain)),
         ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
+        Default::default(),
     )
     .unwrap();
 

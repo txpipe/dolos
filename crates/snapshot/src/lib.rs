@@ -243,6 +243,143 @@ pub const fn state_layer_count() -> usize {
     total
 }
 
+/// The epochs whose state dumps a publisher retains, validated.
+///
+/// A newtype rather than a `Vec<u64>` passed around, because the list is
+/// **signed input**: it is echoed into `parameters`, so the moment it is
+/// readable it is also attestable, and the only place to refuse a bad one is
+/// before it becomes either. A value of this type is a list two publishers of
+/// the same network can be compared on.
+///
+/// The rules, and each one's reason:
+///
+/// - **Strictly ascending.** Order is visible — the list renders into the
+///   canonical document as it is held — so two publishers naming the same
+///   epochs in different orders would publish different documents and stop
+///   co-signing over a difference that means nothing. Ascending is the one
+///   order that needs no convention, and it makes a duplicate a refusal rather
+///   than something to silently drop.
+/// - **Never epoch 0.** Epoch 0's state is the state after Byron's first epoch,
+///   and a stele at `sequence` 0 has no history to inherit a dump from; more to
+///   the point, "retain epoch 0" is the shape a default-constructed or
+///   mis-parsed list takes, and refusing it costs a publisher nothing it
+///   wanted.
+///
+/// Empty is valid and is the default: a publisher that retains nothing
+/// publishes the tip alone, which is what every stele published before
+/// decision 0026 carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetainedEpochs(Vec<u64>);
+
+impl RetainedEpochs {
+    /// Validate a configured list.
+    pub fn new(epochs: Vec<u64>) -> Result<Self, Error> {
+        if let Some(index) = epochs.iter().position(|epoch| *epoch == 0) {
+            return Err(Error::RetainedEpochs(format!(
+                "entry {index} is epoch 0, which no stele retains a dump of"
+            )));
+        }
+
+        for pair in epochs.windows(2) {
+            let (previous, next) = (pair[0], pair[1]);
+
+            if previous == next {
+                return Err(Error::RetainedEpochs(format!(
+                    "epoch {next} is listed twice"
+                )));
+            }
+
+            if previous > next {
+                return Err(Error::RetainedEpochs(format!(
+                    "epoch {next} follows epoch {previous}; the list has to ascend"
+                )));
+            }
+        }
+
+        Ok(Self(epochs))
+    }
+
+    /// The validated list, as `parameters` renders it.
+    pub fn as_slice(&self) -> &[u64] {
+        &self.0
+    }
+
+    /// The retained epochs a stele at `sequence` is due to carry a dump of:
+    /// those at or below it.
+    ///
+    /// A configured epoch above the sequence is not a miss and not a warning —
+    /// it has not happened yet, and the publish that reaches it will cut it.
+    pub fn due(&self, sequence: u64) -> impl Iterator<Item = u64> + '_ {
+        self.0
+            .iter()
+            .copied()
+            .take_while(move |epoch| *epoch <= sequence)
+    }
+
+    /// Whether `sequence` is itself retained — the publish that cuts a dump
+    /// out of its own tip.
+    pub fn cuts(&self, sequence: u64) -> bool {
+        self.0.binary_search(&sequence).is_ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// Whether a layer of `kind` at `scope` may be carried forward from an earlier
+/// publish rather than built again.
+///
+/// One rule in one place, asked by everything that decides it: the
+/// predecessor's manifest, an interrupted publish's record, and the note a
+/// landed layer leaves. It is a question about the **scope** and not only the
+/// kind, which is what decision 0026 changed — a state layer whose descriptor
+/// scope names its epoch is a retained dump of a closed epoch, as immutable as
+/// a `blocks` layer and told apart from every other publish's by the same
+/// scope equality; a state layer whose scope names only a shard is the moving
+/// tip, and every publish's shard `n` compares equal to every other's.
+///
+/// `digests` is in neither set: it has no source in this slice.
+pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
+    if EPOCH_KINDS.contains(&kind) {
+        return true;
+    }
+
+    state_ns_for(kind).is_some()
+        && scope
+            .get("epoch")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+}
+
+/// The pair that identifies one layer: its kind, and the canonical encoding of
+/// its profile-owned scope.
+///
+/// Canonical rather than [`serde_json::Value`] equality, because two scopes are
+/// one layer exactly when they are the same bytes inside the canonical
+/// document — the only sense of "the same scope" the protocol has.
+///
+/// One function rather than three, and that is the point of it being here
+/// instead of beside any one caller. Every table keyed this way is compared
+/// against another table keyed this way: the predecessor's inheritable layers
+/// against what a publish asks for, an interrupted publish's record against the
+/// same, a reproduction's layers against the published ones. Three copies of
+/// four lines would agree until one of them was corrected, and the failure that
+/// follows is silent — a layer rebuilt instead of inherited, or a divergence
+/// reported between two documents that say the same thing.
+pub(crate) fn scope_key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
+    let canonical = stelae::inscription::canonical_json(scope)?;
+
+    let canonical = String::from_utf8(canonical)
+        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
+
+    Ok((kind.to_owned(), canonical))
+}
+
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
@@ -541,6 +678,15 @@ pub enum Error {
         scope: String,
         source: Box<Error>,
     },
+
+    /// A `snapshot.state_epochs` list this profile will not publish under.
+    ///
+    /// Refused where the list is read rather than where a dump is cut, because
+    /// the list is signed input: it reaches `parameters` before any layer is
+    /// written, and a publisher that discovered the problem at the sixteenth
+    /// shard would already have attested it.
+    #[error("snapshot.state_epochs is not a list of retained epochs: {0}")]
+    RetainedEpochs(String),
 }
 
 impl Error {
@@ -777,7 +923,15 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// compatibility machinery of decision 0026 keys on. Both maps are keyed by
 /// namespace — JCS sorts the keys, so the maps render in the byte order the
 /// tables are kept in.
-pub fn parameters() -> serde_json::Value {
+///
+/// `stateEpochs` is the one value here that is not a consequence of code:
+/// which epochs a publisher retains a dump of is an operational choice, so it
+/// is configuration ([`RetainedEpochs`]) rather than a table. Echoing it here
+/// is what makes it *signed* input — two publishers of one network with
+/// different lists produce different parameters, and therefore different
+/// inscription digests, which is a divergence an operator can read out of a
+/// parameters diff instead of hunting through layers for it.
+pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
     let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
         .into_iter()
         .map(|(_, ns, shards)| (ns.to_owned(), json!(shards)))
@@ -788,7 +942,12 @@ pub fn parameters() -> serde_json::Value {
         .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
         .collect();
 
-    json!({"indexKeyHash": INDEX_KEY_HASH, "shards": shards, "schemas": schemas})
+    json!({
+        "indexKeyHash": INDEX_KEY_HASH,
+        "shards": shards,
+        "schemas": schemas,
+        "stateEpochs": retained.as_slice(),
+    })
 }
 
 /// The compression this profile publishes under.
@@ -811,7 +970,31 @@ pub struct EpochScope {
     pub end_slot: u64,
 }
 
-/// Scope of one shard of one state kind's tip.
+/// Which of the two things a state layer is.
+///
+/// The state kinds carry two roles over one record format, and the roles are
+/// told apart by the descriptor scope alone (decision 0026). The header is
+/// deliberately blind to this: at the publish where `sequence` equals a
+/// retained epoch, the tip layer and that epoch's dump are the same header
+/// over the same records, so they are one blob under two descriptors and the
+/// bytes move once. Putting the distinction anywhere inside the layer would
+/// break that by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateRole {
+    /// The moving tip: the state as of this stele's `sequence`, republished
+    /// whole by every publish. Descriptor scope `{"shard": n}`, which names no
+    /// epoch — so nothing distinguishes one publish's tip from another's, and
+    /// nothing may inherit or checkpoint one.
+    Tip,
+
+    /// A retained dump: the state as of a configured epoch, cut once and then
+    /// carried forward unchanged. Descriptor scope `{"epoch": E, "shard": n}`,
+    /// which is what makes it inheritable by the scope-equality rule every
+    /// other immutable layer already uses.
+    Dump,
+}
+
+/// Scope of one shard of one state kind, in one of its two roles.
 ///
 /// Uniform across all seventeen kinds, single-blob namespaces included — their
 /// one layer is shard 0 — so the header and descriptor shapes stay one shape
@@ -819,8 +1002,35 @@ pub struct EpochScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateScope {
     pub network_magic: u64,
+    /// The epoch the records are the state as of: the stele's `sequence` for a
+    /// [tip](StateRole::Tip), the dump's own epoch for a
+    /// [dump](StateRole::Dump). It is the same number at the publish that cuts
+    /// one, which is what makes the two blobs one blob.
     pub epoch: u64,
     pub shard: u8,
+    pub role: StateRole,
+}
+
+impl StateScope {
+    /// One shard of the moving tip of a stele at `epoch`.
+    pub fn tip(network_magic: u64, epoch: u64, shard: u8) -> Self {
+        Self {
+            network_magic,
+            epoch,
+            shard,
+            role: StateRole::Tip,
+        }
+    }
+
+    /// One shard of the retained dump at `epoch`.
+    pub fn dump(network_magic: u64, epoch: u64, shard: u8) -> Self {
+        Self {
+            network_magic,
+            epoch,
+            shard,
+            role: StateRole::Dump,
+        }
+    }
 }
 
 /// Scope of the optional `digests` layer.
@@ -905,8 +1115,15 @@ impl Scope for StateScope {
         })?)
     }
 
+    /// The one place the two roles differ.
+    ///
+    /// [`Scope::header`] above is role-blind on purpose, so the dump a publish
+    /// cuts out of its own tip is the tip's bytes rather than a copy of them.
     fn descriptor(&self) -> serde_json::Value {
-        json!({"shard": self.shard})
+        match self.role {
+            StateRole::Tip => json!({"shard": self.shard}),
+            StateRole::Dump => json!({"epoch": self.epoch, "shard": self.shard}),
+        }
     }
 
     fn kinds(&self) -> &'static [&'static str] {
@@ -1115,9 +1332,11 @@ mod tests {
     /// they are compared against that code rather than against themselves.
     #[test]
     fn parameters_report_what_the_code_does() {
-        let parameters = parameters();
+        let retained = RetainedEpochs::new(vec![4, 100]).unwrap();
+        let parameters = parameters(&retained);
 
         assert_eq!(parameters["indexKeyHash"], INDEX_KEY_HASH);
+        assert_eq!(parameters["stateEpochs"], json!([4, 100]));
         assert!(
             parameters.get("stateShards").is_none(),
             "the flat shard count was replaced by the per-namespace map"
@@ -1160,11 +1379,7 @@ mod tests {
             start_slot: 100,
             end_slot: 199,
         };
-        let state = StateScope {
-            network_magic: 2,
-            epoch: 7,
-            shard: 3,
-        };
+        let state = StateScope::tip(2, 7, 3);
         let digests = DigestsScope {
             network_magic: 2,
             epoch: 7,
@@ -1211,16 +1426,19 @@ mod tests {
             json!({"epoch": 2, "startSlot": 3, "endSlot": 4})
         );
 
-        let state = StateScope {
-            network_magic: 1,
-            epoch: 2,
-            shard: 15,
-        };
+        let state = StateScope::tip(1, 2, 15);
         assert_eq!(
             state.header().unwrap().as_bytes(),
             &[0x83, 0x01, 0x02, 0x0f]
         );
         assert_eq!(state.descriptor(), json!({"shard": 15}));
+
+        // The dump's header is the tip's, byte for byte, and only the
+        // descriptor says which role the layer plays — which is the whole of
+        // why one blob can wear both.
+        let dump = StateScope::dump(1, 2, 15);
+        assert_eq!(dump.header().unwrap(), state.header().unwrap());
+        assert_eq!(dump.descriptor(), json!({"epoch": 2, "shard": 15}));
 
         let digests = DigestsScope {
             network_magic: 1,
@@ -1232,5 +1450,61 @@ mod tests {
             &[0x83, 0x01, 0x02, 0x19, 0x18, 0x2b]
         );
         assert_eq!(digests.descriptor(), json!({"lastImmutable": 6187}));
+    }
+
+    /// Done criterion 4: the list is refused where it is read, not where a
+    /// dump is cut — it reaches `parameters` before any layer is written.
+    #[test]
+    fn a_retained_epoch_list_has_to_ascend_and_start_above_zero() {
+        RetainedEpochs::new(vec![]).unwrap();
+        RetainedEpochs::new(vec![1]).unwrap();
+        assert_eq!(
+            RetainedEpochs::new(vec![4, 208, 250]).unwrap().as_slice(),
+            &[4, 208, 250]
+        );
+
+        for bad in [vec![0], vec![0, 4], vec![4, 4], vec![250, 4], vec![4, 9, 9]] {
+            let err = RetainedEpochs::new(bad.clone()).unwrap_err();
+            assert!(matches!(err, Error::RetainedEpochs(_)), "{bad:?}: {err:?}");
+        }
+    }
+
+    /// What a publish at `sequence` owes: every retained epoch at or below it,
+    /// and nothing above — a configured epoch the chain has not reached is not
+    /// a missing dump.
+    #[test]
+    fn only_the_retained_epochs_at_or_below_the_sequence_are_due() {
+        let retained = RetainedEpochs::new(vec![4, 208, 250]).unwrap();
+
+        assert_eq!(retained.due(3).collect::<Vec<_>>(), Vec::<u64>::new());
+        assert_eq!(retained.due(4).collect::<Vec<_>>(), vec![4]);
+        assert_eq!(retained.due(249).collect::<Vec<_>>(), vec![4, 208]);
+        assert_eq!(retained.due(9_999).collect::<Vec<_>>(), vec![4, 208, 250]);
+
+        assert!(retained.cuts(208));
+        assert!(!retained.cuts(209));
+    }
+
+    /// The rule the predecessor, the resumption record and the landing note
+    /// all decide by — and the one line decision 0026 moved.
+    #[test]
+    fn a_dumps_scope_is_inheritable_and_a_tips_is_not() {
+        let tip = StateScope::tip(2, 7, 3);
+        let dump = StateScope::dump(2, 4, 3);
+
+        assert!(is_inheritable(STATE_KIND_NAMES[0], &dump.descriptor()));
+        assert!(!is_inheritable(STATE_KIND_NAMES[0], &tip.descriptor()));
+
+        for kind in EPOCH_KINDS {
+            assert!(is_inheritable(kind, &json!({"epoch": 7})), "{kind}");
+        }
+
+        // `digests` names an epoch nowhere in its descriptor and has no source
+        // in this slice either way.
+        assert!(!is_inheritable(DIGESTS, &json!({"lastImmutable": 3})));
+
+        // A kind this profile does not define never inherits, whatever its
+        // scope claims.
+        assert!(!is_inheritable("state", &json!({"epoch": 4, "shard": 0})));
     }
 }

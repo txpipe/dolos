@@ -247,6 +247,35 @@ pub trait SteleWriter {
         sink.finish()
     }
 
+    /// Attest a layer this stele already carries under a second descriptor.
+    ///
+    /// One blob, two names. A profile may need the same byte string described
+    /// twice — the Dolos profile's retained state dump at the epoch it is cut
+    /// in *is* that epoch's tip, same header and same records — and the
+    /// protocol has no reason to compress or move those bytes a second time
+    /// to say so.
+    ///
+    /// It takes a `scope` rather than a whole [`LayerSpec`], and that is what
+    /// makes the identity structural instead of a property the caller has to
+    /// keep true: there is no second header record to disagree with the first,
+    /// because there is no second write. The two descriptors are the same
+    /// `diffId`, the same `records` and the same `uncompressedSize`, differing
+    /// in exactly the one field the profile owns.
+    ///
+    /// **The default body is right for a transport that stores blobs by
+    /// content and keeps no list of what it is about to seal** — a directory
+    /// has a file named by a digest and nothing to tell. A transport that
+    /// builds its manifest out of what it wrote must override this and record
+    /// the second descriptor, or its seal will refuse a document describing a
+    /// layer it has no record of.
+    fn carry_again(
+        &self,
+        written: &WrittenLayer,
+        scope: serde_json::Value,
+    ) -> Result<WrittenLayer, Error> {
+        Ok(again(written, scope))
+    }
+
     /// Report what this transport moves to `observer`, for as long as it is
     /// attached.
     ///
@@ -262,6 +291,20 @@ pub trait SteleWriter {
     /// argument and passes it on — so a caller wires one observer once and both
     /// halves of the stream come back through it.
     fn observe(&self, _observer: Observer) {}
+}
+
+/// The second descriptor [`SteleWriter::carry_again`] hands back.
+///
+/// Shared rather than written twice, so an overriding transport and the
+/// default cannot drift about which fields a re-attested layer keeps.
+pub fn again(written: &WrittenLayer, scope: serde_json::Value) -> WrittenLayer {
+    WrittenLayer {
+        descriptor: LayerDescriptor {
+            scope,
+            ..written.descriptor.clone()
+        },
+        digests: written.digests,
+    }
 }
 
 /// Open a layer: everything every [`SteleWriter::layer_sink`] does before its

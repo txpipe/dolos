@@ -75,11 +75,21 @@ pub fn epoch_scope() -> EpochScope {
 }
 
 pub fn state_scope(shard: u8) -> StateScope {
-    StateScope {
-        network_magic: NETWORK_MAGIC,
-        epoch: EPOCH,
-        shard,
-    }
+    StateScope::tip(NETWORK_MAGIC, EPOCH, shard)
+}
+
+/// The one retained epoch the fixture carries a dump of.
+///
+/// Below [`EPOCH`] rather than equal to it, and that is the interesting
+/// choice: a dump cut at the sequence *is* the tip, byte for byte, so a
+/// fixture that used one would write seventeen kinds' worth of layers whose
+/// digests are already pinned and freeze nothing new. A past epoch's dump has
+/// its own header, its own `diffId`, and the descriptor shape decision 0026
+/// added — which is what a golden is for.
+pub const DUMP_EPOCH: u64 = 4;
+
+pub fn dump_scope(shard: u8) -> StateScope {
+    StateScope::dump(NETWORK_MAGIC, DUMP_EPOCH, shard)
 }
 
 pub fn digests_scope() -> DigestsScope {
@@ -310,12 +320,23 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
         ));
     }
 
-    for (kind, ns, shard) in state_layers() {
-        layers.push((
-            kind,
-            Box::new(state_scope(shard)),
-            encode_all(&state(ns, shard), |record| state::encode(ns, record)),
-        ));
+    // Per kind, every shard of the retained dump and then every shard of the
+    // tip — the order an export writes them in, so the golden freezes the
+    // ordering rule as well as the two scope shapes. The records are the same
+    // in both; what tells the layers apart is the epoch in the header and the
+    // epoch in the descriptor scope.
+    for (kind, ns, shards) in STATE_KINDS {
+        let populated: Vec<u8> = SHARDS.into_iter().filter(|shard| *shard < shards).collect();
+
+        for scope in [dump_scope as fn(u8) -> StateScope, state_scope] {
+            for shard in populated.iter().copied() {
+                layers.push((
+                    kind,
+                    Box::new(scope(shard)),
+                    encode_all(&state(ns, shard), |record| state::encode(ns, record)),
+                ));
+            }
+        }
     }
 
     layers.push((
