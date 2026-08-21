@@ -47,18 +47,19 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     restore::{self, Budget, Checkpoint},
-    Error, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
+    DolosProfile, Error, COMPRESSION_LEVEL, KINDS, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, Blank};
+use serde_json::json;
 use stelae::{
-    dir::SteleDir,
-    frame::Limits,
+    dir::{LayerSpec, SteleDir},
+    frame::{encode, Limits},
     inscription::{Inscription, LayerDescriptor},
     plan::RestoreProgress,
     progress::{Observer, Outcome},
     transport::BlobIndex,
-    Digest, LayerReader, Profile, SteleReader,
+    Digest, LayerReader, Profile, SteleReader, SteleWriter,
 };
 
 use watcher::Watcher;
@@ -172,6 +173,175 @@ fn a_stele_for_another_network_is_refused_before_anything_is_written() {
         ),
         "{err:?}"
     );
+
+    assert_untouched(&blank);
+}
+
+/// The layer kind a publisher one version ahead of this build would carry.
+///
+/// Spelled as a `log-{ns}` kind because that is the shape decision 0026 makes
+/// additive: a namespace that starts producing logs arrives as a new kind on a
+/// new layer, not as a change to an existing one.
+const AHEAD_KIND: &str = "log-future";
+
+/// The Dolos profile as a publisher one kind ahead of this build implements it.
+///
+/// Same profile name and same major version — an additive kind is precisely the
+/// change that does not need either to move, which is the claim under test.
+struct AheadProfile {
+    kinds: Vec<&'static str>,
+}
+
+impl AheadProfile {
+    fn new() -> Self {
+        let mut kinds = KINDS.to_vec();
+        kinds.push(AHEAD_KIND);
+
+        Self { kinds }
+    }
+}
+
+impl Profile for AheadProfile {
+    fn name(&self) -> &str {
+        DolosProfile.name()
+    }
+
+    fn version(&self) -> u64 {
+        DolosProfile.version()
+    }
+
+    fn kinds(&self) -> &[&str] {
+        &self.kinds
+    }
+
+    fn layer_media_type(&self, kind: &str) -> Result<String, stelae::Error> {
+        match kind {
+            AHEAD_KIND => Ok(format!("application/vnd.dolos.stele.{AHEAD_KIND}.v1+zstd")),
+            known => DolosProfile.layer_media_type(known),
+        }
+    }
+
+    fn tag_for_sequence(&self, sequence: u64) -> Result<String, stelae::Error> {
+        DolosProfile.tag_for_sequence(sequence)
+    }
+
+    fn max_record(&self) -> usize {
+        DolosProfile.max_record()
+    }
+}
+
+/// Export `domain` into `root`, then have [`AheadProfile`] add its extra layer
+/// and re-seal.
+///
+/// The layer is written through the ordinary writer and the stele re-sealed
+/// through the ordinary seal, so what the restore below reads is an artifact a
+/// newer publisher could have produced — not an inscription with a descriptor
+/// pasted into it, which would say nothing about the layer being real.
+fn export_one_kind_ahead<B: ToyStores>(
+    root: &std::path::Path,
+    domain: &ToyDomain<B>,
+    scope: serde_json::Value,
+) -> Inscription {
+    let mut inscription = export_to(root, domain);
+
+    let stele = SteleDir::open(root).unwrap();
+    let ahead = AheadProfile::new();
+
+    // Shapes this build has no reader for, which is the situation: an unknown
+    // kind's records and header scope are the newer profile's business.
+    let header = encode(|e| {
+        e.array(2)?.u64(0)?.u64(0)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let record = encode(|e| {
+        e.array(2)?
+            .u64(0)?
+            .str("a log this build has never heard of")?;
+        Ok(())
+    })
+    .unwrap();
+
+    let written = stele
+        .write_layer(
+            &ahead,
+            &LayerSpec::new(AHEAD_KIND, header, scope),
+            COMPRESSION_LEVEL,
+            &[record],
+        )
+        .unwrap();
+
+    inscription.layers.push(written.descriptor);
+    stele.seal(&ahead, &inscription).unwrap();
+
+    inscription
+}
+
+/// Decision 0026's client rule, end to end: a stele carrying a kind this build
+/// does not implement restores without it, and reports the skip.
+///
+/// The alternative it replaces is the one worth naming — before this, an
+/// additive kind bricked every deployed reader, which is the blast radius the
+/// decision exists to remove.
+#[test]
+fn an_unknown_layer_kind_is_skipped_and_reported() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let inscription = export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0}));
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let plan = restore::plan(&stele, magic, None).unwrap();
+
+    assert_eq!(plan.skipped_unknown.len(), 1);
+    assert_eq!(plan.skipped_unknown[0].kind, AHEAD_KIND);
+    assert_eq!(plan.skipped_unknown[0].scope, json!({"epoch": 0}));
+
+    // Skipped is about consumption and nothing else. The layer is still in the
+    // document, still covered by the digest that is the stele's identity, and
+    // still a blob on disk — it is simply never read into a store.
+    assert!(plan.layers().all(|layer| layer.kind != AHEAD_KIND));
+    assert_eq!(
+        inscription.layers.len(),
+        plan.layers().count() + plan.skipped_unknown.len()
+    );
+    assert_eq!(stele.blob_index().unwrap().len(), inscription.layers.len());
+
+    let blank = Blank::<MemoryStores>::open();
+    let summary = restore_into(temp.path(), magic, &blank, Budget::default()).unwrap();
+
+    assert_eq!(summary.layers_fetched, plan.layers().count());
+
+    // And the node it lands in is the node the stele came from, so what was
+    // skipped cost the restore nothing it needed.
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
+}
+
+/// The one unknown kind a restore refuses. `required: true` is a publisher
+/// saying this layer is not optional, so a reader that cannot store it must
+/// stop rather than restore a node quietly missing a slice of the chain.
+#[test]
+fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0, "required": true}));
+
+    let blank = Blank::<MemoryStores>::open();
+    let err = restore_into(temp.path(), magic, &blank, Budget::default()).unwrap_err();
+
+    let Error::RequiredUnknownLayer { kind, scope } = &err else {
+        panic!("{err:?}");
+    };
+
+    assert_eq!(kind, AHEAD_KIND);
+    assert_eq!(scope, &json!({"epoch": 0, "required": true}));
 
     assert_untouched(&blank);
 }

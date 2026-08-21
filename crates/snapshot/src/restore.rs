@@ -129,7 +129,8 @@ use crate::{
     layers::{blocks, indexes, logs, state},
     log_ns_for, preflight, read_position,
     reporting::Cursor,
-    DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, STATE, STATE_SHARDS, UTXOS,
+    DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, SCOPE_REQUIRED, STATE, STATE_SHARDS,
+    UTXOS,
 };
 
 /// What a restore holds at once.
@@ -214,6 +215,13 @@ pub struct Plan {
     pub state: Vec<LayerDescriptor>,
     /// Epochs the stele carries and `sync.max_history` excludes.
     pub skipped_epochs: usize,
+    /// Layers of a kind this build does not implement, which it skips rather
+    /// than refuses — see [`unknown_layers`].
+    ///
+    /// Empty for every stele this profile publishes today, and reported rather
+    /// than silent whenever it is not: a restore that quietly dropped a layer
+    /// is a node missing data nothing downstream would notice.
+    pub skipped_unknown: Vec<LayerDescriptor>,
 }
 
 impl Plan {
@@ -358,10 +366,12 @@ pub fn plan<R: SteleReader>(
 ) -> Result<Plan, Error> {
     let inscription = stele.read_inscription()?;
 
-    // Refuses a foreign profile, a profile major above this one, and any layer
-    // kind this profile does not define — all before a store is opened.
+    // Refuses a foreign profile and a profile major above this one — both
+    // before a store is opened. A kind this build does not define is decided a
+    // few lines down instead, where the profile can read its scope.
     inscription.check_profile(&DolosProfile)?;
 
+    let skipped_unknown = unknown_layers(&inscription)?;
     let position = read_position(&inscription.position)?;
 
     if position.network.magic() != network_magic {
@@ -379,8 +389,37 @@ pub fn plan<R: SteleReader>(
         state: select_state(&inscription)?,
         epochs: selected.0,
         skipped_epochs: selected.1,
+        skipped_unknown,
         position,
     })
+}
+
+/// The layers this build has no kind for, once any required one has refused.
+///
+/// The profile's half of the rule decision 0026 sets. The protocol reports
+/// which layers are unknown ([`Inscription::unknown_layers`]) and interprets
+/// nothing about them; reading [`SCOPE_REQUIRED`] out of a profile-owned scope
+/// is this side's job, and it is the only field of an unknown layer's scope
+/// anything here looks at.
+///
+/// Skipping is a *consumption* choice and never an integrity one. A skipped
+/// layer is still a layer of the stele: its `diffId` is still cross-checked
+/// against the manifest and still covered by the inscription digest a publisher
+/// signs. What this decides is only whether its records are read into a store.
+fn unknown_layers(inscription: &Inscription) -> Result<Vec<LayerDescriptor>, Error> {
+    let unknown = inscription.unknown_layers(&DolosProfile);
+
+    if let Some(required) = unknown
+        .iter()
+        .find(|layer| layer.scope.get(SCOPE_REQUIRED) == Some(&serde_json::Value::Bool(true)))
+    {
+        return Err(Error::RequiredUnknownLayer {
+            kind: required.kind.clone(),
+            scope: required.scope.clone(),
+        });
+    }
+
+    Ok(unknown.into_iter().cloned().collect())
 }
 
 /// Group the epoch-scoped layers by the epoch their scope names.
@@ -391,6 +430,9 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
         let kind = descriptor.kind.as_str();
         let log_ns = log_ns_for(kind);
 
+        // The tip kinds and `digests`, which are not epoch-scoped, plus any
+        // kind this build does not define — `plan` has already collected those
+        // into `Plan.skipped_unknown` and refused the required ones.
         if log_ns.is_none() && !matches!(kind, BLOCKS | INDEXES) {
             continue;
         }
@@ -1453,6 +1495,7 @@ mod tests {
             epochs,
             state: select_state(&stele).unwrap(),
             skipped_epochs: skipped,
+            skipped_unknown: Vec::new(),
         };
 
         assert_eq!(plan.skipped_epochs, 1);
@@ -1555,6 +1598,63 @@ mod tests {
         }
     }
 
+    /// A kind published after this build shipped is skipped and reported, not
+    /// refused — the client half of decision 0026's additive-change rule.
+    #[test]
+    fn a_kind_this_build_does_not_implement_is_skipped_and_reported() {
+        let mut layers = state_shards();
+        layers.push(epoch_descriptor(BLOCKS, 0, 0xa0));
+        layers.push(descriptor("log-votes", json!({"epoch": 0}), 0xb0));
+        layers.push(descriptor("state-treasury", json!({"epoch": 0}), 0xb1));
+
+        let skipped = unknown_layers(&inscription(layers)).unwrap();
+
+        assert_eq!(
+            skipped
+                .iter()
+                .map(|layer| layer.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["log-votes", "state-treasury"],
+        );
+
+        // And a stele written by a publisher this build keeps up with skips
+        // nothing at all.
+        let mut known = state_shards();
+        known.push(epoch_descriptor(BLOCKS, 0, 0xa0));
+        known.push(descriptor(DIGESTS, json!({"lastImmutable": 4}), 0xa1));
+
+        assert!(unknown_layers(&inscription(known)).unwrap().is_empty());
+    }
+
+    /// The one unknown kind a restore refuses.
+    #[test]
+    fn a_required_unknown_kind_refuses_the_restore() {
+        let mut layers = state_shards();
+        layers.push(descriptor(
+            "log-votes",
+            json!({"epoch": 7, "required": true}),
+            0xb0,
+        ));
+
+        let err = unknown_layers(&inscription(layers)).unwrap_err();
+
+        let Error::RequiredUnknownLayer { kind, scope } = &err else {
+            panic!("{err:?}");
+        };
+
+        assert_eq!(kind, "log-votes");
+        assert_eq!(scope, &json!({"epoch": 7, "required": true}));
+
+        // `required` is a flag, not a truthy field: only `true` refuses, so a
+        // publisher cannot brick a reader by writing the key at all.
+        for benign in [json!(false), json!("true"), json!(1), json!(null)] {
+            let mut layers = state_shards();
+            layers.push(descriptor("log-votes", json!({"required": benign}), 0xb0));
+
+            assert_eq!(unknown_layers(&inscription(layers)).unwrap().len(), 1);
+        }
+    }
+
     /// The preflight is a refusal for a doomed run, not a promise about a
     /// tight one: an impossible requirement is refused and a plausible one is
     /// allowed through.
@@ -1568,6 +1668,7 @@ mod tests {
             epochs: Vec::new(),
             state: state_shards(),
             skipped_epochs: 0,
+            skipped_unknown: Vec::new(),
         };
 
         plan.preflight(temp.path(), None).unwrap();
@@ -1603,6 +1704,7 @@ mod tests {
             epochs: Vec::new(),
             state: Vec::new(),
             skipped_epochs: 0,
+            skipped_unknown: Vec::new(),
         };
 
         let staging = |largest_layer, unsized_layers| {

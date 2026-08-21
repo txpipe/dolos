@@ -293,6 +293,27 @@ fn report(
         println!("epochs:   {}", plan.epochs.len());
     }
 
+    // Printed only when it happened, and never folded into the epoch line: an
+    // epoch dropped by `sync.max_history` is this node's own configuration, and
+    // a layer dropped for a kind this build does not implement is a stele from
+    // a publisher ahead of it. An operator acts on the second by upgrading.
+    if !plan.skipped_unknown.is_empty() {
+        let mut kinds: Vec<&str> = plan
+            .skipped_unknown
+            .iter()
+            .map(|layer| layer.kind.as_str())
+            .collect();
+
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        println!(
+            "skipped:  {} layer(s) this build has no kind for ({}); upgrade to restore them",
+            plan.skipped_unknown.len(),
+            kinds.join(", "),
+        );
+    }
+
     if outlook.inherited > 0 {
         println!(
             "resumed:  {} layer(s) an earlier attempt had already committed",

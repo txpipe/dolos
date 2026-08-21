@@ -189,6 +189,21 @@ pub fn log_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns)| ns)
 }
 
+/// Scope field by which a layer declares that a reader who cannot restore it
+/// must refuse the stele rather than skip it.
+///
+/// Absent means skippable, which is what every kind this profile publishes
+/// today leaves it at — so no scope shape writes this field and no golden
+/// carries it. It lives in the profile-owned `scope` rather than an OCI
+/// annotation because it is planning input: the scope is canonicalized into the
+/// inscription and covered by the digest a publisher signs, while annotations
+/// ride on the manifest, unsigned and transport-side.
+///
+/// **One-way.** A kind published as required forever constrains readers older
+/// than it, so marking one is an ADR-level act (decision 0026) and not a
+/// publisher's convenience.
+pub const SCOPE_REQUIRED: &str = "required";
+
 /// IANA `vnd.` vendor token for this profile's payload media types. Shorter
 /// than the profile name by custom, and the slot the coexistence rules require
 /// a publisher to control.
@@ -322,6 +337,22 @@ pub enum Error {
     /// The stele is well-formed but does not carry enough to rebuild a node.
     #[error("this stele cannot restore a node: {0}")]
     IncompleteStele(String),
+
+    /// A layer of a kind this build does not implement, which the publisher
+    /// marked [`SCOPE_REQUIRED`].
+    ///
+    /// The one unknown kind a restore refuses instead of skipping. Both the
+    /// kind and the whole scope are in the message because neither alone tells
+    /// an operator what is missing: the kind names what to upgrade to, and the
+    /// scope says which slice of the chain would have been silently absent.
+    #[error(
+        "this stele carries layer kind {kind:?}, which this build does not implement and its \
+         publisher marked required; its scope is {scope}"
+    )]
+    RequiredUnknownLayer {
+        kind: String,
+        scope: serde_json::Value,
+    },
 
     /// A volume that cannot hold what the run is about to put on it, refused
     /// before the run starts.

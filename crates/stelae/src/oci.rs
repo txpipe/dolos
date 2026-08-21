@@ -571,7 +571,9 @@ impl Registry {
     ///    pointing at a document nobody signed;
     /// 4. [`Inscription::check_profile`] — **before any layer is fetched**, so
     ///    a stele of another profile costs one small GET and not a partial
-    ///    restore;
+    ///    restore. The read-side check, deliberately: a pull serves a reader,
+    ///    and a caller that is about to *publish* on top of what it pulled owes
+    ///    the stricter [`Inscription::check_profile_strict`] of its own;
     /// 5. manifest ↔ inscription cross-check, which yields the [`BlobIndex`].
     pub fn pull(&self, profile: &dyn Profile, tag: &str) -> Result<Stele, Error> {
         validate_tag(tag)?;

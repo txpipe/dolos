@@ -1151,6 +1151,9 @@ impl<'a> Chained<'a> {
         let inscription = latest.map(|stele| stele.read_inscription()).transpose()?;
 
         if let Some(previous) = &inscription {
+            // The pull that fetched this checked as a reader; this is the
+            // publish side, which inherits the chain and must attest it.
+            previous.check_profile_strict(&DolosProfile)?;
             same_network(previous, plan)?;
         }
 
