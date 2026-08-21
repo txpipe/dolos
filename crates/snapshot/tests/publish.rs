@@ -66,13 +66,13 @@ use dolos_snapshot::{
     export::{self, Following, Predecessor as _, Standing},
     is_state_kind,
     registry::{self, Publishing},
-    state_layer_count, DolosProfile, Error, BLOCKS, INDEXES,
+    state_layer_count, DolosProfile, Error, RetainedEpochs, BLOCKS, INDEXES, STATE_KINDS,
 };
 use stelae::{progress::Outcome, SteleReader as _};
 
 use watcher::Watcher;
 
-use node::Node;
+use node::{plan_at_boundary, Node};
 use registry_fixture::Fixture;
 
 /// The log kinds epoch 0 carries.
@@ -94,6 +94,20 @@ const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
 
 /// Layers a publish of sequence 1 carries: both epochs plus the state tip.
 const WHOLE_SECOND: usize = EPOCH_0 + EPOCH_1 + state_layer_count();
+
+/// Layers epoch 2 contributes, on the same reading as epoch 1: it is a
+/// boundary sliver of one slot with no blocks and no logs in it, so `blocks`
+/// and `indexes` and nothing else.
+const EPOCH_2: usize = 2;
+
+/// The retained list the dump suites publish under.
+///
+/// Epoch 1 rather than epoch 0, because epoch 0 is the one epoch a list may
+/// not name — and rather than epoch 2, because the point of the pair below is
+/// a dump that is *cut* by one publish and *inherited* by the next.
+fn retaining_epoch_1() -> RetainedEpochs {
+    RetainedEpochs::new(vec![1]).unwrap()
+}
 
 // ---------------------------------------------------------------------------
 // Done criteria 1 and 2
@@ -180,6 +194,267 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
     assert_eq!(
         latest.read_inscription().unwrap().digest().unwrap(),
         second.identity
+    );
+}
+
+/// Done criterion 1: a retained dump is cut once and inherited thereafter, and
+/// the publish that cuts it moves its bytes once.
+///
+/// Two publishes, sequence 1 then sequence 2, both configured to retain epoch
+/// 1. The first stands *in* epoch 1, so its dump is its own tip under a second
+/// scope; the second stands past it, so the dump can only come from the
+/// manifest — and if scope equality did not identify it, this is where it
+/// would be silently rebuilt out of a store that no longer holds epoch 1's
+/// state.
+#[test]
+#[ignore]
+fn a_retained_dump_is_cut_once_and_inherited_after() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let repository = fixture.repository("dolos/dumps");
+
+    let cutting = plan_at_boundary(&node.domain, 1, retaining_epoch_1());
+    let following = plan_at_boundary(&node.domain, 2, retaining_epoch_1());
+
+    // ---- the publish that cuts it ----------------------------------------
+    let cut = node.publish(&repository, &cutting, false);
+
+    assert_eq!(
+        cut.inscription.layers.len(),
+        EPOCH_0 + EPOCH_1 + 2 * state_layer_count(),
+        "both epochs, the tip, and the dump the tip was teed into",
+    );
+
+    // The dump is not "reused": nothing was carried forward into this publish.
+    // It was produced here, by the walk that produced the tip.
+    assert_eq!(cut.layers_reused, 0);
+    assert_eq!(
+        cut.layers_built,
+        EPOCH_0 + EPOCH_1 + 2 * state_layer_count()
+    );
+
+    // **The property.** Every dump descriptor names the same bytes as the tip
+    // shard it was cut from, and those bytes crossed the wire once: the tip's
+    // upload, plus a skip for the second descriptor.
+    let dumps = dumps_of(&cut.inscription, 1);
+    assert_eq!(dumps.len(), state_layer_count());
+
+    for dump in &dumps {
+        let shard = dump.scope["shard"].as_u64().unwrap();
+        let tip = tip_of(&cut.inscription, &dump.kind, shard);
+
+        assert_eq!(dump.diff_id, tip.diff_id, "{}", dump.kind);
+        assert_eq!(dump.records, tip.records, "{}", dump.kind);
+        assert_eq!(
+            dump.uncompressed_size, tip.uncompressed_size,
+            "{}",
+            dump.kind
+        );
+    }
+
+    assert_eq!(
+        cut.transfer.layers_uploaded,
+        (EPOCH_0 + EPOCH_1 + state_layer_count()) as u64,
+        "a dump cut from the tip uploaded a blob of its own",
+    );
+    assert_eq!(
+        cut.transfer.layers_skipped,
+        state_layer_count() as u64,
+        "and every one of them is the tip's blob, already up",
+    );
+    assert_eq!(cut.transfer.layers_reused, 0);
+
+    // ---- the publish that inherits it ------------------------------------
+    let followed = node.publish(&repository, &following, false);
+
+    assert_eq!(
+        followed.layers_reused,
+        EPOCH_0 + EPOCH_1 + state_layer_count(),
+        "both closed epochs off the manifest, and epoch 1's whole dump with them",
+    );
+    assert_eq!(
+        followed.layers_built,
+        EPOCH_2 + state_layer_count(),
+        "epoch 2's two layers and a fresh tip, and nothing else",
+    );
+
+    // Only new blobs moved. The dump's did not: it is epoch 1's state, and
+    // epoch 1 closed before this publish began.
+    assert_eq!(
+        followed.transfer.layers_uploaded,
+        (EPOCH_2 + state_layer_count()) as u64
+    );
+    assert_eq!(
+        followed.transfer.layers_reused,
+        (EPOCH_0 + EPOCH_1 + state_layer_count()) as u64
+    );
+    assert_eq!(followed.transfer.layers_skipped, 0);
+
+    // Inherited whole: the descriptors are the predecessor's, byte for byte.
+    assert_eq!(dumps_of(&followed.inscription, 1), dumps);
+
+    // And this stele's own tip is new, so the dump and the tip have parted
+    // company — which is the state the dump exists to preserve.
+    for dump in &dumps {
+        let shard = dump.scope["shard"].as_u64().unwrap();
+        let tip = tip_of(&followed.inscription, &dump.kind, shard);
+
+        assert_ne!(
+            dump.diff_id, tip.diff_id,
+            "{} shard {shard}: the dump is still the tip one sequence on",
+            dump.kind,
+        );
+    }
+
+    followed.inscription.validate().unwrap();
+
+    eprintln!(
+        "cut:       built {}, uploaded {} ({} bytes), skipped {}\n\
+         inherited: built {}, reused {} ({} bytes not moved), uploaded {}",
+        cut.layers_built,
+        cut.transfer.layers_uploaded,
+        cut.transfer.bytes_uploaded,
+        cut.transfer.layers_skipped,
+        followed.layers_built,
+        followed.layers_reused,
+        followed.transfer.bytes_reused,
+        followed.transfer.layers_uploaded,
+    );
+}
+
+/// The retained dumps a stele carries for `epoch`, in inscription order.
+fn dumps_of(
+    inscription: &stelae::inscription::Inscription,
+    epoch: u64,
+) -> Vec<stelae::inscription::LayerDescriptor> {
+    inscription
+        .layers
+        .iter()
+        .filter(|layer| {
+            is_state_kind(&layer.kind)
+                && layer.scope.get("epoch").and_then(serde_json::Value::as_u64) == Some(epoch)
+        })
+        .cloned()
+        .collect()
+}
+
+/// One tip shard, by the kind and shard a dump names.
+fn tip_of<'a>(
+    inscription: &'a stelae::inscription::Inscription,
+    kind: &str,
+    shard: u64,
+) -> &'a stelae::inscription::LayerDescriptor {
+    inscription
+        .layers
+        .iter()
+        .find(|layer| layer.kind == kind && layer.scope == serde_json::json!({"shard": shard}))
+        .unwrap_or_else(|| panic!("no tip layer for {kind} shard {shard}"))
+}
+
+/// The risk decision 0026 named: a dump is the first **immutable state layer**,
+/// and a resume path that reads "state" as "always rebuild" would drop it.
+///
+/// The publish is killed inside its state pass — at the first tip shard, which
+/// is the first thing opened after that kind's dump has been adopted and
+/// recorded. So the record it leaves contains a state layer, which no record
+/// could contain before, and the resume has to honour it on exactly an epoch
+/// layer's terms.
+#[test]
+#[ignore]
+fn a_restarted_publish_carries_forward_the_retained_dump_it_adopted() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let storage = tempfile::tempdir().unwrap();
+
+    let cutting = plan_at_boundary(&node.domain, 1, retaining_epoch_1());
+    let following = plan_at_boundary(&node.domain, 2, retaining_epoch_1());
+
+    let first = fixture.repository("dolos/dump-resume");
+    node.publish_as(publishing(&first, &storage), &cutting)
+        .unwrap();
+
+    // The first state kind in `STATE_KINDS` order: its dump is adopted, then
+    // its tip is opened, and that open is where this dies.
+    let (first_kind, _, _) = STATE_KINDS[0];
+
+    let dying = fixture.repository("dolos/dump-resume");
+
+    let killed = node
+        .publish_through(
+            &Interrupted {
+                inner: &dying,
+                kind: first_kind,
+                epoch: None,
+            },
+            publishing(&dying, &storage),
+            &following,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(killed, Error::Stelae(stelae::Error::Io(_))),
+        "{killed:?}"
+    );
+
+    let record = registry::PublishRecord::load(&record_path(&storage))
+        .unwrap()
+        .expect("an interrupted publish left no record");
+
+    // Every state layer in the record is a dump, and the dump that got in is
+    // the one whose kind the interruption stopped at.
+    let recorded_state: Vec<_> = record
+        .layers
+        .iter()
+        .filter(|layer| is_state_kind(&layer.descriptor.kind))
+        .collect();
+
+    assert!(
+        !recorded_state.is_empty(),
+        "no state layer reached the record; the interruption did not land in the state pass",
+    );
+
+    for layer in &recorded_state {
+        assert_eq!(layer.descriptor.kind, first_kind);
+        assert_eq!(
+            layer
+                .descriptor
+                .scope
+                .get("epoch")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "a tip shard was recorded: {}",
+            layer.descriptor.scope,
+        );
+    }
+
+    // The restart, against the same repository and the same storage.
+    let resumed_into = fixture.repository("dolos/dump-resume");
+
+    let resumed = node
+        .publish_as(publishing(&resumed_into, &storage), &following)
+        .unwrap();
+
+    // The stele is the one an uninterrupted publish would have produced, down
+    // to the manifest bytes — the only statement strong enough to say the
+    // half-adopted dump was neither dropped nor duplicated. Counters are held
+    // against that same run rather than against literals, so this test says
+    // "the interruption changed nothing" rather than re-deriving the
+    // arithmetic the test above already pins.
+    let clean = fixture.repository("dolos/dump-uninterrupted");
+
+    node.publish(&clean, &cutting, false);
+    let uninterrupted = node.publish(&clean, &following, false);
+
+    assert_eq!(resumed.identity, uninterrupted.identity);
+    assert_eq!(resumed.inscription, uninterrupted.inscription);
+    assert_eq!(resumed.layers_reused, uninterrupted.layers_reused);
+    assert_eq!(resumed.layers_built, uninterrupted.layers_built);
+    assert_eq!(manifest_of(&resumed_into), manifest_of(&clean));
+
+    assert_eq!(
+        registry::PublishRecord::load(&record_path(&storage)).unwrap(),
+        None,
+        "a resumed publish that sealed left its record behind",
     );
 }
 
@@ -684,7 +959,7 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
             &Interrupted {
                 inner: &dying,
                 kind: INDEXES,
-                epoch: 1,
+                epoch: Some(1),
             },
             publishing(&dying, &storage),
             &node.second,
@@ -800,7 +1075,7 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
             &Interrupted {
                 inner: repository,
                 kind: INDEXES,
-                epoch: 1,
+                epoch: Some(1),
             },
             publishing(repository, &storage),
             &node.second,
@@ -897,7 +1172,10 @@ fn manifest_of(repository: &registry::Registry) -> Vec<u8> {
 struct Interrupted<'a> {
     inner: &'a registry::Registry,
     kind: &'static str,
-    epoch: u64,
+    /// The epoch the named layer's **descriptor scope** carries, and `None`
+    /// for a layer whose scope has none — which is how a state tip shard is
+    /// named, and the only way to stop a publish inside its state pass.
+    epoch: Option<u64>,
 }
 
 impl stelae::SteleWriter for Interrupted<'_> {
@@ -911,13 +1189,25 @@ impl stelae::SteleWriter for Interrupted<'_> {
     ) -> Result<Self::Sink, stelae::Error> {
         let epoch = spec.scope.get("epoch").and_then(serde_json::Value::as_u64);
 
-        if spec.kind == self.kind && epoch == Some(self.epoch) {
+        if spec.kind == self.kind && epoch == self.epoch {
             return Err(stelae::Error::Io(std::io::Error::other(
                 "the machine went away",
             )));
         }
 
         self.inner.layer_sink(profile, spec, level)
+    }
+
+    /// Forwarded, like `seal`: a transport double that swallowed the second
+    /// descriptor would fail the seal of any publish that cuts a retained
+    /// dump, for a reason that has nothing to do with the interruption under
+    /// test.
+    fn carry_again(
+        &self,
+        written: &stelae::transport::WrittenLayer,
+        scope: serde_json::Value,
+    ) -> Result<stelae::transport::WrittenLayer, stelae::Error> {
+        self.inner.carry_again(written, scope)
     }
 
     fn seal(

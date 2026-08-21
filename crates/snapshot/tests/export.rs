@@ -45,11 +45,11 @@ use dolos_core::{
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
     layers::{blocks, indexes, logs, state},
-    state_layer_count, DolosProfile, Network, BLOCKS, INDEXES, LOG_KINDS, LOG_NAMESPACES,
-    NAMESPACES, STATE_KINDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, INDEXES,
+    LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
-use node::{export_to, harness, plan_for};
+use node::{export_plan, export_to, harness, plan_at_boundary, plan_for};
 use stelae::{
     dir::SteleDir,
     progress::{Observer, Outcome},
@@ -60,7 +60,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:5d3ab5e9d146af454f896dc8625d304a23870c86e6852bde60b1043e3e5bda05";
+    "sha256:81d5ac63345138795eab162896c01ceed1c6f63cbbb81da4d8e03ef48cd8aac0";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -134,6 +134,7 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
+        Default::default(),
     )
     .unwrap();
 
@@ -205,6 +206,7 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
         &skeleton_summary(),
         Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
         skeleton_point(),
+        Default::default(),
     )
     .unwrap();
 
@@ -237,6 +239,7 @@ fn an_unnamed_network_renders_from_its_magic() {
         &skeleton_summary(),
         Network::for_magic(42),
         skeleton_point(),
+        Default::default(),
     )
     .unwrap();
 
@@ -603,6 +606,32 @@ fn expected_state<B: ToyStores>(
 /// inscription, byte for byte, or the format does not mean what it claims.
 #[test]
 fn both_backends_publish_the_same_inscription() {
+    // At the live cursor, which is what a publisher actually stands at, and
+    // then over a plan that cuts a retained dump. The second is not a separate
+    // property: a dump is written by teeing the tip's own sink, so a backend
+    // whose walk order differed would produce two divergent descriptors from
+    // one divergent walk, and the check that catches it has to be run against
+    // a stele that carries them. The harness ledger sits inside epoch 0 and
+    // epoch 0 may not be retained, so the dump-carrying plan stands at the
+    // epoch-1 boundary — see `plan_at_boundary`.
+    same_inscription_from_both_backends(None);
+    same_inscription_from_both_backends(Some((1, RetainedEpochs::new(vec![1]).unwrap())));
+}
+
+/// The plan the comparison is run over: the live cursor, or a boundary point
+/// with a retained list.
+///
+/// A free function rather than a closure because the two domains are two
+/// types — the whole point of the comparison — and a closure cannot be generic
+/// over them.
+fn plan_of<B: ToyStores>(domain: &ToyDomain<B>, at: &Option<(u64, RetainedEpochs)>) -> Plan {
+    match at {
+        Some((epoch, retained)) => plan_at_boundary(domain, *epoch, retained.clone()),
+        None => plan_for(domain),
+    }
+}
+
+fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
     let memory: ToyDomain<MemoryStores> = harness();
     let fjall: ToyDomain<FjallStores> = harness();
 
@@ -615,8 +644,8 @@ fn both_backends_publish_the_same_inscription() {
     let memory_root = tempfile::tempdir().unwrap();
     let fjall_root = tempfile::tempdir().unwrap();
 
-    let from_memory = export_to(memory_root.path(), &memory);
-    let from_fjall = export_to(fjall_root.path(), &fjall);
+    let from_memory = export_plan(memory_root.path(), &memory, &plan_of(&memory, &at));
+    let from_fjall = export_plan(fjall_root.path(), &fjall, &plan_of(&fjall, &at));
 
     // Compared layer by layer first, so a divergence names the kind and the
     // scope it happened in rather than only moving the final digest.
@@ -666,6 +695,296 @@ fn both_backends_publish_the_same_inscription() {
             descriptor.kind
         );
     }
+}
+
+// --------------------------------------------------------------------------
+// 5. Retained state dumps
+// --------------------------------------------------------------------------
+
+/// The dumps a stele carries, by the epoch their scope names.
+fn dumps_in(
+    inscription: &stelae::inscription::Inscription,
+) -> BTreeMap<u64, Vec<&stelae::inscription::LayerDescriptor>> {
+    let mut by_epoch: BTreeMap<u64, Vec<_>> = BTreeMap::new();
+
+    for layer in &inscription.layers {
+        if state_ns_for(&layer.kind).is_none() {
+            continue;
+        }
+
+        if let Some(epoch) = layer.scope.get("epoch").and_then(serde_json::Value::as_u64) {
+            by_epoch.entry(epoch).or_default().push(layer);
+        }
+    }
+
+    by_epoch
+}
+
+/// Done criterion 1, the half that needs no registry: at the publish that cuts
+/// it, a retained dump **is** the tip — one blob, two descriptors.
+///
+/// The property the whole family's riskiest code exists to hold. It is checked
+/// three ways, because two of them can be true while the third is not: the
+/// descriptors agree on identity and disagree only in scope; the directory
+/// holds exactly as many blobs as there are distinct `diffId`s, so nothing was
+/// written twice; and the pair appears in the document in the order decision
+/// 0026 fixes — dumps ascending epoch, then the tip, shards ascending inside
+/// each.
+#[test]
+fn a_dump_cut_at_the_sequence_is_the_tips_own_blob() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let temp = tempfile::tempdir().unwrap();
+
+    let plan = plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap());
+    let inscription = export_plan(temp.path(), &domain, &plan);
+
+    let dumps = dumps_in(&inscription);
+    assert_eq!(dumps.keys().copied().collect::<Vec<_>>(), vec![1]);
+    assert_eq!(dumps[&1].len(), state_layer_count());
+
+    // One blob, two descriptors: same identity, same records, same size, and a
+    // scope that differs in exactly the epoch.
+    for dump in &dumps[&1] {
+        let shard = dump.scope["shard"].as_u64().unwrap();
+
+        let tip = inscription
+            .layers
+            .iter()
+            .find(|layer| {
+                layer.kind == dump.kind && layer.scope == serde_json::json!({"shard": shard})
+            })
+            .unwrap_or_else(|| panic!("no tip layer for {} shard {shard}", dump.kind));
+
+        assert_eq!(dump.diff_id, tip.diff_id, "{}", dump.kind);
+        assert_eq!(dump.records, tip.records, "{}", dump.kind);
+        assert_eq!(
+            dump.uncompressed_size, tip.uncompressed_size,
+            "{}",
+            dump.kind
+        );
+        assert_eq!(dump.media_type, tip.media_type, "{}", dump.kind);
+        assert_eq!(dump.scope, serde_json::json!({"epoch": 1, "shard": shard}));
+    }
+
+    // And the bytes were written once. A directory names its blobs by content,
+    // so two descriptors over one `diffId` are one file — the count of blobs is
+    // the count of *distinct* identities and not of layers.
+    let identities: std::collections::BTreeSet<_> = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.diff_id)
+        .collect();
+
+    let index = SteleDir::open(temp.path()).unwrap().blob_index().unwrap();
+
+    assert_eq!(index.len(), identities.len());
+    assert_eq!(
+        inscription.layers.len(),
+        identities.len() + state_layer_count(),
+        "every dump shares its blob with the tip shard it was cut from",
+    );
+
+    // Per kind: the dump's shards ascending, then the tip's.
+    let mut expected: Vec<(String, serde_json::Value)> = Vec::new();
+
+    for (kind, _, shards) in STATE_KINDS {
+        for shard in 0..shards {
+            expected.push((
+                kind.to_owned(),
+                serde_json::json!({"epoch": 1, "shard": shard}),
+            ));
+        }
+        for shard in 0..shards {
+            expected.push((kind.to_owned(), serde_json::json!({"shard": shard})));
+        }
+    }
+
+    let found: Vec<(String, serde_json::Value)> = inscription
+        .layers
+        .iter()
+        .filter(|layer| state_ns_for(&layer.kind).is_some())
+        .map(|layer| (layer.kind.clone(), layer.scope.clone()))
+        .collect();
+
+    assert_eq!(found, expected, "the state layers are out of order");
+}
+
+/// Done criterion 2: the retained list is **signed input**.
+///
+/// Two publishers over one ledger, standing at one point, differing in nothing
+/// but their configuration, publish different documents — and the difference is
+/// legible in `parameters` rather than buried in a layer. That is what makes a
+/// publisher running the wrong list eject itself from co-signing instead of
+/// quietly attesting a different history.
+#[test]
+fn two_publishers_with_different_retained_lists_do_not_agree() {
+    let domain: ToyDomain<MemoryStores> = harness();
+
+    let publish = |retained: RetainedEpochs| {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_at_boundary(&domain, 2, retained);
+
+        (export_plan(temp.path(), &domain, &plan), temp)
+    };
+
+    let (none, _a) = publish(RetainedEpochs::default());
+    let (one, _b) = publish(RetainedEpochs::new(vec![2]).unwrap());
+    let (two, _c) = publish(RetainedEpochs::new(vec![1, 2]).unwrap());
+
+    assert_eq!(none.parameters["stateEpochs"], serde_json::json!([]));
+    assert_eq!(one.parameters["stateEpochs"], serde_json::json!([2]));
+    assert_eq!(two.parameters["stateEpochs"], serde_json::json!([1, 2]));
+
+    // Different parameters, therefore different identities — the divergence a
+    // co-signer sees.
+    let digests: std::collections::BTreeSet<_> = [&none, &one, &two]
+        .into_iter()
+        .map(|inscription| inscription.digest().unwrap())
+        .collect();
+
+    assert_eq!(digests.len(), 3, "two lists produced one identity");
+
+    // The parameters are the *only* thing that moved between the first two: the
+    // second carries a dump, the first does not, so the diff an operator reads
+    // is one field and one layer set rather than a document they have to
+    // compare by hand.
+    for (left, right) in [(&none, &one), (&none, &two), (&one, &two)] {
+        assert_eq!(left.position, right.position);
+        assert_eq!(left.compression, right.compression);
+        assert_ne!(left.parameters, right.parameters);
+    }
+}
+
+/// A retained epoch below the sequence that no predecessor can hand over is a
+/// warning and a shorter stele — never a failed publish.
+///
+/// Producing a past epoch's dump is a backfill run's job: this publish's stores
+/// hold the tip, and the state as of an epoch it has moved past is not in them
+/// to be written. The publish that discovers this is the ordinary case for
+/// every publisher that adopts the list before it has backfilled, so it stands.
+#[test]
+fn a_past_dump_no_predecessor_carries_is_skipped_and_the_publish_stands() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let temp = tempfile::tempdir().unwrap();
+
+    // `First` has nothing to inherit, which is exactly the adopt-miss.
+    let plan = plan_at_boundary(&domain, 2, RetainedEpochs::new(vec![1, 2]).unwrap());
+    let inscription = export_plan(temp.path(), &domain, &plan);
+
+    let dumps = dumps_in(&inscription);
+
+    assert_eq!(
+        dumps.keys().copied().collect::<Vec<_>>(),
+        vec![2],
+        "epoch 1's dump has no source in these stores and had to be skipped",
+    );
+    assert_eq!(dumps[&2].len(), state_layer_count());
+
+    // The list is still what it was configured to be: a skipped dump does not
+    // rewrite the signed input, or two publishers with the same configuration
+    // and different backfill states would stop agreeing on their parameters.
+    assert_eq!(
+        inscription.parameters["stateEpochs"],
+        serde_json::json!([1, 2])
+    );
+
+    // And the stele is whole otherwise.
+    assert_eq!(
+        inscription
+            .layers
+            .iter()
+            .filter(
+                |layer| state_ns_for(&layer.kind).is_some() && layer.scope.get("epoch").is_none()
+            )
+            .count(),
+        state_layer_count(),
+    );
+}
+
+/// What a reproduction can and cannot check about a stele carrying dumps.
+///
+/// Two cases with opposite answers, and the boundary between them is the whole
+/// of what `verify --reproduce` promises once dumps exist:
+///
+/// - the dump **at** the stele's own sequence is cut from the tip by the walk,
+///   so a reproduction rebuilds it out of the stores like every other layer
+///   and a divergence in it would be caught;
+/// - a dump for an epoch **below** the sequence cannot be rebuilt by anything
+///   standing at the tip — that epoch's state is not in these stores — so it
+///   is carried forward from the document under verification and taken on
+///   trust, in the same category `history` is already in.
+///
+/// A reproduction that insisted on building the second would report a
+/// divergence on every stele carrying any state history at all, which is not
+/// strictness but an unusable check.
+#[test]
+fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let retained = || RetainedEpochs::new(vec![1]).unwrap();
+
+    // The publish that cuts epoch 1's dump, and its reproduction.
+    let cutting = plan_at_boundary(&domain, 1, retained());
+    let temp = tempfile::tempdir().unwrap();
+    let cut = export_plan(temp.path(), &domain, &cutting);
+
+    let reproduced = export::verify_reproduction(
+        &cut,
+        &cutting,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(reproduced, cut);
+    assert_eq!(dumps_in(&reproduced)[&1].len(), state_layer_count());
+
+    // And it really was rebuilt rather than copied: a reproduction chained the
+    // same way but with nothing to inherit from produces the same document.
+    let from_nothing = export::reproduce(
+        &cutting,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &export::First,
+    )
+    .unwrap();
+
+    assert_eq!(from_nothing.layers, cut.layers);
+
+    // The publish that inherits it. Built through `Following`, which is the
+    // predecessor a verifier chaining from a canonical document holds.
+    let following_plan = plan_at_boundary(&domain, 2, retained());
+    let canonical = cut.canonicalize().unwrap();
+
+    let followed = export::reproduce(
+        &following_plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &export::Following::read(&canonical, &following_plan).unwrap(),
+    )
+    .unwrap();
+
+    // Epoch 1's dump rode across, descriptor for descriptor.
+    assert_eq!(dumps_in(&followed)[&1], dumps_in(&cut)[&1]);
+
+    // And verifying that document reproduces it — which is the case that would
+    // fail outright if an inherited dump had to be rebuilt from these stores.
+    let verified = export::verify_reproduction(
+        &followed,
+        &following_plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(verified, followed);
 }
 
 /// The whole skeleton document, so a change to a key spelling, a scope shape or
@@ -762,7 +1081,8 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
     r#""schemas":{"account-stakes":1,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
-    r#""shards":{"account-stakes":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":16}"#,
+    r#""shards":{"account-stakes":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":16},"#,
+    r#""stateEpochs":[]"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
 

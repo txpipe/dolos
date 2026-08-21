@@ -1038,6 +1038,35 @@ impl SteleWriter for Registry {
         })
     }
 
+    /// Put the second descriptor in the list [`SteleWriter::seal`] builds the
+    /// manifest from.
+    ///
+    /// The override the default's documentation asks for: this transport pairs
+    /// every layer the inscription describes against a layer it wrote, and a
+    /// descriptor with nothing beside it fails the seal. Nothing is uploaded
+    /// and nothing is checked — the blob went up when the first descriptor's
+    /// sink finished, in this same publish, so there is no state of the
+    /// registry under which it is there for one name and absent for the other.
+    ///
+    /// Counted as **skipped** rather than reused, by the distinction
+    /// [`Transfer::layers_reused`] draws: these bytes were built out of a
+    /// store, hashed, and then not uploaded again — which is a blob-skip
+    /// exactly, and not a layer that was never read.
+    fn carry_again(
+        &self,
+        written: &WrittenLayer,
+        scope: serde_json::Value,
+    ) -> Result<WrittenLayer, Error> {
+        let again = crate::transport::again(written, scope);
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_skipped += 1;
+        state.transfer.bytes_skipped += again.digests.compressed_size;
+        state.pending.push(again.clone());
+
+        Ok(again)
+    }
+
     /// Publish the manifest, and with it the stele.
     ///
     /// The order is the whole of the safety argument:

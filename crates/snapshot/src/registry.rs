@@ -409,7 +409,7 @@ impl Origin {
         Self {
             repository: registry.repository().to_string(),
             network_magic: plan.network.magic(),
-            parameters: crate::parameters(),
+            parameters: crate::parameters(&plan.retained),
             compression: crate::compression(),
         }
     }
@@ -526,9 +526,11 @@ impl PublishRecord {
         for layer in &self.layers {
             // The same filter `inheritable_layers` applies to a predecessor's
             // manifest, applied again on the way in: a record naming a state
-            // shard is a record nothing wrote, and honouring one would carry a
-            // stale tip into a manifest.
-            if !EPOCH_KINDS.contains(&layer.descriptor.kind.as_str()) {
+            // *tip* shard is a record nothing wrote, and honouring one would
+            // carry a stale tip into a manifest. A retained dump's scope names
+            // its epoch, so it passes here for the same reason an epoch layer
+            // does.
+            if !crate::is_inheritable(&layer.descriptor.kind, &layer.descriptor.scope) {
                 continue;
             }
 
@@ -1065,10 +1067,13 @@ pub fn preview<A: ArchiveStore>(
     // Every epoch selected contributes one `blocks` and one `indexes` layer and
     // as many log layers as it has namespaces with logs, the state tip
     // contributes every shard of every kind however the epochs were restricted,
-    // and the digests layer is there exactly when its records are.
+    // the retained dumps contribute what `export::state_layers` counts, and the
+    // digests layer is there exactly when its records are.
+    let carried_dumps = export::carried_dumps(plan, &previous)?;
+
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + export::log_layers(plan, archive, &previous)?
-        + crate::state_layer_count()
+        + export::state_layers(plan, &previous)?
         + usize::from(digest_records.is_some());
 
     // The same lookup `export` will make, through the same `layer_spec`, so a
@@ -1077,7 +1082,9 @@ pub fn preview<A: ArchiveStore>(
     // not describe, and it propagates rather than counting as a miss: a dry run
     // that quietly reported "build it" for a layer nobody could build would be
     // the one number a publisher trusts, wrong.
-    let mut layers_reused = 0;
+    // A dump this publish adopts is a layer nothing walks a store for; the one
+    // it cuts out of its own tip is not, because the tip is walked either way.
+    let mut layers_reused = carried_dumps;
 
     for window in &plan.epochs {
         let scope = window.scope(plan.network.magic());
@@ -1289,7 +1296,7 @@ impl Predecessor for Chained<'_> {
             return Ok(());
         };
 
-        if !EPOCH_KINDS.contains(&descriptor.kind.as_str()) {
+        if !crate::is_inheritable(&descriptor.kind, &descriptor.scope) {
             return Ok(());
         }
 
@@ -1302,6 +1309,17 @@ impl Predecessor for Chained<'_> {
             );
 
             return Ok(());
+        };
+
+        // The transport is asked for its *measurement* and not for its
+        // descriptor. `carried` finds a layer by `diffId`, and one `diffId` can
+        // now wear two descriptors — the dump a publish cuts out of its own tip
+        // is the tip's bytes — so recording what the lookup returned verbatim
+        // would file the dump under the tip's scope, where nothing looks for it
+        // and where it would be discarded on the way back in.
+        let written = WrittenLayer {
+            descriptor: descriptor.clone(),
+            digests: written.digests,
         };
 
         let mut layers = record.layers.borrow_mut();
@@ -1318,10 +1336,12 @@ impl Predecessor for Chained<'_> {
 
 /// The layers a new stele may inherit from `previous`, keyed by kind and scope.
 ///
-/// Only the epoch kinds are in it. A state shard is the tip and changes every
-/// publish, and — independently — its descriptor scope names no epoch, so scope
-/// equality could not tell one publish's shard from another's. `digests` has no
-/// source in this slice.
+/// [`crate::is_inheritable`] decides, and it decides on the scope as well as
+/// the kind. A state *tip* shard is out: it changes every publish, and —
+/// independently — its descriptor scope names no epoch, so scope equality
+/// could not tell one publish's shard from another's. A retained state dump is
+/// in: it is a closed epoch's state under a scope that names that epoch.
+/// `digests` has no source in this slice.
 ///
 /// Two layers of one kind claiming one scope, described differently in any
 /// respect, is a refusal rather than a first-wins: it means the stele being
@@ -1337,7 +1357,7 @@ fn inheritable_layers(
     let mut inheritable = BTreeMap::new();
 
     for layer in &previous.layers {
-        if !EPOCH_KINDS.contains(&layer.kind.as_str()) {
+        if !crate::is_inheritable(&layer.kind, &layer.scope) {
             continue;
         }
 
@@ -1411,7 +1431,7 @@ mod tests {
             &DolosProfile,
             sequence,
             json!({"epoch": sequence}),
-            crate::parameters(),
+            crate::parameters(&Default::default()),
             crate::compression(),
         );
 
@@ -1564,7 +1584,7 @@ mod tests {
         Origin {
             repository: repository.to_owned(),
             network_magic: 2,
-            parameters: crate::parameters(),
+            parameters: crate::parameters(&Default::default()),
             compression: crate::compression(),
         }
     }

@@ -63,7 +63,7 @@ fn define_snapshot_url(config: &RootConfig, args: &Args) -> Option<String> {
     let download_url_template = config
         .snapshot
         .as_ref()
-        .map(|x| x.download_url.to_owned())
+        .and_then(|x| x.download_url.to_owned())
         .unwrap_or(DEFAULT_URL_TEMPLATE.to_owned());
 
     let snapshot_url = download_url_template

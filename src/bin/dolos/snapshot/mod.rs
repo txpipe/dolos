@@ -22,8 +22,8 @@
 
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
-use dolos_snapshot::export::Plan;
-use miette::IntoDiagnostic as _;
+use dolos_snapshot::{export::Plan, RetainedEpochs};
+use miette::{Context as _, IntoDiagnostic as _};
 
 use crate::feedback::Feedback;
 
@@ -135,6 +135,26 @@ impl std::str::FromStr for EpochRange {
     }
 }
 
+/// The retained state-dump epochs this node publishes under.
+///
+/// Read here rather than in each command for the same reason [`restrict`] is:
+/// `publish`, `digest` and `verify --reproduce` all put this list in
+/// `parameters`, and a node that gave them different lists would be verifying
+/// a different document than the one it published — and being told it does not
+/// match. An absent `[snapshot]` section means an empty list, which is a
+/// publisher that retains the tip alone.
+pub fn retained_epochs(config: &RootConfig) -> miette::Result<RetainedEpochs> {
+    let configured = config
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.state_epochs.clone())
+        .unwrap_or_default();
+
+    RetainedEpochs::new(configured)
+        .into_diagnostic()
+        .context("reading snapshot.state_epochs")
+}
+
 /// Apply an operator's selection to a plan, or leave it whole.
 ///
 /// The one place either command narrows a plan. `restrict_epochs` takes two
@@ -179,6 +199,17 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
         // printing an empty range and looking like a mistake.
         _ => eprintln!("epochs:   none selected; the state tip only"),
     }
+
+    // Printed always and not only when it is set, because an empty list is a
+    // choice with consequences — it is what makes this publisher's parameters
+    // differ from a co-signer's that retains dumps, and the line is where an
+    // operator sees the two do not match.
+    let due = plan.retained.due(plan.sequence).count();
+
+    eprintln!(
+        "dumps:    {:?} retained ({due} due at this sequence)",
+        plan.retained.as_slice(),
+    );
 
     Ok(())
 }

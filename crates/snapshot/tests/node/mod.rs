@@ -15,7 +15,10 @@
 use std::sync::Arc;
 
 use dolos_core::{import::ImportExt as _, Domain as _, StateStore as _};
-use dolos_snapshot::export::{self, First, Plan};
+use dolos_snapshot::{
+    export::{self, First, Plan},
+    Network, RetainedEpochs,
+};
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig},
     toy_domain::{ToyDomain, ToyStores},
@@ -122,7 +125,7 @@ mod registry_node {
     use dolos_snapshot::{
         export::Plan,
         registry::{self, Published, Publishing, Registry},
-        Error, Network,
+        Error, Network, RetainedEpochs,
     };
     use dolos_testing::toy_domain::{MemoryStores, ToyDomain};
     use stelae::progress::Observer;
@@ -160,8 +163,16 @@ mod registry_node {
             // an export reads it back out of the store.
             let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
 
-            let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
-            let second = Plan::new(&summary, network, point(boundary)).unwrap();
+            let retained = RetainedEpochs::default();
+
+            let first = Plan::new(
+                &summary,
+                network.clone(),
+                point(boundary - 1),
+                retained.clone(),
+            )
+            .unwrap();
+            let second = Plan::new(&summary, network, point(boundary), retained).unwrap();
 
             assert_eq!(first.sequence, 0);
             assert_eq!(second.sequence, 1);
@@ -243,16 +254,48 @@ mod registry_node {
     }
 }
 
-pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
-    export::plan(domain.state(), domain.genesis().network_magic() as u64).unwrap()
+/// A plan for `domain` standing at the **first slot of `epoch`**, retaining the
+/// state dumps `retained` names.
+///
+/// The harness ledger lives inside epoch zero and epoch zero is the one epoch a
+/// retained list may not name, so nothing published at the live cursor can ever
+/// cut a dump. Standing at a synthetic boundary point is how the dump paths are
+/// reached at all — the same device `Node` already uses for its second publish,
+/// and for the same reason: everything downstream is derived by `Plan::new`
+/// from the chain summary, so the point being synthetic changes what the plan
+/// covers and nothing about how it is built.
+pub fn plan_at_boundary<B: ToyStores>(
+    domain: &ToyDomain<B>,
+    epoch: u64,
+    retained: RetainedEpochs,
+) -> Plan {
+    let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
+    let magic = u64::from(domain.genesis().network_magic());
+
+    // Any hash will do: `position` needs one to exist, and nothing in an export
+    // reads it back out of the store.
+    let point = dolos_core::ChainPoint::Specific(
+        summary.epoch_start(epoch),
+        dolos_core::BlockHash::new([0xab; 32]),
+    );
+
+    let plan = Plan::new(&summary, Network::for_magic(magic), point, retained).unwrap();
+    assert_eq!(plan.sequence, epoch);
+
+    plan
 }
 
-pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
+/// [`export_to`], for a plan the caller built.
+pub fn export_plan<B: ToyStores>(
+    root: &std::path::Path,
+    domain: &ToyDomain<B>,
+    plan: &Plan,
+) -> Inscription {
     let stele = SteleDir::create(root).unwrap();
 
     export::export(
         &stele,
-        &plan_for(domain),
+        plan,
         domain.archive(),
         domain.state(),
         domain.indexes(),
@@ -261,4 +304,22 @@ pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) ->
         &Observer::silent(),
     )
     .unwrap()
+}
+
+/// The publish plan for `domain`, retaining the state dumps `retained` names.
+pub fn plan_retaining<B: ToyStores>(domain: &ToyDomain<B>, retained: RetainedEpochs) -> Plan {
+    export::plan(
+        domain.state(),
+        domain.genesis().network_magic() as u64,
+        retained,
+    )
+    .unwrap()
+}
+
+pub fn plan_for<B: ToyStores>(domain: &ToyDomain<B>) -> Plan {
+    plan_retaining(domain, RetainedEpochs::default())
+}
+
+pub fn export_to<B: ToyStores>(root: &std::path::Path, domain: &ToyDomain<B>) -> Inscription {
+    export_plan(root, domain, &plan_for(domain))
 }

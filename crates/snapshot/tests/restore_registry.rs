@@ -115,8 +115,14 @@ impl Node {
 
         let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
 
-        let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
-        let second = Plan::new(&summary, network, point(boundary)).unwrap();
+        let first = Plan::new(
+            &summary,
+            network.clone(),
+            point(boundary - 1),
+            Default::default(),
+        )
+        .unwrap();
+        let second = Plan::new(&summary, network, point(boundary), Default::default()).unwrap();
 
         assert_eq!(first.sequence, 0);
         assert_eq!(second.sequence, 1);

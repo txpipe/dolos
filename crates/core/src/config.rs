@@ -695,9 +695,43 @@ pub struct MithrilConfig {
     pub ancillary_key: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// `[snapshot]` — this node's dealings with published snapshots, in both
+/// directions.
+///
+/// ADR-004 keeps "snapshot" as Dolos's word for the artifact the protocol
+/// calls a stele, and this is the section that word names: what a node
+/// bootstraps from, and — for the small number of nodes that publish — what
+/// their steles carry. `[stelae.registry]` stays separate because it is a
+/// credential and nothing else.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotConfig {
-    pub download_url: String,
+    /// Template the legacy tarball bootstrap downloads from, kept working
+    /// while the stele path replaces it.
+    ///
+    /// Optional so that a publisher can set nothing but
+    /// [`state_epochs`](SnapshotConfig::state_epochs) here. `bootstrap
+    /// snapshot` already falls back to its own default template when the
+    /// section is absent, so an absent field and an absent section mean the
+    /// same thing to the one reader there is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+
+    /// Epochs whose state this publisher retains a dump of, alongside the
+    /// moving tip.
+    ///
+    /// A publisher setting, and normative per network: the list is echoed
+    /// into the inscription's `parameters` as signed input, so two publishers
+    /// of one network that disagree about it publish different documents and
+    /// stop co-signing. Era boundaries are one sensible criterion and
+    /// cherry-picked epochs another; what belongs in it is operational, which
+    /// is why it is configured here rather than derived from the chain
+    /// summary (decision 0026).
+    ///
+    /// Strictly ascending and never naming epoch 0 —
+    /// `dolos_snapshot::RetainedEpochs` is what refuses the rest, since the
+    /// rule is the profile's and this crate carries the shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_epochs: Vec<u64>,
 }
 
 /// `[stelae]` — how this node reaches a stele registry.

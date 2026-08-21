@@ -314,6 +314,25 @@ fn report(
         );
     }
 
+    // The one line about layers this restore deliberately did not read. A
+    // dump is a past epoch's state, and this run is building a node that
+    // stands at the stele's sequence — so what an operator learns here is what
+    // the stele *carries*, which is the difference between a repository they
+    // can restore an old epoch out of later and one they cannot.
+    if !plan.state_dumps.is_empty() {
+        let epochs: Vec<String> = plan
+            .state_dumps
+            .keys()
+            .map(|epoch| epoch.to_string())
+            .collect();
+
+        println!(
+            "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
+            plan.state_dumps.len(),
+            epochs.join(", "),
+        );
+    }
+
     if outlook.inherited > 0 {
         println!(
             "resumed:  {} layer(s) an earlier attempt had already committed",
