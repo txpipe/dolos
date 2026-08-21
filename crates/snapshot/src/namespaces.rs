@@ -54,6 +54,34 @@ pub const NAMESPACES: [Namespace; 17] = [
     UTXOS,
 ];
 
+/// The schema revision of each namespace's record content, as
+/// `parameters.schemas` reports it.
+///
+/// All 1 today: the revision moves when a namespace's stored record shape
+/// changes in a way its `state-{ns}` / `log-{ns}` layers carry — the signal the
+/// compatibility machinery of decision 0026 keys adoption on. Kept beside
+/// [`NAMESPACES`], in the same order, and held to it by
+/// `every_namespace_has_a_schema_rev` below.
+pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
+    (AccountStakeLog::NS, 1),
+    (AccountState::NS, 1),
+    (AssetState::NS, 1),
+    (DatumState::NS, 1),
+    (DRepState::NS, 1),
+    (EpochState::NS, 1),
+    (EraSummary::NS, 1),
+    (GovState::NS, 1),
+    (LeaderRewardLog::NS, 1),
+    (MemberRewardLog::NS, 1),
+    (PendingMirState::NS, 1),
+    (PendingRewardState::NS, 1),
+    (PoolDepositRefundLog::NS, 1),
+    (PoolState::NS, 1),
+    (ProposalState::NS, 1),
+    (StakeLog::NS, 1),
+    (UTXOS, 1),
+];
+
 /// Resolve a namespace read off the wire to the `&'static str` the stores use.
 ///
 /// Fails closed. A namespace this profile does not define cannot be restored —
@@ -81,6 +109,15 @@ mod tests {
         let mut deduped = sorted.to_vec();
         deduped.dedup();
         assert_eq!(deduped.len(), NAMESPACES.len(), "duplicate namespace");
+    }
+
+    #[test]
+    fn every_namespace_has_a_schema_rev() {
+        assert_eq!(
+            SCHEMA_REVS.map(|(ns, _)| ns),
+            NAMESPACES,
+            "SCHEMA_REVS and NAMESPACES disagree about the namespaces"
+        );
     }
 
     #[test]

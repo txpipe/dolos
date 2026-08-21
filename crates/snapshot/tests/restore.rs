@@ -46,8 +46,10 @@ use dolos_core::{
     StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
+    is_state_kind,
     restore::{self, Budget, Checkpoint},
-    DolosProfile, Error, COMPRESSION_LEVEL, KINDS, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
+    state_layer_count, DolosProfile, Error, COMPRESSION_LEVEL, KINDS, NAMESPACES, STATE_KINDS,
+    UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, Blank};
@@ -348,8 +350,8 @@ fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
 
 /// Done criterion 3, second half.
 ///
-/// One state shard's blob is removed, so the restore fails partway through the
-/// tip — after epochs and other shards have landed. `set_cursor` is the last
+/// One state layer's blob is removed, so the restore fails partway through the
+/// tip — after epochs and other layers have landed. `set_cursor` is the last
 /// thing a restore does, so what it leaves behind is a store set with data in
 /// it and no cursor, which is what `bootstrap`'s `has_existing_data()` reads.
 #[test]
@@ -359,11 +361,13 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    // The last shard, so the failure lands after fifteen others have committed.
+    // The last state layer, so the failure lands after every other one has
+    // committed.
     let last = inscription
-        .layers_of_kind(STATE)
-        .last()
-        .expect("a stele has state shards");
+        .layers
+        .iter()
+        .rfind(|layer| is_state_kind(&layer.kind))
+        .expect("a stele has state layers");
 
     let stele = SteleDir::open(temp.path()).unwrap();
     let blob = stele
@@ -961,12 +965,12 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert_eq!(second.sequence, 1, "and one slot later, in epoch 1");
 
     // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
-    // every state shard is new.
+    // every state layer is new.
     let epoch_zero = |stele: &Inscription| -> Vec<Digest> {
         stele
             .layers
             .iter()
-            .filter(|l| l.kind != STATE && l.scope["epoch"] == 0)
+            .filter(|l| !is_state_kind(&l.kind) && l.scope["epoch"] == 0)
             .map(|l| l.diff_id)
             .collect()
     };
@@ -980,19 +984,19 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert!(
         state_diff_ids(&first)
             .iter()
-            .all(|shard| !state_diff_ids(&second).contains(shard)),
-        "a state shard names the epoch it is the tip of, so none can be shared"
+            .all(|layer| !state_diff_ids(&second).contains(layer)),
+        "a state layer names the epoch it is the tip of, so none can be shared"
     );
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
     // The node is pre-seeded by an actual interrupted restore of the older
-    // stele, stopped at its first state shard, rather than by a hand-written
+    // stele, stopped at its first state layer, rather than by a hand-written
     // progress file. That matters: a hand-written one would claim layers whose
     // records were never committed, and the store comparison at the end would
     // then be checking that a resume skipped work nobody had done.
-    let (_, state_shards) = layers_in_driver_order(older.path(), magic);
+    let (_, tip_layers) = layers_in_driver_order(older.path(), magic);
 
     let err = restore_checkpointed(
         older.path(),
@@ -1000,7 +1004,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         magic,
         &blank,
         false,
-        Some(state_shards[0]),
+        Some(tip_layers[0]),
     )
     .unwrap_err();
 
@@ -1017,7 +1021,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_eq!(
         seeded,
-        first.layers.len() - STATE_SHARDS as usize,
+        first.layers.len() - state_layer_count(),
         "every epoch layer committed before the tip was reached"
     );
 
@@ -1034,11 +1038,11 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         resumed.layers_fetched,
         second.layers.len() - seeded,
         "and everything the newer stele adds was fetched: epoch 1's layers, \
-         and all sixteen shards because a shard is never inherited"
+         and every state layer because a state layer is never inherited"
     );
 
     assert!(
-        resumed.layers_fetched > STATE_SHARDS as usize,
+        resumed.layers_fetched > state_layer_count(),
         "the newer stele has to add an epoch, or the tip is all this proves"
     );
 
@@ -1214,16 +1218,16 @@ fn the_remaining_download_excludes_what_is_already_done() {
     assert!(resumed.compressed_bytes < fresh.compressed_bytes);
 
     // The tip is still in it, always.
-    assert_eq!(resumed.layers, STATE_SHARDS as usize);
+    assert_eq!(resumed.layers, state_layer_count());
 
-    // So the peak a resumed run stages is the widest shard, not the widest
+    // So the peak a resumed run stages is the widest state layer, not the widest
     // layer of the stele — the epoch layers it skips are not staged either.
     assert_eq!(resumed.largest_compressed, widest(&mut plan.tip_layers()));
     assert!(resumed.largest_compressed <= fresh.largest_compressed);
 }
 
-/// The epoch layers and the state shards, each in the order the driver reaches
-/// them.
+/// The epoch layers and the state tip's layers, each in the order the driver
+/// reaches them.
 ///
 /// Read off the [`restore::Plan`] and not the inscription. The document's order
 /// is whatever the export wrote; the driver's is epoch by epoch and, within an
@@ -1242,7 +1246,9 @@ fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, V
 
 fn state_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
-        .layers_of_kind(STATE)
+        .layers
+        .iter()
+        .filter(|layer| is_state_kind(&layer.kind))
         .map(|layer| layer.diff_id)
         .collect()
 }
@@ -1251,7 +1257,7 @@ fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
         .layers
         .iter()
-        .filter(|layer| layer.kind != STATE)
+        .filter(|layer| !is_state_kind(&layer.kind))
         .map(|layer| layer.diff_id)
         .collect()
 }
@@ -1261,7 +1267,7 @@ fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
 // --------------------------------------------------------------------------
 
 /// A stele always carries the whole tip, whatever history travels with it, so
-/// `sync.max_history` never touches the state shards — only the epoch layers.
+/// `sync.max_history` never touches the state layers — only the epoch layers.
 #[test]
 fn max_history_selects_epochs_and_never_the_tip() {
     let domain: ToyDomain = harness();
@@ -1274,7 +1280,14 @@ fn max_history_selects_epochs_and_never_the_tip() {
     for max_history in [None, Some(0), Some(u64::MAX)] {
         let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
 
-        assert_eq!(plan.state.len(), STATE_SHARDS as usize, "{max_history:?}");
+        // Keyed by namespace now, so the tip is seventeen entries and every
+        // layer under them.
+        assert_eq!(plan.state.len(), STATE_KINDS.len(), "{max_history:?}");
+        assert_eq!(
+            plan.tip_layers().count(),
+            state_layer_count(),
+            "{max_history:?}"
+        );
 
         // The fixture stands inside epoch zero, so every window reaches the tip
         // and nothing is ever dropped — which is the assertion, not a shortcut:

@@ -56,7 +56,7 @@ use dolos_snapshot::{
     export::Plan,
     registry::{self, Point},
     restore::{self, Budget, Checkpoint},
-    Error, Network, NAMESPACES, STATE_SHARDS, UTXOS,
+    state_layer_count, Error, Network, NAMESPACES, UTXOS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
 use node::{harness, Blank};
@@ -83,7 +83,7 @@ const EPOCH_0: usize = 4;
 const EPOCH_1: usize = 2;
 
 /// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
-const PER_PUBLISH: usize = EPOCH_0 + STATE_SHARDS as usize;
+const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
 
 // ---------------------------------------------------------------------------
 // The node, and the two chain points it publishes from
@@ -500,8 +500,8 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     assert_eq!(
         resumed.layers_fetched,
-        EPOCH_1 + STATE_SHARDS as usize,
-        "epoch 1's two layers and the sixteen shards, and nothing else"
+        EPOCH_1 + state_layer_count(),
+        "epoch 1's two layers and every state layer, and nothing else"
     );
 
     // The point resolved to what it claimed. `latest` is sequence 1 here, and

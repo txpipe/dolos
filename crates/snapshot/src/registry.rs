@@ -91,8 +91,8 @@
 //! file: a host-local note beside the stores, naming each **epoch layer** whose
 //! upload succeeded. A restart reads it and adopts those layers through
 //! [`Registry::adopt_carried`] — the same move an inherited layer makes, one
-//! `HEAD` and no store read. The sixteen state shards are never in it, for the
-//! reason they are never inherited.
+//! `HEAD` and no store read. The state layers are never in it, for the reason
+//! they are never inherited.
 //!
 //! The record is **a stand-in for the predecessor manifest an unfinished
 //! publish never got to write, and nothing more.** Four properties keep it from
@@ -169,7 +169,7 @@ use crate::{
     export::{self, history_for, same_network, Plan, Predecessor, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
-    DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS, STATE, STATE_SHARDS,
+    DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS,
 };
 
 /// Which stele in a repository a restore wants.
@@ -808,13 +808,15 @@ pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
 /// What a publish holds staged on disk at its peak.
 ///
 /// Not the size of the stele: a publish never has the whole document on disk at
-/// once. What it does have at once is the state pass, which keeps all sixteen
-/// shard sinks open across a single walk of the store — see
-/// [`crate::export`] for why sixteen passes is the alternative — plus whatever
-/// epoch layer is in flight beside it.
+/// once. What it does have at once is a state kind's pass, which keeps that
+/// kind's shard sinks open across a single walk of its namespace — see
+/// [`crate::export`] for why sixteen passes over `utxos` is the alternative —
+/// plus whatever epoch layer is in flight beside it. Summing *every* state
+/// layer rather than the widest kind's is deliberately conservative: the peak
+/// it prices is the pre-split one, an upper bound on any per-kind pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StagingPeak {
-    /// The sixteen state shards, which are staged concurrently.
+    /// Every state layer, summed — the conservative reading above.
     pub state_bytes: u64,
     /// The largest single non-state layer, which is staged alongside them.
     pub largest_other_bytes: u64,
@@ -859,14 +861,15 @@ pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
     for descriptor in &inscription.layers {
         match previous.compressed_size(&blobs, descriptor)? {
             None => peak.unsized_layers += 1,
-            // Every shard is open at once, so they add. Everything else is one
-            // layer at a time beside them, so only the biggest counts.
+            // Every state layer adds — the conservative sum-all-state rule the
+            // type documents. Everything else is one layer at a time beside
+            // them, so only the biggest counts.
             //
             // Saturating because these are a manifest's numbers and a manifest
             // is not this node's document: a wrapped sum would be a *small*
             // need, which is the one direction a refusal must never be wrong
             // in.
-            Some(bytes) if descriptor.kind == STATE => {
+            Some(bytes) if crate::is_state_kind(&descriptor.kind) => {
                 peak.state_bytes = peak.state_bytes.saturating_add(bytes)
             }
             Some(bytes) => peak.largest_other_bytes = peak.largest_other_bytes.max(bytes),
@@ -1061,11 +1064,11 @@ pub fn preview<A: ArchiveStore>(
 
     // Every epoch selected contributes one `blocks` and one `indexes` layer and
     // as many log layers as it has namespaces with logs, the state tip
-    // contributes its sixteen shards however the epochs were restricted, and
-    // the digests layer is there exactly when its records are.
+    // contributes every shard of every kind however the epochs were restricted,
+    // and the digests layer is there exactly when its records are.
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + export::log_layers(plan, archive, &previous)?
-        + STATE_SHARDS as usize
+        + crate::state_layer_count()
         + usize::from(digest_records.is_some());
 
     // The same lookup `export` will make, through the same `layer_spec`, so a
@@ -1428,7 +1431,7 @@ mod tests {
                 json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                 1,
             ),
-            layer(crate::STATE, json!({"shard": 0}), 2),
+            layer(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
             layer(crate::DIGESTS, json!({"lastImmutable": 7}), 3),
         ];
 
@@ -1587,7 +1590,7 @@ mod tests {
                     json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                     1,
                 ),
-                written(crate::STATE, json!({"shard": 0}), 2),
+                written(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
             ],
         }
     }

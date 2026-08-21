@@ -27,8 +27,9 @@
 //! ## Memory
 //!
 //! Nothing here holds a layer. Records go into a [`RecordSink`] one at a time,
-//! and the state pass keeps all sixteen shard sinks open across a single walk
-//! of the store rather than sorting a mainnet-sized set into buckets first.
+//! and each state kind's pass keeps that kind's shard sinks open across a
+//! single walk of its namespace rather than sorting a mainnet-sized set into
+//! buckets first.
 //!
 //! ## Where the stele ends up is not this module's business
 //!
@@ -73,9 +74,9 @@ use crate::{
     layers::{blocks, digests, indexes, logs, state},
     namespaces::NAMESPACES,
     reporting::{Cursor, Records},
-    DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS,
-    COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, INDEXES, LOG_KINDS, LOG_NAMESPACES, STATE,
-    STATE_SHARDS, UTXOS,
+    state_layer_count, DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope,
+    BLOCKS, COMPRESSION_LEVEL, DENSE_EPOCH_KINDS, DIGESTS, INDEXES, LOG_KINDS, LOG_NAMESPACES,
+    STATE_KINDS, UTXOS,
 };
 
 /// The slot window one epoch layer covers.
@@ -599,7 +600,7 @@ where
     // both sides, since an empty log kind produces no layer to multiply.
     let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
         + log_layers(plan, archive, previous)?
-        + STATE_SHARDS as usize
+        + state_layer_count()
         + usize::from(digest_records.is_some());
 
     let mut cursor = Cursor::new(observer, total);
@@ -1253,18 +1254,22 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
     Ok(descriptor)
 }
 
-/// The state tip, as sixteen shards written in one pass.
+/// The state tip: seventeen kinds, walked one namespace at a time.
 ///
-/// All sixteen sinks stay open while the store is walked once and each record
-/// is routed by [`crate::shard_of`]. The alternative — sixteen passes, or one
+/// Kinds go in [`STATE_KINDS`] order — the inscription's order — and within a
+/// kind every shard is written ascending. Per kind, that kind's shard sinks
+/// stay open while its namespace is walked once and each record is routed by
+/// [`crate::shard_of`]; the alternative — sixteen passes over `utxos`, or one
 /// pass buffering into sixteen buckets — is either sixteen full scans of a
-/// mainnet-sized state or the whole tip in memory.
+/// mainnet-sized set or the whole of it in memory. The I/O adds up to what the
+/// pre-split single walk cost, because that walk was already seventeen
+/// sequential per-namespace iterations under one loop.
 ///
-/// Every shard is written, including an empty one, so the shard count a reader
-/// sees is [`STATE_SHARDS`] and never a function of what the data happened to
-/// contain.
+/// Every shard of every kind is written, including an empty one, so the layer
+/// set a reader sees is fixed by [`STATE_KINDS`] and never a function of what
+/// the data happened to contain — tip completeness stays structural.
 ///
-/// ## No shard is ever inherited from a predecessor
+/// ## No state layer is ever inherited from a predecessor
 ///
 /// Two reasons, and the second is the one that matters. The first is what a
 /// reader expects: the state is the *tip*, so it changes every publish and
@@ -1281,81 +1286,89 @@ fn write_state<W: SteleWriter, S: StateStore>(
     store: &S,
     cursor: &mut Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
-    let shards = 0..STATE_SHARDS as u8;
+    let mut layers = Vec::with_capacity(state_layer_count());
 
-    let mut sinks = Vec::with_capacity(shards.len());
-    let mut orders = Vec::with_capacity(shards.len());
-    let mut positions = Vec::with_capacity(shards.len());
+    for (kind, ns, shards) in STATE_KINDS {
+        let mut sinks = Vec::with_capacity(shards as usize);
+        let mut orders = Vec::with_capacity(shards as usize);
+        let mut positions = Vec::with_capacity(shards as usize);
 
-    for shard in shards {
-        let spec = plan.state_scope(shard).layer_spec(STATE)?;
+        for shard in 0..shards {
+            let spec = plan.state_scope(shard).layer_spec(kind)?;
 
-        positions.push(cursor.open(STATE, &spec.scope));
-        sinks.push(sink(stele, &spec)?);
-        orders.push(state::OrderCheck::for_shard(shard));
-    }
+            positions.push(cursor.open(kind, &spec.scope));
+            sinks.push(sink(stele, &spec)?);
+            orders.push(state::OrderCheck::for_shard(shard, shards));
+        }
 
-    let mut records = cursor.records();
+        let mut records = cursor.records();
 
-    // `NAMESPACES` is sorted and `utxos` is its last entry, so one walk in
-    // registry order yields `(ns, key)` ascending within every shard — the
-    // layer's ordering rule, for free.
-    for ns in NAMESPACES {
         if ns == UTXOS {
-            continue;
+            for entry in store.iter_utxos()? {
+                let (txo, value) = entry?;
+
+                route(
+                    &mut sinks,
+                    &mut orders,
+                    ns,
+                    shards,
+                    state::utxo(&txo, &value)?,
+                )?;
+                records.tick();
+            }
+        } else {
+            // `full_range` is the store's own name for everything, and it ends
+            // *exclusively* at `[0xff; 32]` — so an entity keyed with
+            // thirty-two `0xff` bytes is invisible to it. That is a limit of a
+            // fixed-width key type rather than something export could route
+            // around: there is no representable exclusive bound above the
+            // maximum key. It is stated rather than silently inherited, because
+            // a state entity that no publisher can export is worth someone
+            // knowing about.
+            for entry in store.iter_entities(ns, EntityKey::full_range())? {
+                let (key, value) = entry?;
+
+                route(
+                    &mut sinks,
+                    &mut orders,
+                    ns,
+                    shards,
+                    state::entity(&key, &value),
+                )?;
+                records.tick();
+            }
         }
 
-        // `full_range` is the store's own name for everything, and it ends
-        // *exclusively* at `[0xff; 32]` — so an entity keyed with thirty-two
-        // `0xff` bytes is invisible to it. That is a limit of a fixed-width key
-        // type rather than something export could route around: there is no
-        // representable exclusive bound above the maximum key. It is stated
-        // rather than silently inherited, because a state entity that no
-        // publisher can export is worth someone knowing about.
-        for entry in store.iter_entities(ns, EntityKey::full_range())? {
-            let (key, value) = entry?;
+        records.flush();
 
-            route(&mut sinks, &mut orders, state::entity(ns, &key, &value)?)?;
-            records.tick();
-        }
-    }
-
-    for entry in store.iter_utxos()? {
-        let (txo, value) = entry?;
-
-        route(&mut sinks, &mut orders, state::utxo(&txo, &value)?)?;
-        records.tick();
-    }
-
-    records.flush();
-
-    sinks
-        .into_iter()
-        .zip(positions)
-        .map(|(sink, at)| {
+        for (sink, at) in sinks.into_iter().zip(positions) {
             let descriptor = sink.finish()?.descriptor;
-            cursor.close(at, STATE, Outcome::Transferred);
+            cursor.close(at, kind, Outcome::Transferred);
 
-            Ok(descriptor)
-        })
-        .collect()
+            layers.push(descriptor);
+        }
+    }
+
+    Ok(layers)
 }
 
-/// Send one state record to the shard its key belongs to.
+/// Send one state record to the shard its key belongs to under `ns`'s count.
 ///
 /// The shard's own `OrderCheck` is what catches a routing mistake. Without it a
-/// misrouted record still restores — the write path dispatches on the
-/// namespace, not the shard — and only a client fetching shards selectively
-/// would ever notice it was missing.
+/// misrouted record still restores — the write path dispatches on the kind, not
+/// the shard — and only a client fetching shards selectively would ever notice
+/// it was missing.
 fn route<K: RecordSink>(
     sinks: &mut [K],
     orders: &mut [state::OrderCheck],
+    ns: Namespace,
+    shards: u8,
     record: state::StateRecord,
 ) -> Result<(), Error> {
-    let shard = record.shard() as usize;
+    let shard = state::shard_of(&record.key, shards) as usize;
 
     orders[shard].check(&record)?;
-    sinks[shard].write_record(&state::encode(&record)?)?;
+    sinks[shard].write_record(&state::encode(ns, &record)?)?;
 
     Ok(())
 }
