@@ -462,11 +462,11 @@ impl Predecessor for Following {
         kind: &str,
         scope: &serde_json::Value,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        Ok(self.dumps.get(&key_of(kind, scope)?).cloned())
+        Ok(self.dumps.get(&crate::scope_key(kind, scope)?).cloned())
     }
 
     fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
-        Ok(self.dumps.contains_key(&key_of(kind, scope)?))
+        Ok(self.dumps.contains_key(&crate::scope_key(kind, scope)?))
     }
 }
 
@@ -515,11 +515,11 @@ impl Predecessor for Attested {
         kind: &str,
         scope: &serde_json::Value,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        Ok(self.dumps.get(&key_of(kind, scope)?).cloned())
+        Ok(self.dumps.get(&crate::scope_key(kind, scope)?).cloned())
     }
 
     fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
-        Ok(self.dumps.contains_key(&key_of(kind, scope)?))
+        Ok(self.dumps.contains_key(&crate::scope_key(kind, scope)?))
     }
 }
 
@@ -545,22 +545,13 @@ fn retained_dumps(
                 Some(epoch) if epoch < sequence,
             )
         })
-        .filter_map(|layer| Some((key_of(&layer.kind, &layer.scope).ok()?, layer.clone())))
+        .filter_map(|layer| {
+            Some((
+                crate::scope_key(&layer.kind, &layer.scope).ok()?,
+                layer.clone(),
+            ))
+        })
         .collect()
-}
-
-/// A layer's kind and the canonical encoding of its scope.
-///
-/// The same pair [`crate::registry`] keys its own tables by, and it has to be:
-/// two scopes are one layer exactly when they are the same bytes inside the
-/// canonical document.
-fn key_of(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
-    let canonical = stelae::inscription::canonical_json(scope)?;
-
-    let canonical = String::from_utf8(canonical)
-        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
-
-    Ok((kind.to_owned(), canonical))
 }
 
 /// The history a stele at `sequence` carries when it follows `previous`.
@@ -1062,14 +1053,11 @@ fn compare(published: &Inscription, reproduced: &Inscription) -> Result<(), Erro
     Ok(())
 }
 
-/// A stele's layers keyed by the pair that identifies one to an operator: the
-/// kind, and the canonical encoding of its profile-owned scope.
+/// A stele's layers under [`crate::scope_key`], for holding two documents
+/// against each other.
 ///
-/// Canonical rather than [`serde_json::Value`] equality, so two scopes are one
-/// key exactly when they are the same bytes inside the canonical document —
-/// the only sense of "the same scope" the protocol has. A `Vec` per key rather
-/// than a refusal of duplicates: the comparison's job is to report what the
-/// documents say, not to relitigate their validity.
+/// A `Vec` per key rather than a refusal of duplicates: the comparison's job is
+/// to report what the documents say, not to relitigate their validity.
 fn layers_by_scope(
     inscription: &Inscription,
 ) -> Result<std::collections::BTreeMap<(String, String), Vec<&LayerDescriptor>>, Error> {
@@ -1077,13 +1065,8 @@ fn layers_by_scope(
         std::collections::BTreeMap::new();
 
     for layer in &inscription.layers {
-        let scope = stelae::inscription::canonical_json(&layer.scope)?;
-
-        let scope = String::from_utf8(scope)
-            .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
-
         layers
-            .entry((layer.kind.clone(), scope))
+            .entry(crate::scope_key(&layer.kind, &layer.scope)?)
             .or_default()
             .push(layer);
     }
@@ -1639,7 +1622,8 @@ fn adopt_dump(
             epoch,
             carried = adopted.len(),
             shards,
-            "the stele this one follows does not carry the retained state dump for this epoch;              publishing without it — a backfill run is what produces one"
+            "the stele this one follows does not carry the retained state dump for this epoch; \
+             publishing without it — a backfill run is what produces one"
         );
     }
 

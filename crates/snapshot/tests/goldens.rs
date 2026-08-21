@@ -342,7 +342,7 @@ const GOLDEN_LAYERS: [(&str, &str, u64, u64); 51] = [
         91,
     ),
     (
-        DIGESTS,
+        "digests",
         "sha256:13f9bbdf676ac47ad7238a52fa525f4413a88335c23d2d567c888abd8dedec80",
         3,
         250,

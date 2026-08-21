@@ -296,8 +296,14 @@ fn a_retained_dump_is_cut_once_and_inherited_after() {
     // Inherited whole: the descriptors are the predecessor's, byte for byte.
     assert_eq!(dumps_of(&followed.inscription, 1), dumps);
 
-    // And this stele's own tip is new, so the dump and the tip have parted
-    // company — which is the state the dump exists to preserve.
+    // And the dump and the tip have parted company, which is the whole of what
+    // a dump is for. What separates them *here* is the header: a state layer's
+    // header record carries its scope's epoch, and a tip's epoch is the stele's
+    // sequence — 1 where the dump was cut, 2 now — so the header bytes differ
+    // and the `diffId` over them differs too. The records behind it are
+    // identical, because this harness's state store does not move between the
+    // two publishes. On a real node they would differ as well; the assertion
+    // does not depend on that, and should not be read as proving it.
     for dump in &dumps {
         let shard = dump.scope["shard"].as_u64().unwrap();
         let tip = tip_of(&followed.inscription, &dump.kind, shard);

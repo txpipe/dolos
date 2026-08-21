@@ -356,6 +356,30 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
             .is_some()
 }
 
+/// The pair that identifies one layer: its kind, and the canonical encoding of
+/// its profile-owned scope.
+///
+/// Canonical rather than [`serde_json::Value`] equality, because two scopes are
+/// one layer exactly when they are the same bytes inside the canonical
+/// document — the only sense of "the same scope" the protocol has.
+///
+/// One function rather than three, and that is the point of it being here
+/// instead of beside any one caller. Every table keyed this way is compared
+/// against another table keyed this way: the predecessor's inheritable layers
+/// against what a publish asks for, an interrupted publish's record against the
+/// same, a reproduction's layers against the published ones. Three copies of
+/// four lines would agree until one of them was corrected, and the failure that
+/// follows is silent — a layer rebuilt instead of inherited, or a divergence
+/// reported between two documents that say the same thing.
+pub(crate) fn scope_key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
+    let canonical = stelae::inscription::canonical_json(scope)?;
+
+    let canonical = String::from_utf8(canonical)
+        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
+
+    Ok((kind.to_owned(), canonical))
+}
+
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and

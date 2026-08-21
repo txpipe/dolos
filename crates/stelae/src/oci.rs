@@ -1052,6 +1052,22 @@ impl SteleWriter for Registry {
     /// [`Transfer::layers_reused`] draws: these bytes were built out of a
     /// store, hashed, and then not uploaded again — which is a blob-skip
     /// exactly, and not a layer that was never read.
+    ///
+    /// ## And silent, unlike the blob-skip on the upload path
+    ///
+    /// That path emits [`Event::Blob`] with `moved: false` because a watcher
+    /// hearing only about uploads would read the skip as a stall. Nothing
+    /// stalls here: the caller closes the second descriptor's layer as
+    /// `Transferred`, so the layer cursor advances on its own, and the blob
+    /// this describes finished uploading moments ago in this same publish.
+    /// The event drives a per-blob bar, so emitting one would reset it to
+    /// "already in the registry" for bytes that had just crossed the wire —
+    /// which reads as a redundant upload rather than as one blob acquiring a
+    /// second name.
+    ///
+    /// The counters above do record it, and there the double count is the
+    /// reading that is wanted: a publisher comparing two publishes wants the
+    /// dump's bytes to appear as bytes it did not pay to move again.
     fn carry_again(
         &self,
         written: &WrittenLayer,

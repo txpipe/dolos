@@ -169,7 +169,7 @@ use crate::{
     export::{self, history_for, same_network, Plan, Predecessor, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
-    DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS,
+    scope_key, DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS,
 };
 
 /// Which stele in a repository a restore wants.
@@ -535,7 +535,7 @@ impl PublishRecord {
             }
 
             table.insert(
-                key(&layer.descriptor.kind, &layer.descriptor.scope)?,
+                scope_key(&layer.descriptor.kind, &layer.descriptor.scope)?,
                 layer.clone(),
             );
         }
@@ -1249,7 +1249,7 @@ impl Predecessor for Chained<'_> {
     /// turn one of these into a rebuild, which is the direction a dry run is
     /// allowed to be wrong in.
     fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
-        let key = key(kind, scope)?;
+        let key = scope_key(kind, scope)?;
 
         Ok(self.inheritable.contains_key(&key) || self.resumable.contains_key(&key))
     }
@@ -1259,7 +1259,7 @@ impl Predecessor for Chained<'_> {
         kind: &str,
         scope: &serde_json::Value,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        let key = key(kind, scope)?;
+        let key = scope_key(kind, scope)?;
 
         // The arrangement and the answer are one act, in both branches: by the
         // time this returns a descriptor, the transport is already carrying the
@@ -1324,7 +1324,7 @@ impl Predecessor for Chained<'_> {
 
         let mut layers = record.layers.borrow_mut();
 
-        layers.insert(key(&descriptor.kind, &descriptor.scope)?, written);
+        layers.insert(scope_key(&descriptor.kind, &descriptor.scope)?, written);
 
         PublishRecord {
             origin: record.origin.clone(),
@@ -1361,7 +1361,7 @@ fn inheritable_layers(
             continue;
         }
 
-        let key = key(&layer.kind, &layer.scope)?;
+        let key = scope_key(&layer.kind, &layer.scope)?;
 
         if let Some(existing) = inheritable.get(&key) {
             let existing: &LayerDescriptor = existing;
@@ -1405,20 +1405,6 @@ fn inheritable_layers(
     Ok(inheritable)
 }
 
-/// The table key: a layer's kind and the canonical encoding of its scope.
-///
-/// Canonical rather than `serde_json::Value` equality, so that two scopes are
-/// the same key exactly when they are the same bytes inside the canonical
-/// document — which is the only sense of "the same scope" the protocol has.
-fn key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
-    let canonical = stelae::inscription::canonical_json(scope)?;
-
-    let canonical = String::from_utf8(canonical)
-        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
-
-    Ok((kind.to_owned(), canonical))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1459,7 +1445,7 @@ mod tests {
 
         assert_eq!(table.len(), 1);
         assert!(table.contains_key(
-            &key(
+            &scope_key(
                 crate::BLOCKS,
                 &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
             )
@@ -1482,7 +1468,7 @@ mod tests {
 
         let table = inheritable_layers(&previous).unwrap();
 
-        let full = key(
+        let full = scope_key(
             crate::BLOCKS,
             &json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
         )
@@ -1611,6 +1597,7 @@ mod tests {
                     1,
                 ),
                 written(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
+                written(crate::STATE_KINDS[16].0, json!({"epoch": 1, "shard": 0}), 3),
             ],
         }
     }
@@ -1651,20 +1638,37 @@ mod tests {
         PublishRecord::remove(&path).unwrap();
     }
 
-    /// Only the epoch kinds come out of a record, whatever went into one.
+    /// Only what a scope names an epoch for comes out of a record, whatever
+    /// went into one.
+    ///
+    /// Both halves of what [`crate::is_inheritable`] decides, and on the same
+    /// kind for the second: the fixture records shard 0 of one state kind
+    /// twice, once as the moving tip and once as a retained dump. The kind is
+    /// identical, so nothing but the scope can separate them — which is the
+    /// distinction decision 0026 moved from the kind to the scope, and the one
+    /// a record honouring a tip would publish a stale shard through.
     #[test]
     fn a_record_offers_epoch_layers_and_nothing_else() {
         let origin = origin("oci://example.test/dolos");
         let table = record(origin.clone()).table(&origin).unwrap();
 
-        assert_eq!(table.len(), 1);
+        assert_eq!(table.len(), 2);
         assert!(table.contains_key(
-            &key(
+            &scope_key(
                 crate::BLOCKS,
                 &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
             )
             .unwrap()
         ));
+
+        // The dump is in.
+        assert!(table.contains_key(
+            &scope_key(crate::STATE_KINDS[16].0, &json!({"epoch": 1, "shard": 0})).unwrap()
+        ));
+
+        // The tip of the same kind is not.
+        assert!(!table
+            .contains_key(&scope_key(crate::STATE_KINDS[16].0, &json!({"shard": 0})).unwrap()));
     }
 
     /// Done criterion 2's second half, decided without a registry: a record
@@ -1717,7 +1721,7 @@ mod tests {
             // And the same layers under the origin they were written for are
             // offered, so what the guard refuses is the mismatch and not the
             // record.
-            assert_eq!(record(theirs.clone()).table(&theirs).unwrap().len(), 1);
+            assert_eq!(record(theirs.clone()).table(&theirs).unwrap().len(), 2);
         }
 
         // An origin that matches names nothing, and one that differs in every
