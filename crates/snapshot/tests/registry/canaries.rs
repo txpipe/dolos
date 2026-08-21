@@ -22,12 +22,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dolos_cardano::{
     model::{
-        AccountStakeLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
-        Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, LeaderRewardLog,
-        MemberRewardLog, Nonces, PParamValue, PParamsSet, PendingMirState, PendingRewardState,
-        PoolDelegation, PoolDepositRefundLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
-        ProposalState, RollingStats, ShardProgress, Stake, StakeLog, VoteHistory,
+        AccountEpochLog, AccountStakeLog, AccountState, AssetState, AuthHistory, Committee,
+        CommitteeAuthorization, Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState,
+        EndStats, EpochState, EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState,
+        LeaderRewardLog, MemberRewardLog, Nonces, PParamValue, PParamsSet, PendingMirState,
+        PendingRewardState, PoolDelegation, PoolDepositRefundLog, PoolParams, PoolSnapshot,
+        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
+        VoteHistory,
     },
     pallas::{
         codec::utils::Bytes,
@@ -105,6 +106,19 @@ fn filled_epoch_value<T: Clone + std::fmt::Debug>(start: Epoch, slots: [T; 5]) -
     value.schedule(start + 3, Some(next));
 
     value
+}
+
+/// Every field populated, both lists at two entries: the arity the merge
+/// exists to make expressible, and the one the four namespaces it replaces
+/// could not carry.
+pub fn account_epoch_log() -> AccountEpochLog {
+    AccountEpochLog {
+        active_stake: Some(9_876_543_210),
+        pool_id: Some(hash28(0x11)),
+        member_reward: Some(2_345_678_901),
+        leader_rewards: vec![(hash28(0x21), 1_234_567_890), (hash28(0x22), 987_654_321)],
+        deposit_refunds: vec![(hash28(0x41), 500_000_000), (hash28(0x42), 500_000_000)],
+    }
 }
 
 pub fn account_stake_log() -> AccountStakeLog {

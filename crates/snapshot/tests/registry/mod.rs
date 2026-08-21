@@ -11,9 +11,9 @@
 //!
 //! Per namespace, a **canary**: a fully-populated value ([`canaries`]) and the
 //! hex of its encoding at the current `SCHEMA_REVS` revision. The encoding is
-//! taken through the production path — `Entity::encode_entity` for the sixteen
-//! entity namespaces, `layers::state::encode_utxo_value` for `utxos`, the one
-//! namespace whose value this profile builds rather than carries.
+//! taken through the production path — `Entity::encode_entity` for the
+//! seventeen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
+//! the one namespace whose value this profile builds rather than carries.
 //!
 //! ## Append-only history
 //!
@@ -56,8 +56,8 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
+    AccountEpochLog, AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState,
+    EraSummary, FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
     PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
 };
 use dolos_core::{Entity, Namespace};
@@ -137,6 +137,15 @@ fn decode_utxos(bytes: &[u8]) -> Result<(), String> {
 /// silent gap in coverage.
 pub fn registry() -> Vec<Entry> {
     vec![
+        entity_entry!(
+            enc_account_epochs,
+            AccountEpochLog,
+            canaries::account_epoch_log,
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/account-epochs.rev1.hex"),
+            }]
+        ),
         entity_entry!(
             enc_account_stakes,
             AccountStakeLog,

@@ -68,8 +68,8 @@ pub mod restore;
 pub use stelae::progress;
 
 use dolos_cardano::model::{
-    AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
+    AccountEpochLog, AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState,
+    EraSummary, FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
     PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
 };
 use dolos_core::{ChainPoint, Namespace};
@@ -98,11 +98,12 @@ pub const DIGESTS: &str = "digests";
 ///
 /// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
 /// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
-/// marks an entity as log-bearing, so the six are spelled here and held to the
-/// entity types by `log_kinds_derive_from_their_namespaces` in
-/// `tests/coverage.rs`. A seventh namespace acquiring logs would have no layer
+/// marks an entity as log-bearing, so the seven are spelled here and held to
+/// the entity types by `log_kinds_derive_from_their_namespaces` in
+/// `tests/coverage.rs`. An eighth namespace acquiring logs would have no layer
 /// to travel in, which is why [`export`] refuses one rather than dropping it.
-pub const LOG_NAMESPACES: [Namespace; 6] = [
+pub const LOG_NAMESPACES: [Namespace; 7] = [
+    AccountEpochLog::NS,
     AccountStakeLog::NS,
     EpochState::NS,
     LeaderRewardLog::NS,
@@ -120,7 +121,8 @@ pub const LOG_NAMESPACES: [Namespace; 6] = [
 /// not underscores — but it is *spelled out* here rather than composed, so the
 /// wire vocabulary is greppable and a namespace rename cannot silently rename a
 /// published kind. The derivation is a test, not a constructor.
-pub const LOG_KINDS: [(&str, Namespace); 6] = [
+pub const LOG_KINDS: [(&str, Namespace); 7] = [
+    ("log-account-epochs", AccountEpochLog::NS),
     ("log-account-stakes", AccountStakeLog::NS),
     ("log-epochs", EpochState::NS),
     ("log-leader-rewards", LeaderRewardLog::NS),
@@ -149,7 +151,8 @@ pub const LOG_KINDS: [(&str, Namespace); 6] = [
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 17] = [
+pub const STATE_KINDS: [(&str, Namespace, u8); 18] = [
+    ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-account-stakes", AccountStakeLog::NS, 1),
     ("state-accounts", AccountState::NS, 16),
     ("state-assets", AssetState::NS, 16),
@@ -169,9 +172,9 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 17] = [
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
-/// The seventeen state kind names alone: what [`StateScope`] answers for
+/// The eighteen state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 17] = [
+pub const STATE_KIND_NAMES: [&str; 18] = [
     STATE_KINDS[0].0,
     STATE_KINDS[1].0,
     STATE_KINDS[2].0,
@@ -189,6 +192,7 @@ pub const STATE_KIND_NAMES: [&str; 17] = [
     STATE_KINDS[14].0,
     STATE_KINDS[15].0,
     STATE_KINDS[16].0,
+    STATE_KINDS[17].0,
 ];
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
@@ -213,7 +217,7 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the seventeen state kinds — the tip predicate the
+/// Whether `kind` is one of the eighteen state kinds — the tip predicate the
 /// staging arithmetic in [`registry`] sums under.
 pub fn is_state_kind(kind: &str) -> bool {
     state_ns_for(kind).is_some()
@@ -228,7 +232,7 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 77
+/// How many state layers every publish writes: the shard counts summed — 78
 /// today. Every shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
@@ -247,13 +251,13 @@ pub const fn state_layer_count() -> usize {
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
 /// only if its namespace has at least one record in the window, so an epoch
-/// contributes between two and eight layers. Split out because the two arities
+/// contributes between two and nine layers. Split out because the two arities
 /// are what the layer arithmetic in [`export::export`] and
 /// [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The twenty-six layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 26] = [
+/// The twenty-eight layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 28] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
@@ -262,6 +266,7 @@ pub const KINDS: [&str; 26] = [
     LOG_KINDS[3].0,
     LOG_KINDS[4].0,
     LOG_KINDS[5].0,
+    LOG_KINDS[6].0,
     STATE_KIND_NAMES[0],
     STATE_KIND_NAMES[1],
     STATE_KIND_NAMES[2],
@@ -279,6 +284,7 @@ pub const KINDS: [&str; 26] = [
     STATE_KIND_NAMES[14],
     STATE_KIND_NAMES[15],
     STATE_KIND_NAMES[16],
+    STATE_KIND_NAMES[17],
     DIGESTS,
 ];
 
@@ -288,7 +294,7 @@ pub const KINDS: [&str; 26] = [
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
 /// keeps per-(kind, scope) inheritance working across the split.
-pub const EPOCH_KINDS: [&str; 8] = [
+pub const EPOCH_KINDS: [&str; 9] = [
     DENSE_EPOCH_KINDS[0],
     DENSE_EPOCH_KINDS[1],
     LOG_KINDS[0].0,
@@ -297,6 +303,7 @@ pub const EPOCH_KINDS: [&str; 8] = [
     LOG_KINDS[3].0,
     LOG_KINDS[4].0,
     LOG_KINDS[5].0,
+    LOG_KINDS[6].0,
 ];
 
 /// The kind carrying `ns`'s logs, or `None` where the namespace has no log

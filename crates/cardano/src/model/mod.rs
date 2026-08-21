@@ -100,6 +100,7 @@ pub enum CardanoEntity {
     PendingMirState(Box<PendingMirState>),
     GovState(Box<GovState>),
     AccountStakeLog(Box<AccountStakeLog>),
+    AccountEpochLog(Box<AccountEpochLog>),
 }
 
 macro_rules! variant_boilerplate {
@@ -137,6 +138,7 @@ variant_boilerplate!(PendingRewardState);
 variant_boilerplate!(PendingMirState);
 variant_boilerplate!(GovState);
 variant_boilerplate!(AccountStakeLog);
+variant_boilerplate!(AccountEpochLog);
 
 impl dolos_core::Entity for CardanoEntity {
     fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, ChainError> {
@@ -159,6 +161,7 @@ impl dolos_core::Entity for CardanoEntity {
             PendingMirState::NS => PendingMirState::decode_entity(ns, value).map(Into::into),
             GovState::NS => GovState::decode_entity(ns, value).map(Into::into),
             AccountStakeLog::NS => AccountStakeLog::decode_entity(ns, value).map(Into::into),
+            AccountEpochLog::NS => AccountEpochLog::decode_entity(ns, value).map(Into::into),
             _ => Err(ChainError::InvalidNamespace(ns)),
         }
     }
@@ -181,6 +184,7 @@ impl dolos_core::Entity for CardanoEntity {
             Self::PendingMirState(x) => PendingMirState::encode_entity(x),
             Self::GovState(x) => GovState::encode_entity(x),
             Self::AccountStakeLog(x) => AccountStakeLog::encode_entity(x),
+            Self::AccountEpochLog(x) => AccountEpochLog::encode_entity(x),
         }
     }
 }
@@ -199,6 +203,7 @@ pub fn build_schema() -> StateSchema {
     schema.insert(PoolDepositRefundLog::NS, NamespaceType::KeyValue);
     schema.insert(StakeLog::NS, NamespaceType::KeyValue);
     schema.insert(AccountStakeLog::NS, NamespaceType::KeyValue);
+    schema.insert(AccountEpochLog::NS, NamespaceType::KeyValue);
     schema.insert(DatumState::NS, NamespaceType::KeyValue);
     schema.insert(PendingRewardState::NS, NamespaceType::KeyValue);
     schema.insert(PendingMirState::NS, NamespaceType::KeyValue);

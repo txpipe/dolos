@@ -152,8 +152,8 @@ pub fn indexes() -> Vec<IndexRecord> {
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one log layer from another here is the record's key and value,
 /// and both are derived from the namespace's position in [`LOG_NAMESPACES`].
-/// The six kind strings are frozen by the layer headers instead, which is where
-/// they now live on the wire.
+/// The seven kind strings are frozen by the layer headers instead, which is
+/// where they now live on the wire.
 pub fn logs(ns: Namespace) -> Vec<LogRecord> {
     let i = LOG_NAMESPACES
         .iter()
@@ -167,9 +167,9 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
 /// inscription order.
 ///
 /// One layer per namespace now, rather than sixteen layers carrying all
-/// seventeen namespaces between them, so a kind's shards are the shards its
+/// eighteen namespaces between them, so a kind's shards are the shards its
 /// spec'd count allows: both of [`SHARDS`] for the four sixteen-way kinds, and
-/// shard 0 alone for the thirteen single blobs. Twenty-one layers, and every
+/// shard 0 alone for the fourteen single blobs. Twenty-two layers, and every
 /// namespace among them — which is what
 /// `the_golden_state_layers_cover_every_namespace` holds this to.
 pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
@@ -189,7 +189,7 @@ pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
 /// The namespace is no longer in the record — it is the layer's kind — so what
 /// distinguishes one state layer's content from another's is the record's key
 /// and value, both derived from the namespace's position in [`NAMESPACES`].
-/// The seventeen namespace strings are frozen by the kinds in the layer
+/// The eighteen namespace strings are frozen by the kinds in the layer
 /// headers instead, which is where they now live on the wire.
 ///
 /// The key's first byte carries the shard in its high nibble, so the record

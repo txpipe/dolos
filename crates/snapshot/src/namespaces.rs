@@ -1,12 +1,12 @@
 //! The closed set of state namespaces a Dolos stele carries.
 //!
-//! ADR-004 defines state as one uniform key-value space: the sixteen entity
+//! ADR-004 defines state as one uniform key-value space: the seventeen entity
 //! namespaces of `dolos_cardano::model::build_schema()` plus [`UTXOS`], which
 //! is the UTxO set wearing the same shape as everything else. That uniformity
 //! is deliberate — it means the format has one state record, and the planned
 //! refactor folding UTxOs into the entity system (#1042) is invisible to it.
 //!
-//! The names are not spelled here. Sixteen of them are read off the entity
+//! The names are not spelled here. Seventeen of them are read off the entity
 //! types' own `FixedNamespace::NS`, and `utxos` is defined here because nothing
 //! else in the tree defines it. A namespace that exists in `build_schema` and
 //! not in [`NAMESPACES`] would be silently dropped from every published stele,
@@ -14,8 +14,8 @@
 //! that a build failure instead.
 
 use dolos_cardano::model::{
-    AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
+    AccountEpochLog, AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState,
+    EraSummary, FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
     PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
 };
 use dolos_core::Namespace;
@@ -34,7 +34,8 @@ pub const UTXOS: Namespace = "utxos";
 /// Sorted because a state layer's records are ordered by `(ns, key)` and the
 /// coverage test compares this list against `build_schema()` directly;
 /// `namespaces_are_sorted` keeps it that way.
-pub const NAMESPACES: [Namespace; 17] = [
+pub const NAMESPACES: [Namespace; 18] = [
+    AccountEpochLog::NS,
     AccountStakeLog::NS,
     AccountState::NS,
     AssetState::NS,
@@ -69,7 +70,8 @@ pub const NAMESPACES: [Namespace; 17] = [
 /// per-instance iteration order made the namespace's bytes irreproducible
 /// across publishers of identical state. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
-pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
+pub const SCHEMA_REVS: [(Namespace, u64); 18] = [
+    (AccountEpochLog::NS, 1),
     (AccountStakeLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
