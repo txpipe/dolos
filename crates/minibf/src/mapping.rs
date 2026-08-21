@@ -1334,31 +1334,28 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
 /// query time.
 pub use dolos_cardano::pallas_extras::redeemer_script_hash;
 
-/// The Blockfrost purpose of a tx-content redeemer, or `None` for vote and
-/// propose.
-///
-/// The Blockfrost schema predates the conway purposes.
-// TODO: discuss with BF team if the schema should be extended to include
-// vote and propose
-pub fn tx_redeemer_purpose(tag: RedeemerTag) -> Option<Purpose> {
+/// The Blockfrost purpose of a tx-content redeemer.
+pub fn tx_redeemer_purpose(tag: RedeemerTag) -> Purpose {
     match tag {
-        RedeemerTag::Spend => Some(Purpose::Spend),
-        RedeemerTag::Mint => Some(Purpose::Mint),
-        RedeemerTag::Cert => Some(Purpose::Cert),
-        RedeemerTag::Reward => Some(Purpose::Reward),
-        _ => None,
+        RedeemerTag::Spend => Purpose::Spend,
+        RedeemerTag::Mint => Purpose::Mint,
+        RedeemerTag::Cert => Purpose::Cert,
+        RedeemerTag::Reward => Purpose::Reward,
+        RedeemerTag::Vote => Purpose::Vote,
+        RedeemerTag::Propose => Purpose::Propose,
     }
 }
 
-/// The Blockfrost purpose of a script redeemer, or `None` for vote and
-/// propose. Same policy as [`tx_redeemer_purpose`], distinct generated enum.
-pub fn script_redeemer_purpose(tag: RedeemerTag) -> Option<ScriptRedeemerPurpose> {
+/// The Blockfrost purpose of a script redeemer. Same mapping as
+/// [`tx_redeemer_purpose`], distinct generated enum.
+pub fn script_redeemer_purpose(tag: RedeemerTag) -> ScriptRedeemerPurpose {
     match tag {
-        RedeemerTag::Spend => Some(ScriptRedeemerPurpose::Spend),
-        RedeemerTag::Mint => Some(ScriptRedeemerPurpose::Mint),
-        RedeemerTag::Cert => Some(ScriptRedeemerPurpose::Cert),
-        RedeemerTag::Reward => Some(ScriptRedeemerPurpose::Reward),
-        _ => None,
+        RedeemerTag::Spend => ScriptRedeemerPurpose::Spend,
+        RedeemerTag::Mint => ScriptRedeemerPurpose::Mint,
+        RedeemerTag::Cert => ScriptRedeemerPurpose::Cert,
+        RedeemerTag::Reward => ScriptRedeemerPurpose::Reward,
+        RedeemerTag::Vote => ScriptRedeemerPurpose::Vote,
+        RedeemerTag::Propose => ScriptRedeemerPurpose::Propose,
     }
 }
 
@@ -1443,8 +1440,7 @@ impl TxModelBuilder<'_> {
         let fee = redeemer_fee(&units, prices)?;
 
         let out = TxContentRedeemersInner {
-            purpose: tx_redeemer_purpose(redeemer.tag())
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+            purpose: tx_redeemer_purpose(redeemer.tag()),
             tx_index: redeemer.index() as i32,
             // TODO: we should change this in Pallas to ensure that we have a KeepRaw wrapping the
             // redeemer data
@@ -1452,6 +1448,9 @@ impl TxModelBuilder<'_> {
             fee: fee.to_string(),
             unit_mem: units.mem.to_string(),
             unit_steps: units.steps.to_string(),
+            // deliberate divergence from deployed Blockfrost: db-sync leaves
+            // vote and propose redeemers unattributed (script_hash ""), we
+            // resolve them from the ledger.
             script_hash: self
                 .find_redeemer_script(redeemer)?
                 .map(|x| x.to_string())
@@ -1478,10 +1477,6 @@ impl IntoModel<Vec<TxContentRedeemersInner>> for TxModelBuilder<'_> {
 
         let items = redeemers
             .into_iter()
-            // the generated Purpose enum has no vote or propose variants yet
-            // (blockfrost/openapi#464); skip those rows like the scripts
-            // endpoint does instead of failing the whole response.
-            .filter(|x| tx_redeemer_purpose(x.tag()).is_some())
             .map(|x| self.build_redeemer_inner(&x, &prices))
             .try_collect()
             .map_err(|_: StatusCode| StatusCode::INTERNAL_SERVER_ERROR)?;
