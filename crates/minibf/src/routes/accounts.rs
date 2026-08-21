@@ -861,7 +861,6 @@ where
         let slot = summary.epoch_start(reward_epoch);
         let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
 
-        // One point read per epoch, where the four namespaces cost three.
         let Some(log) = domain
             .archive()
             .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)

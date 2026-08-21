@@ -80,9 +80,7 @@ impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
             //
             // Also the reward legs of the account's merged log row, which the
             // shard loop assembles from the slice this visit appends —
-            // `BoundaryWork::account_epoch_row`. The two reward namespaces
-            // this used to emit into shared one `LogKey` per account and so
-            // could carry only one entry between them.
+            // `BoundaryWork::account_epoch_row`.
             ctx.applied_rewards.push(AppliedReward {
                 credential: account.credential.clone(),
                 pool,

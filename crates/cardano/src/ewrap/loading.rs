@@ -469,10 +469,6 @@ impl BoundaryWork {
                 visitor_rewards.visit_account(self, &account_id, &account)?;
                 visitor_drops.visit_account(self, &account_id, &account)?;
 
-                // Everything this epoch holds about the account, in one row:
-                // the stake leg the RUPD shard used to write on its own, the
-                // rewards the visitor just applied, and any refund this
-                // boundary owes the account.
                 let row = self.account_epoch_row(&account, &self.applied_rewards[applied_before..]);
 
                 if !row.is_empty() {
@@ -597,12 +593,8 @@ impl BoundaryWork {
                 self.new_pools.insert(pool.operator);
             }
 
-            // The pool half of RUPD's stake filter, kept instead of discarded.
-            // This scan already reads every `PoolState`; RUPD ran the same one
-            // to decide which pools' delegators the epoch's distribution
-            // covers, and the merged log needs the same answer. Pool counts
-            // are in the thousands, so holding the set is memory rather than
-            // scan time.
+            // Pool counts are in the thousands, so holding the set is memory
+            // rather than scan time.
             if let Some(stake_epoch) = stake_epoch {
                 let admitted = pool
                     .snapshot
@@ -2394,8 +2386,6 @@ mod tests {
         assert!(delegation_dropped(&domain, &mid_cycle));
         assert!(!delegation_dropped(&domain, &newest));
     }
-
-    // --- the merged account-epoch row ---
 
     const STAKE_EPOCH: Epoch = 5;
 

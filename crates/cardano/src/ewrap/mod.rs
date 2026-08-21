@@ -372,8 +372,7 @@ impl BoundaryWork {
             if let Some(pool) = account.delegated_pool_at(stake_epoch) {
                 if self.stake_pools.contains(pool) {
                     // Not filtered on `> 0`: a zero-stake delegator's row must
-                    // exist, which is why absence is per field and never the
-                    // row itself.
+                    // exist.
                     row.active_stake = Some(
                         account
                             .stake
