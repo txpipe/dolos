@@ -20,9 +20,9 @@ use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
 use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
-    eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountState,
-    CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr, GovState, PoolHash,
-    PoolState, ProposalOutcome, ProposalState,
+    eras::ChainSummary, rewards::RewardMap, roll::WorkDeltas, rupd::RupdWork, AccountEpochLog,
+    AccountState, CardanoDelta, CardanoEntity, DRepState, EpochState, EraProtocol, GovDistr,
+    GovState, PoolHash, PoolState, ProposalOutcome, ProposalState,
 };
 
 pub mod commit;
@@ -188,6 +188,25 @@ pub struct BoundaryWork {
     /// [`BoundaryWork::clears_drep_delegation`].
     pub retiring_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
+    /// The stake snapshot this boundary's rewards were computed against, and
+    /// the protocol its stake totals are read under: RUPD's `snapshot_epoch`
+    /// (`C - 3`) and the era of `snapshot_epoch + 1`. `None` where RUPD
+    /// computed nothing — `RupdWork::relevant_epochs` returns `None` below
+    /// epoch 4 and while the snapshot epoch is still at or before the first
+    /// Shelley one, and the merged log has to agree with it epoch for epoch.
+    pub stake_snapshot: Option<(Epoch, EraProtocol)>,
+
+    /// The pools whose delegators are in [`Self::stake_snapshot`]'s
+    /// distribution: those with a snapshot at that epoch that is not retired.
+    /// RUPD's filter, kept from the `PoolState` scan `load_pool_data` already
+    /// runs rather than rebuilt from a second one.
+    pub stake_pools: HashSet<PoolHash>,
+
+    /// Pool deposits this boundary refunds, indexed by the reward account that
+    /// receives them. An operator retiring several pools into one account
+    /// collects several — which is why the merged record's field is a list.
+    pub pool_refunds: HashMap<StakeCredential, Vec<(PoolHash, u64)>>,
+
     /// `GovState::num_dormant_epochs` at the boundary. Stored DRep expiries
     /// carry no dormancy credit, so the expiry check adds the counter back
     /// (`actual = stored + dormant`, Haskell-style).
@@ -317,6 +336,95 @@ impl BoundaryWork {
 
     pub fn add_delta(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.add_for_entity(delta);
+    }
+
+    /// The slot the merged account-epoch log is keyed under: the start of the
+    /// epoch the boundary's work *describes*, which is one before the epoch it
+    /// closes.
+    ///
+    /// Three of the four namespaces this record replaces already used it — the
+    /// stake temporal key, shared with the per-pool `StakeLog` so account- and
+    /// pool-level views of an epoch agree on its label by construction. The
+    /// reward family is what moves onto it (ADR-0027), which is also what lets
+    /// the merge deduplicate the `LogKey` and the pool hash.
+    pub fn account_epoch_slot(&self) -> BlockSlot {
+        self.chain_summary
+            .epoch_start(self.ending_state.number.saturating_sub(1))
+    }
+
+    /// Assemble one account's row of the merged log.
+    ///
+    /// `applied` is the slice of [`Self::applied_rewards`] this account's visit
+    /// just produced — the same entries the three reward namespaces used to
+    /// each turn into a log of their own, read here in one place so an account
+    /// has one row instead of three that share a key.
+    pub fn account_epoch_row(
+        &self,
+        account: &AccountState,
+        applied: &[AppliedReward],
+    ) -> AccountEpochLog {
+        let mut row = AccountEpochLog::default();
+
+        // The stake leg: RUPD's three filters, reproduced against the same
+        // immutable snapshot it read. `go` cannot move mid-epoch, so
+        // `snapshot_at(C - 3)` is the same value here that it was at RUPD time.
+        if let Some((stake_epoch, protocol)) = self.stake_snapshot {
+            if let Some(pool) = account.delegated_pool_at(stake_epoch) {
+                if self.stake_pools.contains(pool) {
+                    // Not filtered on `> 0`: a zero-stake delegator's row must
+                    // exist, which is why absence is per field and never the
+                    // row itself.
+                    row.active_stake = Some(
+                        account
+                            .stake
+                            .snapshot_at(stake_epoch)
+                            .map(|stake| stake.total_for_era(protocol))
+                            .unwrap_or_default(),
+                    );
+                    row.pool_id = Some(*pool);
+                }
+            }
+        }
+
+        for reward in applied {
+            if reward.as_leader {
+                row.leader_rewards.push((reward.pool, reward.amount));
+                continue;
+            }
+
+            match row.member_reward {
+                // An account delegates to one pool, so the reward map holds at
+                // most one delegator entry for it. A second would be a reward
+                // this record cannot express — under the namespaces it
+                // replaces it was silently overwritten, so say so instead.
+                Some(_) => tracing::warn!(
+                    credential = ?account.credential,
+                    pool = %reward.pool,
+                    "a second member reward in one epoch — not representable, dropped"
+                ),
+                None => {
+                    row.member_reward = Some(reward.amount);
+
+                    match row.pool_id {
+                        None => row.pool_id = Some(reward.pool),
+                        Some(pool) if pool != reward.pool => tracing::warn!(
+                            credential = ?account.credential,
+                            delegated = %pool,
+                            paid_by = %reward.pool,
+                            "member reward paid by a pool the account did not delegate to"
+                        ),
+                        Some(_) => (),
+                    }
+                }
+            }
+        }
+
+        if let Some(refunds) = self.pool_refunds.get(&account.credential) {
+            row.deposit_refunds.extend(refunds.iter().copied());
+        }
+
+        row.sort();
+        row
     }
 
     /// Whether this boundary clears `account`'s vote delegation to `drep`.

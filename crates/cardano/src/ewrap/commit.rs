@@ -119,9 +119,13 @@ impl BoundaryWork {
             }
         }
 
-        // Archive logs — share the epoch-start temporal key across shards.
-        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+        // Archive logs — share one temporal key across shards. The shard pass
+        // writes the merged account-epoch rows and nothing else, so the key is
+        // the epoch they describe rather than the one being closed: the same
+        // key the per-pool `StakeLog` and the RUPD stake rows already used
+        // (ADR-0027), which is what lets the reward legs land beside the stake
+        // leg instead of one epoch away from it.
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(self.account_epoch_slot()));
 
         debug!(log_count = self.logs.len(), "writing shard archive logs");
         for (entity_key, log) in self.logs.drain(..) {
