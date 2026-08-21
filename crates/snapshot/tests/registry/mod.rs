@@ -37,6 +37,19 @@
 //! revision)`, because some of them run to kilobytes and a wrapped literal
 //! would hide a diff. Enum variant tables are short and stay inline in
 //! [`enums`], next to the policy they pin.
+//!
+//! The hex for a **new** revision comes from the ignored
+//! `print_current_canary_encodings` test, which prints every canary and every
+//! variant row:
+//!
+//! ```text
+//! cargo test -p dolos-snapshot --test field_registry -- --ignored --nocapture
+//! ```
+//!
+//! That is the only legitimate use for it. It prints; it never writes, and a
+//! golden that already exists is never refreshed from it — a pin that
+//! disagrees with a re-run on unchanged code is a determinism defect, and one
+//! that disagrees after a code change is the change being breaking.
 
 pub mod canaries;
 pub mod enums;

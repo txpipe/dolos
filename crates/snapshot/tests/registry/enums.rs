@@ -23,12 +23,12 @@
 //! the governance code touches". `Voter` is not here, for instance: it selects
 //! *which* of a proposal's three vote maps a vote lands in and is never itself
 //! stored in an entity value, so no stele byte depends on its indexes. Two
-//! enums that are reachable are covered indirectly instead of by a table of
-//! their own — `EpochPosition` is `pub(super)` to `model::epoch_value` and so
-//! unnameable from here, and `NonceVariant` is only ever reached through
-//! `Nonce`; both are pinned by the canaries that carry them (`accounts`,
-//! `epochs`, `pools` for the first, the `PParamValue::ExtraEntropy` row below
-//! for the second).
+//! One reachable enum is covered indirectly instead of by a table of its own:
+//! `EpochPosition` is `pub(super)` to `model::epoch_value` and so unnameable
+//! from here, and is pinned by the canaries that carry it (`accounts`,
+//! `epochs`, `pools`). `NonceVariant` does have a table, whose rows encode the
+//! `Nonce` that wraps it — the variant is never written bare, so pinning it
+//! bare would pin bytes no record can contain.
 
 use dolos_cardano::pallas::codec::minicbor;
 

@@ -61,21 +61,20 @@ fn check_entry(entry: &Entry, expected_rev: u64) {
         "{ns}: the registry carries no canary",
     );
 
-    // Revisions are append-only: ascending, distinct, starting at 1.
-    let mut previous = 0;
-    for pinned in entry.history {
-        assert!(
-            pinned.rev > previous,
-            "{ns}: revisions must ascend and be distinct, found {} after {previous}",
-            pinned.rev,
-        );
-        previous = pinned.rev;
-    }
+    // Revisions are append-only and **contiguous** from 1. Contiguity is the
+    // load-bearing half: a history of `[1, 3]` would ascend happily while
+    // saying nothing about the bytes published at 2, which is exactly the
+    // reader tolerance the retained canaries exist to assert.
+    for (index, pinned) in entry.history.iter().enumerate() {
+        let expected = index as u64 + 1;
 
-    assert_eq!(
-        entry.history[0].rev, 1,
-        "{ns}: the retained history must reach back to revision 1",
-    );
+        assert_eq!(
+            pinned.rev, expected,
+            "{ns}: retained revisions must run 1..=current with no gaps; \
+             revision {expected} has no canary, so nothing asserts that today's \
+             decoder still reads what was published at it",
+        );
+    }
 
     let current = entry.history.last().expect("checked non-empty");
 

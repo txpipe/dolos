@@ -86,7 +86,7 @@ fn gov_action_id(seed: u8, index: u32) -> GovActionId {
 }
 
 /// An `EpochValue` with all six of its fields populated, filled the way the
-/// ledger fills one: four `schedule`/`transition` rounds and a final
+/// ledger fills one: three `schedule`/`transition` rounds and a final
 /// `schedule`, leaving `go`, `set`, `mark`, `live` and `next` distinct and the
 /// position three epochs past `start`.
 ///
