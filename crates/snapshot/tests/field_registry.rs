@@ -12,9 +12,9 @@
 //! - **A field was renumbered, removed, or retyped.** Breaking. The namespace's
 //!   `state-{ns}` / `log-{ns}` kind needs a media-type version bump; editing
 //!   the golden hides a break that every published stele already carries.
-//! - **A field was appended and `SCHEMA_REVS` was not bumped** (or the reverse).
-//!   Additive, and the fix is the bump plus a new retained canary beside the
-//!   old one — never an edit to the old one.
+//! - **A field was appended and `SCHEMA_REVS` was not bumped** (or the
+//!   reverse). Additive, and the fix is the bump plus a new retained canary
+//!   beside the old one — never an edit to the old one.
 //! - **A variant was added to a reachable enum.** Breaking within `v{x}`
 //!   regardless of the field policy: decoders refuse indexes they do not know.
 //! - **The same value encoded to different bytes twice.** Not a re-pin under
@@ -288,7 +288,9 @@ fn renumbering_moves_bytes() {
 /// after a code change is the change being breaking. Both are findings, and
 /// neither is fixed here.
 ///
-/// `cargo test -p dolos-snapshot --test field_registry -- --ignored --nocapture`
+/// ```text
+/// cargo test -p dolos-snapshot --test field_registry -- --ignored --nocapture
+/// ```
 #[test]
 #[ignore = "prints goldens for a new revision; never re-pins an existing one"]
 fn print_current_canary_encodings() {
