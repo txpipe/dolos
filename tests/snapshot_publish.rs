@@ -117,13 +117,15 @@ fn an_epoch_range_selects_the_layers_it_names() {
         }
 
         // The state tip is not history, so restricting the epochs never touches
-        // it: a stele always carries all sixteen shards.
-        assert_eq!(
-            inscription.layers_of_kind(dolos_snapshot::STATE).count(),
-            dolos_snapshot::STATE_SHARDS as usize,
-            "{}",
-            out.display()
-        );
+        // it: a stele always carries every shard of every `state-{ns}` kind.
+        for (kind, _, shards) in dolos_snapshot::STATE_KINDS {
+            assert_eq!(
+                inscription.layers_of_kind(kind).count(),
+                shards as usize,
+                "{kind} in {}",
+                out.display()
+            );
+        }
     }
 }
 

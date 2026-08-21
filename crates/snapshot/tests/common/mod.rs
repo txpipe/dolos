@@ -12,8 +12,8 @@
 //! stored key. What the fixture does have to be is *complete*, because the
 //! golden digests are what freeze the vocabulary: every archive dimension,
 //! every exact-record kind, every state namespace and every log *kind* appears
-//! at least once. Log namespaces are frozen through their kinds now — the
-//! record no longer carries one.
+//! at least once. Namespaces are frozen through their kinds now, for the state
+//! layers as for the logs — neither record carries one any more.
 
 // Each integration test binary compiles this module in full, so the parts one
 // binary does not reach look dead to it. They are not.
@@ -32,7 +32,7 @@ use dolos_snapshot::{
         state::{self, StateRecord, ENTITY_KEY_LEN},
     },
     DigestsScope, DolosProfile, EpochScope, Error, Network, Scope, StateScope, BLOCKS, DIGESTS,
-    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE, UTXOS,
+    INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 use stelae::{
     dir::{BlobIndex, SteleDir, WrittenLayer},
@@ -55,8 +55,10 @@ pub const POINT_HASH: [u8; 32] = [0x0b; 32];
 /// A transaction-metadata label, carried verbatim rather than hashed.
 pub const METADATA_LABEL: u64 = 674;
 
-/// The two state shards the fixture populates. Sixteen exist; a fixture that
-/// wrote all of them would say nothing more than two do about the split.
+/// The shards the fixture populates for a sixteen-way state kind. Sixteen
+/// exist; a fixture that wrote all of them would say nothing more than two do
+/// about the split. A single-blob kind has only shard 0, so it takes the first
+/// of these and stops — see [`state_layers`].
 pub const SHARDS: [u8; 2] = [0, 1];
 
 pub fn network() -> Network {
@@ -161,34 +163,56 @@ pub fn logs(ns: Namespace) -> Vec<LogRecord> {
     vec![LogRecord::new(log_key(START_SLOT, 0x30 + i), vec![0x81, i])]
 }
 
-/// One record per state namespace, in the requested shard.
+/// Every state layer the fixture writes: `(kind, namespace, shard)`, in
+/// inscription order.
 ///
-/// Every namespace appears in every shard, which no real stele would do — real
-/// keys are hash-derived and land where they land. It is what makes the golden
-/// freeze all seventeen namespace strings twice over.
-pub fn state(shard: u8) -> Vec<StateRecord> {
-    NAMESPACES
+/// One layer per namespace now, rather than sixteen layers carrying all
+/// seventeen namespaces between them, so a kind's shards are the shards its
+/// spec'd count allows: both of [`SHARDS`] for the four sixteen-way kinds, and
+/// shard 0 alone for the thirteen single blobs. Twenty-one layers, and every
+/// namespace among them — which is what
+/// `the_golden_state_layers_cover_every_namespace` holds this to.
+pub fn state_layers() -> Vec<(&'static str, Namespace, u8)> {
+    STATE_KINDS
         .into_iter()
-        .enumerate()
-        .map(|(i, ns)| {
-            let byte = (shard << 4) | (i as u8 & 0x0f);
-
-            if ns == UTXOS {
-                state::utxo(
-                    &TxoRef([byte; ENTITY_KEY_LEN].into(), 3),
-                    &EraCbor(6, vec![0xa0, byte]),
-                )
-                .unwrap()
-            } else {
-                state::entity(
-                    ns,
-                    &EntityKey::from(&[byte; ENTITY_KEY_LEN]),
-                    &vec![byte, 0xff],
-                )
-                .unwrap()
-            }
+        .flat_map(|(kind, ns, shards)| {
+            SHARDS
+                .into_iter()
+                .filter(move |shard| *shard < shards)
+                .map(move |shard| (kind, ns, shard))
         })
         .collect()
+}
+
+/// One record for `ns`, which is one layer's worth.
+///
+/// The namespace is no longer in the record — it is the layer's kind — so what
+/// distinguishes one state layer's content from another's is the record's key
+/// and value, both derived from the namespace's position in [`NAMESPACES`].
+/// The seventeen namespace strings are frozen by the kinds in the layer
+/// headers instead, which is where they now live on the wire.
+///
+/// The key's first byte carries the shard in its high nibble, so the record
+/// lands in the layer that claims it under [`state_layers`] — the routing rule
+/// [`dolos_snapshot::shard_of`] applies, spelled out here because the fixture
+/// writes layers directly rather than through the export's router.
+pub fn state(ns: Namespace, shard: u8) -> Vec<StateRecord> {
+    let i = NAMESPACES
+        .iter()
+        .position(|known| *known == ns)
+        .expect("a state namespace") as u8;
+
+    let byte = (shard << 4) | (i & 0x0f);
+
+    vec![if ns == UTXOS {
+        state::utxo(
+            &TxoRef([byte; ENTITY_KEY_LEN].into(), 3),
+            &EraCbor(6, vec![0xa0, byte]),
+        )
+        .unwrap()
+    } else {
+        state::entity(&EntityKey::from(&[byte; ENTITY_KEY_LEN]), &vec![byte, 0xff])
+    }]
 }
 
 pub fn digests() -> Vec<ImmutableDigests> {
@@ -255,10 +279,11 @@ pub fn write_layer(
 
 /// The fixture's kinds, encoded, in inscription order.
 ///
-/// `state` appears twice — one layer per populated shard — which is the normal
-/// case for this profile rather than an edge one. Every log kind appears, which
-/// is what makes the goldens freeze all six kind strings: the namespace lives
-/// in the layer header now, and nowhere else on the wire.
+/// Every log kind and every state kind appears, which is what makes the goldens
+/// freeze all twenty-three namespace-bearing kind strings: the namespace lives
+/// in the layer header now, and nowhere else on the wire. A sixteen-way state
+/// kind appears twice — one layer per populated shard — which is the normal
+/// case for this profile rather than an edge one.
 pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
     use dolos_snapshot::layers::{
         blocks, digests as digests_layer, indexes as indexes_layer, logs,
@@ -285,11 +310,11 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
         ));
     }
 
-    for shard in SHARDS {
+    for (kind, ns, shard) in state_layers() {
         layers.push((
-            STATE,
+            kind,
             Box::new(state_scope(shard)),
-            encode_all(&state(shard), state::encode),
+            encode_all(&state(ns, shard), |record| state::encode(ns, record)),
         ));
     }
 

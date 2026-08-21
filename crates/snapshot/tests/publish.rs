@@ -64,8 +64,9 @@ mod watcher;
 use dolos_core::Domain as _;
 use dolos_snapshot::{
     export::{self, Following, Predecessor as _, Standing},
+    is_state_kind,
     registry::{self, Publishing},
-    DolosProfile, Error, BLOCKS, INDEXES, STATE_SHARDS,
+    state_layer_count, DolosProfile, Error, BLOCKS, INDEXES,
 };
 use stelae::{progress::Outcome, SteleReader as _};
 
@@ -89,10 +90,10 @@ const EPOCH_0: usize = 2 + EPOCH_0_LOGS.len();
 const EPOCH_1: usize = 2;
 
 /// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
-const PER_PUBLISH: usize = EPOCH_0 + STATE_SHARDS as usize;
+const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
 
 /// Layers a publish of sequence 1 carries: both epochs plus the state tip.
-const WHOLE_SECOND: usize = EPOCH_0 + EPOCH_1 + STATE_SHARDS as usize;
+const WHOLE_SECOND: usize = EPOCH_0 + EPOCH_1 + state_layer_count();
 
 // ---------------------------------------------------------------------------
 // Done criteria 1 and 2
@@ -127,7 +128,7 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
     );
     assert_eq!(
         second.layers_built,
-        EPOCH_1 + STATE_SHARDS as usize,
+        EPOCH_1 + state_layer_count(),
         "epoch 1's blocks and indexes, and the sixteen state shards"
     );
     assert_eq!(second.inscription.layers.len(), WHOLE_SECOND);
@@ -137,7 +138,7 @@ fn a_second_publish_builds_and_uploads_only_what_is_new() {
     // state shard's header record names its epoch.
     assert_eq!(
         second.transfer.layers_uploaded,
-        (EPOCH_1 + STATE_SHARDS as usize) as u64
+        (EPOCH_1 + state_layer_count()) as u64
     );
     assert_eq!(second.transfer.layers_reused, EPOCH_0 as u64);
     assert_eq!(second.transfer.layers_skipped, 0);
@@ -605,13 +606,14 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
     {
         let size = size.expect("the manifest sizes every layer");
 
-        match descriptor.kind.as_str() {
-            dolos_snapshot::STATE => state_bytes += size,
-            _ => largest_other_bytes = std::cmp::max(largest_other_bytes, size),
+        if is_state_kind(&descriptor.kind) {
+            state_bytes += size;
+        } else {
+            largest_other_bytes = std::cmp::max(largest_other_bytes, size);
         }
     }
 
-    assert_eq!(peak.state_bytes, state_bytes, "all sixteen shards at once");
+    assert_eq!(peak.state_bytes, state_bytes, "every state layer summed");
     assert_eq!(
         peak.largest_other_bytes, largest_other_bytes,
         "and the largest single layer beside them"
@@ -708,8 +710,8 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
         record
             .layers
             .iter()
-            .all(|layer| layer.descriptor.kind != dolos_snapshot::STATE),
-        "a state shard is the tip, and is never recorded",
+            .all(|layer| !is_state_kind(&layer.descriptor.kind)),
+        "a state layer is the tip, and is never recorded",
     );
 
     // The restart, against the same repository and the same storage.
@@ -727,14 +729,17 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
 
     assert_eq!(
         resumed.layers_built,
-        1 + STATE_SHARDS as usize,
-        "epoch 1's indexes and the sixteen state shards, and nothing else",
+        1 + state_layer_count(),
+        "epoch 1's indexes and every state layer, and nothing else",
     );
 
     // The claim in the counters the transport keeps: the layers the record
-    // carried moved no bytes at all, and the shards it never carried did.
+    // carried moved no bytes at all, and the state layers it never carried did.
     assert_eq!(resumed.transfer.layers_reused, (EPOCH_0 + 1) as u64);
-    assert_eq!(resumed.transfer.layers_uploaded, 1 + STATE_SHARDS);
+    assert_eq!(
+        resumed.transfer.layers_uploaded,
+        1 + state_layer_count() as u64
+    );
     assert_eq!(
         resumed.transfer.layers_skipped, 0,
         "a layer skipped by the blob check is one that was built first, which is \
@@ -827,8 +832,8 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
     );
     assert_eq!(
         published.layers_built,
-        EPOCH_1 + STATE_SHARDS as usize,
-        "epoch 1's two layers and the sixteen state shards, exactly as if no \
+        EPOCH_1 + state_layer_count(),
+        "epoch 1's two layers and every state layer, exactly as if no \
          record existed",
     );
 

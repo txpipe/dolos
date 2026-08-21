@@ -3,7 +3,8 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: ten layer kinds, their media types,
+//! what a Dolos stele actually contains: twenty-six layer kinds, their media
+//! types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
@@ -67,8 +68,9 @@ pub mod restore;
 pub use stelae::progress;
 
 use dolos_cardano::model::{
-    AccountStakeLog, EpochState, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-    PoolDepositRefundLog, StakeLog,
+    AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
+    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
+    PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -78,8 +80,8 @@ use stelae::{
     Compression, Profile,
 };
 
-pub use layers::state::{shard_of, STATE_SHARDS};
-pub use namespaces::{NAMESPACES, UTXOS};
+pub use layers::state::shard_of;
+pub use namespaces::{NAMESPACES, SCHEMA_REVS, UTXOS};
 
 /// Reverse-DNS name of this profile. Vendor-owned; the protocol validates the
 /// shape and never composes it.
@@ -90,7 +92,6 @@ pub const PROFILE_VERSION: u64 = 1;
 
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
-pub const STATE: &str = "state";
 pub const DIGESTS: &str = "digests";
 
 /// The namespaces the ledger writes epoch-boundary logs under, byte-sorted.
@@ -128,6 +129,120 @@ pub const LOG_KINDS: [(&str, Namespace); 6] = [
     ("log-stakes", StakeLog::NS),
 ];
 
+/// The state layer kinds: the namespace each carries and the shard count its
+/// tip is published in, in inscription order.
+///
+/// One kind per namespace, for the same reason [`LOG_KINDS`] is one per log
+/// namespace (decision 0026): a breaking change to one namespace's record shape
+/// moves that kind's media type and fails closed on exactly the namespace that
+/// broke, and a namespace this profile does not know is skippable at the
+/// transport rather than poisoning one shared layer. The kind is `state-`
+/// followed by the namespace with `_` rewritten to `-` — a media type's kind
+/// token admits hyphens and not underscores — but it is *spelled out* here
+/// rather than composed, so the wire vocabulary is greppable and a namespace
+/// rename cannot silently rename a published kind. The derivation is a test,
+/// not a constructor (`state_kinds_derive_from_their_namespaces`).
+///
+/// The shard count is **specification, never tuning**: the four namespaces
+/// whose populations are chain-scale — the UTxO set, accounts, assets and
+/// datums — shard sixteen ways by the first key nibble, and every other
+/// namespace is a single blob. Re-sharding a namespace is a media-type-version
+/// event for that namespace's kind, decided by the format's owner; it is not a
+/// constant to nudge.
+pub const STATE_KINDS: [(&str, Namespace, u8); 17] = [
+    ("state-account-stakes", AccountStakeLog::NS, 1),
+    ("state-accounts", AccountState::NS, 16),
+    ("state-assets", AssetState::NS, 16),
+    ("state-datums", DatumState::NS, 16),
+    ("state-dreps", DRepState::NS, 1),
+    ("state-epochs", EpochState::NS, 1),
+    ("state-eras", EraSummary::NS, 1),
+    ("state-gov", GovState::NS, 1),
+    ("state-leader-rewards", LeaderRewardLog::NS, 1),
+    ("state-member-rewards", MemberRewardLog::NS, 1),
+    ("state-pending-mirs", PendingMirState::NS, 1),
+    ("state-pending-rewards", PendingRewardState::NS, 1),
+    ("state-pool-deposit-refunds", PoolDepositRefundLog::NS, 1),
+    ("state-pools", PoolState::NS, 1),
+    ("state-proposals", ProposalState::NS, 1),
+    ("state-stakes", StakeLog::NS, 1),
+    ("state-utxos", namespaces::UTXOS, 16),
+];
+
+/// The seventeen state kind names alone: what [`StateScope`] answers for
+/// [`Scope::kinds`].
+pub const STATE_KIND_NAMES: [&str; 17] = [
+    STATE_KINDS[0].0,
+    STATE_KINDS[1].0,
+    STATE_KINDS[2].0,
+    STATE_KINDS[3].0,
+    STATE_KINDS[4].0,
+    STATE_KINDS[5].0,
+    STATE_KINDS[6].0,
+    STATE_KINDS[7].0,
+    STATE_KINDS[8].0,
+    STATE_KINDS[9].0,
+    STATE_KINDS[10].0,
+    STATE_KINDS[11].0,
+    STATE_KINDS[12].0,
+    STATE_KINDS[13].0,
+    STATE_KINDS[14].0,
+    STATE_KINDS[15].0,
+    STATE_KINDS[16].0,
+];
+
+/// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
+/// this profile defines.
+pub fn state_kind_for(ns: Namespace) -> Option<&'static str> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(_, known, _)| *known == ns)
+        .map(|(kind, _, _)| kind)
+}
+
+/// The namespace `kind` carries state for, or `None` where the kind is not a
+/// state layer.
+///
+/// The reader's half of the split, exactly as [`log_ns_for`] is for the logs:
+/// a restore learns which namespace a layer's records belong to from its kind,
+/// since the records no longer say.
+pub fn state_ns_for(kind: &str) -> Option<Namespace> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(known, _, _)| *known == kind)
+        .map(|(_, ns, _)| ns)
+}
+
+/// Whether `kind` is one of the seventeen state kinds — the tip predicate the
+/// staging arithmetic in [`registry`] sums under.
+pub fn is_state_kind(kind: &str) -> bool {
+    state_ns_for(kind).is_some()
+}
+
+/// How many shards `ns`'s state kind publishes, or `None` where the namespace
+/// is not one this profile defines.
+pub fn shards_for(ns: Namespace) -> Option<u8> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(_, known, _)| *known == ns)
+        .map(|(_, _, shards)| shards)
+}
+
+/// How many state layers every publish writes: the shard counts summed — 77
+/// today. Every shard of every namespace kind is written even when empty, so
+/// tip completeness stays structural rather than data-dependent.
+pub const fn state_layer_count() -> usize {
+    let mut total = 0;
+    let mut i = 0;
+
+    while i < STATE_KINDS.len() {
+        total += STATE_KINDS[i].2 as usize;
+        i += 1;
+    }
+
+    total
+}
+
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
@@ -137,8 +252,8 @@ pub const LOG_KINDS: [(&str, Namespace); 6] = [
 /// [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The ten layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 10] = [
+/// The twenty-six layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 26] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
@@ -147,7 +262,23 @@ pub const KINDS: [&str; 10] = [
     LOG_KINDS[3].0,
     LOG_KINDS[4].0,
     LOG_KINDS[5].0,
-    STATE,
+    STATE_KIND_NAMES[0],
+    STATE_KIND_NAMES[1],
+    STATE_KIND_NAMES[2],
+    STATE_KIND_NAMES[3],
+    STATE_KIND_NAMES[4],
+    STATE_KIND_NAMES[5],
+    STATE_KIND_NAMES[6],
+    STATE_KIND_NAMES[7],
+    STATE_KIND_NAMES[8],
+    STATE_KIND_NAMES[9],
+    STATE_KIND_NAMES[10],
+    STATE_KIND_NAMES[11],
+    STATE_KIND_NAMES[12],
+    STATE_KIND_NAMES[13],
+    STATE_KIND_NAMES[14],
+    STATE_KIND_NAMES[15],
+    STATE_KIND_NAMES[16],
     DIGESTS,
 ];
 
@@ -638,12 +769,26 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// Build the profile's `parameters`: what a reader needs in order to interpret
 /// the layers.
 ///
-/// Both values are consequences of code in this workspace rather than free
-/// choices, so both are sourced rather than spelled: the shard count is
-/// [`STATE_SHARDS`], which [`shard_of`] divides by, and the hash scheme is
-/// [`INDEX_KEY_HASH`], which describes [`dolos_core::key_hash`].
+/// Every value is a consequence of code in this workspace rather than a free
+/// choice, so every one is sourced rather than spelled: the hash scheme is
+/// [`INDEX_KEY_HASH`], which describes [`dolos_core::key_hash`]; `shards` is
+/// the shard column of [`STATE_KINDS`], which the export routes by; and
+/// `schemas` is [`SCHEMA_REVS`], the per-namespace record-content revision the
+/// compatibility machinery of decision 0026 keys on. Both maps are keyed by
+/// namespace — JCS sorts the keys, so the maps render in the byte order the
+/// tables are kept in.
 pub fn parameters() -> serde_json::Value {
-    json!({"stateShards": STATE_SHARDS, "indexKeyHash": INDEX_KEY_HASH})
+    let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
+        .into_iter()
+        .map(|(_, ns, shards)| (ns.to_owned(), json!(shards)))
+        .collect();
+
+    let schemas: serde_json::Map<String, serde_json::Value> = SCHEMA_REVS
+        .into_iter()
+        .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
+        .collect();
+
+    json!({"indexKeyHash": INDEX_KEY_HASH, "shards": shards, "schemas": schemas})
 }
 
 /// The compression this profile publishes under.
@@ -666,7 +811,11 @@ pub struct EpochScope {
     pub end_slot: u64,
 }
 
-/// Scope of one shard of the state tip.
+/// Scope of one shard of one state kind's tip.
+///
+/// Uniform across all seventeen kinds, single-blob namespaces included — their
+/// one layer is shard 0 — so the header and descriptor shapes stay one shape
+/// and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateScope {
     pub network_magic: u64,
@@ -761,7 +910,7 @@ impl Scope for StateScope {
     }
 
     fn kinds(&self) -> &'static [&'static str] {
-        &[STATE]
+        &STATE_KIND_NAMES
     }
 
     fn shape(&self) -> &'static str {
@@ -827,7 +976,7 @@ mod tests {
 
     #[test]
     fn an_undefined_kind_is_refused() {
-        for kind in ["utxos", "receipts", "", "Blocks"] {
+        for kind in ["utxos", "state", "logs", "receipts", "", "Blocks"] {
             assert!(DolosProfile.layer_media_type(kind).is_err(), "{kind:?}");
             assert!(
                 checked_layer_media_type(&DolosProfile, kind).is_err(),
@@ -962,18 +1111,44 @@ mod tests {
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
-    /// The two parameters are claims about code elsewhere in this workspace, so
+    /// The parameters are claims about code elsewhere in this workspace, so
     /// they are compared against that code rather than against themselves.
     #[test]
     fn parameters_report_what_the_code_does() {
         let parameters = parameters();
 
-        assert_eq!(parameters["stateShards"], STATE_SHARDS);
         assert_eq!(parameters["indexKeyHash"], INDEX_KEY_HASH);
+        assert!(
+            parameters.get("stateShards").is_none(),
+            "the flat shard count was replaced by the per-namespace map"
+        );
 
-        let shards: Vec<u8> = (0u8..=255).map(|b| shard_of(&[b])).collect();
-        let distinct: std::collections::BTreeSet<u8> = shards.iter().copied().collect();
-        assert_eq!(distinct.len() as u64, STATE_SHARDS);
+        // The two maps are the two tables, entry for entry — and nothing more:
+        // a namespace in the JSON that no table has would be a claim about code
+        // that does not exist.
+        for (_, ns, shards) in STATE_KINDS {
+            assert_eq!(parameters["shards"][ns], shards, "{ns}");
+        }
+        assert_eq!(
+            parameters["shards"].as_object().unwrap().len(),
+            STATE_KINDS.len()
+        );
+
+        for (ns, rev) in SCHEMA_REVS {
+            assert_eq!(parameters["schemas"][ns], rev, "{ns}");
+        }
+        assert_eq!(
+            parameters["schemas"].as_object().unwrap().len(),
+            SCHEMA_REVS.len()
+        );
+
+        // The routing rule behind the map: a sixteen-way namespace covers every
+        // shard its count promises, and a single blob is always shard 0.
+        let nibbles: std::collections::BTreeSet<u8> =
+            (0u8..=255).map(|b| shard_of(&[b], 16)).collect();
+        assert_eq!(nibbles.len(), 16);
+
+        assert!((0u8..=255).all(|b| shard_of(&[b], 1) == 0));
     }
 
     /// A scope belongs to the kinds whose shape it is, and to no others.
@@ -999,13 +1174,16 @@ mod tests {
         for kind in EPOCH_KINDS {
             epoch.layer_spec(kind).unwrap();
         }
-        state.layer_spec(STATE).unwrap();
+        for kind in STATE_KIND_NAMES {
+            state.layer_spec(kind).unwrap();
+        }
         digests.layer_spec(DIGESTS).unwrap();
 
         for (spec, kind) in [
-            (epoch.layer_spec(STATE), STATE),
+            (epoch.layer_spec(STATE_KIND_NAMES[0]), STATE_KIND_NAMES[0]),
             (epoch.layer_spec(DIGESTS), DIGESTS),
             (state.layer_spec(BLOCKS), BLOCKS),
+            (state.layer_spec("state"), "state"),
             (digests.layer_spec(LOG_KINDS[0].0), LOG_KINDS[0].0),
         ] {
             let err = spec.unwrap_err();

@@ -18,12 +18,11 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::*;
 use dolos_cardano::{indexes::archive_dimensions, model::build_schema};
 use dolos_core::{ExactKind, IndexRecord, Namespace};
 use dolos_snapshot::{
-    layers::indexes, log_kind_for, log_ns_for, namespaces, LOG_KINDS, LOG_NAMESPACES, NAMESPACES,
-    UTXOS,
+    layers::indexes, log_kind_for, log_ns_for, namespaces, shards_for, state_kind_for,
+    state_ns_for, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
 };
 
 /// The state namespaces this profile carries are exactly `build_schema`'s, plus
@@ -140,22 +139,53 @@ fn the_golden_indexes_layer_covers_every_dimension_and_kind() {
     );
 }
 
-/// Every state namespace appears in the golden `state` layers.
+/// Every state namespace appears in the golden state layers.
+///
+/// The record no longer names its namespace, so this counts *layers* rather
+/// than records: a namespace is covered when the fixture writes the kind that
+/// carries it. That is the only thing keeping the split honest here — a
+/// namespace whose kind the fixture skipped would have no golden digest
+/// freezing its media type.
 #[test]
 fn the_golden_state_layers_cover_every_namespace() {
     let expected: BTreeSet<Namespace> = NAMESPACES.into_iter().collect();
 
-    for shard in SHARDS {
-        let present: BTreeSet<Namespace> = common::state(shard)
-            .iter()
-            .map(|record| record.ns)
-            .collect();
+    let present: BTreeSet<Namespace> = common::state_layers()
+        .into_iter()
+        .map(|(_, ns, _)| ns)
+        .collect();
 
-        assert_eq!(
-            present, expected,
-            "shard {shard}: the golden state layer no longer freezes every namespace"
+    assert_eq!(
+        present, expected,
+        "the golden state layers no longer freeze every namespace"
+    );
+
+    // And each of those layers actually carries a record: an empty layer would
+    // freeze the kind string and nothing about the codec under it.
+    for (kind, ns, shard) in common::state_layers() {
+        assert!(
+            !common::state(ns, shard).is_empty(),
+            "{kind}/{shard}: no golden record"
         );
     }
+}
+
+/// Every state kind appears in the golden stele, so all seventeen kind strings
+/// are frozen by a published digest — the state half of
+/// `the_golden_stele_covers_every_log_kind`.
+#[test]
+fn the_golden_stele_covers_every_state_kind() {
+    let present: BTreeSet<&str> = common::all_layers()
+        .iter()
+        .filter_map(|(kind, _, _)| state_ns_for(kind).map(|_| *kind))
+        .collect();
+
+    let expected: BTreeSet<&str> = STATE_KINDS.into_iter().map(|(kind, _, _)| kind).collect();
+
+    assert_eq!(
+        present, expected,
+        "the golden stele no longer freezes every state kind"
+    );
 }
 
 /// The log namespaces draw from the same registry, so a log kind can never name
@@ -252,4 +282,83 @@ fn the_golden_stele_covers_every_log_kind() {
     for (_, ns) in LOG_KINDS {
         assert!(!common::logs(ns).is_empty(), "{ns}: no golden record");
     }
+}
+
+/// Done criterion 3's table half: the STATE_KINDS table, held to its own rule.
+///
+/// The same discipline `log_kinds_derive_from_their_namespaces` applies, plus
+/// the column the log table does not have — the shard count, which is
+/// specification rather than tuning and so is pinned here namespace by
+/// namespace.
+#[test]
+fn state_kinds_derive_from_their_namespaces() {
+    assert_eq!(STATE_KINDS.len(), NAMESPACES.len());
+
+    let mut kinds = Vec::new();
+
+    for (kind, ns, shards) in STATE_KINDS {
+        assert_eq!(kind, format!("state-{}", ns.replace('_', "-")), "{ns}");
+
+        // Both directions of the lookup, against the spelling and not against
+        // the derivation: a table entry nothing can find is a layer nothing can
+        // restore.
+        assert_eq!(state_kind_for(ns), Some(kind), "{ns}");
+        assert_eq!(state_ns_for(kind), Some(ns), "{kind}");
+        assert_eq!(shards_for(ns), Some(shards), "{ns}");
+
+        kinds.push(kind);
+    }
+
+    // The underscore rewrite is not hypothetical here, as it is for the logs:
+    // two state namespaces carry one.
+    assert_eq!(
+        state_kind_for("pending_rewards"),
+        Some("state-pending-rewards")
+    );
+    assert_eq!(state_kind_for("pending_mirs"), Some("state-pending-mirs"));
+
+    // Injective in both columns. Two namespaces sharing a kind would publish one
+    // namespace's tip under another's name; two kinds sharing a namespace would
+    // restore the same records twice.
+    let distinct_kinds: BTreeSet<&str> = kinds.iter().copied().collect();
+    let distinct_namespaces: BTreeSet<Namespace> =
+        STATE_KINDS.into_iter().map(|(_, ns, _)| ns).collect();
+
+    assert_eq!(distinct_kinds.len(), STATE_KINDS.len());
+    assert_eq!(distinct_namespaces.len(), STATE_KINDS.len());
+
+    // Ascending, in both columns: the inscription lists layers in `KINDS` order,
+    // so the table's order is published order.
+    let mut sorted = kinds.clone();
+    sorted.sort_unstable();
+    assert_eq!(kinds, sorted, "STATE_KINDS must be in byte order");
+
+    assert_eq!(
+        STATE_KINDS.map(|(_, ns, _)| ns),
+        NAMESPACES,
+        "STATE_KINDS and NAMESPACES disagree about the namespaces"
+    );
+
+    // The shard map is the spec's, not the data's: four chain-scale namespaces
+    // split sixteen ways, and every other namespace is a single blob. Changing
+    // one of these is a media-type-version event for that kind, so it is spelled
+    // out here rather than derived from the table it is checking.
+    for (_, ns, shards) in STATE_KINDS {
+        let expected = match ns {
+            "utxos" | "accounts" | "assets" | "datums" => 16,
+            _ => 1,
+        };
+
+        assert_eq!(shards, expected, "{ns}");
+    }
+
+    // Nothing else is a state kind — `state`, above all, which is what these
+    // seventeen replaced.
+    for absent in ["state", "state-", "state-logs", "blocks", "", "state_utxos"] {
+        assert!(state_ns_for(absent).is_none(), "{absent:?}");
+    }
+
+    // And a namespace this profile does not define has neither kind nor count.
+    assert_eq!(state_kind_for("receipts"), None);
+    assert_eq!(shards_for("receipts"), None);
 }

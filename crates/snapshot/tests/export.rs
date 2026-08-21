@@ -29,6 +29,8 @@ mod common;
 mod node;
 mod watcher;
 
+use std::collections::BTreeMap;
+
 use common::read_both_ways;
 use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, model::EraSummary,
@@ -37,13 +39,14 @@ use dolos_cardano::{
 use dolos_core::{
     builtin::{MemoryIndexStore, MemoryStateStore},
     ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord,
-    IndexRecord, IndexStore, LogKey, StateStore, StateWriter as _, TagRecord, TemporalKey,
+    IndexRecord, IndexStore, LogKey, Namespace, StateStore, StateWriter as _, TagRecord,
+    TemporalKey,
 };
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
     layers::{blocks, indexes, logs, state},
-    DolosProfile, Network, BLOCKS, INDEXES, LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE,
-    STATE_SHARDS, UTXOS,
+    state_layer_count, DolosProfile, Network, BLOCKS, INDEXES, LOG_KINDS, LOG_NAMESPACES,
+    NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
 use node::{export_to, harness, plan_for};
@@ -57,7 +60,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:6eecdf3b910983cc559f35df6246a2920b11fe442a6297d1e673224e25e24dba";
+    "sha256:f834f8bc649d1a55d35d29ada7f2112393ba7c193bffcc405d2579b29338e603";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -146,11 +149,11 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
     )
     .unwrap();
 
-    // Three epochs of blocks and indexes, then sixteen state shards. No
+    // Three epochs of blocks and indexes, then every state layer. No
     // `digests` layer: nothing supplies one — and **no log layers at all**,
     // which is the omit-if-empty rule seen from the other side: a store with no
     // logs in it publishes no layer claiming there are none.
-    assert_eq!(inscription.layers.len(), 3 * 2 + STATE_SHARDS as usize);
+    assert_eq!(inscription.layers.len(), 3 * 2 + state_layer_count());
 
     for (kind, _) in LOG_KINDS {
         assert_eq!(
@@ -265,8 +268,13 @@ fn a_harness_domain_exports_a_complete_stele() {
     inscription.validate().unwrap();
     inscription.check_profile(&DolosProfile).unwrap();
 
-    // Every kind but `digests`, which has no source in this slice.
-    for kind in [BLOCKS, INDEXES, STATE] {
+    // Every kind but the log kinds and `digests`, which have no source in this
+    // slice. The state kinds are all here, seeded or not: a namespace the
+    // harness never wrote still publishes its shards, empty.
+    for kind in [BLOCKS, INDEXES]
+        .into_iter()
+        .chain(STATE_KINDS.into_iter().map(|(kind, _, _)| kind))
+    {
         assert!(
             inscription.layers_of_kind(kind).next().is_some(),
             "no {kind} layer"
@@ -428,34 +436,43 @@ fn every_layer_reads_back_as_the_store_yields_it() {
     assert!(exact > 0, "the fixture produced no exact records");
 
     // --- state ------------------------------------------------------------
-    let written: Vec<_> = inscription.layers_of_kind(STATE).collect();
-
-    // Sixteen, always: an empty shard is still a shard, so a client planning a
-    // selective fetch never has to discover the count from the data.
-    assert_eq!(written.len(), STATE_SHARDS as usize);
-
     let expected = expected_state(&domain);
 
-    for (shard, descriptor) in written.iter().enumerate() {
-        assert_eq!(descriptor.scope["shard"], shard);
+    let mut records = 0usize;
 
-        let found: Vec<state::StateRecord> = read_both_ways(&stele, &index, descriptor)
-            .iter()
-            .map(|raw| state::decode(raw).unwrap())
-            .collect();
+    for (kind, ns, shards) in STATE_KINDS {
+        let written: Vec<_> = inscription.layers_of_kind(kind).collect();
 
-        let expected: Vec<state::StateRecord> = expected
-            .iter()
-            .filter(|record| record.shard() as usize == shard)
-            .cloned()
-            .collect();
+        // Exactly the shards the kind's spec'd count promises, always: an empty
+        // shard is still a shard, so a client planning a selective fetch never
+        // has to discover the count from the data.
+        assert_eq!(written.len(), shards as usize, "{kind}");
 
-        assert_eq!(found, expected, "shard {shard}");
+        let carried = expected.get(ns).cloned().unwrap_or_default();
+
+        for (shard, descriptor) in written.iter().enumerate() {
+            assert_eq!(descriptor.scope["shard"], shard, "{kind}");
+
+            let found: Vec<state::StateRecord> = read_both_ways(&stele, &index, descriptor)
+                .iter()
+                .map(|raw| state::decode(ns, raw).unwrap())
+                .collect();
+
+            let expected: Vec<state::StateRecord> = carried
+                .iter()
+                .filter(|record| state::shard_of(&record.key, shards) as usize == shard)
+                .cloned()
+                .collect();
+
+            assert_eq!(found, expected, "{kind} shard {shard}");
+
+            records += found.len();
+        }
     }
 
     assert!(
-        !expected.is_empty(),
-        "the fixture produced no state, so the shards prove nothing"
+        records > 0,
+        "the fixture produced no state, so the layers prove nothing"
     );
 }
 
@@ -533,8 +550,12 @@ fn expected_indexes<B: ToyStores>(domain: &ToyDomain<B>, window: &EpochWindow) -
         .collect()
 }
 
-fn expected_state<B: ToyStores>(domain: &ToyDomain<B>) -> Vec<state::StateRecord> {
-    let mut found = Vec::new();
+/// The state the store holds, by namespace — the grouping the layers are in
+/// now, so the comparison above is per kind rather than across one mixed run.
+fn expected_state<B: ToyStores>(
+    domain: &ToyDomain<B>,
+) -> BTreeMap<Namespace, Vec<state::StateRecord>> {
+    let mut found: BTreeMap<Namespace, Vec<state::StateRecord>> = BTreeMap::new();
 
     for ns in NAMESPACES {
         if ns == UTXOS {
@@ -547,16 +568,24 @@ fn expected_state<B: ToyStores>(domain: &ToyDomain<B>) -> Vec<state::StateRecord
             .unwrap()
         {
             let (key, value) = entry.unwrap();
-            found.push(state::entity(ns, &key, &value).unwrap());
+            found
+                .entry(ns)
+                .or_default()
+                .push(state::entity(&key, &value));
         }
     }
 
     for entry in domain.state().iter_utxos().unwrap() {
         let (txo, value) = entry.unwrap();
-        found.push(state::utxo(&txo, &value).unwrap());
+        found
+            .entry(UTXOS)
+            .or_default()
+            .push(state::utxo(&txo, &value).unwrap());
     }
 
-    found.sort_by(|a, b| (a.ns, &a.key).cmp(&(b.ns, &b.key)));
+    for records in found.values_mut() {
+        records.sort_by(|a, b| a.key.cmp(&b.key));
+    }
 
     found
 }
@@ -653,23 +682,88 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:0517f93e76f9fe6059bcde6218af5c90f51020af09890c5e3a05cc8f3a32e447","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":99,"epoch":0,"startSlot":0},"uncompressedSize":44},"#,
     r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:a76e2bb47934f8473a232a31da4930db8d50ce90a4cab2c232fc032644fff62e","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":45},"#,
-    r#"{"diffId":"sha256:c1d65578a9da3b2453c50a8958bcdf426a59b22873012e51409e8acb732822cc","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:21cb592e80427ce7a6c8a24c0f5d5cf3c51da28a61325f47ffcb900ca629ad8d","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:bf5d5484e7def2851a425f266836c1fc0bfdd67db35acad39a5b488742e32855","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:f6b34bef2565e75cef039500c892c07b0e73aa258afe8885c9abdd9537e5e83b","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:69a78d4b3460bbdd65910ad985086afc82fb22c4158ce62b19b65dbc74eb0e73","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:1dd622715f2275dd3a1bc20b34a825ed4fe1c790ea268e0812918e72c4b48856","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:367f3f93a2f78522a1d29bd8a70632c2983c9a47fd107b55948c88cf62bb89f4","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:0a54558b493112b15ee2e5061021cc8d0e2d5211a550e7bfcae66a597f2771ca","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:292f3cd8d6f7ea605d33c16f60ca16b0a3bf8322df4c79a561b2b2d96a1df066","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:0cf3c2340b708a503a5e4301c19f6568599a8b15238d18805b0e26df58293f66","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:e4c0d0e60343333a0e78fddd8cb1885cc05f386065c36f8a58e3ec2ff52ce6cf","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:242048cec84854de49abdb62dd42d1b186b243a7095f05ba95b1862a5cf5e907","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:3825bee5e3bcf04483294f9cb40732f6a66169e222bb2da9cd294a3befd4fbcb","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:e6efd8da5e50463a9380ec4600741407ea84ac2baac44917707bb137d1b119d2","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:1953096685ae64ae6f5d1bbc04d8d3678fbb567138809f581bdcdacfa1e1b90b","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":40},"#,
-    r#"{"diffId":"sha256:0eb6fed603f60e527eb9622e04d72a74c21dcd7ee88e98b95ae6f8895736d5fd","kind":"state","mediaType":"application/vnd.dolos.stele.state.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":40}"#,
-    r#"],"parameters":{"indexKeyHash":"xxh3-64","stateShards":16},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
+    r#"{"diffId":"sha256:318ad5ac29478218eaf3d04f8dfe93fc86834f2f7eca108817e811a603f09a8f","kind":"state-account-stakes","mediaType":"application/vnd.dolos.stele.state-account-stakes.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
+    r#"{"diffId":"sha256:02522facba4552263d4dfaded9dbb82ec8a90937284a15539f6f1f7a7a9ef4fd","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:9c3e2a317428abc07cd8a29934c10d6ed406eef31b0ffebbaa95679ed11a4e89","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:bad9e2528c56aab15c5c593550f17bd850d52804dd17172fefb4b11940641d8d","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:9d296077954a6e1a79ec9139edc2b73c4f292999e697f99e688887045a1ab1e2","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:36a70b77ff0e7ff67d3e42a4dbf9aafc7c3e9e093d2fa0a746253f5d693b5362","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:48ddd612a9127f81231cd901135c791bc9b812bb54ee95d9e3544962e1b3a46c","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:4cb5ff0a33d2e88172898f0565fb91d0c3c0e3f636daff1ec0ab50c2da7a8dd1","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:0eb957c6d2d2b2ae787539fafacfccdd9a2aaad410d5af096fed5b60e5d30967","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:b3f376aa124ed9110f4d6ee6a30848bc8cbec2eaec65020f39439849d75e304e","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:96b86a20d7ba613efa3e1925148b2a9ccaa969c75ca4dc466434a46e0fe6a82f","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:462a4295f3c6ee4d43b2c201d166a225eb59d55e4880e66fe3b947d005a48132","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:87a29f9edd16dc7521df050f8645b99082df697fa42e772e262a61a5b756497a","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:b478aa2b0c1385dfeba5f26da0edc223260f0cac947d91da6d1dc629d48a7541","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:a2c9fa81aec9cac32b36fd325bdf3afe6ac72a95c7412cfaff6f05288354b085","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:5cf477db9c26c4f251c836844db2405f37fa789d03aea868540eb07cdf43bdfe","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:964771e3ed841725948305ad74029c7be92b0aad4e6c43a7569fb09b8e67253f","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":49},"#,
+    r#"{"diffId":"sha256:6b217ee2a4173c3446c8ea31bc84d8c59f1c0b2eb583439f443322ada7dfb5a1","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:833ffb5dbd39bb5eaacf1c2439de47fdd31ad3a100c2ec50f6f1100eeee0801a","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:321c3b09a833a633a61fc7af4e6df23e3f3adfd3f08a11505efcf9069d9da8e2","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:f68da008f436dbac4425da5b7c582a35ea077559312e128755b0eef2899c1f12","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:9f6c54e7404ddd5d37db028eef00fe943dc5a29746f5af17fb9ed022f1c4489f","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:6e87f3f58d31f08051f7c7bdb404767203d56f699f6f05129921017328390946","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:adf44192f4f91e651b43a841fbc81ee74c0bf42bac15c059bcd4e9277ef9a08f","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:542b315989aa1e5f5c8a3fcf2bee5750b9de87ecf63e19aebb1544c5c303edbc","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:ec60a65290505b4351128d7e5676376f691656b9080fb4a9ade9dce8e3a760e7","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:68ef06144365168b8a36c352a3e1d26dcde9029a2857be937c01cda5906172ae","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:ddb6a5961aade95fb820a669d97dcf116021a1b54d8a0d59d4820849b922f286","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:9049a9631a589437e0dc2005552e44cbf414915ae25970d37dd78452162de6ac","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:403ac5c18e878ce6193b5697d754100267961e9a13d7dd5920a741c6a861de00","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:21660b8e2e4fadede65e89589ca10fd9aa467dd0845a7487ada048545d889cdc","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:7bf0d679da18a075420267ce16f38cfefb68efec28b5a74e8c1b7be9fed86654","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:8899bed13545893de75851c8537b383608ea92b29e9beeca19c6ff8f6e64109a","kind":"state-assets","mediaType":"application/vnd.dolos.stele.state-assets.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:5c79490ba5bd0febb78a297aa3273fff7119c9af37fa48a8fba01b3c4e93ba1a","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:128bba0aeae290cbe00284557a591198676a94dd8c948c5c5b8bf78deb892978","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:a1f52ea5164adaecaa2cdb1e306772afe5209fbe81d8ab1bcd66badfeb5238d5","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:468198f05873a9c1c748e6ed213fa0307b7bd6f1baf3784ec3ec765ca3b03383","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:f553bf184e843725c49e9645560876519f9e6994f2bf468efd90150a58ad45fb","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:0cd44b79cc2336ba42d9df42979c9145e391f98b028407e9895e24ceae188e72","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:99855d833d23137d927485ebe6a610b0640bafa7b89e8eceaf5b57754e75927b","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:3325d1e65ccc52abede1ba2bd35f4289af41afbd8f1ff3007c659fe12fb85e00","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:f8b305e7a74ddd9b49f36dc0af339fd1fd0bb600e7a1c86c99c3ad46e1b61fac","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:151817f8cc62d02d9bb9c7980df48240776c1b66f759ee6665057d3ee0056fbb","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:4775430b2bdf697c94bb53d77b304e6ddb7a16b4a51d533bf21915d1ac96c5df","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:df563c54b5d255acc3358a33271f0816673cb8e9ce2e3c29960f55e60d25baf5","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:b4945645a766617aaf3bcfbc09363b107c507455dcc4482e31c42b2a51fcb7a0","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:8140e32dd30b763b9e30d4ec9e3f4c4839674271068028c0eb280acf95fb6803","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:2ac9b61903e09ba2a01e2192cd9e6a1c0ecb30886d3752374cf0d45dfdc3fbda","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:d1f06100a97cbf233453ee235ae2af84fed2ebc9afba1ef44f1a560fa9092517","kind":"state-datums","mediaType":"application/vnd.dolos.stele.state-datums.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:0c02e395163b8721766f4e70ade836dcbeabcb5b660e6538caee76757315305e","kind":"state-dreps","mediaType":"application/vnd.dolos.stele.state-dreps.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:d2956a7d3251484d5ef8f45cd923e34ecbc890552eac579c500ba99b0a98cb9a","kind":"state-epochs","mediaType":"application/vnd.dolos.stele.state-epochs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:a53fdfbe13f40703e1e8cd661ddc5ba5bb54541b22bf7cdcb3b7aa9697fd9cb6","kind":"state-eras","mediaType":"application/vnd.dolos.stele.state-eras.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":45},"#,
+    r#"{"diffId":"sha256:0a74ea019634f7c0135b1030e692d4e3680ff534c89462819fa04c15ada63114","kind":"state-gov","mediaType":"application/vnd.dolos.stele.state-gov.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":44},"#,
+    r#"{"diffId":"sha256:87ed310e3fefe592d1f45dde73677bf2de5642b4f9d64363b64debe6999d07a5","kind":"state-leader-rewards","mediaType":"application/vnd.dolos.stele.state-leader-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
+    r#"{"diffId":"sha256:22a28d8b6fdb0add20994fda1401bfe694e50c79886d5c4517eac96ddb94bc0b","kind":"state-member-rewards","mediaType":"application/vnd.dolos.stele.state-member-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
+    r#"{"diffId":"sha256:2e07a341e23cf37667da069d3e75ba7a7bf2665572f2183353ff0266369cf17f","kind":"state-pending-mirs","mediaType":"application/vnd.dolos.stele.state-pending-mirs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":53},"#,
+    r#"{"diffId":"sha256:ad5994d901c69e757457b2ad6bac6a2679e45ae25769cc616375c10c8c6dc582","kind":"state-pending-rewards","mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
+    r#"{"diffId":"sha256:1d1a0547655e532c3c52d29fab6fcd82e7a3ef3fed1d0c2a9e670f269384ba2b","kind":"state-pool-deposit-refunds","mediaType":"application/vnd.dolos.stele.state-pool-deposit-refunds.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":62},"#,
+    r#"{"diffId":"sha256:da799488bcc20ea1d8c8e236169d7204e328b34f806075a951f266819bd35e34","kind":"state-pools","mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:640c0f9db84510212ae0d71860df7c518244db6eed6728e9fcc6540d99bdcbe7","kind":"state-proposals","mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":50},"#,
+    r#"{"diffId":"sha256:c8517773130f10b7dfb51ca3415ccbe9005f1b84abada0418f46bee7dc7d095f","kind":"state-stakes","mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
+    r#"{"diffId":"sha256:6978ebcdd1accb802d0711afbe6c25747eea28f533de050c184ea24bade637a5","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:aa056a5c4a03811c52492eec692ba0612f7f32f9c447ddd63f64a4c7b1c5ed4a","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:c0055cfef082a8ebe5ada0637de774cc2613d00714d05f74b19690ced71e89c2","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:5b298cc5852e2c25e9bccfcfcc7c379e68b55439b34ecdbbd26fb93d5306dbfd","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":3},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:09081604a9f2fc740fdeabb3a331ff3d35cdde0179a7a95271a2b43079d5962b","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":4},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:86e95890bde0bf9230b48d9ff30d0e37b3e4441f041046d9674d3aecc2381284","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":5},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:e6fe3b69728c8f4587689733e537d593ba4901e175d1b81f583ad6fe3f30b48a","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":6},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:9fc971b8fe01687d280947d27b4b495b8a13b11696b61379c81701db821e1d12","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":7},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:a3ddecb338e823bff9f3269571ae9f8858451ca8f98700501d57273ac141ec01","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":8},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:20c25aaf590428fd30f7ff2e17cdf8b12e2d4819dbdbd27cd36b2e3a59c79bf1","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":9},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:cd57e7f5986a2e811577422b7a174d02a786ea75c79b855a547292aaa3cb9801","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":10},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:ac1e3bdff176deca129ff6ea85f8e32d98c56eb55845fbbb535e145817c2f27c","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":11},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:1b257f003b61fd4389b580e368725779e84d0931916f4e5f21336e3b5775462f","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":12},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:4145245584090ba5ec600cc41743036cd02580999490cd38e94ccb47e713f529","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":13},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:fa3101937f3491ae614180384787cfeb1d2ffb7e522c4c731b60208472573917","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":14},"uncompressedSize":46},"#,
+    r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
+    r#"],"parameters":{"#,
+    r#""indexKeyHash":"xxh3-64","#,
+    r#""schemas":{"account-stakes":1,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":1,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
+    r#""shards":{"account-stakes":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":16}"#,
+    r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
 
 // --------------------------------------------------------------------------
@@ -778,7 +872,7 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
 
     // The state tip alone, which is a legitimate publish and the narrowest one
     // there is.
-    assert_eq!(stored.layers.len(), STATE_SHARDS as usize);
+    assert_eq!(stored.layers.len(), state_layer_count());
 
     assert_eq!(
         stored.canonicalize().unwrap(),

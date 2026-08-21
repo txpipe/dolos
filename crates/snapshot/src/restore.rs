@@ -20,7 +20,8 @@
 //! 3. [`dolos_core::IndexStore::initialize_schema`].
 //! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes`.
-//! 5. The state tip, sixteen shards, `set_cursor` **last**.
+//! 5. The state tip — every shard of every `state-{ns}` kind — with
+//!    `set_cursor` **last**.
 //! 6. Rebuild the live-UTxO index dimensions from the restored UTxO set. They
 //!    are never shipped — ADR-004's Amendment 2 — so this is where they come
 //!    back.
@@ -58,12 +59,12 @@
 //! Epoch layers may. They describe a closed window of a chain that cannot
 //! change again, so the same `diffId` in a newer inscription is the same layer.
 //!
-//! **State shards never may.** They are the tip. They are rewritten by every
-//! publish, and — independently of that — a shard's descriptor scope is
+//! **State layers never may.** They are the tip. They are rewritten by every
+//! publish, and — independently of that — a state layer's descriptor scope is
 //! `{"shard": n}` and names no epoch, so nothing in a shard's identity could
 //! distinguish one publish's tip from another's even if a caller wanted it to.
-//! So they are never asked about and never recorded, and the sixteen of them
-//! plus the live-UTxO rebuild are what every resumed restore pays.
+//! So they are never asked about and never recorded, and the tip's layers plus
+//! the live-UTxO rebuild are what every resumed restore pays.
 //!
 //! The checkpoint lands after each epoch layer's own commit, which is possible
 //! only because the driver commits per layer. That is the ownership split
@@ -129,8 +130,8 @@ use crate::{
     layers::{blocks, indexes, logs, state},
     log_ns_for, preflight, read_position,
     reporting::Cursor,
-    DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, SCOPE_REQUIRED, STATE, STATE_SHARDS,
-    UTXOS,
+    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, SCOPE_REQUIRED,
+    STATE_KINDS, UTXOS,
 };
 
 /// What a restore holds at once.
@@ -211,8 +212,10 @@ pub struct Plan {
     pub sequence: u64,
     /// The epochs whose layers this restore consumes, ascending.
     pub epochs: Vec<EpochLayers>,
-    /// The sixteen state shards, ascending.
-    pub state: Vec<LayerDescriptor>,
+    /// The state tip, by the namespace each kind names — every kind, with its
+    /// shards ascending inside. Namespace byte order is kind byte order, so
+    /// iterating the map is iterating the inscription's own layer order.
+    pub state: BTreeMap<Namespace, Vec<LayerDescriptor>>,
     /// Epochs the stele carries and `sync.max_history` excludes.
     pub skipped_epochs: usize,
     /// Layers of a kind this build does not implement, which it skips rather
@@ -239,13 +242,13 @@ impl Plan {
         self.epochs.iter().flat_map(EpochLayers::descriptors)
     }
 
-    /// The layers a resume never skips: the sixteen state shards.
+    /// The layers a resume never skips: the state tip's, every kind and shard.
     ///
     /// A separate method rather than a comment on a `filter`, because "state
-    /// shards are always redone" is a rule and not a detail — see the module
+    /// layers are always redone" is a rule and not a detail — see the module
     /// documentation for the two independent reasons it holds.
     pub fn tip_layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
-        self.state.iter()
+        self.state.values().flatten()
     }
 
     /// Compressed bytes this restore still has to move, given what is done.
@@ -492,36 +495,59 @@ fn select_epochs(inscription: &Inscription) -> Result<Vec<EpochLayers>, Error> {
     Ok(by_epoch.into_values().collect())
 }
 
-/// The sixteen state shards, ascending.
+/// The state tip: every kind, every shard, grouped by the namespace the kind
+/// names.
 ///
-/// Every shard must be there, including an empty one. A missing shard is a
+/// Completeness is structural, in both dimensions. Every one of the seventeen
+/// kinds must be there — a publish writes all of them, so an absent kind means
+/// a slice of the ledger this stele does not carry — and per kind, exactly the
+/// shards its spec'd count promises, empty ones included. A missing piece is a
 /// missing slice of the ledger that no later step would notice — the write path
-/// dispatches on the namespace, not the shard — so it is refused rather than
-/// restored into a node whose queries quietly miss a sixteenth of the state.
-fn select_state(inscription: &Inscription) -> Result<Vec<LayerDescriptor>, Error> {
-    let mut by_shard: BTreeMap<u64, LayerDescriptor> = BTreeMap::new();
+/// dispatches on the kind, not the shard — so it is refused rather than
+/// restored into a node whose queries quietly miss part of the state.
+fn select_state(
+    inscription: &Inscription,
+) -> Result<BTreeMap<Namespace, Vec<LayerDescriptor>>, Error> {
+    let mut by_ns: BTreeMap<Namespace, BTreeMap<u64, LayerDescriptor>> = BTreeMap::new();
 
-    for descriptor in inscription.layers_of_kind(STATE) {
+    for descriptor in &inscription.layers {
+        let Some(ns) = state_ns_for(&descriptor.kind) else {
+            continue;
+        };
+
         let shard = scope_uint(descriptor, "shard")?;
 
-        if by_shard.insert(shard, descriptor.clone()).is_some() {
+        if by_ns
+            .entry(ns)
+            .or_default()
+            .insert(shard, descriptor.clone())
+            .is_some()
+        {
             return Err(Error::malformed_inscription(
-                "layers[state].scope",
+                format!("layers[{}].scope", descriptor.kind),
                 format!("shard {shard} is described twice"),
             ));
         }
     }
 
-    let expected: Vec<u64> = (0..STATE_SHARDS).collect();
-    let found: Vec<u64> = by_shard.keys().copied().collect();
+    for (kind, ns, shards) in STATE_KINDS {
+        let expected: Vec<u64> = (0..u64::from(shards)).collect();
+        let found: Vec<u64> = by_ns
+            .get(ns)
+            .map(|layers| layers.keys().copied().collect())
+            .unwrap_or_default();
 
-    if found != expected {
-        return Err(Error::IncompleteStele(format!(
-            "the state tip needs all {STATE_SHARDS} shards, and this stele carries {found:?}",
-        )));
+        if found != expected {
+            return Err(Error::IncompleteStele(format!(
+                "the state tip needs {kind} shards {expected:?}, and this stele carries {found:?}",
+            )));
+        }
     }
 
-    Ok(by_shard.into_values().collect())
+    Ok(by_ns
+        .into_iter()
+        .map(|(ns, layers)| (ns, layers.into_values().collect()))
+        .collect())
 }
 
 /// Drop the epochs `sync.max_history` puts out of reach.
@@ -872,18 +898,24 @@ where
         }
     }
 
-    info!(shards = plan.state.len(), "restoring the state tip");
+    info!(
+        layers = plan.tip_layers().count(),
+        "restoring the state tip"
+    );
 
-    for descriptor in &plan.state {
-        let at = cursor.open(STATE, &descriptor.scope);
+    for (ns, layers) in &plan.state {
+        for descriptor in layers {
+            let kind = descriptor.kind.as_str();
+            let at = cursor.open(kind, &descriptor.scope);
 
-        let (entities, utxos) = restore_state(&reader, descriptor, state)?;
+            let (entities, utxos) = restore_state(&reader, descriptor, state, ns)?;
 
-        cursor.close(at, STATE, Outcome::Transferred);
+            cursor.close(at, kind, Outcome::Transferred);
 
-        summary.entities += entities;
-        summary.utxos += utxos;
-        summary.layers_fetched += 1;
+            summary.entities += entities;
+            summary.utxos += utxos;
+            summary.layers_fetched += 1;
+        }
     }
 
     // Last, so that until this commit lands `has_existing_data()` reports an
@@ -1034,7 +1066,7 @@ impl<R: SteleReader> Reader<'_, R> {
     fn drain<T>(
         &self,
         descriptor: &LayerDescriptor,
-        decode: fn(&[u8]) -> Result<T, Error>,
+        decode: impl Fn(&[u8]) -> Result<T, Error>,
         size: impl Fn(&T) -> usize,
         mut flush: impl FnMut(Vec<T>) -> Result<(), Error>,
     ) -> Result<u64, Error> {
@@ -1201,55 +1233,62 @@ fn restore_indexes<R: SteleReader, I: IndexStore>(
     )
 }
 
-/// One state shard, dispatched per namespace.
+/// One state layer, written through the path its kind names.
+///
+/// `ns` comes from the layer's kind, not from its records — the split moved it
+/// there — so the dispatch is per layer rather than per record: the
+/// `state-utxos` kind goes through `apply_utxoset` in chunks (the UTxO set has
+/// its own writer method rather than a per-record one), and every other kind
+/// through `write_entity`.
 ///
 /// Returns the entities and the UTxOs it wrote, separately, because they are
-/// the two halves the cross-check compares and a shard that restored one and
+/// the two halves the cross-check compares and a layer that restored one and
 /// silently dropped the other would still add up.
 fn restore_state<R: SteleReader, S: StateStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
     state: &S,
+    ns: Namespace,
 ) -> Result<(u64, u64), Error> {
-    let mut entities = 0u64;
-    let mut utxos = 0u64;
+    let decode = |bytes: &[u8]| state::decode(ns, bytes);
+    let size = |record: &state::StateRecord| record.key.len() + record.value.len();
 
-    reader.drain(
-        descriptor,
-        state::decode,
-        |record| record.key.len() + record.value.len(),
-        |chunk| {
+    if ns == UTXOS {
+        let utxos = reader.drain(descriptor, decode, size, |chunk| {
             let writer = state.start_writer()?;
 
-            // The UTxO set has its own writer method rather than a per-record
-            // one, so it is collected into a delta and applied once per chunk.
             let mut produced = UtxoSetDelta::default();
 
             for record in chunk {
-                if record.ns == UTXOS {
-                    let (txo, value) = state::as_utxo(&record)?;
+                let (txo, value) = state::as_utxo(&record)?;
 
-                    produced.produced_utxo.insert(txo, Arc::new(value));
-                    utxos += 1;
-                } else {
-                    let (ns, key) = state::as_entity(&record)?;
-
-                    writer.write_entity(ns, &key, &record.value)?;
-                    entities += 1;
-                }
+                produced.produced_utxo.insert(txo, Arc::new(value));
             }
 
-            if !produced.produced_utxo.is_empty() {
-                writer.apply_utxoset(&produced)?;
-            }
-
+            writer.apply_utxoset(&produced)?;
             writer.commit()?;
 
             Ok(())
-        },
-    )?;
+        })?;
 
-    Ok((entities, utxos))
+        return Ok((0, utxos));
+    }
+
+    let entities = reader.drain(descriptor, decode, size, |chunk| {
+        let writer = state.start_writer()?;
+
+        for record in chunk {
+            let key = state::as_entity(&record)?;
+
+            writer.write_entity(ns, &key, &record.value)?;
+        }
+
+        writer.commit()?;
+
+        Ok(())
+    })?;
+
+    Ok((entities, 0))
 }
 
 /// Rebuild the live-UTxO index dimensions from the restored UTxO set.
@@ -1355,24 +1394,70 @@ mod tests {
         inscription
     }
 
-    fn state_shards() -> Vec<LayerDescriptor> {
-        (0..STATE_SHARDS)
-            .map(|shard| descriptor(STATE, json!({ "shard": shard }), shard as u8))
+    /// Every state layer a complete tip carries: each kind, shards ascending.
+    fn state_layers() -> Vec<LayerDescriptor> {
+        let mut byte = 0u8;
+
+        STATE_KINDS
+            .into_iter()
+            .flat_map(|(kind, _, shards)| (0..shards).map(move |shard| (kind, shard)))
+            .map(|(kind, shard)| {
+                byte = byte.wrapping_add(1);
+                descriptor(kind, json!({ "shard": shard }), byte)
+            })
             .collect()
     }
 
+    /// Done criterion 2: completeness per kind and per shard, and the grouping
+    /// a complete tip selects into.
     #[test]
-    fn every_shard_of_the_state_tip_is_required() {
-        select_state(&inscription(state_shards())).unwrap();
+    fn the_state_tip_requires_every_kind_and_every_shard() {
+        let selected = select_state(&inscription(state_layers())).unwrap();
 
-        let mut short = state_shards();
-        short.pop();
+        assert_eq!(selected.len(), STATE_KINDS.len(), "one entry per kind");
+
+        for (kind, ns, shards) in STATE_KINDS {
+            let layers = &selected[ns];
+
+            assert_eq!(layers.len(), shards as usize, "{kind}");
+
+            for (shard, layer) in layers.iter().enumerate() {
+                assert_eq!(layer.kind, kind);
+                assert_eq!(layer.scope["shard"], shard as u64, "{kind}");
+            }
+        }
+
+        // A missing shard of a sixteen-way kind.
+        let mut short = state_layers();
+        let dropped = short
+            .iter()
+            .rposition(|layer| layer.kind == "state-utxos")
+            .unwrap();
+        short.remove(dropped);
 
         let err = select_state(&inscription(short)).unwrap_err();
         assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
 
-        let mut doubled = state_shards();
-        doubled.push(descriptor(STATE, json!({"shard": 0}), 0xff));
+        // An absent kind: tip completeness is all seventeen, not "what's there".
+        let absent: Vec<LayerDescriptor> = state_layers()
+            .into_iter()
+            .filter(|layer| layer.kind != "state-epochs")
+            .collect();
+
+        let err = select_state(&inscription(absent)).unwrap_err();
+        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+        assert!(err.to_string().contains("state-epochs"), "{err}");
+
+        // A shard past a single-blob kind's count.
+        let mut oversharded = state_layers();
+        oversharded.push(descriptor("state-pools", json!({"shard": 1}), 0xfe));
+
+        let err = select_state(&inscription(oversharded)).unwrap_err();
+        assert!(matches!(err, Error::IncompleteStele(_)), "{err:?}");
+
+        // One shard described twice.
+        let mut doubled = state_layers();
+        doubled.push(descriptor("state-utxos", json!({"shard": 0}), 0xff));
 
         let err = select_state(&inscription(doubled)).unwrap_err();
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
@@ -1481,7 +1566,7 @@ mod tests {
 
     #[test]
     fn the_selected_size_is_the_selected_layers_and_not_the_document() {
-        let mut layers = state_shards();
+        let mut layers = state_layers();
         layers.push(epoch_descriptor(BLOCKS, 0, 0xa0));
         layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
 
@@ -1498,9 +1583,11 @@ mod tests {
             skipped_unknown: Vec::new(),
         };
 
+        let tip = crate::state_layer_count() as u64;
+
         assert_eq!(plan.skipped_epochs, 1);
-        assert_eq!(plan.layers().count(), STATE_SHARDS as usize + 1);
-        assert_eq!(plan.uncompressed_size(), (STATE_SHARDS + 1) * 100);
+        assert_eq!(plan.layers().count() as u64, tip + 1);
+        assert_eq!(plan.uncompressed_size(), (tip + 1) * 100);
         assert!(plan.uncompressed_size() < stele.uncompressed_size());
     }
 
@@ -1508,7 +1595,7 @@ mod tests {
     /// store, not after it has written half a ledger.
     #[test]
     fn a_foreign_network_is_refused_by_the_plan() {
-        let stele = inscription(state_shards());
+        let stele = inscription(state_layers());
         let position = read_position(&stele.position).unwrap();
 
         assert_eq!(position.network.magic(), MAINNET_MAGIC);
@@ -1565,7 +1652,7 @@ mod tests {
                 .unwrap(),
             ),
             (
-                STATE,
+                STATE_KINDS[16].0,
                 StateScope {
                     network_magic: MAINNET_MAGIC,
                     epoch: 1,
@@ -1602,12 +1689,13 @@ mod tests {
     /// refused — the client half of decision 0026's additive-change rule.
     #[test]
     fn a_kind_this_build_does_not_implement_is_skipped_and_reported() {
-        let mut layers = state_shards();
+        let mut layers = state_layers();
         layers.push(epoch_descriptor(BLOCKS, 0, 0xa0));
         layers.push(descriptor("log-votes", json!({"epoch": 0}), 0xb0));
         layers.push(descriptor("state-treasury", json!({"epoch": 0}), 0xb1));
 
-        let skipped = unknown_layers(&inscription(layers)).unwrap();
+        let stele = inscription(layers);
+        let skipped = unknown_layers(&stele).unwrap();
 
         assert_eq!(
             skipped
@@ -1617,9 +1705,15 @@ mod tests {
             vec!["log-votes", "state-treasury"],
         );
 
+        // The two halves of the rule compose: a `state-{ns}` this build has no
+        // namespace for is skipped like any other unknown kind, and the tip is
+        // still complete, because completeness is counted over the seventeen
+        // kinds this profile defines rather than over the state layers present.
+        assert_eq!(select_state(&stele).unwrap().len(), STATE_KINDS.len());
+
         // And a stele written by a publisher this build keeps up with skips
         // nothing at all.
-        let mut known = state_shards();
+        let mut known = state_layers();
         known.push(epoch_descriptor(BLOCKS, 0, 0xa0));
         known.push(descriptor(DIGESTS, json!({"lastImmutable": 4}), 0xa1));
 
@@ -1629,7 +1723,7 @@ mod tests {
     /// The one unknown kind a restore refuses.
     #[test]
     fn a_required_unknown_kind_refuses_the_restore() {
-        let mut layers = state_shards();
+        let mut layers = state_layers();
         layers.push(descriptor(
             "log-votes",
             json!({"epoch": 7, "required": true}),
@@ -1648,7 +1742,7 @@ mod tests {
         // `required` is a flag, not a truthy field: only `true` refuses, so a
         // publisher cannot brick a reader by writing the key at all.
         for benign in [json!(false), json!("true"), json!(1), json!(null)] {
-            let mut layers = state_shards();
+            let mut layers = state_layers();
             layers.push(descriptor("log-votes", json!({"required": benign}), 0xb0));
 
             assert_eq!(unknown_layers(&inscription(layers)).unwrap().len(), 1);
@@ -1666,7 +1760,7 @@ mod tests {
             position: read_position(&inscription(vec![]).position).unwrap(),
             sequence: 3,
             epochs: Vec::new(),
-            state: state_shards(),
+            state: select_state(&inscription(state_layers())).unwrap(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),
         };
@@ -1678,8 +1772,10 @@ mod tests {
         plan.preflight(&temp.path().join("not").join("created").join("yet"), None)
             .unwrap();
 
-        for descriptor in &mut plan.state {
-            descriptor.uncompressed_size = u64::MAX / STATE_SHARDS;
+        let tip = crate::state_layer_count() as u64;
+
+        for descriptor in plan.state.values_mut().flatten() {
+            descriptor.uncompressed_size = u64::MAX / tip;
         }
 
         let err = plan.preflight(temp.path(), None).unwrap_err();
@@ -1702,7 +1798,7 @@ mod tests {
             position: read_position(&inscription(vec![]).position).unwrap(),
             sequence: 3,
             epochs: Vec::new(),
-            state: Vec::new(),
+            state: BTreeMap::new(),
             skipped_epochs: 0,
             skipped_unknown: Vec::new(),
         };
