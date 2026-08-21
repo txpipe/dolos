@@ -57,18 +57,25 @@ pub const NAMESPACES: [Namespace; 17] = [
 /// The schema revision of each namespace's record content, as
 /// `parameters.schemas` reports it.
 ///
-/// All 1 today: the revision moves when a namespace's stored record shape
-/// changes in a way its `state-{ns}` / `log-{ns}` layers carry — the signal the
-/// compatibility machinery of decision 0026 keys adoption on. Kept beside
-/// [`NAMESPACES`], in the same order, and held to it by
-/// `every_namespace_has_a_schema_rev` below.
+/// The revision moves when a namespace's stored record shape changes in a way
+/// its `state-{ns}` / `log-{ns}` layers carry — the signal the compatibility
+/// machinery of decision 0026 keys adoption on, and the thing that turns a
+/// cross-publisher digest divergence into a diagnosable "you are behind".
+/// Every value here is pinned by a canary in
+/// `crates/snapshot/tests/field_registry.rs`, which fails the build when a
+/// record's field table moves without its revision, or the other way round.
+///
+/// `epochs` is at 2: `RollingStats::registered_pools` was a `HashSet`, whose
+/// per-instance iteration order made the namespace's bytes irreproducible
+/// across publishers of identical state. Kept beside [`NAMESPACES`], in the
+/// same order, and held to it by `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 17] = [
     (AccountStakeLog::NS, 1),
     (AccountState::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
     (DRepState::NS, 1),
-    (EpochState::NS, 1),
+    (EpochState::NS, 2),
     (EraSummary::NS, 1),
     (GovState::NS, 1),
     (LeaderRewardLog::NS, 1),
