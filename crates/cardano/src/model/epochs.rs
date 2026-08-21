@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
 use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
@@ -104,8 +104,19 @@ pub struct RollingStats {
     #[n(7)]
     pub withdrawals: Lovelace,
 
+    /// Pools registered during the epoch.
+    ///
+    /// **Ordered**, and that is load-bearing rather than incidental: this
+    /// value's minicbor encoding is copied verbatim into a stele's
+    /// `state-epochs` and `log-epochs` layers, so an iteration order that
+    /// varies per instance — as a hash container's does — would make two
+    /// honest publishers of the same ledger disagree about the bytes of
+    /// identical state (ADR-004, "Determinism depends on deterministic entity
+    /// encoding"). Any container reachable from an entity value has to order
+    /// by content; `crates/snapshot/tests/field_registry.rs` is what holds
+    /// this one to it.
     #[n(8)]
-    pub registered_pools: HashSet<PoolHash>,
+    pub registered_pools: BTreeSet<PoolHash>,
 
     #[n(13)]
     pub blocks_minted: u32,
@@ -486,7 +497,7 @@ pub struct EpochStatsUpdate {
     pub(crate) new_accounts: u64,
     pub(crate) removed_accounts: u64,
     pub(crate) withdrawals: u64,
-    pub(crate) registered_pools: HashSet<PoolHash>,
+    pub(crate) registered_pools: BTreeSet<PoolHash>,
     pub(crate) drep_deposits: Lovelace,
     pub(crate) proposal_deposits: Lovelace,
     pub(crate) drep_refunds: Lovelace,
@@ -501,7 +512,7 @@ pub struct EpochStatsUpdate {
     // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
     // can't be recovered by set subtraction (a pool in both prev and self would be removed).
     pub(crate) was_new: bool,
-    pub(crate) prev_registered_pools: HashSet<PoolHash>,
+    pub(crate) prev_registered_pools: BTreeSet<PoolHash>,
 
     // Undo data for the first and last block slots. A min or max operation is
     // not reversible by arithmetic. So `apply` keeps the earlier values here,
