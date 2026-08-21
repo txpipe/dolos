@@ -81,7 +81,7 @@ use stelae::{
 };
 
 pub use layers::state::shard_of;
-pub use namespaces::{NAMESPACES, SCHEMA_REVS, UTXOS};
+pub use namespaces::{NAMESPACES, RETIRED_NAMESPACES, RETIRED_SCHEMA_REV, SCHEMA_REVS, UTXOS};
 
 /// Reverse-DNS name of this profile. Vendor-owned; the protocol validates the
 /// shape and never composes it.
@@ -476,6 +476,22 @@ pub enum Error {
     #[error("this stele cannot restore a node: {0}")]
     IncompleteStele(String),
 
+    /// A namespace this build models that the stele declares retired, or does
+    /// not declare at all.
+    ///
+    /// The removed-kind rule (ADR-0027). Unlike an unknown kind, a retired one
+    /// leaves nothing in the inscription to skip and report: its layers are
+    /// absent, and absence is how the format spells "no records in this
+    /// window". A reader that would restore an empty `member-rewards` history
+    /// and call it a success is the failure this refuses, so it refuses before
+    /// a store is opened and names the namespace an operator has to go and
+    /// read about.
+    #[error(
+        "this stele's publisher no longer carries namespace {namespace:?}, which this build \
+         still models; restoring it would leave that namespace silently empty"
+    )]
+    RetiredNamespace { namespace: Namespace },
+
     /// A layer of a kind this build does not implement, which the publisher
     /// marked [`SCOPE_REQUIRED`].
     ///
@@ -781,9 +797,12 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// [`INDEX_KEY_HASH`], which describes [`dolos_core::key_hash`]; `shards` is
 /// the shard column of [`STATE_KINDS`], which the export routes by; and
 /// `schemas` is [`SCHEMA_REVS`], the per-namespace record-content revision the
-/// compatibility machinery of decision 0026 keys on. Both maps are keyed by
-/// namespace — JCS sorts the keys, so the maps render in the byte order the
-/// tables are kept in.
+/// compatibility machinery of decision 0026 keys on, plus one entry per
+/// [`RETIRED_NAMESPACES`] at [`RETIRED_SCHEMA_REV`] — a namespace this profile
+/// version no longer defines says so rather than vanishing, so that a reader
+/// which still models it can refuse instead of restoring an empty history
+/// (ADR-0027). Both maps are keyed by namespace — JCS sorts the keys, so the
+/// maps render in the byte order the tables are kept in.
 pub fn parameters() -> serde_json::Value {
     let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
         .into_iter()
@@ -792,6 +811,11 @@ pub fn parameters() -> serde_json::Value {
 
     let schemas: serde_json::Map<String, serde_json::Value> = SCHEMA_REVS
         .into_iter()
+        .chain(
+            RETIRED_NAMESPACES
+                .into_iter()
+                .map(|ns| (ns, RETIRED_SCHEMA_REV)),
+        )
         .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
         .collect();
 
