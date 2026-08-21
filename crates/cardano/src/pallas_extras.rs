@@ -3,18 +3,22 @@ use std::ops::Deref as _;
 use dolos_core::BlockSlot;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::addresses::{
-    Address, Network, ShelleyAddress, ShelleyDelegationPart, StakeAddress, StakePayload,
+    Address, Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart, StakeAddress,
+    StakePayload,
 };
 use pallas::ledger::primitives::alonzo::MoveInstantaneousReward;
 use pallas::ledger::primitives::conway::{
-    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ScriptRef,
+    CostModels, DRep, DRepVotingThresholds, GovAction, PoolVotingThresholds, RedeemerTag,
+    ScriptRef, Voter,
 };
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::primitives::{Epoch, ExUnitPrices, ExUnits, Nonce, NonceVariant};
-use pallas::ledger::traverse::{ComputeHash, MultiEraCert, MultiEraTx, OriginalHash};
+use pallas::ledger::traverse::{
+    ComputeHash, MultiEraCert, MultiEraInput, MultiEraRedeemer, MultiEraTx, OriginalHash,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
@@ -342,6 +346,138 @@ pub fn address_as_stake_cred(address: &Address) -> Option<(StakeCredential, IsPo
     }
 }
 
+/// The script credential that witnesses a certificate, if any.
+///
+/// A certificate can name a script credential. The script must then validate
+/// the certificate. A cert-purpose redeemer points at that script. Pool
+/// certificates carry only key hashes.
+pub fn cert_script_hash(cert: &MultiEraCert) -> Option<Hash<28>> {
+    let credential = match cert {
+        MultiEraCert::AlonzoCompatible(cow) => match cow.deref().deref() {
+            AlonzoCert::StakeRegistration(cred)
+            | AlonzoCert::StakeDeregistration(cred)
+            | AlonzoCert::StakeDelegation(cred, _) => Some(cred),
+            _ => None,
+        },
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::StakeRegistration(cred)
+            | ConwayCert::StakeDeregistration(cred)
+            | ConwayCert::StakeDelegation(cred, _)
+            | ConwayCert::Reg(cred, _)
+            | ConwayCert::UnReg(cred, _)
+            | ConwayCert::VoteDeleg(cred, _)
+            | ConwayCert::StakeVoteDeleg(cred, _, _)
+            | ConwayCert::StakeRegDeleg(cred, _, _)
+            | ConwayCert::VoteRegDeleg(cred, _, _)
+            | ConwayCert::StakeVoteRegDeleg(cred, _, _, _)
+            | ConwayCert::AuthCommitteeHot(cred, _)
+            | ConwayCert::ResignCommitteeCold(cred, _)
+            | ConwayCert::RegDRepCert(cred, _, _)
+            | ConwayCert::UnRegDRepCert(cred, _)
+            | ConwayCert::UpdateDRepCert(cred, _) => Some(cred),
+            _ => None,
+        },
+        _ => None,
+    }?;
+
+    match credential {
+        StakeCredential::ScriptHash(hash) => Some(*hash),
+        StakeCredential::AddrKeyhash(_) => None,
+    }
+}
+
+/// The script that votes at the given redeemer index, if the voter is a
+/// script.
+///
+/// The ledger indexes voters by its `Map Voter` order: committee before
+/// dreps before pools, script credentials before key credentials inside
+/// each group. Pallas declares the `Voter` variants in that order, so the
+/// decoded `BTreeMap` already iterates like the ledger. Do not sort by the
+/// cbor encoding: its tag order puts key credentials first.
+fn vote_script_hash(tx: &MultiEraTx<'_>, index: usize) -> Option<Hash<28>> {
+    let body = &tx.as_conway()?.transaction_body;
+    let procedures = body.voting_procedures.as_ref()?;
+
+    match procedures.keys().nth(index)? {
+        Voter::ConstitutionalCommitteeScript(hash) | Voter::DRepScript(hash) => Some(*hash),
+        _ => None,
+    }
+}
+
+/// The guardrails script of the proposal at the given redeemer index, if the
+/// proposed action names one.
+fn propose_script_hash(tx: &MultiEraTx<'_>, index: usize) -> Option<Hash<28>> {
+    let body = &tx.as_conway()?.transaction_body;
+    let proposals = body.proposal_procedures.as_ref()?;
+    let proposal = proposals.get(index)?;
+
+    match &proposal.gov_action {
+        GovAction::ParameterChange(_, _, policy) => *policy,
+        GovAction::TreasuryWithdrawals(_, policy) => *policy,
+        _ => None,
+    }
+}
+
+/// The hash of the script that a redeemer points at.
+///
+/// The redeemer's tag and index select an entity in the tx. A spend redeemer
+/// indexes the sorted input set. Its script hash is the payment credential of
+/// the consumed output's address. That output lives in another tx, so the
+/// injected `resolve_input_address` supplies its address. All other purposes
+/// resolve inside the tx itself.
+pub fn redeemer_script_hash<E, F>(
+    tx: &MultiEraTx<'_>,
+    redeemer: &MultiEraRedeemer<'_>,
+    resolve_input_address: &mut F,
+) -> Result<Option<Hash<28>>, E>
+where
+    F: FnMut(&MultiEraInput<'_>) -> Result<Option<Address>, E>,
+{
+    let index = redeemer.index() as usize;
+
+    match redeemer.tag() {
+        RedeemerTag::Spend => {
+            let inputs = tx.inputs_sorted_set();
+            let Some(input) = inputs.get(index) else {
+                return Ok(None);
+            };
+
+            let Some(address) = resolve_input_address(input)? else {
+                return Ok(None);
+            };
+
+            match address {
+                Address::Shelley(x) => match x.payment() {
+                    ShelleyPaymentPart::Script(hash) => Ok(Some(*hash)),
+                    _ => Ok(None),
+                },
+                _ => Ok(None),
+            }
+        }
+        RedeemerTag::Mint => {
+            let mints = tx.mints_sorted_set();
+            Ok(mints.get(index).map(|x| x.policy()).cloned())
+        }
+        RedeemerTag::Cert => Ok(tx.certs().get(index).and_then(cert_script_hash)),
+        RedeemerTag::Reward => {
+            let withdrawals = tx.withdrawals_sorted_set();
+            let Some((account, _)) = withdrawals.get(index) else {
+                return Ok(None);
+            };
+
+            match Address::from_bytes(account) {
+                Ok(Address::Stake(stake)) => match stake.payload() {
+                    StakePayload::Script(hash) => Ok(Some(*hash)),
+                    StakePayload::Stake(_) => Ok(None),
+                },
+                _ => Ok(None),
+            }
+        }
+        RedeemerTag::Vote => Ok(vote_script_hash(tx, index)),
+        RedeemerTag::Propose => Ok(propose_script_hash(tx, index)),
+    }
+}
+
 pub fn epoch_boundary(
     chain_summary: &ChainSummary,
     prev_slot: BlockSlot,
@@ -526,6 +662,23 @@ pub(crate) mod testing {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeMap;
+
+    use pallas::{
+        codec::minicbor,
+        codec::utils::{Bytes, Int, KeepRaw, NonEmptySet, NonZeroInt, Nullable, Set},
+        ledger::{
+            primitives::{
+                conway::{
+                    Anchor, GovActionId, ProposalProcedure, Redeemer, Redeemers, TransactionBody,
+                    TransactionInput, Tx, Vote, VotingProcedure, WitnessSet,
+                },
+                BigInt, PlutusData,
+            },
+            traverse::Era,
+        },
+    };
+
     static REWARD_ACCOUNT: [u8; 29] = [
         224, 185, 111, 206, 243, 185, 53, 26, 246, 131, 75, 216, 80, 227, 169, 120, 89, 215, 189,
         91, 114, 157, 36, 191, 54, 70, 174, 172, 207,
@@ -535,5 +688,281 @@ mod tests {
     fn test_pool_reward_account() {
         let parsed = parse_reward_account(&REWARD_ACCOUNT).unwrap();
         dbg!(&parsed);
+    }
+
+    const SCRIPT_HASH: [u8; 28] = [0xAA; 28];
+
+    fn redeemer(tag: RedeemerTag, index: u32) -> Redeemer {
+        Redeemer {
+            tag,
+            index,
+            data: PlutusData::BigInt(BigInt::Int(Int::from(0))),
+            ex_units: ExUnits {
+                mem: 10,
+                steps: 100,
+            },
+        }
+    }
+
+    /// A conway tx with one redeemer of every purpose. Each redeemer points
+    /// at an entity under [`SCRIPT_HASH`]: the first input (resolved by the
+    /// injected closure), a mint of its policy, a stake deregistration of
+    /// its stake credential, a withdrawal from its reward account, a vote by
+    /// it as a script DRep, and a treasury withdrawal guarded by it.
+    fn tx_with_redeemers() -> Vec<u8> {
+        let script = Hash::<28>::from(SCRIPT_HASH);
+
+        let input = TransactionInput {
+            transaction_id: Hash::from([9u8; 32]),
+            index: 0,
+        };
+
+        let asset_name = Bytes::from(b"UNIT".to_vec());
+        let mint_amount = NonZeroInt::try_from(-1).expect("non-zero mint");
+        let mint =
+            BTreeMap::from_iter([(script, BTreeMap::from_iter([(asset_name, mint_amount)]))]);
+
+        let cert = ConwayCert::StakeDeregistration(StakeCredential::ScriptHash(script));
+
+        let reward_account = StakeAddress::new(Network::Testnet, StakePayload::Script(script));
+        let withdrawals = BTreeMap::from_iter([(Bytes::from(reward_account.to_vec()), 0)]);
+
+        let ballot = BTreeMap::from_iter([(
+            GovActionId {
+                transaction_id: Hash::from([7u8; 32]),
+                action_index: 0,
+            },
+            VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        )]);
+        let voting_procedures = BTreeMap::from_iter([(Voter::DRepScript(script), ballot.clone())]);
+
+        let proposal = ProposalProcedure {
+            deposit: 0,
+            reward_account: Bytes::from(reward_account.to_vec()),
+            gov_action: GovAction::TreasuryWithdrawals(BTreeMap::new(), Some(script)),
+            anchor: Anchor {
+                url: "https://example.com".to_string(),
+                content_hash: Hash::from([8u8; 32]),
+            },
+        };
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![input]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: Some(NonEmptySet::try_from(vec![cert]).expect("non-empty certs")),
+            withdrawals: Some(withdrawals),
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: Some(mint),
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: Some(voting_procedures),
+            proposal_procedures: Some(
+                NonEmptySet::try_from(vec![proposal]).expect("non-empty proposals"),
+            ),
+            treasury_value: None,
+            donation: None,
+        };
+
+        let redeemers = Redeemers::List(vec![
+            redeemer(RedeemerTag::Spend, 0),
+            redeemer(RedeemerTag::Mint, 0),
+            redeemer(RedeemerTag::Cert, 0),
+            redeemer(RedeemerTag::Reward, 0),
+            redeemer(RedeemerTag::Vote, 0),
+            redeemer(RedeemerTag::Propose, 0),
+        ]);
+
+        let witness_set = WitnessSet {
+            vkeywitness: None,
+            native_script: None,
+            bootstrap_witness: None,
+            plutus_v1_script: None,
+            plutus_data: None,
+            redeemer: Some(KeepRaw::from(redeemers)),
+            plutus_v2_script: None,
+            plutus_v3_script: None,
+        };
+
+        let body_cbor = minicbor::to_vec(&body).expect("failed to encode body");
+        let body = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+            .expect("failed to decode body")
+            .to_owned();
+
+        let tx = Tx {
+            transaction_body: body,
+            transaction_witness_set: KeepRaw::from(witness_set),
+            success: true,
+            auxiliary_data: Nullable::Null,
+        };
+
+        minicbor::to_vec(tx).expect("failed to encode tx")
+    }
+
+    fn shelley_address(payment: ShelleyPaymentPart) -> Address {
+        Address::Shelley(ShelleyAddress::new(
+            Network::Testnet,
+            payment,
+            ShelleyDelegationPart::Null,
+        ))
+    }
+
+    #[test]
+    fn redeemer_script_hash_resolves_every_purpose() {
+        let bytes = tx_with_redeemers();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        let script = Hash::<28>::from(SCRIPT_HASH);
+        let redeemers = tx.redeemers();
+        assert_eq!(redeemers.len(), 6);
+
+        for redeemer in &redeemers {
+            let resolved = redeemer_script_hash(&tx, redeemer, &mut |input| {
+                assert_eq!(input.hash().as_slice(), [9u8; 32].as_slice());
+                Ok::<_, ()>(Some(shelley_address(ShelleyPaymentPart::Script(script))))
+            })
+            .expect("resolution failed");
+
+            assert_eq!(resolved, Some(script), "purpose {:?}", redeemer.tag());
+        }
+    }
+
+    #[test]
+    fn redeemer_script_hash_ignores_key_held_inputs() {
+        let bytes = tx_with_redeemers();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        let redeemers = tx.redeemers();
+        let spend = redeemers
+            .iter()
+            .find(|x| matches!(x.tag(), RedeemerTag::Spend))
+            .expect("spend redeemer");
+
+        let resolved = redeemer_script_hash(&tx, spend, &mut |_| {
+            Ok::<_, ()>(Some(shelley_address(ShelleyPaymentPart::key_hash(
+                Hash::from([0xBBu8; 28]),
+            ))))
+        })
+        .expect("resolution failed");
+
+        assert_eq!(resolved, None, "a key-held input names no script");
+
+        let resolved =
+            redeemer_script_hash(&tx, spend, &mut |_| Ok::<_, ()>(None)).expect("resolution");
+
+        assert_eq!(resolved, None, "an unresolvable input names no script");
+    }
+
+    #[test]
+    fn governance_lookups_handle_out_of_range_indexes() {
+        let bytes = tx_with_redeemers();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        // the fixture carries one voter and one proposal, both at index 0
+        assert_eq!(vote_script_hash(&tx, 1), None);
+        assert_eq!(propose_script_hash(&tx, 1), None);
+    }
+
+    /// A conway tx whose only content is one voter of every kind.
+    fn tx_with_mixed_voters() -> Vec<u8> {
+        let ballot = BTreeMap::from_iter([(
+            GovActionId {
+                transaction_id: Hash::from([7u8; 32]),
+                action_index: 0,
+            },
+            VotingProcedure {
+                vote: Vote::Yes,
+                anchor: None,
+            },
+        )]);
+
+        let voting_procedures = BTreeMap::from_iter([
+            (
+                Voter::ConstitutionalCommitteeKey([1u8; 28].into()),
+                ballot.clone(),
+            ),
+            (
+                Voter::ConstitutionalCommitteeScript([2u8; 28].into()),
+                ballot.clone(),
+            ),
+            (Voter::DRepKey([3u8; 28].into()), ballot.clone()),
+            (Voter::DRepScript([4u8; 28].into()), ballot.clone()),
+            (Voter::StakePoolKey([5u8; 28].into()), ballot),
+        ]);
+
+        let body = TransactionBody {
+            inputs: Set::from(vec![]),
+            outputs: vec![],
+            fee: 0,
+            ttl: None,
+            certificates: None,
+            withdrawals: None,
+            auxiliary_data_hash: None,
+            validity_interval_start: None,
+            mint: None,
+            script_data_hash: None,
+            collateral: None,
+            required_signers: None,
+            network_id: None,
+            collateral_return: None,
+            total_collateral: None,
+            reference_inputs: None,
+            voting_procedures: Some(voting_procedures),
+            proposal_procedures: None,
+            treasury_value: None,
+            donation: None,
+        };
+
+        let witness_set = WitnessSet {
+            vkeywitness: None,
+            native_script: None,
+            bootstrap_witness: None,
+            plutus_v1_script: None,
+            plutus_data: None,
+            redeemer: None,
+            plutus_v2_script: None,
+            plutus_v3_script: None,
+        };
+
+        let body_cbor = minicbor::to_vec(&body).expect("failed to encode body");
+        let body = minicbor::decode::<KeepRaw<'_, TransactionBody<'_>>>(&body_cbor)
+            .expect("failed to decode body")
+            .to_owned();
+
+        let tx = Tx {
+            transaction_body: body,
+            transaction_witness_set: KeepRaw::from(witness_set),
+            success: true,
+            auxiliary_data: Nullable::Null,
+        };
+
+        minicbor::to_vec(tx).expect("failed to encode tx")
+    }
+
+    /// The ledger orders voters by group, then script before key. The cbor
+    /// tag order puts keys first, so an encoding sort resolves the wrong
+    /// voter. This pins the ledger order per index.
+    #[test]
+    fn vote_script_hash_follows_ledger_voter_order() {
+        let bytes = tx_with_mixed_voters();
+        let tx = MultiEraTx::decode_for_era(Era::Conway, &bytes).expect("decodable tx");
+
+        // committee script, committee key, drep script, drep key, pool
+        assert_eq!(vote_script_hash(&tx, 0), Some([2u8; 28].into()));
+        assert_eq!(vote_script_hash(&tx, 1), None);
+        assert_eq!(vote_script_hash(&tx, 2), Some([4u8; 28].into()));
+        assert_eq!(vote_script_hash(&tx, 3), None);
+        assert_eq!(vote_script_hash(&tx, 4), None);
+        assert_eq!(vote_script_hash(&tx, 5), None);
     }
 }

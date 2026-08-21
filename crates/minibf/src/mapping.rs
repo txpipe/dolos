@@ -8,7 +8,7 @@ use pallas::{
     codec::{minicbor, utils::Bytes},
     crypto::hash::{Hash, Hasher},
     ledger::{
-        addresses::{Address, Network, ShelleyPaymentPart, StakeAddress, StakePayload},
+        addresses::{Address, Network, StakeAddress, StakePayload},
         primitives::{
             alonzo::{self, Certificate as AlonzoCert},
             conway::{Certificate as ConwayCert, DRep, DatumOption, RedeemerTag, ScriptRef},
@@ -35,6 +35,7 @@ use blockfrost_openapi::models::{
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    script_redeemers_inner::Purpose as ScriptRedeemerPurpose,
     script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
@@ -1328,6 +1329,76 @@ impl IntoModel<Vec<TxContentMetadataCborInner>> for TxModelBuilder<'_> {
     }
 }
 
+/// The redeemer-to-script matching lives in `dolos_cardano::pallas_extras`:
+/// the archive indexer uses it at index time, and this crate uses it at
+/// query time.
+pub use dolos_cardano::pallas_extras::redeemer_script_hash;
+
+/// The Blockfrost purpose of a tx-content redeemer.
+pub fn tx_redeemer_purpose(tag: RedeemerTag) -> Purpose {
+    match tag {
+        RedeemerTag::Spend => Purpose::Spend,
+        RedeemerTag::Mint => Purpose::Mint,
+        RedeemerTag::Cert => Purpose::Cert,
+        RedeemerTag::Reward => Purpose::Reward,
+        RedeemerTag::Vote => Purpose::Vote,
+        RedeemerTag::Propose => Purpose::Propose,
+    }
+}
+
+/// The Blockfrost purpose of a script redeemer. Same mapping as
+/// [`tx_redeemer_purpose`], distinct generated enum.
+pub fn script_redeemer_purpose(tag: RedeemerTag) -> ScriptRedeemerPurpose {
+    match tag {
+        RedeemerTag::Spend => ScriptRedeemerPurpose::Spend,
+        RedeemerTag::Mint => ScriptRedeemerPurpose::Mint,
+        RedeemerTag::Cert => ScriptRedeemerPurpose::Cert,
+        RedeemerTag::Reward => ScriptRedeemerPurpose::Reward,
+        RedeemerTag::Vote => ScriptRedeemerPurpose::Vote,
+        RedeemerTag::Propose => ScriptRedeemerPurpose::Propose,
+    }
+}
+
+/// The fee to run a redeemer. The inputs are the redeemer's execution units
+/// and the era's execution prices.
+pub fn redeemer_fee(units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
+    let ExUnitPrices {
+        mem_price,
+        step_price,
+    } = prices;
+
+    // BigRational::new panics on a zero denominator
+    if mem_price.denominator == 0 || step_price.denominator == 0 {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
+    let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
+
+    let mem_price = BigRational::new(
+        BigInt::from(mem_price.numerator),
+        BigInt::from(mem_price.denominator),
+    );
+
+    let step_price = BigRational::new(
+        BigInt::from(step_price.numerator),
+        BigInt::from(step_price.denominator),
+    );
+
+    let mem_fee = unit_mem * mem_price;
+    let step_fee = unit_steps * step_price;
+
+    let fee = mem_fee + step_fee;
+
+    let fee: u64 = fee
+        .ceil()
+        .to_integer()
+        .try_into()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(fee)
+}
+
 impl TxModelBuilder<'_> {
     fn find_output_for_input(&self, input: &MultiEraInput<'_>) -> Option<MultiEraOutput<'_>> {
         let tx_hash = input.hash();
@@ -1345,71 +1416,18 @@ impl TxModelBuilder<'_> {
         &self,
         redeemer: &MultiEraRedeemer<'_>,
     ) -> Result<Option<Hash<28>>, StatusCode> {
-        let index = redeemer.index() as usize;
         let tx = self.tx()?;
 
-        match redeemer.tag() {
-            RedeemerTag::Spend => {
-                let inputs = tx.inputs_sorted_set();
-                let Some(input) = inputs.get(index) else {
-                    return Ok(None);
-                };
+        redeemer_script_hash(&tx, redeemer, &mut |input| {
+            let Some(output) = self.find_output_for_input(input) else {
+                return Ok(None);
+            };
 
-                let Some(output) = self.find_output_for_input(input) else {
-                    return Ok(None);
-                };
-
-                let address = output
-                    .address()
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                match address {
-                    Address::Shelley(x) => match x.payment() {
-                        ShelleyPaymentPart::Script(hash) => Ok(Some(*hash)),
-                        _ => Ok(None),
-                    },
-                    _ => Ok(None),
-                }
-            }
-            RedeemerTag::Mint => {
-                let mints = tx.mints();
-                Ok(mints.get(index).map(|x| x.policy()).cloned())
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn compute_fee(&self, units: &ExUnits, prices: &ExUnitPrices) -> Result<u64, StatusCode> {
-        let ExUnitPrices {
-            mem_price,
-            step_price,
-        } = prices;
-
-        let unit_mem = BigRational::from_integer(BigInt::from(units.mem));
-        let unit_steps = BigRational::from_integer(BigInt::from(units.steps));
-
-        let mem_price = BigRational::new(
-            BigInt::from(mem_price.numerator),
-            BigInt::from(mem_price.denominator),
-        );
-
-        let step_price = BigRational::new(
-            BigInt::from(step_price.numerator),
-            BigInt::from(step_price.denominator),
-        );
-
-        let mem_fee = unit_mem * mem_price;
-        let step_fee = unit_steps * step_price;
-
-        let fee = mem_fee + step_fee;
-
-        let fee: u64 = fee
-            .ceil()
-            .to_integer()
-            .try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        Ok(fee)
+            output
+                .address()
+                .map(Some)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
     }
 
     fn build_redeemer_inner(
@@ -1419,17 +1437,10 @@ impl TxModelBuilder<'_> {
     ) -> Result<TxContentRedeemersInner, StatusCode> {
         let units = redeemer.ex_units();
 
-        let fee = self.compute_fee(&units, prices)?;
+        let fee = redeemer_fee(&units, prices)?;
 
         let out = TxContentRedeemersInner {
-            purpose: match redeemer.tag() {
-                RedeemerTag::Spend => Purpose::Spend,
-                RedeemerTag::Mint => Purpose::Mint,
-                RedeemerTag::Cert => Purpose::Cert,
-                RedeemerTag::Reward => Purpose::Reward,
-                // TODO: discuss with BF team if schema should be extended to include these
-                _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-            },
+            purpose: tx_redeemer_purpose(redeemer.tag()),
             tx_index: redeemer.index() as i32,
             // TODO: we should change this in Pallas to ensure that we have a KeepRaw wrapping the
             // redeemer data
@@ -1437,6 +1448,9 @@ impl TxModelBuilder<'_> {
             fee: fee.to_string(),
             unit_mem: units.mem.to_string(),
             unit_steps: units.steps.to_string(),
+            // deliberate divergence from deployed Blockfrost: db-sync leaves
+            // vote and propose redeemers unattributed (script_hash ""), we
+            // resolve them from the ledger.
             script_hash: self
                 .find_redeemer_script(redeemer)?
                 .map(|x| x.to_string())
@@ -2581,5 +2595,32 @@ impl IntoModel<HashMap<String, serde_json::Value>> for PlutusDataWrapper {
     fn into_model(self) -> Result<HashMap<String, serde_json::Value>, StatusCode> {
         let value = self.as_value()?;
         serde_json::from_value(value).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redeemer_fee_charges_ceiled_price() {
+        let units = ExUnits {
+            mem: 10,
+            steps: 100,
+        };
+
+        let prices = ExUnitPrices {
+            mem_price: alonzo::RationalNumber {
+                numerator: 577,
+                denominator: 10_000,
+            },
+            step_price: alonzo::RationalNumber {
+                numerator: 721,
+                denominator: 10_000_000,
+            },
+        };
+
+        // 10 * 577/10000 + 100 * 721/10000000 = 0.584... — the fee rounds up
+        assert_eq!(redeemer_fee(&units, &prices).expect("fee"), 1);
     }
 }
