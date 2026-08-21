@@ -907,12 +907,12 @@ fn a_past_dump_no_predecessor_carries_is_skipped_and_the_publish_stands() {
 /// of what `verify --reproduce` promises once dumps exist:
 ///
 /// - the dump **at** the stele's own sequence is cut from the tip by the walk,
-///   so a reproduction rebuilds it out of the stores like every other layer
-///   and a divergence in it would be caught;
+///   so a reproduction rebuilds it out of the stores like every other layer and
+///   a divergence in it would be caught;
 /// - a dump for an epoch **below** the sequence cannot be rebuilt by anything
-///   standing at the tip — that epoch's state is not in these stores — so it
-///   is carried forward from the document under verification and taken on
-///   trust, in the same category `history` is already in.
+///   standing at the tip — that epoch's state is not in these stores — so it is
+///   carried forward from the document under verification and taken on trust,
+///   in the same category `history` is already in.
 ///
 /// A reproduction that insisted on building the second would report a
 /// divergence on every stele carrying any state history at all, which is not

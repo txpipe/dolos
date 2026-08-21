@@ -257,13 +257,13 @@ pub const fn state_layer_count() -> usize {
 ///   canonical document as it is held — so two publishers naming the same
 ///   epochs in different orders would publish different documents and stop
 ///   co-signing over a difference that means nothing. Ascending is the one
-///   order that needs no convention, and it makes a duplicate a refusal
-///   rather than something to silently drop.
-/// - **Never epoch 0.** Epoch 0's state is the state after Byron's first
-///   epoch, and a stele at `sequence` 0 has no history to inherit a dump
-///   from; more to the point, "retain epoch 0" is the shape a
-///   default-constructed or mis-parsed list takes, and refusing it costs a
-///   publisher nothing it wanted.
+///   order that needs no convention, and it makes a duplicate a refusal rather
+///   than something to silently drop.
+/// - **Never epoch 0.** Epoch 0's state is the state after Byron's first epoch,
+///   and a stele at `sequence` 0 has no history to inherit a dump from; more to
+///   the point, "retain epoch 0" is the shape a default-constructed or
+///   mis-parsed list takes, and refusing it costs a publisher nothing it
+///   wanted.
 ///
 /// Empty is valid and is the default: a publisher that retains nothing
 /// publishes the tip alone, which is what every stele published before
