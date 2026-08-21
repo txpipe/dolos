@@ -119,10 +119,9 @@ where
         self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
         self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
 
-        // Compute the AVVM reclamation once per boundary instead of once
-        // per shard. Empty unless we're crossing the Shelley→Allegra
-        // hardfork — a one-time chain event, but the per-shard cost adds
-        // up at that boundary.
+        // Empty unless we're crossing the Shelley→Allegra hardfork — a
+        // one-time chain event, but the per-shard cost adds up at that
+        // boundary.
         self.avvm_reclamation = AvvmReclamation::at_boundary::<D>(domain.state(), &self.genesis)?;
 
         debug!(

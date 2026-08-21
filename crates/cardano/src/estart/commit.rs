@@ -237,11 +237,6 @@ impl super::WorkContext {
         // Conway-boundary `GovGenesisInit`) go through the singleton path.
         self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
-        // The Shelley→Allegra AVVM reclamation: the unredeemed AVVM UTxOs
-        // leave the set here, in the very transaction whose `EpochTransition`
-        // moves their value from the `utxos` pot to `reserves`. Both halves
-        // read the same `AvvmReclamation`, so no crash can land one without
-        // the other. `None` — and therefore free — at every other boundary.
         let avvm_deletion =
             (!self.avvm_reclamation.is_empty()).then(|| self.avvm_reclamation.deletion_delta());
 
@@ -285,12 +280,8 @@ impl super::WorkContext {
 
         // The by-address (and every other UTxO filter) index has to lose the
         // reclaimed refs too, or the serving APIs keep answering with outputs
-        // the state store no longer holds. Same ordering as the block path:
-        // indexes follow the state commit, so a crash between the two leaves
-        // an index entry pointing at a ref the state no longer has — which
-        // every reader already tolerates, because it resolves refs against
-        // the state and drops what is not there. The other order would hide
-        // a live UTxO instead.
+        // the state store no longer holds. Indexes follow the state commit;
+        // `AvvmReclamation::apply_deletion` records why that order.
         if let Some(delta) = avvm_deletion.as_ref() {
             // Carry the index's own cursor through: this changes what the
             // index holds, not how far it has been advanced, and
