@@ -21,6 +21,7 @@ use crate::{
     EpochState, EraProtocol, PoolState, ProposalState,
 };
 
+pub mod avvm;
 pub mod commit;
 pub mod loading;
 pub mod work_unit;
@@ -29,6 +30,7 @@ pub mod work_unit;
 pub mod nonces;
 pub mod reset;
 
+pub use avvm::AvvmReclamation;
 pub use work_unit::EstartWorkUnit;
 
 pub trait BoundaryVisitor {
@@ -91,8 +93,10 @@ pub struct WorkContext {
     pub chain_summary: ChainSummary,
     pub genesis: Arc<Genesis>,
 
-    /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary.
-    pub avvm_reclamation: u64,
+    /// Unredeemed AVVM UTxOs reclaimed at the Shelley→Allegra boundary:
+    /// the value credited to `reserves` and the refs deleted from the UTxO
+    /// set, which are one event and travel together. Empty everywhere else.
+    pub avvm_reclamation: AvvmReclamation,
 
     // computed via visitors
     pub deltas: WorkDeltas,

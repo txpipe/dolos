@@ -11,7 +11,8 @@
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
-    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    Entity, EntityDelta as _, EntityKey, IndexStore, IndexWriter, LogKey, NsKey, StateStore,
+    StateWriter, TemporalKey,
 };
 use tracing::{debug, instrument, trace, warn};
 
@@ -176,11 +177,16 @@ impl super::WorkContext {
     /// runs. The cursor is set only here, so a crash mid-shard restarts
     /// from the boundary block and the pre-finalize state stays at the
     /// previous-epoch cursor.
+    ///
+    /// It is also where the Shelley→Allegra AVVM reclamation deletes its
+    /// UTxOs — see [`crate::estart::avvm`] for why that belongs in the same
+    /// transaction as the pot delta.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
+        indexes: &D::Indexes,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
@@ -231,6 +237,24 @@ impl super::WorkContext {
         // Conway-boundary `GovGenesisInit`) go through the singleton path.
         self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
 
+        // The Shelley→Allegra AVVM reclamation: the unredeemed AVVM UTxOs
+        // leave the set here, in the very transaction whose `EpochTransition`
+        // moves their value from the `utxos` pot to `reserves`. Both halves
+        // read the same `AvvmReclamation`, so no crash can land one without
+        // the other. `None` — and therefore free — at every other boundary.
+        let avvm_deletion =
+            (!self.avvm_reclamation.is_empty()).then(|| self.avvm_reclamation.deletion_delta());
+
+        if let Some(delta) = avvm_deletion.as_ref() {
+            debug!(
+                count = self.avvm_reclamation.utxos.len(),
+                total = self.avvm_reclamation.total,
+                "deleting unredeemed AVVM utxos"
+            );
+
+            writer.apply_utxoset(delta)?;
+        }
+
         // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {
             writer
@@ -259,6 +283,27 @@ impl super::WorkContext {
         writer.commit()?;
         archive_writer.commit()?;
 
+        // The by-address (and every other UTxO filter) index has to lose the
+        // reclaimed refs too, or the serving APIs keep answering with outputs
+        // the state store no longer holds. Same ordering as the block path:
+        // indexes follow the state commit, so a crash between the two leaves
+        // an index entry pointing at a ref the state no longer has — which
+        // every reader already tolerates, because it resolves refs against
+        // the state and drops what is not there. The other order would hide
+        // a live UTxO instead.
+        if let Some(delta) = avvm_deletion.as_ref() {
+            // Carry the index's own cursor through: this changes what the
+            // index holds, not how far it has been advanced, and
+            // `IndexWriter::apply` writes whatever cursor the delta names.
+            let cursor = indexes.cursor()?.unwrap_or(ChainPoint::Slot(slot));
+
+            let delta = crate::indexes::index_delta_from_utxo_delta(cursor, delta);
+
+            let index_writer = indexes.start_writer()?;
+            index_writer.apply(&delta)?;
+            index_writer.commit()?;
+        }
+
         debug!("estart finalize commit complete");
 
         Ok(())
@@ -282,7 +327,7 @@ mod tests {
             active_protocol: EraProtocol::from(9),
             chain_summary: ChainSummary::default(),
             genesis: domain.genesis(),
-            avvm_reclamation: 0,
+            avvm_reclamation: Default::default(),
             deltas: Default::default(),
             logs: Default::default(),
         }

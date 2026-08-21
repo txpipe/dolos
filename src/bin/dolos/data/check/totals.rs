@@ -58,9 +58,32 @@
 //! - **`utxos` and `reserves` at the Shelley→Allegra boundary.** ESTART
 //!   reclaims the unredeemed AVVM UTxOs there, moving value from the one to the
 //!   other by an amount it reads out of the UTxO set and never records. Nothing
-//!   on disk reproduces it once those UTxOs are gone, so that single boundary
-//!   compares every pot except those two. Every other pot at it, and both of
-//!   them at every other boundary, are still compared.
+//!   on disk reproduces it, so that single boundary compares every pot except
+//!   those two. Every other pot at it, and both of them at every other
+//!   boundary, are still compared.
+//!
+//!   The skip stays, and is now permanent rather than incidental. Until the
+//!   reclamation deleted its UTxOs, the store kept accidental evidence of the
+//!   amount: the unredeemed refs were still in the set, untouched, so deriving
+//!   them from the Byron genesis and summing them reproduced the boundary
+//!   figure at any later tip. That is exactly the defect the deletion fixes —
+//!   the outputs the real chain destroyed are gone — and with them the only
+//!   thing on disk the amount could have been recovered from. Recording it
+//!   would mean a new field on the boundary's own snapshot, which is a schema
+//!   change and a separate concern from the deletion.
+//!
+//!   What the deletion *does* fix here is the tip comparison, which needed no
+//!   change to get it: `initial_pots.utxos` has the reclamation subtracted and
+//!   the live scan no longer holds the outputs, so the two finally agree on
+//!   mainnet.
+//!
+//! - **Not a gap, stated because it had to be checked:** the deleted outputs
+//!   are not double-counted as spends. `produced_utxos` / `consumed_utxos` come
+//!   from `RollingStats`, which only block application writes; the reclamation
+//!   goes straight through `StateWriter::apply_utxoset` in the boundary commit
+//!   and touches no rolling figure. It is a boundary event, attributed to
+//!   neither side of the transaction arithmetic — which is what makes the roll
+//!   forward above exact across it.
 //! - **A hand-off whose closing snapshot is incomplete** — no `EndStats`, or no
 //!   live pparams to say whether the Byron or the Shelley delta path applies.
 //!   The snapshot's completeness is check 4 (`epoch-log`)'s finding; this check

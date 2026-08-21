@@ -47,7 +47,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .mark()
             .map(|p| p.protocol_major_or_default())
             .unwrap_or_else(|| epoch.pparams.unwrap_live().protocol_major_or_default()),
-        avvm_reclamation: ctx.avvm_reclamation,
+        avvm_reclamation: ctx.avvm_reclamation.total,
     };
 
     tracing::debug!(
