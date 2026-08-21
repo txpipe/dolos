@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    sync::execute_work_unit, ChainPoint, Domain as _, Genesis, IndexStore as _, IndexWriter as _,
-    StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta,
+    builtin::MemoryIndexStore, sync::execute_work_unit, ChainPoint, Domain as _, Genesis,
+    IndexStore as _, IndexWriter as _, StateStore as _, StateWriter as _, TxoRef, UtxoSetDelta,
 };
 use dolos_testing::toy_domain::ToyDomain;
 
@@ -199,6 +199,65 @@ fn allegra_boundary_deletes_unredeemed_avvm_utxos() {
     assert_eq!(after.reserves, before.reserves + UNREDEEMED_AMOUNT);
     assert_eq!(after.utxos, before.utxos - UNREDEEMED_AMOUNT);
     assert_eq!(after.max_supply(), before.max_supply());
+}
+
+/// The fallback the deletion needs when the index store carries no cursor at
+/// all — what a restore that skipped cursor placement leaves behind. `None` is
+/// how bootstrap reads "never indexed, replay the whole WAL"; writing the
+/// boundary's own slot there would claim every block before it as indexed.
+#[test]
+fn a_never_indexed_store_is_left_never_indexed() {
+    let genesis = genesis_with_avvm();
+    let domain = ToyDomain::new_with_genesis(genesis.clone(), None, None);
+
+    let (unredeemed, _) = avvm_entry(&genesis, UNREDEEMED_AMOUNT);
+    schedule_allegra(&domain);
+
+    let blank = MemoryIndexStore::new();
+    assert!(
+        blank.cursor().unwrap().is_none(),
+        "the store starts unindexed"
+    );
+
+    // The boundary by hand rather than through `execute_work_unit`, which
+    // would reach for the domain's own indexes: one account shard, then the
+    // finalize pass that carries the deletion.
+    let ranges = dolos_cardano::shard::shard_key_ranges(0, 1);
+    let mut shard = dolos_cardano::estart::WorkContext::load_shard::<ToyDomain>(
+        domain.state(),
+        genesis.clone(),
+        Default::default(),
+        0,
+        1,
+        ranges.clone(),
+    )
+    .unwrap();
+    shard
+        .commit_shard::<ToyDomain>(domain.state(), domain.archive(), ranges)
+        .unwrap();
+
+    let mut context =
+        dolos_cardano::estart::WorkContext::load_finalize::<ToyDomain>(domain.state(), genesis)
+            .unwrap();
+
+    let slot = context
+        .chain_summary
+        .epoch_start(context.starting_epoch_no());
+
+    context
+        .commit_finalize::<ToyDomain>(domain.state(), domain.archive(), &blank, slot)
+        .unwrap();
+
+    assert!(
+        !is_unspent(&domain, &unredeemed),
+        "the unredeemed AVVM utxo survived the boundary"
+    );
+
+    assert_eq!(
+        blank.cursor().unwrap(),
+        Some(ChainPoint::Origin),
+        "the boundary claimed a never-indexed store as indexed up to its own slot"
+    );
 }
 
 /// A network whose Byron genesis distributes nothing through AVVM —
