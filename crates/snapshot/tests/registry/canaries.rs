@@ -42,8 +42,6 @@ use dolos_cardano::{
 };
 use dolos_core::{cbor, EraCbor};
 
-// --- distinctive primitives ---
-//
 // Every byte differs from its neighbours, so a field that shifts by one
 // position, or a hash that is truncated rather than carried whole, changes the
 // pinned bytes instead of landing on a repeated value that hides the move.
@@ -109,8 +107,6 @@ fn filled_epoch_value<T: Clone + std::fmt::Debug>(start: Epoch, slots: [T; 5]) -
     value
 }
 
-// --- log record types ---
-
 pub fn account_stake_log() -> AccountStakeLog {
     AccountStakeLog {
         amount: 9_876_543_210,
@@ -158,8 +154,6 @@ pub fn stake_log() -> StakeLog {
         margin_cost: Some(rational(3, 100)),
     }
 }
-
-// --- state record types ---
 
 fn stake(seed: u64) -> Stake {
     Stake {
@@ -587,7 +581,7 @@ pub fn utxo_value() -> EraCbor {
     EraCbor(6, bytes_of::<48>(0x33).to_vec())
 }
 
-// --- values the enum tables pin, and nothing else builds ---
+// The values the enum tables pin; nothing else builds them.
 
 pub fn every_pparam_value() -> Vec<(&'static str, PParamValue)> {
     vec![

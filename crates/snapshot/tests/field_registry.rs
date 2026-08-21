@@ -86,7 +86,6 @@ fn check_entry(entry: &Entry, expected_rev: u64) {
          is a revision nothing pins.",
     );
 
-    // The current canary still encodes to its pinned bytes.
     let (reported_ns, encoded) = (entry.encode)();
 
     assert_eq!(
@@ -104,9 +103,6 @@ fn check_entry(entry: &Entry, expected_rev: u64) {
         current.rev,
     );
 
-    // Every retained revision, current included, still decodes under today's
-    // decoder. This is the tolerance the readers rely on, asserted rather than
-    // assumed.
     for pinned in entry.history {
         let bytes = decode_hex(pinned.hex);
 

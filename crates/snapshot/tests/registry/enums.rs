@@ -22,7 +22,8 @@
 //! Reachability is the whole membership rule, and it is narrower than "an enum
 //! the governance code touches". `Voter` is not here, for instance: it selects
 //! *which* of a proposal's three vote maps a vote lands in and is never itself
-//! stored in an entity value, so no stele byte depends on its indexes. Two
+//! stored in an entity value, so no stele byte depends on its indexes.
+//!
 //! One reachable enum is covered indirectly instead of by a table of its own:
 //! `EpochPosition` is `pub(super)` to `model::epoch_value` and so unnameable
 //! from here, and is pinned by the canaries that carry it (`accounts`,
@@ -84,7 +85,6 @@ macro_rules! table {
 
 pub fn tables() -> Vec<Table> {
     vec![
-        // --- enums this profile owns ---
         table!(
             enc_pparam_value,
             "PParamValue",
@@ -121,7 +121,6 @@ pub fn tables() -> Vec<Table> {
             canaries::every_committee_authorization,
             COMMITTEE_AUTHORIZATION
         ),
-        // --- Pallas enums the records embed ---
         table!(enc_drep, "DRep", canaries::every_drep, DREP),
         table!(
             enc_stake_credential,
