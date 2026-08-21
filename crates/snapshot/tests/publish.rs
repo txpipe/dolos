@@ -72,7 +72,7 @@ use stelae::{progress::Outcome, SteleReader as _};
 
 use watcher::Watcher;
 
-use node::{plan_at_boundary, Node};
+use node::{plan_at_boundary, plan_at_epoch_end, Node};
 use registry_fixture::Fixture;
 
 /// The log kinds epoch 0 carries.
@@ -213,7 +213,7 @@ fn a_retained_dump_is_cut_once_and_inherited_after() {
     let node = Node::build();
     let repository = fixture.repository("dolos/dumps");
 
-    let cutting = plan_at_boundary(&node.domain, 1, retaining_epoch_1());
+    let cutting = plan_at_epoch_end(&node.domain, 1, retaining_epoch_1());
     let following = plan_at_boundary(&node.domain, 2, retaining_epoch_1());
 
     // ---- the publish that cuts it ----------------------------------------
@@ -276,6 +276,11 @@ fn a_retained_dump_is_cut_once_and_inherited_after() {
         followed.layers_built,
         EPOCH_2 + state_layer_count(),
         "epoch 2's two layers and a fresh tip, and nothing else",
+    );
+    assert_eq!(
+        followed.inscription.layers.len(),
+        EPOCH_0 + EPOCH_1 + EPOCH_2 + 2 * state_layer_count(),
+        "three epochs, the inherited dump, and this sequence's tip",
     );
 
     // Only new blobs moved. The dump's did not: it is epoch 1's state, and
@@ -366,7 +371,7 @@ fn a_restarted_publish_carries_forward_the_retained_dump_it_adopted() {
     let node = Node::build();
     let storage = tempfile::tempdir().unwrap();
 
-    let cutting = plan_at_boundary(&node.domain, 1, retaining_epoch_1());
+    let cutting = plan_at_epoch_end(&node.domain, 1, retaining_epoch_1());
     let following = plan_at_boundary(&node.domain, 2, retaining_epoch_1());
 
     let first = fixture.repository("dolos/dump-resume");
@@ -447,9 +452,28 @@ fn a_restarted_publish_carries_forward_the_retained_dump_it_adopted() {
 
     assert_eq!(resumed.identity, uninterrupted.identity);
     assert_eq!(resumed.inscription, uninterrupted.inscription);
-    assert_eq!(resumed.layers_reused, uninterrupted.layers_reused);
-    assert_eq!(resumed.layers_built, uninterrupted.layers_built);
     assert_eq!(manifest_of(&resumed_into), manifest_of(&clean));
+
+    // The sharpest statement about the dump: the resume rebuilt the tip and
+    // *nothing else*. A resume that had dropped the half-adopted dump would
+    // have had to build one, and one that had lost track of it would have
+    // built seventy-seven.
+    assert_eq!(resumed.layers_built, state_layer_count());
+
+    // The two runs agree on the whole and differ where they must: a resumed
+    // publish carries forward from the record as well as from the manifest, so
+    // it reuses strictly more than an uninterrupted one — the layers the
+    // killed attempt had already uploaded.
+    assert_eq!(
+        resumed.layers_built + resumed.layers_reused,
+        uninterrupted.layers_built + uninterrupted.layers_reused,
+    );
+    assert!(
+        resumed.layers_reused > uninterrupted.layers_reused,
+        "the record bought nothing: {} reused against {}",
+        resumed.layers_reused,
+        uninterrupted.layers_reused,
+    );
 
     assert_eq!(
         registry::PublishRecord::load(&record_path(&storage)).unwrap(),

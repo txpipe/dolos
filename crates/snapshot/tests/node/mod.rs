@@ -269,15 +269,50 @@ pub fn plan_at_boundary<B: ToyStores>(
     epoch: u64,
     retained: RetainedEpochs,
 ) -> Plan {
+    plan_standing_at(
+        domain,
+        epoch,
+        |summary| summary.epoch_start(epoch),
+        retained,
+    )
+}
+
+/// A plan for `domain` standing at the **last slot of `epoch`**, retaining the
+/// state dumps `retained` names.
+///
+/// The sequence is the same as [`plan_at_boundary`]'s for that epoch, and the
+/// epoch windows are not: a stele cut mid-epoch clamps its last window to the
+/// cursor, so the same epoch published later in full wears a *different scope*
+/// and is correctly rebuilt rather than inherited. A pair of publishes meant to
+/// exercise inheritance has to start here, which is the same reason
+/// `Node::first` sits where it does — see `tests/publish.rs` for the longer
+/// argument.
+pub fn plan_at_epoch_end<B: ToyStores>(
+    domain: &ToyDomain<B>,
+    epoch: u64,
+    retained: RetainedEpochs,
+) -> Plan {
+    plan_standing_at(
+        domain,
+        epoch,
+        |summary| summary.epoch_start(epoch + 1) - 1,
+        retained,
+    )
+}
+
+fn plan_standing_at<B: ToyStores>(
+    domain: &ToyDomain<B>,
+    epoch: u64,
+    slot: impl Fn(&dolos_cardano::eras::ChainSummary) -> u64,
+    retained: RetainedEpochs,
+) -> Plan {
     let summary = dolos_cardano::eras::load_chain_summary_from_state(domain.state()).unwrap();
     let magic = u64::from(domain.genesis().network_magic());
 
     // Any hash will do: `position` needs one to exist, and nothing in an export
     // reads it back out of the store.
-    let point = dolos_core::ChainPoint::Specific(
-        summary.epoch_start(epoch),
-        dolos_core::BlockHash::new([0xab; 32]),
-    );
+    let point =
+        dolos_core::ChainPoint::Specific(slot(&summary), dolos_core::BlockHash::new([0xab; 32]));
 
     let plan = Plan::new(&summary, Network::for_magic(magic), point, retained).unwrap();
     assert_eq!(plan.sequence, epoch);
