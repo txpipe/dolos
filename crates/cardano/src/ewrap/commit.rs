@@ -149,9 +149,8 @@ impl BoundaryWork {
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
     /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes
-    /// archive logs produced by the global visitors (e.g.
-    /// `PoolDepositRefundLog`) and the completed `EpochState` snapshot
-    /// under the epoch-start temporal key.
+    /// archive logs produced by the global visitors and the completed
+    /// `EpochState` snapshot under the epoch-start temporal key.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,

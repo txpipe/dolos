@@ -1431,7 +1431,11 @@ mod tests {
                 json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                 1,
             ),
-            layer(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
+            layer(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                json!({"shard": 0}),
+                2,
+            ),
             layer(crate::DIGESTS, json!({"lastImmutable": 7}), 3),
         ];
 
@@ -1590,7 +1594,11 @@ mod tests {
                     json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                     1,
                 ),
-                written(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
+                written(
+                    crate::state_kind_for(crate::UTXOS).unwrap(),
+                    json!({"shard": 0}),
+                    2,
+                ),
             ],
         }
     }

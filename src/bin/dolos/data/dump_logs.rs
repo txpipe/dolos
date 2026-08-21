@@ -4,7 +4,7 @@ use comfy_table::Table;
 use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
-    model::{AccountEpochLog, AccountStakeLog, LeaderRewardLog, MemberRewardLog, PParamKind},
+    model::{AccountEpochLog, PParamKind},
     ChainSummary, EpochState, StakeLog,
 };
 use dolos_core::config::RootConfig;
@@ -67,149 +67,6 @@ trait TableRow: Entity {
         match self.row(key, ctx) {
             row if row.is_empty() => Vec::new(),
             row => vec![row],
-        }
-    }
-}
-
-impl TableRow for LeaderRewardLog {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        match format {
-            OutputFormat::Default => vec!["epoch", "slot", "as leader", "amount"],
-            OutputFormat::Dbsync => vec!["stake", "pool", "amount", "type", "earned_epoch"],
-        }
-    }
-
-    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
-        let temporal = TemporalKey::from(key.clone());
-        let entity = EntityKey::from(key.clone());
-        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
-
-        match ctx.format {
-            OutputFormat::Default => vec![
-                format!("{}", slot),
-                format!("{}", hex::encode(entity.as_ref())),
-                "true".to_string(),
-                format!("{}", self.amount),
-            ],
-            OutputFormat::Dbsync => {
-                if self.amount == 0 {
-                    return Vec::new();
-                }
-                let credential = decode_stake_credential(&entity)
-                    .unwrap_or_else(|_| StakeCredential::AddrKeyhash([0; 28].into()));
-                let stake = pallas_extras::stake_credential_to_address(ctx.network, &credential)
-                    .to_bech32()
-                    .unwrap_or_else(|_| "<invalid>".to_string());
-                let pool_id = bech32::encode::<bech32::Bech32>(POOL_HRP, &self.pool_id)
-                    .unwrap_or_else(|_| "<invalid>".to_string());
-                let reward_type = "leader";
-                let earned_epoch = match ctx.summary.as_ref() {
-                    Some(summary) => summary.slot_epoch(slot).0.saturating_sub(1),
-                    None => slot.saturating_sub(1),
-                };
-
-                vec![
-                    stake,
-                    pool_id,
-                    self.amount.to_string(),
-                    reward_type.to_string(),
-                    earned_epoch.to_string(),
-                ]
-            }
-        }
-    }
-}
-
-impl TableRow for MemberRewardLog {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        match format {
-            OutputFormat::Default => vec!["epoch", "slot", "as leader", "amount"],
-            OutputFormat::Dbsync => vec!["stake", "pool", "amount", "type", "earned_epoch"],
-        }
-    }
-
-    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
-        let temporal = TemporalKey::from(key.clone());
-        let entity = EntityKey::from(key.clone());
-        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
-
-        match ctx.format {
-            OutputFormat::Default => vec![
-                format!("{}", slot),
-                format!("{}", hex::encode(entity.as_ref())),
-                "false".to_string(),
-                format!("{}", self.amount),
-            ],
-            OutputFormat::Dbsync => {
-                if self.amount == 0 {
-                    return Vec::new();
-                }
-                let credential = decode_stake_credential(&entity)
-                    .unwrap_or_else(|_| StakeCredential::AddrKeyhash([0; 28].into()));
-                let stake = pallas_extras::stake_credential_to_address(ctx.network, &credential)
-                    .to_bech32()
-                    .unwrap_or_else(|_| "<invalid>".to_string());
-                let pool_id = bech32::encode::<bech32::Bech32>(POOL_HRP, &self.pool_id)
-                    .unwrap_or_else(|_| "<invalid>".to_string());
-                let reward_type = "member";
-                let earned_epoch = match ctx.summary.as_ref() {
-                    Some(summary) => summary.slot_epoch(slot).0.saturating_sub(1),
-                    None => slot.saturating_sub(1),
-                };
-
-                vec![
-                    stake,
-                    pool_id,
-                    self.amount.to_string(),
-                    reward_type.to_string(),
-                    earned_epoch.to_string(),
-                ]
-            }
-        }
-    }
-}
-
-impl TableRow for AccountStakeLog {
-    fn header(format: OutputFormat) -> Vec<&'static str> {
-        match format {
-            OutputFormat::Default => vec!["slot", "stake", "pool", "amount"],
-            // Matches the `stake-{epoch}.csv` layout the epoch_pots harness
-            // compares against db-sync ground truth.
-            OutputFormat::Dbsync => vec!["stake", "pool", "lovelace"],
-        }
-    }
-
-    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
-        let temporal = TemporalKey::from(key.clone());
-        let entity = EntityKey::from(key.clone());
-        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
-
-        // An undecodable key means the row isn't a credential-keyed log at all
-        // (wrong namespace, corruption). Report it as `<invalid>` rather than
-        // falling back to a zero credential, which would render as a
-        // well-formed stake address and silently mislabel the account — and
-        // collapse every failed row onto the same address in a dbsync diff.
-        let stake = decode_stake_credential(&entity)
-            .ok()
-            .and_then(|credential| {
-                pallas_extras::stake_credential_to_address(ctx.network, &credential)
-                    .to_bech32()
-                    .ok()
-            })
-            .unwrap_or_else(|| "<invalid>".to_string());
-        // bech32 happily encodes any byte length, so a corrupted pool id
-        // would render as a plausible-looking pool address — require the
-        // exact hash size before encoding.
-        let pool = if self.pool_id.len() == 28 {
-            bech32::encode::<bech32::Bech32>(POOL_HRP, &self.pool_id)
-                .unwrap_or_else(|_| "<invalid>".to_string())
-        } else {
-            "<invalid>".to_string()
-        };
-
-        match ctx.format {
-            OutputFormat::Default => vec![slot.to_string(), stake, pool, self.amount.to_string()],
-            OutputFormat::Dbsync => vec![stake, pool, self.amount.to_string()],
         }
     }
 }
@@ -790,39 +647,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     };
 
     match args.namespace.as_str() {
-        "leader-rewards" => dump_logs::<LeaderRewardLog>(
-            &archive,
-            "leader-rewards",
-            args.skip,
-            args.take,
-            &ctx,
-            start_slot,
-            end_slot,
-            range.clone(),
-        )?,
-        "member-rewards" => dump_logs::<MemberRewardLog>(
-            &archive,
-            "member-rewards",
-            args.skip,
-            args.take,
-            &ctx,
-            start_slot,
-            end_slot,
-            range.clone(),
-        )?,
         "stakes" => dump_logs::<StakeLog>(
             &archive,
             "stakes",
-            args.skip,
-            args.take,
-            &ctx,
-            start_slot,
-            end_slot,
-            range.clone(),
-        )?,
-        "account-stakes" => dump_logs::<AccountStakeLog>(
-            &archive,
-            "account-stakes",
             args.skip,
             args.take,
             &ctx,

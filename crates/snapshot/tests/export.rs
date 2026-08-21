@@ -60,7 +60,7 @@ use watcher::Watcher;
 
 /// The identity of an export over an empty store set at [`SKELETON_POINT`].
 const GOLDEN_SKELETON: &str =
-    "sha256:249fdf27139b4607e60668a3ab5002d7bfd1c6872da426e440b1bf42c9b43e2f";
+    "sha256:e487d151c5ef79b1a7cc883861bf3b5d59db4666327fcd8feda7875c55869912";
 
 /// The chain point the skeleton fixture stands at: mid-epoch-2 under
 /// [`skeleton_summary`], so the export covers three epochs and the last window
@@ -683,7 +683,6 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:b64ae324280c4335089cdf9918ac0596fe7f429dbf5a54c2fd2d44f25280b935","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":199,"epoch":1,"startSlot":100},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:a76e2bb47934f8473a232a31da4930db8d50ce90a4cab2c232fc032644fff62e","kind":"indexes","mediaType":"application/vnd.dolos.stele.indexes.v1+zstd","records":1,"scope":{"endSlot":250,"epoch":2,"startSlot":200},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:fabc518edf099744b9871e87076bbf4bc0e4d308f3212983d62187070dc84c80","kind":"state-account-epochs","mediaType":"application/vnd.dolos.stele.state-account-epochs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
-    r#"{"diffId":"sha256:318ad5ac29478218eaf3d04f8dfe93fc86834f2f7eca108817e811a603f09a8f","kind":"state-account-stakes","mediaType":"application/vnd.dolos.stele.state-account-stakes.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
     r#"{"diffId":"sha256:02522facba4552263d4dfaded9dbb82ec8a90937284a15539f6f1f7a7a9ef4fd","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":49},"#,
     r#"{"diffId":"sha256:9c3e2a317428abc07cd8a29934c10d6ed406eef31b0ffebbaa95679ed11a4e89","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":1},"uncompressedSize":49},"#,
     r#"{"diffId":"sha256:bad9e2528c56aab15c5c593550f17bd850d52804dd17172fefb4b11940641d8d","kind":"state-accounts","mediaType":"application/vnd.dolos.stele.state-accounts.v1+zstd","records":1,"scope":{"shard":2},"uncompressedSize":49},"#,
@@ -736,11 +735,8 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:d2956a7d3251484d5ef8f45cd923e34ecbc890552eac579c500ba99b0a98cb9a","kind":"state-epochs","mediaType":"application/vnd.dolos.stele.state-epochs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
     r#"{"diffId":"sha256:a53fdfbe13f40703e1e8cd661ddc5ba5bb54541b22bf7cdcb3b7aa9697fd9cb6","kind":"state-eras","mediaType":"application/vnd.dolos.stele.state-eras.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":45},"#,
     r#"{"diffId":"sha256:0a74ea019634f7c0135b1030e692d4e3680ff534c89462819fa04c15ada63114","kind":"state-gov","mediaType":"application/vnd.dolos.stele.state-gov.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":44},"#,
-    r#"{"diffId":"sha256:87ed310e3fefe592d1f45dde73677bf2de5642b4f9d64363b64debe6999d07a5","kind":"state-leader-rewards","mediaType":"application/vnd.dolos.stele.state-leader-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
-    r#"{"diffId":"sha256:22a28d8b6fdb0add20994fda1401bfe694e50c79886d5c4517eac96ddb94bc0b","kind":"state-member-rewards","mediaType":"application/vnd.dolos.stele.state-member-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":55},"#,
     r#"{"diffId":"sha256:2e07a341e23cf37667da069d3e75ba7a7bf2665572f2183353ff0266369cf17f","kind":"state-pending-mirs","mediaType":"application/vnd.dolos.stele.state-pending-mirs.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":53},"#,
     r#"{"diffId":"sha256:ad5994d901c69e757457b2ad6bac6a2679e45ae25769cc616375c10c8c6dc582","kind":"state-pending-rewards","mediaType":"application/vnd.dolos.stele.state-pending-rewards.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":56},"#,
-    r#"{"diffId":"sha256:1d1a0547655e532c3c52d29fab6fcd82e7a3ef3fed1d0c2a9e670f269384ba2b","kind":"state-pool-deposit-refunds","mediaType":"application/vnd.dolos.stele.state-pool-deposit-refunds.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":62},"#,
     r#"{"diffId":"sha256:da799488bcc20ea1d8c8e236169d7204e328b34f806075a951f266819bd35e34","kind":"state-pools","mediaType":"application/vnd.dolos.stele.state-pools.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":46},"#,
     r#"{"diffId":"sha256:640c0f9db84510212ae0d71860df7c518244db6eed6728e9fcc6540d99bdcbe7","kind":"state-proposals","mediaType":"application/vnd.dolos.stele.state-proposals.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":50},"#,
     r#"{"diffId":"sha256:c8517773130f10b7dfb51ca3415ccbe9005f1b84abada0418f46bee7dc7d095f","kind":"state-stakes","mediaType":"application/vnd.dolos.stele.state-stakes.v1+zstd","records":1,"scope":{"shard":0},"uncompressedSize":47},"#,
@@ -762,8 +758,8 @@ const CANONICAL_SKELETON: &str = concat!(
     r#"{"diffId":"sha256:e59d8b7ec7144216a9caab188b2de8d09d98c7c419e228a41131722796b81711","kind":"state-utxos","mediaType":"application/vnd.dolos.stele.state-utxos.v1+zstd","records":1,"scope":{"shard":15},"uncompressedSize":46}"#,
     r#"],"parameters":{"#,
     r#""indexKeyHash":"xxh3-64","#,
-    r#""schemas":{"account-epochs":1,"account-stakes":1,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
-    r#""shards":{"account-epochs":1,"account-stakes":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"leader-rewards":1,"member-rewards":1,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":1,"pools":1,"proposals":1,"stakes":1,"utxos":16}"#,
+    r#""schemas":{"account-epochs":1,"account-stakes":0,"accounts":1,"assets":1,"datums":1,"dreps":1,"epochs":2,"eras":1,"gov":1,"leader-rewards":0,"member-rewards":0,"pending_mirs":1,"pending_rewards":1,"pool-deposit-refunds":0,"pools":1,"proposals":1,"stakes":1,"utxos":1},"#,
+    r#""shards":{"account-epochs":1,"accounts":16,"assets":16,"datums":16,"dreps":1,"epochs":1,"eras":1,"gov":1,"pending_mirs":1,"pending_rewards":1,"pools":1,"proposals":1,"stakes":1,"utxos":16}"#,
     r#"},"position":{"epoch":2,"network":{"magic":764824073,"name":"mainnet"},"point":{"hash":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","slot":250}},"profile":{"name":"io.txpipe.dolos.cardano","version":1},"schema":1,"sequence":2}"#,
 );
 

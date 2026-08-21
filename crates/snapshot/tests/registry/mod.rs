@@ -56,9 +56,9 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountEpochLog, AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState,
-    EraSummary, FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
-    PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
+    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
+    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
+    StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -147,15 +147,6 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_account_stakes,
-            AccountStakeLog,
-            canaries::account_stake_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/account-stakes.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
             enc_accounts,
             AccountState,
             canaries::account_state,
@@ -233,24 +224,6 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_leader_rewards,
-            LeaderRewardLog,
-            canaries::leader_reward_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/leader-rewards.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_member_rewards,
-            MemberRewardLog,
-            canaries::member_reward_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/member-rewards.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
             enc_pending_mirs,
             PendingMirState,
             canaries::pending_mir_state,
@@ -266,15 +239,6 @@ pub fn registry() -> Vec<Entry> {
             &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/pending_rewards.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_pool_deposit_refunds,
-            PoolDepositRefundLog,
-            canaries::pool_deposit_refund_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/pool-deposit-refunds.rev1.hex"),
             }]
         ),
         entity_entry!(

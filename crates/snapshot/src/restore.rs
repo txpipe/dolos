@@ -1687,7 +1687,7 @@ mod tests {
                 .unwrap(),
             ),
             (
-                STATE_KINDS[16].0,
+                crate::state_kind_for(UTXOS).unwrap(),
                 StateScope {
                     network_magic: MAINNET_MAGIC,
                     epoch: 1,
