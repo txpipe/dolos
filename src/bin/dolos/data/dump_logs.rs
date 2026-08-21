@@ -346,10 +346,13 @@ impl TableRow for AccountEpochRewards {
         let entity = EntityKey::from(key.clone());
         let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
 
-        let epoch = match ctx.summary.as_ref() {
-            Some(summary) => summary.slot_epoch(slot).0,
-            None => slot,
-        };
+        // A slot under a column headed `epoch` is off by orders of magnitude and
+        // says nothing about being wrong, so absence renders as absence.
+        let epoch = ctx
+            .summary
+            .as_ref()
+            .map(|summary| summary.slot_epoch(slot).0.to_string())
+            .unwrap_or_else(|| "-".to_string());
 
         let stake = render_stake_address(&entity, ctx);
 
@@ -378,7 +381,7 @@ impl TableRow for AccountEpochRewards {
             .filter(|(_, amount, _)| *amount > 0)
             .map(|(pool, amount, kind)| match ctx.format {
                 OutputFormat::Default => vec![
-                    epoch.to_string(),
+                    epoch.clone(),
                     stake.clone(),
                     render_pool(pool),
                     kind.to_string(),
@@ -389,7 +392,7 @@ impl TableRow for AccountEpochRewards {
                     render_pool(pool),
                     amount.to_string(),
                     kind.to_string(),
-                    epoch.to_string(),
+                    epoch.clone(),
                 ],
             })
             .collect()
@@ -622,7 +625,12 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let network = dolos_cardano::network_from_genesis(&genesis);
 
     let use_epoch_filter = args.epoch_start.is_some() || args.epoch_end.is_some();
-    let need_summary = use_epoch_filter || matches!(args.format, OutputFormat::Dbsync);
+
+    // The reward view heads a column `epoch`, and only the summary turns the
+    // log's slot key into one, so it pays the state-store open in every format.
+    let need_summary = use_epoch_filter
+        || matches!(args.format, OutputFormat::Dbsync)
+        || args.namespace == "account-epochs/rewards";
     let summary = if need_summary {
         let state = crate::common::open_state_store(config)?;
         Some(load_chain_summary_from_state(&state).map_err(|err| miette::miette!("{err:?}"))?)
