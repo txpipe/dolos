@@ -14,6 +14,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Line tables keep backtraces symbolicated at a fraction of the link time and
+  # cache size. `dev` is the one that matters: `cargo test` builds dependencies
+  # with it. Set here, not in `[profile.dev]`, so local debugging is unaffected.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   fmt:
@@ -72,29 +77,55 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.91
       - uses: Swatinem/rust-cache@v2
+        with:
+          # `all-features` and `e2e` restore this read-only; without a shared
+          # key each would save its own multi-GB entry against a full quota.
+          shared-key: test-${{ matrix.os }}
 
       - name: Run unit tests
         run: cargo test --workspace --all-targets
-
-      # AGENTS.md prescribes verifying with `--all-features`, which enables
-      # feature-gated code (notably the `strict` epoch-coherence assertions in
-      # dolos-cardano) that the default-features run above never exercises.
-      # Keep it green here so the prescribed verification and CI cannot drift
-      # apart. The three service crates are excluded because their test
-      # fixtures import synthetic chains that jump from genesis straight to
-      # epoch 2, tripping the strict assertions inside the fixture itself;
-      # they keep full coverage in the default-features run above. Remove the
-      # exclusions once the fixtures build epoch-coherent domains (see
-      # AGENTS.md, "Code Verification Requirements"). Feature-gated code is
-      # platform-independent, so one OS keeps the cost bounded.
-      - name: Run unit tests (all features)
-        if: runner.os == 'Linux'
-        run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
       - name: Run e2e smoke tests
         if: runner.os != 'Windows'
         run: cargo test --test smoke -- --ignored
 
-      - name: Run e2e tests
-        if: runner.os != 'Windows'
-        run: cargo test --test sync --test snapshot -- --ignored
+  # AGENTS.md prescribes verifying with `--all-features`, which enables
+  # feature-gated code (notably the `strict` epoch-coherence assertions in
+  # dolos-cardano) that the default-features run never exercises. Keep it green
+  # here so the prescribed verification and CI cannot drift apart. The three
+  # service crates are excluded because their test fixtures import synthetic
+  # chains that jump from genesis straight to epoch 2, tripping the strict
+  # assertions inside the fixture itself; they keep full coverage in the
+  # default-features run. Remove the exclusions once the fixtures build
+  # epoch-coherent domains (see AGENTS.md, "Code Verification Requirements").
+  # Feature-gated code is platform-independent, so one OS keeps the cost bounded.
+  all-features:
+    name: Test (all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
+
+  # These sleep on a real relay rather than compute, and cover nothing
+  # platform-specific, so one run replaces the Linux and macOS copies. Smoke
+  # stays on the matrix for the OS-sensitive surface: ports, socket, shutdown.
+  e2e:
+    name: E2E (sync, snapshot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo test --test sync --test snapshot -- --ignored
