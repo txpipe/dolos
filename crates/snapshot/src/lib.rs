@@ -68,9 +68,9 @@ pub mod restore;
 pub use stelae::progress;
 
 use dolos_cardano::model::{
-    AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
-    PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
+    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
+    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
+    StakeLog,
 };
 use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
@@ -81,7 +81,7 @@ use stelae::{
 };
 
 pub use layers::state::shard_of;
-pub use namespaces::{NAMESPACES, SCHEMA_REVS, UTXOS};
+pub use namespaces::{NAMESPACES, RETIRED_NAMESPACES, RETIRED_SCHEMA_REV, SCHEMA_REVS, UTXOS};
 
 /// Reverse-DNS name of this profile. Vendor-owned; the protocol validates the
 /// shape and never composes it.
@@ -98,18 +98,11 @@ pub const DIGESTS: &str = "digests";
 ///
 /// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
 /// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
-/// marks an entity as log-bearing, so the six are spelled here and held to the
-/// entity types by `log_kinds_derive_from_their_namespaces` in
-/// `tests/coverage.rs`. A seventh namespace acquiring logs would have no layer
+/// marks an entity as log-bearing, so the three are spelled here and held to
+/// the entity types by `log_kinds_derive_from_their_namespaces` in
+/// `tests/coverage.rs`. A fourth namespace acquiring logs would have no layer
 /// to travel in, which is why [`export`] refuses one rather than dropping it.
-pub const LOG_NAMESPACES: [Namespace; 6] = [
-    AccountStakeLog::NS,
-    EpochState::NS,
-    LeaderRewardLog::NS,
-    MemberRewardLog::NS,
-    PoolDepositRefundLog::NS,
-    StakeLog::NS,
-];
+pub const LOG_NAMESPACES: [Namespace; 3] = [AccountEpochLog::NS, EpochState::NS, StakeLog::NS];
 
 /// The log layer kinds and the namespace each carries, in inscription order.
 ///
@@ -120,12 +113,9 @@ pub const LOG_NAMESPACES: [Namespace; 6] = [
 /// not underscores — but it is *spelled out* here rather than composed, so the
 /// wire vocabulary is greppable and a namespace rename cannot silently rename a
 /// published kind. The derivation is a test, not a constructor.
-pub const LOG_KINDS: [(&str, Namespace); 6] = [
-    ("log-account-stakes", AccountStakeLog::NS),
+pub const LOG_KINDS: [(&str, Namespace); 3] = [
+    ("log-account-epochs", AccountEpochLog::NS),
     ("log-epochs", EpochState::NS),
-    ("log-leader-rewards", LeaderRewardLog::NS),
-    ("log-member-rewards", MemberRewardLog::NS),
-    ("log-pool-deposit-refunds", PoolDepositRefundLog::NS),
     ("log-stakes", StakeLog::NS),
 ];
 
@@ -149,8 +139,8 @@ pub const LOG_KINDS: [(&str, Namespace); 6] = [
 /// namespace is a single blob. Re-sharding a namespace is a media-type-version
 /// event for that namespace's kind, decided by the format's owner; it is not a
 /// constant to nudge.
-pub const STATE_KINDS: [(&str, Namespace, u8); 17] = [
-    ("state-account-stakes", AccountStakeLog::NS, 1),
+pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
+    ("state-account-epochs", AccountEpochLog::NS, 1),
     ("state-accounts", AccountState::NS, 16),
     ("state-assets", AssetState::NS, 16),
     ("state-datums", DatumState::NS, 16),
@@ -158,20 +148,17 @@ pub const STATE_KINDS: [(&str, Namespace, u8); 17] = [
     ("state-epochs", EpochState::NS, 1),
     ("state-eras", EraSummary::NS, 1),
     ("state-gov", GovState::NS, 1),
-    ("state-leader-rewards", LeaderRewardLog::NS, 1),
-    ("state-member-rewards", MemberRewardLog::NS, 1),
     ("state-pending-mirs", PendingMirState::NS, 1),
     ("state-pending-rewards", PendingRewardState::NS, 1),
-    ("state-pool-deposit-refunds", PoolDepositRefundLog::NS, 1),
     ("state-pools", PoolState::NS, 1),
     ("state-proposals", ProposalState::NS, 1),
     ("state-stakes", StakeLog::NS, 1),
     ("state-utxos", namespaces::UTXOS, 16),
 ];
 
-/// The seventeen state kind names alone: what [`StateScope`] answers for
+/// The fourteen state kind names alone: what [`StateScope`] answers for
 /// [`Scope::kinds`].
-pub const STATE_KIND_NAMES: [&str; 17] = [
+pub const STATE_KIND_NAMES: [&str; 14] = [
     STATE_KINDS[0].0,
     STATE_KINDS[1].0,
     STATE_KINDS[2].0,
@@ -186,9 +173,6 @@ pub const STATE_KIND_NAMES: [&str; 17] = [
     STATE_KINDS[11].0,
     STATE_KINDS[12].0,
     STATE_KINDS[13].0,
-    STATE_KINDS[14].0,
-    STATE_KINDS[15].0,
-    STATE_KINDS[16].0,
 ];
 
 /// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
@@ -213,7 +197,7 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
         .map(|(_, ns, _)| ns)
 }
 
-/// Whether `kind` is one of the seventeen state kinds — the tip predicate the
+/// Whether `kind` is one of the fourteen state kinds — the tip predicate the
 /// staging arithmetic in [`registry`] sums under.
 pub fn is_state_kind(kind: &str) -> bool {
     state_ns_for(kind).is_some()
@@ -228,7 +212,7 @@ pub fn shards_for(ns: Namespace) -> Option<u8> {
         .map(|(_, _, shards)| shards)
 }
 
-/// How many state layers every publish writes: the shard counts summed — 77
+/// How many state layers every publish writes: the shard counts summed — 74
 /// today. Every shard of every namespace kind is written even when empty, so
 /// tip completeness stays structural rather than data-dependent.
 pub const fn state_layer_count() -> usize {
@@ -384,21 +368,18 @@ pub(crate) fn scope_key(kind: &str, scope: &serde_json::Value) -> Result<(String
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
 /// only if its namespace has at least one record in the window, so an epoch
-/// contributes between two and eight layers. Split out because the two arities
+/// contributes between two and five layers. Split out because the two arities
 /// are what the layer arithmetic in [`export::export`] and
 /// [`registry::preview`] is made of.
 pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
 
-/// The twenty-six layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 26] = [
+/// The twenty layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 20] = [
     BLOCKS,
     INDEXES,
     LOG_KINDS[0].0,
     LOG_KINDS[1].0,
     LOG_KINDS[2].0,
-    LOG_KINDS[3].0,
-    LOG_KINDS[4].0,
-    LOG_KINDS[5].0,
     STATE_KIND_NAMES[0],
     STATE_KIND_NAMES[1],
     STATE_KIND_NAMES[2],
@@ -413,9 +394,6 @@ pub const KINDS: [&str; 26] = [
     STATE_KIND_NAMES[11],
     STATE_KIND_NAMES[12],
     STATE_KIND_NAMES[13],
-    STATE_KIND_NAMES[14],
-    STATE_KIND_NAMES[15],
-    STATE_KIND_NAMES[16],
     DIGESTS,
 ];
 
@@ -425,15 +403,12 @@ pub const KINDS: [&str; 26] = [
 /// The namespace lives in the kind rather than in the scope, so a log layer
 /// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
 /// keeps per-(kind, scope) inheritance working across the split.
-pub const EPOCH_KINDS: [&str; 8] = [
+pub const EPOCH_KINDS: [&str; 5] = [
     DENSE_EPOCH_KINDS[0],
     DENSE_EPOCH_KINDS[1],
     LOG_KINDS[0].0,
     LOG_KINDS[1].0,
     LOG_KINDS[2].0,
-    LOG_KINDS[3].0,
-    LOG_KINDS[4].0,
-    LOG_KINDS[5].0,
 ];
 
 /// The kind carrying `ns`'s logs, or `None` where the namespace has no log
@@ -605,6 +580,22 @@ pub enum Error {
     /// The stele is well-formed but does not carry enough to rebuild a node.
     #[error("this stele cannot restore a node: {0}")]
     IncompleteStele(String),
+
+    /// A namespace this build models that the stele declares retired, or does
+    /// not declare at all.
+    ///
+    /// The removed-kind rule (ADR-0027). Unlike an unknown kind, a retired one
+    /// leaves nothing in the inscription to skip and report: its layers are
+    /// absent, and absence is how the format spells "no records in this
+    /// window". A reader that would restore an empty `member-rewards` history
+    /// and call it a success is the failure this refuses, so it refuses before
+    /// a store is opened and names the namespace an operator has to go and
+    /// read about.
+    #[error(
+        "this stele's publisher no longer carries namespace {namespace:?}, which this build \
+         still models; restoring it would leave that namespace silently empty"
+    )]
+    RetiredNamespace { namespace: Namespace },
 
     /// A layer of a kind this build does not implement, which the publisher
     /// marked [`SCOPE_REQUIRED`].
@@ -920,9 +911,12 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// [`INDEX_KEY_HASH`], which describes [`dolos_core::key_hash`]; `shards` is
 /// the shard column of [`STATE_KINDS`], which the export routes by; and
 /// `schemas` is [`SCHEMA_REVS`], the per-namespace record-content revision the
-/// compatibility machinery of decision 0026 keys on. Both maps are keyed by
-/// namespace — JCS sorts the keys, so the maps render in the byte order the
-/// tables are kept in.
+/// compatibility machinery of decision 0026 keys on, plus one entry per
+/// [`RETIRED_NAMESPACES`] at [`RETIRED_SCHEMA_REV`] — a namespace this profile
+/// version no longer defines says so rather than vanishing, so that a reader
+/// which still models it can refuse instead of restoring an empty history
+/// (ADR-0027). Both maps are keyed by namespace — JCS sorts the keys, so the
+/// maps render in the byte order the tables are kept in.
 ///
 /// `stateEpochs` is the one value here that is not a consequence of code:
 /// which epochs a publisher retains a dump of is an operational choice, so it
@@ -939,6 +933,11 @@ pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
 
     let schemas: serde_json::Map<String, serde_json::Value> = SCHEMA_REVS
         .into_iter()
+        .chain(
+            RETIRED_NAMESPACES
+                .into_iter()
+                .map(|ns| (ns, RETIRED_SCHEMA_REV)),
+        )
         .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
         .collect();
 
@@ -1356,9 +1355,18 @@ mod tests {
         for (ns, rev) in SCHEMA_REVS {
             assert_eq!(parameters["schemas"][ns], rev, "{ns}");
         }
+
+        // Plus the retired namespaces, declared at revision 0 rather than
+        // dropped: what a reader that still models one consults to find out
+        // that the absence of its layers is normative (ADR-0027).
+        for ns in RETIRED_NAMESPACES {
+            assert_eq!(parameters["schemas"][ns], RETIRED_SCHEMA_REV, "{ns}");
+            assert!(!NAMESPACES.contains(&ns), "{ns} is both live and retired");
+        }
+
         assert_eq!(
             parameters["schemas"].as_object().unwrap().len(),
-            SCHEMA_REVS.len()
+            SCHEMA_REVS.len() + RETIRED_NAMESPACES.len()
         );
 
         // The routing rule behind the map: a sixteen-way namespace covers every

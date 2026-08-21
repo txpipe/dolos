@@ -1437,7 +1437,11 @@ mod tests {
                 json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                 1,
             ),
-            layer(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
+            layer(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                json!({"shard": 0}),
+                2,
+            ),
             layer(crate::DIGESTS, json!({"lastImmutable": 7}), 3),
         ];
 
@@ -1596,8 +1600,16 @@ mod tests {
                     json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                     1,
                 ),
-                written(crate::STATE_KINDS[16].0, json!({"shard": 0}), 2),
-                written(crate::STATE_KINDS[16].0, json!({"epoch": 1, "shard": 0}), 3),
+                written(
+                    crate::state_kind_for(crate::UTXOS).unwrap(),
+                    json!({"shard": 0}),
+                    2,
+                ),
+                written(
+                    crate::state_kind_for(crate::UTXOS).unwrap(),
+                    json!({"epoch": 1, "shard": 0}),
+                    3,
+                ),
             ],
         }
     }
@@ -1663,12 +1675,21 @@ mod tests {
 
         // The dump is in.
         assert!(table.contains_key(
-            &scope_key(crate::STATE_KINDS[16].0, &json!({"epoch": 1, "shard": 0})).unwrap()
+            &scope_key(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                &json!({"epoch": 1, "shard": 0})
+            )
+            .unwrap()
         ));
 
         // The tip of the same kind is not.
-        assert!(!table
-            .contains_key(&scope_key(crate::STATE_KINDS[16].0, &json!({"shard": 0})).unwrap()));
+        assert!(!table.contains_key(
+            &scope_key(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                &json!({"shard": 0})
+            )
+            .unwrap()
+        ));
     }
 
     /// Done criterion 2's second half, decided without a registry: a record

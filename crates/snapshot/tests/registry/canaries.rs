@@ -22,12 +22,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use dolos_cardano::{
     model::{
-        AccountStakeLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
+        AccountEpochLog, AccountState, AssetState, AuthHistory, Committee, CommitteeAuthorization,
         Constitution, DRepDelegation, DRepExpiry, DRepState, DatumState, EndStats, EpochState,
-        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, LeaderRewardLog,
-        MemberRewardLog, Nonces, PParamValue, PParamsSet, PendingMirState, PendingRewardState,
-        PoolDelegation, PoolDepositRefundLog, PoolParams, PoolSnapshot, PoolState, ProposalAction,
-        ProposalState, RollingStats, ShardProgress, Stake, StakeLog, VoteHistory,
+        EpochValue, EraBoundary, EraSummary, GovDistr, GovRoots, GovState, Nonces, PParamValue,
+        PParamsSet, PendingMirState, PendingRewardState, PoolDelegation, PoolParams, PoolSnapshot,
+        PoolState, ProposalAction, ProposalState, RollingStats, ShardProgress, Stake, StakeLog,
+        VoteHistory,
     },
     pallas::{
         codec::utils::Bytes,
@@ -107,31 +107,16 @@ fn filled_epoch_value<T: Clone + std::fmt::Debug>(start: Epoch, slots: [T; 5]) -
     value
 }
 
-pub fn account_stake_log() -> AccountStakeLog {
-    AccountStakeLog {
-        amount: 9_876_543_210,
-        pool_id: bytes_of::<28>(0x11).to_vec(),
-    }
-}
-
-pub fn leader_reward_log() -> LeaderRewardLog {
-    LeaderRewardLog {
-        amount: 1_234_567_890,
-        pool_id: bytes_of::<28>(0x21).to_vec(),
-    }
-}
-
-pub fn member_reward_log() -> MemberRewardLog {
-    MemberRewardLog {
-        amount: 2_345_678_901,
-        pool_id: bytes_of::<28>(0x31).to_vec(),
-    }
-}
-
-pub fn pool_deposit_refund_log() -> PoolDepositRefundLog {
-    PoolDepositRefundLog {
-        amount: 500_000_000,
-        pool_id: bytes_of::<28>(0x41).to_vec(),
+/// Every field populated, both lists at two entries: the arity the merge
+/// exists to make expressible, and the one the four namespaces it replaces
+/// could not carry.
+pub fn account_epoch_log() -> AccountEpochLog {
+    AccountEpochLog {
+        active_stake: Some(9_876_543_210),
+        pool_id: Some(hash28(0x11)),
+        member_reward: Some(2_345_678_901),
+        leader_rewards: vec![(hash28(0x21), 1_234_567_890), (hash28(0x22), 987_654_321)],
+        deposit_refunds: vec![(hash28(0x41), 500_000_000), (hash28(0x42), 500_000_000)],
     }
 }
 

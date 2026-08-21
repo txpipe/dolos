@@ -77,11 +77,11 @@ use registry_fixture::Fixture;
 
 /// The log kinds epoch 0 carries.
 ///
-/// The harness seeds `epochs` and `member-rewards` and nothing else, so those
-/// are the two log layers epoch 0 publishes — the other four log kinds have no
+/// The harness seeds `epochs` and `account-epochs` and nothing else, so those
+/// are the two log layers epoch 0 publishes — the third log kind has no
 /// records in the window and therefore no layer at all. Epoch 1 is the boundary
 /// sliver, whose logs key at `epoch_start(0)`, so it carries none.
-const EPOCH_0_LOGS: [&str; 2] = ["log-epochs", "log-member-rewards"];
+const EPOCH_0_LOGS: [&str; 2] = ["log-account-epochs", "log-epochs"];
 
 /// Layers epoch 0 contributes: `blocks`, `indexes` and its two log layers.
 const EPOCH_0: usize = 2 + EPOCH_0_LOGS.len();

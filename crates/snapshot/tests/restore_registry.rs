@@ -74,8 +74,8 @@ use stelae::{
 use watcher::Watcher;
 
 /// Layers epoch 0 contributes: `blocks`, `indexes`, and the two log layers the
-/// harness seeds — `log-epochs` and `log-member-rewards`. The other four log
-/// kinds have no records in the window, so they have no layer.
+/// harness seeds — `log-account-epochs` and `log-epochs`. The third log kind
+/// has no records in the window, so it has no layer.
 const EPOCH_0: usize = 4;
 
 /// Layers epoch 1 — the boundary sliver — contributes: `blocks` and `indexes`.

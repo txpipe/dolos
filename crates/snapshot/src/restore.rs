@@ -138,8 +138,8 @@ use crate::{
     layers::{blocks, indexes, logs, state},
     log_ns_for, preflight, read_position,
     reporting::Cursor,
-    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, SCOPE_REQUIRED,
-    STATE_KINDS, UTXOS,
+    state_ns_for, DolosProfile, Error, Position, BLOCKS, DIGESTS, INDEXES, NAMESPACES,
+    RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
 };
 
 /// What a restore holds at once.
@@ -409,6 +409,10 @@ pub fn plan<R: SteleReader>(
     // few lines down instead, where the profile can read its scope.
     inscription.check_profile(&DolosProfile)?;
 
+    // The other half of the compatibility rule: `check_profile` decides about
+    // kinds the stele *carries*, and this decides about the ones it does not.
+    check_namespaces(&inscription)?;
+
     let skipped_unknown = unknown_layers(&inscription)?;
     let position = read_position(&inscription.position)?;
 
@@ -432,6 +436,54 @@ pub fn plan<R: SteleReader>(
         skipped_unknown,
         position,
     })
+}
+
+/// Refuse a stele that has retired a namespace this build still models.
+///
+/// The removed-kind rule (ADR-0027). `parameters.schemas` is the publisher's
+/// statement of which namespaces its profile version defines; a namespace it
+/// has retired stays in the map at [`RETIRED_SCHEMA_REV`] instead of
+/// disappearing from it. Read from this side, an entry that is missing or zero
+/// for a namespace this build models means the stele carries no records for it
+/// and never will — which is indistinguishable, layer by layer, from an epoch
+/// that genuinely had none.
+///
+/// Only presence is judged, never the revision's *value*: a revision the reader
+/// has not seen describes bytes it can still parse and is deliberately not a
+/// gate (ADR-004). What is a gate is a namespace that is gone.
+///
+/// A map that is absent or holds a value of the wrong type is a different
+/// failure and reports as one. This is the first check `plan` runs over
+/// `parameters`, so nothing upstream would catch it, and "the publisher retired
+/// this namespace" is not what happened.
+fn check_namespaces(inscription: &Inscription) -> Result<(), Error> {
+    let schemas = inscription
+        .parameters
+        .get("schemas")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            Error::malformed_inscription("parameters.schemas", "missing or not an object")
+        })?;
+
+    for namespace in NAMESPACES {
+        let rev = match schemas.get(namespace) {
+            None => None,
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                Error::malformed_inscription(
+                    format!("parameters.schemas.{namespace}"),
+                    "not a schema revision",
+                )
+            })?),
+        };
+
+        // A namespace absent from a well-formed map says the same thing as one
+        // declared at the retired revision.
+        if matches!(rev, None | Some(RETIRED_SCHEMA_REV)) {
+            return Err(Error::RetiredNamespace { namespace });
+        }
+    }
+
+    Ok(())
 }
 
 /// The layers this build has no kind for, once any required one has refused.
@@ -1816,7 +1868,7 @@ mod tests {
                 .unwrap(),
             ),
             (
-                STATE_KINDS[16].0,
+                crate::state_kind_for(UTXOS).unwrap(),
                 StateScope::tip(MAINNET_MAGIC, 1, 9).header().unwrap(),
             ),
             (
@@ -1905,6 +1957,98 @@ mod tests {
 
             assert_eq!(unknown_layers(&inscription(layers)).unwrap().len(), 1);
         }
+    }
+
+    /// The other direction, and the one `required` cannot reach: a namespace
+    /// this build models that the publisher has retired.
+    ///
+    /// There is no layer to mark, because the whole point is that there is no
+    /// layer. What the stele says instead is `schemas.{ns} = 0`, and a reader
+    /// that still models the namespace refuses on it rather than restoring a
+    /// history it would report as empty.
+    #[test]
+    fn a_retired_namespace_refuses_the_restore() {
+        let retired = NAMESPACES[0];
+
+        let mut inscription = inscription(state_layers());
+        inscription.parameters["schemas"][retired] = json!(RETIRED_SCHEMA_REV);
+
+        let err = check_namespaces(&inscription).unwrap_err();
+
+        let Error::RetiredNamespace { namespace } = &err else {
+            panic!("{err:?}");
+        };
+
+        assert_eq!(*namespace, retired);
+    }
+
+    /// A namespace dropped from `schemas` outright says the same thing as one
+    /// declared retired, and is refused the same way: the rule is that a
+    /// publisher declares what it carries, not that it declares what it lost.
+    #[test]
+    fn a_namespace_missing_from_schemas_refuses_the_restore() {
+        let dropped = NAMESPACES[1];
+
+        let mut inscription = inscription(state_layers());
+        inscription.parameters["schemas"]
+            .as_object_mut()
+            .unwrap()
+            .remove(dropped);
+
+        assert!(matches!(
+            check_namespaces(&inscription),
+            Err(Error::RetiredNamespace { namespace }) if namespace == dropped
+        ));
+    }
+
+    /// No `schemas` map at all is a malformed inscription, not a retirement.
+    /// This is the first `parameters` check `plan` runs, so reporting it as a
+    /// retired namespace would name a publisher act that never happened.
+    #[test]
+    fn an_absent_schemas_map_is_malformed_rather_than_retired() {
+        let mut inscription = inscription(state_layers());
+        inscription
+            .parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("schemas");
+
+        let err = check_namespaces(&inscription).unwrap_err();
+
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+    }
+
+    /// A revision that is not a number says nothing about whether the
+    /// namespace is carried, so it reports as the malformed field it is.
+    #[test]
+    fn a_non_numeric_schema_revision_is_malformed() {
+        let mut inscription = inscription(state_layers());
+        inscription.parameters["schemas"][NAMESPACES[0]] = json!("1");
+
+        let err = check_namespaces(&inscription).unwrap_err();
+
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+    }
+
+    /// A revision this build has never seen is not a gate. `.v{x}` is a
+    /// contract on record *content*, so a reader skips fields it does not know
+    /// and keeps going; only a namespace that is gone fails closed.
+    #[test]
+    fn an_unfamiliar_schema_revision_is_not_a_refusal() {
+        let mut inscription = inscription(state_layers());
+
+        for namespace in NAMESPACES {
+            inscription.parameters["schemas"][namespace] = json!(99);
+        }
+
+        check_namespaces(&inscription).unwrap();
+    }
+
+    /// What this profile publishes today passes its own check — the property
+    /// that keeps the two tables from drifting apart.
+    #[test]
+    fn the_profiles_own_parameters_satisfy_the_rule() {
+        check_namespaces(&inscription(state_layers())).unwrap();
     }
 
     /// The preflight is a refusal for a doomed run, not a promise about a

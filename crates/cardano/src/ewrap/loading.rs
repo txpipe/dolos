@@ -29,9 +29,38 @@ use crate::{
     rewards::{Reward, RewardMap},
     roll::WorkDeltas,
     rupd::credential_to_key,
-    AccountState, DRepState, EraProtocol, FixedNamespace as _, PendingMirState, PendingRewardState,
-    PoolHash, PoolState, ProposalAction, ProposalOutcome, ProposalState,
+    AccountState, ChainSummary, DRepState, EraProtocol, FixedNamespace as _, PendingMirState,
+    PendingRewardState, PoolHash, PoolState, ProposalAction, ProposalOutcome, ProposalState,
 };
+
+/// `RupdWork::relevant_epochs`, read from the closing boundary's side: the
+/// stake snapshot the epoch's rewards were computed against, and the protocol
+/// its stake totals are read under.
+///
+/// Both clauses of RUPD's guard are reproduced, the second one included: the
+/// node computes no rewards while the snapshot epoch is still at or before the
+/// first Shelley epoch, because the genesis-initialized snapshot at that epoch
+/// is not a reward input. A merged row written where RUPD wrote none would be
+/// a population this log invented.
+///
+/// The protocol is the era of `snapshot_epoch + 1`, not of the snapshot epoch:
+/// the Haskell ledger computes the mark snapshot under the *entering* epoch's
+/// rules, which is what decides whether pointer-address stake counts.
+fn stake_snapshot_of(ending_epoch: Epoch, chain: &ChainSummary) -> Option<(Epoch, EraProtocol)> {
+    if ending_epoch < 4 {
+        return None;
+    }
+
+    let snapshot_epoch = ending_epoch - 3;
+
+    if snapshot_epoch <= chain.first_shelley_epoch() {
+        return None;
+    }
+
+    let protocol = EraProtocol::from(chain.era_for_epoch(snapshot_epoch + 1).protocol);
+
+    Some((snapshot_epoch, protocol))
+}
 
 impl BoundaryWork {
     /// Construct an empty `BoundaryWork` with the small globals every phase
@@ -51,6 +80,8 @@ impl BoundaryWork {
         let gov_active_since = gov.active_since;
         let gov_distr = gov.distr.clone();
 
+        let stake_snapshot = stake_snapshot_of(ending_state.number, &chain_summary);
+
         Ok(BoundaryWork {
             ending_state,
             chain_summary,
@@ -65,6 +96,9 @@ impl BoundaryWork {
             gov_active_since,
             gov_distr,
             gov,
+            stake_snapshot,
+            stake_pools: Default::default(),
+            pool_refunds: Default::default(),
             pv10_migration: false,
             ratify_dreps: Default::default(),
             ratification: None,
@@ -383,6 +417,11 @@ impl BoundaryWork {
         let mut visitor_rewards = super::rewards::BoundaryVisitor::default();
         let mut visitor_drops = super::drops::BoundaryVisitor::default();
 
+        // One merged row per account, collected here and pushed into `logs`
+        // after the loop: the row builder reads `applied_rewards`, which the
+        // loop is still appending to.
+        let mut account_epochs: Vec<(EntityKey, crate::CardanoEntity)> = Vec::new();
+
         let snapshot_epoch = self.distr_snapshot_epoch();
         let mut drep_distr: BTreeMap<DRep, u64> = BTreeMap::new();
         let mut pool_distr: BTreeMap<PoolHash, u64> = BTreeMap::new();
@@ -426,8 +465,15 @@ impl BoundaryWork {
                 // TODO: move retires to ESTART (after the snapshot has been taken)
                 // and drop this ordering hack. (#1037)
                 let rewards_before = visitor_rewards.deltas.len();
+                let applied_before = self.applied_rewards.len();
                 visitor_rewards.visit_account(self, &account_id, &account)?;
                 visitor_drops.visit_account(self, &account_id, &account)?;
+
+                let row = self.account_epoch_row(&account, &self.applied_rewards[applied_before..]);
+
+                if !row.is_empty() {
+                    account_epochs.push((account_id.clone(), row.into()));
+                }
 
                 if let Some(epoch) = snapshot_epoch {
                     // The snapshot is post-reward — that is what the comment
@@ -458,6 +504,8 @@ impl BoundaryWork {
 
         visitor_rewards.flush(self)?;
         visitor_drops.flush(self)?;
+
+        self.logs.append(&mut account_epochs);
 
         for drop in migration_drops {
             self.add_delta(drop);
@@ -535,6 +583,7 @@ impl BoundaryWork {
     }
 
     pub(crate) fn load_pool_data<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
+        let stake_epoch = self.stake_snapshot.map(|(epoch, _)| epoch);
         let pools = state.iter_entities_typed::<PoolState>(PoolState::NS, None)?;
 
         for record in pools {
@@ -544,10 +593,63 @@ impl BoundaryWork {
                 self.new_pools.insert(pool.operator);
             }
 
+            // Pool counts are in the thousands, so holding the set is memory
+            // rather than scan time.
+            if let Some(stake_epoch) = stake_epoch {
+                let admitted = pool
+                    .snapshot
+                    .snapshot_at(stake_epoch)
+                    .is_some_and(|snapshot| !snapshot.is_retired);
+
+                if admitted {
+                    self.stake_pools.insert(pool.operator);
+                }
+            }
+
             if self.should_retire_pool(&pool) {
                 let account = self.load_pool_reward_account::<D>(state, &pool)?;
                 self.retiring_pools.insert(pool.operator, (pool, account));
             }
+        }
+
+        self.index_pool_refunds()?;
+
+        Ok(())
+    }
+
+    /// Index this boundary's pool-deposit refunds by the account that receives
+    /// them.
+    ///
+    /// The refund *delta* stays where the pot arithmetic needs it — the
+    /// finalize pass, over retiring pools. Only the record of it moves here, so
+    /// that every leg of an account's row is assembled by the one shard that
+    /// owns the account: two passes writing the same `LogKey` would overwrite
+    /// each other, which is the defect the merge exists to remove rather than
+    /// to reproduce in a new shape.
+    fn index_pool_refunds(&mut self) -> Result<(), ChainError> {
+        if self.retiring_pools.is_empty() {
+            return Ok(());
+        }
+
+        let deposit = self
+            .ending_state
+            .pparams
+            .unwrap_live()
+            .ensure_pool_deposit()?;
+
+        for (pool, (_, account)) in &self.retiring_pools {
+            let Some(account) = account else {
+                continue;
+            };
+
+            if !account.is_registered() {
+                continue;
+            }
+
+            self.pool_refunds
+                .entry(account.credential.clone())
+                .or_default()
+                .push((*pool, deposit));
         }
 
         Ok(())
@@ -1537,6 +1639,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        ewrap::AppliedReward,
         model::{credential_to_key, drep_to_entity_key},
         shard::shard_key_ranges,
         AccountTransition, AssignRewards, ControlledAmountInc, DRepDelegation, DRepRegistration,
@@ -2282,6 +2385,221 @@ mod tests {
         assert!(delegation_dropped(&domain, &oldest));
         assert!(delegation_dropped(&domain, &mid_cycle));
         assert!(!delegation_dropped(&domain, &newest));
+    }
+
+    const STAKE_EPOCH: Epoch = 5;
+
+    fn merged_pool(byte: u8) -> PoolHash {
+        pallas::crypto::hash::Hash::from([byte; 28])
+    }
+
+    fn merged_credential(byte: u8) -> StakeCredential {
+        StakeCredential::AddrKeyhash([byte; 28].into())
+    }
+
+    /// An account whose stake and delegation at [`STAKE_EPOCH`] are the `go`
+    /// snapshot, which is what the boundary reads.
+    fn merged_account(byte: u8, pool: Option<PoolHash>, utxo_sum: u64) -> AccountState {
+        let live_epoch = STAKE_EPOCH + 3;
+
+        let stake = Stake {
+            utxo_sum,
+            ..Default::default()
+        };
+
+        let delegation = pool.map(PoolDelegation::Pool);
+
+        AccountState {
+            registered_at: Some(0),
+            deregistered_at: None,
+            credential: merged_credential(byte),
+            stake: EpochValue::from_parts(live_epoch, None, None, None, None, Some(stake)),
+            pool: EpochValue::from_parts(live_epoch, None, None, None, None, delegation),
+            drep: EpochValue::new(live_epoch),
+            vote_delegated_at: None,
+            retired_pool: None,
+        }
+    }
+
+    /// A boundary closing `STAKE_EPOCH + 3`, with `pool` admitted to the
+    /// distribution.
+    fn merged_boundary(pools: &[PoolHash]) -> BoundaryWork {
+        let domain = ToyDomain::new(None, None);
+        let mut boundary =
+            BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+
+        boundary.ending_state.number = STAKE_EPOCH + 3;
+        boundary.stake_snapshot = Some((STAKE_EPOCH, EraProtocol::from(7)));
+        boundary.stake_pools = pools.iter().copied().collect();
+
+        boundary
+    }
+
+    fn leader(pool: PoolHash, amount: u64) -> AppliedReward {
+        AppliedReward {
+            credential: merged_credential(0),
+            pool,
+            amount,
+            as_leader: true,
+        }
+    }
+
+    fn member(pool: PoolHash, amount: u64) -> AppliedReward {
+        AppliedReward {
+            credential: merged_credential(0),
+            pool,
+            amount,
+            as_leader: false,
+        }
+    }
+
+    /// `zero_stake_delegators_are_kept`, on the merged record: absence is per
+    /// field, so a delegator with no stake still has a row and its
+    /// `active_stake` is `Some(0)` rather than `None`.
+    #[test]
+    fn a_zero_stake_delegator_keeps_a_row() {
+        let pool = merged_pool(1);
+        let boundary = merged_boundary(&[pool]);
+
+        let row = boundary.account_epoch_row(&merged_account(0xa1, Some(pool), 0), &[]);
+
+        assert!(!row.is_empty());
+        assert_eq!(row.active_stake, Some(0));
+        assert_eq!(row.pool_id, Some(pool));
+    }
+
+    /// RUPD's filters, reproduced: a pool with no snapshot at the stake epoch
+    /// (or a retired one) is not in `stake_pools`, and its delegators are not
+    /// in the distribution.
+    #[test]
+    fn a_pool_outside_the_snapshot_contributes_no_stake_leg() {
+        let boundary = merged_boundary(&[merged_pool(1)]);
+
+        let row = boundary.account_epoch_row(&merged_account(0xa2, Some(merged_pool(2)), 500), &[]);
+
+        assert!(row.is_empty());
+        assert_eq!(row.active_stake, None);
+        assert_eq!(row.pool_id, None);
+    }
+
+    /// A boundary whose `relevant_epochs` gate is closed writes no stake leg
+    /// at all, however the account looks.
+    #[test]
+    fn no_stake_snapshot_means_no_stake_leg() {
+        let mut boundary = merged_boundary(&[merged_pool(1)]);
+        boundary.stake_snapshot = None;
+
+        let row = boundary.account_epoch_row(&merged_account(0xa3, Some(merged_pool(1)), 500), &[]);
+
+        assert!(row.is_empty());
+    }
+
+    /// The overwrite defect, structurally impossible: an account that is the
+    /// reward account of three pools carries three leader rewards, in pool
+    /// order.
+    #[test]
+    fn every_leader_reward_survives_in_pool_order() {
+        let boundary = merged_boundary(&[]);
+
+        let applied = [
+            leader(merged_pool(9), 30),
+            leader(merged_pool(3), 10),
+            leader(merged_pool(6), 20),
+        ];
+
+        let row = boundary.account_epoch_row(&merged_account(0xa4, None, 0), &applied);
+
+        assert_eq!(
+            row.leader_rewards,
+            vec![
+                (merged_pool(3), 10),
+                (merged_pool(6), 20),
+                (merged_pool(9), 30),
+            ]
+        );
+        assert_eq!(
+            row.active_stake, None,
+            "an operator need not be a delegator"
+        );
+    }
+
+    /// The member reward and the stake leg share the pool: the reward is
+    /// computed off the same snapshot the delegation is read from, which is
+    /// what lets one field serve both.
+    #[test]
+    fn a_member_reward_lands_beside_the_stake_it_was_earned_on() {
+        let pool = merged_pool(1);
+        let boundary = merged_boundary(&[pool]);
+
+        let row = boundary.account_epoch_row(
+            &merged_account(0xa5, Some(pool), 1_000),
+            &[member(pool, 42)],
+        );
+
+        assert_eq!(row.active_stake, Some(1_000));
+        assert_eq!(row.pool_id, Some(pool));
+        assert_eq!(row.member_reward, Some(42));
+        assert!(row.leader_rewards.is_empty());
+    }
+
+    /// A refund reaches the account by the index `load_pool_data` builds, so
+    /// the shard that owns the account writes every leg of its row — the
+    /// finalize pass never writes a second row over the top.
+    #[test]
+    fn refunds_ride_the_row_of_the_account_that_receives_them() {
+        let mut boundary = merged_boundary(&[]);
+
+        boundary.pool_refunds.insert(
+            merged_credential(0xa6),
+            vec![(merged_pool(8), 500), (merged_pool(2), 500)],
+        );
+
+        let row = boundary.account_epoch_row(&merged_account(0xa6, None, 0), &[]);
+
+        assert_eq!(
+            row.deposit_refunds,
+            vec![(merged_pool(2), 500), (merged_pool(8), 500)]
+        );
+    }
+
+    /// The key the merged row wears: one epoch before the boundary closes,
+    /// which is the epoch the row describes.
+    #[test]
+    fn the_row_is_keyed_by_the_epoch_it_describes() {
+        let boundary = merged_boundary(&[]);
+        let ending = boundary.ending_state.number;
+
+        assert_eq!(
+            boundary.account_epoch_slot(),
+            boundary.chain_summary.epoch_start(ending - 1)
+        );
+    }
+
+    /// `RupdWork::relevant_epochs`, both clauses. The first-Shelley one is the
+    /// clause the consolidation evaluation's instrumentation omitted, and the
+    /// one reported epoch difference it produced.
+    #[test]
+    fn the_stake_snapshot_gate_matches_rupds() {
+        let domain = ToyDomain::new(None, None);
+        let boundary =
+            BoundaryWork::new_empty::<ToyDomain>(domain.state(), domain.genesis()).unwrap();
+        let chain = &boundary.chain_summary;
+        let first_shelley = chain.first_shelley_epoch();
+
+        for ending in 0..4 {
+            assert_eq!(stake_snapshot_of(ending, chain), None, "epoch {ending}");
+        }
+
+        // `snapshot_epoch <= first_shelley` is closed; the epoch right after it
+        // is open.
+        let closed = first_shelley + 3;
+        assert_eq!(stake_snapshot_of(closed, chain), None);
+
+        let open = closed + 1;
+        assert_eq!(
+            stake_snapshot_of(open, chain).map(|(epoch, _)| epoch),
+            Some(open - 3)
+        );
     }
 }
 

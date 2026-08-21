@@ -18,7 +18,7 @@ use pallas::{
 };
 
 use dolos_cardano::{
-    model::{AccountStakeLog, EpochState, FixedNamespace as _, PoolState},
+    model::{AccountEpochLog, EpochState, FixedNamespace as _, PoolHash, PoolState},
     rupd::StakeSnapshot,
     ChainSummary, EraProtocol,
 };
@@ -556,20 +556,25 @@ pub async fn by_number_stakes<D: Domain>(
     let count = pagination.count;
 
     let page = tokio::task::spawn_blocking(
-        move || -> Result<Vec<(LogKey, AccountStakeLog)>, StatusCode> {
+        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
             let iter = inner
                 .archive()
-                .iter_logs_typed::<AccountStakeLog>(AccountStakeLog::NS, Some(range))
-                .map_err(log_and_500("failed to iterate account stake logs"))?;
+                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
+                .map_err(log_and_500("failed to iterate account epoch logs"))?;
 
-            // The log keeps zero-stake delegators (so row counts match
-            // `StakeLog.delegators_count`), but Blockfrost's epoch_stake
-            // excludes them — filter before paginating for parity.
-            iter.filter(|entry| !matches!(entry, Ok((_, log)) if log.amount == 0))
-                .skip(skip)
-                .take(count)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(log_and_500("failed to read account stake log"))
+            // The merged row exists for anything an account did in the epoch,
+            // so a row with no stake leg is a reward-only account and not part
+            // of the distribution at all. The log also keeps zero-stake
+            // delegators (so row counts match `StakeLog.delegators_count`),
+            // while Blockfrost's epoch_stake excludes them — both filtered
+            // before paginating, for parity.
+            iter.filter(
+                |entry| !matches!(entry, Ok((_, log)) if log.active_stake.unwrap_or(0) == 0),
+            )
+            .skip(skip)
+            .take(count)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(log_and_500("failed to read account epoch log"))
         },
     )
     .await
@@ -587,10 +592,15 @@ pub async fn by_number_stakes<D: Domain>(
                 .to_bech32()
                 .map_err(log_and_500("failed to encode stake address"))?;
 
+            let pool = log.pool_id.ok_or_else(|| {
+                tracing::error!("account epoch log carries stake with no pool");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
             Ok(EpochStakeContentInner {
                 stake_address,
-                pool_id: bech32_pool(&log.pool_id)?,
-                amount: log.amount.to_string(),
+                pool_id: bech32_pool(pool)?,
+                amount: log.active_stake.unwrap_or(0).to_string(),
             })
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;
@@ -613,6 +623,15 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
+    // The merged row stores the pool as a hash rather than as loose bytes, so
+    // the comparison below is against one. A pool with an entity always has a
+    // 28-byte key, which makes this unreachable rather than merely unlikely.
+    let operator: [u8; 28] = operator
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::InvalidPoolId)?;
+    let operator = PoolHash::from(operator);
+
     let tip = domain.get_tip_slot()?;
     let summary = domain.get_chain_summary()?;
     let (current, _) = summary.slot_epoch(tip);
@@ -632,26 +651,27 @@ where
 
     // The pool lives in the value, not the key, so this scans the epoch and
     // filters — the credential-keyed layout keeps per-account history a point
-    // read instead (see the note on `AccountStakeLog`).
+    // read instead (see the note on `AccountEpochLog`).
     let page = tokio::task::spawn_blocking(
-        move || -> Result<Vec<(LogKey, AccountStakeLog)>, StatusCode> {
+        move || -> Result<Vec<(LogKey, AccountEpochLog)>, StatusCode> {
             let iter = inner
                 .archive()
-                .iter_logs_typed::<AccountStakeLog>(AccountStakeLog::NS, Some(range))
-                .map_err(log_and_500("failed to iterate account stake logs"))?;
+                .iter_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, Some(range))
+                .map_err(log_and_500("failed to iterate account epoch logs"))?;
 
             iter.filter(|entry| {
-                matches!(entry, Ok((_, log)) if log.amount > 0 && log.pool_id == operator)
+                matches!(entry, Ok((_, log))
+                    if log.active_stake.unwrap_or(0) > 0 && log.pool_id == Some(operator))
                     || entry.is_err()
             })
             .skip(skip)
             .take(count)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(log_and_500("failed to read account stake log"))
+            .map_err(log_and_500("failed to read account epoch log"))
         },
     )
     .await
-    .map_err(log_and_500("account stake scan task failed"))??;
+    .map_err(log_and_500("account epoch scan task failed"))??;
 
     let out = page
         .into_iter()
@@ -667,7 +687,7 @@ where
 
             Ok(EpochStakePoolContentInner {
                 stake_address,
-                amount: log.amount.to_string(),
+                amount: log.active_stake.unwrap_or(0).to_string(),
             })
         })
         .collect::<Result<Vec<_>, StatusCode>>()?;

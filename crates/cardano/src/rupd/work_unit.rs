@@ -12,10 +12,6 @@
 //! `define_rewards` over every pool but only emits rewards for in-range
 //! credentials, persists the in-range `PendingRewardState` entities, and
 //! emits a `RupdProgress` delta to advance `EpochState.rupd_progress`.
-//! Each shard also writes its own slice of the per-account
-//! `AccountStakeLog` entries — from `commit_state`, committed to the
-//! archive before the state transaction opens, while the shard's
-//! snapshot is still in memory.
 //! `finalize()` writes `EpochState.incentives` once and emits the per-pool
 //! `StakeLog` entries, deriving their figures from the rebuilt snapshot
 //! globals and the persisted `PendingRewardState` entities rather than from
@@ -41,11 +37,11 @@ use crate::{
     rewards::{Reward, RewardMap},
     rupd::credential_to_key,
     shard::{shard_key_ranges, ACCOUNT_SHARDS},
-    AccountStakeLog, CardanoLogic, ChainPoint, EpochState, FixedNamespace, PendingRewardState,
-    PoolHash, SingletonEntity as _, StakeLog,
+    CardanoLogic, ChainPoint, EpochState, FixedNamespace, PendingRewardState, PoolHash,
+    SingletonEntity as _, StakeLog,
 };
 
-use super::{RupdWork, StakeSnapshot};
+use super::RupdWork;
 
 /// Sum the rewards this RUPD emitted, per pool, from the `PendingRewardState`
 /// entities the shards persisted.
@@ -84,39 +80,6 @@ fn aggregate_pending_pool_rewards<S: StateStore>(
     }
 
     Ok(out)
-}
-
-/// Emit one [`AccountStakeLog`] per delegator held in `snapshot`.
-///
-/// Keyed by `(temporal_key, credential)`, where `temporal_key` is the
-/// epoch-start slot of the epoch whose active stake the snapshot describes —
-/// the same key the per-pool [`StakeLog`] uses, so both views agree on the
-/// epoch label by construction.
-///
-/// The caller passes a shard-scoped snapshot: `accounts_by_pool` only holds
-/// the credentials in the current shard's key range, so peak memory stays at
-/// one shard's worth of delegators. Writes are overwrite-by-key, so re-running
-/// a shard after a crash is idempotent. Returns the number of entries written.
-fn write_account_stake_logs<W: ArchiveWriter>(
-    writer: &W,
-    temporal_key: &TemporalKey,
-    snapshot: &StakeSnapshot,
-) -> Result<usize, DomainError> {
-    let mut written = 0;
-
-    for (pool, credential, stake) in snapshot.iter_accounts() {
-        let log = AccountStakeLog {
-            amount: *stake,
-            pool_id: pool.as_slice().to_vec(),
-        };
-
-        let log_key = LogKey::from((temporal_key.clone(), credential_to_key(credential)));
-        writer.write_log_typed(&log_key, &log)?;
-
-        written += 1;
-    }
-
-    Ok(written)
 }
 
 /// Sharded work unit for computing rewards at the stability window.
@@ -195,61 +158,18 @@ impl RupdWorkUnit {
     /// go last (and the state transaction is kept as short as possible while
     /// the potentially large archive batch commits).
     ///
-    /// Split out of the `WorkUnit::commit_state` phase so the ordering can be
-    /// exercised against fault-injecting stores: the trait method's
+    /// Split out of the `WorkUnit::commit_state` phase so it can be exercised
+    /// against fault-injecting stores: the trait method's
     /// `Domain<Chain = CardanoLogic>` bound is unusable from this crate's own
     /// tests, because `dolos-testing` is a dev-dependency that links its own
     /// instance of `dolos-cardano` and the two `CardanoLogic` types never
     /// unify. Taking the two stores directly keeps the bounds on `dolos-core`
-    /// traits, which are shared. Returns the number of `AccountStakeLog`
-    /// entries written.
-    fn commit_shard<S: StateStore, A: ArchiveStore>(
-        &self,
-        state: &S,
-        archive: &A,
-        shard_index: u32,
-    ) -> Result<usize, DomainError> {
-        let work = self
-            .work
-            .as_ref()
-            .ok_or_else(|| DomainError::Internal("rupd work not loaded".into()))?;
-
+    /// traits, which are shared.
+    fn commit_shard<S: StateStore>(&self, state: &S, shard_index: u32) -> Result<(), DomainError> {
         let rewards = self
             .rewards
             .as_ref()
             .ok_or_else(|| DomainError::Internal("rewards not computed".into()))?;
-
-        // ---- Archive: per-account AccountStakeLog entries ----
-        //
-        // Committed before the state transaction below is even opened. The
-        // ordering that matters is archive-commit before the state *commit*
-        // that advances `rupd_progress`: a resumed RUPD skips every already
-        // committed shard (`initialize` sets `start_shard` from
-        // `progress.committed`), and nothing re-derives these rows — the
-        // shard's `accounts_by_pool` only exists while the shard is loaded,
-        // so a crash between an advanced cursor and the archive commit would
-        // drop this shard's slice of the distribution for good. Committing
-        // archive-first inverts the failure into a harmless one — the shard
-        // re-runs and rewrites the same rows (overwrite-by-key). Running the
-        // whole batch before `start_writer` also keeps the state write
-        // transaction from sitting open while a large archive batch commits.
-        //
-        // No relevant epochs means no snapshot was loaded (pre-Shelley or the
-        // first few epochs), so there is no stake distribution to log.
-        let account_stake_logs = match work.relevant_epochs() {
-            Some((_, epoch)) => {
-                let start_of_epoch = ChainPoint::Slot(work.chain.epoch_start(epoch));
-                let temporal_key = TemporalKey::from(&start_of_epoch);
-
-                let archive_writer = archive.start_writer()?;
-                let written =
-                    write_account_stake_logs(&archive_writer, &temporal_key, &work.snapshot)?;
-                archive_writer.commit()?;
-
-                written
-            }
-            None => 0,
-        };
 
         debug!(
             shard = shard_index,
@@ -307,7 +227,7 @@ impl RupdWorkUnit {
 
         writer.commit()?;
 
-        Ok(account_stake_logs)
+        Ok(())
     }
 
     /// Emit the per-pool `StakeLog` entries for the epoch this RUPD covers.
@@ -480,26 +400,17 @@ where
     }
 
     fn commit_state(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        let account_stake_logs =
-            self.commit_shard(domain.state(), domain.archive(), shard_index)?;
+        self.commit_shard(domain.state(), shard_index)?;
 
-        debug!(
-            shard = shard_index,
-            account_stake_logs, "rupd shard state committed"
-        );
+        debug!(shard = shard_index, "rupd shard state committed");
         Ok(())
     }
 
     fn commit_archive(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         // Per-pool StakeLog entries are written in finalize(), once every
-        // shard's pending rewards have landed in state.
-        //
-        // Per-account AccountStakeLog entries are written by commit_state, not
-        // here: this phase runs *after* the state commit that advances
-        // `rupd_progress`, and a resumed RUPD would skip the shard before
-        // these rows were ever written. This follows the durability-ordering
-        // rule documented on `WorkUnit::commit_state`, same as ewrap and
-        // estart; see the archive block in `commit_shard`.
+        // shard's pending rewards have landed in state. The per-account leg of
+        // the distribution is no longer RUPD's to write: it is one field of the
+        // merged account-epoch row EWRAP assembles at the boundary (ADR-0027).
         Ok(())
     }
 
@@ -547,12 +458,9 @@ mod tests {
         faults::{FaultyToyDomain, TestFault},
         toy_domain::ToyDomain,
     };
-    use pallas::{codec::minicbor, crypto::hash::Hash, ledger::primitives::StakeCredential};
+    use pallas::{crypto::hash::Hash, ledger::primitives::StakeCredential};
 
-    use super::*;
-
-    const EPOCH_SLOT: u64 = 4_000;
-    const OTHER_EPOCH_SLOT: u64 = 5_000;
+    use super::{super::StakeSnapshot, *};
 
     fn pool(byte: u8) -> PoolHash {
         Hash::from([byte; 28])
@@ -560,10 +468,6 @@ mod tests {
 
     fn key_cred(byte: u8) -> StakeCredential {
         StakeCredential::AddrKeyhash(Hash::from([byte; 28]))
-    }
-
-    fn script_cred(byte: u8) -> StakeCredential {
-        StakeCredential::ScriptHash(Hash::from([byte; 28]))
     }
 
     /// Build a snapshot as `merge_shard` would leave it: per-account entries
@@ -582,138 +486,6 @@ mod tests {
 
         snapshot
     }
-
-    fn write(domain: &ToyDomain, snapshot: &StakeSnapshot, slot: u64) -> usize {
-        let writer = domain.archive().start_writer().unwrap();
-        let written =
-            write_account_stake_logs(&writer, &TemporalKey::from(slot), snapshot).unwrap();
-        writer.commit().unwrap();
-
-        written
-    }
-
-    /// Read back every log written under a single temporal key, exercising the
-    /// prefix scan an epoch-scoped query relies on.
-    fn read_epoch<D: Domain>(domain: &D, slot: u64) -> Vec<(StakeCredential, AccountStakeLog)> {
-        let range =
-            LogKey::from(TemporalKey::from(slot))..LogKey::from(TemporalKey::from(slot + 1));
-
-        domain
-            .archive()
-            .iter_logs_typed::<AccountStakeLog>(AccountStakeLog::NS, Some(range))
-            .unwrap()
-            .map(|entry| {
-                let (key, log) = entry.unwrap();
-                let credential: StakeCredential =
-                    minicbor::decode(EntityKey::from(key).as_ref()).unwrap();
-                (credential, log)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn writes_one_entry_per_delegator_keyed_by_credential() {
-        let domain = ToyDomain::new(None, None);
-
-        let entries = [
-            (pool(1), key_cred(0xa1), 100),
-            (pool(1), script_cred(0xa2), 250),
-            (pool(2), key_cred(0xa3), 75),
-        ];
-
-        let snapshot = snapshot_with(&entries);
-        assert_eq!(write(&domain, &snapshot, EPOCH_SLOT), entries.len());
-
-        let found = read_epoch(&domain, EPOCH_SLOT);
-        assert_eq!(found.len(), entries.len());
-
-        for (pool_hash, credential, stake) in entries.iter() {
-            let log = found
-                .iter()
-                .find(|(cred, _)| cred == credential)
-                .map(|(_, log)| log)
-                .unwrap_or_else(|| panic!("missing log for {credential:?}"));
-
-            assert_eq!(log.amount, *stake);
-            assert_eq!(log.pool_id, pool_hash.as_slice());
-        }
-    }
-
-    #[test]
-    fn per_pool_sums_match_the_snapshot_pool_stake() {
-        let domain = ToyDomain::new(None, None);
-
-        let snapshot = snapshot_with(&[
-            (pool(1), key_cred(0xb1), 10),
-            (pool(1), key_cred(0xb2), 30),
-            (pool(2), key_cred(0xb3), 55),
-        ]);
-
-        write(&domain, &snapshot, EPOCH_SLOT);
-
-        let found = read_epoch(&domain, EPOCH_SLOT);
-
-        for (pool_hash, expected) in snapshot.pool_stake.iter() {
-            let total: u64 = found
-                .iter()
-                .filter(|(_, log)| log.pool_id == pool_hash.as_slice())
-                .map(|(_, log)| log.amount)
-                .sum();
-
-            assert_eq!(total, *expected, "pool {pool_hash} stake mismatch");
-        }
-    }
-
-    #[test]
-    fn zero_stake_delegators_are_kept() {
-        let domain = ToyDomain::new(None, None);
-
-        let snapshot = snapshot_with(&[(pool(1), key_cred(0xc1), 0)]);
-
-        assert_eq!(write(&domain, &snapshot, EPOCH_SLOT), 1);
-
-        let found = read_epoch(&domain, EPOCH_SLOT);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].1.amount, 0);
-    }
-
-    #[test]
-    fn entries_land_only_under_the_snapshot_epoch() {
-        let domain = ToyDomain::new(None, None);
-
-        let snapshot = snapshot_with(&[(pool(1), key_cred(0xd1), 42)]);
-        write(&domain, &snapshot, EPOCH_SLOT);
-
-        assert_eq!(read_epoch(&domain, EPOCH_SLOT).len(), 1);
-        assert!(read_epoch(&domain, OTHER_EPOCH_SLOT).is_empty());
-    }
-
-    #[test]
-    fn rerunning_a_shard_is_idempotent() {
-        let domain = ToyDomain::new(None, None);
-
-        let snapshot =
-            snapshot_with(&[(pool(1), key_cred(0xe1), 10), (pool(1), key_cred(0xe2), 20)]);
-
-        write(&domain, &snapshot, EPOCH_SLOT);
-        let first = read_epoch(&domain, EPOCH_SLOT);
-
-        write(&domain, &snapshot, EPOCH_SLOT);
-        let second = read_epoch(&domain, EPOCH_SLOT);
-
-        assert_eq!(first.len(), 2);
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn empty_snapshot_writes_nothing() {
-        let domain = ToyDomain::new(None, None);
-
-        assert_eq!(write(&domain, &StakeSnapshot::empty(), EPOCH_SLOT), 0);
-        assert!(read_epoch(&domain, EPOCH_SLOT).is_empty());
-    }
-
-    // --- crash window between the archive rows and the progress cursor ---
 
     const CURRENT_EPOCH: u64 = 5;
     const EPOCH_LENGTH: u64 = 100;
@@ -780,45 +552,18 @@ mod tests {
     }
 
     #[test]
-    fn committing_a_shard_persists_logs_and_advances_progress() {
+    fn committing_a_shard_persists_pending_rewards_and_advances_progress() {
         let domain = FaultyToyDomain::new(ToyDomain::new(None, None), TestFault::None);
 
         let snapshot =
             snapshot_with(&[(pool(1), key_cred(0xf1), 10), (pool(1), key_cred(0xf2), 20)]);
-        let (unit, chain) = loaded_work_unit(domain.genesis(), snapshot);
+        let (unit, _) = loaded_work_unit(domain.genesis(), snapshot);
 
         assert_eq!(committed_shards(&domain), None);
 
-        unit.commit_shard(domain.state(), domain.archive(), 0)
-            .expect("commit_shard");
+        unit.commit_shard(domain.state(), 0).expect("commit_shard");
 
-        // Logs land under the performance epoch — the same key `finalize`
-        // uses for the per-pool `StakeLog`.
-        let epoch_slot = chain.epoch_start(CURRENT_EPOCH - 1);
-        assert_eq!(read_epoch(&domain, epoch_slot).len(), 2);
         assert_eq!(committed_shards(&domain), Some(1));
-    }
-
-    /// The window Codex flagged: if the archive rows landed *after* the state
-    /// commit, a failure here would advance `rupd_progress` past a shard whose
-    /// distribution was never written, and `initialize` would skip it on
-    /// restart — losing that slice for good. Committing the archive first makes
-    /// the failure leave the cursor untouched, so the shard simply re-runs.
-    #[test]
-    fn a_failed_archive_write_leaves_the_progress_cursor_untouched() {
-        let domain = FaultyToyDomain::new(ToyDomain::new(None, None), TestFault::ArchiveStoreError);
-
-        let snapshot = snapshot_with(&[(pool(1), key_cred(0xf3), 10)]);
-        let (unit, _) = loaded_work_unit(domain.genesis(), snapshot);
-
-        let result = unit.commit_shard(domain.state(), domain.archive(), 0);
-
-        assert!(result.is_err(), "archive failure must abort the shard");
-        assert_eq!(
-            committed_shards(&domain),
-            None,
-            "progress advanced past a shard whose logs were never written"
-        );
     }
 
     // --- per-pool StakeLog figures survive a mid-RUPD restart ---
@@ -968,19 +713,17 @@ mod tests {
     }
 
     /// Pre-Shelley / early epochs load no snapshot, so there is nothing to
-    /// write — but the progress cursor must still advance, or the RUPD would
+    /// compute — but the progress cursor must still advance, or the RUPD would
     /// never complete.
     #[test]
-    fn progress_advances_when_there_is_no_snapshot_to_log() {
+    fn progress_advances_when_there_is_no_snapshot() {
         let domain = FaultyToyDomain::new(ToyDomain::new(None, None), TestFault::None);
 
-        let (mut unit, chain) = loaded_work_unit(domain.genesis(), StakeSnapshot::empty());
+        let (mut unit, _) = loaded_work_unit(domain.genesis(), StakeSnapshot::empty());
         unit.work.as_mut().unwrap().current_epoch = 1;
 
-        unit.commit_shard(domain.state(), domain.archive(), 0)
-            .expect("commit_shard");
+        unit.commit_shard(domain.state(), 0).expect("commit_shard");
 
-        assert!(read_epoch(&domain, chain.epoch_start(0)).is_empty());
         assert_eq!(committed_shards(&domain), Some(1));
     }
 }

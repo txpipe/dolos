@@ -11,9 +11,9 @@
 //!
 //! Per namespace, a **canary**: a fully-populated value ([`canaries`]) and the
 //! hex of its encoding at the current `SCHEMA_REVS` revision. The encoding is
-//! taken through the production path — `Entity::encode_entity` for the sixteen
-//! entity namespaces, `layers::state::encode_utxo_value` for `utxos`, the one
-//! namespace whose value this profile builds rather than carries.
+//! taken through the production path — `Entity::encode_entity` for the
+//! thirteen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
+//! the one namespace whose value this profile builds rather than carries.
 //!
 //! ## Append-only history
 //!
@@ -56,9 +56,9 @@ pub mod enums;
 pub mod ground_rules;
 
 use dolos_cardano::model::{
-    AccountStakeLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
-    FixedNamespace, GovState, LeaderRewardLog, MemberRewardLog, PendingMirState,
-    PendingRewardState, PoolDepositRefundLog, PoolState, ProposalState, StakeLog,
+    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
+    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
+    StakeLog,
 };
 use dolos_core::{Entity, Namespace};
 use dolos_snapshot::{layers::state, UTXOS};
@@ -138,12 +138,12 @@ fn decode_utxos(bytes: &[u8]) -> Result<(), String> {
 pub fn registry() -> Vec<Entry> {
     vec![
         entity_entry!(
-            enc_account_stakes,
-            AccountStakeLog,
-            canaries::account_stake_log,
+            enc_account_epochs,
+            AccountEpochLog,
+            canaries::account_epoch_log,
             &[Pinned {
                 rev: 1,
-                hex: include_str!("goldens/account-stakes.rev1.hex"),
+                hex: include_str!("goldens/account-epochs.rev1.hex"),
             }]
         ),
         entity_entry!(
@@ -224,24 +224,6 @@ pub fn registry() -> Vec<Entry> {
             }]
         ),
         entity_entry!(
-            enc_leader_rewards,
-            LeaderRewardLog,
-            canaries::leader_reward_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/leader-rewards.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_member_rewards,
-            MemberRewardLog,
-            canaries::member_reward_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/member-rewards.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
             enc_pending_mirs,
             PendingMirState,
             canaries::pending_mir_state,
@@ -257,15 +239,6 @@ pub fn registry() -> Vec<Entry> {
             &[Pinned {
                 rev: 1,
                 hex: include_str!("goldens/pending_rewards.rev1.hex"),
-            }]
-        ),
-        entity_entry!(
-            enc_pool_deposit_refunds,
-            PoolDepositRefundLog,
-            canaries::pool_deposit_refund_log,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/pool-deposit-refunds.rev1.hex"),
             }]
         ),
         entity_entry!(
