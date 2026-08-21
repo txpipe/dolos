@@ -166,6 +166,7 @@ fn allegra_boundary_deletes_unredeemed_avvm_utxos() {
     schedule_allegra(&domain);
 
     let before = pots(&domain);
+    let index_cursor = domain.indexes().cursor().unwrap();
 
     cross_the_boundary(&domain);
 
@@ -186,6 +187,14 @@ fn allegra_boundary_deletes_unredeemed_avvm_utxos() {
         "the by-address index still answers with the deleted utxo"
     );
     assert_eq!(indexed_at(&domain, &redeemed_addr), 0);
+
+    // The deletion changes what the index holds, never how far it has been
+    // advanced: the boundary's own slot is the state cursor's business.
+    assert_eq!(
+        domain.indexes().cursor().unwrap(),
+        index_cursor,
+        "the boundary deletion moved the index cursor"
+    );
 
     assert_eq!(after.reserves, before.reserves + UNREDEEMED_AMOUNT);
     assert_eq!(after.utxos, before.utxos - UNREDEEMED_AMOUNT);

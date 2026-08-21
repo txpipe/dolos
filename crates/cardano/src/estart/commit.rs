@@ -286,7 +286,10 @@ impl super::WorkContext {
             // Carry the index's own cursor through: this changes what the
             // index holds, not how far it has been advanced, and
             // `IndexWriter::apply` writes whatever cursor the delta names.
-            let cursor = indexes.cursor()?.unwrap_or(ChainPoint::Slot(slot));
+            // `None` is the never-indexed store, which bootstrap reads as
+            // "replay the whole WAL": `Origin` keeps saying that, where this
+            // boundary's slot would claim every block before it as indexed.
+            let cursor = indexes.cursor()?.unwrap_or(ChainPoint::Origin);
 
             let delta = crate::indexes::index_delta_from_utxo_delta(cursor, delta);
 
