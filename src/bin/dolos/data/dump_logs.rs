@@ -4,7 +4,7 @@ use comfy_table::Table;
 use dolos_cardano::{
     eras::load_chain_summary_from_state,
     eras::log_epoch_range_to_key_range,
-    model::{AccountStakeLog, LeaderRewardLog, MemberRewardLog, PParamKind},
+    model::{AccountEpochLog, AccountStakeLog, LeaderRewardLog, MemberRewardLog, PParamKind},
     ChainSummary, EpochState, StakeLog,
 };
 use dolos_core::config::RootConfig;
@@ -53,7 +53,22 @@ struct RowContext {
 
 trait TableRow: Entity {
     fn header(format: OutputFormat) -> Vec<&'static str>;
+
+    /// The row this record renders as, or empty where it has nothing to say in
+    /// this view.
     fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String>;
+
+    /// Every output row this record renders as.
+    ///
+    /// One record is one row for all but the merged account-epoch log, whose
+    /// reward view renders one row per list element — which is the whole point
+    /// of the lists, and the reason this is not just [`Self::row`].
+    fn rows(&self, key: &LogKey, ctx: &RowContext) -> Vec<Vec<String>> {
+        match self.row(key, ctx) {
+            row if row.is_empty() => Vec::new(),
+            row => vec![row],
+        }
+    }
 }
 
 impl TableRow for LeaderRewardLog {
@@ -382,6 +397,181 @@ impl TableRow for StakeLog {
     }
 }
 
+/// The merged account-epoch log, in the stake view: what the four namespaces'
+/// `account-stakes` dump produced, under the namespace that carries it now.
+///
+/// The dbsync layout is the `stake-{epoch}.csv` one the `epoch_pots` harness
+/// compares against db-sync, unchanged — the record moved, the columns did not.
+/// A row with no stake leg renders as nothing: it is an account that took a
+/// reward this epoch without being in its distribution, which the stake view
+/// has never had a line for.
+impl TableRow for AccountEpochLog {
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        match format {
+            OutputFormat::Default => vec![
+                "slot",
+                "stake",
+                "pool",
+                "active stake",
+                "member reward",
+                "leader rewards",
+                "deposit refunds",
+            ],
+            OutputFormat::Dbsync => vec!["stake", "pool", "lovelace"],
+        }
+    }
+
+    fn row(&self, key: &LogKey, ctx: &RowContext) -> Vec<String> {
+        let temporal = TemporalKey::from(key.clone());
+        let entity = EntityKey::from(key.clone());
+        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+
+        let stake = render_stake_address(&entity, ctx);
+        let pool = self
+            .pool_id
+            .map(render_pool)
+            .unwrap_or_else(|| "-".to_string());
+
+        match ctx.format {
+            OutputFormat::Default => vec![
+                slot.to_string(),
+                stake,
+                pool,
+                self.active_stake
+                    .map(|amount| amount.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                self.member_reward
+                    .map(|amount| amount.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                render_pool_amounts(&self.leader_rewards),
+                render_pool_amounts(&self.deposit_refunds),
+            ],
+            OutputFormat::Dbsync => match (self.active_stake, self.pool_id) {
+                (Some(amount), Some(_)) => vec![stake, pool, amount.to_string()],
+                _ => Vec::new(),
+            },
+        }
+    }
+}
+
+/// The merged account-epoch log, in the reward view: one row per reward the
+/// account took, which is where the lists earn their keep.
+///
+/// The dbsync layout is the one the three reward namespaces shared, with
+/// `earned_epoch` read straight off the key — the merged row is filed under the
+/// epoch it describes, so the `- 1` those dumps applied went with their key.
+struct AccountEpochRewards(AccountEpochLog);
+
+impl Entity for AccountEpochRewards {
+    fn decode_entity(ns: Namespace, value: &EntityValue) -> Result<Self, dolos_core::ChainError> {
+        AccountEpochLog::decode_entity(ns, value).map(AccountEpochRewards)
+    }
+
+    fn encode_entity(value: &Self) -> (Namespace, EntityValue) {
+        AccountEpochLog::encode_entity(&value.0)
+    }
+}
+
+impl TableRow for AccountEpochRewards {
+    fn header(format: OutputFormat) -> Vec<&'static str> {
+        match format {
+            OutputFormat::Default => vec!["epoch", "stake", "pool", "type", "amount"],
+            OutputFormat::Dbsync => vec!["stake", "pool", "amount", "type", "earned_epoch"],
+        }
+    }
+
+    fn row(&self, _key: &LogKey, _ctx: &RowContext) -> Vec<String> {
+        unreachable!("the reward view renders through `rows`")
+    }
+
+    fn rows(&self, key: &LogKey, ctx: &RowContext) -> Vec<Vec<String>> {
+        let temporal = TemporalKey::from(key.clone());
+        let entity = EntityKey::from(key.clone());
+        let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
+
+        let epoch = match ctx.summary.as_ref() {
+            Some(summary) => summary.slot_epoch(slot).0,
+            None => slot,
+        };
+
+        let stake = render_stake_address(&entity, ctx);
+
+        let member = self
+            .0
+            .member_reward
+            .zip(self.0.pool_id)
+            .map(|(amount, pool)| (pool, amount, "member"));
+
+        let leader = self
+            .0
+            .leader_rewards
+            .iter()
+            .map(|(pool, amount)| (*pool, *amount, "leader"));
+
+        let refunds = self
+            .0
+            .deposit_refunds
+            .iter()
+            .map(|(pool, amount)| (*pool, *amount, "pool_deposit_refund"));
+
+        leader
+            .chain(member)
+            .chain(refunds)
+            // The `> 0` filter the three reward dumps already applied.
+            .filter(|(_, amount, _)| *amount > 0)
+            .map(|(pool, amount, kind)| match ctx.format {
+                OutputFormat::Default => vec![
+                    epoch.to_string(),
+                    stake.clone(),
+                    render_pool(pool),
+                    kind.to_string(),
+                    amount.to_string(),
+                ],
+                OutputFormat::Dbsync => vec![
+                    stake.clone(),
+                    render_pool(pool),
+                    amount.to_string(),
+                    kind.to_string(),
+                    epoch.to_string(),
+                ],
+            })
+            .collect()
+    }
+}
+
+/// An undecodable key means the row isn't a credential-keyed log at all (wrong
+/// namespace, corruption). Report it as `<invalid>` rather than falling back to
+/// a zero credential, which would render as a well-formed stake address and
+/// silently mislabel the account — and collapse every failed row onto the same
+/// address in a dbsync diff.
+fn render_stake_address(entity: &EntityKey, ctx: &RowContext) -> String {
+    decode_stake_credential(entity)
+        .ok()
+        .and_then(|credential| {
+            pallas_extras::stake_credential_to_address(ctx.network, &credential)
+                .to_bech32()
+                .ok()
+        })
+        .unwrap_or_else(|| "<invalid>".to_string())
+}
+
+fn render_pool(pool: dolos_cardano::PoolHash) -> String {
+    bech32::encode::<bech32::Bech32>(POOL_HRP, pool.as_ref())
+        .unwrap_or_else(|_| "<invalid>".to_string())
+}
+
+fn render_pool_amounts(entries: &[(dolos_cardano::PoolHash, u64)]) -> String {
+    if entries.is_empty() {
+        return "-".to_string();
+    }
+
+    entries
+        .iter()
+        .map(|(pool, amount)| format!("{}:{amount}", render_pool(*pool)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Wrapper around EpochState that outputs protocol parameters as CSV columns.
 struct EpochPParams(EpochState);
 
@@ -492,17 +682,12 @@ impl<T: TableRow> Formatter<T> {
     }
 
     fn write(&mut self, key: LogKey, value: T, ctx: &RowContext) {
-        match self {
-            Formatter::Table(table, _) => {
-                let row = value.row(&key, ctx);
-                table.add_row(row);
-            }
-            Formatter::Csv => {
-                let row = value.row(&key, ctx);
-                if row.is_empty() {
-                    return;
+        for row in value.rows(&key, ctx) {
+            match self {
+                Formatter::Table(table, _) => {
+                    table.add_row(row);
                 }
-                println!("{}", row.join(","));
+                Formatter::Csv => println!("{}", row.join(",")),
             }
         }
     }
@@ -638,6 +823,26 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         "account-stakes" => dump_logs::<AccountStakeLog>(
             &archive,
             "account-stakes",
+            args.skip,
+            args.take,
+            &ctx,
+            start_slot,
+            end_slot,
+            range.clone(),
+        )?,
+        "account-epochs" => dump_logs::<AccountEpochLog>(
+            &archive,
+            "account-epochs",
+            args.skip,
+            args.take,
+            &ctx,
+            start_slot,
+            end_slot,
+            range.clone(),
+        )?,
+        "account-epochs/rewards" => dump_logs::<AccountEpochRewards>(
+            &archive,
+            "account-epochs",
             args.skip,
             args.take,
             &ctx,
