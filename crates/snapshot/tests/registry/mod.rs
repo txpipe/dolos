@@ -12,7 +12,7 @@
 //! Per namespace, a **canary**: a fully-populated value ([`canaries`]) and the
 //! hex of its encoding at the current `SCHEMA_REVS` revision. The encoding is
 //! taken through the production path — `Entity::encode_entity` for the
-//! seventeen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
+//! thirteen entity namespaces, `layers::state::encode_utxo_value` for `utxos`,
 //! the one namespace whose value this profile builds rather than carries.
 //!
 //! ## Append-only history
