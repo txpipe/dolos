@@ -227,8 +227,8 @@ struct RedeemerScan {
 /// Scan the chain for redeemers that point at `hash`, in the pagination's
 /// order. The scan stops once it has enough matches to fill the requested
 /// page, or once it has consumed `max_scan_items` tagged blocks — the
-/// dimension is a superset (failed txs, governance purposes), so a script
-/// whose executions all filter out must not scan its history unbounded.
+/// dimension also tags phase-2-failed executions, so a script whose
+/// executions all filter out must not scan its history unbounded.
 async fn scan_script_redeemers<D>(
     domain: &Facade<D>,
     hash: Hash<28>,
@@ -328,10 +328,7 @@ where
                     continue;
                 }
 
-                // never None here: vote and propose resolve to None above
-                let Some(purpose) = script_redeemer_purpose(redeemer.tag()) else {
-                    continue;
-                };
+                let purpose = script_redeemer_purpose(redeemer.tag());
 
                 let prices = prices_for_epoch(domain, &chain, epoch, &mut prices_by_epoch)?;
                 let units = redeemer.ex_units();
