@@ -216,7 +216,6 @@ fn a_retained_dump_is_cut_once_and_inherited_after() {
     let cutting = plan_at_epoch_end(&node.domain, 1, retaining_epoch_1());
     let following = plan_at_boundary(&node.domain, 2, retaining_epoch_1());
 
-    // ---- the publish that cuts it ----------------------------------------
     let cut = node.publish(&repository, &cutting, false);
 
     assert_eq!(
@@ -264,7 +263,6 @@ fn a_retained_dump_is_cut_once_and_inherited_after() {
     );
     assert_eq!(cut.transfer.layers_reused, 0);
 
-    // ---- the publish that inherits it ------------------------------------
     let followed = node.publish(&repository, &following, false);
 
     assert_eq!(

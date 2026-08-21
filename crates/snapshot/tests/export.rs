@@ -697,10 +697,6 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
     }
 }
 
-// --------------------------------------------------------------------------
-// 5. Retained state dumps
-// --------------------------------------------------------------------------
-
 /// The dumps a stele carries, by the epoch their scope names.
 fn dumps_in(
     inscription: &stelae::inscription::Inscription,
