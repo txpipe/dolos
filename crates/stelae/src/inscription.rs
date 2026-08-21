@@ -214,11 +214,9 @@ impl Inscription {
         let kinds = profile.kinds();
 
         for layer in &self.layers {
-            // A kind this implementation does not define has no yardstick to be
-            // measured against, so there is nothing to check here and the layer
-            // is left for `unknown_layers` to report. Its media type is not
-            // unchecked: `validate_structure` has already established that it
-            // parses and does not squat the reserved `stelae` vendor.
+            // Left to `unknown_layers`. Its media type is still checked:
+            // `validate_structure` has already established that it parses and
+            // does not squat the reserved `stelae` vendor.
             if !kinds.contains(&layer.kind.as_str()) {
                 continue;
             }

@@ -1450,8 +1450,7 @@ fn an_unknown_layer_kind_is_skippable_at_read_and_refused_at_publish() {
     assert!(ahead.unknown_layers(&FutureToyProfile).is_empty());
     ahead.check_profile_strict(&FutureToyProfile).unwrap();
 
-    // The older binary may not: it would either drop `covers` from the stele it
-    // publishes next or attest bytes it never read.
+    // The older binary may not.
     let err = ahead.check_profile_strict(&ToyProfile).unwrap_err();
     assert!(
         matches!(&err, Error::UnknownLayerKind { kind, .. } if kind == "covers"),

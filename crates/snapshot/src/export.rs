@@ -363,10 +363,6 @@ impl Following {
             ));
         }
 
-        // Strict, because this is the publish side: the stele built on top of
-        // this one attests every layer it lists, and a kind this binary cannot
-        // build would be either dropped from the new document or attested
-        // unread.
         previous.check_profile_strict(&DolosProfile)?;
 
         Self::new(&previous, plan)
@@ -1864,12 +1860,6 @@ mod chain_tests {
 
     /// The publish side of decision 0026's unknown-kind rule: a reader may skip
     /// a kind it does not implement, and a publisher may not.
-    ///
-    /// The two failures this refusal is between are both silent. Chaining onto
-    /// the predecessor and building what this binary knows drops the unknown
-    /// layer out of the repository without anything saying so; carrying its
-    /// descriptor forward attests bytes this binary never read. Stopping is the
-    /// only honest third option, and it is one flag on a `check_profile` call.
     #[test]
     fn a_predecessor_carrying_a_kind_this_build_cannot_build_is_refused() {
         let network = Network::for_magic(crate::PREVIEW_MAGIC);

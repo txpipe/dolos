@@ -1600,10 +1600,6 @@ mod tests {
 
     /// A kind published after this build shipped is skipped and reported, not
     /// refused — the client half of decision 0026's additive-change rule.
-    ///
-    /// The scopes are the newer publisher's and mean nothing here, which is the
-    /// point: the only field this side reads out of an unknown layer's scope is
-    /// `required`.
     #[test]
     fn a_kind_this_build_does_not_implement_is_skipped_and_reported() {
         let mut layers = state_shards();
@@ -1630,9 +1626,7 @@ mod tests {
         assert!(unknown_layers(&inscription(known)).unwrap().is_empty());
     }
 
-    /// The one unknown kind a restore refuses. Both the kind and the whole
-    /// scope reach the operator, because the kind says what to upgrade to and
-    /// the scope says what would otherwise have been quietly missing.
+    /// The one unknown kind a restore refuses.
     #[test]
     fn a_required_unknown_kind_refuses_the_restore() {
         let mut layers = state_shards();

@@ -340,8 +340,6 @@ fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
         panic!("{err:?}");
     };
 
-    // Both halves reach the operator: the kind says what to upgrade to, the
-    // scope says which slice would otherwise have been missing.
     assert_eq!(kind, AHEAD_KIND);
     assert_eq!(scope, &json!({"epoch": 0, "required": true}));
 
