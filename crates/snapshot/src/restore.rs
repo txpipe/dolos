@@ -451,16 +451,33 @@ pub fn plan<R: SteleReader>(
 /// Only presence is judged, never the revision's *value*: a revision the reader
 /// has not seen describes bytes it can still parse and is deliberately not a
 /// gate (ADR-004). What is a gate is a namespace that is gone.
+///
+/// A map that is absent or holds a value of the wrong type is a different
+/// failure and reports as one. This is the first check `plan` runs over
+/// `parameters`, so nothing upstream would catch it, and "the publisher retired
+/// this namespace" is not what happened.
 fn check_namespaces(inscription: &Inscription) -> Result<(), Error> {
-    let schemas = inscription.parameters.get("schemas");
+    let schemas = inscription
+        .parameters
+        .get("schemas")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            Error::malformed_inscription("parameters.schemas", "missing or not an object")
+        })?;
 
     for namespace in NAMESPACES {
-        let rev = schemas
-            .and_then(|schemas| schemas.get(namespace))
-            .and_then(serde_json::Value::as_u64);
+        let rev = match schemas.get(namespace) {
+            None => None,
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                Error::malformed_inscription(
+                    format!("parameters.schemas.{namespace}"),
+                    "not a schema revision",
+                )
+            })?),
+        };
 
-        // An inscription with no `schemas` map at all is a malformed one and
-        // is caught elsewhere; here, absence and zero say the same thing.
+        // A namespace absent from a well-formed map says the same thing as one
+        // declared at the retired revision.
         if matches!(rev, None | Some(RETIRED_SCHEMA_REV)) {
             return Err(Error::RetiredNamespace { namespace });
         }
@@ -1982,6 +1999,35 @@ mod tests {
             check_namespaces(&inscription),
             Err(Error::RetiredNamespace { namespace }) if namespace == dropped
         ));
+    }
+
+    /// No `schemas` map at all is a malformed inscription, not a retirement.
+    /// This is the first `parameters` check `plan` runs, so reporting it as a
+    /// retired namespace would name a publisher act that never happened.
+    #[test]
+    fn an_absent_schemas_map_is_malformed_rather_than_retired() {
+        let mut inscription = inscription(state_layers());
+        inscription
+            .parameters
+            .as_object_mut()
+            .unwrap()
+            .remove("schemas");
+
+        let err = check_namespaces(&inscription).unwrap_err();
+
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
+    }
+
+    /// A revision that is not a number says nothing about whether the
+    /// namespace is carried, so it reports as the malformed field it is.
+    #[test]
+    fn a_non_numeric_schema_revision_is_malformed() {
+        let mut inscription = inscription(state_layers());
+        inscription.parameters["schemas"][NAMESPACES[0]] = json!("1");
+
+        let err = check_namespaces(&inscription).unwrap_err();
+
+        assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
     /// A revision this build has never seen is not a gate. `.v{x}` is a
