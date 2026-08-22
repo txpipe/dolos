@@ -15,7 +15,7 @@
 //! hashed on the way in, compressed, and hashed again on the way out. Nothing
 //! is buffered, so a layer of any size costs one sequential scan.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 
 use sha2::{Digest as _, Sha256};
 
@@ -187,7 +187,7 @@ pub fn digest_reader<R: Read>(mut source: R) -> Result<(Digest, u64), Error> {
     let mut total = 0u64;
 
     loop {
-        let read = source.read(&mut buffer)?;
+        let read = read_uninterrupted(&mut source, &mut buffer)?;
         if read == 0 {
             break;
         }
@@ -243,7 +243,7 @@ fn digest_blob<R: Read, W: Write>(
         let mut buffer = [0u8; 64 * 1024];
 
         loop {
-            let read = decoder.read(&mut buffer)?;
+            let read = read_uninterrupted(&mut decoder, &mut buffer)?;
             if read == 0 {
                 break;
             }
@@ -277,6 +277,32 @@ fn digest_blob<R: Read, W: Write>(
         uncompressed_size,
         compressed_size,
     })
+}
+
+/// [`Read::read`], with `ErrorKind::Interrupted` treated as "read again".
+///
+/// A bare `read` propagates `Interrupted`; only `std`'s convenience readers
+/// (`io::copy`, `read_exact`, `read_to_end`) retry it, which is why the habit
+/// is easy to miss in a hand-written loop. Every loop in this crate that drives
+/// a source to EOF goes through here instead, because the sources are no longer
+/// local files: an `oci://` publish or restore reads a network stream for hours
+/// on a process that installs signal handlers, and a spurious mid-restore
+/// failure there costs the whole run and reads as corruption.
+///
+/// Unbounded, like `std`'s own readers: a source that returns `Interrupted`
+/// forever is a source that never delivers a byte, and inventing a retry
+/// ceiling here would turn "no progress" into a different error rather than
+/// into progress.
+pub(crate) fn read_uninterrupted<R: Read + ?Sized>(
+    source: &mut R,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    loop {
+        match source.read(buffer) {
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            other => return other,
+        }
+    }
 }
 
 /// Hashes and counts every byte that passes through, in either direction.
