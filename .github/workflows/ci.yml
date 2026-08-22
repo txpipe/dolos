@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-14]
 
     steps:
       - uses: actions/checkout@v4
@@ -86,8 +86,24 @@ jobs:
         run: cargo test --workspace --all-targets
 
       - name: Run e2e smoke tests
-        if: runner.os != 'Windows'
         run: cargo test --test smoke -- --ignored
+
+  # Windows is the slowest job and skips e2e, so on a PR it adds latency without
+  # coverage anyone acts on. A Windows-only break lands on main and is caught by
+  # the merge run instead of blocking the PR.
+  test-windows:
+    name: Test (windows-latest)
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests
+        run: cargo test --workspace --all-targets
 
   # AGENTS.md prescribes verifying with `--all-features`, which enables
   # feature-gated code (notably the `strict` epoch-coherence assertions in
@@ -113,11 +129,12 @@ jobs:
           save-if: false
       - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
-  # These sleep on a real relay rather than compute, and cover nothing
-  # platform-specific, so one run replaces the Linux and macOS copies. Smoke
-  # stays on the matrix for the OS-sensitive surface: ports, socket, shutdown.
+  # These sleep on a real relay rather than compute, so they are slow and only
+  # as reliable as the relay. Run them on merges to main; smoke stays on the
+  # matrix everywhere and covers ports, socket and shutdown on every PR.
   e2e:
     name: E2E (sync, snapshot)
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
