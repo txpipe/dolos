@@ -316,11 +316,13 @@ impl StateStoreConfig {
         }
     }
 
+    /// Whether this selection round-trips through `Default`: true only for
+    /// the default variant carrying no explicit options, so an explicit
+    /// non-default backend choice survives re-serialization.
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory => false,
+            Self::Redb(_) | Self::InMemory => false,
         }
     }
 }
@@ -352,11 +354,62 @@ impl RedbArchiveConfig {
     }
 }
 
+/// Configuration for the Fjall archive backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FjallArchiveConfig {
+    /// Optional path override for the archive directory.
+    /// If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/archive`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Optional path override for block segment files.
+    /// If not specified, segment files are stored in the archive directory.
+    #[serde(default)]
+    pub blocks_path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum journal size in MB.
+    #[serde(default)]
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    #[serde(default)]
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    #[serde(default)]
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    #[serde(default)]
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    #[serde(default)]
+    pub memtable_size_mb: Option<usize>,
+}
+
+impl FjallArchiveConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.blocks_path.is_none()
+            && self.cache.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
+}
+
 /// Archive store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
+    /// Redb backend, supported via explicit configuration. Reads and writes
+    /// the archive index as a single redb file; block segment files are
+    /// shared with the fjall backend.
     Redb(RedbArchiveConfig),
+    /// Fjall backend, the default. Block segment files are shared with the
+    /// redb backend; only the index differs.
+    Fjall(FjallArchiveConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
     InMemory,
@@ -366,7 +419,7 @@ pub enum ArchiveStoreConfig {
 
 impl Default for ArchiveStoreConfig {
     fn default() -> Self {
-        Self::Redb(RedbArchiveConfig::default())
+        Self::Fjall(FjallArchiveConfig::default())
     }
 }
 
@@ -374,14 +427,19 @@ impl ArchiveStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
             Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
     }
 
+    /// Whether this selection round-trips through `Default`: true only for
+    /// the default variant carrying no explicit options. Any other variant
+    /// must survive re-serialization even with an empty options set — a bare
+    /// `backend = "redb"` is an explicit choice, not the default.
     pub fn is_default(&self) -> bool {
         match self {
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory | Self::NoOp => false,
+            Self::Fjall(cfg) => cfg.is_default(),
+            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -485,11 +543,13 @@ impl IndexStoreConfig {
         }
     }
 
+    /// Whether this selection round-trips through `Default`: true only for
+    /// the default variant carrying no explicit options, so an explicit
+    /// non-default backend choice survives re-serialization.
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory | Self::NoOp => false,
+            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -617,6 +677,9 @@ impl StorageConfig {
         match &self.archive {
             ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
             ArchiveStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
+            }
+            ArchiveStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
             }
         }
@@ -1262,4 +1325,42 @@ pub struct RootConfig {
 
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
     pub telemetry: TelemetryConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An explicit `backend = "redb"` with no options must not be treated as
+    /// the default: dropping it on re-serialization would silently flip the
+    /// archive to fjall on the next load.
+    #[test]
+    fn explicit_non_default_backend_survives_reserialization() {
+        let storage = StorageConfig {
+            archive: ArchiveStoreConfig::Redb(RedbArchiveConfig::default()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&storage).unwrap();
+        let restored: StorageConfig = serde_json::from_value(json).unwrap();
+
+        assert!(matches!(restored.archive, ArchiveStoreConfig::Redb(_)));
+    }
+
+    #[test]
+    fn default_backend_selections_are_not_serialized() {
+        let json = serde_json::to_value(StorageConfig::default()).unwrap();
+
+        assert!(json.get("archive").is_none());
+        assert!(json.get("state").is_none());
+        assert!(json.get("index").is_none());
+    }
+
+    #[test]
+    fn the_default_archive_backend_is_fjall() {
+        assert!(matches!(
+            ArchiveStoreConfig::default(),
+            ArchiveStoreConfig::Fjall(cfg) if cfg.is_default()
+        ));
+    }
 }
