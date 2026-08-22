@@ -1489,6 +1489,7 @@ dependencies = [
  "pallas",
  "paste",
  "proptest",
+ "rand 0.9.3",
  "rayon",
  "self_cell",
  "serde",
