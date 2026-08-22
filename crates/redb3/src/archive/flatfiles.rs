@@ -78,6 +78,21 @@ fn segment_filename(segment_id: u32) -> String {
     format!("{:06}.segment", segment_id)
 }
 
+/// Wall-clock spent appending and fsyncing segment files, process-wide.
+///
+/// The archive-backend benchmark subtracts this from replay wall-clock to
+/// get index-attributable time: block bodies land on the same disk through
+/// the same code for every backend, and on a slow disk that shared cost is
+/// large enough to hide an index-path regression inside the total.
+static CUMULATIVE_APPEND_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Total time this process has spent in [`FlatFileStore::append_batch`].
+pub fn cumulative_append_time() -> std::time::Duration {
+    std::time::Duration::from_nanos(
+        CUMULATIVE_APPEND_NANOS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 /// Manages append-only segment files for block storage.
 pub struct FlatFileStore {
     segments_dir: PathBuf,
@@ -121,6 +136,16 @@ impl FlatFileStore {
     ///
     /// Returns a `BlockLocation` for each input item, in the same order.
     pub fn append_batch(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
+        let started = std::time::Instant::now();
+        let result = self.append_batch_inner(items);
+        CUMULATIVE_APPEND_NANOS.fetch_add(
+            started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        result
+    }
+
+    fn append_batch_inner(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
         let mut locations = Vec::with_capacity(items.len());
         let mut touched_segments: HashMap<u32, ()> = HashMap::new();
 

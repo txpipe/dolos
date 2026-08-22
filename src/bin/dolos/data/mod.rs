@@ -2,6 +2,7 @@ use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 
+mod bench_archive;
 mod cardinality_stats;
 mod check;
 mod clear_state;
@@ -68,6 +69,9 @@ pub enum Command {
     Housekeeping(housekeeping::Args),
     /// imports blocks from immutable DB into archive store only
     ImportArchive(import_archive::Args),
+    /// measures archive access shapes for the backend evaluation
+    #[command(hide = true)]
+    BenchArchive(bench_archive::Args),
 }
 
 #[derive(Debug, Parser)]
@@ -101,6 +105,7 @@ pub fn run(
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
         Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
+        Command::BenchArchive(x) => bench_archive::run(config, x)?,
     }
 
     Ok(())

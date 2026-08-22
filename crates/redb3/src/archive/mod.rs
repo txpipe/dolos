@@ -133,6 +133,10 @@ pub struct ArchiveStore {
 impl ArchiveStore {
     /// Gracefully shutdown the archive store.
     pub fn shutdown(&self) -> Result<(), RedbArchiveError> {
+        info!(
+            flatfile_append_secs = flatfiles::cumulative_append_time().as_secs_f64(),
+            "archive store: cumulative flat-file append time"
+        );
         Ok(())
     }
 

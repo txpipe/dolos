@@ -581,7 +581,11 @@ fn assert_state_matches<S: StateStore>(restored: &S, original: &S) {
     assert_eq!(utxos_of(restored), utxos, "the utxo set");
 }
 
-fn assert_archive_matches<A: ArchiveStore>(restored: &A, original: &A) {
+// The two sides are independent type parameters: the restore target keeps a
+// concrete redb archive while the harness's archive follows the `ToyStores`
+// binding, so under `FjallStores` this compares across backends — which is
+// exactly the agreement the archive conformance suite wants proven here.
+fn assert_archive_matches<A: ArchiveStore, B: ArchiveStore>(restored: &A, original: &B) {
     let blocks = blocks_of(original);
     assert!(!blocks.is_empty(), "the fixture archived no blocks");
     assert_eq!(blocks_of(restored), blocks, "blocks");

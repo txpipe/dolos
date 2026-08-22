@@ -221,6 +221,11 @@ impl ArchiveStore {
         use std::time::Duration;
 
         tracing::info!("archive store: starting graceful shutdown");
+        tracing::info!(
+            flatfile_append_secs =
+                dolos_redb3::archive::flatfiles::cumulative_append_time().as_secs_f64(),
+            "archive store: cumulative flat-file append time"
+        );
 
         self.db.persist(PersistMode::SyncAll)?;
 
