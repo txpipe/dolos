@@ -1607,6 +1607,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "pallas",
+ "rand 0.9.3",
  "redb",
  "redb-extras",
  "serde",

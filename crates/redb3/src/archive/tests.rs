@@ -862,3 +862,143 @@ fn find_intersect_resolves_an_ebb_by_its_own_hash() {
         Some(ebb.0.clone())
     );
 }
+
+/// How full the leaf pages of a derived-log namespace end up, as a function of
+/// nothing but the order its batches are inserted in.
+///
+/// redb splits a full leaf at half its bytes with no rightmost-split case
+/// (3.1.0, `tree_store/btree_base.rs`, `build_split`). Every log batch carries
+/// a fresh temporal prefix greater than everything already stored, so a batch
+/// handed over in key order is a pure right-edge append: split, fill, split,
+/// leaving every page behind at half. The same keys inserted in an arbitrary
+/// order converge to the `ln 2` ≈ 69% random-insertion asymptote instead.
+///
+/// This is the property the account-epoch log's batch shuffle buys, measured
+/// here on redb itself rather than inferred from its source.
+mod leaf_fill {
+    use dolos_core::{
+        ArchiveWriter as _, EntityKey, LogKey, NamespaceType, StateSchema, TemporalKey,
+    };
+    use rand::{seq::SliceRandom as _, Rng as _, SeedableRng as _};
+
+    use crate::archive::ArchiveStore;
+
+    const NS: &str = "account-epochs";
+
+    /// Epochs, and accounts per epoch. The product has to cross enough leaf
+    /// splits for the asymptote to be the thing measured rather than the first
+    /// few pages; ~150k rows at ~83 bytes each is a few thousand leaves.
+    const EPOCHS: u64 = 20;
+    const ACCOUNTS: usize = 4_000;
+
+    /// A row the size of a real one: a 40-byte `LogKey` (8-byte slot, 32-byte
+    /// credential) against a 43-byte `AccountEpochLog` — a stake and a member
+    /// reward against one pool, which is what the overwhelming majority of
+    /// rows carry.
+    const VALUE_SIZE: usize = 43;
+
+    fn store() -> ArchiveStore {
+        let mut schema = StateSchema::default();
+        schema.insert(NS, NamespaceType::KeyValue);
+
+        ArchiveStore::in_memory(schema).unwrap()
+    }
+
+    /// The measurement, run once per insertion order.
+    ///
+    /// Both runs write the identical set of keys — same accounts, same epochs,
+    /// same values — so the only variable between the two numbers is the order
+    /// the batch reaches the table in.
+    fn fill(shuffle: bool) -> (f64, u64, u64) {
+        let store = store();
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+
+        let accounts: Vec<EntityKey> = (0..ACCOUNTS)
+            .map(|_| EntityKey::from(rng.random::<[u8; 32]>().as_slice()))
+            .collect();
+
+        let value = vec![0u8; VALUE_SIZE];
+
+        for epoch in 0..EPOCHS {
+            // One transaction per epoch, as the boundary commit does.
+            let writer = store.start_writer().unwrap();
+
+            let temporal = TemporalKey::from(epoch * 432_000);
+
+            let mut batch: Vec<LogKey> = accounts
+                .iter()
+                .map(|account| LogKey::from((temporal.clone(), account.clone())))
+                .collect();
+
+            // The collection order: accounts are streamed from the state store
+            // in key order, so the batch arrives sorted.
+            batch.sort();
+
+            if shuffle {
+                batch.shuffle(&mut rng);
+            }
+
+            for key in batch {
+                writer.write_log(NS, &key, &value).unwrap();
+            }
+
+            writer.commit().unwrap();
+        }
+
+        let stats = store.stats().unwrap();
+
+        let (_, footprint) = stats
+            .into_iter()
+            .find(|(name, _)| name == NS)
+            .expect("namespace missing from stats");
+
+        assert_eq!(footprint.rows, Some(EPOCHS * ACCOUNTS as u64));
+
+        (
+            footprint.leaf_fill().unwrap(),
+            footprint.stats.leaf_pages(),
+            footprint.stats.stored_bytes(),
+        )
+    }
+
+    /// Sorted batches leave the leaves half empty, shuffled ones do not.
+    ///
+    /// The bounds are loose on purpose: what is being pinned is the gap
+    /// between the two regimes, not a particular redb release's exact
+    /// convergence. A failure here means redb changed how it splits — at which
+    /// point the shuffle is either unnecessary or insufficient, and either way
+    /// the account-epoch log's footprint needs re-measuring.
+    #[test]
+    fn shuffling_a_log_batch_raises_leaf_fill() {
+        let (sorted, sorted_pages, bytes) = fill(false);
+        let (shuffled, shuffled_pages, shuffled_bytes) = fill(true);
+
+        assert_eq!(bytes, shuffled_bytes, "the two runs stored different data");
+
+        println!(
+            "sorted:   {:.1}% fill over {sorted_pages} leaf pages",
+            sorted * 100.0
+        );
+        println!(
+            "shuffled: {:.1}% fill over {shuffled_pages} leaf pages",
+            shuffled * 100.0
+        );
+        println!(
+            "{:.1}% fewer leaf pages for the same {bytes} stored bytes",
+            (1.0 - shuffled_pages as f64 / sorted_pages as f64) * 100.0
+        );
+
+        // The regimes, loosely bounded: what matters is that they are two
+        // regimes and not one. The exact convergence belongs to a redb release
+        // and to the row size, and neither is this test's subject.
+        assert!(sorted < 0.55, "sorted fill was {sorted}");
+        assert!(shuffled > 0.58, "shuffled fill was {shuffled}");
+
+        // The saving itself, stated as the thing the shuffle is for.
+        assert!(
+            shuffled_pages < sorted_pages * 4 / 5,
+            "shuffling saved only {sorted_pages} -> {shuffled_pages} leaf pages"
+        );
+    }
+}
