@@ -50,6 +50,10 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
             info!("chain segment trimmed");
         }
+        ArchiveStoreBackend::Fjall(_) => {
+            // The LSM tree compacts in the background on its own schedule.
+            info!("fjall archive, background compaction handles reclamation");
+        }
         ArchiveStoreBackend::NoOp(_) => {
             // No compaction needed for noop
             info!("noop archive, skipping compaction");

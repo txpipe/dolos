@@ -165,6 +165,9 @@ pub fn run(
         }
         ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
         ArchiveStoreBackend::Redb(_) | ArchiveStoreBackend::LogsOnly(_) => {}
+        ArchiveStoreBackend::Fjall(_) => {
+            bail!("export command is not available for the fjall archive prototype")
+        }
         ArchiveStoreBackend::NoOp(_) => {
             bail!("export command is not available for noop archive backend")
         }

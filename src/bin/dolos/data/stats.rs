@@ -58,7 +58,10 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
                 serde_json::Value::Object(tables.collect()),
             );
         }
-        ArchiveStoreBackend::NoOp(_) => (),
+        // The fjall archive's on-disk footprint is reported per keyspace by
+        // `dolos data bench-archive`; redb's page-level TableStats have no
+        // LSM equivalent here.
+        ArchiveStoreBackend::Fjall(_) | ArchiveStoreBackend::NoOp(_) => (),
     }
 
     if json.is_empty() {

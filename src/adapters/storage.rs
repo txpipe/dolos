@@ -642,6 +642,7 @@ pub enum ArchiveStoreBackend {
     /// boundary log keys are slot-derived and identical under replay, so
     /// re-written log rows overwrite the originals in place.
     LogsOnly(dolos_redb3::archive::ArchiveStore),
+    Fjall(dolos_fjall::archive::ArchiveStore),
     NoOp(NoOpArchiveStore),
 }
 
@@ -655,6 +656,18 @@ impl ArchiveStoreBackend {
         Ok(Self::Redb(dolos_redb3::archive::ArchiveStore::open(
             schema, path, config,
         )?))
+    }
+
+    /// Open an archive store with the Fjall backend.
+    pub fn open_fjall(
+        path: impl AsRef<Path>,
+        schema: StateSchema,
+        config: &dolos_core::config::FjallArchiveConfig,
+    ) -> Result<Self, ArchiveError> {
+        Ok(Self::Fjall(
+            dolos_fjall::archive::ArchiveStore::open(schema, path, config)
+                .map_err(ArchiveError::from)?,
+        ))
     }
 
     /// Create a no-op archive store that discards all writes.
@@ -677,6 +690,7 @@ impl ArchiveStoreBackend {
     pub fn logs_only(&self) -> Option<Self> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => Some(Self::LogsOnly(s.clone())),
+            Self::Fjall(_) => None,
             Self::NoOp(_) => None,
         }
     }
@@ -700,9 +714,7 @@ impl ArchiveStoreBackend {
     ) -> Result<Self, ArchiveError> {
         match config {
             ArchiveStoreConfig::Redb(cfg) => Self::open_redb(path, schema, cfg),
-            ArchiveStoreConfig::Fjall(_) => Err(ArchiveError::InternalError(
-                "the fjall archive backend is not wired yet".to_string(),
-            )),
+            ArchiveStoreConfig::Fjall(cfg) => Self::open_fjall(path, schema, cfg),
             ArchiveStoreConfig::InMemory => Self::in_memory(schema),
             ArchiveStoreConfig::NoOp => Ok(Self::noop()),
         }
@@ -713,6 +725,7 @@ impl ArchiveStoreBackend {
             Self::Redb(s) | Self::LogsOnly(s) => s
                 .shutdown()
                 .map_err(|e| ArchiveError::InternalError(e.to_string())),
+            Self::Fjall(s) => s.shutdown().map_err(ArchiveError::from),
             Self::NoOp(s) => s.shutdown(),
         }
     }
@@ -722,6 +735,7 @@ pub enum ArchiveWriterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     /// Delegates `write_log` and `commit`; discards `apply` and `undo`.
     LogsOnly(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::Writer>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
 }
 
@@ -730,6 +744,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
         match self {
             Self::Redb(w) => w.apply(point, block),
             Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.apply(point, block),
             Self::NoOp(w) => w.apply(point, block),
         }
     }
@@ -742,6 +757,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     ) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(w) | Self::LogsOnly(w) => w.write_log(ns, key, value),
+            Self::Fjall(w) => w.write_log(ns, key, value),
             Self::NoOp(w) => w.write_log(ns, key, value),
         }
     }
@@ -750,6 +766,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
         match self {
             Self::Redb(w) => w.undo(point),
             Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.undo(point),
             Self::NoOp(w) => w.undo(point),
         }
     }
@@ -757,6 +774,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn commit(self) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(w) | Self::LogsOnly(w) => (*w).commit(),
+            Self::Fjall(w) => (*w).commit(),
             Self::NoOp(w) => w.commit(),
         }
     }
@@ -764,6 +782,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
 
 pub enum ArchiveBlockIterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::BlockIter<'static>>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::BlockIter<'static>>),
     NoOp(EmptyBlockIter),
 }
 
@@ -772,6 +791,7 @@ impl Iterator for ArchiveBlockIterBackend {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -781,6 +801,7 @@ impl DoubleEndedIterator for ArchiveBlockIterBackend {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next_back(),
+            Self::Fjall(iter) => iter.next_back(),
             Self::NoOp(iter) => iter.next_back(),
         }
     }
@@ -790,6 +811,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
     fn skip_forward(&mut self, n: usize) {
         match self {
             Self::Redb(iter) => iter.skip_forward(n),
+            Self::Fjall(iter) => iter.skip_forward(n),
             Self::NoOp(iter) => iter.skip_forward(n),
         }
     }
@@ -797,6 +819,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
     fn skip_backward(&mut self, n: usize) {
         match self {
             Self::Redb(iter) => iter.skip_backward(n),
+            Self::Fjall(iter) => iter.skip_backward(n),
             Self::NoOp(iter) => iter.skip_backward(n),
         }
     }
@@ -804,6 +827,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
 
 pub enum ArchiveLogIterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::LogIter>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::LogIter>),
     NoOp(EmptyLogIter),
 }
 
@@ -812,6 +836,7 @@ impl Iterator for ArchiveLogIterBackend {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -819,6 +844,7 @@ impl Iterator for ArchiveLogIterBackend {
 
 pub enum ArchiveEntityValueIterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::EntityValueIter>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::EntityValueIter>),
     NoOp(dolos_core::builtin::EmptyEntityValueIter),
 }
 
@@ -827,6 +853,7 @@ impl Iterator for ArchiveEntityValueIterBackend {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -844,6 +871,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
                 .map(|writer| ArchiveWriterBackend::Redb(Box::new(writer))),
             Self::LogsOnly(s) => CoreArchiveStore::start_writer(s)
                 .map(|writer| ArchiveWriterBackend::LogsOnly(Box::new(writer))),
+            Self::Fjall(s) => CoreArchiveStore::start_writer(s)
+                .map(|writer| ArchiveWriterBackend::Fjall(Box::new(writer))),
             Self::NoOp(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::NoOp),
         }
     }
@@ -855,6 +884,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     ) -> Result<Vec<Option<EntityValue>>, ArchiveError> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::read_logs(s, ns, keys),
+            Self::Fjall(s) => CoreArchiveStore::read_logs(s, ns, keys),
             Self::NoOp(s) => CoreArchiveStore::read_logs(s, ns, keys),
         }
     }
@@ -867,6 +897,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::iter_logs(s, ns, range)
                 .map(|iter| ArchiveLogIterBackend::Redb(Box::new(iter))),
+            Self::Fjall(s) => CoreArchiveStore::iter_logs(s, ns, range)
+                .map(|iter| ArchiveLogIterBackend::Fjall(Box::new(iter))),
             Self::NoOp(s) => {
                 CoreArchiveStore::iter_logs(s, ns, range).map(ArchiveLogIterBackend::NoOp)
             }
@@ -876,6 +908,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::get_block_by_slot(s, slot),
+            Self::Fjall(s) => CoreArchiveStore::get_block_by_slot(s, slot),
             Self::NoOp(s) => CoreArchiveStore::get_block_by_slot(s, slot),
         }
     }
@@ -883,6 +916,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
+            Self::Fjall(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
             Self::NoOp(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
         }
     }
@@ -895,6 +929,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::get_range(s, from, to)
                 .map(|iter| ArchiveBlockIterBackend::Redb(Box::new(iter))),
+            Self::Fjall(s) => CoreArchiveStore::get_range(s, from, to)
+                .map(|iter| ArchiveBlockIterBackend::Fjall(Box::new(iter))),
             Self::NoOp(s) => {
                 CoreArchiveStore::get_range(s, from, to).map(ArchiveBlockIterBackend::NoOp)
             }
@@ -904,6 +940,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::find_intersect(s, intersect),
+            Self::Fjall(s) => CoreArchiveStore::find_intersect(s, intersect),
             Self::NoOp(s) => CoreArchiveStore::find_intersect(s, intersect),
         }
     }
@@ -911,6 +948,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::get_tip(s),
+            Self::Fjall(s) => CoreArchiveStore::get_tip(s),
             Self::NoOp(s) => CoreArchiveStore::get_tip(s),
         }
     }
@@ -920,6 +958,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::Redb(s) | Self::LogsOnly(s) => {
                 CoreArchiveStore::prune_history(s, max_slots, max_prune)
             }
+            Self::Fjall(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
             Self::NoOp(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
         }
     }
@@ -927,6 +966,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(s) | Self::LogsOnly(s) => CoreArchiveStore::truncate_front(s, after),
+            Self::Fjall(s) => CoreArchiveStore::truncate_front(s, after),
             Self::NoOp(s) => CoreArchiveStore::truncate_front(s, after),
         }
     }
