@@ -10,10 +10,13 @@
 //! - [`index`]: Index store implementation for cross-cutting indexes
 //! - [`state`]: State store implementation for ledger state (UTxOs, entities,
 //!   datums)
+//! - [`archive`]: Archive store implementation (experimental benchmark vehicle;
+//!   block bodies stay in the redb crate's flat segment files)
 //! - [`keys`]: Shared key encoding utilities
 
-use dolos_core::{IndexError, StateError};
+use dolos_core::{ArchiveError, IndexError, StateError};
 
+pub mod archive;
 pub mod index;
 pub mod keys;
 pub mod state;
@@ -39,6 +42,9 @@ pub enum Error {
 
     #[error("keyspace not found: {0}")]
     KeyspaceNotFound(String),
+
+    #[error("io error: {0}")]
+    Io(String),
 }
 
 impl From<Error> for IndexError {
@@ -50,5 +56,11 @@ impl From<Error> for IndexError {
 impl From<Error> for StateError {
     fn from(error: Error) -> Self {
         StateError::InternalStoreError(error.to_string())
+    }
+}
+
+impl From<Error> for ArchiveError {
+    fn from(error: Error) -> Self {
+        ArchiveError::InternalError(error.to_string())
     }
 }
