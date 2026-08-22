@@ -66,6 +66,13 @@ pub struct Args {
     #[arg(long, action)]
     reproduce: bool,
 
+    /// epochs whose index layers one traversal of the index store fills; a
+    /// larger band trades resident memory for fewer traversals, and changes
+    /// nothing about the stele it produces. Defaults to the measured value
+    /// that keeps the index pass inside 1 GiB
+    #[arg(long, value_name = "EPOCHS", requires = "reproduce")]
+    index_band: Option<std::num::NonZeroUsize>,
+
     /// epochs the reproduction builds layers for, e.g. `500..520`, `500..=520`
     /// or `500`; defaults to every epoch below the cursor, and must match what
     /// the stele was published with
@@ -132,6 +139,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     .context("planning the reproduction")?;
 
     let plan = super::restrict(plan, args.epochs);
+    let plan = super::banded(plan, args.index_band);
 
     super::report_plan(&plan)?;
 

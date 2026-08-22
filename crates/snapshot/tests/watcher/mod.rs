@@ -16,7 +16,7 @@
 // binary does not reach look dead to it. They are not.
 #![allow(dead_code)]
 
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 use stelae::progress::{Event, Observer, Outcome, Progress};
 
@@ -56,6 +56,13 @@ struct Stream {
     /// checking it is how a byte delta escaping into the gap between layers
     /// gets caught.
     trailing: usize,
+    /// Layers of each kind open right now, and the most that were ever open at
+    /// once. A driver that holds several open across one walk of a store — the
+    /// state pass over its shards, the index pass over a band — is reporting
+    /// exactly that through this seam, and the peak is the only thing in the
+    /// stream that says so.
+    live: BTreeMap<String, usize>,
+    peak: BTreeMap<String, usize>,
 }
 
 /// Everything a run said about itself.
@@ -79,19 +86,44 @@ impl Progress for Watcher {
                 total,
                 kind,
                 scope,
-            } => stream.opened.push(layer(index, total, kind, scope)),
+            } => {
+                stream.opened.push(layer(index, total, kind, scope));
+
+                let live = stream.live.entry(kind.to_owned()).or_default();
+                *live += 1;
+
+                let live = *live;
+                let peak = stream.peak.entry(kind.to_owned()).or_default();
+                *peak = (*peak).max(live);
+            }
 
             Event::LayerFinished {
                 index,
                 total,
                 kind,
                 outcome,
-            } => stream.closed.push(Closed {
-                index,
-                total,
-                kind: kind.to_owned(),
-                outcome,
-            }),
+            } => {
+                stream.closed.push(Closed {
+                    index,
+                    total,
+                    kind: kind.to_owned(),
+                    outcome,
+                });
+
+                // A finish with no open layer to match is exactly the
+                // malformation this harness exists to catch, so it fails here
+                // rather than wrapping a `usize` and leaving `peak` unreadable
+                // in a release build.
+                let Some(live) = stream.live.get_mut(kind) else {
+                    panic!("a `{kind}` layer finished without one having started");
+                };
+
+                let Some(left) = live.checked_sub(1) else {
+                    panic!("more `{kind}` layers finished than were started");
+                };
+
+                *live = left;
+            }
 
             Event::Records(moved) => {
                 if stream.settled() {
@@ -149,6 +181,11 @@ impl Watcher {
             .iter()
             .filter(|closed| closed.outcome == outcome)
             .count()
+    }
+
+    /// The most layers of `kind` the run held open at the same time.
+    pub fn peak_open(&self, kind: &str) -> usize {
+        self.0.lock().unwrap().peak.get(kind).copied().unwrap_or(0)
     }
 
     pub fn records(&self) -> u64 {
@@ -235,6 +272,14 @@ impl Watcher {
         assert_eq!(
             stream.trailing, 0,
             "records or bytes were reported after the last layer closed"
+        );
+
+        let open: Vec<(&String, &usize)> =
+            stream.live.iter().filter(|(_, live)| **live > 0).collect();
+
+        assert!(
+            open.is_empty(),
+            "the run ended with layers still open: {open:?}"
         );
     }
 }

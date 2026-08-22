@@ -61,6 +61,13 @@ pub struct Args {
     #[arg(long, value_name = "RANGE")]
     epochs: Option<EpochRange>,
 
+    /// epochs whose index layers one traversal of the index store fills; a
+    /// larger band trades resident memory for fewer traversals, and changes
+    /// nothing about the stele it produces. Defaults to the measured value
+    /// that keeps the index pass inside 1 GiB
+    #[arg(long, value_name = "EPOCHS")]
+    index_band: Option<std::num::NonZeroUsize>,
+
     /// canonical inscription of the stele this one follows, as
     /// `inspect --json` or a published `inscription.json` holds it; without it
     /// the reproduction carries no history, which is a different digest
@@ -88,6 +95,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     .context("planning the reproduction")?;
 
     let plan = super::restrict(plan, args.epochs);
+    let plan = super::banded(plan, args.index_band);
 
     super::report_plan(&plan)?;
 
