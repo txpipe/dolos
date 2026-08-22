@@ -180,17 +180,6 @@ impl IndexBand {
     pub fn epochs(&self) -> usize {
         self.0.get()
     }
-
-    /// What this band budgets for the sinks it holds open, for a caller
-    /// reporting the trade it is making.
-    ///
-    /// The budget rather than a measurement:
-    /// [`SINK_BYTES`](IndexBand::SINK_BYTES) is pinned above what a sink
-    /// was measured to cost, so this is an upper bound and reads a little
-    /// high on purpose.
-    pub fn resident_bytes(&self) -> usize {
-        self.epochs() * Self::SINK_BYTES
-    }
 }
 
 impl Default for IndexBand {

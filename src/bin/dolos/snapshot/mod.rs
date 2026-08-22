@@ -207,10 +207,14 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
     eprintln!("cursor:   {}", plan.cursor);
     eprintln!("sequence: {} (tag {tag})", plan.sequence);
 
+    // Clamped to the epochs actually selected, because the band chunks them:
+    // a `--epochs 500..502` publish opens three sinks whatever the band says,
+    // and the unclamped budget would overstate it by orders of magnitude.
+    let band = plan.band.epochs().min(plan.epochs.len());
+
     eprintln!(
-        "band:     {} epochs per index traversal ({} MiB budgeted)",
-        plan.band.epochs(),
-        plan.band.resident_bytes() / (1024 * 1024),
+        "band:     {band} epochs per index traversal ({} MiB budgeted)",
+        band.saturating_mul(IndexBand::SINK_BYTES) / (1024 * 1024),
     );
 
     match (plan.epochs.first(), plan.epochs.last()) {

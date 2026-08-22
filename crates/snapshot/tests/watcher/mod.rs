@@ -110,7 +110,19 @@ impl Progress for Watcher {
                     outcome,
                 });
 
-                *stream.live.entry(kind.to_owned()).or_default() -= 1;
+                // A finish with no open layer to match is exactly the
+                // malformation this harness exists to catch, so it fails here
+                // rather than wrapping a `usize` and leaving `peak` unreadable
+                // in a release build.
+                let Some(live) = stream.live.get_mut(kind) else {
+                    panic!("a `{kind}` layer finished without one having started");
+                };
+
+                let Some(left) = live.checked_sub(1) else {
+                    panic!("more `{kind}` layers finished than were started");
+                };
+
+                *live = left;
             }
 
             Event::Records(moved) => {
@@ -260,6 +272,14 @@ impl Watcher {
         assert_eq!(
             stream.trailing, 0,
             "records or bytes were reported after the last layer closed"
+        );
+
+        let open: Vec<(&String, &usize)> =
+            stream.live.iter().filter(|(_, live)| **live > 0).collect();
+
+        assert!(
+            open.is_empty(),
+            "the run ended with layers still open: {open:?}"
         );
     }
 }
