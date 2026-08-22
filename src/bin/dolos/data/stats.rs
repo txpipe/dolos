@@ -46,7 +46,7 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     }
 
     match &stores.archive {
-        ArchiveStoreBackend::Redb(archive) | ArchiveStoreBackend::LogsOnly(archive) => {
+        ArchiveStoreBackend::Redb(archive) => {
             let stats = archive.stats().into_diagnostic()?;
 
             let tables = stats
@@ -58,7 +58,9 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
                 serde_json::Value::Object(tables.collect()),
             );
         }
-        ArchiveStoreBackend::NoOp(_) => (),
+        ArchiveStoreBackend::Fjall(_)
+        | ArchiveStoreBackend::LogsOnly(_)
+        | ArchiveStoreBackend::NoOp(_) => (),
     }
 
     if json.is_empty() {
