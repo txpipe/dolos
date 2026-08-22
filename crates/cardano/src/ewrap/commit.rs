@@ -11,10 +11,9 @@
 //! archive.
 
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _,
-    EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    ArchiveStore, ArchiveWriter, ChainError, ChainPoint, Domain, Entity, EntityDelta as _, LogKey,
+    NsKey, StateStore, StateWriter, TemporalKey,
 };
-use rand::{seq::SliceRandom as _, SeedableRng as _};
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
@@ -22,25 +21,6 @@ use crate::{
     EpochState, FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState,
     ProposalState,
 };
-
-/// Break the ascending order of a log batch before it is inserted.
-///
-/// Every key in the batch carries the same fresh temporal prefix, greater than
-/// anything already in the table, and the batch itself arrives in account
-/// order because the accounts were streamed from the state store. Handing redb
-/// a sorted run of new keys is a pure right-edge append, and redb splits a full
-/// leaf at half its bytes with no rightmost-split case, so the pages left
-/// behind converge to ~50% full. Inserting the same keys in an arbitrary order
-/// converges to the ~69% (`ln 2`) random-insertion asymptote instead.
-///
-/// Only arrival order changes. The rows, their keys, and the table they end up
-/// in are identical either way, so a stele cut from the result is
-/// byte-identical (ADR-004) — the seed is the temporal slot only so a replay of
-/// the same boundary lays the pages out the same way twice.
-fn break_insertion_order(logs: &mut [(EntityKey, CardanoEntity)], seed: u64) {
-    let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
-    logs.shuffle(&mut rng);
-}
 
 impl BoundaryWork {
     /// Stream entities from a namespace, apply deltas, and write immediately.
@@ -142,11 +122,9 @@ impl BoundaryWork {
         // Archive logs — share one temporal key across shards. The shard pass
         // writes the merged account-epoch rows and nothing else, so the key is
         // theirs rather than the closing epoch's.
-        let slot = self.account_epoch_slot();
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(slot));
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(self.account_epoch_slot()));
 
         debug!(log_count = self.logs.len(), "writing shard archive logs");
-        break_insertion_order(&mut self.logs, slot);
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
@@ -228,7 +206,6 @@ impl BoundaryWork {
         let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
 
         debug!(log_count = self.logs.len(), "writing ewrap archive logs");
-        break_insertion_order(&mut self.logs, start_of_epoch);
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
             archive_writer.write_log_typed(&log_key, &log)?;
@@ -249,88 +226,5 @@ impl BoundaryWork {
 
         debug!("ewrap commit complete");
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{AccountEpochLog, CardanoEntity};
-
-    /// A batch shaped like a real one: an account key per row, ascending,
-    /// each row carrying its own index so a row that lost its key shows up.
-    fn batch(len: u32) -> Vec<(EntityKey, CardanoEntity)> {
-        (0..len)
-            .map(|i| {
-                let log = AccountEpochLog {
-                    active_stake: Some(i as u64),
-                    ..Default::default()
-                };
-
-                (EntityKey::from(i.to_be_bytes().as_slice()), log.into())
-            })
-            .collect()
-    }
-
-    fn rows(batch: &[(EntityKey, CardanoEntity)]) -> Vec<(u32, u64)> {
-        batch
-            .iter()
-            .map(|(key, entity)| {
-                let CardanoEntity::AccountEpochLog(log) = entity else {
-                    panic!("unexpected entity in batch");
-                };
-
-                let key = u32::from_be_bytes(key.as_ref()[..4].try_into().unwrap());
-
-                (key, log.active_stake.unwrap())
-            })
-            .collect()
-    }
-
-    /// The batch that reaches the table is the batch that was collected — the
-    /// shuffle moves rows, it never adds, drops, or splits a key from a value.
-    #[test]
-    fn shuffle_is_a_permutation() {
-        let mut shuffled = batch(1_000);
-
-        break_insertion_order(&mut shuffled, 42);
-
-        let mut rows = rows(&shuffled);
-        rows.sort_unstable();
-
-        assert_eq!(rows, rows_in_order(1_000));
-    }
-
-    fn rows_in_order(len: u32) -> Vec<(u32, u64)> {
-        (0..len).map(|i| (i, i as u64)).collect()
-    }
-
-    /// The point of the shuffle: what redb sees is not a right-edge append.
-    ///
-    /// A batch this size has a vanishing chance of coming out ascending by
-    /// accident, so an ascending result means the shuffle did not run.
-    #[test]
-    fn shuffle_breaks_ascending_order() {
-        let mut shuffled = batch(1_000);
-
-        break_insertion_order(&mut shuffled, 42);
-
-        assert!(rows(&shuffled).windows(2).any(|w| w[0].0 > w[1].0));
-    }
-
-    /// Same boundary, same layout: a replay of an epoch writes its rows in the
-    /// order the first pass did, and a different boundary does not inherit it.
-    #[test]
-    fn shuffle_is_seeded_by_the_boundary() {
-        let mut first = batch(1_000);
-        let mut second = batch(1_000);
-        let mut other_boundary = batch(1_000);
-
-        break_insertion_order(&mut first, 7);
-        break_insertion_order(&mut second, 7);
-        break_insertion_order(&mut other_boundary, 8);
-
-        assert_eq!(rows(&first), rows(&second));
-        assert_ne!(rows(&first), rows(&other_boundary));
     }
 }

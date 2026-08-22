@@ -24,10 +24,10 @@ dolos-core = { path = "../core" }
 
 redb = { version = "^3.1" }
 redb-extras = "0.6.1"
+rand = { version = "0.9.1", features = ["small_rng"] }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
-rand = { version = "0.9.1", features = ["small_rng"] }
 
 # The Byron EBB recovery scan is a dev-only target — it is deliberately not
 # reachable from the `dolos` binary — but it writes to a real archive, so its
