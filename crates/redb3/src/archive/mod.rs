@@ -3,7 +3,7 @@ use redb::{
     MultimapTableHandle as _, ReadTransaction, ReadableTableMetadata as _, TableHandle as _,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -888,18 +888,41 @@ pub struct ArchiveStoreWriter {
 /// batches. Only arrival order changes — the rows, their keys, and the table
 /// they land in are identical either way, so a stele cut from the result is
 /// byte-identical (ADR-004).
-fn break_insertion_order(batch: &mut [(Namespace, LogKey, EntityValue)]) {
+fn break_insertion_order(
+    tables: &HashMap<Namespace, Table>,
+    batch: Vec<(Namespace, LogKey, EntityValue)>,
+) -> Vec<(Namespace, LogKey, EntityValue)> {
+    // A key written twice in one batch means different things per namespace
+    // kind, and the difference decides whether reordering is safe. A value
+    // table *replaces*, so only the last write is supposed to survive — and a
+    // shuffle, left to itself, would be free to persist the superseded one.
+    // A multimap table *adds an element*, so every write is its own row and
+    // the order they arrive in does not matter. Collapse the first kind to its
+    // last write; leave the second whole.
+    let mut superseded = HashSet::new();
+
+    let mut batch: Vec<_> = batch
+        .into_iter()
+        .rev()
+        .filter(|(ns, key, _)| {
+            matches!(tables.get(ns), Some(Table::MultiValue(_)))
+                || superseded.insert((*ns, key.clone()))
+        })
+        .collect();
+
+    batch.reverse();
+
     // The batch seeds its own shuffle from the first key's temporal prefix —
     // the slot every row of one boundary shares — so replaying a boundary lays
     // its pages out the same way twice.
-    let Some((_, key, _)) = batch.first() else {
-        return;
-    };
+    if let Some((_, key, _)) = batch.first() {
+        let seed = TemporalKey::from(key.clone());
+        let seed = u64::from_be_bytes(seed.as_ref().try_into().unwrap());
 
-    let seed = TemporalKey::from(key.clone());
-    let seed = u64::from_be_bytes(seed.as_ref().try_into().unwrap());
+        batch.shuffle(&mut SmallRng::seed_from_u64(seed));
+    }
 
-    batch.shuffle(&mut SmallRng::seed_from_u64(seed));
+    batch
 }
 
 impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
@@ -926,8 +949,8 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
             tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)?;
         }
 
-        let mut logs = self.pending_logs.into_inner().unwrap();
-        break_insertion_order(&mut logs);
+        let logs = self.pending_logs.into_inner().unwrap();
+        let logs = break_insertion_order(&self.tables, logs);
 
         for (ns, key, value) in logs {
             let table = self

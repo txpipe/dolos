@@ -874,9 +874,11 @@ fn find_intersect_resolves_an_ebb_by_its_own_hash() {
 /// that, and these tests measure it on redb itself rather than infer it from
 /// redb's source.
 mod leaf_fill {
+    use std::collections::HashMap;
+
     use dolos_core::{
-        ArchiveWriter as _, EntityKey, EntityValue, LogKey, Namespace, NamespaceType, StateSchema,
-        TemporalKey,
+        ArchiveStore as _, ArchiveWriter as _, EntityKey, EntityValue, LogKey, Namespace,
+        NamespaceType, StateSchema, TemporalKey,
     };
     use rand::{Rng as _, SeedableRng as _};
 
@@ -1017,6 +1019,12 @@ mod leaf_fill {
         );
     }
 
+    /// The namespace map the reordering consults to tell a value table from a
+    /// multimap one.
+    fn value_tables() -> HashMap<Namespace, crate::Table> {
+        HashMap::from_iter([(NS, crate::Table::new_value(NS))])
+    }
+
     fn rows(len: u32) -> Vec<(Namespace, LogKey, EntityValue)> {
         (0..len)
             .map(|i| {
@@ -1035,11 +1043,7 @@ mod leaf_fill {
     /// value.
     #[test]
     fn reordering_is_a_permutation() {
-        let mut shuffled = rows(1_000);
-
-        break_insertion_order(&mut shuffled);
-
-        let mut sorted = shuffled.clone();
+        let mut sorted = break_insertion_order(&value_tables(), rows(1_000));
         sorted.sort();
 
         assert_eq!(sorted, rows(1_000));
@@ -1049,9 +1053,7 @@ mod leaf_fill {
     /// size has a vanishing chance of coming out ascending by accident.
     #[test]
     fn reordering_breaks_ascending_order() {
-        let mut shuffled = rows(1_000);
-
-        break_insertion_order(&mut shuffled);
+        let shuffled = break_insertion_order(&value_tables(), rows(1_000));
 
         assert!(shuffled.windows(2).any(|w| w[0].1 > w[1].1));
     }
@@ -1060,16 +1062,13 @@ mod leaf_fill {
     /// order the first pass did, and a different boundary does not inherit it.
     #[test]
     fn reordering_is_seeded_by_the_batch() {
-        let mut first = rows(1_000);
-        let mut second = rows(1_000);
-
-        break_insertion_order(&mut first);
-        break_insertion_order(&mut second);
+        let first = break_insertion_order(&value_tables(), rows(1_000));
+        let second = break_insertion_order(&value_tables(), rows(1_000));
 
         assert_eq!(first, second);
 
         // Same rows under a later temporal prefix — a different boundary.
-        let mut later: Vec<_> = rows(1_000)
+        let later: Vec<_> = rows(1_000)
             .into_iter()
             .map(|(ns, key, value)| {
                 let account = EntityKey::from(key.clone());
@@ -1081,7 +1080,7 @@ mod leaf_fill {
             })
             .collect();
 
-        break_insertion_order(&mut later);
+        let later = break_insertion_order(&value_tables(), later);
 
         let order = |b: &[(Namespace, LogKey, EntityValue)]| {
             b.iter().map(|(_, _, v)| v.clone()).collect::<Vec<_>>()
@@ -1093,6 +1092,33 @@ mod leaf_fill {
     /// An empty batch is not a special case for the caller to remember.
     #[test]
     fn reordering_tolerates_an_empty_batch() {
-        break_insertion_order(&mut []);
+        assert!(break_insertion_order(&HashMap::new(), vec![]).is_empty());
+    }
+
+    /// The last write to a key is the one that survives the reordering.
+    ///
+    /// Writing straight through, a repeated key in a value namespace simply
+    /// overwrote: the last `write_log` won. Buffering the batch and shuffling
+    /// it puts that at risk — nothing stops a shuffle from placing the
+    /// superseded row after the one that superseded it — so the reordering has
+    /// to collapse duplicates before it touches the order.
+    #[test]
+    fn the_last_write_to_a_key_wins() {
+        let store = store();
+        let key = LogKey::from((TemporalKey::from(432_000u64), EntityKey::from(&[7u8; 32])));
+
+        let writer = store.start_writer().unwrap();
+
+        // Enough repeats that a shuffle preserving the wrong one is not a
+        // coin flip that might pass by luck.
+        for i in 0..64u8 {
+            writer.write_log(NS, &key, &vec![i]).unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        let found = store.read_logs(NS, &[&key]).unwrap();
+
+        assert_eq!(found, vec![Some(vec![63u8])]);
     }
 }
