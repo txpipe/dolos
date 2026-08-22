@@ -1,7 +1,9 @@
 use ::redb::{Database, ReadableDatabase};
-use redb::ReadTransaction;
+use redb::{
+    MultimapTableHandle as _, ReadTransaction, ReadableTableMetadata as _, TableHandle as _,
+};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -9,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use dolos_core::{
     config::RedbArchiveConfig, ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue,
-    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder, TxoRef,
+    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TemporalKey, TxHash, TxOrder, TxoRef,
 };
 
 use ::redb::Durability;
@@ -20,10 +22,11 @@ use pallas::{
         traverse::{ComputeHash, MultiEraBlock, OriginalHash},
     },
 };
+use rand::{rngs::SmallRng, seq::SliceRandom as _, SeedableRng as _};
 use redb::WriteTransaction;
 use redb_extras::buckets::BucketError;
 
-use crate::{build_tables, Error, Table};
+use crate::{build_tables, Error, Table, TableFootprint};
 
 // The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
 // these index definitions and the location packing rather than restating them.
@@ -252,6 +255,7 @@ impl ArchiveStore {
             tables: self.tables.clone(),
             flatfiles: self.flatfiles.clone(),
             pending_blocks: Mutex::new(Vec::new()),
+            pending_logs: Mutex::new(Vec::new()),
         })
     }
 
@@ -731,6 +735,41 @@ impl ArchiveStore {
         tables::BlocksTable::get_tip(&rx, &self.flatfiles)
     }
 
+    /// Per-table storage statistics for every table in the archive index.
+    ///
+    /// Enumerated from the database itself rather than from a list of known
+    /// definitions, so the derived-log namespaces — which are named by the
+    /// state schema at open time and carry the bulk of the file — are covered
+    /// alongside the block and index tables without a second registry to keep
+    /// in sync.
+    pub fn stats(&self) -> Result<Vec<(String, TableFootprint)>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+
+        let mut out = vec![];
+
+        for handle in rx.list_tables()?.collect::<Vec<_>>() {
+            let name = handle.name().to_string();
+            let table = rx.open_untyped_table(handle)?;
+            out.push((
+                name,
+                TableFootprint::new(Some(table.len()?), table.stats()?),
+            ));
+        }
+
+        for handle in rx.list_multimap_tables()?.collect::<Vec<_>>() {
+            let name = handle.name().to_string();
+            let table = rx.open_untyped_multimap_table(handle)?;
+            out.push((
+                name,
+                TableFootprint::new(Some(table.len()?), table.stats()?),
+            ));
+        }
+
+        out.sort_by(|(a, _): &(String, _), (b, _)| a.cmp(b));
+
+        Ok(out)
+    }
+
     pub fn prune_history(
         &self,
         max_slots: u64,
@@ -827,6 +866,63 @@ pub struct ArchiveStoreWriter {
     tables: HashMap<Namespace, Table>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
+    pending_logs: Mutex<Vec<(Namespace, LogKey, EntityValue)>>,
+}
+
+/// Break the ascending order of a batch of log rows before it is inserted.
+///
+/// Derived-log batches arrive in key order — their writers stream entities out
+/// of the state store, which is sorted — and every key in one batch carries a
+/// fresh temporal prefix greater than everything already stored. That makes the
+/// batch a pure right-edge append, and redb splits a full leaf at half its
+/// bytes with no rightmost-split case (`tree_store/btree_base.rs`,
+/// `build_split`), so every page left behind converges to half full. The same
+/// keys inserted in an arbitrary order converge to the ~69% (`ln 2`)
+/// random-insertion asymptote instead.
+///
+/// Measured on a full preprod replay of the account-epoch log: 47.0% → 61.6%
+/// leaf fill, 23.6% fewer leaf pages for byte-identical data.
+///
+/// This is a property of redb's B-tree, not of any particular log, so it lives
+/// with the backend rather than with the callers that happen to produce sorted
+/// batches. Only arrival order changes — the rows, their keys, and the table
+/// they land in are identical either way, so a stele cut from the result is
+/// byte-identical (ADR-004).
+fn break_insertion_order(
+    tables: &HashMap<Namespace, Table>,
+    batch: Vec<(Namespace, LogKey, EntityValue)>,
+) -> Vec<(Namespace, LogKey, EntityValue)> {
+    // A key written twice in one batch means different things per namespace
+    // kind, and the difference decides whether reordering is safe. A value
+    // table *replaces*, so only the last write is supposed to survive — and a
+    // shuffle, left to itself, would be free to persist the superseded one.
+    // A multimap table *adds an element*, so every write is its own row and
+    // the order they arrive in does not matter. Collapse the first kind to its
+    // last write; leave the second whole.
+    let mut superseded = HashSet::new();
+
+    let mut batch: Vec<_> = batch
+        .into_iter()
+        .rev()
+        .filter(|(ns, key, _)| {
+            matches!(tables.get(ns), Some(Table::MultiValue(_)))
+                || superseded.insert((*ns, key.clone()))
+        })
+        .collect();
+
+    batch.reverse();
+
+    // The batch seeds its own shuffle from the first key's temporal prefix —
+    // the slot every row of one boundary shares — so replaying a boundary lays
+    // its pages out the same way twice.
+    if let Some((_, key, _)) = batch.first() {
+        let seed = TemporalKey::from(key.clone());
+        let seed = u64::from_be_bytes(seed.as_ref().try_into().unwrap());
+
+        batch.shuffle(&mut SmallRng::seed_from_u64(seed));
+    }
+
+    batch
 }
 
 impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
@@ -846,10 +942,25 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
     fn commit(self) -> Result<(), ArchiveError> {
         // 1. Batch-append all pending blocks to flat files (fsync inside).
         // 2. Insert all index entries into redb.
-        // 3. Commit redb transaction.
+        // 3. Insert the log rows, in an order that does not halve the leaves.
+        // 4. Commit redb transaction.
         let pending = self.pending_blocks.into_inner().unwrap();
         if !pending.is_empty() {
             tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)?;
+        }
+
+        let logs = self.pending_logs.into_inner().unwrap();
+        let logs = break_insertion_order(&self.tables, logs);
+
+        for (ns, key, value) in logs {
+            let table = self
+                .tables
+                .get(&ns)
+                .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+
+            table
+                .write(&self.wx, key, &value)
+                .map_err(RedbArchiveError::from)?;
         }
 
         self.wx.commit().map_err(RedbArchiveError::from)?;
@@ -862,14 +973,17 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         key: &dolos_core::LogKey,
         value: &dolos_core::EntityValue,
     ) -> Result<(), ArchiveError> {
-        let table = self
-            .tables
-            .get(&ns)
-            .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+        // Held back until `commit`, where the whole batch is reordered — see
+        // `break_insertion_order`. The namespace is still resolved here so an
+        // unknown one fails at the call that names it rather than at commit.
+        if !self.tables.contains_key(&ns) {
+            return Err(ArchiveError::NamespaceNotFound(ns));
+        }
 
-        table
-            .write(&self.wx, key, value)
-            .map_err(RedbArchiveError::from)?;
+        self.pending_logs
+            .lock()
+            .unwrap()
+            .push((ns, key.clone(), value.clone()));
 
         Ok(())
     }

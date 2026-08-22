@@ -24,6 +24,7 @@ dolos-core = { path = "../core" }
 
 redb = { version = "^3.1" }
 redb-extras = "0.6.1"
+rand = { version = "0.9.1", features = ["small_rng"] }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }

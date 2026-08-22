@@ -862,3 +862,263 @@ fn find_intersect_resolves_an_ebb_by_its_own_hash() {
         Some(ebb.0.clone())
     );
 }
+
+/// How full the leaf pages of a derived-log namespace end up, and what the
+/// writer's reordering buys.
+///
+/// redb splits a full leaf at half its bytes with no rightmost-split case
+/// (3.1.0, `tree_store/btree_base.rs`, `build_split`). Every log batch carries
+/// a fresh temporal prefix greater than everything already stored, so a batch
+/// inserted in key order is a pure right-edge append: split, fill, split,
+/// leaving every page behind at half. `break_insertion_order` is what stops
+/// that, and these tests measure it on redb itself rather than infer it from
+/// redb's source.
+mod leaf_fill {
+    use std::collections::HashMap;
+
+    use dolos_core::{
+        ArchiveStore as _, ArchiveWriter as _, EntityKey, EntityValue, LogKey, Namespace,
+        NamespaceType, StateSchema, TemporalKey,
+    };
+    use rand::{Rng as _, SeedableRng as _};
+
+    use crate::archive::{break_insertion_order, ArchiveStore};
+
+    const NS: &str = "account-epochs";
+
+    /// Epochs, and accounts per epoch. The product has to cross enough leaf
+    /// splits for the asymptote to be the thing measured rather than the first
+    /// few pages; ~80k rows at ~83 bytes each is a few thousand leaves.
+    const EPOCHS: u64 = 20;
+    const ACCOUNTS: usize = 4_000;
+
+    /// A row the size of a real one: a 40-byte `LogKey` (8-byte slot, 32-byte
+    /// credential) against a 43-byte `AccountEpochLog` — a stake and a member
+    /// reward against one pool, which is what most rows carry.
+    const VALUE_SIZE: usize = 43;
+
+    fn store() -> ArchiveStore {
+        let mut schema = StateSchema::default();
+        schema.insert(NS, NamespaceType::KeyValue);
+
+        ArchiveStore::in_memory(schema).unwrap()
+    }
+
+    /// One epoch's worth of keys, in the order they are collected: accounts are
+    /// streamed from the state store in key order, so a batch arrives sorted.
+    fn batch(accounts: &[EntityKey], epoch: u64) -> Vec<LogKey> {
+        let temporal = TemporalKey::from(epoch * 432_000);
+
+        let mut batch: Vec<LogKey> = accounts
+            .iter()
+            .map(|account| LogKey::from((temporal.clone(), account.clone())))
+            .collect();
+
+        batch.sort();
+        batch
+    }
+
+    fn accounts() -> Vec<EntityKey> {
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(1);
+
+        (0..ACCOUNTS)
+            .map(|_| EntityKey::from(rng.random::<[u8; 32]>().as_slice()))
+            .collect()
+    }
+
+    fn fill_of(store: &ArchiveStore) -> (f64, u64, u64) {
+        let (_, footprint) = store
+            .stats()
+            .unwrap()
+            .into_iter()
+            .find(|(name, _)| name == NS)
+            .expect("namespace missing from stats");
+
+        assert_eq!(footprint.rows, Some(EPOCHS * ACCOUNTS as u64));
+
+        (
+            footprint.leaf_fill().unwrap(),
+            footprint.stats.leaf_pages(),
+            footprint.stats.stored_bytes(),
+        )
+    }
+
+    /// What the leaves look like without the writer's reordering.
+    ///
+    /// Writes straight to the table rather than through `ArchiveWriter`,
+    /// because the writer no longer offers a way to insert a batch in the order
+    /// it was handed over — which is the point of this file.
+    fn insert_sorted() -> (f64, u64, u64) {
+        let store = store();
+        let accounts = accounts();
+        let value: EntityValue = vec![0u8; VALUE_SIZE];
+        let table = store.tables.get(NS).unwrap();
+
+        for epoch in 0..EPOCHS {
+            let wx = store.db().begin_write().unwrap();
+
+            for key in batch(&accounts, epoch) {
+                table.write(&wx, key, &value).unwrap();
+            }
+
+            wx.commit().unwrap();
+        }
+
+        fill_of(&store)
+    }
+
+    /// What the leaves look like through the real write path.
+    fn insert_via_writer() -> (f64, u64, u64) {
+        let store = store();
+        let accounts = accounts();
+        let value: EntityValue = vec![0u8; VALUE_SIZE];
+
+        for epoch in 0..EPOCHS {
+            // One transaction per epoch, as a boundary commit does.
+            let writer = store.start_writer().unwrap();
+
+            for key in batch(&accounts, epoch) {
+                writer.write_log(NS, &key, &value).unwrap();
+            }
+
+            writer.commit().unwrap();
+        }
+
+        fill_of(&store)
+    }
+
+    /// The writer's leaves are materially fuller than a sorted insert's.
+    ///
+    /// The bounds are loose on purpose: the subject is the gap between the two
+    /// regimes, not a particular redb release's exact convergence. A failure
+    /// means redb changed how it splits — at which point the reordering is
+    /// either unnecessary or insufficient, and the log footprint needs
+    /// re-measuring either way.
+    #[test]
+    fn the_writer_fills_leaves_past_the_ascending_ceiling() {
+        let (sorted, sorted_pages, bytes) = insert_sorted();
+        let (written, written_pages, written_bytes) = insert_via_writer();
+
+        assert_eq!(bytes, written_bytes, "the two runs stored different data");
+
+        println!(
+            "sorted: {:.1}% fill over {sorted_pages} leaf pages",
+            sorted * 100.0
+        );
+        println!(
+            "writer: {:.1}% fill over {written_pages} leaf pages",
+            written * 100.0
+        );
+
+        assert!(sorted < 0.55, "sorted fill was {sorted}");
+        assert!(written > 0.58, "writer fill was {written}");
+
+        assert!(
+            written_pages < sorted_pages * 4 / 5,
+            "reordering saved only {sorted_pages} -> {written_pages} leaf pages"
+        );
+    }
+
+    /// The namespace map the reordering consults to tell a value table from a
+    /// multimap one.
+    fn value_tables() -> HashMap<Namespace, crate::Table> {
+        HashMap::from_iter([(NS, crate::Table::new_value(NS))])
+    }
+
+    fn rows(len: u32) -> Vec<(Namespace, LogKey, EntityValue)> {
+        (0..len)
+            .map(|i| {
+                let key = LogKey::from((
+                    TemporalKey::from(432_000u64),
+                    EntityKey::from(&i.to_be_bytes()),
+                ));
+
+                (NS, key, i.to_be_bytes().to_vec())
+            })
+            .collect()
+    }
+
+    /// The batch that reaches the table is the batch that was handed over — the
+    /// reordering moves rows, it never adds, drops, or splits a key from a
+    /// value.
+    #[test]
+    fn reordering_is_a_permutation() {
+        let mut sorted = break_insertion_order(&value_tables(), rows(1_000));
+        sorted.sort();
+
+        assert_eq!(sorted, rows(1_000));
+    }
+
+    /// The point of it: what redb sees is not a right-edge append. A batch this
+    /// size has a vanishing chance of coming out ascending by accident.
+    #[test]
+    fn reordering_breaks_ascending_order() {
+        let shuffled = break_insertion_order(&value_tables(), rows(1_000));
+
+        assert!(shuffled.windows(2).any(|w| w[0].1 > w[1].1));
+    }
+
+    /// Same boundary, same layout: replaying an epoch writes its rows in the
+    /// order the first pass did, and a different boundary does not inherit it.
+    #[test]
+    fn reordering_is_seeded_by_the_batch() {
+        let first = break_insertion_order(&value_tables(), rows(1_000));
+        let second = break_insertion_order(&value_tables(), rows(1_000));
+
+        assert_eq!(first, second);
+
+        // Same rows under a later temporal prefix — a different boundary.
+        let later: Vec<_> = rows(1_000)
+            .into_iter()
+            .map(|(ns, key, value)| {
+                let account = EntityKey::from(key.clone());
+                (
+                    ns,
+                    LogKey::from((TemporalKey::from(864_000u64), account)),
+                    value,
+                )
+            })
+            .collect();
+
+        let later = break_insertion_order(&value_tables(), later);
+
+        let order = |b: &[(Namespace, LogKey, EntityValue)]| {
+            b.iter().map(|(_, _, v)| v.clone()).collect::<Vec<_>>()
+        };
+
+        assert_ne!(order(&first), order(&later));
+    }
+
+    /// An empty batch is not a special case for the caller to remember.
+    #[test]
+    fn reordering_tolerates_an_empty_batch() {
+        assert!(break_insertion_order(&HashMap::new(), vec![]).is_empty());
+    }
+
+    /// The last write to a key is the one that survives the reordering.
+    ///
+    /// Writing straight through, a repeated key in a value namespace simply
+    /// overwrote: the last `write_log` won. Buffering the batch and shuffling
+    /// it puts that at risk — nothing stops a shuffle from placing the
+    /// superseded row after the one that superseded it — so the reordering has
+    /// to collapse duplicates before it touches the order.
+    #[test]
+    fn the_last_write_to_a_key_wins() {
+        let store = store();
+        let key = LogKey::from((TemporalKey::from(432_000u64), EntityKey::from(&[7u8; 32])));
+
+        let writer = store.start_writer().unwrap();
+
+        // Enough repeats that a shuffle preserving the wrong one is not a
+        // coin flip that might pass by luck.
+        for i in 0..64u8 {
+            writer.write_log(NS, &key, &vec![i]).unwrap();
+        }
+
+        writer.commit().unwrap();
+
+        let found = store.read_logs(NS, &[&key]).unwrap();
+
+        assert_eq!(found, vec![Some(vec![63u8])]);
+    }
+}
