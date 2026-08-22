@@ -55,14 +55,14 @@
 //! records, but obtaining them means a Mithril aggregator and a certificate
 //! check, which is publisher plumbing. No restore, no signatures.
 
-use std::{collections::BTreeMap, ops::Range};
+use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range};
 
 use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexStore, LogKey, Namespace, StateStore,
-    TemporalKey,
+    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexRecord, IndexStore, LogKey, Namespace,
+    StateStore, TemporalKey,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -107,6 +107,98 @@ impl EpochWindow {
     }
 }
 
+/// How many `indexes` layers one traversal of the index store fills.
+///
+/// ## Why a publish needs a band at all
+///
+/// Neither index traversal can seek to a slot — a tag's slot is the last
+/// component of its key and an exact record's slot is its stored *value* — so
+/// reading one epoch out of the store costs a pass over the whole of it. One
+/// pass per epoch makes a first publish of N epochs O(N²): measured at 800 ms
+/// per epoch against an eight-epoch store and 3.0 s against a thirty-two-epoch
+/// one, which extrapolates to hours of nothing but index traversal on mainnet.
+///
+/// A band routes one pass into K sinks at once — the move the state pass makes
+/// with its shard sinks — so N epochs cost ⌈N/K⌉ passes rather than N.
+///
+/// ## Why K is not simply N
+///
+/// Every open sink holds a zstd compression context at
+/// [`COMPRESSION_LEVEL`](crate::COMPRESSION_LEVEL), and those contexts are the
+/// resident cost of holding layers open: measured at 10.3 MiB apiece, so K = N
+/// on mainnet would be a multi-gigabyte resident set — exactly what
+/// streaming-writes exists to prevent. K is therefore a memory budget divided
+/// by that figure and not a taste: [`IndexBand::DEFAULT`] is the largest band
+/// that keeps the index pass inside a **1 GiB** ceiling, and an operator with
+/// less to spend narrows it with `--index-band`.
+///
+/// Banding reorders *when* records are read and never which layer they land in
+/// or in what order, so K is invisible in the bytes: the export golden and the
+/// two-backend determinism test hold across every value of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexBand(NonZeroUsize);
+
+impl IndexBand {
+    /// The resident cost of one open layer sink.
+    ///
+    /// A zstd compression context at level 9 and the framing around it.
+    /// Measured at **10.3 MiB** by `measure_layer_sink_residency` in the root
+    /// package's `tests/index_roundtrip.rs` — thirty-two sinks opened against a
+    /// real stele and each given records to compress, since a context that has
+    /// never compressed anything has not yet allocated its window. Pinned above
+    /// the measurement rather than at it, so a zstd whose level-9 parameters
+    /// grow does not silently overrun the ceiling.
+    ///
+    /// A constant because [`DEFAULT`](IndexBand::DEFAULT) is arithmetic over it
+    /// rather than a number someone liked.
+    pub const SINK_BYTES: usize = 12 * 1024 * 1024;
+
+    /// What the index pass may hold resident.
+    ///
+    /// A publish is a batch job an operator starts on a node that is already
+    /// holding a ledger, so this is a budget for one *phase* of it rather than
+    /// for the process. A gigabyte buys 85 epochs per traversal, which takes
+    /// mainnet's ~580 epochs from 580 passes to seven; the next gigabyte buys
+    /// the difference between seven passes and four, which is the wrong trade.
+    pub const CEILING_BYTES: usize = 1024 * 1024 * 1024;
+
+    /// The band a publish takes unless an operator narrows it.
+    pub const DEFAULT: Self = match NonZeroUsize::new(Self::CEILING_BYTES / Self::SINK_BYTES) {
+        Some(epochs) => Self(epochs),
+        // Unreachable: the ceiling is larger than one sink. A `const` panic
+        // rather than a fallback, so a ceiling edited below one sink's cost
+        // fails to compile instead of silently banding by one.
+        None => panic!("the index band ceiling has to hold at least one sink"),
+    };
+
+    /// A band of `epochs` layers. Zero is not representable, which is the
+    /// refusal: a band of no epochs would traverse and write nothing.
+    pub fn new(epochs: NonZeroUsize) -> Self {
+        Self(epochs)
+    }
+
+    pub fn epochs(&self) -> usize {
+        self.0.get()
+    }
+
+    /// What this band budgets for the sinks it holds open, for a caller
+    /// reporting the trade it is making.
+    ///
+    /// The budget rather than a measurement:
+    /// [`SINK_BYTES`](IndexBand::SINK_BYTES) is pinned above what a sink
+    /// was measured to cost, so this is an upper bound and reads a little
+    /// high on purpose.
+    pub fn resident_bytes(&self) -> usize {
+        self.epochs() * Self::SINK_BYTES
+    }
+}
+
+impl Default for IndexBand {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// What a publish covers: where the node stands, and which epochs its layers
 /// describe.
 ///
@@ -129,6 +221,16 @@ pub struct Plan {
     /// derived from `summary` — which epochs are worth a dump is operational
     /// (decision 0026).
     pub retained: RetainedEpochs,
+    /// How many `indexes` layers one traversal of the index store fills.
+    ///
+    /// Execution rather than geometry, and the one field here that is: it
+    /// changes neither which layers this publish writes nor a byte of what is
+    /// in them, only how many passes over the index store it takes to fill
+    /// them. It rides on the plan because every driver that walks these stores
+    /// — [`export`], [`reproduce`], [`verify_reproduction`] — pays the same
+    /// cost and should take the same band without each call site spelling it.
+    /// See [`IndexBand`].
+    pub band: IndexBand,
 }
 
 impl Plan {
@@ -171,7 +273,19 @@ impl Plan {
             sequence: tip_epoch,
             epochs,
             retained,
+            band: IndexBand::DEFAULT,
         })
+    }
+
+    /// Take a band other than [`IndexBand::DEFAULT`].
+    ///
+    /// The same builder shape as [`restrict_epochs`](Plan::restrict_epochs),
+    /// and for the same reason: the CLI is where an operator's choice is
+    /// spelled, and it applies it to a plan the rules already built.
+    pub fn with_band(mut self, band: IndexBand) -> Self {
+        self.band = band;
+
+        self
     }
 
     /// Keep only the epoch layers within `first..=last`.
@@ -749,12 +863,13 @@ where
         )?;
     }
 
-    for window in &plan.epochs {
-        landed(
-            write_indexes(stele, plan, indexes, window, previous, &mut cursor)?,
-            previous,
-            &mut layers,
-        )?;
+    // Banded rather than one window at a time: an index layer costs a pass over
+    // the whole store, so this loop is where a first publish's O(N²) lives.
+    // See [`IndexBand`].
+    for band in plan.epochs.chunks(plan.band.epochs()) {
+        for descriptor in write_indexes(stele, plan, indexes, band, previous, &mut cursor)? {
+            landed(descriptor, previous, &mut layers)?;
+        }
     }
 
     // Kind-major, like the two loops above: the inscription lists layers in
@@ -1353,71 +1468,164 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
     LogKey::from(TemporalKey::from(slots.start))..LogKey::from(TemporalKey::from(slots.end))
 }
 
-/// One epoch's index records: every tag, then every exact record.
+/// One band of epochs' index records: every tag, then every exact record,
+/// each routed to the layer whose epoch its slot falls in.
 ///
 /// Both runs come out of the store in the order the layer requires, which the
-/// trait promises and the `OrderCheck` holds it to.
+/// trait promises and the per-layer `OrderCheck` holds it to. Restricting one
+/// ascending run to a sub-range of it is still that run, so a layer receives
+/// exactly the records — and exactly the order — a pass over its own epoch
+/// alone would have handed it. That is why banding is invisible in the bytes.
 ///
-/// ## This is a scan, not a seek
+/// ## This is a scan, not a seek, which is why it is banded
 ///
 /// Neither traversal can seek to a slot — a tag's slot is the last component of
-/// its key and an exact record's slot is its stored *value* — so one epoch
-/// layer costs a pass over the whole index store, and a publish of N epochs
-/// costs N of them. Measured at 800 ms per epoch against an eight-epoch store
-/// and 3.0 s against a thirty-two-epoch one; the extrapolation to mainnet and
-/// the banded traversal that answers it are in
-/// `plans/dolos-stelae-publish-cost.md`. It is stated here because a reader of
-/// this loop should not have to rediscover it.
+/// its key and an exact record's slot is its stored *value* — so a pass here
+/// costs a walk of the whole index store however few epochs it fills. One epoch
+/// per pass makes a first publish O(N²); [`IndexBand`] is what turns that into
+/// ⌈N/K⌉ passes, and carries the measurement K is sized on.
+///
+/// ## Positions are handed out before anything is written
+///
+/// K layers are announced, then one traversal fills them, then they close —
+/// the shape [`write_state`] already needs for its shard sinks and the
+/// [`Cursor`] already supports. An observer therefore sees the band in flight,
+/// through the same seam and not a second one.
+///
+/// A window in the band whose layer is **inherited** opens and closes with
+/// nothing between: it costs no sink, and the records that fall in its slots
+/// are routed to no one. Same for a window an operator's `--epochs` left out
+/// between two that stayed — the traversal spans the band in one range and
+/// cannot exclude either, so the routing does.
 fn write_indexes<W: SteleWriter, I: IndexStore>(
     stele: &W,
     plan: &Plan,
     store: &I,
-    window: &EpochWindow,
+    band: &[EpochWindow],
     previous: &dyn Predecessor,
     cursor: &mut Cursor<'_>,
-) -> Result<LayerDescriptor, Error> {
-    let scope = window.scope(plan.network.magic());
+) -> Result<Vec<LayerDescriptor>, Error> {
+    let mut descriptors: Vec<Option<LayerDescriptor>> = Vec::with_capacity(band.len());
+    let mut building = Vec::with_capacity(band.len());
 
-    // The layer this saves the most: a publish that inherits a closed epoch's
-    // index layer skips a whole pass over the index store, which is the cost
-    // the doc comment above measures.
-    let (spec, adopted) = inherit(&scope, INDEXES, previous)?;
-    let at = cursor.open(INDEXES, &spec.scope);
+    for window in band {
+        let scope = window.scope(plan.network.magic());
 
-    if let Some(descriptor) = adopted {
-        cursor.close(at, INDEXES, Outcome::Inherited);
+        // The layer this saves the most: a publish that inherits a closed
+        // epoch's index layer costs no sink and no share of a pass.
+        let (spec, adopted) = inherit(&scope, INDEXES, previous)?;
+        let at = cursor.open(INDEXES, &spec.scope);
 
-        return Ok(descriptor);
+        let position = descriptors.len();
+
+        match adopted {
+            Some(descriptor) => {
+                cursor.close(at, INDEXES, Outcome::Inherited);
+                descriptors.push(Some(descriptor));
+            }
+            None => {
+                descriptors.push(None);
+                building.push(Building {
+                    slots: window.slots(),
+                    at,
+                    position,
+                    sink: sink(stele, &spec)?,
+                    order: indexes::OrderCheck::default(),
+                });
+            }
+        }
     }
 
-    let mut sink = sink(stele, &spec)?;
-    let mut order = indexes::OrderCheck::default();
+    // Every layer in the band was inherited: the store is not touched at all,
+    // which is the whole point of asking the predecessor first.
+    if building.is_empty() {
+        return Ok(descriptors.into_iter().flatten().collect());
+    }
+
+    // One span over the band. `building` is ascending and its windows are
+    // disjoint, so the first one's start and the last one's end bound
+    // everything any of them wants.
+    let slots = building[0].slots.start
+        ..building
+            .last()
+            .expect("the band has at least one layer to build")
+            .slots
+            .end;
+
     let mut records = cursor.records();
 
-    let slots = window.slots();
-
     for tag in store.iter_archive_tags(&archive_dimensions::ALL, slots.clone())? {
-        let record = tag?.into();
-
-        order.check(&record)?;
-        sink.write_record(&indexes::encode(&record)?)?;
-        records.tick();
+        route_index(&mut building, tag?.into(), &mut records)?;
     }
 
     for exact in store.iter_exact_records(slots)? {
-        let record = exact?.into();
-
-        order.check(&record)?;
-        sink.write_record(&indexes::encode(&record)?)?;
-        records.tick();
+        route_index(&mut building, exact?.into(), &mut records)?;
     }
 
     records.flush();
 
-    let descriptor = sink.finish()?.descriptor;
-    cursor.close(at, INDEXES, Outcome::Transferred);
+    for layer in building {
+        let descriptor = layer.sink.finish()?.descriptor;
+        cursor.close(layer.at, INDEXES, Outcome::Transferred);
 
-    Ok(descriptor)
+        descriptors[layer.position] = Some(descriptor);
+    }
+
+    debug_assert!(
+        descriptors.iter().all(Option::is_some),
+        "every layer the band announced has to have been filled or inherited",
+    );
+
+    Ok(descriptors.into_iter().flatten().collect())
+}
+
+/// One `indexes` layer being filled by a band's traversal.
+struct Building<K> {
+    /// The half-open slot range this layer's epoch covers — what a record is
+    /// routed by.
+    slots: Range<BlockSlot>,
+    /// The position [`Cursor::open`] handed out for it.
+    at: usize,
+    /// Where its descriptor belongs among the band's, so the inscription still
+    /// lists a kind's layers by ascending epoch whatever mix of inherited and
+    /// built the band held.
+    position: usize,
+    sink: K,
+    order: indexes::OrderCheck,
+}
+
+/// Send one index record to the layer whose epoch its slot falls in.
+///
+/// A binary search rather than a walk of the band: this runs once per record,
+/// and a mainnet index store holds hundreds of millions of them.
+///
+/// A record that lands in no layer is **dropped on purpose** — see
+/// [`write_indexes`] for the two ways the band's span can cover a slot no layer
+/// in it wants. The layer's own `OrderCheck` is what catches a routing mistake
+/// in the other direction: a record sent to the wrong layer arrives out of
+/// order there, or breaks the order of the layer it was taken from.
+fn route_index<K: RecordSink>(
+    building: &mut [Building<K>],
+    record: IndexRecord,
+    records: &mut Records<'_>,
+) -> Result<(), Error> {
+    let slot = indexes::slot_of(&record);
+
+    let above = building.partition_point(|layer| layer.slots.start <= slot);
+
+    let Some(layer) = above.checked_sub(1).map(|at| &mut building[at]) else {
+        return Ok(());
+    };
+
+    if !layer.slots.contains(&slot) {
+        return Ok(());
+    }
+
+    layer.order.check(&record)?;
+    layer.sink.write_record(&indexes::encode(&record)?)?;
+    records.tick();
+
+    Ok(())
 }
 
 /// The state tip: seventeen kinds, walked one namespace at a time.
@@ -1929,6 +2137,7 @@ mod chain_tests {
             sequence: 3,
             epochs: vec![],
             retained: RetainedEpochs::default(),
+            band: IndexBand::DEFAULT,
         }
     }
 

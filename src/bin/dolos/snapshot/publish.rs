@@ -56,6 +56,13 @@ pub struct Args {
     #[arg(long, value_name = "DIR", conflicts_with = "output_dir")]
     scratch_dir: Option<PathBuf>,
 
+    /// epochs whose index layers one traversal of the index store fills; a
+    /// larger band trades resident memory for fewer traversals, and changes
+    /// nothing about the stele it produces. Defaults to the measured value
+    /// that keeps the index pass inside 1 GiB
+    #[arg(long, value_name = "EPOCHS")]
+    index_band: Option<std::num::NonZeroUsize>,
+
     /// report what would be written and exit
     #[arg(long, action)]
     dry_run: bool,
@@ -85,6 +92,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     .context("planning the publish")?;
 
     let plan = super::restrict(plan, args.epochs);
+    let plan = super::banded(plan, args.index_band);
 
     super::report_plan(&plan)?;
 
