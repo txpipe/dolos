@@ -24,7 +24,7 @@ use dolos_core::{BlockSlot, Domain, DomainError, Genesis, WorkUnit};
 use tracing::{debug, info};
 
 use crate::{
-    estart::WorkContext,
+    estart::{AvvmReclamation, WorkContext},
     load_epoch,
     shard::{shard_key_ranges, ACCOUNT_SHARDS},
     CardanoLogic, EpochState,
@@ -50,10 +50,10 @@ pub struct EstartWorkUnit {
     /// rotate every account in the replayed shard).
     start_shard: u32,
 
-    /// AVVM reclamation total for this boundary, computed once in
-    /// `initialize()`. Reused across all shards so the per-shard `load`
-    /// doesn't re-query the UTxO set.
-    avvm_reclamation: u64,
+    /// AVVM reclamation for this boundary, computed once in `initialize()`.
+    /// Reused across all shards so the per-shard `load` doesn't re-query the
+    /// UTxO set.
+    avvm_reclamation: AvvmReclamation,
 
     /// During the per-shard loop, holds the in-flight shard's
     /// `WorkContext` (build-and-discard between shards). After
@@ -70,7 +70,7 @@ impl EstartWorkUnit {
             genesis,
             total_shards: 0,
             start_shard: 0,
-            avvm_reclamation: 0,
+            avvm_reclamation: AvvmReclamation::default(),
             context: None,
         }
     }
@@ -119,18 +119,17 @@ where
         self.total_shards = progress.map(|p| p.total).unwrap_or(ACCOUNT_SHARDS);
         self.start_shard = progress.map(|p| p.committed).unwrap_or(0);
 
-        // Compute AVVM reclamation once per boundary instead of once per
-        // shard. Returns 0 unless we're crossing the Shelley→Allegra
-        // hardfork — a one-time chain event, but the per-shard cost adds
-        // up at that boundary.
-        self.avvm_reclamation =
-            WorkContext::compute_boundary_avvm::<D>(domain.state(), &self.genesis)?;
+        // Empty unless we're crossing the Shelley→Allegra hardfork — a
+        // one-time chain event, but the per-shard cost adds up at that
+        // boundary.
+        self.avvm_reclamation = AvvmReclamation::at_boundary::<D>(domain.state(), &self.genesis)?;
 
         debug!(
             slot = self.slot,
             total = self.total_shards,
             start = self.start_shard,
-            avvm = self.avvm_reclamation,
+            avvm = self.avvm_reclamation.total,
+            avvm_utxos = self.avvm_reclamation.utxos.len(),
             "estart initialize"
         );
         Ok(())
@@ -149,7 +148,7 @@ where
         let context = WorkContext::load_shard::<D>(
             domain.state(),
             self.genesis.clone(),
-            self.avvm_reclamation,
+            self.avvm_reclamation.clone(),
             shard_index,
             self.total_shards,
             ranges,
@@ -195,7 +194,12 @@ where
 
         info!(epoch = context.starting_epoch_no(), "starting epoch");
 
-        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
+        context.commit_finalize::<D>(
+            domain.state(),
+            domain.archive(),
+            domain.indexes(),
+            self.slot,
+        )?;
 
         // Replace the per-shard context with the finalize-phase
         // WorkContext so post-finalize introspection (e.g. `ended_state`

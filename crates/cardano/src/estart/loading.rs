@@ -5,15 +5,16 @@
 //! `compute_shard_deltas`) and the finalize-time global pass
 //! (`compute_global_deltas` / `load_finalize`). The shared boundary state
 //! (ended_state + chain summary + AVVM reclamation) is built by
-//! `new_empty_with_avvm`; `compute_boundary_avvm` exposes the once-per-
-//! boundary AVVM lookup so the work unit can hoist it into `initialize`.
+//! `new_empty_with_avvm`; the once-per-boundary AVVM lookup itself is
+//! `AvvmReclamation::at_boundary`, which the work unit hoists into
+//! `initialize`.
 
 use std::{ops::Range, sync::Arc};
 
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore, TxoRef};
+use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore};
 
 use crate::{
-    estart::{BoundaryVisitor as _, WorkContext},
+    estart::{avvm::AvvmReclamation, BoundaryVisitor as _, WorkContext},
     gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
     AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, GovGenesisInit,
@@ -87,58 +88,6 @@ impl WorkContext {
         Ok(())
     }
 
-    /// Compute the value of unredeemed AVVM UTxOs at the Shelley→Allegra
-    /// boundary. These UTxOs are removed from the UTxO set and their value
-    /// returned to reserves, matching the Haskell ledger's `translateEra`.
-    fn compute_avvm_reclamation<D: Domain>(
-        state: &D::State,
-        genesis: &Genesis,
-    ) -> Result<u64, ChainError> {
-        let avvm_utxos =
-            pallas::interop::hardano::configs::byron::genesis_avvm_utxos(&genesis.byron);
-
-        // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
-        let refs: Vec<TxoRef> = avvm_utxos.iter().map(|(tx, _, _)| TxoRef(*tx, 0)).collect();
-
-        // Query the UTxO set to find which are still unspent
-        let remaining = state.get_utxos(refs)?;
-
-        // Sum the remaining values
-        let total: u64 = remaining
-            .values()
-            .map(|utxo| {
-                pallas::ledger::traverse::MultiEraOutput::try_from(utxo.as_ref())
-                    .map(|o| o.value().coin())
-                    .unwrap_or(0)
-            })
-            .sum();
-
-        tracing::debug!(
-            remaining_count = remaining.len(),
-            total_avvm = total,
-            "AVVM reclamation at Shelley→Allegra boundary"
-        );
-
-        Ok(total)
-    }
-
-    /// Compute the AVVM reclamation total for the boundary closing the
-    /// current epoch. Returns `0` outside the Shelley→Allegra transition.
-    /// Exposed so the work unit can hoist this once-per-boundary state read
-    /// out of the per-shard `load` calls.
-    pub(crate) fn compute_boundary_avvm<D: Domain>(
-        state: &D::State,
-        genesis: &Genesis,
-    ) -> Result<u64, ChainError> {
-        let ended_state = crate::load_epoch::<D>(state)?;
-        if let Some(transition) = ended_state.pparams.era_transition() {
-            if transition.entering_allegra() {
-                return Self::compute_avvm_reclamation::<D>(state, genesis);
-            }
-        }
-        Ok(0)
-    }
-
     /// Build a fresh `WorkContext` (ended_state + chain summary + AVVM
     /// reclamation) without any computed deltas. Used by the finalize-phase
     /// loader; for the per-shard loader prefer `new_empty_with_avvm` so the
@@ -147,17 +96,17 @@ impl WorkContext {
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<Self, ChainError> {
-        let avvm_reclamation = Self::compute_boundary_avvm::<D>(state, &genesis)?;
+        let avvm_reclamation = AvvmReclamation::at_boundary::<D>(state, &genesis)?;
         Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)
     }
 
-    /// Variant of `new_empty` that takes a precomputed AVVM reclamation
-    /// total. Used by the per-shard loader so the AVVM state read happens
-    /// once per boundary (in `initialize`) rather than once per shard.
+    /// Variant of `new_empty` that takes a precomputed AVVM reclamation.
+    /// Used by the per-shard loader so the AVVM state read happens once per
+    /// boundary (in `initialize`) rather than once per shard.
     pub(crate) fn new_empty_with_avvm<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-        avvm_reclamation: u64,
+        avvm_reclamation: AvvmReclamation,
     ) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
@@ -222,7 +171,7 @@ impl WorkContext {
     pub fn load_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-        avvm_reclamation: u64,
+        avvm_reclamation: AvvmReclamation,
         shard_index: u32,
         total_shards: u32,
         ranges: Vec<Range<EntityKey>>,
