@@ -866,10 +866,19 @@ where
     // Banded rather than one window at a time: an index layer costs a pass over
     // the whole store, so this loop is where a first publish's O(N²) lives.
     // See [`IndexBand`].
+    //
+    // No `landed` here, unlike the loops around it: a band tells the
+    // predecessor about each of its layers the moment that layer exists, rather
+    // than when the band it belongs to is over. See [`write_indexes`].
     for band in plan.epochs.chunks(plan.band.epochs()) {
-        for descriptor in write_indexes(stele, plan, indexes, band, previous, &mut cursor)? {
-            landed(descriptor, previous, &mut layers)?;
-        }
+        layers.extend(write_indexes(
+            stele,
+            plan,
+            indexes,
+            band,
+            previous,
+            &mut cursor,
+        )?);
     }
 
     // Kind-major, like the two loops above: the inscription lists layers in
@@ -1497,6 +1506,23 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// are routed to no one. Same for a window an operator's `--epochs` left out
 /// between two that stayed — the traversal spans the band in one range and
 /// cannot exclude either, so the routing does.
+///
+/// ## Each layer is recorded when it exists, not when the band ends
+///
+/// [`Predecessor::landed`] is what an interrupted publish resumes from, so this
+/// calls it per layer — an inherited one before the traversal starts, a built
+/// one the moment its sink finishes — instead of once for the band on the way
+/// out. The difference is only visible when a publish dies mid-band, which is
+/// exactly when the record is worth having: an inherited layer the transport is
+/// already carrying stays recorded even though the band it sat in never
+/// finished. That is also why this function, alone among the layer writers,
+/// does its own recording rather than leaving it to [`landed`].
+///
+/// What banding does cost is resume *granularity* for the layers it builds: K
+/// sinks finish together, so a death inside a traversal loses that band's built
+/// index layers rather than the ones before the dying epoch. There is nothing
+/// to save there — resuming into the middle of a band would have to re-traverse
+/// the store for the rest of it anyway.
 fn write_indexes<W: SteleWriter, I: IndexStore>(
     stele: &W,
     plan: &Plan,
@@ -1521,6 +1547,8 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
         match adopted {
             Some(descriptor) => {
                 cursor.close(at, INDEXES, Outcome::Inherited);
+
+                previous.landed(&descriptor)?;
                 descriptors.push(Some(descriptor));
             }
             None => {
@@ -1568,6 +1596,7 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
         let descriptor = layer.sink.finish()?.descriptor;
         cursor.close(layer.at, INDEXES, Outcome::Transferred);
 
+        previous.landed(&descriptor)?;
         descriptors[layer.position] = Some(descriptor);
     }
 
