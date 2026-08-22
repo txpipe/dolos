@@ -117,7 +117,7 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
@@ -135,7 +135,7 @@ use oci_client::{
 pub use oci_client::Reference;
 
 use crate::{
-    digest::{LayerDigests, LayerWriter},
+    digest::{read_uninterrupted, LayerDigests, LayerWriter},
     frame::{CanonicalCbor, Limits, SeqWriter},
     inscription::{canonical_json, Inscription, LayerDescriptor},
     layer::LayerReader,
@@ -1593,7 +1593,7 @@ fn blob_stream(
             let mut filled = 0usize;
 
             while filled < chunk.len() {
-                match file.read(&mut chunk[filled..]) {
+                match read_uninterrupted(&mut file, &mut chunk[filled..]) {
                     Ok(0) => break,
                     Ok(read) => filled += read,
                     Err(e) => return Some((Err(e.into()), None)),
