@@ -352,11 +352,60 @@ impl RedbArchiveConfig {
     }
 }
 
+/// Configuration for the Fjall archive backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FjallArchiveConfig {
+    /// Optional path override for the archive directory.
+    /// If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/archive`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Optional path override for block segment files.
+    /// If not specified, segment files are stored in the archive directory.
+    #[serde(default)]
+    pub blocks_path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum journal size in MB.
+    #[serde(default)]
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    #[serde(default)]
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    #[serde(default)]
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    #[serde(default)]
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    #[serde(default)]
+    pub memtable_size_mb: Option<usize>,
+}
+
+impl FjallArchiveConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.blocks_path.is_none()
+            && self.cache.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
+}
+
 /// Archive store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
     Redb(RedbArchiveConfig),
+    /// Experimental Fjall backend, a benchmark vehicle for the archive-index
+    /// backend evaluation. Block segment files are shared with the redb
+    /// backend; only the index moves.
+    Fjall(FjallArchiveConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
     InMemory,
@@ -374,6 +423,7 @@ impl ArchiveStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
             Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
     }
@@ -381,6 +431,7 @@ impl ArchiveStoreConfig {
     pub fn is_default(&self) -> bool {
         match self {
             Self::Redb(cfg) => cfg.is_default(),
+            Self::Fjall(cfg) => cfg.is_default(),
             Self::InMemory | Self::NoOp => false,
         }
     }
@@ -617,6 +668,9 @@ impl StorageConfig {
         match &self.archive {
             ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
             ArchiveStoreConfig::Redb(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
+            }
+            ArchiveStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
             }
         }

@@ -700,6 +700,9 @@ impl ArchiveStoreBackend {
     ) -> Result<Self, ArchiveError> {
         match config {
             ArchiveStoreConfig::Redb(cfg) => Self::open_redb(path, schema, cfg),
+            ArchiveStoreConfig::Fjall(_) => Err(ArchiveError::InternalError(
+                "the fjall archive backend is not wired yet".to_string(),
+            )),
             ArchiveStoreConfig::InMemory => Self::in_memory(schema),
             ArchiveStoreConfig::NoOp => Ok(Self::noop()),
         }
