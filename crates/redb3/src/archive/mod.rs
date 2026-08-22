@@ -1,5 +1,7 @@
 use ::redb::{Database, ReadableDatabase};
-use redb::ReadTransaction;
+use redb::{
+    MultimapTableHandle as _, ReadTransaction, ReadableTableMetadata as _, TableHandle as _,
+};
 use std::{
     collections::{HashMap, VecDeque},
     path::Path,
@@ -23,7 +25,7 @@ use pallas::{
 use redb::WriteTransaction;
 use redb_extras::buckets::BucketError;
 
-use crate::{build_tables, Error, Table};
+use crate::{build_tables, Error, Table, TableFootprint};
 
 // The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
 // these index definitions and the location packing rather than restating them.
@@ -729,6 +731,41 @@ impl ArchiveStore {
     pub fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, RedbArchiveError> {
         let rx = self.db().begin_read()?;
         tables::BlocksTable::get_tip(&rx, &self.flatfiles)
+    }
+
+    /// Per-table storage statistics for every table in the archive index.
+    ///
+    /// Enumerated from the database itself rather than from a list of known
+    /// definitions, so the derived-log namespaces — which are named by the
+    /// state schema at open time and carry the bulk of the file — are covered
+    /// alongside the block and index tables without a second registry to keep
+    /// in sync.
+    pub fn stats(&self) -> Result<Vec<(String, TableFootprint)>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+
+        let mut out = vec![];
+
+        for handle in rx.list_tables()?.collect::<Vec<_>>() {
+            let name = handle.name().to_string();
+            let table = rx.open_untyped_table(handle)?;
+            out.push((
+                name,
+                TableFootprint::new(Some(table.len()?), table.stats()?),
+            ));
+        }
+
+        for handle in rx.list_multimap_tables()?.collect::<Vec<_>>() {
+            let name = handle.name().to_string();
+            let table = rx.open_untyped_multimap_table(handle)?;
+            out.push((
+                name,
+                TableFootprint::new(Some(table.len()?), table.stats()?),
+            ));
+        }
+
+        out.sort_by(|(a, _): &(String, _), (b, _)| a.cmp(b));
+
+        Ok(out)
     }
 
     pub fn prune_history(
