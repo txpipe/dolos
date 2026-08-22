@@ -134,7 +134,7 @@ impl dolos_core::MempoolStore for Mempool {
     }
 }
 
-/// The state and index backends a [`ToyDomain`] is bound to.
+/// The state, index and archive backends a [`ToyDomain`] is bound to.
 ///
 /// A binding, not a variant: there is one harness domain, and this is the axis
 /// along which it is pointed at a backend. The two implementations below are
@@ -142,18 +142,20 @@ impl dolos_core::MempoolStore for Mempool {
 /// running on either is running on a live configuration rather than on a
 /// test-only store.
 ///
-/// The pair is one trait rather than two parameters because they are always
-/// chosen together, and because [`FjallStores`] has to keep a temporary
-/// directory alive for both.
+/// The set is one trait rather than separate parameters because the stores are
+/// always chosen together, and because [`FjallStores`] has to keep a temporary
+/// directory alive for all of them.
 pub trait ToyStores: Clone + Send + Sync + 'static {
     type State: StateStore;
     type Indexes: dolos_core::IndexStore;
+    type Archive: dolos_core::ArchiveStore;
 
-    /// Open a fresh, empty pair.
+    /// Open a fresh, empty set.
     fn open() -> Self;
 
     fn state(&self) -> &Self::State;
     fn indexes(&self) -> &Self::Indexes;
+    fn archive(&self) -> &Self::Archive;
 }
 
 /// The builtin in-memory stores: the default, and what almost every suite
@@ -168,16 +170,22 @@ pub trait ToyStores: Clone + Send + Sync + 'static {
 pub struct MemoryStores {
     state: MemoryStateStore,
     indexes: MemoryIndexStore,
+    archive: dolos_redb3::archive::ArchiveStore,
 }
 
 impl ToyStores for MemoryStores {
     type State = MemoryStateStore;
     type Indexes = MemoryIndexStore;
+    type Archive = dolos_redb3::archive::ArchiveStore;
 
     fn open() -> Self {
         Self {
             state: MemoryStateStore::new(),
             indexes: MemoryIndexStore::new(),
+            archive: dolos_redb3::archive::ArchiveStore::in_memory(
+                dolos_cardano::model::build_schema(),
+            )
+            .expect("opening the in-memory redb archive store"),
         }
     }
 
@@ -187,6 +195,10 @@ impl ToyStores for MemoryStores {
 
     fn indexes(&self) -> &Self::Indexes {
         &self.indexes
+    }
+
+    fn archive(&self) -> &Self::Archive {
+        &self.archive
     }
 }
 
@@ -203,12 +215,14 @@ impl ToyStores for MemoryStores {
 pub struct FjallStores {
     state: dolos_fjall::StateStore,
     indexes: dolos_fjall::IndexStore,
+    archive: dolos_fjall::archive::ArchiveStore,
     _dir: Arc<tempfile::TempDir>,
 }
 
 impl ToyStores for FjallStores {
     type State = dolos_fjall::StateStore;
     type Indexes = dolos_fjall::IndexStore;
+    type Archive = dolos_fjall::archive::ArchiveStore;
 
     fn open() -> Self {
         let dir = tempfile::tempdir().expect("temp dir for the fjall stores");
@@ -225,9 +239,17 @@ impl ToyStores for FjallStores {
         )
         .expect("opening the fjall index store");
 
+        let archive = dolos_fjall::archive::ArchiveStore::open(
+            dolos_cardano::model::build_schema(),
+            dir.path().join("archive"),
+            &dolos_core::config::FjallArchiveConfig::default(),
+        )
+        .expect("opening the fjall archive store");
+
         Self {
             state,
             indexes,
+            archive,
             _dir: Arc::new(dir),
         }
     }
@@ -239,10 +261,14 @@ impl ToyStores for FjallStores {
     fn indexes(&self) -> &Self::Indexes {
         &self.indexes
     }
+
+    fn archive(&self) -> &Self::Archive {
+        &self.archive
+    }
 }
 
-/// Minimal `Domain` implementation, with the archive on redb and the state and
-/// index stores chosen by [`ToyStores`].
+/// Minimal `Domain` implementation, with the state, index and archive stores
+/// chosen by [`ToyStores`].
 ///
 /// Defaults to [`MemoryStores`], so `ToyDomain` unqualified is the cheap
 /// in-memory harness every existing suite already binds.
@@ -251,7 +277,6 @@ pub struct ToyDomain<B: ToyStores = MemoryStores> {
     wal: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     chain: Arc<RwLock<dolos_cardano::CardanoLogic>>,
     stores: B,
-    archive: dolos_redb3::archive::ArchiveStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     sync_config: SyncConfig,
@@ -306,10 +331,6 @@ impl<B: ToyStores> ToyDomain<B> {
 
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
-        let archive =
-            dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
-                .unwrap();
-
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
             config.clone(),
             stores.state(),
@@ -322,7 +343,6 @@ impl<B: ToyStores> ToyDomain<B> {
             stores,
             wal: dolos_redb3::wal::RedbWalStore::memory().unwrap(),
             chain: Arc::new(RwLock::new(chain)),
-            archive,
             mempool: Mempool {
                 pending: Arc::new(RwLock::new(Vec::new())),
             },
@@ -355,7 +375,7 @@ impl<B: ToyStores> ToyDomain<B> {
         let epoch = dolos_cardano::load_epoch::<Self>(domain.stores.state()).unwrap();
         let epoch_start = chain.epoch_start(epoch.number);
         let log_key = LogKey::from(TemporalKey::from(epoch_start));
-        let writer = domain.archive.start_writer().unwrap();
+        let writer = domain.stores.archive().start_writer().unwrap();
         writer.write_log_typed(&log_key, &epoch).unwrap();
         writer.commit().unwrap();
 
@@ -419,7 +439,7 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
     type Entity = dolos_cardano::CardanoEntity;
     type EntityDelta = dolos_cardano::CardanoDelta;
     type Wal = dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>;
-    type Archive = dolos_redb3::archive::ArchiveStore;
+    type Archive = B::Archive;
     type State = B::State;
     type Chain = dolos_cardano::CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
@@ -456,7 +476,7 @@ impl<B: ToyStores> dolos_core::Domain for ToyDomain<B> {
     }
 
     fn archive(&self) -> &Self::Archive {
-        &self.archive
+        self.stores.archive()
     }
 
     fn indexes(&self) -> &Self::Indexes {
