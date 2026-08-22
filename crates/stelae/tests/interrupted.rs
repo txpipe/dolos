@@ -1,17 +1,8 @@
 //! A read that was interrupted is not a read that failed.
 //!
-//! `Read::read` is allowed to return `ErrorKind::Interrupted` at any moment —
-//! on Unix that is a syscall cut short by a signal delivered to the process,
-//! and it says nothing about the source except "ask again". `std` retries it
-//! inside `io::copy`, `read_exact` and `read_to_end`, and nowhere else, so a
-//! hand-written loop over a bare `read` inherits the opposite behaviour by
-//! default: one signal, one aborted read, one failed layer.
-//!
-//! That was survivable while every source here was a local file. It is not now:
-//! an `oci://` publish or restore drives these same loops over a network stream
-//! for hours, inside a process that installs signal handlers, and a spurious
-//! failure mid-restore costs the whole run and reads to an operator like a
-//! corrupt stele.
+//! Why the crate retries `ErrorKind::Interrupted` at all is stated once, on
+//! `digest::read_uninterrupted`; what these tests add is that the three loops
+//! routed through it actually hold the property under interruption.
 //!
 //! Every test below reads through [`Interrupting`], which raises `Interrupted`
 //! before *every* successful read and then hands over a few bytes.
