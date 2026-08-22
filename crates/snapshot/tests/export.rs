@@ -1341,10 +1341,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
     );
 }
 
-// --------------------------------------------------------------------------
-// 6. Banding: fewer traversals, the same bytes
-// --------------------------------------------------------------------------
-
 /// An index store that counts how many traversals were *constructed* over it.
 ///
 /// The count is the property under test and inspection is not: banding is a

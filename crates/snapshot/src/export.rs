@@ -865,11 +865,8 @@ where
 
     // Banded rather than one window at a time: an index layer costs a pass over
     // the whole store, so this loop is where a first publish's O(N²) lives.
-    // See [`IndexBand`].
-    //
-    // No `landed` here, unlike the loops around it: a band tells the
-    // predecessor about each of its layers the moment that layer exists, rather
-    // than when the band it belongs to is over. See [`write_indexes`].
+    // See [`IndexBand`], and [`write_indexes`] for why no `landed` call sits
+    // here as it does in the loops around it.
     for band in plan.epochs.chunks(plan.band.epochs()) {
         layers.extend(write_indexes(
             stele,
@@ -1488,11 +1485,10 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 ///
 /// ## This is a scan, not a seek, which is why it is banded
 ///
-/// Neither traversal can seek to a slot — a tag's slot is the last component of
-/// its key and an exact record's slot is its stored *value* — so a pass here
-/// costs a walk of the whole index store however few epochs it fills. One epoch
-/// per pass makes a first publish O(N²); [`IndexBand`] is what turns that into
-/// ⌈N/K⌉ passes, and carries the measurement K is sized on.
+/// Neither traversal can seek to a slot, so a pass here costs a walk of the
+/// whole index store however few epochs it fills, and one epoch per pass makes
+/// a first publish O(N²). [`IndexBand`] states why the store cannot seek, what
+/// turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
 ///
 /// ## Positions are handed out before anything is written
 ///
