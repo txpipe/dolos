@@ -28,13 +28,9 @@ use redb_extras::buckets::BucketError;
 
 use crate::{build_tables, Error, Table, TableFootprint};
 
-// The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
-// these index definitions and the location packing rather than restating them.
-// It is the only thing that ever enables `maintenance`; the `dolos` binary
-// does not, so the crate's ordinary surface keeps them private.
-#[cfg(not(feature = "maintenance"))]
-pub(crate) mod flatfiles;
-#[cfg(feature = "maintenance")]
+// Flat segment files are backend-independent (std + tempfile only): the fjall
+// archive prototype reuses them as-is, so the module is public unconditionally.
+// A mergeable fjall backend would relocate it out of this crate instead.
 pub mod flatfiles;
 
 pub(crate) mod indexes;
