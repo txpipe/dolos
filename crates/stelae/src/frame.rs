@@ -39,7 +39,7 @@ use std::{
     ops::Range,
 };
 
-use crate::{Error, LAYER_FORMAT_VERSION};
+use crate::{digest::read_uninterrupted, Error, LAYER_FORMAT_VERSION};
 
 /// Maximum nesting depth accepted by the canonical-form scanner.
 ///
@@ -882,7 +882,7 @@ impl<R: Read> RecordReader<R> {
             self.window.resize(required.min(self.limits.max_record), 0);
         }
 
-        let read = self.source.read(&mut self.window[self.filled..])?;
+        let read = read_uninterrupted(&mut self.source, &mut self.window[self.filled..])?;
 
         if read == 0 {
             self.eof = true;
