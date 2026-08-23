@@ -22,7 +22,10 @@
 
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
-use dolos_snapshot::{export::Plan, RetainedEpochs};
+use dolos_snapshot::{
+    export::{IndexBand, Plan},
+    RetainedEpochs,
+};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use crate::feedback::Feedback;
@@ -168,6 +171,24 @@ pub fn restrict(plan: Plan, range: Option<EpochRange>) -> Plan {
     }
 }
 
+/// Apply an operator's index band to a plan, or leave the measured default.
+///
+/// The one place any command spells the mapping, for the reason [`restrict`] is
+/// shared: `publish`, `digest` and `verify --reproduce` all pay the same index
+/// traversals, and a knob one of them spelled its own way would be a knob an
+/// operator has to learn three times.
+///
+/// Unlike [`restrict`], this changes nothing about the document: banding
+/// reorders when index records are read, never which layer they land in. Two
+/// runs at different bands produce the same digest, which is why a
+/// reproduction is free to band differently than the publish it checks.
+pub fn banded(plan: Plan, band: Option<std::num::NonZeroUsize>) -> Plan {
+    match band {
+        Some(band) => plan.with_band(IndexBand::new(band)),
+        None => plan,
+    }
+}
+
 /// The report every command opens with: where the node stands and what the
 /// selection covers.
 ///
@@ -185,6 +206,16 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
     );
     eprintln!("cursor:   {}", plan.cursor);
     eprintln!("sequence: {} (tag {tag})", plan.sequence);
+
+    // Clamped to the epochs actually selected, because the band chunks them:
+    // a `--epochs 500..502` publish opens three sinks whatever the band says,
+    // and the unclamped budget would overstate it by orders of magnitude.
+    let band = plan.band.epochs().min(plan.epochs.len());
+
+    eprintln!(
+        "band:     {band} epochs per index traversal ({} MiB budgeted)",
+        band.saturating_mul(IndexBand::SINK_BYTES) / (1024 * 1024),
+    );
 
     match (plan.epochs.first(), plan.epochs.last()) {
         (Some(first), Some(last)) => eprintln!(

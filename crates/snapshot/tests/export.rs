@@ -29,7 +29,13 @@ mod common;
 mod node;
 mod watcher;
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 use common::read_both_ways;
 use dolos_cardano::{
@@ -39,8 +45,8 @@ use dolos_cardano::{
 use dolos_core::{
     builtin::{MemoryIndexStore, MemoryStateStore},
     ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord,
-    IndexRecord, IndexStore, LogKey, Namespace, StateStore, StateWriter as _, TagRecord,
-    TemporalKey,
+    IndexRecord, IndexStore, IndexWriter as _, LogKey, Namespace, StateStore, StateWriter as _,
+    TagRecord, TemporalKey,
 };
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
@@ -1333,4 +1339,246 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         with.canonicalize().unwrap(),
         without.canonicalize().unwrap(),
     );
+}
+
+/// An index store that counts how many traversals were *constructed* over it.
+///
+/// The count is the property under test and inspection is not: banding is a
+/// claim about how many times the store is walked, and a reader satisfying
+/// themselves by looking at the loop is exactly what stops being true the next
+/// time someone edits it. Every other method delegates, so an export sees the
+/// store it would have seen.
+#[derive(Clone)]
+struct Counted<S> {
+    inner: S,
+    tags: Arc<AtomicUsize>,
+    exacts: Arc<AtomicUsize>,
+}
+
+impl<S: IndexStore> Counted<S> {
+    fn new(inner: S) -> Self {
+        Self {
+            inner,
+            tags: Arc::default(),
+            exacts: Arc::default(),
+        }
+    }
+
+    /// Traversals built over the store: tag runs and exact runs separately,
+    /// because a band that fixed one and not the other would still be O(N²).
+    fn traversals(&self) -> (usize, usize) {
+        (
+            self.tags.load(Ordering::Relaxed),
+            self.exacts.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl<S: IndexStore> IndexStore for Counted<S> {
+    type Writer = S::Writer;
+    type SlotIter = S::SlotIter;
+    type TagIter = S::TagIter;
+    type ExactIter = S::ExactIter;
+
+    fn start_writer(&self) -> Result<Self::Writer, dolos_core::IndexError> {
+        self.inner.start_writer()
+    }
+
+    fn initialize_schema(&self) -> Result<(), dolos_core::IndexError> {
+        self.inner.initialize_schema()
+    }
+
+    fn copy(&self, target: &Self) -> Result<(), dolos_core::IndexError> {
+        self.inner.copy(&target.inner)
+    }
+
+    fn cursor(&self) -> Result<Option<ChainPoint>, dolos_core::IndexError> {
+        self.inner.cursor()
+    }
+
+    fn utxos_by_tag(
+        &self,
+        dimension: dolos_core::TagDimension,
+        key: &[u8],
+    ) -> Result<dolos_core::UtxoSet, dolos_core::IndexError> {
+        self.inner.utxos_by_tag(dimension, key)
+    }
+
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
+        self.inner.slot_by_block_hash(hash)
+    }
+
+    fn slot_by_block_number(
+        &self,
+        number: u64,
+    ) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
+        self.inner.slot_by_block_number(number)
+    }
+
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
+        self.inner.slot_by_tx_hash(hash)
+    }
+
+    fn slots_by_tag(
+        &self,
+        dimension: dolos_core::TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, dolos_core::IndexError> {
+        self.inner.slots_by_tag(dimension, key, start, end)
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[dolos_core::TagDimension],
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, dolos_core::IndexError> {
+        self.tags.fetch_add(1, Ordering::Relaxed);
+
+        self.inner.iter_archive_tags(dimensions, slots)
+    }
+
+    fn iter_exact_records(
+        &self,
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::ExactIter, dolos_core::IndexError> {
+        self.exacts.fetch_add(1, Ordering::Relaxed);
+
+        self.inner.iter_exact_records(slots)
+    }
+}
+
+/// Index records spread across the skeleton's three epochs, so a band that
+/// misrouted one would produce a layer that is short and a layer that is long.
+///
+/// Two blocks per epoch, each carrying tags in every dimension and the three
+/// exact kinds a block produces. Nothing here has to be a real ledger: what the
+/// banded pass does with a record is decided by its slot alone.
+fn index_across_the_skeleton() -> MemoryIndexStore {
+    let store = MemoryIndexStore::new();
+    let writer = store.start_writer().unwrap();
+
+    let mut archive = Vec::new();
+
+    for epoch in 0..3u64 {
+        for block in 0..2u64 {
+            let slot = epoch * 100 + block * 40 + 10;
+
+            archive.push(dolos_core::ArchiveIndexDelta {
+                slot,
+                block_hash: vec![slot as u8; 32],
+                block_number: Some(slot),
+                tx_hashes: vec![vec![0x80 | slot as u8; 32]],
+                tags: archive_dimensions::ALL
+                    .into_iter()
+                    .map(|dimension| dolos_core::Tag::new(dimension, vec![slot as u8; 28]))
+                    .collect(),
+            });
+        }
+    }
+
+    writer
+        .apply(&dolos_core::IndexDelta {
+            cursor: ChainPoint::Slot(SKELETON_SLOT),
+            utxo: Default::default(),
+            archive,
+        })
+        .unwrap();
+
+    store
+}
+
+/// Export the seeded skeleton at `band`, and report what it cost and what it
+/// produced.
+fn export_banded(band: usize) -> (usize, usize, usize, Vec<u8>) {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let (archive, state, _) = empty_stores();
+    let indexes = Counted::new(index_across_the_skeleton());
+
+    let plan = Plan::new(
+        &skeleton_summary(),
+        Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
+        skeleton_point(),
+        Default::default(),
+    )
+    .unwrap()
+    .with_band(export::IndexBand::new(band.try_into().unwrap()));
+
+    let watcher = Arc::new(Watcher::default());
+
+    let inscription = export::export(
+        &stele,
+        &plan,
+        &archive,
+        &state,
+        &indexes,
+        None,
+        &export::First,
+        &watcher.observer(),
+    )
+    .unwrap();
+
+    watcher.assert_well_formed(inscription.layers.len());
+
+    let (tags, exacts) = indexes.traversals();
+
+    (
+        tags,
+        exacts,
+        watcher.peak_open(INDEXES),
+        inscription.canonicalize().unwrap(),
+    )
+}
+
+/// Done criterion 1: N epochs cost ⌈N/K⌉ index traversals, counted rather than
+/// inspected.
+///
+/// Both runs are counted — tags and exact records — because they are two
+/// separate scans of the store and banding one without the other would leave
+/// the publish O(N²) with half the constant.
+///
+/// The peak is what an operator's progress display shows and what bounds the
+/// memory: K layers of `indexes` open across one walk, never more.
+#[test]
+fn a_band_costs_one_index_traversal_however_many_epochs_it_covers() {
+    for (band, traversals) in [(1usize, 3usize), (2, 2), (3, 1), (4, 1)] {
+        let (tags, exacts, peak, _) = export_banded(band);
+
+        assert_eq!(
+            (tags, exacts),
+            (traversals, traversals),
+            "a band of {band} over three epochs",
+        );
+
+        assert_eq!(
+            peak,
+            band.min(3),
+            "a band of {band} held the wrong number of index layers open",
+        );
+    }
+}
+
+/// Done criterion 3, from the side a golden cannot reach: the golden pins one
+/// band's bytes, and this pins that *every* band produces those bytes.
+///
+/// Banding reorders when records are read, never which layer they land in or in
+/// what order — so the canonical document is a function of the stores and not
+/// of the band. Compared as bytes rather than as digests, so a divergence says
+/// where.
+#[test]
+fn banding_moves_no_bytes() {
+    let (.., unbanded) = export_banded(1);
+
+    for band in [2usize, 3, 4, 64] {
+        let (.., banded) = export_banded(band);
+
+        assert_eq!(
+            String::from_utf8(banded).unwrap(),
+            String::from_utf8(unbanded.clone()).unwrap(),
+            "a band of {band} produced a different document",
+        );
+    }
 }
