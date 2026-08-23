@@ -101,6 +101,16 @@ fn block_location_resolution<B: Backend>(bencher: divan::Bencher) {
     let (store, _dir) = populated::<B>();
     let slots = sampled_slots();
 
+    // skip_forward silently stops at exhaustion, so an empty range would
+    // "resolve" nothing and still time successfully; pin every sampled slot
+    // to a real block before the timed passes.
+    for &slot in &slots {
+        assert!(
+            store.get_block_by_slot(&slot).unwrap().is_some(),
+            "sampled slot missing from the population"
+        );
+    }
+
     bencher.bench_local(|| {
         for &slot in &slots {
             let mut iter = store.get_range(Some(slot), Some(slot + 1)).unwrap();

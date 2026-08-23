@@ -49,14 +49,19 @@ impl ArchiveShape {
         epoch * self.slots_per_epoch
     }
 
+    /// The gap between consecutive block slots inside one epoch. Shared by
+    /// [`Self::block_slots`] and [`populate_archive`] so the slots callers
+    /// sample are exactly the slots the population wrote.
+    pub fn stride(&self) -> u64 {
+        (self.slots_per_epoch / self.blocks_per_epoch).max(1)
+    }
+
     /// Every block slot the population writes, in ascending order. Callers
     /// sample read keys from this instead of scanning the store, so both
     /// backends measure exactly the keys that exist.
     pub fn block_slots(&self) -> impl Iterator<Item = BlockSlot> + '_ {
-        let stride = (self.slots_per_epoch / self.blocks_per_epoch).max(1);
-
         (0..self.epochs).flat_map(move |epoch| {
-            (0..self.blocks_per_epoch).map(move |i| self.epoch_start(epoch) + i * stride)
+            (0..self.blocks_per_epoch).map(move |i| self.epoch_start(epoch) + i * self.stride())
         })
     }
 
@@ -101,7 +106,7 @@ pub fn populate_archive<S: ArchiveStore>(
     shape: &ArchiveShape,
 ) -> Result<(), ArchiveError> {
     let mut rng = SplitMix64(shape.seed);
-    let stride = (shape.slots_per_epoch / shape.blocks_per_epoch).max(1);
+    let stride = shape.stride();
 
     for epoch in 0..shape.epochs {
         let writer = store.start_writer()?;
