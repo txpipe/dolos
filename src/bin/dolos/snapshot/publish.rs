@@ -89,11 +89,48 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     super::report_plan(&plan)?;
 
     match (&args.repo, &args.output_dir) {
-        (Some(repo), _) => to_repository(config, args, repo, &plan, &stores, feedback),
+        (Some(repo), _) => {
+            let publish = RepositoryPublish {
+                repo,
+                insecure: args.insecure,
+                scratch_dir: args.scratch_dir.as_deref(),
+                rebuild: args.rebuild,
+                dry_run: args.dry_run,
+                require_new: args.require_new,
+            };
+
+            to_repository(config, &publish, &plan, &stores, feedback)
+        }
         (None, Some(dir)) => to_directory(args, dir, &plan, &stores, feedback),
         // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
     }
+}
+
+/// The repository arm's settings, freed of the CLI that spelled them.
+///
+/// Factored so `snapshot backfill` publishes through exactly the code path
+/// `snapshot publish --repo` does — same standing check, same preflight, same
+/// chained predecessor, same report — rather than a second telling of it that
+/// would drift.
+pub(super) struct RepositoryPublish<'a> {
+    /// The repository to publish into.
+    pub repo: &'a Repository,
+
+    /// Talk plaintext HTTP rather than HTTPS.
+    pub insecure: bool,
+
+    /// Where to stage layers; `None` takes `<storage.path>/scratch`.
+    pub scratch_dir: Option<&'a std::path::Path>,
+
+    /// Build every layer instead of carrying forward published ones.
+    pub rebuild: bool,
+
+    /// Report what would be written and stop.
+    pub dry_run: bool,
+
+    /// Fail when the repository is already at this node's sequence.
+    pub require_new: bool,
 }
 
 fn to_directory(
@@ -145,14 +182,15 @@ fn to_directory(
 /// The report is what a publisher wants to check rather than trust: how much of
 /// this stele was inherited rather than built, and how much of it moved. Both
 /// are numbers the code counted, not an inference from a duration.
-fn to_repository(
+pub(super) fn to_repository(
     config: &RootConfig,
-    args: &Args,
-    repo: &Repository,
+    publish: &RepositoryPublish,
     plan: &export::Plan,
     stores: &crate::common::Stores,
     feedback: &Feedback,
 ) -> miette::Result<()> {
+    let repo = publish.repo;
+
     // A publisher's credentials come from `STELAE_REGISTRY_USER` /
     // `STELAE_REGISTRY_PASSWORD`, which override anything configured. The
     // configured user is still the fallback: it is read-only, so authenticating
@@ -160,9 +198,9 @@ fn to_repository(
     // is the honest place for "these credentials cannot publish" to be said.
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    let scratch = crate::common::stele_scratch_dir(&config.storage, args.scratch_dir.as_deref());
+    let scratch = crate::common::stele_scratch_dir(&config.storage, publish.scratch_dir);
 
-    let registry = registry::open(repo, args.insecure, auth, scratch)
+    let registry = registry::open(repo, publish.insecure, auth, scratch)
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -172,11 +210,11 @@ fn to_repository(
     // along with everything else.
     let publishing = registry::Publishing::new(&registry)
         .recording_in(&config.storage.path)
-        .rebuilding(args.rebuild);
+        .rebuilding(publish.rebuild);
 
     // Before anything is built, and before the dry run too: a publisher asking
     // what a publish would do wants the same answer the publish gives.
-    if !standing(&registry, plan, args)? {
+    if !standing(&registry, plan, publish.require_new)? {
         return Ok(());
     }
 
@@ -190,7 +228,7 @@ fn to_repository(
         .into_diagnostic()
         .context("sizing the staging directory")?;
 
-    if args.dry_run {
+    if publish.dry_run {
         // `None` here and `None` at the `publish` below are one decision: a dry
         // run describes the publish that follows it, so the two calls are
         // handed the same digest records or the number is about something else.
@@ -273,7 +311,7 @@ fn to_repository(
 ///   to invent. What is new is that the message names the distance alongside
 ///   both sequences, so "the publisher has been down for a day" and "the
 ///   publisher has been down for a month" do not read the same.
-fn standing(registry: &Registry, plan: &export::Plan, args: &Args) -> miette::Result<bool> {
+fn standing(registry: &Registry, plan: &export::Plan, require_new: bool) -> miette::Result<bool> {
     let standing = registry::standing(registry, plan)
         .into_diagnostic()
         .context("reading the repository's latest stele")?;
@@ -294,7 +332,7 @@ fn standing(registry: &Registry, plan: &export::Plan, args: &Args) -> miette::Re
                 plan.sequence,
             );
 
-            if args.require_new {
+            if require_new {
                 return Err(miette::miette!("{message}"));
             }
 

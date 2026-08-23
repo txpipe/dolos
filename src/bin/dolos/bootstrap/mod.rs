@@ -8,7 +8,7 @@ use tracing::info;
 use crate::feedback::Feedback;
 use dolos_core::{StateStore, WalStore};
 
-mod mithril;
+pub(crate) mod mithril;
 mod ranged;
 mod relay;
 mod snapshot;

@@ -148,6 +148,19 @@ pub fn stele_scratch_dir(config: &StorageConfig, chosen: Option<&std::path::Path
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
+    setup_domain_with_stop_epoch(config, None)
+}
+
+/// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
+///
+/// For callers that replay to a chosen epoch boundary over the live stores —
+/// `snapshot backfill` — the way `doctor rebuild-state` forces it on the
+/// domain it hand-builds. A `Some` here overrides whatever the configuration
+/// says; `None` leaves it alone.
+pub fn setup_domain_with_stop_epoch(
+    config: &RootConfig,
+    stop_epoch: Option<u64>,
+) -> miette::Result<DomainAdapter> {
     let stores = open_data_stores(config).map_err(|e| match e {
         Error::WalError(WalError::IncompatibleVersion { found, expected }) => miette::miette!(
             help = format!(
@@ -162,7 +175,11 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 
-    let ChainConfig::Cardano(chain_config) = chain;
+    let ChainConfig::Cardano(mut chain_config) = chain;
+
+    if stop_epoch.is_some() {
+        chain_config.stop_epoch = stop_epoch;
+    }
 
     let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
         chain_config,
@@ -333,7 +350,7 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
 
 #[inline]
 #[cfg(unix)]
-async fn wait_for_exit_signal() {
+pub(crate) async fn wait_for_exit_signal() {
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
@@ -349,7 +366,7 @@ async fn wait_for_exit_signal() {
 
 #[inline]
 #[cfg(windows)]
-async fn wait_for_exit_signal() {
+pub(crate) async fn wait_for_exit_signal() {
     tokio::signal::ctrl_c().await.unwrap()
 }
 
