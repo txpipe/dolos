@@ -179,10 +179,14 @@ fn resume_file(highest: Option<u64>, cursor_slot: Option<u64>) -> Option<u64> {
 /// The resume file is deliberately re-fetched rather than skipped: an
 /// interrupted download may have left it truncated, and it has not been
 /// verified yet.
+///
+/// The window is added saturating: an operator's `--window` is unbounded above
+/// and the beacon clamps the end anyway, so a window wider than the chain is
+/// an ordinary "everything the aggregator has" rather than an overflow.
 fn next_window(resume: Option<u64>, window: u64, beacon: u64) -> Option<(Option<u64>, u64)> {
     match resume {
         Some(resume) if beacon <= resume => None,
-        Some(resume) => Some((Some(resume), beacon.min(resume + window))),
+        Some(resume) => Some((Some(resume), beacon.min(resume.saturating_add(window)))),
         None => Some((None, beacon.min(window))),
     }
 }
@@ -325,6 +329,21 @@ impl Driver<'_> {
     /// the domain: `import_blocks` skips the WAL by design, so a run that
     /// died mid-import left the state ahead of it, and the next domain open
     /// would refuse with `InconsistentState`.
+    ///
+    /// These stores are dropped rather than shut down, where [`Self::extend`]
+    /// takes the trouble — and the asymmetry is the write, not an oversight.
+    /// The one write here is the WAL reseed, whose only backend is redb, whose
+    /// `shutdown` is a no-op because a redb commit is already durable and its
+    /// drop cleans up without blocking. Everything the publish touches after
+    /// that it only reads, so fjall has no flush of ours to drain — which is
+    /// the whole reason `extend` shuts its domain down after a bulk import.
+    ///
+    /// Nothing in the publish observes [`Self::cancel`], either: a stele goes
+    /// out over minutes of store walking and uploading with no seam to check
+    /// a token at, so a signal arriving here is answered at the top of the
+    /// next loop. The window is wide by construction and the crash-safety the
+    /// module doc describes is what covers it — a SIGKILL through a publish
+    /// costs a store reopen and the in-flight epoch, and never a gap.
     fn publish_pending(&self) -> miette::Result<Step> {
         let stores = crate::common::open_data_stores(self.config)
             .into_diagnostic()
@@ -803,6 +822,10 @@ mod tests {
 
         // the last window clamps to the beacon
         assert_eq!(next_window(Some(990), 40, 1000), Some((Some(990), 1000)));
+
+        // a window wider than the chain clamps to the beacon rather than
+        // overflowing the addition
+        assert_eq!(next_window(Some(1), u64::MAX, 1000), Some((Some(1), 1000)));
 
         // nothing newer than what is on disk
         assert_eq!(next_window(Some(1000), 40, 1000), None);

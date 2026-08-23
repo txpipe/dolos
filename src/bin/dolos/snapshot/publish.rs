@@ -314,6 +314,11 @@ pub(super) fn to_repository(
 fn standing(registry: &Registry, plan: &export::Plan, require_new: bool) -> miette::Result<bool> {
     // A read of the latest manifest and the one network call a publish makes
     // before it commits to anything, so running it again is free of consequence.
+    //
+    // `&|| false` for every caller, `snapshot backfill`'s driver included: the
+    // publish that follows this read observes no cancellation for as long as it
+    // runs, so a predicate threaded in here would cut a shutdown's wait by the
+    // backoff and leave the minutes on either side of it untouched.
     let standing =
         crate::common::retry_transient("reading the repository's latest stele", &|| false, || {
             registry::standing(registry, plan)
