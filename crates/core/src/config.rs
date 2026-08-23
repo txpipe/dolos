@@ -414,6 +414,7 @@ pub enum ArchiveStoreConfig {
     #[serde(rename = "in_memory")]
     InMemory,
     /// No-op backend that discards all writes and returns empty results.
+    #[serde(rename = "no_op", alias = "noop")]
     NoOp,
 }
 
@@ -524,6 +525,7 @@ pub enum IndexStoreConfig {
     Fjall(FjallIndexConfig),
     /// No-op backend that discards all writes and returns empty results: an
     /// explicit opt-out of the index layer.
+    #[serde(rename = "no_op", alias = "noop")]
     NoOp,
 }
 
@@ -1362,5 +1364,29 @@ mod tests {
             ArchiveStoreConfig::default(),
             ArchiveStoreConfig::Fjall(cfg) if cfg.is_default()
         ));
+    }
+
+    /// The docs spell the opt-out backend `no_op`; the historical serde
+    /// lowercase of `NoOp` was `noop`. Both must parse, and serialization
+    /// must emit the documented spelling.
+    #[test]
+    fn no_op_backend_accepts_both_spellings_and_serializes_documented_one() {
+        use serde_json::json;
+
+        for spelling in ["no_op", "noop"] {
+            let archive: ArchiveStoreConfig =
+                serde_json::from_value(json!({ "backend": spelling })).unwrap();
+            assert!(matches!(archive, ArchiveStoreConfig::NoOp));
+
+            let index: IndexStoreConfig =
+                serde_json::from_value(json!({ "backend": spelling })).unwrap();
+            assert!(matches!(index, IndexStoreConfig::NoOp));
+        }
+
+        let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
+        assert_eq!(json["backend"], "no_op");
+
+        let json = serde_json::to_value(IndexStoreConfig::NoOp).unwrap();
+        assert_eq!(json["backend"], "no_op");
     }
 }
