@@ -433,9 +433,7 @@ impl Driver<'_> {
             .ok_or_else(|| miette::miette!("missing mithril config"))?;
 
         // After the publish and before the next epoch goes in, never between
-        // a boundary and its publish: pruning at tip T drops history below
-        // `T - max_history` only, and every later publish reads blocks at or
-        // above the T it was standing at when its predecessor was published.
+        // a boundary and its publish.
         if prune {
             let rounds = domain
                 .drain_housekeeping(None)
@@ -466,20 +464,13 @@ impl Driver<'_> {
                     break Advance::Boundary { cursor_slot };
                 }
                 Import::Cancelled => break Advance::Cancelled,
-                // Zero blocks imported is not a stall: on a sparse chain a
-                // whole window of chunks can legitimately be empty, and the
-                // replay simply needs those slot ranges walked. Keep
-                // fetching; the stall check below speaks in file numbers.
+                // Fetch another window rather than conclude anything: the
+                // stall check below is what decides whether more is coming.
                 Import::Exhausted => {}
             }
 
-            // Retried before it is fatal: the aggregator is the driver's most
-            // transient-prone external, and a beacon query it drops costs a
-            // whole restart — a restore, a window re-download and the
-            // in-flight epoch again — for a read that would have answered on
-            // the next attempt. A cancellation resolves to `Ok(None)` rather
-            // than an error, so a shutdown is never something the retry waits
-            // out.
+            // A cancellation resolves to `Ok(None)` rather than an error, so
+            // a shutdown is never something the retry waits out.
             let Some(beacon) = crate::common::retry_transient(
                 "listing mithril snapshots",
                 &|| self.cancel.is_cancelled(),
@@ -529,11 +520,8 @@ impl Driver<'_> {
                 ..Default::default()
             };
 
-            // Safe to simply run again: the window is named by explicit
-            // `download_start`/`download_end` arguments, so a retry plans the
-            // identical download and rewrites the same files — the same thing
-            // a restart would do, minus the store restore and the epoch's
-            // re-replay that made these failures expensive.
+            // Safe to run again: the explicit `download_start`/`download_end`
+            // make a retry plan the identical download over the same files.
             let fetched = crate::common::retry_transient(
                 "fetching a mithril immutable window",
                 &|| self.cancel.is_cancelled(),
@@ -557,11 +545,8 @@ impl Driver<'_> {
                 break Advance::Cancelled;
             }
 
-            // The one stall that is a hard error, and it is measured in file
-            // numbers, never blocks: a fetch that left the highest file
-            // where it was returned nothing new — a misconfigured range or
-            // a download failure — and every later round would only repeat
-            // it.
+            // The one stall that is a hard error: every later round would
+            // only repeat a fetch that returned nothing new.
             let after = crate::bootstrap::mithril::highest_existing_immutable(&self.immutable_dir);
 
             if !fetch_advanced(highest, after) {
@@ -657,10 +642,8 @@ impl Driver<'_> {
         }
 
         // A yield of nothing is not a verdict: the walk exhausts silently at
-        // the retained edge, empty chunks contribute no blocks, and a chunk
-        // read error truncates the iterator the same way. Whether anything
-        // more is coming is the fetch loop's question, answered in file
-        // numbers, never in block counts.
+        // the retained edge, and a chunk read error truncates the iterator the
+        // same way.
         Ok(Import::Exhausted)
     }
 
