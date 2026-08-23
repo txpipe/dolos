@@ -49,9 +49,7 @@ use std::path::{Path, PathBuf};
 use pallas::ledger::traverse::{probe, MultiEraBlock};
 use redb::{Database, ReadableDatabase as _, ReadableTable as _};
 
-use dolos_redb3::archive::flatfiles::{
-    decode_locations, encode_locations, BlockLocation, FlatFileStore,
-};
+use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 use dolos_redb3::archive::tables::BlocksTable;
 
 type BoxError = Box<dyn std::error::Error>;

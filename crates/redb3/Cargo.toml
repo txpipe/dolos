@@ -21,6 +21,7 @@ xxhash-rust.workspace = true
 tempfile = "3"
 
 dolos-core = { path = "../core" }
+dolos-flatfiles = { path = "../flatfiles" }
 
 redb = { version = "^3.1" }
 redb-extras = "0.6.1"

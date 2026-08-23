@@ -29,13 +29,10 @@ use redb_extras::buckets::BucketError;
 use crate::{build_tables, Error, Table, TableFootprint};
 
 // The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
-// these index definitions and the location packing rather than restating them.
-// It is the only thing that ever enables `maintenance`; the `dolos` binary
-// does not, so the crate's ordinary surface keeps them private.
-#[cfg(not(feature = "maintenance"))]
-pub(crate) mod flatfiles;
-#[cfg(feature = "maintenance")]
-pub mod flatfiles;
+// these index definitions rather than restating them. It is the only thing
+// that ever enables `maintenance`; the `dolos` binary does not, so the
+// crate's ordinary surface keeps them private.
+use dolos_flatfiles as flatfiles;
 
 pub(crate) mod indexes;
 
