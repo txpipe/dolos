@@ -30,6 +30,8 @@ use miette::{Context as _, IntoDiagnostic as _};
 
 use crate::feedback::Feedback;
 
+#[cfg(feature = "mithril")]
+mod backfill;
 mod digest;
 mod inspect;
 mod publish;
@@ -39,6 +41,11 @@ mod verify;
 pub enum Command {
     /// writes a stele to a local directory or an OCI repository
     Publish(publish::Args),
+
+    /// replays mithril history one epoch at a time, publishing a stele at
+    /// each boundary into an OCI repository
+    #[cfg(feature = "mithril")]
+    Backfill(backfill::Args),
 
     /// computes a stele's inscription and identity without writing one
     Digest(digest::Args),
@@ -64,6 +71,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         // that waits on a store walk and a network, and the other three are
         // over in the time it takes to print what they found.
         Command::Publish(x) => publish::run(config, x, feedback),
+        #[cfg(feature = "mithril")]
+        Command::Backfill(x) => backfill::run(config, x, feedback),
         Command::Digest(x) => digest::run(config, x),
         Command::Verify(x) => verify::run(config, x),
         Command::Inspect(x) => inspect::run(config, x),

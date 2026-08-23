@@ -15,35 +15,35 @@ use dolos::prelude::*;
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
     #[arg(long, default_value = "./snapshot")]
-    download_dir: String,
+    pub(crate) download_dir: String,
 
     /// Skip the Mithril certificate validation
     #[arg(long, action)]
-    skip_validation: bool,
+    pub(crate) skip_validation: bool,
 
     /// Assume the snapshot is already available in the download dir
     #[arg(long, action)]
-    skip_download: bool,
+    pub(crate) skip_download: bool,
 
     /// Retain downloaded snapshot instead of deleting it
     #[arg(long, action)]
-    retain_snapshot: bool,
+    pub(crate) retain_snapshot: bool,
 
     /// Number of blocks to process in each chunk, more is faster but uses more
     /// memory
     #[arg(long, default_value = "500")]
-    chunk_size: usize,
+    pub(crate) chunk_size: usize,
 
     #[arg(long)]
-    start_from: Option<ChainPoint>,
+    pub(crate) start_from: Option<ChainPoint>,
 
     /// Start downloading from this immutable file number (inclusive)
     #[arg(long)]
-    download_start: Option<u64>,
+    pub(crate) download_start: Option<u64>,
 
     /// Download up to this immutable file number (inclusive)
     #[arg(long)]
-    download_end: Option<u64>,
+    pub(crate) download_end: Option<u64>,
 }
 
 impl Default for Args {
@@ -170,7 +170,7 @@ impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
 }
 
 /// Scan the immutable directory for the highest immutable file number present.
-fn highest_existing_immutable(immutable_dir: &Path) -> Option<u64> {
+pub(crate) fn highest_existing_immutable(immutable_dir: &Path) -> Option<u64> {
     let entries = std::fs::read_dir(immutable_dir).ok()?;
     let mut max: Option<u64> = None;
     for entry in entries.flatten() {
@@ -239,17 +239,39 @@ fn plan_download(args: &Args, immutable_dir: &Path, last_immutable: u64) -> Down
     }
 }
 
-async fn fetch_snapshot(
+/// One aggregator client configuration, shared by the fetch and the beacon
+/// query so the two cannot drift apart on discovery or key handling.
+fn client_builder(config: &MithrilConfig) -> ClientBuilder {
+    ClientBuilder::new(AggregatorDiscoveryType::Url(config.aggregator.clone()))
+        .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
+            config.genesis_key.clone(),
+        ))
+}
+
+/// The highest immutable file number any aggregator snapshot covers.
+///
+/// What `snapshot backfill` sizes its next download window against, and how it
+/// knows the aggregator has nothing past the files already on disk.
+pub(crate) async fn latest_immutable_file(config: &MithrilConfig) -> MithrilResult<u64> {
+    let client = client_builder(config).build()?;
+
+    let snapshots = client.cardano_database_v2().list().await?;
+
+    snapshots
+        .iter()
+        .map(|snapshot| snapshot.beacon.immutable_file_number)
+        .max()
+        .ok_or(MithrilError::msg("no snapshot available"))
+}
+
+pub(crate) async fn fetch_snapshot(
     args: &Args,
     config: &MithrilConfig,
     feedback: &Feedback,
 ) -> MithrilResult<()> {
     let feedback = MithrilFeedback::new(feedback);
 
-    let client = ClientBuilder::new(AggregatorDiscoveryType::Url(config.aggregator.clone()))
-        .set_genesis_verification_key(mithril_client::GenesisVerificationKey::JsonHex(
-            config.genesis_key.clone(),
-        ))
+    let client = client_builder(config)
         .add_feedback_receiver(Arc::new(feedback))
         .build()?;
 

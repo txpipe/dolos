@@ -112,10 +112,15 @@ The `storage` section controls how Dolos stores data in the local file system. E
 - `version`: storage schema version (`v0` - `v3`).
 
 Besides the stores, this directory holds `scratch/`: where `dolos snapshot
-publish`, `dolos bootstrap stelae` and `dolos snapshot verify` stage the layers
-they move over an OCI registry. It defaults here because this volume is already
-sized for the data; a mainnet transfer stages gigabytes. The first two take
-`--scratch-dir` to point somewhere else.
+publish`, `dolos snapshot backfill`, `dolos bootstrap stelae` and `dolos
+snapshot verify` stage the layers they move over an OCI registry. It defaults
+here because this volume is already sized for the data; a mainnet transfer
+stages gigabytes. All but `verify` take `--scratch-dir` to point somewhere
+else.
+
+`dolos snapshot backfill` adds `mithril/`, the immutable window it replays
+from, for the same reason — the download is data-volume sized, and the command
+deletes the files it has consumed as it goes. `--download-dir` moves it.
 
 ### `storage.wal` section
 
@@ -413,7 +418,9 @@ The `snapshot` section controls bootstrap from a snapshot archive.
 
 The `stelae` section controls how this node reaches a **stele registry** — the OCI
 repositories `dolos bootstrap stelae --source oci://…` restores from and
-`dolos snapshot publish --repo oci://…` publishes into.
+`dolos snapshot publish --repo oci://…` publishes into. `dolos snapshot
+backfill --repo oci://…` reads the same section: it is `publish` run in a loop,
+replaying mithril history one epoch at a time and publishing at each boundary.
 
 ### `stelae.registry` section
 
