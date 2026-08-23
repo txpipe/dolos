@@ -312,7 +312,15 @@ pub(super) fn to_repository(
 ///   both sequences, so "the publisher has been down for a day" and "the
 ///   publisher has been down for a month" do not read the same.
 fn standing(registry: &Registry, plan: &export::Plan, require_new: bool) -> miette::Result<bool> {
-    let standing = registry::standing(registry, plan)
+    // The one network read a publish makes before it commits to anything, and
+    // the second of the two externals the preprod backfill saw drop calls. It
+    // is a read of the repository's latest manifest, so running it again is
+    // free of consequence, and the bounded retry keeps a dropped connection
+    // from costing a publisher the whole publish it was about to make.
+    let standing =
+        crate::common::retry_transient("reading the repository's latest stele", &|| false, || {
+            registry::standing(registry, plan)
+        })
         .into_diagnostic()
         .context("reading the repository's latest stele")?;
 

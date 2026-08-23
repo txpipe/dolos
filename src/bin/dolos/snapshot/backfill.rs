@@ -27,6 +27,16 @@
 //! moving on, instead of replaying past it and leaving a gap no later stele
 //! could close.
 //!
+//! The two externals — the mithril aggregator and the repository — are
+//! retried with backoff before their failure is fatal, because a checkpoint
+//! architecture absorbs a transient failure correctly and expensively: the
+//! preprod G1 run took four such exits in two hours and kept publishing, at
+//! ~40% of its throughput, each incident paying a restore, a window
+//! re-download and the in-flight epoch's re-replay. The patience is bounded
+//! at [`common::retry_transient`](crate::common::retry_transient)'s four
+//! attempts, so an aggregator that is wrong rather than flaky still fails,
+//! and fails while an operator is watching.
+//!
 //! This module is orchestration only: it composes the mithril fetch, the
 //! import lifecycle, and the publish path `snapshot publish --repo` uses, and
 //! changes none of them.
@@ -463,18 +473,29 @@ impl Driver<'_> {
                 Import::Exhausted => {}
             }
 
-            let Some(beacon) = self
-                .runtime
-                .block_on(async {
-                    tokio::select! {
-                        beacon = crate::bootstrap::mithril::latest_immutable_file(mithril) => {
-                            beacon.map(Some)
+            // Retried before it is fatal: the aggregator is the driver's most
+            // transient-prone external, and a beacon query it drops costs a
+            // whole restart — a restore, a window re-download and the
+            // in-flight epoch again — for a read that would have answered on
+            // the next attempt. A cancellation resolves to `Ok(None)` rather
+            // than an error, so a shutdown is never something the retry waits
+            // out.
+            let Some(beacon) = crate::common::retry_transient(
+                "listing mithril snapshots",
+                &|| self.cancel.is_cancelled(),
+                || {
+                    self.runtime.block_on(async {
+                        tokio::select! {
+                            beacon = crate::bootstrap::mithril::latest_immutable_file(mithril) => {
+                                beacon.map(Some)
+                            }
+                            _ = self.cancel.cancelled() => Ok(None),
                         }
-                        _ = self.cancel.cancelled() => Ok(None),
-                    }
-                })
-                .map_err(|err| miette::miette!(err.to_string()))
-                .context("listing mithril snapshots")?
+                    })
+                },
+            )
+            .map_err(|err| miette::miette!(err.to_string()))
+            .context("listing mithril snapshots")?
             else {
                 break Advance::Cancelled;
             };
@@ -508,20 +529,29 @@ impl Driver<'_> {
                 ..Default::default()
             };
 
-            let fetched = self
-                .runtime
-                .block_on(async {
-                    tokio::select! {
-                        fetched = crate::bootstrap::mithril::fetch_snapshot(
-                            &fetch,
-                            mithril,
-                            self.feedback,
-                        ) => fetched.map(Some),
-                        _ = self.cancel.cancelled() => Ok(None),
-                    }
-                })
-                .map_err(|err| miette::miette!(err.to_string()))
-                .context("fetching a mithril immutable window")?;
+            // Safe to simply run again: the window is named by explicit
+            // `download_start`/`download_end` arguments, so a retry plans the
+            // identical download and rewrites the same files — the same thing
+            // a restart would do, minus the store restore and the epoch's
+            // re-replay that made these failures expensive.
+            let fetched = crate::common::retry_transient(
+                "fetching a mithril immutable window",
+                &|| self.cancel.is_cancelled(),
+                || {
+                    self.runtime.block_on(async {
+                        tokio::select! {
+                            fetched = crate::bootstrap::mithril::fetch_snapshot(
+                                &fetch,
+                                mithril,
+                                self.feedback,
+                            ) => fetched.map(Some),
+                            _ = self.cancel.cancelled() => Ok(None),
+                        }
+                    })
+                },
+            )
+            .map_err(|err| miette::miette!(err.to_string()))
+            .context("fetching a mithril immutable window")?;
 
             if fetched.is_none() {
                 break Advance::Cancelled;
