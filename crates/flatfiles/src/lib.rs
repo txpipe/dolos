@@ -1,3 +1,12 @@
+//! Flat segment files for archived block bodies.
+//!
+//! Bodies are appended to numbered segment files (one Cardano epoch per
+//! segment) and addressed by packed [`BlockLocation`]s stored in whichever
+//! archive index backend is in use. The layout is backend-independent: the
+//! redb and fjall archive stores share these files byte for byte, which is
+//! why this crate depends on nothing but the standard library (plus
+//! `tempfile` for throwaway stores).
+
 use std::collections::{hash_map::Entry, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};

@@ -1408,6 +1408,7 @@ dependencies = [
  "console-subscriber",
  "csv",
  "csv-diff",
+ "divan",
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",
@@ -1529,6 +1530,7 @@ version = "1.7.0-alpha.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
+ "dolos-flatfiles",
  "dolos-testing",
  "fjall",
  "pallas",
@@ -1536,6 +1538,13 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dolos-flatfiles"
+version = "1.7.0-alpha.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]
@@ -1600,6 +1609,7 @@ version = "1.7.0-alpha.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
+ "dolos-flatfiles",
  "dolos-testing",
  "futures-core",
  "futures-util",

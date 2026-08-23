@@ -1,0 +1,7 @@
+[package]
+name = "dolos-flatfiles"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tempfile = "3"

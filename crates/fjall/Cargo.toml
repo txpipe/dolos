@@ -5,13 +5,14 @@ edition.workspace = true
 
 [dependencies]
 dolos-core = { path = "../core" }
+dolos-flatfiles = { path = "../flatfiles" }
 fjall = "3.1.0"
 tracing.workspace = true
 thiserror.workspace = true
 bincode.workspace = true
 xxhash-rust.workspace = true
 pallas.workspace = true
+tempfile = "3"
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }
-tempfile = "3"

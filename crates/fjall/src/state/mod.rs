@@ -153,6 +153,17 @@ impl StateStore {
         &self.entities
     }
 
+    /// Per-keyspace disk footprint: `(name, bytes, path)`.
+    pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
+        [
+            (keyspace_names::CURSOR, &self.cursor),
+            (keyspace_names::UTXOS, &self.utxos),
+            (keyspace_names::ENTITIES, &self.entities),
+        ]
+        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .to_vec()
+    }
+
     /// Gracefully shutdown the state store.
     ///
     /// This method ensures all pending work is completed before the database

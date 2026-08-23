@@ -3,7 +3,7 @@ use tracing::trace;
 
 use dolos_core::{BlockBody, BlockSlot, ChainPoint, RawBlock};
 
-use super::flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
+use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
 type Error = super::RedbArchiveError;
 

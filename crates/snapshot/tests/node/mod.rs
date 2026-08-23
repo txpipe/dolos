@@ -77,22 +77,22 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
 /// An archive, state and index store with nothing in them: where a restore
 /// writes.
 ///
-/// The same three backends [`harness`] binds, so a comparison between a
-/// restored node and a replayed one is about the drivers and not about the
-/// stores.
+/// The same three backends [`harness`] binds — the archive included, via the
+/// `ToyStores` binding — so a comparison between a restored node and a
+/// replayed one is about the drivers and not about the stores, and the
+/// fjall-bound suites exercise a restore *into* a fjall archive.
 pub struct Blank<B: ToyStores> {
-    pub archive: dolos_redb3::archive::ArchiveStore,
+    pub archive: B::Archive,
     pub stores: B,
 }
 
 impl<B: ToyStores> Blank<B> {
     pub fn open() -> Self {
+        let stores = B::open();
+
         Self {
-            archive: dolos_redb3::archive::ArchiveStore::in_memory(
-                dolos_cardano::model::build_schema(),
-            )
-            .unwrap(),
-            stores: B::open(),
+            archive: stores.archive().clone(),
+            stores,
         }
     }
 

@@ -123,10 +123,13 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
 
     // Segment files can live outside the archive directory; the backend takes
     // `blocks_path` verbatim, so this check does too.
-    if let dolos_core::config::ArchiveStoreConfig::Redb(cfg) = &config.storage.archive {
-        if let Some(path) = &cfg.blocks_path {
-            others.push(("archive segments", path.clone()));
-        }
+    let blocks_path = match &config.storage.archive {
+        dolos_core::config::ArchiveStoreConfig::Redb(cfg) => cfg.blocks_path.as_ref(),
+        dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.as_ref(),
+        _ => None,
+    };
+    if let Some(path) = blocks_path {
+        others.push(("archive segments", path.clone()));
     }
 
     for (what, path) in others {
@@ -401,7 +404,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     let domain_archive = if args.rewrite_logs {
         archive
             .logs_only()
-            .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent redb archive"))?
+            .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent archive"))?
     } else {
         ArchiveStoreBackend::noop()
     };
