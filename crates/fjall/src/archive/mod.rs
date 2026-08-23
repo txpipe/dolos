@@ -210,6 +210,19 @@ impl ArchiveStore {
         ]
     }
 
+    /// Fully compact both keyspaces and sync the result to disk.
+    ///
+    /// The export path runs this as its sanitization step — the LSM analogue
+    /// of redb's pre-export compaction — so an exported database directory
+    /// carries settled segments rather than journal backlog and stale levels.
+    pub fn compact(&self) -> Result<(), Error> {
+        self.blocks.major_compact()?;
+        self.logs.major_compact()?;
+        self.db.persist(PersistMode::SyncAll)?;
+
+        Ok(())
+    }
+
     /// Gracefully shutdown the archive store.
     ///
     /// Persists all data and waits for outstanding flushes so fjall's drop

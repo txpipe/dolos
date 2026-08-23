@@ -28,21 +28,33 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
 
     let mut json = serde_json::Map::new();
 
-    // Every store is reported if and only if it is on redb; a backend that is
-    // not gets left out rather than aborting the command. The live backend set
-    // puts state and indexes on fjall and leaves the archive on redb, so
-    // aborting on the first non-redb store would report nothing at all on a
-    // normally configured node.
-    if let StateStoreBackend::Redb(state) = &stores.state {
-        let stats = state.utxoset_stats().into_diagnostic()?;
+    // Each engine reports the shape it actually has: redb gets per-table
+    // B-tree footprints (rows, leaf fill, page counts), fjall gets per-keyspace
+    // disk footprints — LSM trees have no leaf-fill analogue and faking one
+    // would mislead. Stores on neither engine are left out rather than
+    // aborting the command.
+    match &stores.state {
+        StateStoreBackend::Redb(state) => {
+            let stats = state.utxoset_stats().into_diagnostic()?;
 
-        json.insert("state".to_string(), section(stats));
+            json.insert("state".to_string(), redb_section(stats));
+        }
+        StateStoreBackend::Fjall(state) => {
+            json.insert("state".to_string(), fjall_section(state.disk_usage()));
+        }
+        StateStoreBackend::Memory(_) => (),
     }
 
-    if let IndexStoreBackend::Redb(indexes) = &stores.indexes {
-        let stats = indexes.utxo_index_stats().into_diagnostic()?;
+    match &stores.indexes {
+        IndexStoreBackend::Redb(indexes) => {
+            let stats = indexes.utxo_index_stats().into_diagnostic()?;
 
-        json.insert("indexes".to_string(), section(stats));
+            json.insert("indexes".to_string(), redb_section(stats));
+        }
+        IndexStoreBackend::Fjall(indexes) => {
+            json.insert("indexes".to_string(), fjall_section(indexes.disk_usage()));
+        }
+        IndexStoreBackend::Memory(_) | IndexStoreBackend::NoOp(_) => (),
     }
 
     match &stores.archive {
@@ -51,20 +63,22 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
 
             let tables = stats
                 .into_iter()
-                .map(|(name, footprint)| (name, footprint_to_json(&footprint)));
+                .map(|(name, footprint)| (name, footprint_to_json(&footprint)))
+                .collect();
 
             json.insert(
                 "archive".to_string(),
-                serde_json::Value::Object(tables.collect()),
+                json!({ "engine": "redb", "tables": serde_json::Value::Object(tables) }),
             );
         }
-        ArchiveStoreBackend::Fjall(_)
-        | ArchiveStoreBackend::LogsOnly(_)
-        | ArchiveStoreBackend::NoOp(_) => (),
+        ArchiveStoreBackend::Fjall(archive) => {
+            json.insert("archive".to_string(), fjall_section(archive.disk_usage()));
+        }
+        ArchiveStoreBackend::LogsOnly(_) | ArchiveStoreBackend::NoOp(_) => (),
     }
 
     if json.is_empty() {
-        bail!("stats command is only available for redb backends, none are configured");
+        bail!("no persistent store backends are configured, nothing to report");
     }
 
     println!("{}", serde_json::to_string_pretty(&json).unwrap());
@@ -72,15 +86,32 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
     Ok(())
 }
 
-fn section<'a>(
+fn redb_section<'a>(
     stats: impl IntoIterator<Item = (&'a str, dolos_redb3::redb::TableStats)>,
 ) -> serde_json::Value {
-    let tables = stats.into_iter().map(|(name, stats)| {
-        (
-            name.to_string(),
-            footprint_to_json(&TableFootprint::new(None, stats)),
-        )
-    });
+    let tables: serde_json::Map<_, _> = stats
+        .into_iter()
+        .map(|(name, stats)| {
+            (
+                name.to_string(),
+                footprint_to_json(&TableFootprint::new(None, stats)),
+            )
+        })
+        .collect();
 
-    serde_json::Value::Object(tables.collect())
+    json!({ "engine": "redb", "tables": serde_json::Value::Object(tables) })
+}
+
+fn fjall_section(usage: Vec<(&'static str, u64, std::path::PathBuf)>) -> serde_json::Value {
+    let keyspaces: serde_json::Map<_, _> = usage
+        .into_iter()
+        .map(|(name, bytes, path)| {
+            (
+                name.to_string(),
+                json!({ "disk_bytes": bytes, "path": path.display().to_string() }),
+            )
+        })
+        .collect();
+
+    json!({ "engine": "fjall", "keyspaces": serde_json::Value::Object(keyspaces) })
 }

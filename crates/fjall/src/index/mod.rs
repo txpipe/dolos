@@ -199,6 +199,18 @@ impl IndexStore {
         &self.block_tags
     }
 
+    /// Per-keyspace disk footprint: `(name, bytes, path)`.
+    pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
+        [
+            (keyspace_names::CURSOR, &self.cursor),
+            (keyspace_names::EXACT, &self.exact),
+            (keyspace_names::UTXO_TAGS, &self.utxo_tags),
+            (keyspace_names::BLOCK_TAGS, &self.block_tags),
+        ]
+        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .to_vec()
+    }
+
     /// Gracefully shutdown the index store.
     ///
     /// This method ensures all pending work is completed before the database
