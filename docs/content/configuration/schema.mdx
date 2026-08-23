@@ -151,17 +151,23 @@ sized for the data; a mainnet transfer stages gigabytes. The first two take
 
 ### `storage.archive` section
 
-| property    | type    | example   |
-| ----------- | ------- | --------- |
-| backend     | string  | "redb"    |
-| path        | string  | "archive" |
-| blocks_path | string  | "blocks" |
-| cache       | integer | 500       |
+| property         | type    | example   |
+| ---------------- | ------- | --------- |
+| backend          | string  | "fjall"   |
+| path             | string  | "archive" |
+| blocks_path      | string  | "blocks"  |
+| cache            | integer | 500       |
+| max_journal_size | integer | 1024      |
+| flush_on_commit  | boolean | false     |
+| l0_threshold     | integer | 4         |
+| worker_threads   | integer | 4         |
+| memtable_size_mb | integer | 64        |
 
-- `backend`: `redb`, `in_memory`, or `no_op` (defaults to `redb`).
+- `backend`: `fjall`, `redb`, `in_memory`, or `no_op` (defaults to `fjall`). Unlike the state and index stores, `redb` remains a supported archive backend when selected explicitly. Both persistent backends share the same block segment file layout; only the index format differs, so an archive written by one cannot be opened by the other without re-bootstrapping.
 - `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
-- `blocks_path`: optional override for block segment files (Redb only).
-- `cache`: size (MB) of the archive cache (Redb only).
+- `blocks_path`: optional override for block segment files (both persistent backends).
+- `cache`: size (MB) of the archive index cache (both persistent backends).
+- `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
 ### `storage.index` section
 
