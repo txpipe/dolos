@@ -620,9 +620,28 @@ impl Driver<'_> {
             .into_diagnostic()
             .context("reading the state cursor")?;
 
-        let point: Point = cursor
-            .map(|c| c.try_into().unwrap())
-            .unwrap_or(Point::Origin);
+        // A cursor with no hash is `ChainPoint::Slot`, which the pallas
+        // conversion refuses — and it refuses with `()`, so an `unwrap` here
+        // would panic saying nothing at all. The state reaches that shape when
+        // a crash lands between the epoch-start commit, which sets the cursor
+        // to the boundary slot alone, and the boundary block's own commit right
+        // after it. `export::plan` refuses the same state first, as an
+        // unanchored point, so the driver ordinarily fails there rather than
+        // here; this says the same thing `seed_wal` says, for the path that
+        // reaches it anyway.
+        let point: Point = match cursor {
+            None => Point::Origin,
+            Some(cursor) => {
+                let slot = cursor.slot();
+
+                cursor.try_into().map_err(|_| {
+                    miette::miette!(
+                        "state cursor at slot {slot} has no block hash, cannot walk the \
+                         immutable db from it"
+                    )
+                })?
+            }
+        };
 
         let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
             &self.immutable_dir,
