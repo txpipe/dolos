@@ -20,6 +20,7 @@ use rand::Rng;
 
 use dolos_core::*;
 
+pub mod archive;
 pub mod blocks;
 pub mod faults;
 pub mod synthetic;
