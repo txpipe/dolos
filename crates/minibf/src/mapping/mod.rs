@@ -137,7 +137,7 @@ impl RatioFormat for Unrounded {
     }
 }
 
-const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
+pub const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
