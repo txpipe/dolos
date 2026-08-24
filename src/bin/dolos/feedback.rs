@@ -259,21 +259,56 @@ impl Progress for SteleProgress {
 
             Event::Records(moved) => self.records.inc(moved),
 
-            // Per blob, not per run: the total a run will move is not knowable
-            // up front on the publish side — a layer's compressed size exists
-            // only once it has been compressed — so a cumulative bar would show
-            // a length that grew as it filled.
+            // A running total rather than a bar per blob. A publish moves
+            // several layers at once, so "the blob in flight" is not a single
+            // thing and a bar reset here would be eight uploads overwriting
+            // each other; what an operator is watching is the link. The total
+            // grows as the transfer takes blobs on, which is what makes the
+            // rate and the estimate honest without the transport having to know
+            // the whole stele's weight up front.
             Event::Blob { moved, bytes } => {
-                self.blob.set_position(0);
-                self.blob.set_length(bytes);
+                self.blob.inc_length(bytes);
 
-                match moved {
-                    true => self.blob.set_message(""),
-                    false => self.blob.set_message("already in the registry"),
+                // Counted as done the moment it is announced: nothing will
+                // cross the wire for it, and a bar whose total grew by bytes
+                // that are never coming would stall a little further from the
+                // end with every blob the far side already held.
+                if !moved {
+                    self.blob.inc(bytes);
                 }
             }
 
-            Event::Bytes(moved) => self.blob.inc(moved),
+            // The total is held to at least the position rather than trusted
+            // to bound it. A round trip the registry failed is made again from
+            // the blob's first byte, and what the lost attempt moved is bytes
+            // that crossed the wire — so the deltas can outrun the
+            // announcements by however far the failure got. Taking the total up
+            // to meet them is what the bar means: the link carried that much.
+            Event::Bytes(moved) => {
+                self.blob.inc(moved);
+
+                let position = self.blob.position();
+
+                if self.blob.length().is_some_and(|total| total < position) {
+                    self.blob.set_length(position);
+                }
+            }
+
+            // Said out loud rather than absorbed. The whole point of retrying
+            // is that the run survives a registry's bad minute, and the whole
+            // risk of retrying is that nobody finds out it had one — a `500`
+            // per hour is a fact about the registry, and it reaches an operator
+            // through the run log or not at all.
+            Event::Retry {
+                attempt,
+                remaining,
+                reason,
+            } => tracing::warn!(
+                attempt,
+                remaining,
+                reason,
+                "the registry failed a round trip; making it again",
+            ),
         }
     }
 }
@@ -343,26 +378,71 @@ mod tests {
         assert_eq!(progress.layers.length(), Some(4));
     }
 
+    /// The byte bar totals the run, and a blob nothing moves for is counted
+    /// done rather than pending.
+    ///
+    /// The interleaving is the point of the first half: two blobs are announced
+    /// before either finishes, exactly as a concurrent publish announces them,
+    /// and the deltas that follow belong to whichever of the two produced them.
+    /// A bar that reset per blob would answer 40 here.
     #[test]
-    fn a_blob_bar_is_per_blob_and_a_skip_moves_nothing() {
+    fn the_byte_bar_totals_the_run_across_blobs_in_flight() {
         let progress = hidden("publishing");
 
         progress.on(Event::Blob {
             moved: true,
             bytes: 300,
         });
+        progress.on(Event::Blob {
+            moved: true,
+            bytes: 100,
+        });
+
         progress.on(Event::Bytes(120));
         progress.on(Event::Bytes(180));
+        progress.on(Event::Bytes(100));
 
-        assert_eq!(progress.blob.position(), 300);
-        assert_eq!(progress.blob.length(), Some(300));
+        assert_eq!(progress.blob.position(), 400);
+        assert_eq!(progress.blob.length(), Some(400));
 
+        // And a blob the far side already holds lands on both sides at once, so
+        // the bar stays where it was rather than falling behind by its size.
         progress.on(Event::Blob {
             moved: false,
             bytes: 50,
         });
 
-        assert_eq!(progress.blob.position(), 0);
-        assert_eq!(progress.blob.length(), Some(50));
+        assert_eq!(progress.blob.position(), 450);
+        assert_eq!(progress.blob.length(), Some(450));
+    }
+
+    /// A blob the registry failed part way through is sent again from its first
+    /// byte, so the deltas outrun the announcement — and the total goes up to
+    /// meet them rather than the bar sitting past its own end.
+    ///
+    /// The arithmetic is the point: 120 bytes of a 300-byte blob went out
+    /// before the round trip died, the retry sent all 300, and 420 bytes really
+    /// did cross the wire for a blob that was announced once.
+    #[test]
+    fn a_retried_blob_takes_the_total_up_to_what_the_link_carried() {
+        let progress = hidden("publishing");
+
+        progress.on(Event::Blob {
+            moved: true,
+            bytes: 300,
+        });
+
+        progress.on(Event::Bytes(120));
+
+        progress.on(Event::Retry {
+            attempt: 1,
+            remaining: 3,
+            reason: "the registry said 500",
+        });
+
+        progress.on(Event::Bytes(300));
+
+        assert_eq!(progress.blob.position(), 420);
+        assert_eq!(progress.blob.length(), Some(420));
     }
 }
