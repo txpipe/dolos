@@ -124,9 +124,6 @@ serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
 stelae = { path = "crates/stelae" }
 
-[build-dependencies]
-vergen-gitcl = "9.1.0"
-
 [[bench]]
 name = "archive_backends"
 harness = false
