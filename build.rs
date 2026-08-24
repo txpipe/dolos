@@ -77,10 +77,8 @@ fn revision(manifest_dir: &str) -> (String, bool) {
 }
 
 fn main() {
-    // Cargo reads these from the environment of *this* process, so they
-    // describe the build actually running. The `env!` equivalents would be
-    // baked into the build script binary, which is itself cached across
-    // worktrees — the very staleness this script exists to avoid.
+    // Read from this process's environment, not via `env!` — that would bake the
+    // values into the build-script binary, which is itself cached across worktrees.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let package_version = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
