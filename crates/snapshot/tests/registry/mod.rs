@@ -177,10 +177,18 @@ pub fn registry() -> Vec<Entry> {
             enc_dreps,
             DRepState,
             canaries::drep_state,
-            &[Pinned {
-                rev: 1,
-                hex: include_str!("goldens/dreps.rev1.hex"),
-            }]
+            // Revision 2 appends `first_seen_at` (index 9); revision 1 rows
+            // predate the field and must keep decoding.
+            &[
+                Pinned {
+                    rev: 1,
+                    hex: include_str!("goldens/dreps.rev1.hex"),
+                },
+                Pinned {
+                    rev: 2,
+                    hex: include_str!("goldens/dreps.rev2.hex"),
+                },
+            ]
         ),
         entity_entry!(
             enc_epochs,

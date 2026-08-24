@@ -12,16 +12,20 @@ use tracing::{debug, warn};
 use super::FixedNamespace as _;
 use crate::pallas_extras;
 
-pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
-    let bytes = match value {
+/// Raw single-prefix-byte encoding of a DRep identity — the bytes the entity
+/// key pads and the hex the API renders.
+pub fn drep_encoded_bytes(value: &DRep) -> Vec<u8> {
+    match value {
         DRep::Key(key) => [vec![pallas_extras::DREP_KEY_PREFIX], key.to_vec()].concat(),
         DRep::Script(key) => [vec![pallas_extras::DREP_SCRIPT_PREFIX], key.to_vec()].concat(),
         // Invented keys for convenience
         DRep::Abstain => vec![0],
         DRep::NoConfidence => vec![1],
-    };
+    }
+}
 
-    EntityKey::from(bytes)
+pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
+    EntityKey::from(drep_encoded_bytes(value))
 }
 
 /// Epoch-based DRep expiry, stored exactly as the Haskell ledger stores
@@ -116,6 +120,13 @@ pub struct DRepState {
     // anything else.
     #[n(8)]
     pub expiry: Option<DRepExpiry>,
+
+    // Backward-compatible addition: absent in pre-existing rows, decodes as
+    // `None`. First on-chain reference by any certificate, vote delegations
+    // included; mirrors db-sync's `drep_hash` insertion order. Index 9 must
+    // not be reused for anything else.
+    #[n(9)]
+    pub first_seen_at: Option<(BlockSlot, TxOrder)>,
 }
 
 impl DRepState {
@@ -130,6 +141,7 @@ impl DRepState {
             identifier,
             anchor: None,
             expiry: None,
+            first_seen_at: None,
         }
     }
 
@@ -178,6 +190,7 @@ pub(crate) mod testing {
             deposit in root::any_lovelace(),
             anchor in prop::option::of(root::any_anchor()),
             expiry in prop::option::of(any_drep_expiry()),
+            first_seen_at in prop::option::of((root::any_slot(), root::any_tx_order())),
         ) -> DRepState {
             DRepState {
                 identifier,
@@ -189,6 +202,7 @@ pub(crate) mod testing {
                 deposit,
                 anchor,
                 expiry,
+                first_seen_at,
             }
         }
     }
@@ -321,6 +335,70 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
         state.voting_power = self.prev_voting_power.unwrap_or(0);
         state.unregistered_at = self.prev_unregistered_at;
         state.deposit = self.prev_deposit.unwrap_or(0);
+    }
+}
+
+/// Records the first on-chain appearance of a DRep, creating the entity if it
+/// doesn't exist yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DRepSeen {
+    pub(crate) drep: DRep,
+    pub(crate) slot: BlockSlot,
+    pub(crate) txorder: TxOrder,
+
+    // undo
+    pub(crate) prev_first_seen_at: Option<(BlockSlot, TxOrder)>,
+    pub(crate) was_new: bool,
+}
+
+impl DRepSeen {
+    pub fn new(drep: DRep, slot: BlockSlot, txorder: TxOrder) -> Self {
+        Self {
+            drep,
+            slot,
+            txorder,
+            prev_first_seen_at: None,
+            was_new: false,
+        }
+    }
+}
+
+impl dolos_core::EntityDelta for DRepSeen {
+    type Entity = DRepState;
+
+    fn key(&self) -> NsKey {
+        NsKey::from((DRepState::NS, drep_to_entity_key(&self.drep)))
+    }
+
+    fn apply(&mut self, entity: &mut Option<DRepState>) {
+        self.was_new = entity.is_none();
+
+        let entity = entity.get_or_insert_with(|| DRepState::new(self.drep.clone()));
+
+        // save undo info
+        self.prev_first_seen_at = entity.first_seen_at;
+
+        // only the earliest sighting counts; a legacy row can predate this
+        // field, so its lifecycle stamps are earlier on-chain references than
+        // any new sighting
+        if entity.first_seen_at.is_none() {
+            entity.first_seen_at = [
+                entity.registered_at,
+                entity.unregistered_at,
+                Some((self.slot, self.txorder)),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+        }
+    }
+
+    fn undo(&self, entity: &mut Option<DRepState>) {
+        if self.was_new {
+            *entity = None;
+        } else if let Some(state) = entity {
+            state.first_seen_at = self.prev_first_seen_at;
+        }
     }
 }
 
@@ -771,6 +849,16 @@ mod prop_tests {
         }
     }
 
+    prop_compose! {
+        fn any_drep_seen()(
+            drep in root::any_drep(),
+            slot in root::any_slot(),
+            txorder in root::any_tx_order(),
+        ) -> DRepSeen {
+            DRepSeen::new(drep, slot, txorder)
+        }
+    }
+
     proptest! {
         #[test]
         fn drep_registration_roundtrip(
@@ -867,6 +955,56 @@ mod prop_tests {
         ) {
             root::assert_delta_serde_roundtrip(entity, delta);
         }
+
+        #[test]
+        fn drep_seen_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_seen(),
+        ) {
+            assert_delta_roundtrip(entity, delta);
+        }
+
+        #[test]
+        fn drep_seen_serde_roundtrip(
+            entity in prop::option::of(any_drep_state()),
+            delta in any_drep_seen(),
+        ) {
+            root::assert_delta_serde_roundtrip(entity, delta);
+        }
+    }
+
+    #[test]
+    fn drep_seen_keeps_earliest_sighting() {
+        use dolos_core::EntityDelta as _;
+
+        let drep = DRep::Key([1u8; 28].into());
+        let mut entity = None;
+
+        DRepSeen::new(drep.clone(), 100, 3).apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 3)));
+
+        // a later sighting must not move the first appearance
+        DRepSeen::new(drep, 200, 1).apply(&mut entity);
+        assert_eq!(entity.unwrap().first_seen_at, Some((100, 3)));
+    }
+
+    #[test]
+    fn drep_seen_backfills_legacy_rows_from_lifecycle_stamps() {
+        use dolos_core::EntityDelta as _;
+
+        // a row written before `first_seen_at` existed: the registration is
+        // an earlier on-chain reference than the sighting that backfills it
+        let drep = DRep::Key([1u8; 28].into());
+        let mut legacy = DRepState::new(drep.clone());
+        legacy.registered_at = Some((100, 0));
+        let mut entity = Some(legacy);
+
+        let mut seen = DRepSeen::new(drep, 200, 0);
+        seen.apply(&mut entity);
+        assert_eq!(entity.as_ref().unwrap().first_seen_at, Some((100, 0)));
+
+        seen.undo(&mut entity);
+        assert_eq!(entity.unwrap().first_seen_at, None);
     }
 }
 
@@ -1002,9 +1140,9 @@ mod compat_tests {
     use super::*;
 
     /// Replica of the on-disk `DRepState` shape before the phase-3 expiry
-    /// addition (indexes 0..=7). Encoding this and decoding it as the
-    /// current `DRepState` proves that pre-existing rows keep decoding,
-    /// with the new field empty.
+    /// and first-seen additions (indexes 0..=7). Encoding this and decoding
+    /// it as the current `DRepState` proves that pre-existing rows keep
+    /// decoding, with the new fields empty.
     #[derive(Debug, Encode, Decode, Clone, PartialEq, Eq)]
     struct LegacyDRepState {
         #[n(0)]
@@ -1033,7 +1171,7 @@ mod compat_tests {
     }
 
     #[test]
-    fn legacy_rows_decode_with_expiry_empty() {
+    fn legacy_rows_decode_with_new_fields_empty() {
         let legacy = LegacyDRepState {
             registered_at: Some((1234, 2)),
             voting_power: 500_000_000,
@@ -1060,6 +1198,7 @@ mod compat_tests {
         assert_eq!(decoded.identifier, legacy.identifier);
         assert_eq!(decoded.anchor, legacy.anchor);
         assert_eq!(decoded.expiry, None);
+        assert_eq!(decoded.first_seen_at, None);
     }
 
     #[test]
@@ -1071,6 +1210,7 @@ mod compat_tests {
             updated_in: 500,
             prev: Some(510),
         });
+        state.first_seen_at = Some((100, 1));
 
         let bytes = minicbor::to_vec(&state).unwrap();
         let decoded: DRepState = minicbor::decode(&bytes).unwrap();
