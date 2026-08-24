@@ -1997,7 +1997,14 @@ fn a_verified_carry_refuses_a_blob_the_repository_does_not_hold() {
 /// blobs happened to land in.
 ///
 /// Two repositories in one registry rather than two registries, so the
-/// comparison is not also comparing two servers.
+/// comparison is not also comparing two servers — with the one consequence
+/// that the *counters* cannot be compared to each other. `zot` addresses
+/// blobs across the whole registry rather than per repository, as
+/// [`a_verified_carry_refuses_a_blob_the_repository_does_not_hold`] documents
+/// at more length, so on that registry the second publish skips what the first
+/// one uploaded. What is asserted instead is the property that holds on either
+/// kind and is the one worth having: every layer and every byte the stele
+/// describes is accounted for, whichever way the registry answered.
 #[test]
 #[ignore = "spawns a registry"]
 fn concurrency_changes_the_cost_of_a_publish_and_not_the_stele() {
@@ -2027,11 +2034,29 @@ fn concurrency_changes_the_cost_of_a_publish_and_not_the_stele() {
         "the manifests differ",
     );
 
+    // The serial publish is the first into this registry, so nothing can have
+    // been there before it: two layers, both uploaded.
+    let counted = serial.transfer();
+
+    assert_eq!(counted.layers_uploaded, one.layers.len() as u64);
+    assert_eq!(counted.layers_skipped, 0);
+
+    // And the concurrent one accounts for exactly the same layers and the same
+    // bytes, however the registry split them between "uploaded" and "the far
+    // side already had it".
+    let against = concurrent.transfer();
+
     assert_eq!(
-        serial.transfer(),
-        concurrent.transfer(),
-        "the transfers differ",
+        against.layers_uploaded + against.layers_skipped,
+        counted.layers_uploaded + counted.layers_skipped,
+        "a layer went unaccounted for",
     );
+    assert_eq!(
+        against.bytes_uploaded + against.bytes_skipped,
+        counted.bytes_uploaded + counted.bytes_skipped,
+        "the bytes do not add up",
+    );
+    assert_eq!(against.layers_reused, 0, "nothing was carried forward");
 
     // And it reads back, which is the property the manifest exists to serve.
     let inscription = from_concurrent.read_inscription().unwrap();
