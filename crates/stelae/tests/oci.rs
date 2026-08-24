@@ -2193,6 +2193,16 @@ fn a_deferred_upload_that_fails_fails_every_seal() {
         .seal(&ToyProfile, &inscription)
         .expect_err("sealed against a port nothing is listening on");
 
+    // The *cause*, not the sticky refusal — and asserting which way round that
+    // is, is the point. `LayerNotWritten` is what every seal *after* this one
+    // answers; a first seal that reported it would have thrown away what the
+    // network actually said, leaving an operator to debug a connection failure
+    // from a message about a layer.
+    assert!(
+        matches!(refused, Error::Registry(_)),
+        "the first seal reported the refusal instead of its cause: {refused:?}",
+    );
+
     println!("the seal collected the deferred failure: {refused}");
 
     // And it is remembered: nothing is outstanding any more, so a transport
