@@ -29,7 +29,10 @@ fn git(args: &[&str]) -> Option<String> {
 
 #[test]
 fn stamped_revision_names_the_tree_it_was_built_from() {
-    if std::env::var("DOLOS_GIT_SHA").is_ok() {
+    // Not `env::var("DOLOS_GIT_SHA")`: cargo puts the stamp itself into this
+    // process's environment, so that guard holds for every build and skips the
+    // whole test. The marker exists only when an override really happened.
+    if option_env!("DOLOS_GIT_SHA_OVERRIDDEN").is_some() {
         eprintln!("skipped: the revision was overridden via DOLOS_GIT_SHA");
         return;
     }

@@ -24,6 +24,13 @@ use std::process::Command;
 /// source archive, or a pipeline that already knows the commit it checked out.
 const REVISION_OVERRIDE: &str = "DOLOS_GIT_SHA";
 
+/// Emitted only when [`REVISION_OVERRIDE`] supplied the revision. The stamp
+/// itself cannot carry that fact: cargo puts every `rustc-env` variable into
+/// the environment of the executables it runs, so a test asking whether
+/// `DOLOS_GIT_SHA` is set sees the stamp and concludes every build was
+/// overridden. This marker is absent unless an override really happened.
+const OVERRIDE_MARKER: &str = "DOLOS_GIT_SHA_OVERRIDDEN";
+
 /// Runs `git` in the package directory, returning its trimmed stdout on
 /// success. Any failure — no git, no repository, no commit — is `None`, which
 /// the caller turns into `unknown` rather than into a guess.
@@ -42,28 +49,31 @@ fn git(manifest_dir: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// The revision to stamp: the override if one is set, else `HEAD` abbreviated
+/// The revision to stamp, and whether it came from [`REVISION_OVERRIDE`]
+/// rather than from git: the override if one is set, else `HEAD` abbreviated
 /// to eight characters, suffixed `-dirty` when tracked files differ from it.
-fn revision(manifest_dir: &str) -> String {
+fn revision(manifest_dir: &str) -> (String, bool) {
     if let Ok(sha) = std::env::var(REVISION_OVERRIDE) {
         if !sha.trim().is_empty() {
-            return sha.trim().to_owned();
+            return (sha.trim().to_owned(), true);
         }
     }
 
     let Some(sha) =
         git(manifest_dir, &["rev-parse", "--short=8", "HEAD"]).filter(|s| !s.is_empty())
     else {
-        return "unknown".to_owned();
+        return ("unknown".to_owned(), false);
     };
 
-    match git(
+    let sha = match git(
         manifest_dir,
         &["status", "--porcelain", "--untracked-files=no"],
     ) {
         Some(status) if !status.is_empty() => format!("{sha}-dirty"),
         _ => sha,
-    }
+    };
+
+    (sha, false)
 }
 
 fn main() {
@@ -79,8 +89,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", never_created.display());
     println!("cargo:rerun-if-env-changed={REVISION_OVERRIDE}");
 
-    let revision = revision(&manifest_dir);
+    let (revision, overridden) = revision(&manifest_dir);
 
-    println!("cargo:rustc-env=DOLOS_GIT_SHA={revision}");
+    println!("cargo:rustc-env={REVISION_OVERRIDE}={revision}");
     println!("cargo:rustc-env=DOLOS_VERSION={package_version} ({revision})");
+
+    if overridden {
+        println!("cargo:rustc-env={OVERRIDE_MARKER}=1");
+    }
 }
