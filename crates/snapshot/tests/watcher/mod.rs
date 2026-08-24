@@ -52,6 +52,14 @@ struct Stream {
     records: u64,
     blobs: Vec<Blob>,
     bytes: u64,
+    /// Round trips the transport made again after the registry failed one.
+    ///
+    /// Recorded because it is the one thing that unpicks the byte cross-check
+    /// below: a re-sent blob crosses the wire twice and is counted once, so a
+    /// run that retried moved more bytes than it uploaded. Against these
+    /// fixtures it is always zero, and a suite that asserts that is a suite
+    /// that would notice a retry loop firing where nothing failed.
+    retries: usize,
     /// Anything the *driver* reported after the last layer closed — which is
     /// nothing, and checking it is how a record delta escaping into the gap
     /// between layers gets caught.
@@ -145,6 +153,8 @@ impl Progress for Watcher {
             Event::Blob { moved, bytes } => stream.blobs.push(Blob { moved, bytes }),
 
             Event::Bytes(moved) => stream.bytes += moved,
+
+            Event::Retry { .. } => stream.retries += 1,
         }
     }
 }
@@ -192,6 +202,11 @@ impl Watcher {
     /// Compressed bytes the transport said crossed the wire.
     pub fn bytes(&self) -> u64 {
         self.0.lock().unwrap().bytes
+    }
+
+    /// Round trips the registry failed and the transport made again.
+    pub fn retries(&self) -> usize {
+        self.0.lock().unwrap().retries
     }
 
     /// Blobs the transport handled, by whether anything moved for them.

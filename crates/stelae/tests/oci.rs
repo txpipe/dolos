@@ -103,6 +103,7 @@ use stelae::{
         build_manifest, manifest_bytes, read_manifest, Auth, Options, Registry, DIFF_ID_ANNOTATION,
         KIND_ANNOTATION, SCOPE_ANNOTATION,
     },
+    progress::{Event, Observer, Progress},
     Compression, Digest, Error, HistoryEntry, Inscription, LayerDigests, LayerSpec, Profile,
     RecordSink, SteleReader, SteleWriter, WrittenLayer,
 };
@@ -2129,6 +2130,13 @@ fn a_publish_dropped_mid_flight_leaves_the_previous_stele_standing() {
 ///    transport must never write, and it is exactly the document a concurrent
 ///    publish makes reachable — so the refusal is remembered rather than
 ///    recomputed.
+/// 3. **The failure was retried first, and said so.** A connection nobody
+///    answers is the transient class, so the round trip is made again before it
+///    is anybody's failure — and the retry is announced, because a transport
+///    that absorbed a registry's bad minute in silence would have hidden the
+///    measurement that motivated absorbing it. Two attempts here rather than
+///    the default four, so the test proves the loop runs without waiting out
+///    the whole of its patience.
 #[test]
 fn a_deferred_upload_that_fails_fails_every_seal() {
     let _serial = exclusive();
@@ -2147,10 +2155,14 @@ fn a_deferred_upload_that_fails_fails_every_seal() {
         Options {
             insecure: true,
             concurrency: 4,
+            attempts: 2,
             ..Default::default()
         },
     )
     .unwrap();
+
+    let retries = std::sync::Arc::new(Retries::default());
+    registry.observe(Observer::new(retries.clone()));
 
     let (header, scope) = notes_scope(1);
     let notes: Vec<CanonicalCbor> = (1..=3).map(note_record).collect();
@@ -2204,6 +2216,37 @@ fn a_deferred_upload_that_fails_fails_every_seal() {
     assert!(!why.is_empty(), "the refusal names no cause");
 
     println!("and every seal after it: {again}");
+
+    // One round trip was deferred — the existence check for the one layer — and
+    // it was made twice. The second seal had nothing outstanding to retry, so
+    // this also says the sticky refusal is answered without touching the
+    // network again.
+    assert_eq!(
+        retries.seen(),
+        vec![(1, 1)],
+        "a refused connection was not retried before the layer was declared lost",
+    );
+}
+
+/// What a transport said about the round trips it made again.
+#[derive(Default)]
+struct Retries(Mutex<Vec<(u32, u32)>>);
+
+impl Progress for Retries {
+    fn on(&self, event: Event<'_>) {
+        if let Event::Retry {
+            attempt, remaining, ..
+        } = event
+        {
+            self.0.lock().unwrap().push((attempt, remaining));
+        }
+    }
+}
+
+impl Retries {
+    fn seen(&self) -> Vec<(u32, u32)> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 /// The annotation map is a `BTreeMap`, so the canonical JSON above is not

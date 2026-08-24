@@ -278,7 +278,37 @@ impl Progress for SteleProgress {
                 }
             }
 
-            Event::Bytes(moved) => self.blob.inc(moved),
+            // The total is held to at least the position rather than trusted
+            // to bound it. A round trip the registry failed is made again from
+            // the blob's first byte, and what the lost attempt moved is bytes
+            // that crossed the wire — so the deltas can outrun the
+            // announcements by however far the failure got. Taking the total up
+            // to meet them is what the bar means: the link carried that much.
+            Event::Bytes(moved) => {
+                self.blob.inc(moved);
+
+                let position = self.blob.position();
+
+                if self.blob.length().is_some_and(|total| total < position) {
+                    self.blob.set_length(position);
+                }
+            }
+
+            // Said out loud rather than absorbed. The whole point of retrying
+            // is that the run survives a registry's bad minute, and the whole
+            // risk of retrying is that nobody finds out it had one — a `500`
+            // per hour is a fact about the registry, and it reaches an operator
+            // through the run log or not at all.
+            Event::Retry {
+                attempt,
+                remaining,
+                reason,
+            } => tracing::warn!(
+                attempt,
+                remaining,
+                reason,
+                "the registry failed a round trip; making it again",
+            ),
         }
     }
 }
@@ -384,5 +414,35 @@ mod tests {
 
         assert_eq!(progress.blob.position(), 450);
         assert_eq!(progress.blob.length(), Some(450));
+    }
+
+    /// A blob the registry failed part way through is sent again from its first
+    /// byte, so the deltas outrun the announcement — and the total goes up to
+    /// meet them rather than the bar sitting past its own end.
+    ///
+    /// The arithmetic is the point: 120 bytes of a 300-byte blob went out
+    /// before the round trip died, the retry sent all 300, and 420 bytes really
+    /// did cross the wire for a blob that was announced once.
+    #[test]
+    fn a_retried_blob_takes_the_total_up_to_what_the_link_carried() {
+        let progress = hidden("publishing");
+
+        progress.on(Event::Blob {
+            moved: true,
+            bytes: 300,
+        });
+
+        progress.on(Event::Bytes(120));
+
+        progress.on(Event::Retry {
+            attempt: 1,
+            remaining: 3,
+            reason: "the registry said 500",
+        });
+
+        progress.on(Event::Bytes(300));
+
+        assert_eq!(progress.blob.position(), 420);
+        assert_eq!(progress.blob.length(), Some(420));
     }
 }

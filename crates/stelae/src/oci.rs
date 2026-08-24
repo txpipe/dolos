@@ -103,6 +103,46 @@
 //! filling: at most [`Options::concurrency`] staged layers exist at once,
 //! whatever order the sinks finish in.
 //!
+//! ## A round trip nobody answered is made again
+//!
+//! Concurrency raised the number of round trips in flight; it did nothing about
+//! the ones that fail for no reason and would have worked a second later. Over
+//! eleven hours of the mainnet backfill the registry answered a create-session
+//! `POST` with a bare `500` eight times, each lasting the milliseconds it took
+//! to ask again — and each one cost the whole epoch, because a publish that
+//! could not seal took the driver down with it, and the driver's recovery is to
+//! restore its stores and replay the epoch it lost.
+//!
+//! That is the most expensive recovery in the system, bought for the cheapest
+//! failure there is. So a round trip is **attempted [`Options::attempts`]
+//! times**, with a doubling wait between them, and the failure the caller keeps
+//! is the last attempt's:
+//!
+//! - **a `5xx`** — the registry answered, and what it said was about itself
+//!   rather than about the request. Asking again is the whole remedy;
+//! - **no answer at all** — a connection refused, a request that timed out, a
+//!   socket that went away mid-body.
+//!
+//! Nothing else. A `4xx` is the registry saying something true about *this*
+//! request — the credential, the digest, the name — and repeating it four times
+//! only makes the diagnosis take longer to arrive. `429` is excluded on purpose
+//! and not by omission: a registry rationing this publisher is a fact its
+//! operator has to see, and a client that absorbed it would report the ration
+//! as slowness.
+//!
+//! This is safe to do at every seam because every one of them is idempotent by
+//! construction. A blob is addressed by the digest of its own content, so an
+//! upload that half-happened and an upload that fully happened both converge on
+//! the same blob when it is sent again; a `HEAD` and a manifest `GET` are
+//! reads; and the manifest `PUT` writes bytes that are a pure function of the
+//! stele. The one thing a retry needs and the serial path did not is the
+//! staging file back at its first byte, which is why it is rewound per attempt
+//! rather than consumed once.
+//!
+//! Every retry is announced through [`Event::Retry`], because a transport that
+//! silently absorbed the failure class would have hidden the measurement that
+//! motivated absorbing it.
+//!
 //! ## TLS, and the second rule it comes with
 //!
 //! The client speaks TLS through rustls, built with **no crypto provider wired
@@ -159,6 +199,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
+    time::Duration,
 };
 
 use futures_util::Stream;
@@ -322,6 +363,27 @@ pub struct Transfer {
 /// measured their own.
 pub const DEFAULT_CONCURRENCY: usize = 8;
 
+/// How many times one of a publish's round trips is made before the failure is
+/// the caller's.
+///
+/// Four, and the number is read off the failure it absorbs rather than chosen:
+/// the registry's transient `500`s arrive alone and clear in the time it takes
+/// to ask again, so the first retry is the one that does the work and the rest
+/// are there for the case where it is a second longer than that. Bounded for
+/// the same reason [`crate::Error::LayerNotWritten`] exists — a registry that
+/// is *actually* refusing has to keep refusing, out loud, while whoever
+/// launched the publish is still watching.
+pub const DEFAULT_ATTEMPTS: u32 = 4;
+
+/// How long the transport waits after the first failed attempt; each later wait
+/// doubles it.
+///
+/// Three waits of 500ms, 1s and 2s put the ceiling at three and a half seconds
+/// of patience per round trip — under the cost of one lost epoch by four orders
+/// of magnitude, and small enough that a publish absorbing a handful of them a
+/// night does not show up as a slower publish.
+const RETRY_DELAY: Duration = Duration::from_millis(500);
+
 /// How to reach a registry.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -376,6 +438,18 @@ pub struct Options {
     /// an operator publishing into a registry whose retention they do not
     /// trust.
     pub verify_adopted: bool,
+
+    /// How many times a round trip is made before its failure is the caller's.
+    ///
+    /// Defaults to [`DEFAULT_ATTEMPTS`]. `0` and `1` both mean one attempt and
+    /// no retry — `0` is read as `1` rather than refused, for the reason
+    /// [`Options::concurrency`] reads it that way: a transport that would make
+    /// no attempt at all is not a configuration anybody means.
+    ///
+    /// Only the failures the module documentation lists are retried; a
+    /// registry's refusal of *this* request is never one of them, so raising
+    /// this does not slow down a publish that was going to fail anyway.
+    pub attempts: u32,
 }
 
 impl Default for Options {
@@ -386,6 +460,7 @@ impl Default for Options {
             auth: Auth::default(),
             concurrency: DEFAULT_CONCURRENCY,
             verify_adopted: false,
+            attempts: DEFAULT_ATTEMPTS,
         }
     }
 }
@@ -564,6 +639,8 @@ struct Shared {
     /// beside the semaphore because the semaphore's own count is whatever is
     /// free at the moment it is asked.
     concurrency: usize,
+    /// [`Options::attempts`], as it was resolved.
+    attempts: u32,
 }
 
 #[derive(Default)]
@@ -681,6 +758,7 @@ impl Registry {
                 observer: Mutex::new(Observer::silent()),
                 verify_adopted: options.verify_adopted,
                 concurrency,
+                attempts: options.attempts.max(1),
             }),
         })
     }
@@ -770,11 +848,13 @@ impl Registry {
 
         let reference = self.shared.tagged(tag);
 
-        let (manifest, _digest) = self.shared.runtime.block_on(
-            self.shared
-                .client
-                .pull_image_manifest(&reference, &self.shared.auth),
-        )?;
+        let (manifest, _digest) = self.shared.retrying(|| {
+            Ok(self.shared.runtime.block_on(
+                self.shared
+                    .client
+                    .pull_image_manifest(&reference, &self.shared.auth),
+            )?)
+        })?;
 
         check_envelope(&manifest)?;
 
@@ -1017,6 +1097,175 @@ fn is_absent(error: &oci_client::errors::OciDistributionError) -> bool {
     }
 }
 
+/// Whether a failure is one that asking again can fix.
+///
+/// The counterpart of [`is_absent`], and narrow for the same reason that one
+/// is: a classification that guesses wide turns a registry's considered refusal
+/// into four of them spread over three and a half seconds, and the caller reads
+/// the last copy. Two shapes qualify.
+///
+/// **A `5xx`.** The registry answered, and what it said was about itself. This
+/// is the measured class — the create-session `POST` that returns
+/// `500 INTERNAL_ERROR` and succeeds on the next ask.
+///
+/// **No answer at all.** A connection refused, a request that timed out, a
+/// socket closed mid-body. `oci-client` reports these through `reqwest`
+/// untouched, and [`oci_client::Client::blob_exists`] reports a `5xx` that way
+/// too — it asks `reqwest` for the status rather than mapping it — so both
+/// shapes have to be read out of the same variant.
+///
+/// Everything else propagates on the first attempt:
+///
+/// - **a `4xx`** is the registry saying something true about *this* request.
+///   The credential is wrong, the digest does not match what arrived, the
+///   repository is not there. Repetition does not change any of those, it only
+///   delays the report;
+/// - **`429` in particular**, and that is a decision rather than an oversight.
+///   A registry rationing this publisher is a fact its operator needs, and a
+///   client that waited it out would deliver the ration as unexplained
+///   slowness;
+/// - **anything local** — a staging file that would not read, a manifest that
+///   would not parse. Nothing on the far side is involved and nothing about
+///   waiting helps.
+fn is_transient(error: &Error) -> bool {
+    use oci_client::errors::OciDistributionError as E;
+
+    let Error::Registry(error) = error else {
+        return false;
+    };
+
+    match error {
+        E::ServerError { code, .. } => (500..600).contains(code),
+        E::RequestError(source) => match source.status() {
+            Some(status) => status.is_server_error(),
+            None => source.is_timeout() || source.is_connect() || source.is_request(),
+        },
+        _ => false,
+    }
+}
+
+/// What a bounded retry keeps between attempts: how many are left, and how long
+/// the next wait is.
+///
+/// A value rather than a loop because there are two loops — one on the caller's
+/// thread around a `block_on`, one inside a deferred task around an `await` —
+/// and the decision they share is this and not the sleeping. Splitting it here
+/// is what keeps the policy in one place while each loop waits the way its own
+/// thread has to.
+struct Backoff {
+    attempted: u32,
+    attempts: u32,
+    delay: Duration,
+}
+
+impl Backoff {
+    fn new(attempts: u32, delay: Duration) -> Self {
+        Self {
+            attempted: 0,
+            attempts: attempts.max(1),
+            delay,
+        }
+    }
+
+    /// How long to wait before making the round trip again, or `None` if this
+    /// failure is the caller's.
+    ///
+    /// Announces the retry it is about to allow, before the wait rather than
+    /// after it, so a watcher hears about a registry misbehaving while it is
+    /// still misbehaving.
+    fn wait_after(&mut self, error: &Error, observer: &Observer) -> Option<Duration> {
+        self.attempted += 1;
+
+        let remaining = self.attempts - self.attempted;
+
+        if remaining == 0 || !is_transient(error) {
+            return None;
+        }
+
+        observer.emit(Event::Retry {
+            attempt: self.attempted,
+            remaining,
+            reason: &error.to_string(),
+        });
+
+        let waiting = self.delay;
+        self.delay = self.delay.saturating_mul(2);
+
+        Some(waiting)
+    }
+}
+
+/// Run a round trip on the caller's thread, making it again while
+/// [`is_transient`] says it is worth it.
+///
+/// `op` does its own `block_on` and is run from a thread that is not the
+/// transport's runtime — the rule the module documentation states — so the wait
+/// is a plain thread sleep. `op` is called again from scratch, which is what
+/// puts any resetting a second attempt needs inside it rather than around it.
+fn retrying<T>(
+    attempts: u32,
+    observer: &Observer,
+    mut op: impl FnMut() -> Result<T, Error>,
+) -> Result<T, Error> {
+    let mut backoff = Backoff::new(attempts, RETRY_DELAY);
+
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) => match backoff.wait_after(&error, observer) {
+                Some(waiting) => std::thread::sleep(waiting),
+                None => return Err(error),
+            },
+        }
+    }
+}
+
+/// [`retrying`], for a round trip already inside the runtime.
+///
+/// The deferred layer tasks, where the wait must yield the worker rather than
+/// hold it: a thread sleeping here is one of [`Options::concurrency`] threads,
+/// and parking it would stall an upload that has nothing wrong with it.
+///
+/// `op` returns a future that owns everything it touches, for the reason
+/// [`Shared::defer`] gives — and here for a second one: a future that borrowed
+/// the closure could not be built twice.
+async fn retrying_async<T, F, Fut>(
+    attempts: u32,
+    observer: &Observer,
+    mut op: F,
+) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Error>>,
+{
+    let mut backoff = Backoff::new(attempts, RETRY_DELAY);
+
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(error) => match backoff.wait_after(&error, observer) {
+                Some(waiting) => tokio::time::sleep(waiting).await,
+                None => return Err(error),
+            },
+        }
+    }
+}
+
+/// A staging file, back at its first byte and ready to be streamed.
+///
+/// A `dup` rather than the file itself, because a stream consumes what it is
+/// given and a second attempt has to read the same bytes again. The two
+/// descriptors share an offset, so the seek here is what rewinds *the* file
+/// however many handles are outstanding — which is sound because only one
+/// attempt of one layer ever reads it at a time.
+fn rewound(staged: &File) -> Result<File, Error> {
+    let mut again = staged.try_clone()?;
+
+    again.seek(SeekFrom::Start(0))?;
+
+    Ok(again)
+}
+
 /// A staged file, created where [`Options::scratch_dir`] said.
 ///
 /// Both calls that can fail against a *named* directory raise
@@ -1083,11 +1332,23 @@ impl Shared {
         scratch_in(self.scratch_dir.as_deref())
     }
 
+    /// [`retrying`], with this transport's own bound and observer.
+    ///
+    /// Every round trip made on a caller's thread goes through here, so the
+    /// policy is stated once and no seam is left out by having been written
+    /// before the policy existed.
+    fn retrying<T>(&self, op: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+        retrying(self.attempts, &self.observer(), op)
+    }
+
     fn blob_exists(&self, digest: &Digest) -> Result<bool, Error> {
-        Ok(self.runtime.block_on(
-            self.client
-                .blob_exists(&self.repository, &digest.to_string()),
-        )?)
+        let named = digest.to_string();
+
+        self.retrying(|| {
+            Ok(self
+                .runtime
+                .block_on(self.client.blob_exists(&self.repository, &named))?)
+        })
     }
 
     /// Take a permit, on the caller's thread.
@@ -1135,6 +1396,12 @@ impl Shared {
     /// itself; every call after it reports [`Error::LayerNotWritten`], because
     /// the handles are gone and a join that found nothing outstanding would
     /// otherwise read as "everything landed".
+    ///
+    /// A failure that arrives here has already been retried — each round trip
+    /// was made [`Options::attempts`] times while its staged bytes were still
+    /// in hand, which is the only moment at which the transport can do anything
+    /// about it. So what reaches this point is a registry that means it, and
+    /// permanence is the right answer to it rather than a harsh one.
     fn join_layers(&self) -> Result<(), Error> {
         let handles: Vec<_> = std::mem::take(
             &mut *self
@@ -1194,6 +1461,7 @@ impl Shared {
         let digest = layer.digests.blob_digest;
         let size = layer.digests.compressed_size;
         let observer = self.observer();
+        let attempts = self.attempts;
 
         self.locked().pending.push(layer.clone());
 
@@ -1205,7 +1473,16 @@ impl Shared {
             let _permit = permit;
             let named = digest.to_string();
 
-            if client.blob_exists(&repository, &named).await? {
+            let present = retrying_async(attempts, &observer, || {
+                let client = client.clone();
+                let repository = repository.clone();
+                let named = named.clone();
+
+                async move { Ok(client.blob_exists(&repository, &named).await?) }
+            })
+            .await?;
+
+            if present {
                 // Announced even though nothing moves: "the registry already
                 // had this one" is the blob-skip working, and a watcher that
                 // only heard about uploads would read the whole point of a
@@ -1225,14 +1502,38 @@ impl Shared {
             // Before the upload rather than after it, so a watcher knows how
             // big the transfer it is about to see is while it is still
             // happening.
+            //
+            // Once, however many attempts the upload takes. What a lost attempt
+            // moved is bytes that crossed the wire and are not coming back, so
+            // the deltas can outrun this announcement — which is a fact about
+            // the link, and [`Event::Bytes`] says so where a renderer will read
+            // it.
             observer.emit(Event::Blob {
                 moved: true,
                 bytes: size,
             });
 
-            client
-                .push_blob_stream(&repository, blob_stream(staged, observer), &named)
-                .await?;
+            // The staged bytes are still in hand here, which is the whole
+            // reason this is the right place for the retry: past the join the
+            // layer's only copy is the store it was built from, and the
+            // recovery costs a publish. Rewound per attempt, because the stream
+            // consumes the handle it is given.
+            retrying_async(attempts, &observer, || {
+                let client = client.clone();
+                let repository = repository.clone();
+                let named = named.clone();
+                let observer = observer.clone();
+                let staged = rewound(&staged);
+
+                async move {
+                    client
+                        .push_blob_stream(&repository, blob_stream(staged?, observer), &named)
+                        .await?;
+
+                    Ok(())
+                }
+            })
+            .await?;
 
             let mut state = lock(&state);
             state.transfer.layers_uploaded += 1;
@@ -1255,12 +1556,26 @@ impl Shared {
 
         let client = self.client.clone();
         let repository = self.repository.clone();
+        let observer = self.observer();
+        let attempts = self.attempts;
 
         self.defer(async move {
             let _permit = permit;
             let named = blob.to_string();
 
-            match client.blob_exists(&repository, &named).await? {
+            // The retry is over the round trip and not over the verdict: a
+            // registry that answered "no" answered, and asking a second time is
+            // how a publisher talks itself into carrying a blob that is gone.
+            let present = retrying_async(attempts, &observer, || {
+                let client = client.clone();
+                let repository = repository.clone();
+                let named = named.clone();
+
+                async move { Ok(client.blob_exists(&repository, &named).await?) }
+            })
+            .await?;
+
+            match present {
                 true => Ok(()),
                 false => Err(Error::BlobMissing {
                     kind,
@@ -1278,13 +1593,22 @@ impl Shared {
             return Ok(());
         }
 
-        self.runtime.block_on(self.client.push_blob(
-            &self.repository,
-            bytes,
-            &digest.to_string(),
-        ))?;
+        let named = digest.to_string();
 
-        Ok(())
+        // Into `Bytes` once, so an attempt after the first re-sends the
+        // document rather than re-allocating it: this is the inscription, and
+        // the clone a retry costs should be a refcount.
+        let bytes = bytes::Bytes::from(bytes);
+
+        self.retrying(|| {
+            self.runtime.block_on(self.client.push_blob(
+                &self.repository,
+                bytes.clone(),
+                &named,
+            ))?;
+
+            Ok(())
+        })
     }
 
     /// Fetch a small blob into memory, bounded by the size its descriptor
@@ -1302,16 +1626,26 @@ impl Shared {
         // No observer: the config blob is the inscription, not a layer, and a
         // watcher summing byte deltas against a layer total would find them
         // disagreeing by however large the document is.
-        self.runtime.block_on(self.client.pull_blob(
-            reference,
-            descriptor,
-            Blocking::new(
-                &mut buffer,
-                descriptor.size,
-                &descriptor.digest,
-                Observer::silent(),
-            ),
-        ))?;
+        self.retrying(|| {
+            // Emptied rather than reused, so a second attempt writes the
+            // document and not the document twice. `Blocking` counts from zero
+            // per attempt for the same reason, which it gets by being built
+            // here.
+            buffer.clear();
+
+            self.runtime.block_on(self.client.pull_blob(
+                reference,
+                descriptor,
+                Blocking::new(
+                    &mut buffer,
+                    descriptor.size,
+                    &descriptor.digest,
+                    Observer::silent(),
+                ),
+            ))?;
+
+            Ok(())
+        })?;
 
         Ok(buffer)
     }
@@ -1337,11 +1671,27 @@ impl Shared {
             bytes: descriptor.size.max(0) as u64,
         });
 
-        self.runtime.block_on(self.client.pull_blob(
-            reference,
-            descriptor,
-            Blocking::new(&mut file, descriptor.size, &descriptor.digest, observer),
-        ))?;
+        self.retrying(|| {
+            // Back to empty before each attempt, for the reason a staged layer
+            // is rewound before each of its own: what a half-finished download
+            // left behind is not a prefix of what the next one writes, it is
+            // bytes in front of it.
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+
+            self.runtime.block_on(self.client.pull_blob(
+                reference,
+                descriptor,
+                Blocking::new(
+                    &mut file,
+                    descriptor.size,
+                    &descriptor.digest,
+                    observer.clone(),
+                ),
+            ))?;
+
+            Ok(())
+        })?;
 
         file.seek(SeekFrom::Start(0))?;
 
@@ -1457,6 +1807,11 @@ impl SteleWriter for Registry {
     /// recovery is another publish rather than another seal. Retrying the seal
     /// is what would produce the one document this transport must never
     /// write — see [`Shared::join_layers`].
+    ///
+    /// Which is why the retry that *can* help is not here but inside the round
+    /// trip, where the staging file has not been spent yet: by the time a
+    /// failure reaches this join it has already been asked
+    /// [`Options::attempts`] times.
     fn seal(&self, profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
         // Both tags before either push. Validating the moving tag after the
         // sequence manifest is already public would make a bad tag something
@@ -1507,13 +1862,15 @@ impl Shared {
     fn push_manifest(&self, tag: &str, body: Vec<u8>) -> Result<(), Error> {
         let reference = self.tagged(tag);
 
-        self.runtime.block_on(self.client.push_manifest_raw(
-            &reference,
-            body,
-            http::HeaderValue::from_static(OCI_IMAGE_MEDIA_TYPE),
-        ))?;
+        self.retrying(|| {
+            self.runtime.block_on(self.client.push_manifest_raw(
+                &reference,
+                body.clone(),
+                http::HeaderValue::from_static(OCI_IMAGE_MEDIA_TYPE),
+            ))?;
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -2110,6 +2467,196 @@ mod tests {
         assert!(is_absent(&server_error(404)));
         assert!(is_absent(&envelope(OciErrorCode::ManifestUnknown)));
         assert!(is_absent(&envelope(OciErrorCode::NameUnknown)));
+    }
+
+    /// A `reqwest` error carrying a status, which is how
+    /// [`oci_client::Client::blob_exists`] reports one.
+    ///
+    /// There is no constructor for one, so it is provoked: a response with the
+    /// status, asked to fail on it. Built on the transport's own runtime kind
+    /// rather than in an async test, because this module's rule is that its
+    /// types are used from synchronous code.
+    fn request_error(code: u16) -> OciDistributionError {
+        let response = http::Response::builder()
+            .status(code)
+            .body(Vec::new())
+            .unwrap();
+
+        let refused = reqwest::Response::from(response)
+            .error_for_status()
+            .expect_err("a status the builder was given was not an error");
+
+        OciDistributionError::RequestError(refused)
+    }
+
+    /// The two shapes worth asking again about, and the several that are not.
+    #[test]
+    fn a_transient_failure_is_the_registry_talking_about_itself() {
+        // The measured class: the create-session `POST` that answers 500 and
+        // works on the next ask.
+        assert!(is_transient(&Error::Registry(server_error(500))));
+        assert!(is_transient(&Error::Registry(server_error(502))));
+        assert!(is_transient(&Error::Registry(server_error(503))));
+
+        // And the same thing seen through `blob_exists`, which asks `reqwest`
+        // for the status instead of mapping it.
+        assert!(is_transient(&Error::Registry(request_error(500))));
+
+        // A refusal of *this* request is not. Repeating it only delays the
+        // report, and `429` is deliberately among them: a registry rationing
+        // this publisher is something its operator has to be told.
+        assert!(!is_transient(&Error::Registry(server_error(400))));
+        assert!(!is_transient(&Error::Registry(server_error(404))));
+        assert!(!is_transient(&Error::Registry(server_error(429))));
+        assert!(!is_transient(&Error::Registry(request_error(429))));
+        assert!(!is_transient(&Error::Registry(envelope(
+            OciErrorCode::DigestInvalid
+        ))));
+        assert!(!is_transient(&Error::Registry(
+            OciDistributionError::UnauthorizedError {
+                url: "https://registry.invalid/v2/".to_owned(),
+            }
+        )));
+
+        // Nor is anything that never involved the far side. A staging file that
+        // would not read reads the same the second time.
+        assert!(!is_transient(&Error::Io(std::io::Error::other("staging"))));
+        assert!(!is_transient(&Error::LayerNotWritten("earlier".to_owned())));
+    }
+
+    /// A recorder for what the retry loop announced.
+    #[derive(Default)]
+    struct Retries(Mutex<Vec<(u32, u32)>>);
+
+    impl crate::progress::Progress for Retries {
+        fn on(&self, event: Event<'_>) {
+            if let Event::Retry {
+                attempt, remaining, ..
+            } = event
+            {
+                self.0.lock().unwrap().push((attempt, remaining));
+            }
+        }
+    }
+
+    /// The loop with the waits taken out, so the bound can be exercised without
+    /// waiting out a real backoff.
+    fn retried<T>(
+        attempts: u32,
+        observer: &Observer,
+        mut op: impl FnMut() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut backoff = Backoff::new(attempts, Duration::ZERO);
+
+        loop {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(error) => match backoff.wait_after(&error, observer) {
+                    Some(_) => continue,
+                    None => return Err(error),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_that_succeeds_is_made_once() {
+        let mut calls = 0;
+
+        let value = retried(4, &Observer::silent(), || {
+            calls += 1;
+            Ok(7u8)
+        })
+        .unwrap();
+
+        assert_eq!(value, 7);
+        assert_eq!(calls, 1, "a success must not be retried");
+    }
+
+    /// The whole point: the registry's bad half-second costs a half-second and
+    /// not an epoch.
+    #[test]
+    fn a_transient_failure_is_absorbed() {
+        let watcher = Arc::new(Retries::default());
+        let observer = Observer::new(watcher.clone());
+
+        let mut calls = 0;
+
+        let value = retried(4, &observer, || {
+            calls += 1;
+
+            match calls < 3 {
+                true => Err(Error::Registry(server_error(500))),
+                false => Ok(calls),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(value, 3);
+        assert_eq!(calls, 3);
+
+        // And it said so both times, counting the failures up and the patience
+        // down, so a watcher can tell a hiccup from a transport about to give
+        // up.
+        assert_eq!(*watcher.0.lock().unwrap(), vec![(1, 3), (2, 2)]);
+    }
+
+    /// Bounded, so a registry that is wrong rather than flaky still fails —
+    /// and fails as itself, with what it actually said.
+    #[test]
+    fn patience_runs_out_and_the_last_failure_is_the_one_reported() {
+        let watcher = Arc::new(Retries::default());
+        let observer = Observer::new(watcher.clone());
+
+        let mut calls = 0;
+
+        let refused = retried(4, &observer, || {
+            calls += 1;
+            Err::<(), _>(Error::Registry(server_error(500)))
+        })
+        .expect_err("a registry that never answered was treated as having answered");
+
+        assert_eq!(calls, 4, "the bound is attempts, not retries");
+        assert!(matches!(refused, Error::Registry(_)));
+
+        // Three retries for four attempts, and nothing announced for the last
+        // failure — there was no next attempt to announce.
+        assert_eq!(*watcher.0.lock().unwrap(), vec![(1, 3), (2, 2), (3, 1)]);
+    }
+
+    /// A refusal of this request is reported the first time it is made.
+    #[test]
+    fn a_refusal_of_this_request_is_not_retried() {
+        let watcher = Arc::new(Retries::default());
+        let observer = Observer::new(watcher.clone());
+
+        let mut calls = 0;
+
+        let refused = retried(4, &observer, || {
+            calls += 1;
+            Err::<(), _>(Error::Registry(envelope(OciErrorCode::DigestInvalid)))
+        })
+        .expect_err("a digest the registry rejected was retried");
+
+        assert_eq!(calls, 1, "a refusal must cost one round trip");
+        assert!(matches!(refused, Error::Registry(_)));
+        assert!(watcher.0.lock().unwrap().is_empty());
+    }
+
+    /// `0` attempts is one attempt, for the reason `0` concurrency is one
+    /// permit: a transport that would make no attempt at all is not a
+    /// configuration anybody means.
+    #[test]
+    fn no_attempts_at_all_is_still_one_attempt() {
+        let mut calls = 0;
+
+        let refused = retried(0, &Observer::silent(), || {
+            calls += 1;
+            Err::<(), _>(Error::Registry(server_error(500)))
+        });
+
+        assert_eq!(calls, 1);
+        assert!(refused.is_err());
     }
 
     fn repository(raw: &str) -> Result<Repository, Error> {

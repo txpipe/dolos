@@ -92,11 +92,12 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 # One runtime, owned by the transport and entered with `block_on` at each call,
 # so the protocol stays synchronous. See `oci.rs`.
 #
-# `sync` is named here and not at the workspace root because it is this crate's
-# need and nobody else's: the publish path bounds its concurrent layer round
-# trips with a `Semaphore`, and the permit is what also bounds how many staged
-# layers can exist at once.
-tokio = { workspace = true, optional = true, features = ["sync"] }
+# `sync` and `time` are named here and not at the workspace root because they
+# are this crate's need and nobody else's: the publish path bounds its
+# concurrent layer round trips with a `Semaphore`, and the permit is what also
+# bounds how many staged layers can exist at once, while a round trip the
+# registry answered with a `5xx` waits out a backoff before it is made again.
+tokio = { workspace = true, optional = true, features = ["sync", "time"] }
 # `push_blob_stream` takes a `Stream`, which is how a layer is uploaded from
 # its staging file without ever being held.
 futures-util = { workspace = true, optional = true }

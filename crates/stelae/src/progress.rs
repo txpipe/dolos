@@ -206,7 +206,35 @@ pub enum Event<'a> {
     /// that is uploading eight layers at once reports one stream of deltas,
     /// because the thing an operator is watching is the link and not one of the
     /// eight.
+    ///
+    /// **These can total more than the blobs announced.** A round trip the
+    /// registry failed is made again from the blob's first byte, and the bytes
+    /// the lost attempt moved were still moved — see [`Event::Retry`]. So a
+    /// renderer keeping a running total holds the total to at least the
+    /// position rather than assuming the announcements bound it; what it is
+    /// reporting is the link, and the link carried them.
     Bytes(u64),
+
+    /// A round trip that failed in a way the transport answered by making it
+    /// again.
+    ///
+    /// Emitted before the wait, once per attempt that was thrown away, and it
+    /// is the only trace a retry leaves: a transport that quietly absorbed a
+    /// registry's `5xx` would turn "this registry is unwell" into "publishes
+    /// got slower", which is the diagnosis nobody can act on. A publisher's
+    /// business is to make progress anyway; an operator's is to know it had
+    /// to.
+    ///
+    /// `attempt` is the one that just failed, counting from one; `remaining` is
+    /// how many are left after it, so a watcher can tell a hiccup from a
+    /// transport about to give up. `reason` is the failure as it rendered
+    /// itself, because what an operator reads is the binary's business and not
+    /// this crate's.
+    Retry {
+        attempt: u32,
+        remaining: u32,
+        reason: &'a str,
+    },
 }
 
 #[cfg(test)]

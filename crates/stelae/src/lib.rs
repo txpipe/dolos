@@ -290,6 +290,11 @@ pub enum Error {
     /// went with the round trip that lost it, and the bytes only exist in the
     /// store the publisher built them from.
     ///
+    /// The retry that *could* have undone it already happened, inside the round
+    /// trip and while the staging was still in hand — see
+    /// [`oci::Options::attempts`]. So a failure that gets this far is one the
+    /// registry repeated.
+    ///
     /// So the recovery is a new publish, not another seal. Carrying the string
     /// rather than the error keeps the original readable across the many later
     /// calls that report it, which is the whole reason this variant exists

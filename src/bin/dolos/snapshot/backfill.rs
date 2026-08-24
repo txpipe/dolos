@@ -32,10 +32,21 @@
 //! architecture absorbs a transient failure correctly and expensively: the
 //! preprod G1 run took four such exits in two hours and kept publishing, at
 //! ~40% of its throughput, each incident paying a restore, a window
-//! re-download and the in-flight epoch's re-replay. The patience is bounded
-//! at [`common::retry_transient`](crate::common::retry_transient)'s four
-//! attempts, so an aggregator that is wrong rather than flaky still fails,
-//! and fails while an operator is watching.
+//! re-download and the in-flight epoch's re-replay. The mainnet run measured
+//! the same shape on the other external — eight transient registry `500`s in
+//! eleven hours, each costing an epoch, ~7% of the night's wall clock spent
+//! redoing work over a failure class that lasts milliseconds. The patience is
+//! bounded at [`common::retry_transient`](crate::common::retry_transient)'s
+//! four attempts, so an aggregator that is wrong rather than flaky still
+//! fails, and fails while an operator is watching.
+//!
+//! The publish is retried *in place*, and that is the cheap recovery rather
+//! than a second copy of the expensive one. The transport's own answer to a
+//! layer it could not move is that the recovery is another publish — so this
+//! loop performs one, from stores that are intact and consistent at that point
+//! and a resumption record that carries forward every layer the failed attempt
+//! already got up. What the alternative buys is the same publish, after a pod
+//! restart, a registry restore and a full epoch re-replay.
 //!
 //! This module is orchestration only: it composes the mithril fetch, the
 //! import lifecycle, and the publish path `snapshot publish --repo` uses, and
@@ -352,12 +363,15 @@ impl Driver<'_> {
     /// that it only reads, so fjall has no flush of ours to drain — which is
     /// the whole reason `extend` shuts its domain down after a bulk import.
     ///
-    /// Nothing in the publish observes [`Self::cancel`], either: a stele goes
-    /// out over minutes of store walking and uploading with no seam to check
-    /// a token at, so a signal arriving here is answered at the top of the
+    /// Nothing *inside* the publish observes [`Self::cancel`]: a stele goes out
+    /// over minutes of store walking and uploading with no seam to check a
+    /// token at, so a signal arriving mid-publish is answered at the top of the
     /// next loop. The window is wide by construction and the crash-safety the
     /// module doc describes is what covers it — a SIGKILL through a publish
-    /// costs a store reopen and the in-flight epoch, and never a gap.
+    /// costs a store reopen and the in-flight epoch, and never a gap. The one
+    /// seam that does exist is *between* attempts, which is where the retry
+    /// below polls it: a shutdown during a backoff ends the run on the failure
+    /// in hand rather than after the remaining patience.
     fn publish_pending(&self) -> miette::Result<Step> {
         let stores = crate::common::open_data_stores(self.config)
             .into_diagnostic()
@@ -423,7 +437,24 @@ impl Driver<'_> {
             },
         };
 
-        super::publish::to_repository(self.config, &publish, &plan, &stores, self.feedback)?;
+        // Retried here rather than allowed to end the process, because the
+        // process ending is the most expensive recovery this driver has and a
+        // transient `500` is the cheapest failure it sees. Nothing about the
+        // publish is spent by an attempt that failed: `to_repository` opens its
+        // own transport, the stores it reads are untouched, and the resumption
+        // record beside them means the layers that did land are carried forward
+        // instead of rebuilt. So the second attempt is a fraction of the first,
+        // where a restart would pay for the epoch twice.
+        //
+        // The shutdown token is observed between attempts — the only seam in
+        // the whole publish where it can be, per this method's own note — so a
+        // SIGTERM arriving during a backoff ends the run on the failure in hand
+        // rather than after the remaining patience.
+        crate::common::retry_transient(
+            "publishing the pending sequence",
+            &|| self.cancel.is_cancelled(),
+            || super::publish::to_repository(self.config, &publish, &plan, &stores, self.feedback),
+        )?;
 
         if self
             .args

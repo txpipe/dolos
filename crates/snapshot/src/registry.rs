@@ -313,6 +313,12 @@ pub fn open(
             auth,
             concurrency: tuning.concurrency.map_or(DEFAULT_CONCURRENCY, Into::into),
             verify_adopted: tuning.verify_adopted,
+            // Not an operator's knob and deliberately not one: the number that
+            // absorbs a registry's transient `5xx` is the transport's own
+            // measurement, and an outage longer than it is answered a level up,
+            // where `snapshot backfill` re-runs the whole publish rather than
+            // dying into a pod restart.
+            attempts: stelae::oci::DEFAULT_ATTEMPTS,
         },
     )?)
 }
