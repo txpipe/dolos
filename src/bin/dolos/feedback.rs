@@ -259,10 +259,6 @@ impl Progress for SteleProgress {
 
             Event::Records(moved) => self.records.inc(moved),
 
-            // Per blob, not per run: the total a run will move is not knowable
-            // up front on the publish side — a layer's compressed size exists
-            // only once it has been compressed — so a cumulative bar would show
-            // a length that grew as it filled.
             // A running total rather than a bar per blob. A publish moves
             // several layers at once, so "the blob in flight" is not a single
             // thing and a bar reset here would be eight uploads overwriting

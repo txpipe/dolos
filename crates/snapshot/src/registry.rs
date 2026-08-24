@@ -919,11 +919,6 @@ pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
             None => peak.unsized_layers += 1,
             // Every state layer adds — the conservative sum-all-state rule the
             // type documents.
-            //
-            // Saturating because these are a manifest's numbers and a manifest
-            // is not this node's document: a wrapped sum would be a *small*
-            // need, which is the one direction a refusal must never be wrong
-            // in.
             Some(bytes) if crate::is_state_kind(&descriptor.kind) => {
                 peak.state_bytes = peak.state_bytes.saturating_add(bytes)
             }
