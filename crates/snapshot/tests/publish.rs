@@ -857,10 +857,10 @@ fn a_publisher_can_ask_where_it_stands() {
 /// in `registry`'s own unit tests, which need no registry to decide it.
 ///
 /// The peak is deliberately not the stele's size. A publish holds all sixteen
-/// shard sinks open across one walk of the store plus whatever epoch layer is
-/// in flight beside them, and never the whole document, so an operator sizing
-/// a scratch volume off the repository's total would size it for a run that
-/// never happens.
+/// shard sinks open across one walk of the store plus as many finished layers
+/// as the transport is uploading at once beside them, and never the whole
+/// document, so an operator sizing a scratch volume off the repository's total
+/// would size it for a run that never happens.
 #[test]
 #[ignore]
 fn a_publish_sizes_its_staging_off_the_stele_before_it() {
@@ -899,7 +899,7 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
     let inspected = registry::inspect(&repository, registry::Point::Latest).unwrap();
 
     let mut state_bytes = 0;
-    let mut largest_other_bytes = 0;
+    let mut others = Vec::new();
 
     for (descriptor, size) in inspected
         .inscription
@@ -912,35 +912,77 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
         if is_state_kind(&descriptor.kind) {
             state_bytes += size;
         } else {
-            largest_other_bytes = std::cmp::max(largest_other_bytes, size);
+            others.push(size);
         }
     }
 
-    assert_eq!(peak.state_bytes, state_bytes, "every state layer summed");
-    assert_eq!(
-        peak.largest_other_bytes, largest_other_bytes,
-        "and the largest single layer beside them"
-    );
-    assert_eq!(peak.bytes(), state_bytes + largest_other_bytes);
+    others.sort_unstable_by(|a, b| b.cmp(a));
 
-    // Epoch 0's other two layers are in the stele and not in the peak, which is
-    // the whole difference between what a repository holds and what a publish
-    // holds at once.
+    assert_eq!(peak.state_bytes, state_bytes, "every state layer summed");
+
+    // As many non-state layers as the transport uploads at once, because each
+    // holds its staging file until its own round trip lands — capped by how
+    // many the stele has. Read off the transport, not off a literal that would
+    // drift from the default.
+    let concurrency = stelae::oci::Registry::concurrency(&repository);
+    let staged = others.len().min(concurrency);
+
+    assert_eq!(
+        peak.concurrent_other_bytes,
+        others[..staged],
+        "the largest {staged} of the {} layers beside the state pass",
+        others.len(),
+    );
+
+    assert_eq!(
+        peak.largest_other_bytes(),
+        others[0],
+        "and the first of them is the largest",
+    );
+
+    assert_eq!(
+        peak.bytes(),
+        state_bytes + others[..staged].iter().sum::<u64>(),
+    );
+
+    // Never more than the repository holds: the publish stages a subset of the
+    // stele, which is the whole difference between what a repository holds and
+    // what a publish holds at once. Equality here is this fixture's stele
+    // having fewer epoch layers than the transport has permits — a mainnet
+    // stele has hundreds — so the claim is stated as the bound it is.
     assert!(
-        peak.bytes() < inspected.total_compressed,
-        "peak {} is not below the stele's {} compressed bytes",
+        peak.bytes() <= inspected.total_compressed,
+        "peak {} is above the stele's {} compressed bytes",
         peak.bytes(),
         inspected.total_compressed,
     );
+
+    // And a transport that uploads one at a time stages exactly one of them
+    // beside the pass, which is the arrangement this check was first written
+    // for and the floor the concurrent one is measured against.
+    let serial = fixture.repository_tuned(
+        "dolos/staging",
+        registry_fixture::credentials(),
+        registry::Tuning {
+            concurrency: std::num::NonZeroUsize::new(1),
+            verify_adopted: false,
+        },
+    );
+
+    let alone = registry::staging_peak(&serial).unwrap().unwrap();
+
+    assert_eq!(alone.bytes(), state_bytes + others[0]);
+    assert!(alone.bytes() < inspected.total_compressed);
 
     // And the volume the fixture stages on holds it, so the publish that
     // follows is not refused.
     registry::preflight(&repository).unwrap();
 
     eprintln!(
-        "staging peak: {} bytes ({state_bytes} across sixteen shards, {largest_other_bytes} for \
-         the largest other layer), against {} compressed bytes in the repository",
+        "staging peak: {} bytes ({state_bytes} across sixteen shards, {:?} for the {staged} \
+         largest layers beside them), against {} compressed bytes in the repository",
         peak.bytes(),
+        peak.concurrent_other_bytes,
         inspected.total_compressed,
     );
 }

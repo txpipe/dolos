@@ -2,8 +2,8 @@
 //!
 //! What makes this worth having rather than a `Vec` per test: the assertions
 //! below are about the stream's *shape* — every layer opens once and closes
-//! once, the positions are exactly `0..total`, nothing is reported after the
-//! last layer closes — and those hold for a publish and a restore alike. A
+//! once, the positions are exactly `0..total`, the driver reports nothing after
+//! the last layer closes — and those hold for a publish and a restore alike. A
 //! suite that only checked the numbers it happened to care about would let a
 //! second emitter added later report a layer twice without anything noticing.
 //!
@@ -52,9 +52,18 @@ struct Stream {
     records: u64,
     blobs: Vec<Blob>,
     bytes: u64,
-    /// Anything reported after the last layer closed — which is nothing, and
-    /// checking it is how a byte delta escaping into the gap between layers
-    /// gets caught.
+    /// Anything the *driver* reported after the last layer closed — which is
+    /// nothing, and checking it is how a record delta escaping into the gap
+    /// between layers gets caught.
+    ///
+    /// The driver's events only, because the transport's are no longer in step
+    /// with them and are not meant to be: a publish uploads a layer's blob
+    /// concurrently with the driver building the next one, so a blob announced
+    /// or a byte moved after the last layer closed is the publish still
+    /// finishing rather than an emitter that has lost its place. What holds for
+    /// those is that they have all arrived by the time the operation returns,
+    /// and the totals below — cross-checked against `Transfer` — are what says
+    /// so.
     trailing: usize,
     /// Layers of each kind open right now, and the most that were ever open at
     /// once. A driver that holds several open across one walk of a store — the
@@ -133,21 +142,9 @@ impl Progress for Watcher {
                 stream.records += moved;
             }
 
-            Event::Blob { moved, bytes } => {
-                if stream.settled() {
-                    stream.trailing += 1;
-                }
+            Event::Blob { moved, bytes } => stream.blobs.push(Blob { moved, bytes }),
 
-                stream.blobs.push(Blob { moved, bytes });
-            }
-
-            Event::Bytes(moved) => {
-                if stream.settled() {
-                    stream.trailing += 1;
-                }
-
-                stream.bytes += moved;
-            }
+            Event::Bytes(moved) => stream.bytes += moved,
         }
     }
 }
@@ -271,7 +268,7 @@ impl Watcher {
 
         assert_eq!(
             stream.trailing, 0,
-            "records or bytes were reported after the last layer closed"
+            "records were reported after the last layer closed"
         );
 
         let open: Vec<(&String, &usize)> =

@@ -63,6 +63,20 @@ pub struct Args {
     #[arg(long, value_name = "EPOCHS")]
     index_band: Option<std::num::NonZeroUsize>,
 
+    /// how many layer round trips to run at once against the repository; a
+    /// publish is a few hundred small transfers and its wall clock is their
+    /// latency, not their bytes. Defaults to 8; `1` is the strictly serial
+    /// path, for a registry that answers concurrency badly
+    #[arg(long, value_name = "N", conflicts_with = "output_dir")]
+    concurrency: Option<std::num::NonZeroUsize>,
+
+    /// check that the repository still holds every layer carried forward from
+    /// the previous stele, instead of trusting the manifest that names them.
+    /// One round trip per carried layer, so the cost grows with the history
+    /// behind the stele; for a repository whose blob retention you do not trust
+    #[arg(long, action, conflicts_with = "output_dir")]
+    verify_carried: bool,
+
     /// report what would be written and exit
     #[arg(long, action)]
     dry_run: bool,
@@ -105,6 +119,10 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 rebuild: args.rebuild,
                 dry_run: args.dry_run,
                 require_new: args.require_new,
+                tuning: registry::Tuning {
+                    concurrency: args.concurrency,
+                    verify_adopted: args.verify_carried,
+                },
             };
 
             to_repository(config, &publish, &plan, &stores, feedback)
@@ -139,6 +157,9 @@ pub(super) struct RepositoryPublish<'a> {
 
     /// Fail when the repository is already at this node's sequence.
     pub require_new: bool,
+
+    /// How the publish moves: concurrency, and the carried-layer check.
+    pub tuning: registry::Tuning,
 }
 
 fn to_directory(
@@ -208,7 +229,7 @@ pub(super) fn to_repository(
 
     let scratch = crate::common::stele_scratch_dir(&config.storage, publish.scratch_dir);
 
-    let registry = registry::open(repo, publish.insecure, auth, scratch)
+    let registry = registry::open(repo, publish.insecure, auth, scratch, publish.tuning)
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -455,11 +476,13 @@ mod tests {
         assert_eq!(progress.layers_length(), Some(PER_PUBLISH as u64));
         assert_eq!(progress.records_position(), 53_000);
 
-        // The last blob was one the registry already held, so the byte bar sits
-        // at zero over its stated size rather than carrying the previous
-        // layer's total forward.
-        assert_eq!(progress.blob_position(), 0);
-        assert_eq!(progress.blob_length(), Some(512));
+        // Everything the publish took on is accounted for: the three layers
+        // that were uploaded, byte for byte, and the ones the registry already
+        // held, counted done the moment they were announced.
+        let skipped = (PER_PUBLISH as u64 - 3) * 512;
+
+        assert_eq!(progress.blob_position(), 3 * 4_096 + skipped);
+        assert_eq!(progress.blob_length(), Some(3 * 4_096 + skipped));
 
         assert_eq!(moved, 3 * 4_096);
 

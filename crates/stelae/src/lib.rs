@@ -280,6 +280,24 @@ pub enum Error {
         blob: String,
     },
 
+    /// A seal asked again of a transport whose layers did not all land.
+    ///
+    /// The publish path moves its layers concurrently and joins them at the
+    /// seal, so a layer's failure is reported *there* — once, as itself, with
+    /// whatever the registry or the network actually said. This is what every
+    /// seal after that one answers, and it is a refusal rather than a retry
+    /// because the failure is not one the transport can undo: a layer's staging
+    /// went with the round trip that lost it, and the bytes only exist in the
+    /// store the publisher built them from.
+    ///
+    /// So the recovery is a new publish, not another seal. Carrying the string
+    /// rather than the error keeps the original readable across the many later
+    /// calls that report it, which is the whole reason this variant exists
+    /// instead of a second copy of the cause.
+    #[cfg(feature = "oci")]
+    #[error("this publish cannot be sealed: a layer never reached the repository ({0})")]
+    LayerNotWritten(String),
+
     /// A repository name an operator gave that cannot address a repository.
     ///
     /// Raised while *reading* a name, never while using one, so a caller can

@@ -47,7 +47,10 @@ use std::sync::Arc;
 use clap::Parser;
 use dolos_core::config::RootConfig;
 use dolos_core::{Domain as _, DomainError, ImportExt as _, StateStore as _, WalStore as _};
-use dolos_snapshot::{export, registry::Repository};
+use dolos_snapshot::{
+    export,
+    registry::{self, Repository},
+};
 use indicatif::ProgressBar;
 use itertools::Itertools as _;
 use miette::{bail, Context as _, IntoDiagnostic as _};
@@ -100,6 +103,17 @@ pub struct Args {
     /// `<storage.path>/scratch`
     #[arg(long, value_name = "DIR")]
     scratch_dir: Option<PathBuf>,
+
+    /// how many layer round trips to run at once against the repository; see
+    /// `dolos snapshot publish --concurrency`. Defaults to 8
+    #[arg(long, value_name = "N")]
+    concurrency: Option<std::num::NonZeroUsize>,
+
+    /// check that the repository still holds every layer carried forward from
+    /// the previous stele; see `dolos snapshot publish --verify-carried`. One
+    /// round trip per carried layer, every epoch
+    #[arg(long, action)]
+    verify_carried: bool,
 
     /// directory the mithril immutable files are downloaded into; defaults to
     /// `<storage.path>/mithril`
@@ -403,6 +417,10 @@ impl Driver<'_> {
             rebuild: false,
             dry_run: false,
             require_new: false,
+            tuning: registry::Tuning {
+                concurrency: self.args.concurrency,
+                verify_adopted: self.args.verify_carried,
+            },
         };
 
         super::publish::to_repository(self.config, &publish, &plan, &stores, self.feedback)?;

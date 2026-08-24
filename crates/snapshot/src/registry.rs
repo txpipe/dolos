@@ -137,6 +137,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
     io::Write as _,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
 };
 
@@ -163,7 +164,7 @@ use stelae::{
 /// [`Auth`] rides along for the same reason: a host resolving its own
 /// credentials should not have to name the protocol crate to say what it
 /// resolved them to.
-pub use stelae::oci::{Auth, Registry, Repository, SCHEME};
+pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 
 use crate::{
     export::{self, history_for, same_network, Plan, Predecessor, Standing},
@@ -290,14 +291,19 @@ where
 /// `scratch_dir` is where layers are staged, in both directions. The transport
 /// creates it when the first layer needs it, so it need not exist yet.
 ///
+/// `tuning` is the publish path's concurrency and the one check an operator may
+/// want back; [`Tuning::default`] is what every caller that is not publishing
+/// wants.
+///
 /// **Never call any of this from inside an async context.** The transport owns
-/// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
-/// module documentation states the rule and the reason.
+/// a runtime and enters it with `block_on`; `stelae::oci`'s module
+/// documentation states the rule and the reason.
 pub fn open(
     repository: &Repository,
     insecure: bool,
     auth: Auth,
     scratch_dir: PathBuf,
+    tuning: Tuning,
 ) -> Result<Registry, Error> {
     Ok(Registry::open(
         repository,
@@ -305,8 +311,30 @@ pub fn open(
             insecure,
             scratch_dir: Some(scratch_dir),
             auth,
+            concurrency: tuning.concurrency.map_or(DEFAULT_CONCURRENCY, Into::into),
+            verify_adopted: tuning.verify_adopted,
         },
     )?)
+}
+
+/// What an operator may set about *how* a publish moves, as against where it
+/// goes.
+///
+/// Separated from [`open`]'s other arguments because it is the only one of them
+/// a caller can leave alone: a repository, a credential and a staging directory
+/// are facts a publish cannot be run without, and these two are a default and
+/// an escape hatch. A restore or an inspection passes [`Tuning::default`] and
+/// means it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Tuning {
+    /// How many layer round trips run at once; `None` is
+    /// [`DEFAULT_CONCURRENCY`].
+    pub concurrency: Option<NonZeroUsize>,
+
+    /// Re-prove that the registry still holds each blob carried forward out of
+    /// the predecessor's manifest. See [`stelae::oci::Options::verify_adopted`]
+    /// for why this is off.
+    pub verify_adopted: bool,
 }
 
 /// Where a publish is going, and what the host running it knows about itself.
@@ -813,15 +841,26 @@ pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
 /// once. What it does have at once is a state kind's pass, which keeps that
 /// kind's shard sinks open across a single walk of its namespace — see
 /// [`crate::export`] for why sixteen passes over `utxos` is the alternative —
-/// plus whatever epoch layer is in flight beside it. Summing *every* state
+/// plus whatever epoch layers are in flight beside it. Summing *every* state
 /// layer rather than the widest kind's is deliberately conservative: the peak
 /// it prices is the pre-split one, an upper bound on any per-kind pass.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// "Epoch layers beside it" is a handful and not one, because the transport
+/// uploads concurrently: a layer's staging file lives until its own round trip
+/// lands, so as many finished layers as the transport has permits can sit on
+/// disk at once alongside the pass. How many that is comes from
+/// [`stelae::oci::Registry::concurrency`] — asked of the transport rather than
+/// assumed here — and *which* ones is the largest that many, since the peak is
+/// the worst arrangement and nothing orders the uploads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StagingPeak {
     /// Every state layer, summed — the conservative reading above.
     pub state_bytes: u64,
-    /// The largest single non-state layer, which is staged alongside them.
-    pub largest_other_bytes: u64,
+    /// The non-state layers that can be staged at once, largest first: as many
+    /// as the transport uploads concurrently, or all of them where the stele
+    /// has fewer than that. Empty on a stele that is all state, and on a
+    /// [`StagingPeak::default`] nothing was measured into.
+    pub concurrent_other_bytes: Vec<u64>,
     /// Layers the predecessor's manifest stated no size for. Non-zero makes
     /// every number here a floor rather than an estimate.
     pub unsized_layers: usize,
@@ -829,8 +868,22 @@ pub struct StagingPeak {
 
 impl StagingPeak {
     /// Compressed bytes the scratch volume has to hold at once.
+    ///
+    /// Saturating throughout, because these are a manifest's numbers and a
+    /// manifest is not this node's document: a wrapped sum would be a *small*
+    /// need, which is the one direction a refusal must never be wrong in.
     pub fn bytes(&self) -> u64 {
-        self.state_bytes.saturating_add(self.largest_other_bytes)
+        self.concurrent_other_bytes
+            .iter()
+            .fold(self.state_bytes, |total, bytes| {
+                total.saturating_add(*bytes)
+            })
+    }
+
+    /// The largest non-state layer, which is the first of the ones staged at
+    /// once.
+    pub fn largest_other_bytes(&self) -> u64 {
+        self.concurrent_other_bytes.first().copied().unwrap_or(0)
     }
 }
 
@@ -859,13 +912,13 @@ pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
     let blobs = previous.blob_index()?;
 
     let mut peak = StagingPeak::default();
+    let mut others = Vec::new();
 
     for descriptor in &inscription.layers {
         match previous.compressed_size(&blobs, descriptor)? {
             None => peak.unsized_layers += 1,
             // Every state layer adds — the conservative sum-all-state rule the
-            // type documents. Everything else is one layer at a time beside
-            // them, so only the biggest counts.
+            // type documents.
             //
             // Saturating because these are a manifest's numbers and a manifest
             // is not this node's document: a wrapped sum would be a *small*
@@ -874,9 +927,17 @@ pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
             Some(bytes) if crate::is_state_kind(&descriptor.kind) => {
                 peak.state_bytes = peak.state_bytes.saturating_add(bytes)
             }
-            Some(bytes) => peak.largest_other_bytes = peak.largest_other_bytes.max(bytes),
+            Some(bytes) => others.push(bytes),
         }
     }
+
+    // The largest as many as the transport stages at once, and no more: a stele
+    // with fewer non-state layers than the transport has permits cannot put
+    // more of them on disk than it has.
+    others.sort_unstable_by(|a, b| b.cmp(a));
+    others.truncate(registry.concurrency());
+
+    peak.concurrent_other_bytes = others;
 
     Ok(Some(peak))
 }
@@ -1794,7 +1855,7 @@ mod tests {
         // their sum and not on either alone.
         let err = check(Some(StagingPeak {
             state_bytes: u64::MAX / 2,
-            largest_other_bytes: u64::MAX / 2,
+            concurrent_other_bytes: vec![u64::MAX / 4, u64::MAX / 4],
             unsized_layers: 0,
         }))
         .unwrap_err();

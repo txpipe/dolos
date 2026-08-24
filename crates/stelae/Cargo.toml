@@ -89,9 +89,14 @@ oci-client = { version = "0.17", optional = true, default-features = false }
 reqwest = { version = "0.13", optional = true, default-features = false, features = [
     "rustls-no-provider",
 ] }
-# One current-thread runtime, owned by the transport and entered with
-# `block_on` at each call, so the protocol stays synchronous. See `oci.rs`.
-tokio = { workspace = true, optional = true }
+# One runtime, owned by the transport and entered with `block_on` at each call,
+# so the protocol stays synchronous. See `oci.rs`.
+#
+# `sync` is named here and not at the workspace root because it is this crate's
+# need and nobody else's: the publish path bounds its concurrent layer round
+# trips with a `Semaphore`, and the permit is what also bounds how many staged
+# layers can exist at once.
+tokio = { workspace = true, optional = true, features = ["sync"] }
 # `push_blob_stream` takes a `Stream`, which is how a layer is uploaded from
 # its staging file without ever being held.
 futures-util = { workspace = true, optional = true }

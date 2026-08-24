@@ -31,6 +31,13 @@
 //!   driver reports nothing for the entire duration of a download, which on the
 //!   restore side is the entire operation.
 //!
+//! The two halves are not in step, and on the publish side they are
+//! deliberately not: the transport moves a layer's blob concurrently with the
+//! driver building the next one, so a blob's bytes arrive after the driver has
+//! already closed the layer they belong to. Everything is reported before the
+//! operation returns — that is what the seal's join buys — and nothing about
+//! the order in between is promised.
+//!
 //! The transports answer through [`SteleWriter::observe`] and
 //! [`SteleReader::observe`], which have default no-op bodies: reporting is
 //! something a transport *may* do, not a tax every implementation pays.
@@ -180,11 +187,25 @@ pub enum Event<'a> {
     /// both directions — from the digest pipeline on the way up, from the
     /// manifest on the way down — so a watcher can size the transfer it is
     /// about to see. `moved` is false when nothing will cross the wire because
-    /// the far side already holds it, and no [`Event::Bytes`] follows.
+    /// the far side already holds it, and no [`Event::Bytes`] follows for it.
+    ///
+    /// **Several of these can be outstanding at once, and one is not finished
+    /// when the next arrives.** A publish runs its layer round trips
+    /// concurrently, so what this announces is one more blob the transfer has
+    /// taken on rather than the blob the transfer is now on. A renderer that
+    /// reset a per-blob bar here would show eight uploads fighting over one
+    /// bar; the shape that reads correctly is a running total, and the totals
+    /// are exact because every announced blob is accounted for before the
+    /// operation that announced it returns.
     Blob { moved: bool, bytes: u64 },
 
-    /// Compressed bytes that crossed the wire since the last one of these,
-    /// for the blob the most recent [`Event::Blob`] announced.
+    /// Compressed bytes that crossed the wire since the last one of these.
+    ///
+    /// Across every blob the transport currently has in flight, and not for the
+    /// blob the most recent [`Event::Blob`] announced — see there. A publish
+    /// that is uploading eight layers at once reports one stream of deltas,
+    /// because the thing an operator is watching is the link and not one of the
+    /// eight.
     Bytes(u64),
 }
 

@@ -207,11 +207,24 @@ impl Fixture {
 
     /// The same, with whatever credentials a caller wants to try.
     pub fn repository_as(&self, name: &str, auth: Auth) -> Registry {
+        self.repository_tuned(name, auth, registry::Tuning::default())
+    }
+
+    /// The same again, with the publish path's concurrency named — for a test
+    /// whose subject is how many round trips the transport runs at once.
+    pub fn repository_tuned(&self, name: &str, auth: Auth, tuning: registry::Tuning) -> Registry {
         let repository = format!("oci://127.0.0.1:{}/{name}", self.port)
             .parse()
             .expect("the fixture named a usable repository");
 
-        registry::open(&repository, true, auth, self.scratch.path().to_path_buf()).unwrap()
+        registry::open(
+            &repository,
+            true,
+            auth,
+            self.scratch.path().to_path_buf(),
+            tuning,
+        )
+        .unwrap()
     }
 
     /// Where the transports this fixture opens stage their layers.

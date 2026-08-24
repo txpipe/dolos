@@ -238,7 +238,7 @@ fn restore_repo(
 
     let scratch = crate::common::stele_scratch_dir(&config.storage, scratch_dir);
 
-    let registry = registry::open(repo, insecure, auth, scratch)
+    let registry = registry::open(repo, insecure, auth, scratch, registry::Tuning::default())
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -524,8 +524,12 @@ mod progress_tests {
         assert_eq!(progress.layers_position(), PER_RESTORE as u64);
         assert_eq!(progress.layers_length(), Some(PER_RESTORE as u64));
 
-        assert_eq!(progress.blob_position(), 8_192);
-        assert_eq!(progress.blob_length(), Some(8_192));
+        // A running total over every blob the restore pulled, rather than the
+        // last one's size — see `SteleProgress`.
+        let pulled = (PER_RESTORE as u64 - 1) * 8_192;
+
+        assert_eq!(progress.blob_position(), pulled);
+        assert_eq!(progress.blob_length(), Some(pulled));
 
         assert_eq!(
             progress.records_position(),

@@ -88,9 +88,15 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // than moving a node's own data.
     let scratch = crate::common::stele_scratch_dir(&config.storage, None);
 
-    let registry = registry::open(&args.repo, args.insecure, auth, scratch)
-        .into_diagnostic()
-        .context("opening the repository")?;
+    let registry = registry::open(
+        &args.repo,
+        args.insecure,
+        auth,
+        scratch,
+        registry::Tuning::default(),
+    )
+    .into_diagnostic()
+    .context("opening the repository")?;
 
     let verified = registry::verify(&registry, args.point)
         .into_diagnostic()

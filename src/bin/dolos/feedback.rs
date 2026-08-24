@@ -263,13 +263,22 @@ impl Progress for SteleProgress {
             // up front on the publish side — a layer's compressed size exists
             // only once it has been compressed — so a cumulative bar would show
             // a length that grew as it filled.
+            // A running total rather than a bar per blob. A publish moves
+            // several layers at once, so "the blob in flight" is not a single
+            // thing and a bar reset here would be eight uploads overwriting
+            // each other; what an operator is watching is the link. The total
+            // grows as the transfer takes blobs on, which is what makes the
+            // rate and the estimate honest without the transport having to know
+            // the whole stele's weight up front.
             Event::Blob { moved, bytes } => {
-                self.blob.set_position(0);
-                self.blob.set_length(bytes);
+                self.blob.inc_length(bytes);
 
-                match moved {
-                    true => self.blob.set_message(""),
-                    false => self.blob.set_message("already in the registry"),
+                // Counted as done the moment it is announced: nothing will
+                // cross the wire for it, and a bar whose total grew by bytes
+                // that are never coming would stall a little further from the
+                // end with every blob the far side already held.
+                if !moved {
+                    self.blob.inc(bytes);
                 }
             }
 
@@ -343,26 +352,41 @@ mod tests {
         assert_eq!(progress.layers.length(), Some(4));
     }
 
+    /// The byte bar totals the run, and a blob nothing moves for is counted
+    /// done rather than pending.
+    ///
+    /// The interleaving is the point of the first half: two blobs are announced
+    /// before either finishes, exactly as a concurrent publish announces them,
+    /// and the deltas that follow belong to whichever of the two produced them.
+    /// A bar that reset per blob would answer 40 here.
     #[test]
-    fn a_blob_bar_is_per_blob_and_a_skip_moves_nothing() {
+    fn the_byte_bar_totals_the_run_across_blobs_in_flight() {
         let progress = hidden("publishing");
 
         progress.on(Event::Blob {
             moved: true,
             bytes: 300,
         });
+        progress.on(Event::Blob {
+            moved: true,
+            bytes: 100,
+        });
+
         progress.on(Event::Bytes(120));
         progress.on(Event::Bytes(180));
+        progress.on(Event::Bytes(100));
 
-        assert_eq!(progress.blob.position(), 300);
-        assert_eq!(progress.blob.length(), Some(300));
+        assert_eq!(progress.blob.position(), 400);
+        assert_eq!(progress.blob.length(), Some(400));
 
+        // And a blob the far side already holds lands on both sides at once, so
+        // the bar stays where it was rather than falling behind by its size.
         progress.on(Event::Blob {
             moved: false,
             bytes: 50,
         });
 
-        assert_eq!(progress.blob.position(), 0);
-        assert_eq!(progress.blob.length(), Some(50));
+        assert_eq!(progress.blob.position(), 450);
+        assert_eq!(progress.blob.length(), Some(450));
     }
 }

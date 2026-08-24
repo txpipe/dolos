@@ -57,9 +57,15 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // and this directory is never created here.
     let scratch = crate::common::stele_scratch_dir(&config.storage, None);
 
-    let registry = registry::open(&args.repo, args.insecure, auth, scratch)
-        .into_diagnostic()
-        .context("opening the repository")?;
+    let registry = registry::open(
+        &args.repo,
+        args.insecure,
+        auth,
+        scratch,
+        registry::Tuning::default(),
+    )
+    .into_diagnostic()
+    .context("opening the repository")?;
 
     let inspected = registry::inspect(&registry, args.point)
         .into_diagnostic()
