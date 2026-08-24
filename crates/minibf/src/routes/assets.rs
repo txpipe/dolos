@@ -472,22 +472,45 @@ impl AssetModelBuilder {
     }
 }
 
+/// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars
+/// of asset name. Blockfrost rejects any other shape with 400 before looking
+/// the asset up.
+pub(crate) fn decode_asset_subject(subject: &str) -> Result<Vec<u8>, Error> {
+    if !(56..=120).contains(&subject.len()) {
+        return Err(Error::InvalidAsset);
+    }
+
+    hex::decode(subject).map_err(|_| Error::InvalidAsset)
+}
+
+/// Decodes the subject and loads its state. Blockfrost returns 404 for a
+/// valid but unknown asset.
+fn resolve_asset_state<D>(domain: &Facade<D>, subject: &str) -> Result<(Vec<u8>, AssetState), Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
+{
+    let subject = decode_asset_subject(subject)?;
+
+    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let state = domain
+        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok((subject, state))
+}
+
 pub async fn by_subject<D>(
     Path(unit): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Asset>, StatusCode>
+) -> Result<Json<Asset>, Error>
 where
     Option<AssetState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let (subject, asset_state) = resolve_asset_state(&domain, &unit)?;
 
     let registry_url = domain.config.token_registry_url.clone();
-
-    let asset_state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
-        .ok_or(StatusCode::NOT_FOUND)?;
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
         domain
@@ -520,12 +543,7 @@ where
     Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
-
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(asset.as_slice());
-    if !domain.cardano_entity_exists::<AssetState>(entity_key.as_slice())? {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
+    let (asset, _) = resolve_asset_state(&domain, &subject)?;
 
     let utxoset = domain
         .indexes()
@@ -686,13 +704,7 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
-
-    // Blockfrost returns 404 for a valid but unknown asset, same as `/addresses`.
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
-    if !domain.cardano_entity_exists::<AssetState>(entity_key.as_slice())? {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
+    let (subject, _) = resolve_asset_state(&domain, &subject)?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_asset_stream(
@@ -737,17 +749,22 @@ where
 }
 
 /// Alias of `/assets/{subject}/transactions` that returns only the tx hashes.
-/// Same scan, same pagination, thinner payload.
+/// Same scan, same order/count/page pagination, thinner payload.
 pub async fn by_subject_txs<D>(
     path: Path<String>,
-    params: Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     state: State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<AssetState>: From<D::Entity>,
 {
-    let Json(transactions) = by_subject_transactions(path, params, state).await?;
+    // Blockfrost does not define `from`/`to` for this variant and ignores any
+    // supplied values, so the alias drops them before delegating.
+    params.from = None;
+    params.to = None;
+
+    let Json(transactions) = by_subject_transactions(path, Query(params), state).await?;
 
     let hashes = transactions.into_iter().map(|x| x.tx_hash).collect();
 
@@ -857,8 +874,17 @@ mod tests {
     use blockfrost_openapi::models::asset::Asset;
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
-    fn invalid_asset() -> &'static str {
-        "not-hex-asset"
+    fn invalid_assets() -> Vec<String> {
+        vec![
+            // non-hex characters
+            "not-hex-asset".to_string(),
+            // valid hex, shorter than a policy id
+            "abcd".to_string(),
+            // valid hex, longer than a policy id plus the longest asset name
+            "f".repeat(122),
+            // valid length, non-hex characters
+            "z".repeat(56),
+        ]
     }
 
     fn missing_asset() -> &'static str {
@@ -894,8 +920,10 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_bad_request() {
         let app = TestApp::new();
-        let path = format!("/assets/{}", invalid_asset());
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[tokio::test]
@@ -934,8 +962,10 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_addresses_bad_request() {
         let app = TestApp::new();
-        let path = format!("/assets/{}/addresses", invalid_asset());
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}/addresses");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[tokio::test]
@@ -1059,8 +1089,10 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_transactions_bad_request() {
         let app = TestApp::new();
-        let path = format!("/assets/{}/transactions", invalid_asset());
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}/transactions");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[tokio::test]
@@ -1140,10 +1172,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assets_by_subject_txs_ignores_from_to() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+
+        let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/txs")).await;
+        assert_eq!(status, StatusCode::OK);
+        let all: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+
+        // the range must actually constrain `/transactions`, otherwise the
+        // comparison below proves nothing
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/assets/{asset}/transactions?from={}&to={}",
+                block.block_number, block.block_number
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let constrained: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset transactions");
+        assert!(constrained.len() < all.len());
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/assets/{asset}/txs?from={}&to={}",
+                block.block_number, block.block_number
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let ranged: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+        assert_eq!(ranged, all);
+
+        // a malformed range is ignored as well, never validated
+        let (status, bytes) = app
+            .get_bytes(&format!("/assets/{asset}/txs?from=not-a-number"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let ranged: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+        assert_eq!(ranged, all);
+    }
+
+    #[tokio::test]
     async fn assets_by_subject_txs_bad_request() {
         let app = TestApp::new();
-        let path = format!("/assets/{}/txs", invalid_asset());
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}/txs");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[tokio::test]
