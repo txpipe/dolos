@@ -14,9 +14,8 @@
 //! start is derived from the cursor's chunk file instead, a margin early,
 //! so a restart costs one window rather than the chain so far. The chunk
 //! file's size is read from the chain's own shelley genesis rather than
-//! assumed: a mainnet-sized chunk applied to preview divides by five times
-//! too much and resumes 4096 files early, which is the whole chain over
-//! again in the direction nothing was guarding.
+//! assumed: mainnet's chunk applied to preview is five times too wide and
+//! resumes thousands of files early.
 //!
 //! The reader never opens the highest downloaded file — pallas pops it as
 //! "not really immutable" — so at the aggregator tip the replay stands at
@@ -90,15 +89,12 @@ const IMMUTABLE_FILE_MARGIN: u64 = 2;
 
 /// Slots an immutable chunk file holds per unit of the security parameter:
 /// a chunk is `10k` slots wide. A packaging convention, not a protocol
-/// invariant — stated as the multiplier so the derivation below reads as
-/// the rule rather than as one chain's answer to it.
+/// invariant.
 const SLOTS_PER_SECURITY_PARAM: u64 = 10;
 
 /// Slots per immutable chunk file when the shelley genesis names no
-/// `securityParam`: mainnet's `10k`, which is what every dolos before this
-/// one used on every chain. Guessing *small* is the expensive direction —
-/// it resumes a cold start far behind its own cursor — so an unknown `k`
-/// keeps the old value rather than inventing a smaller one.
+/// `securityParam`: mainnet's `10k`. Guessing small resumes a cold start far
+/// behind its own cursor, so an unknown `k` keeps the old value.
 const FALLBACK_SLOTS_PER_IMMUTABLE_FILE: u64 = 21_600;
 
 /// Where the mithril window lands when the operator names nowhere: beside the
@@ -193,11 +189,7 @@ enum Import {
 ///
 /// Used to pick files safe to delete and, on a cold start whose download dir
 /// is empty, to derive where downloading resumes; never to plan how far a
-/// replay goes. Both uses carry [`IMMUTABLE_FILE_MARGIN`]. The derivation is
-/// no more trusted than the literal it replaces — landing past the cursor's
-/// chunk is still caught by the stalled-window check, and landing far behind
-/// it by [`resume_lag`] — but it is at least asked of the chain being
-/// replayed: mainnet and preprod answer 21600, preview 4320.
+/// replay goes. Both uses carry [`IMMUTABLE_FILE_MARGIN`].
 fn slots_per_immutable_file(genesis: &Genesis) -> u64 {
     genesis
         .shelley
@@ -233,17 +225,11 @@ fn resume_file(
 }
 
 /// Immutable files a resume start sits behind the cursor's own chunk, past
-/// the [`IMMUTABLE_FILE_MARGIN`] the derivation deliberately backs up by, or
-/// `None` when it sits within the margin.
+/// the [`IMMUTABLE_FILE_MARGIN`], or `None` when it sits within the margin.
 ///
-/// Early is the cheap direction in the small — a re-downloaded file's blocks
-/// at or before the cursor are skipped on import — and that cheapness is what
-/// left it unguarded. It stops being cheap in the large: a chunk size taken
-/// from the wrong chain resumed a preview cold start 4096 files behind its
-/// own cursor and spent 89 minutes re-downloading them before it could replay
-/// anything, with nothing in the log naming the cost. This is that number, so
-/// the next packaging assumption that drifts gets reported rather than paid
-/// for in silence.
+/// Early is the cheap direction only in the small: a resume many files behind
+/// the cursor re-downloads every file between before the replay can advance,
+/// so it is measured rather than left silent.
 fn resume_lag(
     resume: Option<u64>,
     cursor_slot: Option<u64>,
@@ -408,9 +394,8 @@ struct Driver<'a> {
     cancel: CancellationToken,
     download_dir: PathBuf,
     immutable_dir: PathBuf,
-    /// `10k` for the chain being replayed, settled once from the shelley
-    /// genesis at startup: it cannot change under a running backfill, and
-    /// deriving it per round would only reread the same files.
+    /// Settled once at startup: it cannot change under a running backfill,
+    /// and deriving it per round would only reread the same genesis.
     slots_per_immutable_file: u64,
 }
 
@@ -638,9 +623,8 @@ impl Driver<'_> {
 
             let resume = resume_file(highest, cursor_slot, self.slots_per_immutable_file);
 
-            // Not fatal, and deliberately not a fallback either: the round
-            // still runs, it just stops running silently. Anything inside a
-            // window is the margin doing its job.
+            // Deliberately not a fallback: the round still runs, it just
+            // stops running silently. Inside a window is the margin working.
             if let Some(lag) = resume_lag(resume, cursor_slot, self.slots_per_immutable_file)
                 .filter(|lag| *lag > self.args.window)
             {
@@ -921,13 +905,11 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 mod tests {
     use super::*;
 
-    /// Mainnet's `10k`, and the value every network used before the chunk
-    /// size was derived. Spelled out so the tests below assert against a
-    /// number rather than against the constant they are checking.
+    /// Mainnet's `10k`, spelled out so the tests assert against a number
+    /// rather than against the constant they are checking.
     const MAINNET_SLOTS_PER_FILE: u64 = 21_600;
 
-    /// The preview publisher's restore cursor on 2026-08-25 — the restart
-    /// that cost 89 minutes and ~2900 re-downloaded files.
+    /// The preview publisher's restore cursor on 2026-08-25.
     const PREVIEW_RESTORE_CURSOR: u64 = 22_118_504;
 
     #[test]
@@ -941,9 +923,8 @@ mod tests {
     fn the_chunk_size_is_each_networks_own_ten_k() {
         use dolos_cardano::include;
 
-        // the four networks dolos ships a genesis for. Preview is the reason
-        // this is derived at all: its `k` is 432, so its chunks are a fifth
-        // of mainnet's and the literal divided by five times too much.
+        // preview is the reason this is derived: its `k` is 432, so its
+        // chunks are a fifth of mainnet's
         assert_eq!(
             slots_per_immutable_file(&include::mainnet::load()),
             MAINNET_SLOTS_PER_FILE,
@@ -961,8 +942,7 @@ mod tests {
 
     #[test]
     fn a_genesis_without_a_security_param_keeps_the_old_value() {
-        // guessing small is the expensive direction — the one this change
-        // exists to remove — so an unknown `k` falls back rather than guesses
+        // guessing small is the expensive direction, so an unknown `k` falls back
         let mut genesis = dolos_cardano::include::preview::load();
         genesis.shelley.security_param = None;
 
@@ -982,15 +962,12 @@ mod tests {
         };
 
         // the regression bar: 21600-slot chunks put this cursor in file 1024,
-        // a margin early is 1022, and that is what these three resumed from
-        // before the derivation existed. A change here means it is wrong.
+        // a margin early is 1022 — unchanged from before the derivation
         assert_eq!(resume(include::mainnet::load()), Some(1022));
         assert_eq!(resume(include::preprod::load()), Some(1022));
         assert_eq!(resume(include::devnet::load()), Some(1022));
 
-        // and the fix: preview's 4320-slot chunks put the same cursor in file
-        // 5120, so the resume moves 4096 files forward, onto the window it
-        // actually needs
+        // preview's 4320-slot chunks put the same cursor in file 5120
         assert_eq!(resume(include::preview::load()), Some(5118));
     }
 
