@@ -123,11 +123,6 @@ serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
 stelae = { path = "crates/stelae" }
 
-# `nix` is a POSIX binding and has no Windows build. The e2e tests that SIGTERM
-# a child are already `#![cfg(not(windows))]`, and the `getrusage` measurements
-# in tests/index_roundtrip.rs are `#[cfg(unix)]` for the same reason; gating the
-# dependency here keeps the two from drifting apart, and spares the Windows job
-# a crate it can only ever compile to nothing.
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.30.1", features = ["signal", "resource"] }
 
