@@ -703,6 +703,157 @@ fn same_inscription_from_both_backends(at: Option<(u64, RetainedEpochs)>) {
     }
 }
 
+/// The pool changes nothing about the document — the property
+/// [`export::Producers`] promises and every operator flag repeats.
+///
+/// One backend, one seeding, three walks: strictly serial (one producer, no
+/// threads at all), the default pool, and a pool wider than the job list is
+/// deep. Each runs over a plan that cuts a retained dump — so the tee through
+/// `carry_again` is in the mix — and with the band narrowed to one epoch, so
+/// more than one band job actually queues on the band lane. Byte-identical
+/// inscriptions and blobs, or the pool moved something it promised only to
+/// reschedule.
+#[test]
+fn a_pooled_production_is_byte_identical_to_the_serial_walk() {
+    let domain: ToyDomain = harness();
+    let retained = RetainedEpochs::new(vec![1]).unwrap();
+
+    let pool_of = |producers: usize| {
+        plan_at_boundary(&domain, 1, retained.clone())
+            .with_band(export::IndexBand::new(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            ))
+            .with_producers(export::Producers::new(
+                std::num::NonZeroUsize::new(producers).unwrap(),
+            ))
+    };
+
+    let serial_root = tempfile::tempdir().unwrap();
+    let pooled_root = tempfile::tempdir().unwrap();
+    let wide_root = tempfile::tempdir().unwrap();
+
+    let serial = export_plan(serial_root.path(), &domain, &pool_of(1));
+    let pooled = export_plan(pooled_root.path(), &domain, &pool_of(4));
+    let wide = export_plan(wide_root.path(), &domain, &pool_of(32));
+
+    // Compared layer by layer first, so a divergence names the kind and the
+    // scope it happened in rather than only moving the final digest.
+    for (left, right) in serial.layers.iter().zip(&pooled.layers) {
+        assert_eq!(
+            (&left.kind, &left.scope, left.records, left.diff_id),
+            (&right.kind, &right.scope, right.records, right.diff_id),
+            "layer {:?} {} diverged between the serial and pooled walks",
+            left.kind,
+            left.scope,
+        );
+    }
+
+    assert_eq!(serial, pooled);
+    assert_eq!(serial, wide);
+    assert_eq!(serial.digest().unwrap(), pooled.digest().unwrap());
+
+    // Same document on disk, and the same blobs behind it.
+    assert_eq!(
+        std::fs::read(serial_root.path().join("inscription.json")).unwrap(),
+        std::fs::read(pooled_root.path().join("inscription.json")).unwrap(),
+    );
+
+    let left = SteleDir::open(serial_root.path())
+        .unwrap()
+        .blob_index()
+        .unwrap();
+    let right = SteleDir::open(pooled_root.path())
+        .unwrap()
+        .blob_index()
+        .unwrap();
+
+    for descriptor in &serial.layers {
+        assert_eq!(
+            left.blob_for(&descriptor.diff_id),
+            right.blob_for(&descriptor.diff_id),
+            "layer {:?} {}",
+            descriptor.kind,
+            descriptor.scope,
+        );
+    }
+}
+
+/// A transport that refuses to open a sink for one kind, for the test below.
+///
+/// The directory twin of `tests/publish.rs`'s `Interrupted`: everything else
+/// goes straight through, and `carry_again`'s default body is right here
+/// because a directory's is the default.
+struct DyingAt<'a> {
+    inner: &'a SteleDir,
+    kind: &'static str,
+}
+
+impl stelae::SteleWriter for DyingAt<'_> {
+    type Sink = <SteleDir as stelae::SteleWriter>::Sink;
+
+    fn layer_sink(
+        &self,
+        profile: &dyn stelae::Profile,
+        spec: &stelae::LayerSpec,
+        level: i32,
+    ) -> Result<Self::Sink, stelae::Error> {
+        if spec.kind == self.kind {
+            return Err(stelae::Error::Io(std::io::Error::other(
+                "the machine went away",
+            )));
+        }
+
+        self.inner.layer_sink(profile, spec, level)
+    }
+
+    fn seal(
+        &self,
+        profile: &dyn stelae::Profile,
+        inscription: &stelae::Inscription,
+    ) -> Result<stelae::Digest, stelae::Error> {
+        self.inner.seal(profile, inscription)
+    }
+}
+
+/// A failing job fails the pooled export with its own error.
+///
+/// The pool's error path: the first failure stops the queues, the jobs already
+/// running finish, and what the caller gets is the failure itself rather than
+/// a document with a hole in it. The serial walk's version of this property is
+/// exercised by every error test above; this one runs the pool.
+#[test]
+fn a_failing_producer_fails_the_pooled_export() {
+    let domain: ToyDomain = harness();
+
+    let root = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(root.path()).unwrap();
+    let dying = DyingAt {
+        inner: &stele,
+        kind: BLOCKS,
+    };
+
+    let plan = plan_for(&domain).with_producers(export::Producers::new(
+        std::num::NonZeroUsize::new(4).unwrap(),
+    ));
+
+    let err = export::export(
+        &dying,
+        &plan,
+        domain.archive(),
+        domain.state(),
+        domain.indexes(),
+        None,
+        &export::First,
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, dolos_snapshot::Error::Stelae(stelae::Error::Io(_))),
+        "{err:?}"
+    );
+}
+
 /// The dumps a stele carries, by the epoch their scope names.
 fn dumps_in(
     inscription: &stelae::inscription::Inscription,

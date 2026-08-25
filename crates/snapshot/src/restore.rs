@@ -978,7 +978,7 @@ where
         observer,
     };
 
-    let mut cursor = Cursor::new(observer, plan.layers().count());
+    let cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
 
     indexes.initialize_schema()?;

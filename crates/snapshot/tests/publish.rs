@@ -396,7 +396,7 @@ fn a_restarted_publish_carries_forward_the_retained_dump_it_adopted() {
                 epoch: None,
             },
             publishing(&dying, &storage),
-            &following,
+            &serial(&following),
         )
         .unwrap_err();
 
@@ -477,6 +477,93 @@ fn a_restarted_publish_carries_forward_the_retained_dump_it_adopted() {
         "the record bought nothing: {} reused against {}",
         resumed.layers_reused,
         uninterrupted.layers_reused,
+    );
+
+    assert_eq!(
+        registry::PublishRecord::load(&record_path(&storage)).unwrap(),
+        None,
+        "a resumed publish that sealed left its record behind",
+    );
+}
+
+/// The kill-during-parallel-production case: a publish dies inside one
+/// producer while the others are still landing layers, and the restart still
+/// converges on the uninterrupted manifest, byte for byte.
+///
+/// The serial version of this property is the test above; what a pool adds is
+/// that the record is written from concurrent producers and the killed
+/// attempt's surviving layers are whichever jobs happened to finish. So the
+/// assertions here are the invariants that must hold *whatever* landed —
+/// identical stele, identical manifest, no layer dropped and none duplicated,
+/// record consumed — and none of the exact arithmetic, which is racy by
+/// design and already pinned serially.
+#[test]
+#[ignore]
+fn a_publish_killed_during_parallel_production_resumes_cleanly() {
+    let fixture = Fixture::spawn();
+    let node = Node::build();
+    let storage = tempfile::tempdir().unwrap();
+
+    let pooled = |plan: export::Plan| {
+        plan.with_producers(export::Producers::new(
+            std::num::NonZeroUsize::new(4).unwrap(),
+        ))
+    };
+
+    let cutting = pooled(plan_at_epoch_end(&node.domain, 1, retaining_epoch_1()));
+    let following = pooled(plan_at_boundary(&node.domain, 2, retaining_epoch_1()));
+
+    let first = fixture.repository("dolos/parallel-kill");
+    node.publish_as(publishing(&first, &storage), &cutting)
+        .unwrap();
+
+    // Die at the first tip shard of the first state kind, exactly as the
+    // serial test does — except here the sink is asked for from a producer
+    // thread, with the other producers mid-flight.
+    let (first_kind, _, _) = STATE_KINDS[0];
+
+    let dying = fixture.repository("dolos/parallel-kill");
+
+    let killed = node
+        .publish_through(
+            &Interrupted {
+                inner: &dying,
+                kind: first_kind,
+                epoch: None,
+            },
+            publishing(&dying, &storage),
+            &following,
+        )
+        .unwrap_err();
+
+    assert!(
+        matches!(killed, Error::Stelae(stelae::Error::Io(_))),
+        "{killed:?}"
+    );
+
+    // The restart, against the same repository and the same storage.
+    let resumed_into = fixture.repository("dolos/parallel-kill");
+
+    let resumed = node
+        .publish_as(publishing(&resumed_into, &storage), &following)
+        .unwrap();
+
+    // Held against an uninterrupted pooled run rather than literals, exactly
+    // as the serial resume test is: "the interruption changed nothing".
+    let clean = fixture.repository("dolos/parallel-kill-clean");
+
+    node.publish(&clean, &cutting, false);
+    let uninterrupted = node.publish(&clean, &following, false);
+
+    assert_eq!(resumed.identity, uninterrupted.identity);
+    assert_eq!(resumed.inscription, uninterrupted.inscription);
+    assert_eq!(manifest_of(&resumed_into), manifest_of(&clean));
+
+    // Whatever subset of layers the killed attempt landed, the resume accounts
+    // for every layer exactly once.
+    assert_eq!(
+        resumed.layers_built + resumed.layers_reused,
+        uninterrupted.layers_built + uninterrupted.layers_reused,
     );
 
     assert_eq!(
@@ -1032,7 +1119,7 @@ fn a_restarted_publish_carries_forward_the_layers_it_finished() {
                 epoch: Some(1),
             },
             publishing(&dying, &storage),
-            &node.second,
+            &serial(&node.second),
         )
         .unwrap_err();
 
@@ -1148,7 +1235,7 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
                 epoch: Some(1),
             },
             publishing(repository, &storage),
-            &node.second,
+            &serial(&node.second),
         )
         .unwrap_err();
 
@@ -1211,6 +1298,19 @@ fn a_rebuild_and_another_repository_both_ignore_the_record() {
         1,
         "a rebuild still chains",
     );
+}
+
+/// The same plan on the strictly serial walk.
+///
+/// For the interruption tests whose assertions name *which* layers landed
+/// ahead of the kill: that prefix is only deterministic when one producer
+/// drives the walk in document order, which is exactly what these tests pin.
+/// The pooled counterpart — whatever subset landed, the resume converges —
+/// is `a_publish_killed_during_parallel_production_resumes_cleanly`.
+fn serial(plan: &export::Plan) -> export::Plan {
+    plan.clone().with_producers(export::Producers::new(
+        std::num::NonZeroUsize::new(1).unwrap(),
+    ))
 }
 
 /// A publish into `repository`, recording beside the stores at `storage`.

@@ -65,6 +65,12 @@
 //! caller that is not is a design question, and the answer is not a second
 //! runtime.
 //!
+//! Several synchronous caller threads at once are fine, and the publish path
+//! uses them: a profile driver may open and finish sinks from a pool of its
+//! own producer threads. Everything those calls share — the push state, the
+//! in-flight list, the permits — is behind its own lock, and `block_on` from
+//! many non-runtime threads is exactly what a runtime is for.
+//!
 //! ## Why the publish path is concurrent, and where it joins again
 //!
 //! A publish is not one transfer; it is a few hundred small ones. A stele's
