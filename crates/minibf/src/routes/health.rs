@@ -153,8 +153,8 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
 
-        // The conformance suite compares this body with `toStrictEqual`, so the
-        // shape is load-bearing: one extra field fails the `health` fixture.
+        // Parsed as raw JSON, not into `RootResponse`, which would accept an
+        // extra field silently and let the conformance regression through.
         let body: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
         assert_eq!(body, serde_json::json!({ "is_healthy": true }));
     }
@@ -184,7 +184,6 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
 
-        // No threshold configured: the endpoint measures but does not judge.
         assert_eq!(body.is_stale, None);
         assert_eq!(body.max_tip_age_seconds, None);
 
