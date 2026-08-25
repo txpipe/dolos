@@ -71,10 +71,18 @@ pub fn make_conway_block_with_prev(
     (chain_point, Arc::new(raw_bytes))
 }
 
+/// Hard-fork-combinator variant index for a Conway block. `pallas`'s
+/// `probe::block_era` reads this to pick the decoder, and its numbering is
+/// offset by one from `Era` (`Era::Byron` is 0, but the Byron variant is 1),
+/// so `Era::Conway as u16` would tag the block as Babbage — which decodes an
+/// empty body fine and only fails once the body carries a Conway-only field.
+const CONWAY_BLOCK_WRAPPER: u16 = 7;
+
 pub fn make_conway_block_with_tx(
     slot: BlockSlot,
     tx_body: pallas::ledger::primitives::conway::TransactionBody<'static>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
+    valid: bool,
 ) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number: 1,
@@ -123,12 +131,12 @@ pub fn make_conway_block_with_tx(
             }
             None => BTreeMap::new(),
         },
-        invalid_transactions: None,
+        invalid_transactions: if valid { None } else { Some(vec![0]) },
     };
 
     let hash = block.header.compute_hash();
 
-    let wrapper = (Era::Conway as u16, block);
+    let wrapper = (CONWAY_BLOCK_WRAPPER, block);
 
     let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
     let chain_point = ChainPoint::Specific(slot, hash);
