@@ -229,7 +229,7 @@ mod registry_node {
 
         /// The same publish, through a writer of the caller's — the interrupted
         /// transport the resume suite kills at a layer it chose.
-        pub fn publish_through<W: stelae::SteleWriter>(
+        pub fn publish_through<W: stelae::SteleWriter + Sync>(
             &self,
             stele: &W,
             publishing: Publishing<'_>,

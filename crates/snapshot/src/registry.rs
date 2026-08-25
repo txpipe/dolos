@@ -134,11 +134,14 @@
 //! same goes for where the layers are staged on the way through.
 
 use std::{
-    cell::{Cell, RefCell},
     collections::BTreeMap,
     io::Write as _,
     num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 
 use dolos_core::{ArchiveStore, IndexStore, StateStore};
@@ -1062,7 +1065,7 @@ pub fn publish_into<W, A, S, I>(
     observer: &Observer,
 ) -> Result<Published, Error>
 where
-    W: SteleWriter,
+    W: SteleWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
     I: IndexStore,
@@ -1092,7 +1095,7 @@ where
     previous.forget_record()?;
 
     let identity = inscription.digest()?;
-    let layers_reused = previous.adopted.get();
+    let layers_reused = previous.adopted.load(Ordering::Relaxed);
 
     Ok(Published {
         layers_built: inscription.layers.len() - layers_reused,
@@ -1193,7 +1196,9 @@ struct Chained<'a> {
     inheritable: BTreeMap<(String, String), LayerDescriptor>,
     resumable: BTreeMap<(String, String), WrittenLayer>,
     record: Option<Recording>,
-    adopted: Cell<usize>,
+    /// Atomic, like the record's lock below: [`export::export`] asks a
+    /// predecessor about layers from a pool of producer threads.
+    adopted: AtomicUsize,
 }
 
 /// The resumption record this publish is writing, open.
@@ -1202,10 +1207,15 @@ struct Chained<'a> {
 /// than the whole of what *this attempt* put up: an attempt that adopts twenty
 /// layers and adds one, then dies, has to leave twenty-one behind or the third
 /// attempt pays for the difference.
+///
+/// The lock is held across the file write as well as the map insert: each
+/// write rewrites the whole record, so two producers landing layers at once
+/// must serialize on the file or the later write would drop the earlier
+/// layer.
 struct Recording {
     path: PathBuf,
     origin: Origin,
-    layers: RefCell<BTreeMap<(String, String), WrittenLayer>>,
+    layers: Mutex<BTreeMap<(String, String), WrittenLayer>>,
 }
 
 impl<'a> Chained<'a> {
@@ -1273,7 +1283,7 @@ impl<'a> Chained<'a> {
         let record = storage_path.map(|storage_path| Recording {
             path: record_path_in(storage_path),
             origin,
-            layers: RefCell::new(resumable.clone()),
+            layers: Mutex::new(resumable.clone()),
         });
 
         Ok(Self {
@@ -1284,7 +1294,7 @@ impl<'a> Chained<'a> {
             inheritable,
             resumable,
             record,
-            adopted: Cell::new(0),
+            adopted: AtomicUsize::new(0),
         })
     }
 
@@ -1329,7 +1339,7 @@ impl Predecessor for Chained<'_> {
         // happened.
         if let (Some(source), Some(descriptor)) = (self.source, self.inheritable.get(&key)) {
             self.registry.adopt_layer(source, descriptor.clone())?;
-            self.adopted.set(self.adopted.get() + 1);
+            self.adopted.fetch_add(1, Ordering::Relaxed);
 
             return Ok(Some(descriptor.clone()));
         }
@@ -1348,7 +1358,7 @@ impl Predecessor for Chained<'_> {
             return Ok(None);
         }
 
-        self.adopted.set(self.adopted.get() + 1);
+        self.adopted.fetch_add(1, Ordering::Relaxed);
 
         Ok(Some(recorded.descriptor.clone()))
     }
@@ -1384,7 +1394,11 @@ impl Predecessor for Chained<'_> {
             digests: written.digests,
         };
 
-        let mut layers = record.layers.borrow_mut();
+        // Held across the save below, not just the insert — see [`Recording`].
+        let mut layers = record
+            .layers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         layers.insert(scope_key(&descriptor.kind, &descriptor.scope)?, written);
 
