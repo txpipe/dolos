@@ -516,23 +516,12 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
     pipeline.teardown();
 }
 
-/// Drain the serving drivers, cancelling the rest once any one of them fails.
+/// Drains the serving drivers, cancelling the rest once any one of them fails.
 ///
-/// Polls the whole set rather than awaiting the handles in order: a driver
-/// only completes on its own failure or on cancellation, so awaiting them one
-/// at a time parked on the first healthy driver forever and left a failing
-/// driver's error sitting unobserved in its `JoinHandle`.
-///
-/// The first failure is returned, not just logged. Both callers surface it as
-/// the command's exit status, which is what a supervisor reads: a driver that
-/// cannot bind has to exit non-zero, or `Restart=on-failure` and
-/// `restartPolicy: OnFailure` see a clean shutdown and leave the node down.
-/// A task that panicked counts as a failure too — that path used to reach an
-/// `.unwrap()` and abort the process, and must not quietly become a success.
-///
-/// Draining continues past the first failure on purpose. Cancellation is what
-/// lets the healthy drivers wind down, and this is the only thing awaiting
-/// them; returning early would drop them mid-teardown.
+/// Returns the first failure instead of only logging it: the exit status is
+/// what a supervisor reads. Draining continues past that failure because
+/// cancellation is what winds the healthy drivers down and nothing else
+/// awaits them.
 pub async fn monitor_drivers(
     mut drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>>,
     exit: CancellationToken,
@@ -543,11 +532,11 @@ pub async fn monitor_drivers(
         let failure = match result {
             Ok(Ok(())) => continue,
             Ok(Err(e)) => {
-                error!("driver error: {}", e);
+                error!(error = %e, "driver failed");
                 e
             }
             Err(e) => {
-                error!("driver task failed: {}", e);
+                error!(error = %e, "driver task failed");
                 ServeError::Internal(Box::new(e))
             }
         };
@@ -845,10 +834,8 @@ mod tests {
         let exit = CancellationToken::new();
         let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
 
-        // Pushed first on purpose. `FuturesUnordered` links at the head, so
-        // the ordered drain this replaced reached the *last* push first; the
-        // failure that went unobserved is the one pushed here, exactly as
-        // `serve::load_drivers` pushes the Ouroboros driver first.
+        // `FuturesUnordered` links at the head, so the ordered drain this
+        // replaced reached the last push first.
         drivers.push(tokio::spawn(async {
             Err(ServeError::BindError(io::Error::new(
                 io::ErrorKind::AddrInUse,
@@ -890,7 +877,7 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "a panicking driver used to abort the process; it must not report success",
+            "a panicking driver must not report success",
         );
     }
 
