@@ -73,12 +73,14 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 | token_registry_url | string  | "https://token-registry.io"     |
 | url                | string  | "https://minibf.local"          |
 | max_scan_items     | integer | 3000                             |
+| max_tip_age_sec    | integer | 300                              |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata. 
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `max_tip_age_sec`: opts into the health gate described under "Health and staleness" below — past this many seconds of tip age, `/health` answers `503`. Unset by default, in which case `/health` keeps reporting healthy however far behind the node has fallen.
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
 
@@ -89,6 +91,7 @@ permissive_cors = true
 token_registry_url = "https://token-registry.io"
 url = "https://minibf.local"
 max_scan_items = 3000
+max_tip_age_sec = 300
 ```
 
 Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.

@@ -989,8 +989,8 @@ impl MinibfConfig {
     ///
     /// Unset by default: a node that has fallen behind still reports healthy,
     /// because a node catching up from a bootstrap is hours behind by design.
-    /// `/health` always reports `tip_age_seconds` regardless, so staleness is
-    /// observable whether or not an operator opts into the gate.
+    /// `/health/tip` reports `tip_age_seconds` whenever the tip is readable, so
+    /// staleness is observable whether or not an operator opts into the gate.
     pub fn max_tip_age_sec(&self) -> Option<u64> {
         self.max_tip_age_sec
     }
