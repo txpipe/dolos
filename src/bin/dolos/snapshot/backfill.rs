@@ -88,8 +88,8 @@ const IMPORT_CHUNK: usize = 100;
 /// the immutable reader without the cursor's own chunk.
 const IMMUTABLE_FILE_MARGIN: u64 = 2;
 
-/// Immutable chunk files a node packs per slot of the security parameter:
-/// a chunk holds `10k` slots. A packaging convention, not a protocol
+/// Slots an immutable chunk file holds per unit of the security parameter:
+/// a chunk is `10k` slots wide. A packaging convention, not a protocol
 /// invariant — stated as the multiplier so the derivation below reads as
 /// the rule rather than as one chain's answer to it.
 const SLOTS_PER_SECURITY_PARAM: u64 = 10;
