@@ -76,9 +76,9 @@ impl Stage {
     }
 
     /// Warn, on every tick, while nothing has arrived from upstream for longer
-    /// than [`UPSTREAM_SILENCE_THRESHOLD`]. Repeating it is deliberate: a single
-    /// line at the moment the peer went quiet scrolls out of a log that then
-    /// looks entirely healthy.
+    /// than [`UPSTREAM_SILENCE_THRESHOLD`]. Repeating it is deliberate: a
+    /// single line at the moment the peer went quiet scrolls out of a log
+    /// that then looks entirely healthy.
     fn warn_if_upstream_silent(&self) {
         let Some(peer_address) = self.peer_address.as_ref() else {
             return;
