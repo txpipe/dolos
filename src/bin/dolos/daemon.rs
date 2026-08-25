@@ -47,11 +47,11 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
         exit.clone(),
     );
 
-    crate::common::monitor_drivers(drivers, exit.clone()).await;
+    let outcome = crate::common::monitor_drivers(drivers, exit.clone()).await;
 
     sync.await.unwrap();
 
     warn!("shutdown complete");
 
-    Ok(())
+    outcome.into_diagnostic().context("serving clients")
 }
