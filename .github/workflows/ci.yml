@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -91,9 +93,18 @@ jobs:
   # Windows is the slowest job and skips e2e, so on a PR it adds latency without
   # coverage anyone acts on. A Windows-only break lands on main and is caught by
   # the merge run instead of blocking the PR.
+  #
+  # The cost of that trade is that a fix *for* a Windows break cannot be proven
+  # before it merges, which is how the `getrusage` break stayed red across five
+  # merges. The two extra arms are the way out: label a PR `ci:windows` to opt
+  # it into this job, or dispatch the workflow against a branch. Neither changes
+  # what an unlabelled PR runs.
   test-windows:
     name: Test (windows-latest)
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main'
+      || github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'ci:windows')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

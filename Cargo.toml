@@ -108,7 +108,6 @@ divan = "0.1.21"
 comfy-table = "7.1.1"
 csv = "1"
 csv-diff = "0.1"
-nix = { version = "0.30.1", features = ["signal", "resource"] }
 serde = { workspace = true }
 tempfile = "3.20.0"
 toml = "0.8.13"
@@ -123,6 +122,9 @@ stats_alloc = "0.1"
 serial_test = "3"
 dolos-redb3 = { path = "crates/redb3" }
 stelae = { path = "crates/stelae" }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.30.1", features = ["signal", "resource"] }
 
 [build-dependencies]
 vergen-gitcl = "9.1.0"
