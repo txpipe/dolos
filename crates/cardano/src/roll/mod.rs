@@ -833,6 +833,12 @@ mod tests {
             .expect("epoch stats delta")
     }
 
+    /// The operator hash of the fixture's `PoolRegistration` certificate,
+    /// which `PoolRegistration::key` uses as the `pools` entity key.
+    fn cert_pool_key() -> EntityKey {
+        EntityKey::from([0x77u8; 28].as_slice())
+    }
+
     /// The block issuer's operator hash, which `PoolStateVisitor::visit_root`
     /// emits a `MintedBlocksInc` for on every block regardless of validity.
     fn block_issuer_key() -> EntityKey {
@@ -886,6 +892,13 @@ mod tests {
                 "valid tx wrote nothing to the `{ns}` namespace — the fixture is wrong"
             );
         }
+
+        // `visit_root` alone fills `pools` with the block issuer, so only the
+        // certificate's own operator key proves the cert path ran.
+        assert!(
+            keys_in(&deltas, "pools").contains(&cert_pool_key()),
+            "valid tx did not register the certificate's pool — the fixture is wrong"
+        );
 
         let stats = epoch_stats(&deltas);
         assert!(stats.new_accounts > 0);
