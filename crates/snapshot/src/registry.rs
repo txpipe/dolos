@@ -322,6 +322,14 @@ pub fn open(
             // where `snapshot backfill` re-runs the whole publish rather than
             // dying into a pod restart.
             attempts: stelae::oci::DEFAULT_ATTEMPTS,
+            // Nor these, for a related reason: both are facts about the
+            // registry this publishes to and about the pod the publisher runs
+            // in, measured rather than chosen, and neither moves when an
+            // operator changes how fast a publish goes. `upload_memory` in
+            // particular is what keeps `--concurrency` from being a claim on
+            // memory — raising one does not raise the other.
+            monolithic_max: stelae::oci::DEFAULT_MONOLITHIC_MAX,
+            upload_memory: stelae::oci::DEFAULT_UPLOAD_MEMORY,
         },
     )?)
 }

@@ -1290,7 +1290,7 @@ fn bulk_records() -> u64 {
     }
 }
 
-/// What either direction may hold at any one moment.
+/// What either direction may hold at any one moment, on the *streamed* path.
 ///
 /// The push peak is one upload chunk and a little change — 4 MiB and some
 /// tens of kilobytes, measured, and stable to a fraction of a percent across
@@ -1302,6 +1302,12 @@ fn bulk_records() -> u64 {
 /// does: the peak is bound by the chunk, and the layer here is ten times the
 /// budget. `STELAE_TEST_BULK_RECORDS` below asks the same question at a
 /// mainnet shard's scale and this constant does not follow it up.
+///
+/// It is not the bound on the *single-request* path, which holds a whole layer
+/// by construction and is bounded by [`Options::upload_memory`] instead —
+/// [`the_single_request_path_is_bounded_by_its_byte_budget`]. Every push test
+/// here therefore has to say which path it is measuring, and this one says so
+/// by naming a threshold below the layer it sends.
 const TRANSPORT_BUDGET: usize = 5 * 1024 * 1024;
 
 /// A record whose body zstd cannot shrink.
@@ -1397,7 +1403,8 @@ impl Peak {
     }
 }
 
-/// Done criterion 4: neither direction scales with the layer.
+/// Done criterion 4: neither direction scales with the layer, on the streamed
+/// path.
 ///
 /// The layer is fifty times the budget and never fits in it, so a transport
 /// that held one — buffering a blob before uploading it, or decompressing a
@@ -1405,13 +1412,19 @@ impl Peak {
 /// discipline extended to the transport; it lives here rather than there
 /// because it needs a registry, and a bound measured against a mock would only
 /// be a bound on the mock.
+///
+/// The threshold is named rather than left at its default, and that is the
+/// whole reason this test still means what it meant: at the default a fifty
+/// megabyte layer is *under* [`Options::monolithic_max`] and goes up in one
+/// request, holding itself while it does. Sending it as a chain is now a
+/// decision a caller makes, so a test about the chain has to make it.
 #[test]
 #[ignore = "spawns a registry"]
 fn neither_direction_holds_a_layer() {
     let _serial = exclusive();
 
     let fixture = Fixture::spawn();
-    let registry = fixture.registry("stelae/memory");
+    let registry = fixture.options("stelae/memory", |options| options.monolithic_max = 0);
 
     let (header_scope, scope) = notes_scope(1);
     let spec = LayerSpec::new("notes", header_scope, scope);
@@ -1509,6 +1522,314 @@ fn neither_direction_holds_a_layer() {
         pulled < TRANSPORT_BUDGET,
         "pulling a {size}-byte layer held {pulled} bytes at peak; \
          the budget is {TRANSPORT_BUDGET}",
+    );
+}
+
+/// Every [`Event::Bytes`] the transport emitted, in order.
+///
+/// The only in-process view of *how many requests* an upload took. The
+/// streamed path emits one of these per chunk handed to the client and a chunk
+/// is one `PATCH` — its own documentation says so — while the single-request
+/// path has nothing finer to report and emits once. So a sequence of deltas is
+/// the shape of the upload, and comparing two of them compares two paths.
+///
+/// Not a request count read off the wire, and it should not be mistaken for
+/// one: a registry's own log would say more, and none of the three servers this
+/// fixture runs against says it the same way.
+#[derive(Default)]
+struct Chunks(Mutex<Vec<u64>>);
+
+impl Progress for Chunks {
+    fn on(&self, event: Event<'_>) {
+        if let Event::Bytes(n) = event {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(n);
+        }
+    }
+}
+
+impl Chunks {
+    fn seen(&self) -> Vec<u64> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// A layer that fits goes up in one request; one that does not still streams;
+/// and neither is a different layer for it.
+///
+/// The second half is the one decision 0026 rests on. A stele carries its
+/// predecessor's layers forward by identity, so a layer republished through a
+/// different transport path has to *be* the same layer — same `diffId` over the
+/// same uncompressed bytes, same blob under the same digest — or every stele
+/// after this change would carry nothing forward and every publish would be a
+/// full upload.
+///
+/// Both layers go into one publish, past one threshold, so neither the
+/// registry's blob-skip nor a second server can be what the difference is: the
+/// small layer is under [`Options::monolithic_max`] and the bulk layer is over
+/// it, and they are new blobs in an empty repository either way.
+///
+/// Serial on purpose. The deltas carry no layer identity, so attributing them
+/// needs the uploads not to overlap — which is what a concurrency of one buys,
+/// and the only thing this test wants from it.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_layer_under_the_threshold_goes_up_in_one_request() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    // Between the two layers below: the small one under it, the bulk one over.
+    const THRESHOLD: u64 = 1024 * 1024;
+
+    // The transport's `UPLOAD_CHUNK`, which the crate keeps private. It is what
+    // sets the streamed event count — one per chunk handed to the client — and
+    // it is not the threshold: what makes the bulk layer a *chain* is being
+    // over this, and a "chain" of one would prove nothing.
+    const CHUNK: u64 = 4 * 1024 * 1024;
+
+    // Comfortably over one upload chunk once compressed — the bodies are
+    // incompressible, so this is close to what crosses the socket.
+    const BULK: u64 = 6 * 1024;
+
+    let chunks = std::sync::Arc::new(Chunks::default());
+
+    let registry = fixture.options("stelae/one-request", |options| {
+        options.monolithic_max = THRESHOLD;
+        options.concurrency = 1;
+    });
+
+    registry.observe(Observer::new(chunks.clone()));
+
+    let (notes_header, notes_scope) = notes_scope(1);
+    let notes: Vec<CanonicalCbor> = (1..=3).map(note_record).collect();
+
+    let small = registry
+        .write_layer(
+            &ToyProfile,
+            &LayerSpec::new("notes", notes_header, notes_scope),
+            COMPRESSION_LEVEL,
+            &notes,
+        )
+        .unwrap();
+
+    let (index_header, index_scope) = index_scope(1);
+
+    let mut sink = registry
+        .layer_sink(
+            &ToyProfile,
+            &LayerSpec::new("index", index_header, index_scope),
+            COMPRESSION_LEVEL,
+        )
+        .unwrap();
+
+    // Its own range of the record space. Two of the three registries this runs
+    // against address blobs across the whole registry rather than per
+    // repository, so a layer that happened to be another test's layer would be
+    // skipped rather than uploaded and there would be nothing to count.
+    for i in 0..BULK {
+        sink.write_record(&bulk_record(2_000_000 + i)).unwrap();
+    }
+
+    let bulk = sink.finish().unwrap();
+
+    let mut inscription = Inscription::new(
+        &ToyProfile,
+        1,
+        json!({"chapter": 1}),
+        json!({}),
+        Compression {
+            algo: "zstd".to_owned(),
+            level: COMPRESSION_LEVEL as i64,
+        },
+    );
+
+    inscription.layers = vec![small.descriptor.clone(), bulk.descriptor.clone()];
+
+    registry.seal(&ToyProfile, &inscription).unwrap();
+
+    let small_size = small.digests.compressed_size;
+    let bulk_size = bulk.digests.compressed_size;
+
+    assert!(
+        small_size <= THRESHOLD,
+        "the small layer has to be under the threshold: {small_size} against {THRESHOLD}",
+    );
+    assert!(
+        bulk_size > CHUNK,
+        "the bulk layer has to be over one upload chunk, or it streams as a \
+         single delta and the chain below is a chain of one: \
+         {bulk_size} against {CHUNK}",
+    );
+
+    let seen = chunks.seen();
+
+    assert_eq!(
+        seen.first().copied(),
+        Some(small_size),
+        "the layer under the threshold reported {seen:?}; \
+         one request is one delta, and it is the whole layer",
+    );
+    assert!(
+        seen.len() > 2,
+        "the layer over the threshold reported {seen:?}; \
+         a chain is more than one chunk",
+    );
+    assert_eq!(
+        seen.iter().sum::<u64>(),
+        small_size + bulk_size,
+        "the deltas do not add up to what was published: {seen:?}",
+    );
+
+    let stele = registry.pull_latest(&ToyProfile).unwrap();
+    let read = stele.read_inscription().unwrap();
+
+    assert_eq!(read, inscription, "the inscription came back different");
+
+    let blobs = stele.blob_index().unwrap();
+
+    for (described, written) in read.layers.iter().zip([&small, &bulk]) {
+        let mut reader = stele
+            .stream_layer(&blobs, &ToyProfile, described, Limits::default())
+            .unwrap();
+
+        while let Some(record) = reader.next_record() {
+            record.unwrap();
+        }
+
+        // Recomputed over every byte the registry gave back, so this is the
+        // identity the carry-forward will look for and not a number copied out
+        // of the descriptor that claimed it.
+        assert_eq!(
+            reader.finish().unwrap().diff_id,
+            written.descriptor.diff_id,
+            "the {} layer is not the layer that was pushed",
+            described.kind,
+        );
+    }
+}
+
+/// The single-request path holds its budget, not its concurrency.
+///
+/// The one thing this change can break in production. A monolithic push is
+/// resident in full, so a bound counted in *layers* would let
+/// [`Options::concurrency`] multiply a hundred megabytes by thirty-two and take
+/// the publisher pod down mid-publish — which costs an epoch and looks like a
+/// registry failure. The bound is counted in bytes instead, and this is the
+/// assertion that it is.
+///
+/// Eight layers, all under the threshold so all resident, against a budget of
+/// one and a half of them. A transport bounded by the layer count would hold
+/// eight; one bounded by the budget holds two and makes the rest wait.
+#[test]
+#[ignore = "spawns a registry"]
+fn the_single_request_path_is_bounded_by_its_byte_budget() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    /// Layers, all in flight at once as far as the permits are concerned.
+    const LAYERS: u64 = 8;
+
+    /// Records each, ~4 MB compressed — incompressible bodies, so the layer and
+    /// the blob are the same order of magnitude.
+    const BULK: u64 = 4 * 1024;
+
+    /// What the transport may hold. Under two layers, so seven eighths of the
+    /// publish cannot be resident whatever the concurrency says.
+    const BUDGET: u64 = 6 * 1024 * 1024;
+
+    let registry = fixture.options("stelae/budget", |options| {
+        options.concurrency = LAYERS as usize;
+        options.upload_memory = BUDGET;
+    });
+
+    let sampler = Peak::start();
+
+    let mut inscription = Inscription::new(
+        &ToyProfile,
+        1,
+        json!({"chapter": 1}),
+        json!({}),
+        Compression {
+            algo: "zstd".to_owned(),
+            level: COMPRESSION_LEVEL as i64,
+        },
+    );
+
+    for layer in 0..LAYERS {
+        let (header, scope) = notes_scope(layer);
+
+        let mut sink = registry
+            .layer_sink(
+                &ToyProfile,
+                &LayerSpec::new("notes", header, scope),
+                COMPRESSION_LEVEL,
+            )
+            .unwrap();
+
+        // Offset per layer so no two layers are the same blob, and offset again
+        // past every other test in this file so no *other* test's blob is one
+        // of these: two of the three registries this runs against address blobs
+        // across the whole registry, and a skipped layer would leave the budget
+        // untested.
+        for i in 0..BULK {
+            sink.write_record(&bulk_record(3_000_000 + layer * BULK + i))
+                .unwrap();
+        }
+
+        let written = sink.finish().unwrap();
+
+        // The threshold here is `BUDGET` — `monolithic_max` is left at its
+        // default and clamped down to it — so a layer over this line would
+        // stream, hold one chunk, and sail under the ceiling below without the
+        // byte budget ever being asked for. The assertion is what stops a
+        // change in what `bulk_record` compresses to from quietly turning this
+        // test into one that measures nothing.
+        assert!(
+            written.digests.compressed_size <= BUDGET,
+            "layer {layer} has to be resident for this to measure the budget: \
+             {} against {BUDGET}",
+            written.digests.compressed_size,
+        );
+
+        inscription.layers.push(written.descriptor);
+    }
+
+    registry.seal(&ToyProfile, &inscription).unwrap();
+
+    let held = sampler.finish();
+
+    let published: u64 = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.uncompressed_size)
+        .sum();
+
+    println!("budget: {published} bytes published, peak {held} bytes held");
+
+    assert_eq!(
+        registry.transfer().layers_uploaded,
+        LAYERS,
+        "every layer has to have been uploaded, or the budget was never asked for",
+    );
+
+    // The budget plus the streaming allowance: the staging, the compressor and
+    // the client's own buffers are not what this bounds, and `TRANSPORT_BUDGET`
+    // is already the measured size of them.
+    let ceiling = BUDGET as usize + TRANSPORT_BUDGET;
+
+    assert!(
+        held < ceiling,
+        "publishing {LAYERS} layers held {held} bytes at peak against a \
+         {BUDGET}-byte budget; a bound counted in layers would hold about \
+         {}",
+        LAYERS as usize * (published as usize / LAYERS as usize),
     );
 }
 
