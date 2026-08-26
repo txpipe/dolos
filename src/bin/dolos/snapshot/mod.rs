@@ -22,11 +22,16 @@
 
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
-use dolos_snapshot::export::Plan;
-use miette::IntoDiagnostic as _;
+use dolos_snapshot::{
+    export::{IndexBand, Plan, Producers},
+    RetainedEpochs,
+};
+use miette::{Context as _, IntoDiagnostic as _};
 
 use crate::feedback::Feedback;
 
+#[cfg(feature = "mithril")]
+mod backfill;
 mod digest;
 mod inspect;
 mod publish;
@@ -36,6 +41,11 @@ mod verify;
 pub enum Command {
     /// writes a stele to a local directory or an OCI repository
     Publish(publish::Args),
+
+    /// replays mithril history one epoch at a time, publishing a stele at
+    /// each boundary into an OCI repository
+    #[cfg(feature = "mithril")]
+    Backfill(backfill::Args),
 
     /// computes a stele's inscription and identity without writing one
     Digest(digest::Args),
@@ -61,6 +71,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         // that waits on a store walk and a network, and the other three are
         // over in the time it takes to print what they found.
         Command::Publish(x) => publish::run(config, x, feedback),
+        #[cfg(feature = "mithril")]
+        Command::Backfill(x) => backfill::run(config, x, feedback),
         Command::Digest(x) => digest::run(config, x),
         Command::Verify(x) => verify::run(config, x),
         Command::Inspect(x) => inspect::run(config, x),
@@ -135,6 +147,26 @@ impl std::str::FromStr for EpochRange {
     }
 }
 
+/// The retained state-dump epochs this node publishes under.
+///
+/// Read here rather than in each command for the same reason [`restrict`] is:
+/// `publish`, `digest` and `verify --reproduce` all put this list in
+/// `parameters`, and a node that gave them different lists would be verifying
+/// a different document than the one it published — and being told it does not
+/// match. An absent `[snapshot]` section means an empty list, which is a
+/// publisher that retains the tip alone.
+pub fn retained_epochs(config: &RootConfig) -> miette::Result<RetainedEpochs> {
+    let configured = config
+        .snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.state_epochs.clone())
+        .unwrap_or_default();
+
+    RetainedEpochs::new(configured)
+        .into_diagnostic()
+        .context("reading snapshot.state_epochs")
+}
+
 /// Apply an operator's selection to a plan, or leave it whole.
 ///
 /// The one place either command narrows a plan. `restrict_epochs` takes two
@@ -144,6 +176,38 @@ impl std::str::FromStr for EpochRange {
 pub fn restrict(plan: Plan, range: Option<EpochRange>) -> Plan {
     match range {
         Some(range) => plan.restrict_epochs(range.first, range.last),
+        None => plan,
+    }
+}
+
+/// Apply an operator's index band to a plan, or leave the measured default.
+///
+/// The one place any command spells the mapping, for the reason [`restrict`] is
+/// shared: `publish`, `digest` and `verify --reproduce` all pay the same index
+/// traversals, and a knob one of them spelled its own way would be a knob an
+/// operator has to learn three times.
+///
+/// Unlike [`restrict`], this changes nothing about the document: banding
+/// reorders when index records are read, never which layer they land in. Two
+/// runs at different bands produce the same digest, which is why a
+/// reproduction is free to band differently than the publish it checks.
+pub fn banded(plan: Plan, band: Option<std::num::NonZeroUsize>) -> Plan {
+    match band {
+        Some(band) => plan.with_band(IndexBand::new(band)),
+        None => plan,
+    }
+}
+
+/// Apply an operator's producer pool to a plan, or leave the sized default.
+///
+/// Shared for the reason [`banded`] is: the same three commands pay the same
+/// store walks, so the knob that pools them is spelled once. Like the band,
+/// this changes nothing about the document — layers are reassembled by their
+/// position in it, never by completion order — so a reproduction is free to
+/// pool differently than the publish it checks.
+pub fn produced(plan: Plan, producers: Option<std::num::NonZeroUsize>) -> Plan {
+    match producers {
+        Some(producers) => plan.with_producers(Producers::new(producers)),
         None => plan,
     }
 }
@@ -166,6 +230,16 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
     eprintln!("cursor:   {}", plan.cursor);
     eprintln!("sequence: {} (tag {tag})", plan.sequence);
 
+    // Clamped to the epochs actually selected, because the band chunks them:
+    // a `--epochs 500..502` publish opens three sinks whatever the band says,
+    // and the unclamped budget would overstate it by orders of magnitude.
+    let band = plan.band.epochs().min(plan.epochs.len());
+
+    eprintln!(
+        "band:     {band} epochs per index traversal ({} MiB budgeted)",
+        band.saturating_mul(IndexBand::SINK_BYTES) / (1024 * 1024),
+    );
+
     match (plan.epochs.first(), plan.epochs.last()) {
         (Some(first), Some(last)) => eprintln!(
             "epochs:   {}..={} ({} of them, slots {}..={})",
@@ -179,6 +253,17 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
         // printing an empty range and looking like a mistake.
         _ => eprintln!("epochs:   none selected; the state tip only"),
     }
+
+    // Printed always and not only when it is set, because an empty list is a
+    // choice with consequences — it is what makes this publisher's parameters
+    // differ from a co-signer's that retains dumps, and the line is where an
+    // operator sees the two do not match.
+    let due = plan.retained.due(plan.sequence).count();
+
+    eprintln!(
+        "dumps:    {:?} retained ({due} due at this sequence)",
+        plan.retained.as_slice(),
+    );
 
     Ok(())
 }

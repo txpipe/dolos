@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0-alpha.1] - 2026-08-24
+
+### 🚀 Features
+
+- *(minibf)* Implement `/pools/retired` endpoint (#1218)
+- *(cli)* Add doctor command to regenerate the state store (#1222)
+- *(cli)* Improve data checks of pots at epoch boundaries (#1235)
+- *(minibf)* Bump Blockfrost OpenAPI to v0.1.91 (#1223)
+- *(minibf)* Add `/txs/{hash}/required_signers` endpoint (#1232)
+- *(minibf)* Implement `/pools/{pool_id}/updates` endpoint (#1237)
+- *(minibf)* Add `/epochs/{number}/blocks/{pool_id}` endpoint (#1233)
+- *(minibf)* Add `/scripts/{script_hash}/utxos` endpoint (#1207)
+- *(stelae)* Make an unknown layer kind skippable at restore, strict at publish (#1242)
+- *(snapshot)* Retain state dumps at configured epochs (#1246)
+- *(cardano)* [**breaking**] Merge the four per-account epoch logs into one entity (#1249)
+- Introduce fjall archive backend as the default (#1257)
+- *(snapshot)* Add the `snapshot backfill` publisher driver (#1259)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Move the pots when a treasury withdrawal enacts (#1227)
+- *(deps)* Update `h2` for `RUSTSEC-2026-0258` (#1229)
+- *(cardano)* Align the boundary DRep distribution with the ledger's post-enactment snapshot (#1228)
+- *(snapshot)* Align the stele's sequence and tag with the epoch it names (#1240)
+- *(archive)* Support EBBs persistence via multi-block per slot (#1239)
+- *(grpc)* Don't panic on an unservable FollowTip/WatchTx intersect (#1226)
+- *(cli)* Advance the state rebuild by block, not by slot (#1244)
+- *(cardano)* Delete the unredeemed AVVM utxos the Allegra boundary reclaims (#1250)
+- *(stelae)* Retry a read the OS interrupted instead of failing the layer (#1254)
+
+### 🚜 Refactor
+
+- *(snapshot)* Split the logs layer into per-namespace kinds (#1241)
+- *(snapshot)* Split the state layer into per-namespace kinds (#1243)
+
+### 🔧 Continuous Integration
+
+- Improve workflow performance by removing steps from the critical path (#1251)
+
+### ⚡ Performance
+
+- *(redb3)* Avoid empty space in leaf pages by randomizing insert order (#1253)
+- *(snapshot)* Band the index traversal across a run of epochs (#1255)
+- *(stelae)* Move a publish's layer round trips concurrently (#1260)
+
+### 🧪 Testing
+
+- *(snapshot)* Pin every namespace's field table against the compatibility contract (#1245)
+
+### ⚙️ Miscellaneous Tasks
+
+- Increase surface of dolos-devs code ownership (#1231)
+
 ## [1.7.0-alpha.0] - 2026-08-16
 
 ### 🚀 Features
@@ -95,6 +148,10 @@ All notable changes to this project will be documented in this file.
 
 - *(storage)* Formalize supported vs deprecated backends (#1155)
 - Add dolos-devs as code owner for `crates/minibf` (#1194)
+
+### Release
+
+- V1.7.0-alpha.0
 
 ## [1.6.0] - 2026-07-27
 

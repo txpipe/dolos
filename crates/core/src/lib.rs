@@ -337,11 +337,11 @@ impl WalError {
 
 #[derive(Debug, Error)]
 pub enum ServeError {
-    #[error("failed to bind listener")]
-    BindError(std::io::Error),
+    #[error("failed to bind listener: {0}")]
+    BindError(#[source] std::io::Error),
 
-    #[error("failed to shutdown")]
-    ShutdownError(std::io::Error),
+    #[error("failed to shutdown: {0}")]
+    ShutdownError(#[source] std::io::Error),
 
     #[error(transparent)]
     Internal(#[from] Box<dyn std::error::Error + Send + Sync>),

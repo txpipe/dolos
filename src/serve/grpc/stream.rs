@@ -9,17 +9,13 @@ impl ChainStream {
         domain: D,
         intersect: Vec<ChainPoint>,
         cancel: C,
-    ) -> impl Stream<Item = TipEvent> + 'static {
-        async_stream::stream! {
-            let result = ChainCrawler::<D>::start(
-                &domain,
-                &intersect,
-            );
+    ) -> Result<Option<impl Stream<Item = TipEvent> + 'static>, DomainError> {
+        let Some((mut crawler, intersected)) = ChainCrawler::<D>::start(&domain, &intersect)?
+        else {
+            return Ok(None);
+        };
 
-            let start = result.expect("issue starting crawler");
-
-            let (mut crawler, intersected) = start.expect("crawler can't find start point");
-
+        Ok(Some(async_stream::stream! {
             yield TipEvent::Mark(intersected.clone());
 
             while let Some((point, block)) = crawler.next_block() {
@@ -36,7 +32,7 @@ impl ChainStream {
                     }
                 }
             }
-        }
+        }))
     }
 }
 
@@ -81,7 +77,9 @@ mod tests {
             domain,
             vec![chain_point.clone()],
             CancelTokenImpl(CancellationToken::new()),
-        );
+        )
+        .unwrap()
+        .expect("intersect point should be found");
 
         pin_mut!(s);
 
@@ -104,5 +102,28 @@ mod tests {
         }
 
         background.abort();
+    }
+
+    #[tokio::test]
+    async fn test_stream_unknown_intersect() {
+        let domain = ToyDomain::new(None, None);
+
+        for i in 0..=10 {
+            let (_, block) = make_conway_block(i * 10);
+
+            use dolos_core::SyncExt;
+            domain.roll_forward(block).unwrap();
+        }
+
+        // this point was never rolled forward, so the domain can't intersect it.
+        let unknown_point = make_conway_block(9999).0;
+
+        let result = ChainStream::start::<ToyDomain, CancelTokenImpl>(
+            domain,
+            vec![unknown_point],
+            CancelTokenImpl(CancellationToken::new()),
+        );
+
+        assert!(result.unwrap().is_none());
     }
 }

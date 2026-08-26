@@ -55,9 +55,8 @@
 //! `oci-client` is async and this crate is not: `export` and `restore` are
 //! synchronous iterator code driving fallible store iterators, and threading a
 //! runtime through them would change every profile's shape for the benefit of
-//! one transport. So the transport owns **one current-thread runtime** and
-//! enters it with `block_on` at each call — the idiom `dolos bootstrap mithril`
-//! already uses.
+//! one transport. So the transport owns **one runtime** and enters it with
+//! `block_on` at each call — the idiom `dolos bootstrap mithril` already uses.
 //!
 //! **A [`Registry`] must never be used from inside an async context, and must
 //! never be dropped inside one.** `Runtime::block_on` panics when called from a
@@ -65,6 +64,90 @@
 //! caller today is a synchronous CLI path, which is what makes this safe; a
 //! caller that is not is a design question, and the answer is not a second
 //! runtime.
+//!
+//! Several synchronous caller threads at once are fine, and the publish path
+//! uses them: a profile driver may open and finish sinks from a pool of its
+//! own producer threads. Everything those calls share — the push state, the
+//! in-flight list, the permits — is behind its own lock, and `block_on` from
+//! many non-runtime threads is exactly what a runtime is for.
+//!
+//! ## Why the publish path is concurrent, and where it joins again
+//!
+//! A publish is not one transfer; it is a few hundred small ones. A stele's
+//! layers are cut at record-type and epoch granularity, so a mainnet publish
+//! moves tens of new blobs of half a megabyte each and carries hundreds of
+//! older ones forward — and every one of those, new or carried, costs at least
+//! one round trip to a registry that may be an ocean away. Run in sequence, the
+//! path spends nearly all of its wall clock waiting on a socket with the CPU
+//! and the link both idle, and the carried-forward half makes it *worse every
+//! epoch*: the stele gains layers, so the publish gains round trips, so the
+//! cycle time grows linearly with the history behind it.
+//!
+//! Nothing about that is a bandwidth problem, so the answer is not bigger
+//! layers — the cut geometry is the profile's, and it is deliberate. The answer
+//! is to stop doing one round trip at a time. Every layer's round trips are
+//! independent of every other layer's: a blob is addressed by its own content,
+//! and no blob's upload observes another's. So they are **deferred onto the
+//! runtime and run concurrently**, bounded by [`Options::concurrency`], and the
+//! caller's thread goes back to reading the store rather than waiting on a
+//! `PATCH`.
+//!
+//! What is *not* independent is the manifest, and that is the whole of the
+//! safety argument this concurrency has to preserve:
+//!
+//! > **A manifest must never name a blob the registry has not committed.**
+//!
+//! So [`SteleWriter::seal`] is the join. Every deferred round trip is awaited
+//! there — before the manifest is built, before the config blob goes up, before
+//! either tag is written — and the first failure among them fails the seal, in
+//! the state a failed seal has always left behind: layers unspent, nothing
+//! tagged, and the caller free to seal again. A publish that dies mid-flight
+//! leaves untagged blobs the registry reclaims, exactly as a serial one did.
+//!
+//! The bound is a permit taken *before* the staged layer is handed over rather
+//! than inside the task, so it is also what keeps the scratch directory from
+//! filling: at most [`Options::concurrency`] staged layers exist at once,
+//! whatever order the sinks finish in.
+//!
+//! ## A round trip nobody answered is made again
+//!
+//! Concurrency raised the number of round trips in flight; it did nothing about
+//! the ones that fail for no reason and would have worked a second later. Over
+//! eleven hours of the mainnet backfill the registry answered a create-session
+//! `POST` with a bare `500` eight times, each lasting the milliseconds it took
+//! to ask again — and each one cost the whole epoch, because a publish that
+//! could not seal took the driver down with it, and the driver's recovery is to
+//! restore its stores and replay the epoch it lost.
+//!
+//! That is the most expensive recovery in the system, bought for the cheapest
+//! failure there is. So a round trip is **attempted [`Options::attempts`]
+//! times**, with a doubling wait between them, and the failure the caller keeps
+//! is the last attempt's:
+//!
+//! - **a `5xx`** — the registry answered, and what it said was about itself
+//!   rather than about the request. Asking again is the whole remedy;
+//! - **no answer at all** — a connection refused, a request that timed out, a
+//!   socket that went away mid-body.
+//!
+//! Nothing else. A `4xx` is the registry saying something true about *this*
+//! request — the credential, the digest, the name — and repeating it four times
+//! only makes the diagnosis take longer to arrive. `429` is excluded on purpose
+//! and not by omission: a registry rationing this publisher is a fact its
+//! operator has to see, and a client that absorbed it would report the ration
+//! as slowness.
+//!
+//! This is safe to do at every seam because every one of them is idempotent by
+//! construction. A blob is addressed by the digest of its own content, so an
+//! upload that half-happened and an upload that fully happened both converge on
+//! the same blob when it is sent again; a `HEAD` and a manifest `GET` are
+//! reads; and the manifest `PUT` writes bytes that are a pure function of the
+//! stele. The one thing a retry needs and the serial path did not is the
+//! staging file back at its first byte, which is why it is rewound per attempt
+//! rather than consumed once.
+//!
+//! Every retry is announced through [`Event::Retry`], because a transport that
+//! silently absorbed the failure class would have hidden the measurement that
+//! motivated absorbing it.
 //!
 //! ## TLS, and the second rule it comes with
 //!
@@ -117,11 +200,12 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
+    time::Duration,
 };
 
 use futures_util::Stream;
@@ -135,7 +219,7 @@ use oci_client::{
 pub use oci_client::Reference;
 
 use crate::{
-    digest::{LayerDigests, LayerWriter},
+    digest::{read_uninterrupted, LayerDigests, LayerWriter},
     frame::{CanonicalCbor, Limits, SeqWriter},
     inscription::{canonical_json, Inscription, LayerDescriptor},
     layer::LayerReader,
@@ -231,9 +315,24 @@ pub const SCOPE_ANNOTATION: &str = "store.stelae.layer.scope";
 /// How much of a staged layer is held in memory on the way up.
 ///
 /// One chunk at a time, allocated and handed to the client, which sends it as
-/// one `PATCH`. Well under `oci-client`'s own 4 MiB ceiling per chunk, so this
-/// number — and not the layer's size — is what bounds the upload.
-const UPLOAD_CHUNK: usize = 1024 * 1024;
+/// one `PATCH` — and a `PATCH` costs the registry about three seconds
+/// *whatever it carries*, flat across an eightfold change in chunk size,
+/// because what it is spent on is the upload state the worker round-trips
+/// through its object store rather than the bytes. So the chunk count is the
+/// publish's wall clock, and this constant is what sets it: mainnet's largest
+/// layer is 231 MB, which at 1 MiB was 221 round trips and eleven minutes of a
+/// fifteen-minute publish.
+///
+/// Concurrency is not the alternative. A `PATCH` answers with a `Location`
+/// carrying the session's state hash and the next one is refused unless it
+/// presents the current value, so a blob is one serial chain —
+/// [`Options::concurrency`] bounds layers in flight, never chunks within a
+/// layer.
+///
+/// 4 MiB and not more because `oci-client` re-splits whatever this stream hands
+/// it at its own `PUSH_CHUNK_MAX_SIZE`, which is 4 MiB and has no setter.
+/// Anything larger here would go out as 4 MiB anyway, having cost the memory.
+const UPLOAD_CHUNK: usize = 4 * 1024 * 1024;
 
 /// What a push moved, and what it did not have to.
 ///
@@ -270,8 +369,44 @@ pub struct Transfer {
     pub bytes_reused: u64,
 }
 
+/// How many of a publish's layer round trips run at once.
+///
+/// Eight, and the number is a floor on the registry's side of the trade rather
+/// than a ceiling on this one's: the round trips are latency, not bandwidth, so
+/// the transport would happily run more, and what stops it is that a stele's
+/// blobs go to *one* repository behind one origin. A publisher that opens
+/// thirty-two upload sessions at once against a registry sized for a container
+/// image is a publisher that finds the registry's limits rather than its own.
+///
+/// Eight moves the mainnet publish path off its serial floor by most of an
+/// order of magnitude while staying inside what a modest origin answers without
+/// complaint. [`Options::concurrency`] is there for an operator who has
+/// measured their own.
+pub const DEFAULT_CONCURRENCY: usize = 8;
+
+/// How many times one of a publish's round trips is made before the failure is
+/// the caller's.
+///
+/// Four, and the number is read off the failure it absorbs rather than chosen:
+/// the registry's transient `500`s arrive alone and clear in the time it takes
+/// to ask again, so the first retry is the one that does the work and the rest
+/// are there for the case where it is a second longer than that. Bounded for
+/// the same reason [`crate::Error::LayerNotWritten`] exists — a registry that
+/// is *actually* refusing has to keep refusing, out loud, while whoever
+/// launched the publish is still watching.
+pub const DEFAULT_ATTEMPTS: u32 = 4;
+
+/// How long the transport waits after the first failed attempt; each later wait
+/// doubles it.
+///
+/// Three waits of 500ms, 1s and 2s put the ceiling at three and a half seconds
+/// of patience per round trip — under the cost of one lost epoch by four orders
+/// of magnitude, and small enough that a publish absorbing a handful of them a
+/// night does not show up as a slower publish.
+const RETRY_DELAY: Duration = Duration::from_millis(500);
+
 /// How to reach a registry.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
     /// Talk to the registry over plaintext HTTP rather than HTTPS.
     ///
@@ -293,6 +428,62 @@ pub struct Options {
     /// credentials — see the module documentation for why that is a boundary
     /// rather than an omission.
     pub auth: Auth,
+
+    /// How many layer round trips a publish runs at once.
+    ///
+    /// Defaults to [`DEFAULT_CONCURRENCY`]. `1` restores the strictly serial
+    /// path — an escape hatch for a registry that answers concurrency badly,
+    /// not a mode anything should want — and `0` is read as `1` rather than
+    /// refused, because a transport that could move nothing is not a
+    /// configuration anybody means.
+    ///
+    /// It bounds the staging directory as well as the wire: see the module
+    /// documentation.
+    pub concurrency: usize,
+
+    /// Re-prove that the registry still holds a blob being adopted out of a
+    /// manifest this transport pulled.
+    ///
+    /// Off, and that is the plain reading of the distribution specification
+    /// rather than an optimism: a blob referenced by a manifest under a live
+    /// tag is not garbage, and a registry that reclaims one has broken the
+    /// contract that makes *the stele the manifest came from* restorable —
+    /// which the `HEAD` would not have saved either. Paying a round trip per
+    /// carried layer to re-establish that is what made the publish path's cost
+    /// grow with the history behind it, for a check whose failure means the
+    /// repository is already unusable.
+    ///
+    /// On, [`Registry::adopt_layer`] proves each blob before the manifest names
+    /// it, concurrently with everything else the publish is doing — so the
+    /// check costs latency it can hide rather than latency it serializes. For
+    /// an operator publishing into a registry whose retention they do not
+    /// trust.
+    pub verify_adopted: bool,
+
+    /// How many times a round trip is made before its failure is the caller's.
+    ///
+    /// Defaults to [`DEFAULT_ATTEMPTS`]. `0` and `1` both mean one attempt and
+    /// no retry — `0` is read as `1` rather than refused, for the reason
+    /// [`Options::concurrency`] reads it that way: a transport that would make
+    /// no attempt at all is not a configuration anybody means.
+    ///
+    /// Only the failures the module documentation lists are retried; a
+    /// registry's refusal of *this* request is never one of them, so raising
+    /// this does not slow down a publish that was going to fail anyway.
+    pub attempts: u32,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            insecure: false,
+            scratch_dir: None,
+            auth: Auth::default(),
+            concurrency: DEFAULT_CONCURRENCY,
+            verify_adopted: false,
+            attempts: DEFAULT_ATTEMPTS,
+        }
+    }
 }
 
 /// A repository an operator named, as `oci://HOST/PATH`.
@@ -436,7 +627,25 @@ struct Shared {
     name: Repository,
     auth: RegistryAuth,
     scratch_dir: Option<PathBuf>,
-    state: Mutex<PushState>,
+    /// Behind its own [`Arc`] rather than inside this one, because a deferred
+    /// layer round trip has to reach it and must **not** reach the runtime: the
+    /// task would then hold the thing that is driving it, and the last handle
+    /// dropping inside a worker thread would drop a runtime from inside itself,
+    /// which panics. Every deferred task below is built out of cheap clones —
+    /// the client, the reference, this handle, the observer — and never out of
+    /// a `Shared`.
+    state: Arc<Mutex<PushState>>,
+    /// How many layer round trips may be outstanding at once, and with them how
+    /// many staged layers may exist at once. A permit is taken on the caller's
+    /// thread before the staging file is handed over and released when the
+    /// round trip is done. See [`Options::concurrency`].
+    permits: Arc<tokio::sync::Semaphore>,
+    /// The deferred layer round trips, waiting to be joined by
+    /// [`SteleWriter::seal`].
+    ///
+    /// Not in [`PushState`], for the reason `state` is not in `Shared`: the
+    /// tasks reach the state and must never reach the handles that own them.
+    inflight: Mutex<Vec<tokio::task::JoinHandle<Result<(), Error>>>>,
     /// Who is watching this connection, in either direction.
     ///
     /// Beside the push state rather than inside it, because a [`Stele`] shares
@@ -445,6 +654,14 @@ struct Shared {
     /// property a restore depends on — the reader is created inside the driver
     /// and there is no other moment to wire it.
     observer: Mutex<Observer>,
+    /// [`Options::verify_adopted`], as it was given.
+    verify_adopted: bool,
+    /// [`Options::concurrency`], as it was resolved — the permit count, kept
+    /// beside the semaphore because the semaphore's own count is whatever is
+    /// free at the moment it is asked.
+    concurrency: usize,
+    /// [`Options::attempts`], as it was resolved.
+    attempts: u32,
 }
 
 #[derive(Default)]
@@ -452,6 +669,36 @@ struct PushState {
     /// Layers finished since the last [`SteleWriter::seal`], in finish order.
     pending: Vec<WrittenLayer>,
     transfer: Transfer,
+    /// The first deferred round trip that failed, rendered.
+    ///
+    /// Sticky, and that is the point. A failed [`Shared::join_layers`] empties
+    /// the handles it awaited, so without this a second seal would find nothing
+    /// in flight, agree that every layer was up, and publish a manifest naming
+    /// a blob that never landed — the one document this transport must never
+    /// write. See [`Error::LayerNotWritten`].
+    failed: Option<String>,
+}
+
+/// One layer's share of [`Options::concurrency`], held for as long as its round
+/// trips are outstanding.
+///
+/// Named because it is passed hand to hand — taken on the caller's thread by
+/// whoever is about to defer, moved into the task, and dropped when the task
+/// ends — and a bare `OwnedSemaphorePermit` in three signatures says nothing
+/// about which of those it is.
+type Permit = tokio::sync::OwnedSemaphorePermit;
+
+/// The push state, for a deferred task that holds the state and not the
+/// transport.
+///
+/// A poisoned lock means a push panicked while holding it. The counters are
+/// plain integers and the pending list is append-only, so what is behind the
+/// lock is still coherent; refusing to look at it would turn one failed push
+/// into a transport nobody can use.
+fn lock(state: &Mutex<PushState>) -> std::sync::MutexGuard<'_, PushState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Registry {
@@ -464,9 +711,9 @@ impl Registry {
     /// parses it into a [`Repository`] and hands that over; nothing outside
     /// this module needs to know where the host ends.
     ///
-    /// Builds the current-thread runtime the whole transport runs on, and
-    /// stores the credentials [`Options::auth`] carries so they never have to
-    /// be threaded through a profile's call stack.
+    /// Builds the runtime the whole transport runs on, and stores the
+    /// credentials [`Options::auth`] carries so they never have to be threaded
+    /// through a profile's call stack.
     ///
     /// # Panics
     ///
@@ -498,7 +745,17 @@ impl Registry {
 
         let auth = options.auth.to_registry_auth();
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        // One worker per permit, and the two numbers are one decision. A
+        // deferred upload reads its staged layer with a *blocking* file read —
+        // see `blob_stream`, where that is deliberate — so a worker driving one
+        // upload is unavailable to another for the length of a read. Sizing the
+        // pool to the bound is what keeps that from turning a concurrency of
+        // eight into a concurrency of one on a slow volume.
+        let concurrency = options.concurrency.max(1);
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(concurrency)
+            .thread_name("stelae-oci")
             .enable_all()
             .build()?;
 
@@ -516,8 +773,13 @@ impl Registry {
                 name: repository.clone(),
                 auth,
                 scratch_dir: options.scratch_dir,
-                state: Mutex::new(PushState::default()),
+                state: Arc::new(Mutex::new(PushState::default())),
+                permits: Arc::new(tokio::sync::Semaphore::new(concurrency)),
+                inflight: Mutex::new(Vec::new()),
                 observer: Mutex::new(Observer::silent()),
+                verify_adopted: options.verify_adopted,
+                concurrency,
+                attempts: options.attempts.max(1),
             }),
         })
     }
@@ -545,14 +807,41 @@ impl Registry {
         &self.shared.name
     }
 
+    /// [`Options::concurrency`], as it was resolved.
+    ///
+    /// Asked by a caller sizing the volume this transport stages on, for the
+    /// reason [`Registry::scratch_dir`] is asked for the directory: the number
+    /// that bounds how many layers are staged at once is the transport's, and a
+    /// caller re-deriving it from its own configuration is a second copy of a
+    /// number that has to stay in step.
+    pub fn concurrency(&self) -> usize {
+        self.shared.concurrency
+    }
+
     /// What has been pushed through this transport since it was opened, or
     /// since the last [`Registry::take_transfer`].
+    ///
+    /// **What has *finished*.** Layer round trips are deferred and joined at
+    /// the seal, so a publish still in flight is a publish still counting, and
+    /// the moment these numbers are the whole story is after
+    /// [`SteleWriter::seal`] returns. Asked earlier they are a progress
+    /// reading; asked there they are the cost of the stele. A caller that wants
+    /// the second one does not have to do anything to get it — a publish ends
+    /// at a seal — and this does not block to manufacture it, because a
+    /// counter that waited for the network would be a strange thing for a
+    /// progress renderer to call.
     pub fn transfer(&self) -> Transfer {
         self.shared.locked().transfer
     }
 
     /// The same numbers, and reset — so a publisher pushing several steles
     /// through one transport reads each one's cost rather than a running total.
+    ///
+    /// Read it after the seal, for the reason [`Registry::transfer`] gives, and
+    /// with one more of its own: this one clears what it read, so a call made
+    /// while round trips are still in flight does not merely see a partial
+    /// figure, it takes the figure away from the seal that was going to
+    /// complete it.
     pub fn take_transfer(&self) -> Transfer {
         std::mem::take(&mut self.shared.locked().transfer)
     }
@@ -571,18 +860,22 @@ impl Registry {
     ///    pointing at a document nobody signed;
     /// 4. [`Inscription::check_profile`] — **before any layer is fetched**, so
     ///    a stele of another profile costs one small GET and not a partial
-    ///    restore;
+    ///    restore. The read-side check, deliberately: a pull serves a reader,
+    ///    and a caller that is about to *publish* on top of what it pulled owes
+    ///    the stricter [`Inscription::check_profile_strict`] of its own;
     /// 5. manifest ↔ inscription cross-check, which yields the [`BlobIndex`].
     pub fn pull(&self, profile: &dyn Profile, tag: &str) -> Result<Stele, Error> {
         validate_tag(tag)?;
 
         let reference = self.shared.tagged(tag);
 
-        let (manifest, _digest) = self.shared.runtime.block_on(
-            self.shared
-                .client
-                .pull_image_manifest(&reference, &self.shared.auth),
-        )?;
+        let (manifest, _digest) = self.shared.retrying(|| {
+            Ok(self.shared.runtime.block_on(
+                self.shared
+                    .client
+                    .pull_image_manifest(&reference, &self.shared.auth),
+            )?)
+        })?;
 
         check_envelope(&manifest)?;
 
@@ -664,11 +957,24 @@ impl Registry {
     /// **The new stele attests a layer it did not reproduce.** That is the
     /// trade, and it is the caller's to make: nothing here can check that the
     /// descriptor describes those bytes, because checking would mean reading
-    /// them, which is the cost being avoided. What *is* checked is that the
-    /// blob is still there — one `HEAD`, before the manifest is written —
-    /// because a descriptor pointing at a blob the registry has reclaimed is a
-    /// stele nobody can restore, and it would be published looking perfectly
-    /// well-formed.
+    /// them, which is the cost being avoided.
+    ///
+    /// ## What is not checked, and why that is the default
+    ///
+    /// `source` is a stele this transport *pulled*: its manifest is live in
+    /// this repository under a tag, and it names this blob. A registry is not
+    /// permitted to reclaim a blob in that position, and one that does has
+    /// already broken the stele the descriptor came from — a `HEAD` here would
+    /// find the damage a publish too late and could not have prevented it.
+    ///
+    /// Re-establishing it per carried layer per publish is what made this path
+    /// cost a round trip for every layer of history behind the stele, and made
+    /// each publish slower than the one before it for a reason that had nothing
+    /// to do with what it was publishing. So it is not paid by default.
+    /// [`Options::verify_adopted`] restores the proof for an operator who wants
+    /// it, and pays for it concurrently rather than in sequence: the `HEAD`
+    /// still lands before the manifest names the blob, which is the only
+    /// ordering that was ever load-bearing.
     ///
     /// The caller names the layer by its `descriptor` — identity, out of an
     /// inscription — and the stele it came from. The blob digest and the
@@ -719,20 +1025,21 @@ impl Registry {
             descriptor,
         };
 
-        let kind = adopted.descriptor.kind.clone();
-        let diff_id = adopted.descriptor.diff_id;
-
         // A manifest naming a blob the registry no longer has is a refusal and
         // not a miss: the stele that named it is published, and something has
         // reclaimed underneath it. See [`Registry::adopt_carried`] for the case
-        // where the same absence is merely a rebuild.
-        if !self.adopt_carried(adopted)? {
-            return Err(Error::BlobMissing {
-                kind,
-                diff_id: diff_id.to_string(),
-                blob: named,
-            });
+        // where the same absence is merely a rebuild — and `Options` for why
+        // this transport does not go looking for it by default.
+        if self.shared.verify_adopted {
+            let permit = self.shared.permit();
+
+            self.shared.prove_blob(&adopted, permit);
         }
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_reused += 1;
+        state.transfer.bytes_reused += adopted.digests.compressed_size;
+        state.pending.push(adopted);
 
         Ok(())
     }
@@ -811,6 +1118,175 @@ fn is_absent(error: &oci_client::errors::OciDistributionError) -> bool {
     }
 }
 
+/// Whether a failure is one that asking again can fix.
+///
+/// The counterpart of [`is_absent`], and narrow for the same reason that one
+/// is: a classification that guesses wide turns a registry's considered refusal
+/// into four of them spread over three and a half seconds, and the caller reads
+/// the last copy. Two shapes qualify.
+///
+/// **A `5xx`.** The registry answered, and what it said was about itself. This
+/// is the measured class — the create-session `POST` that returns
+/// `500 INTERNAL_ERROR` and succeeds on the next ask.
+///
+/// **No answer at all.** A connection refused, a request that timed out, a
+/// socket closed mid-body. `oci-client` reports these through `reqwest`
+/// untouched, and [`oci_client::Client::blob_exists`] reports a `5xx` that way
+/// too — it asks `reqwest` for the status rather than mapping it — so both
+/// shapes have to be read out of the same variant.
+///
+/// Everything else propagates on the first attempt:
+///
+/// - **a `4xx`** is the registry saying something true about *this* request.
+///   The credential is wrong, the digest does not match what arrived, the
+///   repository is not there. Repetition does not change any of those, it only
+///   delays the report;
+/// - **`429` in particular**, and that is a decision rather than an oversight.
+///   A registry rationing this publisher is a fact its operator needs, and a
+///   client that waited it out would deliver the ration as unexplained
+///   slowness;
+/// - **anything local** — a staging file that would not read, a manifest that
+///   would not parse. Nothing on the far side is involved and nothing about
+///   waiting helps.
+fn is_transient(error: &Error) -> bool {
+    use oci_client::errors::OciDistributionError as E;
+
+    let Error::Registry(error) = error else {
+        return false;
+    };
+
+    match error {
+        E::ServerError { code, .. } => (500..600).contains(code),
+        E::RequestError(source) => match source.status() {
+            Some(status) => status.is_server_error(),
+            None => source.is_timeout() || source.is_connect() || source.is_request(),
+        },
+        _ => false,
+    }
+}
+
+/// What a bounded retry keeps between attempts: how many are left, and how long
+/// the next wait is.
+///
+/// A value rather than a loop because there are two loops — one on the caller's
+/// thread around a `block_on`, one inside a deferred task around an `await` —
+/// and the decision they share is this and not the sleeping. Splitting it here
+/// is what keeps the policy in one place while each loop waits the way its own
+/// thread has to.
+struct Backoff {
+    attempted: u32,
+    attempts: u32,
+    delay: Duration,
+}
+
+impl Backoff {
+    fn new(attempts: u32, delay: Duration) -> Self {
+        Self {
+            attempted: 0,
+            attempts: attempts.max(1),
+            delay,
+        }
+    }
+
+    /// How long to wait before making the round trip again, or `None` if this
+    /// failure is the caller's.
+    ///
+    /// Announces the retry it is about to allow, before the wait rather than
+    /// after it, so a watcher hears about a registry misbehaving while it is
+    /// still misbehaving.
+    fn wait_after(&mut self, error: &Error, observer: &Observer) -> Option<Duration> {
+        self.attempted += 1;
+
+        let remaining = self.attempts - self.attempted;
+
+        if remaining == 0 || !is_transient(error) {
+            return None;
+        }
+
+        observer.emit(Event::Retry {
+            attempt: self.attempted,
+            remaining,
+            reason: &error.to_string(),
+        });
+
+        let waiting = self.delay;
+        self.delay = self.delay.saturating_mul(2);
+
+        Some(waiting)
+    }
+}
+
+/// Run a round trip on the caller's thread, making it again while
+/// [`is_transient`] says it is worth it.
+///
+/// `op` does its own `block_on` and is run from a thread that is not the
+/// transport's runtime — the rule the module documentation states — so the wait
+/// is a plain thread sleep. `op` is called again from scratch, which is what
+/// puts any resetting a second attempt needs inside it rather than around it.
+fn retrying<T>(
+    attempts: u32,
+    observer: &Observer,
+    mut op: impl FnMut() -> Result<T, Error>,
+) -> Result<T, Error> {
+    let mut backoff = Backoff::new(attempts, RETRY_DELAY);
+
+    loop {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) => match backoff.wait_after(&error, observer) {
+                Some(waiting) => std::thread::sleep(waiting),
+                None => return Err(error),
+            },
+        }
+    }
+}
+
+/// [`retrying`], for a round trip already inside the runtime.
+///
+/// The deferred layer tasks, where the wait must yield the worker rather than
+/// hold it: a thread sleeping here is one of [`Options::concurrency`] threads,
+/// and parking it would stall an upload that has nothing wrong with it.
+///
+/// `op` returns a future that owns everything it touches, for the reason
+/// [`Shared::defer`] gives — and here for a second one: a future that borrowed
+/// the closure could not be built twice.
+async fn retrying_async<T, F, Fut>(
+    attempts: u32,
+    observer: &Observer,
+    mut op: F,
+) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, Error>>,
+{
+    let mut backoff = Backoff::new(attempts, RETRY_DELAY);
+
+    loop {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(error) => match backoff.wait_after(&error, observer) {
+                Some(waiting) => tokio::time::sleep(waiting).await,
+                None => return Err(error),
+            },
+        }
+    }
+}
+
+/// A staging file, back at its first byte and ready to be streamed.
+///
+/// A `dup` rather than the file itself, because a stream consumes what it is
+/// given and a second attempt has to read the same bytes again. The two
+/// descriptors share an offset, so the seek here is what rewinds *the* file
+/// however many handles are outstanding — which is sound because only one
+/// attempt of one layer ever reads it at a time.
+fn rewound(staged: &File) -> Result<File, Error> {
+    let mut again = staged.try_clone()?;
+
+    again.seek(SeekFrom::Start(0))?;
+
+    Ok(again)
+}
+
 /// A staged file, created where [`Options::scratch_dir`] said.
 ///
 /// Both calls that can fail against a *named* directory raise
@@ -842,13 +1318,7 @@ fn scratch_in(dir: Option<&Path>) -> Result<File, Error> {
 
 impl Shared {
     fn locked(&self) -> std::sync::MutexGuard<'_, PushState> {
-        // A poisoned lock means a push panicked while holding it. The counters
-        // are plain integers and the pending list is append-only, so what is
-        // behind the lock is still coherent; refusing to look at it would turn
-        // one failed push into a transport nobody can use.
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock(&self.state)
     }
 
     /// A handle on whoever is watching, taken once per operation.
@@ -883,59 +1353,258 @@ impl Shared {
         scratch_in(self.scratch_dir.as_deref())
     }
 
-    fn blob_exists(&self, digest: &Digest) -> Result<bool, Error> {
-        Ok(self.runtime.block_on(
-            self.client
-                .blob_exists(&self.repository, &digest.to_string()),
-        )?)
+    /// [`retrying`], with this transport's own bound and observer.
+    ///
+    /// Every round trip made on a caller's thread goes through here, so the
+    /// policy is stated once and no seam is left out by having been written
+    /// before the policy existed.
+    fn retrying<T>(&self, op: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+        retrying(self.attempts, &self.observer(), op)
     }
 
-    /// Upload a staged layer, unless the registry already has it.
+    fn blob_exists(&self, digest: &Digest) -> Result<bool, Error> {
+        let named = digest.to_string();
+
+        self.retrying(|| {
+            Ok(self
+                .runtime
+                .block_on(self.client.blob_exists(&self.repository, &named))?)
+        })
+    }
+
+    /// Take a permit, on the caller's thread.
+    ///
+    /// This is the back pressure, and taking it *here* rather than inside the
+    /// task is what makes it back pressure at all: the caller does not get to
+    /// stage a ninth layer while eight are still moving, so the scratch
+    /// directory is bounded by the same number as the wire.
+    fn permit(&self) -> tokio::sync::OwnedSemaphorePermit {
+        // The semaphore is never closed — nothing here closes one — so the only
+        // error this call has is unreachable.
+        self.runtime
+            .block_on(Arc::clone(&self.permits).acquire_owned())
+            .expect("the transport's semaphore is never closed")
+    }
+
+    /// Run one layer's round trips off the caller's thread.
+    ///
+    /// The future is built by the caller out of clones and owns everything it
+    /// touches, which is the invariant that keeps a task from holding the
+    /// runtime driving it — see [`Shared::state`].
+    fn defer(&self, task: impl std::future::Future<Output = Result<(), Error>> + Send + 'static) {
+        let handle = self.runtime.spawn(task);
+
+        self.inflight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(handle);
+    }
+
+    /// Wait for every deferred round trip, and report the first failure.
+    ///
+    /// **Every** one, including after a failure has already been seen: a task
+    /// left running is a task still writing to a registry the caller is about
+    /// to be told nothing was written to, and — on the error path — one that
+    /// would be cancelled by the runtime shutting down under it. The first
+    /// error is the one reported because the others are usually the same
+    /// network saying the same thing twice.
+    ///
+    /// A panicking task is re-raised on this thread rather than folded into an
+    /// error: a panic in an upload is a bug in this module, and turning it into
+    /// a returned `Err` would file it under "the registry refused".
+    ///
+    /// **A failure here is remembered.** The first call reports the cause
+    /// itself; every call after it reports [`Error::LayerNotWritten`], because
+    /// the handles are gone and a join that found nothing outstanding would
+    /// otherwise read as "everything landed".
+    ///
+    /// A failure that arrives here has already been retried — each round trip
+    /// was made [`Options::attempts`] times while its staged bytes were still
+    /// in hand, which is the only moment at which the transport can do anything
+    /// about it. So what reaches this point is a registry that means it, and
+    /// permanence is the right answer to it rather than a harsh one.
+    fn join_layers(&self) -> Result<(), Error> {
+        let handles: Vec<_> = std::mem::take(
+            &mut *self
+                .inflight
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+
+        let (first, panicked) = self.runtime.block_on(async {
+            let mut first: Option<Error> = None;
+            let mut panicked: Option<Box<dyn std::any::Any + Send>> = None;
+
+            for handle in handles {
+                match handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => first = first.or(Some(error)),
+                    Err(join) if join.is_panic() => panicked = panicked.or(Some(join.into_panic())),
+                    // Nothing here cancels a task, so this arm is the runtime
+                    // shutting down mid-join, which cannot happen while this
+                    // call holds it.
+                    Err(_) => {}
+                }
+            }
+
+            (first, panicked)
+        });
+
+        if let Some(payload) = panicked {
+            std::panic::resume_unwind(payload);
+        }
+
+        let mut state = self.locked();
+
+        if let Some(error) = first {
+            state.failed.get_or_insert_with(|| error.to_string());
+
+            return Err(error);
+        }
+
+        match &state.failed {
+            Some(why) => Err(Error::LayerNotWritten(why.clone())),
+            None => Ok(()),
+        }
+    }
+
+    /// Upload a staged layer, unless the registry already has it — later.
     ///
     /// The existence check *is* the blob-skip — the whole delta-transfer claim
     /// reduces to this one `HEAD` per layer — and both outcomes are counted.
-    fn put_layer(&self, layer: &WrittenLayer, staged: File) -> Result<(), Error> {
+    ///
+    /// The layer is added to the pending list here, on the caller's thread and
+    /// in finish order, so [`Registry::carried`] answers for it the moment its
+    /// sink returns and the manifest is built out of the order the inscription
+    /// was. What is deferred is the two round trips, and their failure, which
+    /// [`Shared::join_layers`] collects at the seal.
+    fn put_layer(&self, layer: &WrittenLayer, staged: File, permit: Permit) {
         let digest = layer.digests.blob_digest;
         let size = layer.digests.compressed_size;
         let observer = self.observer();
+        let attempts = self.attempts;
 
-        if self.blob_exists(&digest)? {
-            // Announced even though nothing moves: "the registry already had
-            // this one" is the blob-skip working, and a watcher that only heard
-            // about uploads would read the whole point of a content-addressed
-            // registry as a stall.
+        self.locked().pending.push(layer.clone());
+
+        let client = self.client.clone();
+        let repository = self.repository.clone();
+        let state = Arc::clone(&self.state);
+
+        self.defer(async move {
+            let _permit = permit;
+            let named = digest.to_string();
+
+            let present = retrying_async(attempts, &observer, || {
+                let client = client.clone();
+                let repository = repository.clone();
+                let named = named.clone();
+
+                async move { Ok(client.blob_exists(&repository, &named).await?) }
+            })
+            .await?;
+
+            if present {
+                // Announced even though nothing moves: "the registry already
+                // had this one" is the blob-skip working, and a watcher that
+                // only heard about uploads would read the whole point of a
+                // content-addressed registry as a stall.
+                observer.emit(Event::Blob {
+                    moved: false,
+                    bytes: size,
+                });
+
+                let mut state = lock(&state);
+                state.transfer.layers_skipped += 1;
+                state.transfer.bytes_skipped += size;
+
+                return Ok(());
+            }
+
+            // Before the upload rather than after it, so a watcher knows how
+            // big the transfer it is about to see is while it is still
+            // happening.
+            //
+            // Once, however many attempts the upload takes. What a lost attempt
+            // moved is bytes that crossed the wire and are not coming back, so
+            // the deltas can outrun this announcement — which is a fact about
+            // the link, and [`Event::Bytes`] says so where a renderer will read
+            // it.
             observer.emit(Event::Blob {
-                moved: false,
+                moved: true,
                 bytes: size,
             });
 
-            let mut state = self.locked();
-            state.transfer.layers_skipped += 1;
-            state.transfer.bytes_skipped += size;
-            state.pending.push(layer.clone());
+            // The staged bytes are still in hand here, which is the whole
+            // reason this is the right place for the retry: past the join the
+            // layer's only copy is the store it was built from, and the
+            // recovery costs a publish. Rewound per attempt, because the stream
+            // consumes the handle it is given.
+            retrying_async(attempts, &observer, || {
+                let client = client.clone();
+                let repository = repository.clone();
+                let named = named.clone();
+                let observer = observer.clone();
+                let staged = rewound(&staged);
 
-            return Ok(());
-        }
+                async move {
+                    client
+                        .push_blob_stream(&repository, blob_stream(staged?, observer), &named)
+                        .await?;
 
-        // Before the upload rather than after it, so a watcher knows how big
-        // the transfer it is about to see is while it is still happening.
-        observer.emit(Event::Blob {
-            moved: true,
-            bytes: size,
+                    Ok(())
+                }
+            })
+            .await?;
+
+            let mut state = lock(&state);
+            state.transfer.layers_uploaded += 1;
+            state.transfer.bytes_uploaded += size;
+
+            Ok(())
         });
+    }
 
-        self.runtime.block_on(self.client.push_blob_stream(
-            &self.repository,
-            blob_stream(staged, observer),
-            &digest.to_string(),
-        ))?;
+    /// Prove — later — that the registry still holds a blob being carried
+    /// forward.
+    ///
+    /// [`Options::verify_adopted`] only. Deferred for the reason an upload is,
+    /// and joined at the same point: what the check has to beat is the manifest
+    /// naming the blob, not the descriptor being handed back.
+    fn prove_blob(&self, layer: &WrittenLayer, permit: Permit) {
+        let kind = layer.descriptor.kind.clone();
+        let diff_id = layer.descriptor.diff_id;
+        let blob = layer.digests.blob_digest;
 
-        let mut state = self.locked();
-        state.transfer.layers_uploaded += 1;
-        state.transfer.bytes_uploaded += size;
-        state.pending.push(layer.clone());
+        let client = self.client.clone();
+        let repository = self.repository.clone();
+        let observer = self.observer();
+        let attempts = self.attempts;
 
-        Ok(())
+        self.defer(async move {
+            let _permit = permit;
+            let named = blob.to_string();
+
+            // The retry is over the round trip and not over the verdict: a
+            // registry that answered "no" answered, and asking a second time is
+            // how a publisher talks itself into carrying a blob that is gone.
+            let present = retrying_async(attempts, &observer, || {
+                let client = client.clone();
+                let repository = repository.clone();
+                let named = named.clone();
+
+                async move { Ok(client.blob_exists(&repository, &named).await?) }
+            })
+            .await?;
+
+            match present {
+                true => Ok(()),
+                false => Err(Error::BlobMissing {
+                    kind,
+                    diff_id: diff_id.to_string(),
+                    blob: named,
+                }),
+            }
+        });
     }
 
     /// Upload a small blob a caller already holds — the inscription, and
@@ -945,13 +1614,22 @@ impl Shared {
             return Ok(());
         }
 
-        self.runtime.block_on(self.client.push_blob(
-            &self.repository,
-            bytes,
-            &digest.to_string(),
-        ))?;
+        let named = digest.to_string();
 
-        Ok(())
+        // Into `Bytes` once, so an attempt after the first re-sends the
+        // document rather than re-allocating it: this is the inscription, and
+        // the clone a retry costs should be a refcount.
+        let bytes = bytes::Bytes::from(bytes);
+
+        self.retrying(|| {
+            self.runtime.block_on(self.client.push_blob(
+                &self.repository,
+                bytes.clone(),
+                &named,
+            ))?;
+
+            Ok(())
+        })
     }
 
     /// Fetch a small blob into memory, bounded by the size its descriptor
@@ -969,16 +1647,26 @@ impl Shared {
         // No observer: the config blob is the inscription, not a layer, and a
         // watcher summing byte deltas against a layer total would find them
         // disagreeing by however large the document is.
-        self.runtime.block_on(self.client.pull_blob(
-            reference,
-            descriptor,
-            Blocking::new(
-                &mut buffer,
-                descriptor.size,
-                &descriptor.digest,
-                Observer::silent(),
-            ),
-        ))?;
+        self.retrying(|| {
+            // Emptied rather than reused, so a second attempt writes the
+            // document and not the document twice. `Blocking` counts from zero
+            // per attempt for the same reason, which it gets by being built
+            // here.
+            buffer.clear();
+
+            self.runtime.block_on(self.client.pull_blob(
+                reference,
+                descriptor,
+                Blocking::new(
+                    &mut buffer,
+                    descriptor.size,
+                    &descriptor.digest,
+                    Observer::silent(),
+                ),
+            ))?;
+
+            Ok(())
+        })?;
 
         Ok(buffer)
     }
@@ -1004,11 +1692,27 @@ impl Shared {
             bytes: descriptor.size.max(0) as u64,
         });
 
-        self.runtime.block_on(self.client.pull_blob(
-            reference,
-            descriptor,
-            Blocking::new(&mut file, descriptor.size, &descriptor.digest, observer),
-        ))?;
+        self.retrying(|| {
+            // Back to empty before each attempt, for the reason a staged layer
+            // is rewound before each of its own: what a half-finished download
+            // left behind is not a prefix of what the next one writes, it is
+            // bytes in front of it.
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+
+            self.runtime.block_on(self.client.pull_blob(
+                reference,
+                descriptor,
+                Blocking::new(
+                    &mut file,
+                    descriptor.size,
+                    &descriptor.digest,
+                    observer.clone(),
+                ),
+            ))?;
+
+            Ok(())
+        })?;
 
         file.seek(SeekFrom::Start(0))?;
 
@@ -1036,21 +1740,73 @@ impl SteleWriter for Registry {
         })
     }
 
+    /// Put the second descriptor in the list [`SteleWriter::seal`] builds the
+    /// manifest from.
+    ///
+    /// The override the default's documentation asks for: this transport pairs
+    /// every layer the inscription describes against a layer it wrote, and a
+    /// descriptor with nothing beside it fails the seal. Nothing is uploaded
+    /// and nothing is checked — the blob was handed to the upload pool when the
+    /// first descriptor's sink finished, in this same publish, and the seal
+    /// joins that upload before it names either descriptor. So there is no
+    /// state of the registry under which it is there for one name and absent
+    /// for the other.
+    ///
+    /// Counted as **skipped** rather than reused, by the distinction
+    /// [`Transfer::layers_reused`] draws: these bytes were built out of a
+    /// store, hashed, and then not uploaded again — which is a blob-skip
+    /// exactly, and not a layer that was never read.
+    ///
+    /// ## And silent, unlike the blob-skip on the upload path
+    ///
+    /// That path emits [`Event::Blob`] with `moved: false` because a watcher
+    /// hearing only about uploads would read the skip as a stall. Nothing
+    /// stalls here: the caller closes the second descriptor's layer as
+    /// `Transferred`, so the layer cursor advances on its own, and the blob
+    /// this describes finished uploading moments ago in this same publish.
+    /// The event drives a per-blob bar, so emitting one would reset it to
+    /// "already in the registry" for bytes that had just crossed the wire —
+    /// which reads as a redundant upload rather than as one blob acquiring a
+    /// second name.
+    ///
+    /// The counters above do record it, and there the double count is the
+    /// reading that is wanted: a publisher comparing two publishes wants the
+    /// dump's bytes to appear as bytes it did not pay to move again.
+    fn carry_again(
+        &self,
+        written: &WrittenLayer,
+        scope: serde_json::Value,
+    ) -> Result<WrittenLayer, Error> {
+        let again = crate::transport::again(written, scope);
+
+        let mut state = self.shared.locked();
+        state.transfer.layers_skipped += 1;
+        state.transfer.bytes_skipped += again.digests.compressed_size;
+        state.pending.push(again.clone());
+
+        Ok(again)
+    }
+
     /// Publish the manifest, and with it the stele.
     ///
     /// The order is the whole of the safety argument:
     ///
-    /// 1. every layer blob is already up — that happened in
-    ///    [`RecordSink::finish`], one blob at a time;
+    /// 1. **every layer blob is up.** The round trips were deferred by
+    ///    [`RecordSink::finish`] and [`Registry::adopt_layer`] and ran
+    ///    concurrently; this is where they are joined, and the first failure
+    ///    among them is this call's failure;
     /// 2. the inscription goes up as the config blob;
     /// 3. the manifest is tagged with the immutable tag the profile renders for
     ///    this sequence;
     /// 4. and **only then** the moving tag moves.
     ///
-    /// Step 4 is last so that a reader following `latest` never resolves to a
-    /// stele whose blobs are still uploading. A push that dies in the middle
-    /// leaves untagged blobs the registry will reclaim, and a `latest` that
-    /// still points at the previous stele — which is a stele, and restores.
+    /// Step 1 is the serialization point the concurrency is arranged around:
+    /// the manifest is built *after* it, so no document this transport writes
+    /// can name a blob the registry has not committed. Step 4 is last so that a
+    /// reader following `latest` never resolves to a stele whose blobs are
+    /// still uploading. A push that dies in the middle leaves untagged blobs
+    /// the registry will reclaim, and a `latest` that still points at the
+    /// previous stele — which is a stele, and restores.
     ///
     /// **A seal that succeeds consumes the layers finished since the last
     /// one.** One transport can therefore publish several steles in turn —
@@ -1063,6 +1819,20 @@ impl SteleWriter for Registry {
     /// 500 leaves a transport the caller can seal again — the blobs are
     /// already up, and re-exporting a stele to recover from a transient error
     /// is not a price this owes anyone.
+    ///
+    /// **A seal that fails at step 1 is the exception, and it is permanent.** A
+    /// layer that did not reach the repository cannot be sent again from here:
+    /// its staging went with the round trip that lost it, and the bytes are
+    /// only in the store the publisher built them from. So the failure is
+    /// remembered, every later seal answers [`Error::LayerNotWritten`], and the
+    /// recovery is another publish rather than another seal. Retrying the seal
+    /// is what would produce the one document this transport must never
+    /// write — see [`Shared::join_layers`].
+    ///
+    /// Which is why the retry that *can* help is not here but inside the round
+    /// trip, where the staging file has not been spent yet: by the time a
+    /// failure reaches this join it has already been asked
+    /// [`Options::attempts`] times.
     fn seal(&self, profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
         // Both tags before either push. Validating the moving tag after the
         // sequence manifest is already public would make a bad tag something
@@ -1070,6 +1840,15 @@ impl SteleWriter for Registry {
         let sequence_tag = checked_tag_for_sequence(profile, inscription.sequence)?;
         let moving_tag = profile.moving_tag().to_owned();
         validate_tag(&moving_tag)?;
+
+        // The join, and it is before the manifest is even built rather than
+        // merely before it is pushed: a document assembled out of a pending
+        // list whose blobs are still in flight is a document that must not
+        // exist, not one that must not be sent. Fallible, like every other step
+        // here, and — like every other step here — it runs before the layers
+        // are spent, so a transport whose upload the network broke can be
+        // sealed again once the caller has decided what to do about it.
+        self.shared.join_layers()?;
 
         // Scoped so the guard is gone before anything touches the network.
         let (body, config) = {
@@ -1104,13 +1883,15 @@ impl Shared {
     fn push_manifest(&self, tag: &str, body: Vec<u8>) -> Result<(), Error> {
         let reference = self.tagged(tag);
 
-        self.runtime.block_on(self.client.push_manifest_raw(
-            &reference,
-            body,
-            http::HeaderValue::from_static(OCI_IMAGE_MEDIA_TYPE),
-        ))?;
+        self.retrying(|| {
+            self.runtime.block_on(self.client.push_manifest_raw(
+                &reference,
+                body.clone(),
+                http::HeaderValue::from_static(OCI_IMAGE_MEDIA_TYPE),
+            ))?;
 
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -1141,7 +1922,19 @@ impl RecordSink for RegistrySink {
         self.sequence.count()
     }
 
-    /// Close the layer and upload it — unless the registry has it already.
+    /// Close the layer and hand it to the upload pool.
+    ///
+    /// The descriptor comes back as soon as the last record is framed: it is a
+    /// fact about bytes this sink already has, and nothing the registry says
+    /// can change it. The upload — and the `HEAD` that may make it
+    /// unnecessary — runs concurrently with whatever the caller does next, and
+    /// is joined by [`SteleWriter::seal`] before the manifest can name it.
+    ///
+    /// So an error here is a failure to *close the layer*; a failure to move it
+    /// surfaces at the seal. That is a change in when a registry's refusal is
+    /// reported and not in what it costs: a publish that cannot upload is a
+    /// publish that does not seal, in either arrangement, having tagged
+    /// nothing.
     fn finish(self) -> Result<WrittenLayer, Error> {
         let Self {
             sequence,
@@ -1150,6 +1943,14 @@ impl RecordSink for RegistrySink {
             media_type,
             scope,
         } = self;
+
+        // Before the layer is closed, so the bound on outstanding round trips
+        // is also the bound on staged layers: a caller with sixteen sinks open
+        // waits here rather than filling the scratch directory. Taken before
+        // the fallible steps below for the same reason it is released by the
+        // task — a permit's lifetime is the layer's, and a layer that never
+        // closes has none.
+        let permit = shared.permit();
 
         let count = sequence.count();
         let (mut staged, digests) = sequence.into_inner().finish()?;
@@ -1169,7 +1970,7 @@ impl RecordSink for RegistrySink {
             digests,
         };
 
-        shared.put_layer(&written, staged)?;
+        shared.put_layer(&written, staged, permit);
 
         Ok(written)
     }
@@ -1524,9 +2325,10 @@ pub fn read_manifest(
 
 /// A staged layer, as a stream of chunks.
 ///
-/// Reads from the staging file synchronously, which is safe precisely because
-/// the runtime under it is this transport's own and has nothing else to do: the
-/// read is not waiting on anything the runtime is responsible for driving.
+/// Reads from the staging file synchronously. The runtime under it is this
+/// transport's own — the read is not waiting on anything it is responsible for
+/// driving — and it is sized so that a read blocking a worker cannot starve the
+/// other uploads: one worker per permit, decided in [`Registry::open`].
 ///
 /// One chunk is allocated at a time and handed over, so what the upload holds
 /// is [`UPLOAD_CHUNK`] and not the layer.
@@ -1546,7 +2348,7 @@ fn blob_stream(
             let mut filled = 0usize;
 
             while filled < chunk.len() {
-                match file.read(&mut chunk[filled..]) {
+                match read_uninterrupted(&mut file, &mut chunk[filled..]) {
                     Ok(0) => break,
                     Ok(read) => filled += read,
                     Err(e) => return Some((Err(e.into()), None)),
@@ -1686,6 +2488,196 @@ mod tests {
         assert!(is_absent(&server_error(404)));
         assert!(is_absent(&envelope(OciErrorCode::ManifestUnknown)));
         assert!(is_absent(&envelope(OciErrorCode::NameUnknown)));
+    }
+
+    /// A `reqwest` error carrying a status, which is how
+    /// [`oci_client::Client::blob_exists`] reports one.
+    ///
+    /// There is no constructor for one, so it is provoked: a response with the
+    /// status, asked to fail on it. Built on the transport's own runtime kind
+    /// rather than in an async test, because this module's rule is that its
+    /// types are used from synchronous code.
+    fn request_error(code: u16) -> OciDistributionError {
+        let response = http::Response::builder()
+            .status(code)
+            .body(Vec::new())
+            .unwrap();
+
+        let refused = reqwest::Response::from(response)
+            .error_for_status()
+            .expect_err("a status the builder was given was not an error");
+
+        OciDistributionError::RequestError(refused)
+    }
+
+    /// The two shapes worth asking again about, and the several that are not.
+    #[test]
+    fn a_transient_failure_is_the_registry_talking_about_itself() {
+        // The measured class: the create-session `POST` that answers 500 and
+        // works on the next ask.
+        assert!(is_transient(&Error::Registry(server_error(500))));
+        assert!(is_transient(&Error::Registry(server_error(502))));
+        assert!(is_transient(&Error::Registry(server_error(503))));
+
+        // And the same thing seen through `blob_exists`, which asks `reqwest`
+        // for the status instead of mapping it.
+        assert!(is_transient(&Error::Registry(request_error(500))));
+
+        // A refusal of *this* request is not. Repeating it only delays the
+        // report, and `429` is deliberately among them: a registry rationing
+        // this publisher is something its operator has to be told.
+        assert!(!is_transient(&Error::Registry(server_error(400))));
+        assert!(!is_transient(&Error::Registry(server_error(404))));
+        assert!(!is_transient(&Error::Registry(server_error(429))));
+        assert!(!is_transient(&Error::Registry(request_error(429))));
+        assert!(!is_transient(&Error::Registry(envelope(
+            OciErrorCode::DigestInvalid
+        ))));
+        assert!(!is_transient(&Error::Registry(
+            OciDistributionError::UnauthorizedError {
+                url: "https://registry.invalid/v2/".to_owned(),
+            }
+        )));
+
+        // Nor is anything that never involved the far side. A staging file that
+        // would not read reads the same the second time.
+        assert!(!is_transient(&Error::Io(std::io::Error::other("staging"))));
+        assert!(!is_transient(&Error::LayerNotWritten("earlier".to_owned())));
+    }
+
+    /// A recorder for what the retry loop announced.
+    #[derive(Default)]
+    struct Retries(Mutex<Vec<(u32, u32)>>);
+
+    impl crate::progress::Progress for Retries {
+        fn on(&self, event: Event<'_>) {
+            if let Event::Retry {
+                attempt, remaining, ..
+            } = event
+            {
+                self.0.lock().unwrap().push((attempt, remaining));
+            }
+        }
+    }
+
+    /// The loop with the waits taken out, so the bound can be exercised without
+    /// waiting out a real backoff.
+    fn retried<T>(
+        attempts: u32,
+        observer: &Observer,
+        mut op: impl FnMut() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut backoff = Backoff::new(attempts, Duration::ZERO);
+
+        loop {
+            match op() {
+                Ok(value) => return Ok(value),
+                Err(error) => match backoff.wait_after(&error, observer) {
+                    Some(_) => continue,
+                    None => return Err(error),
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn a_call_that_succeeds_is_made_once() {
+        let mut calls = 0;
+
+        let value = retried(4, &Observer::silent(), || {
+            calls += 1;
+            Ok(7u8)
+        })
+        .unwrap();
+
+        assert_eq!(value, 7);
+        assert_eq!(calls, 1, "a success must not be retried");
+    }
+
+    /// The whole point: the registry's bad half-second costs a half-second and
+    /// not an epoch.
+    #[test]
+    fn a_transient_failure_is_absorbed() {
+        let watcher = Arc::new(Retries::default());
+        let observer = Observer::new(watcher.clone());
+
+        let mut calls = 0;
+
+        let value = retried(4, &observer, || {
+            calls += 1;
+
+            match calls < 3 {
+                true => Err(Error::Registry(server_error(500))),
+                false => Ok(calls),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(value, 3);
+        assert_eq!(calls, 3);
+
+        // And it said so both times, counting the failures up and the patience
+        // down, so a watcher can tell a hiccup from a transport about to give
+        // up.
+        assert_eq!(*watcher.0.lock().unwrap(), vec![(1, 3), (2, 2)]);
+    }
+
+    /// Bounded, so a registry that is wrong rather than flaky still fails —
+    /// and fails as itself, with what it actually said.
+    #[test]
+    fn patience_runs_out_and_the_last_failure_is_the_one_reported() {
+        let watcher = Arc::new(Retries::default());
+        let observer = Observer::new(watcher.clone());
+
+        let mut calls = 0;
+
+        let refused = retried(4, &observer, || {
+            calls += 1;
+            Err::<(), _>(Error::Registry(server_error(500)))
+        })
+        .expect_err("a registry that never answered was treated as having answered");
+
+        assert_eq!(calls, 4, "the bound is attempts, not retries");
+        assert!(matches!(refused, Error::Registry(_)));
+
+        // Three retries for four attempts, and nothing announced for the last
+        // failure — there was no next attempt to announce.
+        assert_eq!(*watcher.0.lock().unwrap(), vec![(1, 3), (2, 2), (3, 1)]);
+    }
+
+    /// A refusal of this request is reported the first time it is made.
+    #[test]
+    fn a_refusal_of_this_request_is_not_retried() {
+        let watcher = Arc::new(Retries::default());
+        let observer = Observer::new(watcher.clone());
+
+        let mut calls = 0;
+
+        let refused = retried(4, &observer, || {
+            calls += 1;
+            Err::<(), _>(Error::Registry(envelope(OciErrorCode::DigestInvalid)))
+        })
+        .expect_err("a digest the registry rejected was retried");
+
+        assert_eq!(calls, 1, "a refusal must cost one round trip");
+        assert!(matches!(refused, Error::Registry(_)));
+        assert!(watcher.0.lock().unwrap().is_empty());
+    }
+
+    /// `0` attempts is one attempt, for the reason `0` concurrency is one
+    /// permit: a transport that would make no attempt at all is not a
+    /// configuration anybody means.
+    #[test]
+    fn no_attempts_at_all_is_still_one_attempt() {
+        let mut calls = 0;
+
+        let refused = retried(0, &Observer::silent(), || {
+            calls += 1;
+            Err::<(), _>(Error::Registry(server_error(500)))
+        });
+
+        assert_eq!(calls, 1);
+        assert!(refused.is_err());
     }
 
     fn repository(raw: &str) -> Result<Repository, Error> {

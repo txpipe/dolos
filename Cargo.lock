@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "dolos"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1408,6 +1408,7 @@ dependencies = [
  "console-subscriber",
  "csv",
  "csv-diff",
+ "divan",
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",
@@ -1471,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1499,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "dolos-testing",
  "futures-core",
@@ -1525,10 +1526,11 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
+ "dolos-flatfiles",
  "dolos-testing",
  "fjall",
  "pallas",
@@ -1539,8 +1541,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dolos-flatfiles"
+version = "1.7.0-alpha.1"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "dolos-minibf"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1575,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minikupo"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1596,16 +1605,18 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
+ "dolos-flatfiles",
  "dolos-testing",
  "futures-core",
  "futures-util",
  "hex",
  "itertools 0.14.0",
  "pallas",
+ "rand 0.9.3",
  "redb",
  "redb-extras",
  "serde",
@@ -1621,7 +1632,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-snapshot"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
@@ -1641,7 +1652,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
@@ -1661,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
@@ -5352,7 +5363,7 @@ checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stelae"
-version = "1.7.0-alpha.0"
+version = "1.7.0-alpha.1"
 dependencies = [
  "bytes",
  "futures-util",

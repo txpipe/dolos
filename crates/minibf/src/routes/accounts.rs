@@ -23,8 +23,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
     model::{AccountState, DRepState},
-    pallas_extras, ChainSummary, FixedNamespace, LeaderRewardLog, MemberRewardLog,
-    PoolDepositRefundLog,
+    pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
 use dolos_core::{
     async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _,
@@ -777,70 +776,59 @@ where
     Ok(Json(items))
 }
 
-enum AccountRewardWrapper {
-    Leader((Epoch, LeaderRewardLog)),
-    Member((Epoch, MemberRewardLog)),
-    PoolDepositRefund((Epoch, PoolDepositRefundLog)),
-}
+/// Build the reward entries for one reward epoch.
+///
+/// `stake` contains the leader and member rewards for this epoch. `refund`
+/// contains the deposit refunds from the row two epochs before this epoch.
+///
+/// Each `leader_rewards` item becomes a separate entry. This preserves all
+/// leader rewards when one account operates more than one pool.
+fn reward_entries(
+    epoch: Epoch,
+    stake: Option<&AccountEpochLog>,
+    refund: Option<&AccountEpochLog>,
+) -> Result<Vec<AccountRewardContentInner>, StatusCode> {
+    use blockfrost_openapi::models::account_reward_content_inner::Type;
 
-impl From<(Epoch, LeaderRewardLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, LeaderRewardLog)) -> Self {
-        AccountRewardWrapper::Leader(value)
+    fn entry(
+        epoch: Epoch,
+        pool: &PoolHash,
+        amount: u64,
+        r#type: Type,
+    ) -> Result<AccountRewardContentInner, StatusCode> {
+        Ok(AccountRewardContentInner {
+            epoch: epoch as i32,
+            amount: amount.to_string(),
+            pool_id: mapping::bech32_pool(pool)?,
+            r#type,
+        })
     }
-}
 
-impl From<(Epoch, MemberRewardLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, MemberRewardLog)) -> Self {
-        AccountRewardWrapper::Member(value)
-    }
-}
+    let mut out = Vec::new();
 
-impl From<(Epoch, PoolDepositRefundLog)> for AccountRewardWrapper {
-    fn from(value: (Epoch, PoolDepositRefundLog)) -> Self {
-        AccountRewardWrapper::PoolDepositRefund(value)
-    }
-}
-
-impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
-    type Error = StatusCode;
-
-    fn try_from(value: AccountRewardWrapper) -> Result<Self, Self::Error> {
-        match value {
-            AccountRewardWrapper::Leader((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
-                let pool_id = mapping::bech32_pool(operator)?;
-
-                Ok(AccountRewardContentInner {
-                    epoch: epoch as i32,
-                    amount: x.amount.to_string(),
-                    pool_id,
-                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Leader,
-                })
+    if let Some(stake) = stake {
+        for (pool, amount) in &stake.leader_rewards {
+            if *amount > 0 {
+                out.push(entry(epoch, pool, *amount, Type::Leader)?);
             }
-            AccountRewardWrapper::Member((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
-                let pool_id = mapping::bech32_pool(operator)?;
+        }
 
-                Ok(AccountRewardContentInner {
-                    epoch: epoch as i32,
-                    amount: x.amount.to_string(),
-                    pool_id,
-                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Member,
-                })
-            }
-            AccountRewardWrapper::PoolDepositRefund((epoch, x)) => {
-                let operator = Hash::<28>::from(EntityKey::from(x.pool_id));
-                let pool_id = mapping::bech32_pool(operator)?;
-
-                Ok(AccountRewardContentInner {
-                    epoch: epoch as i32,
-                    amount: x.amount.to_string(),
-                    pool_id,
-                    r#type: blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund,
-                })
+        if let (Some(pool), Some(amount)) = (stake.pool_id.as_ref(), stake.member_reward) {
+            if amount > 0 {
+                out.push(entry(epoch, pool, amount, Type::Member)?);
             }
         }
     }
+
+    if let Some(refund) = refund {
+        for (pool, amount) in &refund.deposit_refunds {
+            if *amount > 0 {
+                out.push(entry(epoch, pool, *amount, Type::PoolDepositRefund)?);
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 pub async fn by_stake_rewards<D>(
@@ -867,78 +855,45 @@ where
     let mut skipped = 0;
     let skip = pagination.skip();
 
-    // The ledger writes each reward log at an epoch-boundary slot. This slot
-    // is the key of the log, but it is not the reward epoch. Blockfrost reports
-    // the reward epoch as `earned_epoch`. The db-sync schema uses the same
-    // term. The three reward types use different slots:
+    // Blockfrost reports the reward epoch as `earned_epoch`. The db-sync schema
+    // uses the same term. Each reward epoch uses two merged rows:
     //
-    //   * The ledger makes a leader or member reward for epoch `e` spendable
-    //     at epoch `e + 2`. The log for this reward is at `epoch_start(e + 1)`.
-    //   * When the ledger retires the pool at epoch `e`, it pays a pool-deposit
-    //     refund. The log for this refund is at `epoch_start(e - 1)`.
+    //   * Row `e` contains the leader and member rewards for epoch `e`.
+    //   * Row `e - 2` contains refunds that become spendable in epoch `e`.
     //
-    // The loop iterates by the reward epoch `e`. It combines the three reward
-    // types into one ascending sequence before pagination. Within one epoch,
-    // the order is leader, then member, then refund. This order matches the
-    // `type ASC` order in db-sync.
+    // This order matches the db-sync order: leader, member, then refund.
     for reward_epoch in 0..=epoch {
-        let stake_slot = summary.epoch_start(reward_epoch + 1);
+        let stake_slot = summary.epoch_start(reward_epoch);
         let stake_key: LogKey = (TemporalKey::from(stake_slot), entity_key.clone()).into();
 
-        let leader = domain
+        let stake = domain
             .archive()
-            .read_log_typed::<LeaderRewardLog>(LeaderRewardLog::NS, &stake_key)
+            .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &stake_key)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if let Some(reward) = leader.filter(|reward| reward.amount > 0) {
-            if skipped < skip {
-                skipped += 1;
-            } else {
-                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
-            }
-        }
-
-        if items.len() >= pagination.count {
-            break;
-        }
-
-        let member = domain
-            .archive()
-            .read_log_typed::<MemberRewardLog>(MemberRewardLog::NS, &stake_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if let Some(reward) = member.filter(|reward| reward.amount > 0) {
-            if skipped < skip {
-                skipped += 1;
-            } else {
-                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
-            }
-        }
-
-        if items.len() >= pagination.count {
-            break;
-        }
-
-        if reward_epoch >= 1 {
-            let refund_slot = summary.epoch_start(reward_epoch - 1);
+        let refund = if reward_epoch >= 2 {
+            let refund_slot = summary.epoch_start(reward_epoch - 2);
             let refund_key: LogKey = (TemporalKey::from(refund_slot), entity_key.clone()).into();
 
-            let pool_deposit_refund = domain
+            domain
                 .archive()
-                .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &refund_key)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &refund_key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            None
+        };
 
-            if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {
-                if skipped < skip {
-                    skipped += 1;
-                } else {
-                    items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
-                }
+        for item in reward_entries(reward_epoch, stake.as_ref(), refund.as_ref())? {
+            if skipped < skip {
+                skipped += 1;
+                continue;
             }
-        }
 
-        if items.len() >= pagination.count {
-            break;
+            items.push(item);
+
+            if items.len() >= pagination.count {
+                return Ok(Json(items));
+            }
         }
     }
 
@@ -1167,8 +1122,10 @@ mod tests {
         account_transactions_content_inner::AccountTransactionsContentInner,
         account_withdrawal_content_inner::AccountWithdrawalContentInner,
     };
-    use dolos_core::{EraCbor, StateWriter as _, UtxoSetDelta};
-    use dolos_testing::{synthetic::SyntheticBlockConfig, utxo_with_value, MIN_UTXO_AMOUNT};
+    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta};
+    use dolos_testing::{
+        synthetic::SyntheticBlockConfig, toy_domain::ToyDomain, utxo_with_value, MIN_UTXO_AMOUNT,
+    };
     use pallas::ledger::primitives::conway::{PositiveCoin, Value};
     use std::{collections::BTreeMap, sync::Arc};
 
@@ -1890,6 +1847,70 @@ mod tests {
         );
         let _: Vec<AccountRewardContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_reports_refund_at_spendable_epoch() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+                .expect("era summary");
+            let tip = domain
+                .state()
+                .read_cursor()
+                .expect("cursor read failed")
+                .expect("missing tip")
+                .slot();
+            let (tip_epoch, _) = summary.slot_epoch(tip);
+            let source_epoch = tip_epoch.checked_sub(2).expect("tip before epoch 2");
+            let account = parse_account_key_param(&vectors.stake_address, Network::Testnet)
+                .expect("invalid fixture stake address");
+            let log_key: LogKey = (
+                TemporalKey::from(summary.epoch_start(source_epoch)),
+                EntityKey::from(account.entity_key),
+            )
+                .into();
+            let mut log = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
+                .expect("reward log read failed")
+                .expect("missing reward log");
+            let pool = log.pool_id.expect("missing reward pool");
+            log.deposit_refunds.push((pool, 500));
+            log.sort();
+
+            let writer = domain.archive().start_writer().expect("archive writer");
+            writer
+                .write_log_typed(&log_key, &log)
+                .expect("refund log write failed");
+            writer.commit().expect("refund log commit failed");
+        });
+
+        let tip_epoch = app.tip_epoch();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let items: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+        let refunds: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.r#type,
+                    blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund
+                )
+            })
+            .collect();
+
+        assert_eq!(refunds.len(), 1);
+        assert_eq!(refunds[0].epoch, tip_epoch as i32);
+        assert_eq!(refunds[0].amount, "500");
     }
 
     #[tokio::test]

@@ -158,13 +158,21 @@ pub fn run(
     let mut stores = crate::common::open_data_stores(config)?;
     let root = crate::common::ensure_storage_path(config)?;
 
-    // prepare_archive requires direct redb access
     match &mut stores.archive {
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
             bail!("archive sanitization needs exclusive access to the archive database")
         }
+        // Sanitization requires direct backend access: redb compacts and
+        // integrity-checks the database file, fjall major-compacts both
+        // keyspaces (an LSM has no offline integrity check to run).
         ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
-        ArchiveStoreBackend::Redb(_) | ArchiveStoreBackend::LogsOnly(_) => {}
+        ArchiveStoreBackend::Fjall(s) if !args.skip_sanitization => {
+            pb.set_message("compacting archive");
+            s.compact().into_diagnostic()?;
+        }
+        ArchiveStoreBackend::Redb(_)
+        | ArchiveStoreBackend::LogsOnly(_)
+        | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
             bail!("export command is not available for noop archive backend")
         }

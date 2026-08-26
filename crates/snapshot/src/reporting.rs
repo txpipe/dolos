@@ -27,9 +27,15 @@ const RECORD_CADENCE: u64 = 4096;
 /// driver may hold several open at once — the export's state pass keeps all
 /// sixteen shard sinks open across one walk of the store — and a single cursor
 /// would report the last one opened as the one that finished.
+///
+/// The position counter is atomic because the export drives its layer
+/// producers from a pool of threads, and every producer announces through the
+/// one cursor. Positions are display order, nothing else: the inscription
+/// lists layers by its own rule, so two runs that announce in different
+/// interleavings still publish the same document.
 pub(crate) struct Cursor<'a> {
     observer: &'a Observer,
-    next: usize,
+    next: std::sync::atomic::AtomicUsize,
     total: usize,
 }
 
@@ -37,15 +43,14 @@ impl<'a> Cursor<'a> {
     pub(crate) fn new(observer: &'a Observer, total: usize) -> Self {
         Self {
             observer,
-            next: 0,
+            next: std::sync::atomic::AtomicUsize::new(0),
             total,
         }
     }
 
     /// Announce a layer and take its position in the run.
-    pub(crate) fn open(&mut self, kind: &str, scope: &serde_json::Value) -> usize {
-        let index = self.next;
-        self.next += 1;
+    pub(crate) fn open(&self, kind: &str, scope: &serde_json::Value) -> usize {
+        let index = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         self.observer.emit(Event::LayerStarted {
             index,
@@ -78,7 +83,7 @@ impl<'a> Cursor<'a> {
     /// Layers announced so far — what a caller cross-checks its own total
     /// against once the run is over.
     pub(crate) fn opened(&self) -> usize {
-        self.next
+        self.next.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -144,7 +149,7 @@ mod tests {
     fn positions_survive_layers_held_open_together() {
         let recorder = Arc::new(Recorder::default());
         let observer = Observer::new(recorder.clone());
-        let mut cursor = Cursor::new(&observer, 2);
+        let cursor = Cursor::new(&observer, 2);
 
         let scope = serde_json::json!({});
         let first = cursor.open("state", &scope);

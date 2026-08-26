@@ -66,6 +66,49 @@ impl From<crate::archive::RedbArchiveError> for Error {
     }
 }
 
+/// What one redb table costs on disk, and the two ratios that cost is read
+/// through.
+///
+/// `redb::TableStats` alone answers "how many bytes"; a footprint question
+/// needs "how many bytes per row" — the record shape's own cost — and "how
+/// full are the leaves" — the cost the insertion pattern adds on top. Both
+/// are derived here so every caller reads them the same way.
+#[derive(Debug)]
+pub struct TableFootprint {
+    /// `None` where the caller holds stats without having counted the table.
+    pub rows: Option<u64>,
+    pub stats: ::redb::TableStats,
+}
+
+impl TableFootprint {
+    /// redb's page size is fixed at 4 KiB and not exposed by the crate.
+    const PAGE_SIZE: u64 = 4096;
+
+    pub fn new(rows: Option<u64>, stats: ::redb::TableStats) -> Self {
+        Self { rows, stats }
+    }
+
+    /// Key plus value bytes per row: what the record shape itself costs,
+    /// independent of how redb packs it.
+    pub fn bytes_per_row(&self) -> Option<f64> {
+        self.rows
+            .filter(|rows| *rows > 0)
+            .map(|rows| self.stats.stored_bytes() as f64 / rows as f64)
+    }
+
+    /// The fraction of the allocated leaf pages that holds data.
+    ///
+    /// redb splits a full leaf in half with no rightmost-split optimization,
+    /// so a purely ascending insertion converges to ~50% while a random one
+    /// converges to the ~69% (`ln 2`) asymptote. The gap between those two
+    /// numbers is arrival order and nothing else.
+    pub fn leaf_fill(&self) -> Option<f64> {
+        let pages = self.stats.leaf_pages();
+
+        (pages > 0).then(|| self.stats.stored_bytes() as f64 / (pages * Self::PAGE_SIZE) as f64)
+    }
+}
+
 pub type ValueTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 pub type MultiValueTable = MultimapTableDefinition<'static, &'static [u8], &'static [u8]>;
 

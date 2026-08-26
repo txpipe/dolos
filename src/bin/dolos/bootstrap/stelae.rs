@@ -238,7 +238,7 @@ fn restore_repo(
 
     let scratch = crate::common::stele_scratch_dir(&config.storage, scratch_dir);
 
-    let registry = registry::open(repo, insecure, auth, scratch)
+    let registry = registry::open(repo, insecure, auth, scratch, registry::Tuning::default())
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -291,6 +291,63 @@ fn report(
         );
     } else {
         println!("epochs:   {}", plan.epochs.len());
+    }
+
+    // Printed only when it happened, and never folded into the epoch line: an
+    // epoch dropped by `sync.max_history` is this node's own configuration, and
+    // a layer dropped for a kind this build does not implement is a stele from
+    // a publisher ahead of it. An operator acts on the second by upgrading.
+    if !plan.skipped_unknown.is_empty() {
+        let mut kinds: Vec<&str> = plan
+            .skipped_unknown
+            .iter()
+            .map(|layer| layer.kind.as_str())
+            .collect();
+
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        println!(
+            "skipped:  {} layer(s) this build has no kind for ({}); upgrade to restore them",
+            plan.skipped_unknown.len(),
+            kinds.join(", "),
+        );
+    }
+
+    // The one line about layers this restore deliberately did not read. A
+    // dump is a past epoch's state, and this run is building a node that
+    // stands at the stele's sequence — so what an operator learns here is what
+    // the stele *carries*, which is the difference between a repository they
+    // can restore an old epoch out of later and one they cannot.
+    //
+    // With the layer count when it is short of a whole one, because a dump may
+    // be. Only the tip is checked for completeness — a publisher whose
+    // predecessor did not carry every shard of an epoch warns and publishes the
+    // short dump anyway — so an epoch listed bare here and an epoch missing
+    // nine of its shards would otherwise read identically, and the second is
+    // not a repository that restores that epoch.
+    if !plan.state_dumps.is_empty() {
+        let epochs: Vec<String> = plan
+            .state_dumps
+            .iter()
+            .map(|(epoch, kinds)| {
+                let carried: usize = kinds.values().map(Vec::len).sum();
+
+                match carried == dolos_snapshot::state_layer_count() {
+                    true => epoch.to_string(),
+                    false => format!(
+                        "{epoch} (partial: {carried} of {} layers)",
+                        dolos_snapshot::state_layer_count(),
+                    ),
+                }
+            })
+            .collect();
+
+        println!(
+            "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
+            plan.state_dumps.len(),
+            epochs.join(", "),
+        );
     }
 
     if outlook.inherited > 0 {
@@ -467,8 +524,12 @@ mod progress_tests {
         assert_eq!(progress.layers_position(), PER_RESTORE as u64);
         assert_eq!(progress.layers_length(), Some(PER_RESTORE as u64));
 
-        assert_eq!(progress.blob_position(), 8_192);
-        assert_eq!(progress.blob_length(), Some(8_192));
+        // A running total over every blob the restore pulled, rather than the
+        // last one's size — see `SteleProgress`.
+        let pulled = (PER_RESTORE as u64 - 1) * 8_192;
+
+        assert_eq!(progress.blob_position(), pulled);
+        assert_eq!(progress.blob_length(), Some(pulled));
 
         assert_eq!(
             progress.records_position(),

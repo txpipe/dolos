@@ -14,7 +14,7 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     layers::{blocks, digests, indexes, logs, state},
-    DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOGS, STATE,
+    shards_for, DolosProfile, Error, Scope, BLOCKS, DIGESTS, INDEXES, LOG_KINDS,
 };
 use stelae::{
     dir::SteleDir,
@@ -138,44 +138,47 @@ fn indexes_round_trip_through_a_layer() {
 }
 
 #[test]
-fn logs_round_trip_through_a_layer() {
-    let records = common::logs();
-    let decoded = roundtrip(LOGS, &epoch_scope(), &records, logs::encode, logs::decode);
+fn logs_round_trip_through_a_layer_per_namespace() {
+    for (kind, ns) in LOG_KINDS {
+        let records = common::logs(ns);
+        let decoded = roundtrip(kind, &epoch_scope(), &records, logs::encode, logs::decode);
 
-    let mut order = logs::OrderCheck::default();
-    for record in &decoded {
-        order.check(record).unwrap();
+        let mut order = logs::OrderCheck::default();
+        for record in &decoded {
+            order.check(record).unwrap();
+        }
     }
 }
 
 #[test]
-fn state_round_trips_through_a_layer_per_shard() {
-    for shard in SHARDS {
-        let records = common::state(shard);
+fn state_round_trips_through_a_layer_per_kind_and_shard() {
+    for (kind, ns, shard) in common::state_layers() {
+        let shards = shards_for(ns).expect("a state namespace");
+        let records = common::state(ns, shard);
+
         let decoded = roundtrip(
-            STATE,
+            kind,
             &state_scope(shard),
             &records,
-            state::encode,
-            state::decode,
+            |record| state::encode(ns, record),
+            |bytes| state::decode(ns, bytes),
         );
 
-        let mut order = state::OrderCheck::for_shard(shard);
+        let mut order = state::OrderCheck::for_shard(shard, shards);
         for record in &decoded {
             order.check(record).unwrap();
         }
 
         // The utxo value is the one field this profile composes rather than
         // carries, so it is the one that has to survive the trip as a value and
-        // not merely as bytes.
-        let utxo = decoded
-            .iter()
-            .find(|record| record.ns == dolos_snapshot::UTXOS)
-            .expect("the fixture carries a utxo record");
+        // not merely as bytes. It rides in its own kind now, so this is a check
+        // on that kind rather than a search through a mixed layer.
+        if ns == dolos_snapshot::UTXOS {
+            let (txo, value) = state::as_utxo(&decoded[0]).unwrap();
 
-        let (txo, value) = state::as_utxo(utxo).unwrap();
-        assert_eq!(txo.1, 3);
-        assert_eq!(value.0, 6);
+            assert_eq!(txo.1, 3);
+            assert_eq!(value.0, 6);
+        }
     }
 }
 

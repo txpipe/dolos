@@ -119,9 +119,10 @@ impl BoundaryWork {
             }
         }
 
-        // Archive logs — share the epoch-start temporal key across shards.
-        let start_of_epoch = self.chain_summary.epoch_start(self.ending_state().number);
-        let temporal_key = TemporalKey::from(&ChainPoint::Slot(start_of_epoch));
+        // Archive logs — share one temporal key across shards. The shard pass
+        // writes the merged account-epoch rows and nothing else, so the key is
+        // theirs rather than the closing epoch's.
+        let temporal_key = TemporalKey::from(&ChainPoint::Slot(self.account_epoch_slot()));
 
         debug!(log_count = self.logs.len(), "writing shard archive logs");
         for (entity_key, log) in self.logs.drain(..) {
@@ -145,9 +146,8 @@ impl BoundaryWork {
     /// `EpochWrapUp` delta on `EpochState` that closes the boundary
     /// (overwrites `entity.end` with the final stats, rotates
     /// rolling/pparams snapshots, clears `ewrap_progress`). Also writes
-    /// archive logs produced by the global visitors (e.g.
-    /// `PoolDepositRefundLog`) and the completed `EpochState` snapshot
-    /// under the epoch-start temporal key.
+    /// archive logs produced by the global visitors and the completed
+    /// `EpochState` snapshot under the epoch-start temporal key.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,

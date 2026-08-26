@@ -61,6 +61,20 @@ pub struct Args {
     #[arg(long, value_name = "RANGE")]
     epochs: Option<EpochRange>,
 
+    /// epochs whose index layers one traversal of the index store fills; a
+    /// larger band trades resident memory for fewer traversals, and changes
+    /// nothing about the stele it produces. Defaults to the measured value
+    /// that keeps the index pass inside 1 GiB
+    #[arg(long, value_name = "EPOCHS")]
+    index_band: Option<std::num::NonZeroUsize>,
+
+    /// how many layer producers run at once: the store traversals that fill,
+    /// frame and compress layers, one of them reserved for the index bands.
+    /// Changes nothing about the digest it computes. Defaults to 4; `1` is the
+    /// strictly serial walk
+    #[arg(long, value_name = "N")]
+    producers: Option<std::num::NonZeroUsize>,
+
     /// canonical inscription of the stele this one follows, as
     /// `inspect --json` or a published `inscription.json` holds it; without it
     /// the reproduction carries no history, which is a different digest
@@ -79,11 +93,17 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()))
-        .into_diagnostic()
-        .context("planning the reproduction")?;
+    let plan = export::plan(
+        &stores.state,
+        u64::from(genesis.network_magic()),
+        super::retained_epochs(config)?,
+    )
+    .into_diagnostic()
+    .context("planning the reproduction")?;
 
     let plan = super::restrict(plan, args.epochs);
+    let plan = super::banded(plan, args.index_band);
+    let plan = super::produced(plan, args.producers);
 
     super::report_plan(&plan)?;
 

@@ -123,10 +123,13 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
 
     // Segment files can live outside the archive directory; the backend takes
     // `blocks_path` verbatim, so this check does too.
-    if let dolos_core::config::ArchiveStoreConfig::Redb(cfg) = &config.storage.archive {
-        if let Some(path) = &cfg.blocks_path {
-            others.push(("archive segments", path.clone()));
-        }
+    let blocks_path = match &config.storage.archive {
+        dolos_core::config::ArchiveStoreConfig::Redb(cfg) => cfg.blocks_path.as_ref(),
+        dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.as_ref(),
+        _ => None,
+    };
+    if let Some(path) = blocks_path {
+        others.push(("archive segments", path.clone()));
     }
 
     for (what, path) in others {
@@ -268,6 +271,59 @@ fn build_domain(
     })
 }
 
+/// The block a chunk ended on.
+///
+/// A slot alone does not name one. A Byron epoch-boundary block carries the
+/// same absolute slot as the first main block of the epoch it opens, and the
+/// archive keeps both, so the hash is what says which of the two the replay
+/// has already seen.
+type Resume = (BlockSlot, BlockHash);
+
+/// Take the next chunk out of an archive walk that starts at `resume`'s own
+/// slot.
+///
+/// Everything up to and including the resume point is dropped here. On an
+/// ordinary slot that is one block; at a Byron boundary where the chunk ended
+/// on the epoch-boundary block it is that block alone, which is what keeps the
+/// epoch's first main block in the replay. Starting the walk at `slot + 1`
+/// instead would step over it, and the next continuity check would abort the
+/// run.
+fn next_chunk(
+    blocks: impl Iterator<Item = (BlockSlot, BlockBody)>,
+    resume: Option<&Resume>,
+    chunk_size: usize,
+) -> miette::Result<Vec<(BlockSlot, BlockBody)>> {
+    let mut chunk = Vec::with_capacity(chunk_size);
+    let mut passed = resume.is_none();
+
+    for (slot, body) in blocks {
+        if !passed {
+            let (resume_slot, resume_hash) = resume.expect("a resume point to walk past");
+
+            if slot > *resume_slot {
+                // Past the resume slot with nothing skipped, which is every
+                // chunk boundary that does not land inside a shared slot.
+                passed = true;
+            } else {
+                let decoded = MultiEraBlock::decode(&body)
+                    .into_diagnostic()
+                    .with_context(|| format!("decoding an archive block at slot {slot}"))?;
+
+                passed = decoded.hash() == *resume_hash;
+                continue;
+            }
+        }
+
+        chunk.push((slot, body));
+
+        if chunk.len() == chunk_size {
+            break;
+        }
+    }
+
+    Ok(chunk)
+}
+
 /// Replay the archive into the rebuild domain in chunks.
 ///
 /// The range iterator is re-opened per chunk: it holds a redb read
@@ -280,24 +336,32 @@ fn replay(
     chunk_size: usize,
     progress: &ProgressBar,
 ) -> miette::Result<bool> {
-    let mut cursor: Option<BlockSlot> = None;
+    let mut resume: Option<Resume> = None;
 
     loop {
-        let blocks: Vec<RawBlock> = source
-            .get_range(cursor.map(|slot| slot + 1), None)
+        let walk = source
+            .get_range(resume.map(|(slot, _)| slot), None)
             .into_diagnostic()
-            .context("iterating archive blocks")?
-            .take(chunk_size)
-            .map(|(_, body)| Arc::new(body))
-            .collect();
+            .context("iterating archive blocks")?;
 
-        if blocks.is_empty() {
+        let chunk = next_chunk(walk, resume.as_ref(), chunk_size)?;
+
+        let Some((_, last_body)) = chunk.last() else {
             return Ok(false);
-        }
+        };
+
+        // Read before the bodies are handed over: `import_blocks` answers with
+        // a slot, and a slot is not enough to resume from.
+        let last_hash = MultiEraBlock::decode(last_body)
+            .into_diagnostic()
+            .context("decoding the last block of a chunk")?
+            .hash();
+
+        let blocks: Vec<RawBlock> = chunk.into_iter().map(|(_, body)| Arc::new(body)).collect();
 
         match domain.import_blocks(blocks) {
             Ok(last) => {
-                cursor = Some(last);
+                resume = Some((last, last_hash));
                 progress.set_position(last);
             }
             Err(DomainError::StopEpochReached) => return Ok(true),
@@ -305,7 +369,7 @@ fn replay(
                 return Err(miette::miette!("{e}")).with_context(|| {
                     format!(
                         "importing a block chunk after slot {}",
-                        cursor.unwrap_or_default(),
+                        resume.map(|(slot, _)| slot).unwrap_or_default(),
                     )
                 })
             }
@@ -340,7 +404,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     let domain_archive = if args.rewrite_logs {
         archive
             .logs_only()
-            .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent redb archive"))?
+            .ok_or_else(|| miette::miette!("--rewrite-logs needs a persistent archive"))?
     } else {
         ArchiveStoreBackend::noop()
     };
@@ -462,4 +526,110 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+
+    use super::*;
+
+    /// A Byron boundary as `get_range` yields it once the archive keeps both
+    /// blocks: the epoch-boundary block and the epoch's first main block, on
+    /// one slot, in chain order.
+    fn boundary_walk(epoch: u64) -> Vec<(BlockSlot, BlockBody)> {
+        let slot = byron_ebb_slot(epoch);
+
+        let head = make_conway_block_with_prev(slot - 1, None, 0);
+        let ebb = make_byron_ebb(epoch, head.0.hash().unwrap());
+        let main = make_conway_block_with_prev(slot, ebb.0.hash(), 1);
+        let tail = make_conway_block_with_prev(slot + 1, main.0.hash(), 2);
+
+        vec![
+            (head.0.slot(), head.1.as_ref().clone()),
+            (slot, ebb.1.as_ref().clone()),
+            (slot, main.1.as_ref().clone()),
+            (tail.0.slot(), tail.1.as_ref().clone()),
+        ]
+    }
+
+    /// Drive `next_chunk` the way [`replay`] does — re-opening the walk at the
+    /// resume point's own slot each time — and collect everything it would
+    /// have imported.
+    fn walk_in_chunks(blocks: &[(BlockSlot, BlockBody)], chunk_size: usize) -> Vec<BlockBody> {
+        let mut imported: Vec<BlockBody> = Vec::new();
+        let mut resume: Option<Resume> = None;
+
+        loop {
+            let from = resume.map(|(slot, _)| slot).unwrap_or_default();
+            let walk = blocks.iter().filter(|(slot, _)| *slot >= from).cloned();
+
+            let chunk = next_chunk(walk, resume.as_ref(), chunk_size).unwrap();
+
+            let Some((last_slot, last_body)) = chunk.last().cloned() else {
+                return imported;
+            };
+
+            let last_hash = MultiEraBlock::decode(&last_body).unwrap().hash();
+
+            imported.extend(chunk.into_iter().map(|(_, body)| body));
+            resume = Some((last_slot, last_hash));
+        }
+    }
+
+    fn bodies(blocks: &[(BlockSlot, BlockBody)]) -> Vec<BlockBody> {
+        blocks.iter().map(|(_, body)| body.clone()).collect()
+    }
+
+    /// The defect this resume point exists for: a chunk that ends on the
+    /// epoch-boundary block must not take the block sharing its slot with it.
+    /// Resuming from `slot + 1` dropped that block, and the next continuity
+    /// check aborted the replay.
+    #[test]
+    fn a_chunk_ending_on_an_ebb_keeps_the_block_that_shares_its_slot() {
+        let blocks = boundary_walk(1);
+
+        // Two blocks per chunk puts the boundary exactly on the chunk edge.
+        assert_eq!(walk_in_chunks(&blocks, 2), bodies(&blocks));
+    }
+
+    /// The walk does not depend on where the chunk edges fall: every size
+    /// yields every block, once, in chain order.
+    #[test]
+    fn every_chunk_size_yields_the_whole_walk_once() {
+        let blocks = boundary_walk(1);
+        let expected = bodies(&blocks);
+
+        for chunk_size in 1..=blocks.len() + 1 {
+            assert_eq!(
+                walk_in_chunks(&blocks, chunk_size),
+                expected,
+                "chunk size {chunk_size}"
+            );
+        }
+    }
+
+    /// A chain with no shared slot is unaffected: the resume point still skips
+    /// exactly the one block it names.
+    #[test]
+    fn an_ordinary_chain_is_walked_once() {
+        let mut blocks = Vec::new();
+        let mut prev = None;
+
+        for i in 0..5u64 {
+            let (point, body) = make_conway_block_with_prev(100 + i, prev, i);
+            prev = point.hash();
+            blocks.push((point.slot(), body.as_ref().clone()));
+        }
+
+        let expected = bodies(&blocks);
+
+        for chunk_size in 1..=6 {
+            assert_eq!(
+                walk_in_chunks(&blocks, chunk_size),
+                expected,
+                "chunk size {chunk_size}"
+            );
+        }
+    }
 }

@@ -56,6 +56,34 @@ pub struct Args {
     #[arg(long, value_name = "DIR", conflicts_with = "output_dir")]
     scratch_dir: Option<PathBuf>,
 
+    /// epochs whose index layers one traversal of the index store fills; a
+    /// larger band trades resident memory for fewer traversals, and changes
+    /// nothing about the stele it produces. Defaults to the measured value
+    /// that keeps the index pass inside 1 GiB
+    #[arg(long, value_name = "EPOCHS")]
+    index_band: Option<std::num::NonZeroUsize>,
+
+    /// how many layer producers run at once: the store traversals that fill,
+    /// frame and compress layers, one of them reserved for the index bands.
+    /// Changes nothing about the stele it produces. Defaults to 4; `1` is the
+    /// strictly serial walk
+    #[arg(long, value_name = "N")]
+    producers: Option<std::num::NonZeroUsize>,
+
+    /// how many layer round trips to run at once against the repository; a
+    /// publish is a few hundred small transfers and its wall clock is their
+    /// latency, not their bytes. Defaults to 8; `1` is the strictly serial
+    /// path, for a registry that answers concurrency badly
+    #[arg(long, value_name = "N", conflicts_with = "output_dir")]
+    concurrency: Option<std::num::NonZeroUsize>,
+
+    /// check that the repository still holds every layer carried forward from
+    /// the previous stele, instead of trusting the manifest that names them.
+    /// One round trip per carried layer, so the cost grows with the history
+    /// behind the stele; for a repository whose blob retention you do not trust
+    #[arg(long, action, conflicts_with = "output_dir")]
+    verify_carried: bool,
+
     /// report what would be written and exit
     #[arg(long, action)]
     dry_run: bool,
@@ -76,20 +104,70 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()))
-        .into_diagnostic()
-        .context("planning the publish")?;
+    let plan = export::plan(
+        &stores.state,
+        u64::from(genesis.network_magic()),
+        super::retained_epochs(config)?,
+    )
+    .into_diagnostic()
+    .context("planning the publish")?;
 
     let plan = super::restrict(plan, args.epochs);
+    let plan = super::banded(plan, args.index_band);
+    let plan = super::produced(plan, args.producers);
 
     super::report_plan(&plan)?;
 
     match (&args.repo, &args.output_dir) {
-        (Some(repo), _) => to_repository(config, args, repo, &plan, &stores, feedback),
+        (Some(repo), _) => {
+            let publish = RepositoryPublish {
+                repo,
+                insecure: args.insecure,
+                scratch_dir: args.scratch_dir.as_deref(),
+                rebuild: args.rebuild,
+                dry_run: args.dry_run,
+                require_new: args.require_new,
+                tuning: registry::Tuning {
+                    concurrency: args.concurrency,
+                    verify_adopted: args.verify_carried,
+                },
+            };
+
+            to_repository(config, &publish, &plan, &stores, feedback)
+        }
         (None, Some(dir)) => to_directory(args, dir, &plan, &stores, feedback),
         // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
     }
+}
+
+/// The repository arm's settings, freed of the CLI that spelled them.
+///
+/// Factored so `snapshot backfill` publishes through exactly the code path
+/// `snapshot publish --repo` does — same standing check, same preflight, same
+/// chained predecessor, same report — rather than a second telling of it that
+/// would drift.
+pub(super) struct RepositoryPublish<'a> {
+    /// The repository to publish into.
+    pub repo: &'a Repository,
+
+    /// Talk plaintext HTTP rather than HTTPS.
+    pub insecure: bool,
+
+    /// Where to stage layers; `None` takes `<storage.path>/scratch`.
+    pub scratch_dir: Option<&'a std::path::Path>,
+
+    /// Build every layer instead of carrying forward published ones.
+    pub rebuild: bool,
+
+    /// Report what would be written and stop.
+    pub dry_run: bool,
+
+    /// Fail when the repository is already at this node's sequence.
+    pub require_new: bool,
+
+    /// How the publish moves: concurrency, and the carried-layer check.
+    pub tuning: registry::Tuning,
 }
 
 fn to_directory(
@@ -141,14 +219,15 @@ fn to_directory(
 /// The report is what a publisher wants to check rather than trust: how much of
 /// this stele was inherited rather than built, and how much of it moved. Both
 /// are numbers the code counted, not an inference from a duration.
-fn to_repository(
+pub(super) fn to_repository(
     config: &RootConfig,
-    args: &Args,
-    repo: &Repository,
+    publish: &RepositoryPublish,
     plan: &export::Plan,
     stores: &crate::common::Stores,
     feedback: &Feedback,
 ) -> miette::Result<()> {
+    let repo = publish.repo;
+
     // A publisher's credentials come from `STELAE_REGISTRY_USER` /
     // `STELAE_REGISTRY_PASSWORD`, which override anything configured. The
     // configured user is still the fallback: it is read-only, so authenticating
@@ -156,9 +235,9 @@ fn to_repository(
     // is the honest place for "these credentials cannot publish" to be said.
     let auth = crate::common::stele_registry_auth(&config.stelae)?;
 
-    let scratch = crate::common::stele_scratch_dir(&config.storage, args.scratch_dir.as_deref());
+    let scratch = crate::common::stele_scratch_dir(&config.storage, publish.scratch_dir);
 
-    let registry = registry::open(repo, args.insecure, auth, scratch)
+    let registry = registry::open(repo, publish.insecure, auth, scratch, publish.tuning)
         .into_diagnostic()
         .context("opening the repository")?;
 
@@ -168,11 +247,11 @@ fn to_repository(
     // along with everything else.
     let publishing = registry::Publishing::new(&registry)
         .recording_in(&config.storage.path)
-        .rebuilding(args.rebuild);
+        .rebuilding(publish.rebuild);
 
     // Before anything is built, and before the dry run too: a publisher asking
     // what a publish would do wants the same answer the publish gives.
-    if !standing(&registry, plan, args)? {
+    if !standing(&registry, plan, publish.require_new)? {
         return Ok(());
     }
 
@@ -186,11 +265,11 @@ fn to_repository(
         .into_diagnostic()
         .context("sizing the staging directory")?;
 
-    if args.dry_run {
+    if publish.dry_run {
         // `None` here and `None` at the `publish` below are one decision: a dry
         // run describes the publish that follows it, so the two calls are
         // handed the same digest records or the number is about something else.
-        let preview = registry::preview(publishing, plan, None)
+        let preview = registry::preview(publishing, plan, &stores.archive, None)
             .into_diagnostic()
             .context("planning the publish")?;
 
@@ -269,8 +348,18 @@ fn to_repository(
 ///   to invent. What is new is that the message names the distance alongside
 ///   both sequences, so "the publisher has been down for a day" and "the
 ///   publisher has been down for a month" do not read the same.
-fn standing(registry: &Registry, plan: &export::Plan, args: &Args) -> miette::Result<bool> {
-    let standing = registry::standing(registry, plan)
+fn standing(registry: &Registry, plan: &export::Plan, require_new: bool) -> miette::Result<bool> {
+    // A read of the latest manifest and the one network call a publish makes
+    // before it commits to anything, so running it again is free of consequence.
+    //
+    // `&|| false` for every caller, `snapshot backfill`'s driver included: the
+    // publish that follows this read observes no cancellation for as long as it
+    // runs, so a predicate threaded in here would cut a shutdown's wait by the
+    // backoff and leave the minutes on either side of it untouched.
+    let standing =
+        crate::common::retry_transient("reading the repository's latest stele", &|| false, || {
+            registry::standing(registry, plan)
+        })
         .into_diagnostic()
         .context("reading the repository's latest stele")?;
 
@@ -290,7 +379,7 @@ fn standing(registry: &Registry, plan: &export::Plan, args: &Args) -> miette::Re
                 plan.sequence,
             );
 
-            if args.require_new {
+            if require_new {
                 return Err(miette::miette!("{message}"));
             }
 
@@ -395,11 +484,13 @@ mod tests {
         assert_eq!(progress.layers_length(), Some(PER_PUBLISH as u64));
         assert_eq!(progress.records_position(), 53_000);
 
-        // The last blob was one the registry already held, so the byte bar sits
-        // at zero over its stated size rather than carrying the previous
-        // layer's total forward.
-        assert_eq!(progress.blob_position(), 0);
-        assert_eq!(progress.blob_length(), Some(512));
+        // Everything the publish took on is accounted for: the three layers
+        // that were uploaded, byte for byte, and the ones the registry already
+        // held, counted done the moment they were announced.
+        let skipped = (PER_PUBLISH as u64 - 3) * 512;
+
+        assert_eq!(progress.blob_position(), 3 * 4_096 + skipped);
+        assert_eq!(progress.blob_length(), Some(3 * 4_096 + skipped));
 
         assert_eq!(moved, 3 * 4_096);
 

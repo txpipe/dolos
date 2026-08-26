@@ -3,7 +3,8 @@
 //! [`stelae`] is the protocol: framing, canonicalization, digests and the
 //! naming rules that let vendors coexist in one registry. It knows nothing
 //! about Cardano. This crate is the other half — the *profile* — and it says
-//! what a Dolos stele actually contains: five layer kinds, their media types,
+//! what a Dolos stele actually contains: twenty-six layer kinds, their media
+//! types,
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
@@ -66,7 +67,12 @@ pub mod restore;
 /// [`export::publish`] and [`restore::restore_dir`] hold for the transports.
 pub use stelae::progress;
 
-use dolos_core::ChainPoint;
+use dolos_cardano::model::{
+    AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
+    FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,
+    StakeLog,
+};
+use dolos_core::{ChainPoint, Namespace};
 use serde_json::json;
 use stelae::{
     dir::LayerSpec,
@@ -74,8 +80,8 @@ use stelae::{
     Compression, Profile,
 };
 
-pub use layers::state::{shard_of, STATE_SHARDS};
-pub use namespaces::{NAMESPACES, UTXOS};
+pub use layers::state::shard_of;
+pub use namespaces::{NAMESPACES, RETIRED_NAMESPACES, RETIRED_SCHEMA_REV, SCHEMA_REVS, UTXOS};
 
 /// Reverse-DNS name of this profile. Vendor-owned; the protocol validates the
 /// shape and never composes it.
@@ -86,16 +92,360 @@ pub const PROFILE_VERSION: u64 = 1;
 
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
-pub const LOGS: &str = "logs";
-pub const STATE: &str = "state";
 pub const DIGESTS: &str = "digests";
 
-/// The five layer kinds, in the order the inscription lists them.
-pub const KINDS: [&str; 5] = [BLOCKS, INDEXES, LOGS, STATE, DIGESTS];
+/// The namespaces the ledger writes epoch-boundary logs under, byte-sorted.
+///
+/// A subset of [`NAMESPACES`] — every log namespace is also a state namespace —
+/// and the closed set the `log-{ns}` kinds are drawn from. Nothing in the tree
+/// marks an entity as log-bearing, so the three are spelled here and held to
+/// the entity types by `log_kinds_derive_from_their_namespaces` in
+/// `tests/coverage.rs`. A fourth namespace acquiring logs would have no layer
+/// to travel in, which is why [`export`] refuses one rather than dropping it.
+pub const LOG_NAMESPACES: [Namespace; 3] = [AccountEpochLog::NS, EpochState::NS, StakeLog::NS];
+
+/// The log layer kinds and the namespace each carries, in inscription order.
+///
+/// One kind per namespace, so a change to one namespace's record shape costs a
+/// backfill of that namespace's blobs rather than of every log layer ever
+/// published (decision 0026). The kind is `log-` followed by the namespace with
+/// `_` rewritten to `-`, because a media type's kind token admits hyphens and
+/// not underscores — but it is *spelled out* here rather than composed, so the
+/// wire vocabulary is greppable and a namespace rename cannot silently rename a
+/// published kind. The derivation is a test, not a constructor.
+pub const LOG_KINDS: [(&str, Namespace); 3] = [
+    ("log-account-epochs", AccountEpochLog::NS),
+    ("log-epochs", EpochState::NS),
+    ("log-stakes", StakeLog::NS),
+];
+
+/// The state layer kinds: the namespace each carries and the shard count its
+/// tip is published in, in inscription order.
+///
+/// One kind per namespace, for the same reason [`LOG_KINDS`] is one per log
+/// namespace (decision 0026): a breaking change to one namespace's record shape
+/// moves that kind's media type and fails closed on exactly the namespace that
+/// broke, and a namespace this profile does not know is skippable at the
+/// transport rather than poisoning one shared layer. The kind is `state-`
+/// followed by the namespace with `_` rewritten to `-` — a media type's kind
+/// token admits hyphens and not underscores — but it is *spelled out* here
+/// rather than composed, so the wire vocabulary is greppable and a namespace
+/// rename cannot silently rename a published kind. The derivation is a test,
+/// not a constructor (`state_kinds_derive_from_their_namespaces`).
+///
+/// The shard count is **specification, never tuning**: the four namespaces
+/// whose populations are chain-scale — the UTxO set, accounts, assets and
+/// datums — shard sixteen ways by the first key nibble, and every other
+/// namespace is a single blob. Re-sharding a namespace is a media-type-version
+/// event for that namespace's kind, decided by the format's owner; it is not a
+/// constant to nudge.
+pub const STATE_KINDS: [(&str, Namespace, u8); 14] = [
+    ("state-account-epochs", AccountEpochLog::NS, 1),
+    ("state-accounts", AccountState::NS, 16),
+    ("state-assets", AssetState::NS, 16),
+    ("state-datums", DatumState::NS, 16),
+    ("state-dreps", DRepState::NS, 1),
+    ("state-epochs", EpochState::NS, 1),
+    ("state-eras", EraSummary::NS, 1),
+    ("state-gov", GovState::NS, 1),
+    ("state-pending-mirs", PendingMirState::NS, 1),
+    ("state-pending-rewards", PendingRewardState::NS, 1),
+    ("state-pools", PoolState::NS, 1),
+    ("state-proposals", ProposalState::NS, 1),
+    ("state-stakes", StakeLog::NS, 1),
+    ("state-utxos", namespaces::UTXOS, 16),
+];
+
+/// The fourteen state kind names alone: what [`StateScope`] answers for
+/// [`Scope::kinds`].
+pub const STATE_KIND_NAMES: [&str; 14] = [
+    STATE_KINDS[0].0,
+    STATE_KINDS[1].0,
+    STATE_KINDS[2].0,
+    STATE_KINDS[3].0,
+    STATE_KINDS[4].0,
+    STATE_KINDS[5].0,
+    STATE_KINDS[6].0,
+    STATE_KINDS[7].0,
+    STATE_KINDS[8].0,
+    STATE_KINDS[9].0,
+    STATE_KINDS[10].0,
+    STATE_KINDS[11].0,
+    STATE_KINDS[12].0,
+    STATE_KINDS[13].0,
+];
+
+/// The kind carrying `ns`'s state tip, or `None` where the namespace is not one
+/// this profile defines.
+pub fn state_kind_for(ns: Namespace) -> Option<&'static str> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(_, known, _)| *known == ns)
+        .map(|(kind, _, _)| kind)
+}
+
+/// The namespace `kind` carries state for, or `None` where the kind is not a
+/// state layer.
+///
+/// The reader's half of the split, exactly as [`log_ns_for`] is for the logs:
+/// a restore learns which namespace a layer's records belong to from its kind,
+/// since the records no longer say.
+pub fn state_ns_for(kind: &str) -> Option<Namespace> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(known, _, _)| *known == kind)
+        .map(|(_, ns, _)| ns)
+}
+
+/// Whether `kind` is one of the fourteen state kinds — the tip predicate the
+/// staging arithmetic in [`registry`] sums under.
+pub fn is_state_kind(kind: &str) -> bool {
+    state_ns_for(kind).is_some()
+}
+
+/// How many shards `ns`'s state kind publishes, or `None` where the namespace
+/// is not one this profile defines.
+pub fn shards_for(ns: Namespace) -> Option<u8> {
+    STATE_KINDS
+        .into_iter()
+        .find(|(_, known, _)| *known == ns)
+        .map(|(_, _, shards)| shards)
+}
+
+/// How many state layers every publish writes: the shard counts summed — 74
+/// today. Every shard of every namespace kind is written even when empty, so
+/// tip completeness stays structural rather than data-dependent.
+pub const fn state_layer_count() -> usize {
+    let mut total = 0;
+    let mut i = 0;
+
+    while i < STATE_KINDS.len() {
+        total += STATE_KINDS[i].2 as usize;
+        i += 1;
+    }
+
+    total
+}
+
+/// The epochs whose state dumps a publisher retains, validated.
+///
+/// A newtype rather than a `Vec<u64>` passed around, because the list is
+/// **signed input**: it is echoed into `parameters`, so the moment it is
+/// readable it is also attestable, and the only place to refuse a bad one is
+/// before it becomes either. A value of this type is a list two publishers of
+/// the same network can be compared on.
+///
+/// The rules, and each one's reason:
+///
+/// - **Strictly ascending.** Order is visible — the list renders into the
+///   canonical document as it is held — so two publishers naming the same
+///   epochs in different orders would publish different documents and stop
+///   co-signing over a difference that means nothing. Ascending is the one
+///   order that needs no convention, and it makes a duplicate a refusal rather
+///   than something to silently drop.
+/// - **Never epoch 0.** Epoch 0's state is the state after Byron's first epoch,
+///   and a stele at `sequence` 0 has no history to inherit a dump from; more to
+///   the point, "retain epoch 0" is the shape a default-constructed or
+///   mis-parsed list takes, and refusing it costs a publisher nothing it
+///   wanted.
+///
+/// Empty is valid and is the default: a publisher that retains nothing
+/// publishes the tip alone, which is what every stele published before
+/// decision 0026 carries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetainedEpochs(Vec<u64>);
+
+impl RetainedEpochs {
+    /// Validate a configured list.
+    pub fn new(epochs: Vec<u64>) -> Result<Self, Error> {
+        if let Some(index) = epochs.iter().position(|epoch| *epoch == 0) {
+            return Err(Error::RetainedEpochs(format!(
+                "entry {index} is epoch 0, which no stele retains a dump of"
+            )));
+        }
+
+        for pair in epochs.windows(2) {
+            let (previous, next) = (pair[0], pair[1]);
+
+            if previous == next {
+                return Err(Error::RetainedEpochs(format!(
+                    "epoch {next} is listed twice"
+                )));
+            }
+
+            if previous > next {
+                return Err(Error::RetainedEpochs(format!(
+                    "epoch {next} follows epoch {previous}; the list has to ascend"
+                )));
+            }
+        }
+
+        Ok(Self(epochs))
+    }
+
+    /// The validated list, as `parameters` renders it.
+    pub fn as_slice(&self) -> &[u64] {
+        &self.0
+    }
+
+    /// The retained epochs a stele at `sequence` is due to carry a dump of:
+    /// those at or below it.
+    ///
+    /// A configured epoch above the sequence is not a miss and not a warning —
+    /// it has not happened yet, and the publish that reaches it will cut it.
+    pub fn due(&self, sequence: u64) -> impl Iterator<Item = u64> + '_ {
+        self.0
+            .iter()
+            .copied()
+            .take_while(move |epoch| *epoch <= sequence)
+    }
+
+    /// Whether `sequence` is itself retained — the publish that cuts a dump
+    /// out of its own tip.
+    pub fn cuts(&self, sequence: u64) -> bool {
+        self.0.binary_search(&sequence).is_ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// Whether a layer of `kind` at `scope` may be carried forward from an earlier
+/// publish rather than built again.
+///
+/// One rule in one place, asked by everything that decides it: the
+/// predecessor's manifest, an interrupted publish's record, and the note a
+/// landed layer leaves. It is a question about the **scope** and not only the
+/// kind, which is what decision 0026 changed — a state layer whose descriptor
+/// scope names its epoch is a retained dump of a closed epoch, as immutable as
+/// a `blocks` layer and told apart from every other publish's by the same
+/// scope equality; a state layer whose scope names only a shard is the moving
+/// tip, and every publish's shard `n` compares equal to every other's.
+///
+/// `digests` is in neither set: it has no source in this slice.
+pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
+    if EPOCH_KINDS.contains(&kind) {
+        return true;
+    }
+
+    state_ns_for(kind).is_some()
+        && scope
+            .get("epoch")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+}
+
+/// The pair that identifies one layer: its kind, and the canonical encoding of
+/// its profile-owned scope.
+///
+/// Canonical rather than [`serde_json::Value`] equality, because two scopes are
+/// one layer exactly when they are the same bytes inside the canonical
+/// document — the only sense of "the same scope" the protocol has.
+///
+/// One function rather than three, and that is the point of it being here
+/// instead of beside any one caller. Every table keyed this way is compared
+/// against another table keyed this way: the predecessor's inheritable layers
+/// against what a publish asks for, an interrupted publish's record against the
+/// same, a reproduction's layers against the published ones. Three copies of
+/// four lines would agree until one of them was corrected, and the failure that
+/// follows is silent — a layer rebuilt instead of inherited, or a divergence
+/// reported between two documents that say the same thing.
+pub(crate) fn scope_key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
+    let canonical = stelae::inscription::canonical_json(scope)?;
+
+    let canonical = String::from_utf8(canonical)
+        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
+
+    Ok((kind.to_owned(), canonical))
+}
+
+/// The epoch kinds a window always produces a layer for.
+///
+/// The log kinds are the exception, and the only one: a log layer exists if and
+/// only if its namespace has at least one record in the window, so an epoch
+/// contributes between two and five layers. Split out because the two arities
+/// are what the layer arithmetic in [`export::export`] and
+/// [`registry::preview`] is made of.
+pub const DENSE_EPOCH_KINDS: [&str; 2] = [BLOCKS, INDEXES];
+
+/// The twenty layer kinds, in the order the inscription lists them.
+pub const KINDS: [&str; 20] = [
+    BLOCKS,
+    INDEXES,
+    LOG_KINDS[0].0,
+    LOG_KINDS[1].0,
+    LOG_KINDS[2].0,
+    STATE_KIND_NAMES[0],
+    STATE_KIND_NAMES[1],
+    STATE_KIND_NAMES[2],
+    STATE_KIND_NAMES[3],
+    STATE_KIND_NAMES[4],
+    STATE_KIND_NAMES[5],
+    STATE_KIND_NAMES[6],
+    STATE_KIND_NAMES[7],
+    STATE_KIND_NAMES[8],
+    STATE_KIND_NAMES[9],
+    STATE_KIND_NAMES[10],
+    STATE_KIND_NAMES[11],
+    STATE_KIND_NAMES[12],
+    STATE_KIND_NAMES[13],
+    DIGESTS,
+];
 
 /// The kinds whose scope is an epoch range. The remaining two are tip layers
 /// and carry their own scope shapes.
-pub const EPOCH_KINDS: [&str; 3] = [BLOCKS, INDEXES, LOGS];
+///
+/// The namespace lives in the kind rather than in the scope, so a log layer
+/// wears the same [`EpochScope`] as `blocks` and `indexes` do — which is what
+/// keeps per-(kind, scope) inheritance working across the split.
+pub const EPOCH_KINDS: [&str; 5] = [
+    DENSE_EPOCH_KINDS[0],
+    DENSE_EPOCH_KINDS[1],
+    LOG_KINDS[0].0,
+    LOG_KINDS[1].0,
+    LOG_KINDS[2].0,
+];
+
+/// The kind carrying `ns`'s logs, or `None` where the namespace has no log
+/// layer.
+pub fn log_kind_for(ns: Namespace) -> Option<&'static str> {
+    LOG_KINDS
+        .into_iter()
+        .find(|(_, known)| *known == ns)
+        .map(|(kind, _)| kind)
+}
+
+/// The namespace `kind` carries logs for, or `None` where the kind is not a log
+/// layer.
+///
+/// The reader's half of the split: a restore learns which namespace a layer's
+/// records belong to from its kind, since the records no longer say.
+pub fn log_ns_for(kind: &str) -> Option<Namespace> {
+    LOG_KINDS
+        .into_iter()
+        .find(|(known, _)| *known == kind)
+        .map(|(_, ns)| ns)
+}
+
+/// Scope field by which a layer declares that a reader who cannot restore it
+/// must refuse the stele rather than skip it.
+///
+/// Absent means skippable, which is what every kind this profile publishes
+/// today leaves it at — so no scope shape writes this field and no golden
+/// carries it. It lives in the profile-owned `scope` rather than an OCI
+/// annotation because it is planning input: the scope is canonicalized into the
+/// inscription and covered by the digest a publisher signs, while annotations
+/// ride on the manifest, unsigned and transport-side.
+///
+/// **One-way.** A kind published as required forever constrains readers older
+/// than it, so marking one is an ADR-level act (decision 0026) and not a
+/// publisher's convenience.
+pub const SCOPE_REQUIRED: &str = "required";
 
 /// IANA `vnd.` vendor token for this profile's payload media types. Shorter
 /// than the profile name by custom, and the slot the coexistence rules require
@@ -186,6 +536,24 @@ pub enum Error {
     #[error("{0:?} is not a state namespace this profile defines")]
     UnknownNamespace(String),
 
+    /// A log this profile has no layer to carry.
+    ///
+    /// One `log-{ns}` kind per log namespace means the export walks a closed
+    /// list rather than every namespace, so a namespace that starts producing
+    /// logs would simply not be visited. Refusing at publish time is the whole
+    /// point: the all-namespace walk this replaced would have carried the
+    /// record, and a snapshot silently missing a slice of the ledger is the
+    /// failure that costs most and shows least.
+    #[error(
+        "epoch {epoch} has logs under namespace {ns:?}, which no log layer kind carries; \
+         this profile ships logs for {covered:?}"
+    )]
+    UncoveredLogNamespace {
+        epoch: u64,
+        ns: String,
+        covered: &'static [Namespace],
+    },
+
     #[error("{0:?} is not an exact-record kind this profile defines")]
     UnknownExactKind(String),
 
@@ -212,6 +580,38 @@ pub enum Error {
     /// The stele is well-formed but does not carry enough to rebuild a node.
     #[error("this stele cannot restore a node: {0}")]
     IncompleteStele(String),
+
+    /// A namespace this build models that the stele declares retired, or does
+    /// not declare at all.
+    ///
+    /// The removed-kind rule (ADR-0027). Unlike an unknown kind, a retired one
+    /// leaves nothing in the inscription to skip and report: its layers are
+    /// absent, and absence is how the format spells "no records in this
+    /// window". A reader that would restore an empty `member-rewards` history
+    /// and call it a success is the failure this refuses, so it refuses before
+    /// a store is opened and names the namespace an operator has to go and
+    /// read about.
+    #[error(
+        "this stele's publisher no longer carries namespace {namespace:?}, which this build \
+         still models; restoring it would leave that namespace silently empty"
+    )]
+    RetiredNamespace { namespace: Namespace },
+
+    /// A layer of a kind this build does not implement, which the publisher
+    /// marked [`SCOPE_REQUIRED`].
+    ///
+    /// The one unknown kind a restore refuses instead of skipping. Both the
+    /// kind and the whole scope are in the message because neither alone tells
+    /// an operator what is missing: the kind names what to upgrade to, and the
+    /// scope says which slice of the chain would have been silently absent.
+    #[error(
+        "this stele carries layer kind {kind:?}, which this build does not implement and its \
+         publisher marked required; its scope is {scope}"
+    )]
+    RequiredUnknownLayer {
+        kind: String,
+        scope: serde_json::Value,
+    },
 
     /// A volume that cannot hold what the run is about to put on it, refused
     /// before the run starts.
@@ -269,6 +669,15 @@ pub enum Error {
         scope: String,
         source: Box<Error>,
     },
+
+    /// A `snapshot.state_epochs` list this profile will not publish under.
+    ///
+    /// Refused where the list is read rather than where a dump is cut, because
+    /// the list is signed input: it reaches `parameters` before any layer is
+    /// written, and a publisher that discovered the problem at the sixteenth
+    /// shard would already have attested it.
+    #[error("snapshot.state_epochs is not a list of retained epochs: {0}")]
+    RetainedEpochs(String),
 }
 
 impl Error {
@@ -497,12 +906,47 @@ pub fn read_position(value: &serde_json::Value) -> Result<Position, Error> {
 /// Build the profile's `parameters`: what a reader needs in order to interpret
 /// the layers.
 ///
-/// Both values are consequences of code in this workspace rather than free
-/// choices, so both are sourced rather than spelled: the shard count is
-/// [`STATE_SHARDS`], which [`shard_of`] divides by, and the hash scheme is
-/// [`INDEX_KEY_HASH`], which describes [`dolos_core::key_hash`].
-pub fn parameters() -> serde_json::Value {
-    json!({"stateShards": STATE_SHARDS, "indexKeyHash": INDEX_KEY_HASH})
+/// Every value is a consequence of code in this workspace rather than a free
+/// choice, so every one is sourced rather than spelled: the hash scheme is
+/// [`INDEX_KEY_HASH`], which describes [`dolos_core::key_hash`]; `shards` is
+/// the shard column of [`STATE_KINDS`], which the export routes by; and
+/// `schemas` is [`SCHEMA_REVS`], the per-namespace record-content revision the
+/// compatibility machinery of decision 0026 keys on, plus one entry per
+/// [`RETIRED_NAMESPACES`] at [`RETIRED_SCHEMA_REV`] — a namespace this profile
+/// version no longer defines says so rather than vanishing, so that a reader
+/// which still models it can refuse instead of restoring an empty history
+/// (ADR-0027). Both maps are keyed by namespace — JCS sorts the keys, so the
+/// maps render in the byte order the tables are kept in.
+///
+/// `stateEpochs` is the one value here that is not a consequence of code:
+/// which epochs a publisher retains a dump of is an operational choice, so it
+/// is configuration ([`RetainedEpochs`]) rather than a table. Echoing it here
+/// is what makes it *signed* input — two publishers of one network with
+/// different lists produce different parameters, and therefore different
+/// inscription digests, which is a divergence an operator can read out of a
+/// parameters diff instead of hunting through layers for it.
+pub fn parameters(retained: &RetainedEpochs) -> serde_json::Value {
+    let shards: serde_json::Map<String, serde_json::Value> = STATE_KINDS
+        .into_iter()
+        .map(|(_, ns, shards)| (ns.to_owned(), json!(shards)))
+        .collect();
+
+    let schemas: serde_json::Map<String, serde_json::Value> = SCHEMA_REVS
+        .into_iter()
+        .chain(
+            RETIRED_NAMESPACES
+                .into_iter()
+                .map(|ns| (ns, RETIRED_SCHEMA_REV)),
+        )
+        .map(|(ns, rev)| (ns.to_owned(), json!(rev)))
+        .collect();
+
+    json!({
+        "indexKeyHash": INDEX_KEY_HASH,
+        "shards": shards,
+        "schemas": schemas,
+        "stateEpochs": retained.as_slice(),
+    })
 }
 
 /// The compression this profile publishes under.
@@ -525,12 +969,67 @@ pub struct EpochScope {
     pub end_slot: u64,
 }
 
-/// Scope of one shard of the state tip.
+/// Which of the two things a state layer is.
+///
+/// The state kinds carry two roles over one record format, and the roles are
+/// told apart by the descriptor scope alone (decision 0026). The header is
+/// deliberately blind to this: at the publish where `sequence` equals a
+/// retained epoch, the tip layer and that epoch's dump are the same header
+/// over the same records, so they are one blob under two descriptors and the
+/// bytes move once. Putting the distinction anywhere inside the layer would
+/// break that by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateRole {
+    /// The moving tip: the state as of this stele's `sequence`, republished
+    /// whole by every publish. Descriptor scope `{"shard": n}`, which names no
+    /// epoch — so nothing distinguishes one publish's tip from another's, and
+    /// nothing may inherit or checkpoint one.
+    Tip,
+
+    /// A retained dump: the state as of a configured epoch, cut once and then
+    /// carried forward unchanged. Descriptor scope `{"epoch": E, "shard": n}`,
+    /// which is what makes it inheritable by the scope-equality rule every
+    /// other immutable layer already uses.
+    Dump,
+}
+
+/// Scope of one shard of one state kind, in one of its two roles.
+///
+/// Uniform across all seventeen kinds, single-blob namespaces included — their
+/// one layer is shard 0 — so the header and descriptor shapes stay one shape
+/// and a reader never dispatches on the kind to parse a scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateScope {
     pub network_magic: u64,
+    /// The epoch the records are the state as of: the stele's `sequence` for a
+    /// [tip](StateRole::Tip), the dump's own epoch for a
+    /// [dump](StateRole::Dump). It is the same number at the publish that cuts
+    /// one, which is what makes the two blobs one blob.
     pub epoch: u64,
     pub shard: u8,
+    pub role: StateRole,
+}
+
+impl StateScope {
+    /// One shard of the moving tip of a stele at `epoch`.
+    pub fn tip(network_magic: u64, epoch: u64, shard: u8) -> Self {
+        Self {
+            network_magic,
+            epoch,
+            shard,
+            role: StateRole::Tip,
+        }
+    }
+
+    /// One shard of the retained dump at `epoch`.
+    pub fn dump(network_magic: u64, epoch: u64, shard: u8) -> Self {
+        Self {
+            network_magic,
+            epoch,
+            shard,
+            role: StateRole::Dump,
+        }
+    }
 }
 
 /// Scope of the optional `digests` layer.
@@ -615,12 +1114,19 @@ impl Scope for StateScope {
         })?)
     }
 
+    /// The one place the two roles differ.
+    ///
+    /// [`Scope::header`] above is role-blind on purpose, so the dump a publish
+    /// cuts out of its own tip is the tip's bytes rather than a copy of them.
     fn descriptor(&self) -> serde_json::Value {
-        json!({"shard": self.shard})
+        match self.role {
+            StateRole::Tip => json!({"shard": self.shard}),
+            StateRole::Dump => json!({"epoch": self.epoch, "shard": self.shard}),
+        }
     }
 
     fn kinds(&self) -> &'static [&'static str] {
-        &[STATE]
+        &STATE_KIND_NAMES
     }
 
     fn shape(&self) -> &'static str {
@@ -686,7 +1192,7 @@ mod tests {
 
     #[test]
     fn an_undefined_kind_is_refused() {
-        for kind in ["utxos", "receipts", "", "Blocks"] {
+        for kind in ["utxos", "state", "logs", "receipts", "", "Blocks"] {
             assert!(DolosProfile.layer_media_type(kind).is_err(), "{kind:?}");
             assert!(
                 checked_layer_media_type(&DolosProfile, kind).is_err(),
@@ -821,18 +1327,55 @@ mod tests {
         assert!(matches!(err, Error::MalformedInscription { .. }), "{err:?}");
     }
 
-    /// The two parameters are claims about code elsewhere in this workspace, so
+    /// The parameters are claims about code elsewhere in this workspace, so
     /// they are compared against that code rather than against themselves.
     #[test]
     fn parameters_report_what_the_code_does() {
-        let parameters = parameters();
+        let retained = RetainedEpochs::new(vec![4, 100]).unwrap();
+        let parameters = parameters(&retained);
 
-        assert_eq!(parameters["stateShards"], STATE_SHARDS);
         assert_eq!(parameters["indexKeyHash"], INDEX_KEY_HASH);
+        assert_eq!(parameters["stateEpochs"], json!([4, 100]));
+        assert!(
+            parameters.get("stateShards").is_none(),
+            "the flat shard count was replaced by the per-namespace map"
+        );
 
-        let shards: Vec<u8> = (0u8..=255).map(|b| shard_of(&[b])).collect();
-        let distinct: std::collections::BTreeSet<u8> = shards.iter().copied().collect();
-        assert_eq!(distinct.len() as u64, STATE_SHARDS);
+        // The two maps are the two tables, entry for entry — and nothing more:
+        // a namespace in the JSON that no table has would be a claim about code
+        // that does not exist.
+        for (_, ns, shards) in STATE_KINDS {
+            assert_eq!(parameters["shards"][ns], shards, "{ns}");
+        }
+        assert_eq!(
+            parameters["shards"].as_object().unwrap().len(),
+            STATE_KINDS.len()
+        );
+
+        for (ns, rev) in SCHEMA_REVS {
+            assert_eq!(parameters["schemas"][ns], rev, "{ns}");
+        }
+
+        // Plus the retired namespaces, declared at revision 0 rather than
+        // dropped: what a reader that still models one consults to find out
+        // that the absence of its layers is normative (ADR-0027).
+        for ns in RETIRED_NAMESPACES {
+            assert_eq!(parameters["schemas"][ns], RETIRED_SCHEMA_REV, "{ns}");
+            assert!(!NAMESPACES.contains(&ns), "{ns} is both live and retired");
+        }
+
+        assert_eq!(
+            parameters["schemas"].as_object().unwrap().len(),
+            SCHEMA_REVS.len() + RETIRED_NAMESPACES.len()
+        );
+
+        // The routing rule behind the map: a sixteen-way namespace covers every
+        // shard its count promises, and a single blob is always shard 0.
+        let nibbles: std::collections::BTreeSet<u8> =
+            (0u8..=255).map(|b| shard_of(&[b], 16)).collect();
+        assert_eq!(nibbles.len(), 16);
+
+        assert!((0u8..=255).all(|b| shard_of(&[b], 1) == 0));
     }
 
     /// A scope belongs to the kinds whose shape it is, and to no others.
@@ -844,11 +1387,7 @@ mod tests {
             start_slot: 100,
             end_slot: 199,
         };
-        let state = StateScope {
-            network_magic: 2,
-            epoch: 7,
-            shard: 3,
-        };
+        let state = StateScope::tip(2, 7, 3);
         let digests = DigestsScope {
             network_magic: 2,
             epoch: 7,
@@ -858,14 +1397,17 @@ mod tests {
         for kind in EPOCH_KINDS {
             epoch.layer_spec(kind).unwrap();
         }
-        state.layer_spec(STATE).unwrap();
+        for kind in STATE_KIND_NAMES {
+            state.layer_spec(kind).unwrap();
+        }
         digests.layer_spec(DIGESTS).unwrap();
 
         for (spec, kind) in [
-            (epoch.layer_spec(STATE), STATE),
+            (epoch.layer_spec(STATE_KIND_NAMES[0]), STATE_KIND_NAMES[0]),
             (epoch.layer_spec(DIGESTS), DIGESTS),
             (state.layer_spec(BLOCKS), BLOCKS),
-            (digests.layer_spec(LOGS), LOGS),
+            (state.layer_spec("state"), "state"),
+            (digests.layer_spec(LOG_KINDS[0].0), LOG_KINDS[0].0),
         ] {
             let err = spec.unwrap_err();
             assert!(
@@ -892,16 +1434,19 @@ mod tests {
             json!({"epoch": 2, "startSlot": 3, "endSlot": 4})
         );
 
-        let state = StateScope {
-            network_magic: 1,
-            epoch: 2,
-            shard: 15,
-        };
+        let state = StateScope::tip(1, 2, 15);
         assert_eq!(
             state.header().unwrap().as_bytes(),
             &[0x83, 0x01, 0x02, 0x0f]
         );
         assert_eq!(state.descriptor(), json!({"shard": 15}));
+
+        // The dump's header is the tip's, byte for byte, and only the
+        // descriptor says which role the layer plays — which is the whole of
+        // why one blob can wear both.
+        let dump = StateScope::dump(1, 2, 15);
+        assert_eq!(dump.header().unwrap(), state.header().unwrap());
+        assert_eq!(dump.descriptor(), json!({"epoch": 2, "shard": 15}));
 
         let digests = DigestsScope {
             network_magic: 1,
@@ -913,5 +1458,61 @@ mod tests {
             &[0x83, 0x01, 0x02, 0x19, 0x18, 0x2b]
         );
         assert_eq!(digests.descriptor(), json!({"lastImmutable": 6187}));
+    }
+
+    /// Done criterion 4: the list is refused where it is read, not where a
+    /// dump is cut — it reaches `parameters` before any layer is written.
+    #[test]
+    fn a_retained_epoch_list_has_to_ascend_and_start_above_zero() {
+        RetainedEpochs::new(vec![]).unwrap();
+        RetainedEpochs::new(vec![1]).unwrap();
+        assert_eq!(
+            RetainedEpochs::new(vec![4, 208, 250]).unwrap().as_slice(),
+            &[4, 208, 250]
+        );
+
+        for bad in [vec![0], vec![0, 4], vec![4, 4], vec![250, 4], vec![4, 9, 9]] {
+            let err = RetainedEpochs::new(bad.clone()).unwrap_err();
+            assert!(matches!(err, Error::RetainedEpochs(_)), "{bad:?}: {err:?}");
+        }
+    }
+
+    /// What a publish at `sequence` owes: every retained epoch at or below it,
+    /// and nothing above — a configured epoch the chain has not reached is not
+    /// a missing dump.
+    #[test]
+    fn only_the_retained_epochs_at_or_below_the_sequence_are_due() {
+        let retained = RetainedEpochs::new(vec![4, 208, 250]).unwrap();
+
+        assert_eq!(retained.due(3).collect::<Vec<_>>(), Vec::<u64>::new());
+        assert_eq!(retained.due(4).collect::<Vec<_>>(), vec![4]);
+        assert_eq!(retained.due(249).collect::<Vec<_>>(), vec![4, 208]);
+        assert_eq!(retained.due(9_999).collect::<Vec<_>>(), vec![4, 208, 250]);
+
+        assert!(retained.cuts(208));
+        assert!(!retained.cuts(209));
+    }
+
+    /// The rule the predecessor, the resumption record and the landing note
+    /// all decide by — and the one line decision 0026 moved.
+    #[test]
+    fn a_dumps_scope_is_inheritable_and_a_tips_is_not() {
+        let tip = StateScope::tip(2, 7, 3);
+        let dump = StateScope::dump(2, 4, 3);
+
+        assert!(is_inheritable(STATE_KIND_NAMES[0], &dump.descriptor()));
+        assert!(!is_inheritable(STATE_KIND_NAMES[0], &tip.descriptor()));
+
+        for kind in EPOCH_KINDS {
+            assert!(is_inheritable(kind, &json!({"epoch": 7})), "{kind}");
+        }
+
+        // `digests` names an epoch nowhere in its descriptor and has no source
+        // in this slice either way.
+        assert!(!is_inheritable(DIGESTS, &json!({"lastImmutable": 3})));
+
+        // A kind this profile does not define never inherits, whatever its
+        // scope claims.
+        assert!(!is_inheritable("state", &json!({"epoch": 4, "shard": 0})));
     }
 }

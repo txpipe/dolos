@@ -8,7 +8,7 @@ use dolos_core::{
 use crate::{tx_sequence_to_hash, utxo_with_value};
 
 use bech32::{FromBase32, ToBase32, Variant};
-use dolos_cardano::model::{AccountStakeLog, MemberRewardLog};
+use dolos_cardano::model::{AccountEpochLog, FixedNamespace as _};
 use dolos_cardano::rupd::credential_to_key;
 use pallas::codec::utils::{CborWrap, Int, Nullable};
 use pallas::codec::{minicbor, utils::KeepRaw};
@@ -485,6 +485,29 @@ fn build_datum_and_script_fixture() -> SyntheticFixtureExtras {
     }
 }
 
+/// Read the merged row at `log_key`, or start an empty one.
+///
+/// The seeders below fill different legs of the same `(account, epoch)` row,
+/// and the namespace is overwrite-by-key: a second seeder that wrote a fresh
+/// record would erase the first one's leg. Reading first is what keeps two
+/// seeders from behaving like the two writers the merge removed.
+fn account_epoch_row<D: Domain>(
+    domain: &D,
+    log_key: &LogKey,
+) -> Result<AccountEpochLog, ChainError> {
+    let existing = domain
+        .archive()
+        .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, log_key)
+        .map_err(ChainError::from)?;
+
+    Ok(existing.unwrap_or_default())
+}
+
+/// Seed a member reward for `stake_address` in each of `epochs`.
+///
+/// The epoch is the one the row is filed under, and the one
+/// `/accounts/{stake}/rewards` renders: the merged log wears the stake
+/// temporal key, so the rendered label is the key's epoch verbatim.
 pub fn seed_reward_logs<D: Domain>(
     domain: &D,
     stake_address: &str,
@@ -504,10 +527,11 @@ pub fn seed_reward_logs<D: Domain>(
     for epoch in epochs {
         let slot = summary.epoch_start(*epoch);
         let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
-        let log = MemberRewardLog {
-            amount: 42,
-            pool_id: pool_keyhash.as_ref().to_vec(),
-        };
+
+        let mut log = account_epoch_row(domain, &log_key)?;
+        log.member_reward = Some(42);
+        log.pool_id = Some(pool_keyhash);
+
         writer
             .write_log_typed(&log_key, &log)
             .map_err(ChainError::from)?;
@@ -517,13 +541,13 @@ pub fn seed_reward_logs<D: Domain>(
     Ok(())
 }
 
-/// Seed per-account `AccountStakeLog` entries for the given epochs.
+/// Seed the stake leg of the merged account-epoch rows for the given epochs.
 ///
 /// Writes one row for `stake_address` and one for a fixed synthetic script
 /// credential, both delegated to `pool_id` — two distinct keys so pagination
 /// over the epoch's stake distribution is testable. A third credential is
 /// seeded with zero stake, which endpoints must exclude (Blockfrost's
-/// epoch_stake has no zero-amount rows).
+/// epoch_stake has no zero-amount rows) and which the ledger must still keep.
 pub fn seed_account_stake_logs<D: Domain>(
     domain: &D,
     stake_address: &str,
@@ -553,10 +577,11 @@ pub fn seed_account_stake_logs<D: Domain>(
 
         for (credential, amount) in entries {
             let log_key: LogKey = (TemporalKey::from(slot), credential_to_key(credential)).into();
-            let log = AccountStakeLog {
-                amount,
-                pool_id: pool_keyhash.as_ref().to_vec(),
-            };
+
+            let mut log = account_epoch_row(domain, &log_key)?;
+            log.active_stake = Some(amount);
+            log.pool_id = Some(pool_keyhash);
+
             writer
                 .write_log_typed(&log_key, &log)
                 .map_err(ChainError::from)?;

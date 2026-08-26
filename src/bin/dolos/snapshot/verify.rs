@@ -66,6 +66,20 @@ pub struct Args {
     #[arg(long, action)]
     reproduce: bool,
 
+    /// epochs whose index layers one traversal of the index store fills; a
+    /// larger band trades resident memory for fewer traversals, and changes
+    /// nothing about the stele it produces. Defaults to the measured value
+    /// that keeps the index pass inside 1 GiB
+    #[arg(long, value_name = "EPOCHS", requires = "reproduce")]
+    index_band: Option<std::num::NonZeroUsize>,
+
+    /// how many layer producers run at once: the store traversals that fill,
+    /// frame and compress layers, one of them reserved for the index bands.
+    /// Changes nothing about the reproduction. Defaults to 4; `1` is the
+    /// strictly serial walk
+    #[arg(long, value_name = "N", requires = "reproduce")]
+    producers: Option<std::num::NonZeroUsize>,
+
     /// epochs the reproduction builds layers for, e.g. `500..520`, `500..=520`
     /// or `500`; defaults to every epoch below the cursor, and must match what
     /// the stele was published with
@@ -81,9 +95,15 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // than moving a node's own data.
     let scratch = crate::common::stele_scratch_dir(&config.storage, None);
 
-    let registry = registry::open(&args.repo, args.insecure, auth, scratch)
-        .into_diagnostic()
-        .context("opening the repository")?;
+    let registry = registry::open(
+        &args.repo,
+        args.insecure,
+        auth,
+        scratch,
+        registry::Tuning::default(),
+    )
+    .into_diagnostic()
+    .context("opening the repository")?;
 
     let verified = registry::verify(&registry, args.point)
         .into_diagnostic()
@@ -123,11 +143,17 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()))
-        .into_diagnostic()
-        .context("planning the reproduction")?;
+    let plan = export::plan(
+        &stores.state,
+        u64::from(genesis.network_magic()),
+        super::retained_epochs(config)?,
+    )
+    .into_diagnostic()
+    .context("planning the reproduction")?;
 
     let plan = super::restrict(plan, args.epochs);
+    let plan = super::banded(plan, args.index_band);
+    let plan = super::produced(plan, args.producers);
 
     super::report_plan(&plan)?;
 

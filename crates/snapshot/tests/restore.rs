@@ -46,19 +46,22 @@ use dolos_core::{
     StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
+    is_state_kind,
     restore::{self, Budget, Checkpoint},
-    Error, NAMESPACES, STATE, STATE_SHARDS, UTXOS,
+    state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
+    NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
-use node::{export_to, harness, Blank};
+use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
+use serde_json::json;
 use stelae::{
-    dir::SteleDir,
-    frame::Limits,
+    dir::{LayerSpec, SteleDir},
+    frame::{encode, Limits},
     inscription::{Inscription, LayerDescriptor},
     plan::RestoreProgress,
     progress::{Observer, Outcome},
     transport::BlobIndex,
-    Digest, LayerReader, Profile, SteleReader,
+    Digest, LayerReader, Profile, SteleReader, SteleWriter,
 };
 
 use watcher::Watcher;
@@ -176,10 +179,179 @@ fn a_stele_for_another_network_is_refused_before_anything_is_written() {
     assert_untouched(&blank);
 }
 
+/// The layer kind a publisher one version ahead of this build would carry.
+///
+/// Spelled as a `log-{ns}` kind because that is the shape decision 0026 makes
+/// additive: a namespace that starts producing logs arrives as a new kind on a
+/// new layer, not as a change to an existing one.
+const AHEAD_KIND: &str = "log-future";
+
+/// The Dolos profile as a publisher one kind ahead of this build implements it.
+///
+/// Same profile name and same major version — an additive kind is precisely the
+/// change that does not need either to move, which is the claim under test.
+struct AheadProfile {
+    kinds: Vec<&'static str>,
+}
+
+impl AheadProfile {
+    fn new() -> Self {
+        let mut kinds = KINDS.to_vec();
+        kinds.push(AHEAD_KIND);
+
+        Self { kinds }
+    }
+}
+
+impl Profile for AheadProfile {
+    fn name(&self) -> &str {
+        DolosProfile.name()
+    }
+
+    fn version(&self) -> u64 {
+        DolosProfile.version()
+    }
+
+    fn kinds(&self) -> &[&str] {
+        &self.kinds
+    }
+
+    fn layer_media_type(&self, kind: &str) -> Result<String, stelae::Error> {
+        match kind {
+            AHEAD_KIND => Ok(format!("application/vnd.dolos.stele.{AHEAD_KIND}.v1+zstd")),
+            known => DolosProfile.layer_media_type(known),
+        }
+    }
+
+    fn tag_for_sequence(&self, sequence: u64) -> Result<String, stelae::Error> {
+        DolosProfile.tag_for_sequence(sequence)
+    }
+
+    fn max_record(&self) -> usize {
+        DolosProfile.max_record()
+    }
+}
+
+/// Export `domain` into `root`, then have [`AheadProfile`] add its extra layer
+/// and re-seal.
+///
+/// The layer is written through the ordinary writer and the stele re-sealed
+/// through the ordinary seal, so what the restore below reads is an artifact a
+/// newer publisher could have produced — not an inscription with a descriptor
+/// pasted into it, which would say nothing about the layer being real.
+fn export_one_kind_ahead<B: ToyStores>(
+    root: &std::path::Path,
+    domain: &ToyDomain<B>,
+    scope: serde_json::Value,
+) -> Inscription {
+    let mut inscription = export_to(root, domain);
+
+    let stele = SteleDir::open(root).unwrap();
+    let ahead = AheadProfile::new();
+
+    // Shapes this build has no reader for, which is the situation: an unknown
+    // kind's records and header scope are the newer profile's business.
+    let header = encode(|e| {
+        e.array(2)?.u64(0)?.u64(0)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let record = encode(|e| {
+        e.array(2)?
+            .u64(0)?
+            .str("a log this build has never heard of")?;
+        Ok(())
+    })
+    .unwrap();
+
+    let written = stele
+        .write_layer(
+            &ahead,
+            &LayerSpec::new(AHEAD_KIND, header, scope),
+            COMPRESSION_LEVEL,
+            &[record],
+        )
+        .unwrap();
+
+    inscription.layers.push(written.descriptor);
+    stele.seal(&ahead, &inscription).unwrap();
+
+    inscription
+}
+
+/// Decision 0026's client rule, end to end: a stele carrying a kind this build
+/// does not implement restores without it, and reports the skip.
+///
+/// The alternative it replaces is the one worth naming — before this, an
+/// additive kind bricked every deployed reader, which is the blast radius the
+/// decision exists to remove.
+#[test]
+fn an_unknown_layer_kind_is_skipped_and_reported() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    let inscription = export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0}));
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let plan = restore::plan(&stele, magic, None).unwrap();
+
+    assert_eq!(plan.skipped_unknown.len(), 1);
+    assert_eq!(plan.skipped_unknown[0].kind, AHEAD_KIND);
+    assert_eq!(plan.skipped_unknown[0].scope, json!({"epoch": 0}));
+
+    // Skipped is about consumption and nothing else. The layer is still in the
+    // document, still covered by the digest that is the stele's identity, and
+    // still a blob on disk — it is simply never read into a store.
+    assert!(plan.layers().all(|layer| layer.kind != AHEAD_KIND));
+    assert_eq!(
+        inscription.layers.len(),
+        plan.layers().count() + plan.skipped_unknown.len()
+    );
+    assert_eq!(stele.blob_index().unwrap().len(), inscription.layers.len());
+
+    let blank = Blank::<MemoryStores>::open();
+    let summary = restore_into(temp.path(), magic, &blank, Budget::default()).unwrap();
+
+    assert_eq!(summary.layers_fetched, plan.layers().count());
+
+    // And the node it lands in is the node the stele came from, so what was
+    // skipped cost the restore nothing it needed.
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
+}
+
+/// The one unknown kind a restore refuses. `required: true` is a publisher
+/// saying this layer is not optional, so a reader that cannot store it must
+/// stop rather than restore a node quietly missing a slice of the chain.
+#[test]
+fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+
+    let temp = tempfile::tempdir().unwrap();
+    export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0, "required": true}));
+
+    let blank = Blank::<MemoryStores>::open();
+    let err = restore_into(temp.path(), magic, &blank, Budget::default()).unwrap_err();
+
+    let Error::RequiredUnknownLayer { kind, scope } = &err else {
+        panic!("{err:?}");
+    };
+
+    assert_eq!(kind, AHEAD_KIND);
+    assert_eq!(scope, &json!({"epoch": 0, "required": true}));
+
+    assert_untouched(&blank);
+}
+
 /// Done criterion 3, second half.
 ///
-/// One state shard's blob is removed, so the restore fails partway through the
-/// tip — after epochs and other shards have landed. `set_cursor` is the last
+/// One state layer's blob is removed, so the restore fails partway through the
+/// tip — after epochs and other layers have landed. `set_cursor` is the last
 /// thing a restore does, so what it leaves behind is a store set with data in
 /// it and no cursor, which is what `bootstrap`'s `has_existing_data()` reads.
 #[test]
@@ -189,11 +361,13 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
     let temp = tempfile::tempdir().unwrap();
     let inscription = export_to(temp.path(), &domain);
 
-    // The last shard, so the failure lands after fifteen others have committed.
+    // The last state layer, so the failure lands after every other one has
+    // committed.
     let last = inscription
-        .layers_of_kind(STATE)
-        .last()
-        .expect("a stele has state shards");
+        .layers
+        .iter()
+        .rfind(|layer| is_state_kind(&layer.kind))
+        .expect("a stele has state layers");
 
     let stele = SteleDir::open(temp.path()).unwrap();
     let blob = stele
@@ -298,7 +472,9 @@ fn roundtrip<B: ToyStores>() {
 
     let restored = {
         let stele = SteleDir::create(from_restored.path()).unwrap();
-        let plan = dolos_snapshot::export::plan(blank.state(), magic_of(&domain)).unwrap();
+        let plan =
+            dolos_snapshot::export::plan(blank.state(), magic_of(&domain), Default::default())
+                .unwrap();
 
         dolos_snapshot::export::export(
             &stele,
@@ -742,6 +918,162 @@ fn kill_and_resume<B: ToyStores>() {
     assert_stores_match(&blank, &domain);
 }
 
+/// Done criterion 3: a stele carrying retained dumps restores the tip, reports
+/// the dumps, and pays nothing for them.
+///
+/// Two steles over one ledger from one point, differing only in whether the
+/// publisher retained epoch 1 — so anything the restore does differently is
+/// the dumps and nothing else. What it must do differently is *report* them
+/// and nothing more: same layers read, same bytes planned, same node.
+#[test]
+fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = magic_of(&domain);
+
+    let plain_root = tempfile::tempdir().unwrap();
+    let dumped_root = tempfile::tempdir().unwrap();
+
+    export_plan(
+        plain_root.path(),
+        &domain,
+        &plan_at_boundary(&domain, 1, RetainedEpochs::default()),
+    );
+
+    let dumped = export_plan(
+        dumped_root.path(),
+        &domain,
+        &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
+    );
+
+    let plain_plan =
+        restore::plan(&SteleDir::open(plain_root.path()).unwrap(), magic, None).unwrap();
+    let dumped_plan =
+        restore::plan(&SteleDir::open(dumped_root.path()).unwrap(), magic, None).unwrap();
+
+    // Reported: every kind's shards, under the epoch their scope names.
+    assert!(plain_plan.state_dumps.is_empty());
+    assert_eq!(
+        dumped_plan.state_dumps.keys().copied().collect::<Vec<_>>(),
+        vec![1]
+    );
+    assert_eq!(dumped_plan.dump_layers().count(), state_layer_count());
+
+    // The document carries them; the plan does not consume them.
+    assert_eq!(
+        dumped.layers.len(),
+        plain_plan.layers().count() + state_layer_count(),
+    );
+    assert_eq!(dumped_plan.layers().count(), plain_plan.layers().count());
+    assert_eq!(dumped_plan.tip_layers().count(), state_layer_count());
+    assert_eq!(
+        dumped_plan.uncompressed_size(),
+        plain_plan.uncompressed_size(),
+        "a dump was counted against the disk a restore needs",
+    );
+
+    // Not in the tip either: a dump that leaked into `state` would be restored
+    // *over* the tip, one shard at a time, and the node would still look right.
+    for layers in dumped_plan.state.values() {
+        for layer in layers {
+            assert!(layer.scope.get("epoch").is_none(), "{}", layer.kind);
+        }
+    }
+
+    // And the run itself is the same run.
+    let plain_blank = Blank::<MemoryStores>::open();
+    let dumped_blank = Blank::<MemoryStores>::open();
+
+    let from_plain =
+        restore_into(plain_root.path(), magic, &plain_blank, Budget::default()).unwrap();
+    let from_dumped =
+        restore_into(dumped_root.path(), magic, &dumped_blank, Budget::default()).unwrap();
+
+    assert_eq!(from_plain, from_dumped);
+    assert_state_matches(dumped_blank.state(), plain_blank.state());
+    assert_archive_matches(&dumped_blank.archive, &plain_blank.archive);
+}
+
+/// The resume half of done criterion 3, and the rule the module documentation
+/// states: a dump is checkpointable and the tip is not, and today neither is
+/// checkpointed because neither is read — what a resumed restore records is
+/// the epoch layers alone.
+#[test]
+fn a_resumed_restore_of_a_dumped_stele_records_only_the_epoch_layers() {
+    let domain: ToyDomain<MemoryStores> = harness();
+    let magic = magic_of(&domain);
+
+    let root = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+
+    let inscription = export_plan(
+        root.path(),
+        &domain,
+        &plan_at_boundary(&domain, 1, RetainedEpochs::new(vec![1]).unwrap()),
+    );
+
+    let blank = Blank::<MemoryStores>::open();
+
+    // Killed at the first state layer, so every epoch layer has committed and
+    // the tip has not.
+    let first_tip = inscription
+        .layers
+        .iter()
+        .find(|layer| state_ns_for(&layer.kind).is_some())
+        .unwrap();
+
+    let err = restore_checkpointed(
+        root.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(first_tip.diff_id),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(err, Error::Stelae(stelae::Error::Io(_))),
+        "{err:?}"
+    );
+
+    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+        .unwrap()
+        .expect("a killed restore left no progress file");
+
+    // Every recorded layer is an epoch layer. No dump is in it, and neither is
+    // a tip shard — the two for opposite reasons, and the same outcome.
+    for recorded in &progress.completed {
+        let layer = inscription
+            .layers
+            .iter()
+            .find(|layer| layer.diff_id == *recorded)
+            .expect("a recorded diffId this stele does not carry");
+
+        assert!(
+            state_ns_for(&layer.kind).is_none(),
+            "a state layer was checkpointed: {} at {}",
+            layer.kind,
+            layer.scope,
+        );
+    }
+
+    let resumed =
+        restore_checkpointed(root.path(), storage.path(), magic, &blank, true, None).unwrap();
+
+    assert_eq!(resumed.layers_skipped, progress.completed.len());
+    assert_eq!(
+        resumed.layers_fetched + resumed.layers_skipped,
+        inscription.layers.len() - state_layer_count(),
+        "the resume fetched a retained dump, which no restore reads",
+    );
+
+    assert_eq!(
+        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        None,
+        "a finished restore left its progress file behind"
+    );
+}
+
 #[test]
 fn a_killed_restore_resumes_into_the_same_node_on_memory() {
     kill_and_resume::<MemoryStores>();
@@ -787,16 +1119,16 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     // the first staying true under the second, and that says nothing unless
     // the second is a different document.
     assert_ne!(first.digest().unwrap(), second.digest().unwrap());
-    assert_eq!(first.sequence, 1);
-    assert_eq!(second.sequence, 2);
+    assert_eq!(first.sequence, 0, "the cursor stands in epoch 0");
+    assert_eq!(second.sequence, 1, "and one slot later, in epoch 1");
 
     // And the two sides of the rule, as bytes. Epoch 0's layers carry forward;
-    // every state shard is new.
+    // every state layer is new.
     let epoch_zero = |stele: &Inscription| -> Vec<Digest> {
         stele
             .layers
             .iter()
-            .filter(|l| l.kind != STATE && l.scope["epoch"] == 0)
+            .filter(|l| !is_state_kind(&l.kind) && l.scope["epoch"] == 0)
             .map(|l| l.diff_id)
             .collect()
     };
@@ -810,19 +1142,19 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert!(
         state_diff_ids(&first)
             .iter()
-            .all(|shard| !state_diff_ids(&second).contains(shard)),
-        "a state shard names the epoch it is the tip of, so none can be shared"
+            .all(|layer| !state_diff_ids(&second).contains(layer)),
+        "a state layer names the epoch it is the tip of, so none can be shared"
     );
 
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
     // The node is pre-seeded by an actual interrupted restore of the older
-    // stele, stopped at its first state shard, rather than by a hand-written
+    // stele, stopped at its first state layer, rather than by a hand-written
     // progress file. That matters: a hand-written one would claim layers whose
     // records were never committed, and the store comparison at the end would
     // then be checking that a resume skipped work nobody had done.
-    let (_, state_shards) = layers_in_driver_order(older.path(), magic);
+    let (_, tip_layers) = layers_in_driver_order(older.path(), magic);
 
     let err = restore_checkpointed(
         older.path(),
@@ -830,7 +1162,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         magic,
         &blank,
         false,
-        Some(state_shards[0]),
+        Some(tip_layers[0]),
     )
     .unwrap_err();
 
@@ -847,7 +1179,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_eq!(
         seeded,
-        first.layers.len() - STATE_SHARDS as usize,
+        first.layers.len() - state_layer_count(),
         "every epoch layer committed before the tip was reached"
     );
 
@@ -864,11 +1196,11 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         resumed.layers_fetched,
         second.layers.len() - seeded,
         "and everything the newer stele adds was fetched: epoch 1's layers, \
-         and all sixteen shards because a shard is never inherited"
+         and every state layer because a state layer is never inherited"
     );
 
     assert!(
-        resumed.layers_fetched > STATE_SHARDS as usize,
+        resumed.layers_fetched > state_layer_count(),
         "the newer stele has to add an epoch, or the tip is all this proves"
     );
 
@@ -923,6 +1255,7 @@ fn export_standing_at<B: ToyStores>(
         &summary,
         dolos_snapshot::Network::for_magic(magic_of(domain)),
         ChainPoint::Specific(slot, dolos_core::BlockHash::new([0xab; 32])),
+        Default::default(),
     )
     .unwrap();
 
@@ -1044,16 +1377,16 @@ fn the_remaining_download_excludes_what_is_already_done() {
     assert!(resumed.compressed_bytes < fresh.compressed_bytes);
 
     // The tip is still in it, always.
-    assert_eq!(resumed.layers, STATE_SHARDS as usize);
+    assert_eq!(resumed.layers, state_layer_count());
 
-    // So the peak a resumed run stages is the widest shard, not the widest
+    // So the peak a resumed run stages is the widest state layer, not the widest
     // layer of the stele — the epoch layers it skips are not staged either.
     assert_eq!(resumed.largest_compressed, widest(&mut plan.tip_layers()));
     assert!(resumed.largest_compressed <= fresh.largest_compressed);
 }
 
-/// The epoch layers and the state shards, each in the order the driver reaches
-/// them.
+/// The epoch layers and the state tip's layers, each in the order the driver
+/// reaches them.
 ///
 /// Read off the [`restore::Plan`] and not the inscription. The document's order
 /// is whatever the export wrote; the driver's is epoch by epoch and, within an
@@ -1072,7 +1405,9 @@ fn layers_in_driver_order(root: &std::path::Path, magic: u64) -> (Vec<Digest>, V
 
 fn state_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
-        .layers_of_kind(STATE)
+        .layers
+        .iter()
+        .filter(|layer| is_state_kind(&layer.kind))
         .map(|layer| layer.diff_id)
         .collect()
 }
@@ -1081,7 +1416,7 @@ fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
     inscription
         .layers
         .iter()
-        .filter(|layer| layer.kind != STATE)
+        .filter(|layer| !is_state_kind(&layer.kind))
         .map(|layer| layer.diff_id)
         .collect()
 }
@@ -1091,7 +1426,7 @@ fn epoch_diff_ids(inscription: &Inscription) -> Vec<Digest> {
 // --------------------------------------------------------------------------
 
 /// A stele always carries the whole tip, whatever history travels with it, so
-/// `sync.max_history` never touches the state shards — only the epoch layers.
+/// `sync.max_history` never touches the state layers — only the epoch layers.
 #[test]
 fn max_history_selects_epochs_and_never_the_tip() {
     let domain: ToyDomain = harness();
@@ -1104,7 +1439,14 @@ fn max_history_selects_epochs_and_never_the_tip() {
     for max_history in [None, Some(0), Some(u64::MAX)] {
         let plan = restore::plan(&stele, magic_of(&domain), max_history).unwrap();
 
-        assert_eq!(plan.state.len(), STATE_SHARDS as usize, "{max_history:?}");
+        // Keyed by namespace now, so the tip is seventeen entries and every
+        // layer under them.
+        assert_eq!(plan.state.len(), STATE_KINDS.len(), "{max_history:?}");
+        assert_eq!(
+            plan.tip_layers().count(),
+            state_layer_count(),
+            "{max_history:?}"
+        );
 
         // The fixture stands inside epoch zero, so every window reaches the tip
         // and nothing is ever dropped — which is the assertion, not a shortcut:

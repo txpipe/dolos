@@ -211,6 +211,15 @@ impl ArchiveStore for FaultyArchiveStore {
             .map_err(ArchiveError::from)
     }
 
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner
+            .get_blocks_by_slot(slot)
+            .map_err(ArchiveError::from)
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

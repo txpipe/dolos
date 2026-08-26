@@ -4,13 +4,15 @@ use dolos_core::config::{
 };
 use dolos_core::BootstrapExt;
 use dolos_snapshot::registry::Auth;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
@@ -148,6 +150,19 @@ pub fn stele_scratch_dir(config: &StorageConfig, chosen: Option<&std::path::Path
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
+    setup_domain_with_stop_epoch(config, None)
+}
+
+/// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
+///
+/// For callers that replay to a chosen epoch boundary over the live stores —
+/// `snapshot backfill` — the way `doctor rebuild-state` forces it on the
+/// domain it hand-builds. A `Some` here overrides whatever the configuration
+/// says; `None` leaves it alone.
+pub fn setup_domain_with_stop_epoch(
+    config: &RootConfig,
+    stop_epoch: Option<u64>,
+) -> miette::Result<DomainAdapter> {
     let stores = open_data_stores(config).map_err(|e| match e {
         Error::WalError(WalError::IncompatibleVersion { found, expected }) => miette::miette!(
             help = format!(
@@ -162,7 +177,11 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 
-    let ChainConfig::Cardano(chain_config) = chain;
+    let ChainConfig::Cardano(mut chain_config) = chain;
+
+    if stop_epoch.is_some() {
+        chain_config.stop_epoch = stop_epoch;
+    }
 
     let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
         chain_config,
@@ -333,7 +352,7 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
 
 #[inline]
 #[cfg(unix)]
-async fn wait_for_exit_signal() {
+pub(crate) async fn wait_for_exit_signal() {
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
@@ -349,7 +368,7 @@ async fn wait_for_exit_signal() {
 
 #[inline]
 #[cfg(windows)]
-async fn wait_for_exit_signal() {
+pub(crate) async fn wait_for_exit_signal() {
     tokio::signal::ctrl_c().await.unwrap()
 }
 
@@ -364,6 +383,114 @@ pub fn hook_exit_token() -> CancellationToken {
     });
 
     cancel
+}
+
+/// Attempts a transient-prone external gets before its failure is fatal.
+///
+/// Bounded on purpose. The preprod G1 backfill measured why the retry exists —
+/// four container exits between 06:39Z and 08:53Z on 2026-08-23, each one
+/// paying a store restore, a window re-download and the in-flight epoch's
+/// re-replay for what a half-minute wait would have absorbed — and the same
+/// measurement is why it is not open-ended: a misconfigured aggregator or a
+/// repository the credentials cannot read has to keep failing, and keep
+/// failing while whoever launched the run is still watching.
+const RETRY_ATTEMPTS: u32 = 4;
+
+/// The first wait between attempts; each later one doubles it. Three waits of
+/// 5s, 10s and 20s put the ceiling at 35 seconds of patience.
+const RETRY_BASE_DELAY: Duration = Duration::from_secs(5);
+
+/// Sleep, unless a shutdown is requested first. `false` means it was.
+///
+/// Sliced rather than slept in one call so a signal that arrives during a
+/// backoff is honoured at the next slice instead of at the end of the wait —
+/// the driver's whole shutdown budget is a container's SIGTERM grace period,
+/// which a 20-second sleep would eat.
+fn sleep_unless_aborted(delay: Duration, abort: &dyn Fn() -> bool) -> bool {
+    const SLICE: Duration = Duration::from_millis(250);
+
+    let mut left = delay;
+
+    while !left.is_zero() {
+        if abort() {
+            return false;
+        }
+
+        let slice = left.min(SLICE);
+        std::thread::sleep(slice);
+        left -= slice;
+    }
+
+    !abort()
+}
+
+/// Run `op`, retrying a failure with exponential backoff, then let it be fatal.
+///
+/// The last attempt's error is returned untouched, so every caller keeps the
+/// diagnostic it had before the retry was wrapped around it — the retry moves
+/// where the fatal path is reached, never what it says. Nothing here decides a
+/// failure is transient: the classification the alternative would need does not
+/// exist at these seams (an aggregator's errors arrive as opaque strings), and
+/// guessing it wrong reinstates exactly the fatal exits this is here to absorb.
+/// What bounds the patience is [`RETRY_ATTEMPTS`], not a judgement about the
+/// error.
+///
+/// `abort` is polled between and during the waits, so a shutdown ends the run
+/// on the failure in hand rather than after the remaining backoff. Callers with
+/// no shutdown to observe pass `&|| false`.
+///
+/// Only for operations that are safe to simply run again: reads, and downloads
+/// whose destination is rewritten from the same arguments.
+pub fn retry_transient<T, E, F>(what: &str, abort: &dyn Fn() -> bool, op: F) -> Result<T, E>
+where
+    F: FnMut() -> Result<T, E>,
+    E: std::fmt::Display,
+{
+    retry_bounded(what, RETRY_ATTEMPTS, RETRY_BASE_DELAY, abort, op)
+}
+
+/// [`retry_transient`] with its two constants spelled out, so the tests can
+/// exercise the loop without waiting out a real backoff.
+fn retry_bounded<T, E, F>(
+    what: &str,
+    attempts: u32,
+    base_delay: Duration,
+    abort: &dyn Fn() -> bool,
+    mut op: F,
+) -> Result<T, E>
+where
+    F: FnMut() -> Result<T, E>,
+    E: std::fmt::Display,
+{
+    let mut delay = base_delay;
+
+    for attempt in 1..attempts {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if abort() {
+                    return Err(err);
+                }
+
+                tracing::warn!(
+                    what,
+                    attempt,
+                    remaining = attempts - attempt,
+                    backoff_secs = delay.as_secs(),
+                    error = %err,
+                    "transient failure; retrying",
+                );
+
+                if !sleep_unless_aborted(delay, abort) {
+                    return Err(err);
+                }
+
+                delay = delay.saturating_mul(2);
+            }
+        }
+    }
+
+    op()
 }
 
 pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
@@ -389,6 +516,40 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
     pipeline.teardown();
 }
 
+/// Drains the serving drivers, cancelling the rest once any one of them fails.
+///
+/// Returns the first failure instead of only logging it: the exit status is
+/// what a supervisor reads. Draining continues past that failure because
+/// cancellation is what winds the healthy drivers down and nothing else
+/// awaits them.
+pub async fn monitor_drivers(
+    mut drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>>,
+    exit: CancellationToken,
+) -> Result<(), ServeError> {
+    let mut first_failure = None;
+
+    while let Some(result) = drivers.next().await {
+        let failure = match result {
+            Ok(Ok(())) => continue,
+            Ok(Err(e)) => {
+                error!(error = %e, "driver failed");
+                e
+            }
+            Err(e) => {
+                error!(error = %e, "driver task failed");
+                ServeError::Internal(Box::new(e))
+            }
+        };
+
+        warn!("cancelling remaining drivers");
+        exit.cancel();
+
+        first_failure.get_or_insert(failure);
+    }
+
+    first_failure.map_or(Ok(()), Err)
+}
+
 pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
     let root = &config.storage.path;
 
@@ -410,9 +571,91 @@ pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use dolos_core::config::StelaeRegistryConfig;
+    use futures_util::stream::FuturesUnordered;
+    use std::io;
+    use tokio::task::JoinHandle;
 
     use super::*;
     use crate::init::OFFICIAL_REGISTRY_PASSWORD;
+
+    /// The retry loop, with the real backoff replaced by none of it.
+    fn retried<T, E: std::fmt::Display>(
+        abort: &dyn Fn() -> bool,
+        op: impl FnMut() -> Result<T, E>,
+    ) -> Result<T, E> {
+        super::retry_bounded("a test", super::RETRY_ATTEMPTS, Duration::ZERO, abort, op)
+    }
+
+    #[test]
+    fn a_call_that_succeeds_is_made_once() {
+        let mut calls = 0;
+
+        let result: Result<u8, String> = retried(&|| false, || {
+            calls += 1;
+            Ok(7)
+        });
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls, 1, "a success must not be retried");
+    }
+
+    #[test]
+    fn a_transient_failure_is_absorbed() {
+        let mut calls = 0;
+
+        let result: Result<u8, String> = retried(&|| false, || {
+            calls += 1;
+
+            if calls < 3 {
+                Err("the aggregator hung up".to_owned())
+            } else {
+                Ok(7)
+            }
+        });
+
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(calls, 3, "the loop stops at the first success");
+    }
+
+    #[test]
+    fn patience_is_bounded_and_the_last_error_is_the_one_raised() {
+        let mut calls = 0;
+
+        let result: Result<u8, String> = retried(&|| false, || {
+            calls += 1;
+            Err(format!("attempt {calls} failed"))
+        });
+
+        assert_eq!(
+            calls, RETRY_ATTEMPTS as usize,
+            "a persistent failure must still reach the fatal path",
+        );
+
+        assert_eq!(
+            result.unwrap_err(),
+            format!("attempt {RETRY_ATTEMPTS} failed"),
+            "the caller keeps the diagnostic the final attempt produced",
+        );
+    }
+
+    #[test]
+    fn a_shutdown_ends_the_run_on_the_failure_in_hand() {
+        let mut calls = 0;
+
+        let result: Result<u8, String> = retried(&|| true, || {
+            calls += 1;
+            Err("interrupted".to_owned())
+        });
+
+        assert_eq!(calls, 1, "a requested shutdown is not waited out");
+        assert_eq!(result.unwrap_err(), "interrupted");
+    }
+
+    #[test]
+    fn a_shutdown_during_a_backoff_cuts_the_wait_short() {
+        assert!(!sleep_unless_aborted(Duration::from_secs(60), &|| true));
+        assert!(sleep_unless_aborted(Duration::ZERO, &|| false));
+    }
 
     fn storage(path: &str) -> StorageConfig {
         let document = format!(
@@ -584,5 +827,82 @@ mod tests {
             },
             "the DOLOS_ prefix no longer reaches [stelae.registry]",
         );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_observes_a_failure_a_healthy_driver_would_hide() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        // `FuturesUnordered` links at the head, so the ordered drain this
+        // replaced reached the last push first.
+        drivers.push(tokio::spawn(async {
+            Err(ServeError::BindError(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "socket already exists",
+            )))
+        }));
+
+        let exit_for_healthy_driver = exit.clone();
+        drivers.push(tokio::spawn(async move {
+            exit_for_healthy_driver.cancelled().await;
+            Ok(())
+        }));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_drivers(drivers, exit.clone()),
+        )
+        .await
+        .expect("driver monitor should observe the bind failure promptly");
+
+        assert!(exit.is_cancelled());
+
+        assert!(
+            matches!(result, Err(ServeError::BindError(_))),
+            "the bind failure has to reach the caller, not just the log",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_propagates_a_panicking_driver() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        drivers.push(tokio::spawn(async { panic!("driver panicked") }));
+
+        let result = monitor_drivers(drivers, exit.clone()).await;
+
+        assert!(exit.is_cancelled());
+
+        assert!(
+            result.is_err(),
+            "a panicking driver must not report success",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_reports_a_clean_shutdown_as_success() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        for _ in 0..3 {
+            let exit_for_driver = exit.clone();
+            drivers.push(tokio::spawn(async move {
+                exit_for_driver.cancelled().await;
+                Ok(())
+            }));
+        }
+
+        exit.cancel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_drivers(drivers, exit.clone()),
+        )
+        .await
+        .expect("cancelled drivers should finish promptly");
+
+        assert!(result.is_ok(), "a signalled shutdown is not a failure");
     }
 }

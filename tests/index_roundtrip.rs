@@ -1083,6 +1083,278 @@ fn measure_one_epoch_iteration_cost() {
     assert_eq!(exacts.len() as u64, written.exacts_per_epoch);
 }
 
+/// Peak resident set of this process, in bytes.
+///
+/// `ru_maxrss` is a **high-water mark** and never falls, which is what makes it
+/// the right instrument here — the question is what a publish peaked at, not
+/// what it holds at the moment anyone looks — and also what makes a *delta*
+/// between two of these the only honest way to attribute memory to a phase.
+///
+/// The unit is not portable: macOS reports bytes and Linux kilobytes. Both are
+/// spelled out rather than papered over, because a figure that is a thousand
+/// times wrong is worse than no figure.
+///
+/// `getrusage` is POSIX and has no Windows counterpart, so this and everything
+/// downstream of it is unix-only. The gate has to match the one on `nix` in
+/// `Cargo.toml` exactly — a config where one applies and the other does not is
+/// the compile error this replaces.
+#[cfg(unix)]
+fn max_rss_bytes() -> u64 {
+    let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_SELF)
+        .expect("getrusage failed");
+
+    let raw = usage.max_rss().max(0) as u64;
+
+    match cfg!(target_os = "macos") {
+        true => raw,
+        false => raw * 1024,
+    }
+}
+
+#[cfg(unix)]
+fn mib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// What holding one `indexes` layer open costs resident.
+///
+/// [`IndexBand`](dolos_snapshot::export::IndexBand) divides a memory ceiling by
+/// this number to arrive at K, so the number has to come from somewhere other
+/// than a guess about zstd's internals. Sinks are opened one at a time against
+/// a real stele and each is given records to compress, because a compression
+/// context that has never compressed anything has not yet allocated its
+/// window — a measurement taken before that would say a sink is nearly free.
+///
+/// Run with:
+/// `cargo test --release --test index_roundtrip -- --ignored --nocapture
+/// measure_layer_sink_residency`
+#[cfg(unix)]
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn measure_layer_sink_residency() {
+    use dolos_snapshot::{DolosProfile, EpochScope, Scope as _, COMPRESSION_LEVEL, INDEXES};
+    use stelae::transport::{RecordSink as _, SteleWriter as _};
+
+    const SINKS: u64 = 32;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let stele = stelae::dir::SteleDir::create(temp.path()).expect("create stele");
+
+    // A record for every sink to chew on, built once: the point is the
+    // compressor's resident state, not the bytes handed to it.
+    let record = dolos_snapshot::layers::indexes::encode(&IndexRecord::Tag(TagRecord::new(
+        archive_dimensions::ADDRESS,
+        [0x5a; 8],
+        1,
+    )))
+    .expect("encode");
+
+    let base = max_rss_bytes();
+    let mut sinks = Vec::new();
+
+    for epoch in 0..SINKS {
+        let spec = EpochScope {
+            network_magic: dolos_snapshot::MAINNET_MAGIC,
+            epoch,
+            start_slot: epoch * EPOCH_LEN,
+            end_slot: (epoch + 1) * EPOCH_LEN - 1,
+        }
+        .layer_spec(INDEXES)
+        .expect("layer spec");
+
+        let mut sink = stele
+            .layer_sink(&DolosProfile, &spec, COMPRESSION_LEVEL)
+            .expect("layer sink");
+
+        // Enough to drive the encoder past its lazy initialisation, and enough
+        // again that a buffer growing with the data would show.
+        for _ in 0..8_192 {
+            sink.write_record(&record).expect("write record");
+        }
+
+        sinks.push(sink);
+    }
+
+    let held = max_rss_bytes();
+
+    println!("--- layer sink residency (zstd level {COMPRESSION_LEVEL}) ---");
+    println!(
+        "{SINKS} sinks open: {:.1} MiB resident above baseline, {:.1} MiB each",
+        mib(held - base),
+        mib(held - base) / SINKS as f64,
+    );
+    println!(
+        "IndexBand::SINK_BYTES is pinned at {:.1} MiB",
+        mib(dolos_snapshot::export::IndexBand::SINK_BYTES as u64),
+    );
+
+    // Kept alive to here on purpose: a sink dropped early is a sink whose
+    // memory the measurement above did not see.
+    drop(sinks);
+}
+
+/// The whole-publish figure the banding is sized on: what a first publish of a
+/// store this deep costs, banded and unbanded.
+///
+/// The stele is written for real — compressed, framed and landed in a
+/// directory — because the claim is about a publish and not about a loop. Only
+/// the index store is seeded: `blocks`, `log-*` and `state-*` are already
+/// O(range) and would add the same constant to both arms while making the run
+/// several times longer. What is left is exactly the term this measures.
+///
+/// Both arms produce the same document, and that is asserted rather than
+/// assumed — a speed-up that moved the bytes would not be one.
+///
+/// Run with:
+/// `cargo test --release --test index_roundtrip -- --ignored --nocapture
+/// measure_banded_publish_cost`, and `DOLOS_INDEX_COST_EPOCHS=32` for the
+/// deeper store [`measure_one_epoch_iteration_cost`] also reports.
+#[cfg(unix)]
+#[test]
+#[ignore = "measurement, not an assertion"]
+fn measure_banded_publish_cost() {
+    use dolos_snapshot::export::IndexBand;
+
+    let (store, _guard) = Fjall::open();
+
+    let epochs = cost_epochs();
+    let spec = cost_spec(epochs);
+
+    let started = std::time::Instant::now();
+    let written = seed_deltas(&spec, &mut |delta| apply(&store, &delta));
+    let seeding = started.elapsed();
+
+    println!("--- banded publish cost ---");
+    println!(
+        "store: {epochs} epochs, {} tag records, {} exact records (seeded in {seeding:.1?})",
+        written.tags(),
+        written.exacts(),
+    );
+
+    // The banded arm runs **first**, and the order is the measurement rather
+    // than a preference. `ru_maxrss` is a high-water mark, so only the first
+    // arm's delta is that arm's own; the second reports what it added above the
+    // first. What this plan has to state is the peak of a *banded* publish, so
+    // that is the arm that goes first — and it leaves the unbanded arm running
+    // against the warmer page cache, which is the direction that understates
+    // the improvement rather than inventing it.
+    let bands = [("banded", IndexBand::DEFAULT.epochs()), ("unbanded", 1)];
+
+    let mut documents = Vec::new();
+
+    for (label, band) in bands {
+        let before = max_rss_bytes();
+        let started = std::time::Instant::now();
+
+        let (inscription, temp) = publish_at_band(&store, epochs, band);
+
+        let elapsed = started.elapsed();
+        let peak = max_rss_bytes();
+
+        let traversals = epochs.div_ceil(band as u64);
+
+        println!(
+            "{label:>9} (K={band:>3}): {traversals:>3} traversals, {elapsed:>10.1?}, \
+             peak rss {:>8.1} MiB (+{:.1} MiB above the mark this arm started at)",
+            mib(peak),
+            mib(peak.saturating_sub(before)),
+        );
+
+        documents.push(inscription.canonicalize().expect("canonicalize"));
+
+        // Held until the figures are printed, then released: the stele on disk
+        // is the size of the index store and the next arm wants the space.
+        drop(temp);
+    }
+
+    assert_eq!(
+        documents[0], documents[1],
+        "the banded publish produced a different document",
+    );
+}
+
+/// Publish the seeded index store at `band`, into a directory that lives as
+/// long as the returned guard.
+#[cfg(unix)]
+fn publish_at_band<S: CoreIndexStore>(
+    store: &S,
+    epochs: u64,
+    band: usize,
+) -> (stelae::inscription::Inscription, tempfile::TempDir) {
+    use dolos_core::{StateStore as _, StateWriter as _};
+    use dolos_snapshot::{
+        export::{IndexBand, Plan},
+        Network,
+    };
+
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let archive =
+        dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
+            .expect("archive store");
+
+    let state = dolos_core::builtin::MemoryStateStore::new();
+
+    // The publish stands on the last slot the seed wrote to, so its plan covers
+    // every epoch in the store and nothing beyond it.
+    let tip = ChainPoint::Specific(
+        epochs * EPOCH_LEN - 1,
+        dolos_core::BlockHash::new([0xab; 32]),
+    );
+
+    let writer = state.start_writer().expect("state writer");
+    writer.set_cursor(tip.clone()).expect("set cursor");
+    writer.commit().expect("commit");
+
+    let plan = Plan::new(
+        &cost_summary(),
+        Network::for_magic(dolos_snapshot::MAINNET_MAGIC),
+        tip,
+        Default::default(),
+    )
+    .expect("plan")
+    .with_band(IndexBand::new(
+        band.try_into().expect("a band of no epochs"),
+    ));
+
+    let inscription = dolos_snapshot::export::publish(
+        temp.path().join("stele"),
+        &plan,
+        &archive,
+        &state,
+        store,
+        None,
+        &stelae::progress::Observer::silent(),
+    )
+    .expect("publish");
+
+    (inscription, temp)
+}
+
+/// One era of [`EPOCH_LEN`]-slot epochs from slot zero — the geometry
+/// [`epoch_slots`] already seeds against, stated in the form a [`Plan`] reads.
+#[cfg(unix)]
+fn cost_summary() -> dolos_cardano::eras::ChainSummary {
+    let mut chain = dolos_cardano::eras::ChainSummary::default();
+
+    chain.append_era(
+        6,
+        dolos_cardano::model::EraSummary {
+            start: dolos_cardano::EraBoundary {
+                epoch: 0,
+                slot: 0,
+                timestamp: 0,
+            },
+            end: None,
+            epoch_length: EPOCH_LEN,
+            slot_length: 1,
+            protocol: 6,
+        },
+    );
+
+    chain
+}
+
 /// `ArchiveIndexDelta` carries its block and transaction hashes as `Vec<u8>`,
 /// so nothing upstream enforces their width — a malformed hash reaches storage
 /// as a plain byte slice.

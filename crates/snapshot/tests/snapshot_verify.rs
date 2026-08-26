@@ -49,6 +49,11 @@ use stelae::Digest;
 use node::Node;
 use registry_fixture::Fixture;
 
+/// Layers epoch 0 contributes, and therefore what sequence 1 inherits:
+/// `blocks`, `indexes`, and the two log layers the harness seeds. The other
+/// four log kinds have no records in the window, so they have no layer.
+const EPOCH_0: usize = 4;
+
 // ---------------------------------------------------------------------------
 // Done criterion 3: verify --repo
 // ---------------------------------------------------------------------------
@@ -70,7 +75,7 @@ fn a_freshly_published_stele_verifies_clean() {
     let second = node.publish(&repository, &node.second, false);
 
     assert_eq!(
-        second.layers_reused, 3,
+        second.layers_reused, EPOCH_0,
         "the interesting stele is one with inherited layers"
     );
 
@@ -84,12 +89,12 @@ fn a_freshly_published_stele_verifies_clean() {
     assert!(verified.compressed_bytes > 0);
 
     // The immutable tag reads the predecessor back just as clean.
-    let predecessor = registry::verify(&repository, Point::Epoch(1)).unwrap();
+    let predecessor = registry::verify(&repository, Point::Epoch(0)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
     eprintln!(
-        "verified latest = {} ({} layers, {} compressed bytes) and epoch-1 = {}",
+        "verified latest = {} ({} layers, {} compressed bytes) and epoch-0 = {}",
         verified.identity,
         verified.inscription.layers.len(),
         verified.compressed_bytes,
@@ -248,7 +253,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
     let second = node.publish(&repository, &node.second, false);
 
     assert_eq!(
-        second.layers_reused, 3,
+        second.layers_reused, EPOCH_0,
         "there is no trust gap to close unless the publish inherited something"
     );
 
@@ -280,7 +285,7 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
 
     assert!(matches!(err, Error::ReproductionMismatch { .. }), "{err:?}");
     assert!(
-        message.contains("sequence 2") && message.contains("sequence 1"),
+        message.contains("sequence 1") && message.contains("sequence 0"),
         "{message}"
     );
 
@@ -334,7 +339,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     assert_eq!(total, inspected.total_compressed);
 
     // The `--json` output is the canonical document, verbatim.
-    let predecessor = registry::inspect(&repository, Point::Epoch(1)).unwrap();
+    let predecessor = registry::inspect(&repository, Point::Epoch(0)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
@@ -360,7 +365,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     );
 
     eprintln!(
-        "inspected {} layers, {} compressed bytes; epoch-1's document chained to {}",
+        "inspected {} layers, {} compressed bytes; epoch-0's document chained to {}",
         inspected.inscription.layers.len(),
         inspected.total_compressed,
         reproduced.digest().unwrap(),

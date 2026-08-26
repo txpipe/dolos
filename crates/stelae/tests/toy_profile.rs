@@ -18,6 +18,8 @@
 //!    one implemented, is refused cleanly.
 //! 6. Both write paths — a layer handed over whole, and a layer streamed into a
 //!    sink — produce the same artifact, and this profile publishes one of each.
+//! 7. A stele carrying a layer kind this build does not define is *readable* —
+//!    the layer is reported and skipped — and not publishable on top of.
 
 use std::{collections::BTreeSet, io::Write as _};
 
@@ -34,6 +36,7 @@ use stelae::{
 const PROFILE_NAME: &str = "dev.example.toy";
 const NOTES_MEDIA_TYPE: &str = "application/vnd.example.stele.notes.v1+zstd";
 const INDEX_MEDIA_TYPE: &str = "application/vnd.example.stele.index.v1+zstd";
+const COVERS_MEDIA_TYPE: &str = "application/vnd.example.stele.covers.v1+zstd";
 const COMPRESSION_LEVEL: i32 = 9;
 
 /// A vendor's profile. Everything here is the vendor's business; none of it is
@@ -909,10 +912,13 @@ fn a_foreign_profile_is_refused() {
         "{err:?}"
     );
 
-    // As is a layer kind the profile does not define.
+    // A layer kind the profile does not define is *not* one of these: it is
+    // skippable at read and refused only on the publish side — see
+    // `an_unknown_layer_kind_is_skippable_at_read_and_refused_at_publish`.
     let mut unknown_kind = inscription.clone();
     unknown_kind.layers[0].kind = "receipts".to_owned();
-    let err = unknown_kind.check_profile(&ToyProfile).unwrap_err();
+    unknown_kind.check_profile(&ToyProfile).unwrap();
+    let err = unknown_kind.check_profile_strict(&ToyProfile).unwrap_err();
     assert!(matches!(err, Error::UnknownLayerKind { .. }), "{err:?}");
 }
 
@@ -1346,4 +1352,166 @@ fn a_discarding_writer_reproduces_what_a_directory_stores() {
     // Nothing was written anywhere on the way: the only stele on disk is the
     // one the directory wrote, and it has exactly its own two blobs.
     assert_eq!(stored_blobs.len(), 2);
+}
+
+/// The same vendor, one kind ahead: `dev.example.toy` after it started
+/// publishing cover art. Same profile name and same major version, because an
+/// *additive* kind is exactly the change that does not break a reader — which
+/// is the claim the tests below check rather than assume.
+struct FutureToyProfile;
+
+impl Profile for FutureToyProfile {
+    fn name(&self) -> &str {
+        PROFILE_NAME
+    }
+
+    fn version(&self) -> u64 {
+        1
+    }
+
+    fn kinds(&self) -> &[&str] {
+        &["notes", "index", "covers"]
+    }
+
+    fn layer_media_type(&self, kind: &str) -> Result<String, Error> {
+        match kind {
+            "covers" => Ok(COVERS_MEDIA_TYPE.to_owned()),
+            other => ToyProfile.layer_media_type(other),
+        }
+    }
+
+    fn tag_for_sequence(&self, sequence: u64) -> Result<String, Error> {
+        ToyProfile.tag_for_sequence(sequence)
+    }
+}
+
+/// Write the toy stele, then have the newer publisher add its `covers` layer
+/// and re-seal.
+///
+/// Through the ordinary writer and the ordinary seal, so what the assertions
+/// read back is a stele somebody could have published — not an inscription with
+/// a descriptor pasted into it, which would prove nothing about the layer being
+/// real.
+fn published_ahead(root: &std::path::Path, scope: serde_json::Value) -> Inscription {
+    let (mut inscription, _) = write_stele(root);
+    let stele = SteleDir::open(root).unwrap();
+
+    let header = encode(|e| {
+        e.map(1)?.str("chapter")?.u64(3)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let cover = encode(|e| {
+        e.str("a woodcut of the east shelf")?;
+        Ok(())
+    })
+    .unwrap();
+
+    let written = stele
+        .write_layer(
+            &FutureToyProfile,
+            &LayerSpec::new("covers", header, scope),
+            COMPRESSION_LEVEL,
+            &[cover],
+        )
+        .unwrap();
+
+    inscription.layers.push(written.descriptor);
+    stele.seal(&FutureToyProfile, &inscription).unwrap();
+
+    inscription
+}
+
+/// The blast radius of an additive kind, in one test.
+///
+/// A profile that gains a kind publishes it as a new media type on a new layer.
+/// If an older reader refused the whole stele over it, every additive change
+/// would brick every deployed reader; so the reader takes the document, keeps
+/// the layers it models, and *reports* the one it does not. The publish side
+/// keeps the old rule, because a publisher attests every layer it lists.
+#[test]
+fn an_unknown_layer_kind_is_skippable_at_read_and_refused_at_publish() {
+    let temp = tempfile::tempdir().unwrap();
+    let ahead = published_ahead(temp.path(), json!({"chapter": 3}));
+
+    // The older reader takes the document.
+    ahead.check_profile(&ToyProfile).unwrap();
+
+    // And the layer it cannot model comes back whole — kind and scope — which
+    // is what leaves the skip-or-refuse decision with the profile rather than
+    // with the protocol.
+    let unknown = ahead.unknown_layers(&ToyProfile);
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0].kind, "covers");
+    assert_eq!(unknown[0].scope, json!({"chapter": 3}));
+
+    // The publisher that wrote it skips nothing, and may chain onto it.
+    assert!(ahead.unknown_layers(&FutureToyProfile).is_empty());
+    ahead.check_profile_strict(&FutureToyProfile).unwrap();
+
+    // The older binary may not.
+    let err = ahead.check_profile_strict(&ToyProfile).unwrap_err();
+    assert!(
+        matches!(&err, Error::UnknownLayerKind { kind, .. } if kind == "covers"),
+        "{err:?}"
+    );
+
+    // Skipping is about consumption and nothing else: the layers the old reader
+    // does model are still reachable through the identities the inscription
+    // pins, and the skipped one is still a layer of the stele.
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let index = stele.blob_index().unwrap();
+    assert_eq!(index.len(), 3);
+
+    for kind in ["notes", "index"] {
+        let descriptor = ahead.layers_of_kind(kind).next().unwrap();
+        stele.read_layer(&index, &ToyProfile, descriptor).unwrap();
+    }
+}
+
+/// `required: true` in a layer's scope is a publisher telling older readers
+/// that this layer is not optional: refuse the stele rather than restore a
+/// partial one.
+///
+/// The protocol never reads the flag — a scope is profile-owned and opaque — so
+/// the planner below is the whole of the profile side, written out to show how
+/// little `unknown_layers` leaves it to do.
+#[test]
+fn a_required_unknown_layer_is_the_profiles_own_refusal() {
+    fn plan(inscription: &Inscription) -> Result<Vec<String>, String> {
+        let unknown = inscription.unknown_layers(&ToyProfile);
+
+        match unknown
+            .iter()
+            .find(|layer| layer.scope.get("required") == Some(&json!(true)))
+        {
+            Some(layer) => Err(format!("{} is required: {}", layer.kind, layer.scope)),
+            None => Ok(unknown.iter().map(|layer| layer.kind.clone()).collect()),
+        }
+    }
+
+    let optional = tempfile::tempdir().unwrap();
+    let skipped = plan(&published_ahead(optional.path(), json!({"chapter": 3}))).unwrap();
+    assert_eq!(skipped, vec!["covers".to_owned()]);
+
+    // The same stele, the same reader, one flag apart.
+    let required = tempfile::tempdir().unwrap();
+    let refusal = plan(&published_ahead(
+        required.path(),
+        json!({"chapter": 3, "required": true}),
+    ))
+    .unwrap_err();
+
+    assert!(refusal.contains("covers"), "{refusal}");
+    assert!(refusal.contains("chapter"), "{refusal}");
+
+    // `required` is a scope field like any other to the protocol: it neither
+    // makes the layer known nor stops the document being read.
+    let stele = SteleDir::open(required.path()).unwrap();
+    stele
+        .read_inscription()
+        .unwrap()
+        .check_profile(&ToyProfile)
+        .unwrap();
 }

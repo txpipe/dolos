@@ -56,7 +56,7 @@ use dolos_snapshot::{
     export::Plan,
     registry::{self, Point},
     restore::{self, Budget, Checkpoint},
-    Error, Network, NAMESPACES, STATE_SHARDS, UTXOS,
+    state_layer_count, Error, Network, NAMESPACES, UTXOS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
 use node::{harness, Blank};
@@ -73,8 +73,17 @@ use stelae::{
 
 use watcher::Watcher;
 
-/// Layers a publish of one epoch writes: three epoch kinds plus the state tip.
-const PER_PUBLISH: usize = 3 + STATE_SHARDS as usize;
+/// Layers epoch 0 contributes: `blocks`, `indexes`, and the two log layers the
+/// harness seeds — `log-account-epochs` and `log-epochs`. The third log kind
+/// has no records in the window, so it has no layer.
+const EPOCH_0: usize = 4;
+
+/// Layers epoch 1 — the boundary sliver — contributes: `blocks` and `indexes`.
+/// Its logs would key at `epoch_start(1)`, and the harness writes none there.
+const EPOCH_1: usize = 2;
+
+/// Layers a publish of sequence 0 writes: epoch 0 plus the state tip.
+const PER_PUBLISH: usize = EPOCH_0 + state_layer_count();
 
 // ---------------------------------------------------------------------------
 // The node, and the two chain points it publishes from
@@ -106,11 +115,17 @@ impl Node {
 
         let point = |slot| ChainPoint::Specific(slot, BlockHash::new([0xab; 32]));
 
-        let first = Plan::new(&summary, network.clone(), point(boundary - 1)).unwrap();
-        let second = Plan::new(&summary, network, point(boundary)).unwrap();
+        let first = Plan::new(
+            &summary,
+            network.clone(),
+            point(boundary - 1),
+            Default::default(),
+        )
+        .unwrap();
+        let second = Plan::new(&summary, network, point(boundary), Default::default()).unwrap();
 
-        assert_eq!(first.sequence, 1);
-        assert_eq!(second.sequence, 2);
+        assert_eq!(first.sequence, 0);
+        assert_eq!(second.sequence, 1);
 
         Self {
             domain,
@@ -438,9 +453,9 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    // Sequence 1, interrupted at its first state shard: every epoch layer it
+    // Sequence 0, interrupted at its first state shard: every epoch layer it
     // carries commits, the tip does not.
-    let first = Point::Epoch(1).pull(&repository).unwrap();
+    let first = Point::Epoch(0).pull(&repository).unwrap();
     let identity = first.read_inscription().unwrap().digest().unwrap();
     let plan = restore::plan(&first, node.magic, None).unwrap();
     let index = first.blob_index().unwrap();
@@ -472,7 +487,7 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
 
     assert_eq!(seeded, epoch_layers, "epoch 0's layers all committed");
 
-    // Now catch up to sequence 2 — which describes epoch 0 with the same
+    // Now catch up to sequence 1 — which describes epoch 0 with the same
     // identities, epoch 1 besides, and a tip of its own.
     let resumed = restore_from(
         &fixture.repository("dolos/delta"),
@@ -490,16 +505,17 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     );
 
     assert_eq!(
-        resumed.layers_fetched, PER_PUBLISH,
-        "epoch 1's three layers and the sixteen shards, and nothing else"
+        resumed.layers_fetched,
+        EPOCH_1 + state_layer_count(),
+        "epoch 1's two layers and every state layer, and nothing else"
     );
 
-    // The point resolved to what it claimed. `latest` is sequence 2 here, and
-    // `epoch-1` is still the stele the first half of this test read.
+    // The point resolved to what it claimed. `latest` is sequence 1 here, and
+    // `epoch-0` is still the stele the first half of this test read.
     let latest = Point::Latest.pull(&repository).unwrap();
-    assert_eq!(latest.read_inscription().unwrap().sequence, 2);
+    assert_eq!(latest.read_inscription().unwrap().sequence, 1);
     assert_eq!(
-        Point::Epoch(1)
+        Point::Epoch(0)
             .pull(&repository)
             .unwrap()
             .read_inscription()
@@ -530,7 +546,7 @@ fn a_point_that_names_no_stele_is_refused() {
     let storage = tempfile::tempdir().unwrap();
     let blank = Blank::<MemoryStores>::open();
 
-    // The repository holds sequence 1 and nothing else.
+    // The repository holds sequence 0 and nothing else.
     let err = restore_from(
         &repository,
         Point::Epoch(97),

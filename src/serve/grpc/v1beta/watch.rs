@@ -486,7 +486,13 @@ where
             .collect::<Vec<ChainPoint>>();
 
         let stream =
-            ChainStream::start::<D, _>(self.domain.clone(), intersect, self.cancel.clone());
+            ChainStream::start::<D, _>(self.domain.clone(), intersect.clone(), self.cancel.clone())
+                .map_err(|e| Status::internal(format!("failed to start chain stream: {e}")))?
+                .ok_or_else(|| {
+                    Status::not_found(format!(
+                        "none of the requested points intersect with local history: {intersect:?}"
+                    ))
+                })?;
 
         let mapper = self.mapper.clone();
 

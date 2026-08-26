@@ -100,9 +100,10 @@ use stelae::{
     frame::{encode, CanonicalCbor, Limits},
     inscription::LayerDescriptor,
     oci::{
-        build_manifest, manifest_bytes, read_manifest, Auth, Options, Registry, Transfer,
-        DIFF_ID_ANNOTATION, KIND_ANNOTATION, SCOPE_ANNOTATION,
+        build_manifest, manifest_bytes, read_manifest, Auth, Options, Registry, DIFF_ID_ANNOTATION,
+        KIND_ANNOTATION, SCOPE_ANNOTATION,
     },
+    progress::{Event, Observer, Progress},
     Compression, Digest, Error, HistoryEntry, Inscription, LayerDigests, LayerSpec, Profile,
     RecordSink, SteleReader, SteleWriter, WrittenLayer,
 };
@@ -839,6 +840,20 @@ impl Fixture {
         self.registry_staging_in(repository, None)
     }
 
+    /// The same transport, with the publish path's concurrency named.
+    ///
+    /// Only the tests whose subject is the concurrency itself set it; every
+    /// other test in this file runs at the default, which is the arrangement
+    /// the deployment uses.
+    fn registry_at(&self, repository: &str, concurrency: usize) -> Registry {
+        self.options(repository, |options| options.concurrency = concurrency)
+    }
+
+    /// The same transport, re-proving every layer it carries forward.
+    fn verifying(&self, repository: &str) -> Registry {
+        self.options(repository, |options| options.verify_adopted = true)
+    }
+
     /// Every transport in this file is built here, so that whether the fixture
     /// is speaking TLS — and which credentials it presents — is decided in
     /// exactly one place. A test that assembled its own [`Options`] to set a
@@ -890,20 +905,44 @@ impl Fixture {
     }
 
     fn registry_as(&self, repository: &str, scratch_dir: Option<PathBuf>, auth: Auth) -> Registry {
+        self.open(repository, scratch_dir, auth, |_| {})
+    }
+
+    /// The fixture's own transport, with one thing about it changed.
+    ///
+    /// The knob the tests below reach for. Spelled as an edit rather than as
+    /// another argument so that a test naming the concurrency does not also
+    /// have to restate the credentials and the scheme this fixture decided.
+    fn options(&self, repository: &str, set: impl FnOnce(&mut Options)) -> Registry {
+        self.open(repository, None, self.credentials(), set)
+    }
+
+    fn open(
+        &self,
+        repository: &str,
+        scratch_dir: Option<PathBuf>,
+        auth: Auth,
+        set: impl FnOnce(&mut Options),
+    ) -> Registry {
         let repository = match &self.server {
             Server::Container { .. } => repository.to_owned(),
             Server::Remote { namespace, .. } => format!("{namespace}/{repository}"),
         };
 
+        let mut options = Options {
+            insecure: !self.tls,
+            scratch_dir,
+            auth,
+            ..Default::default()
+        };
+
+        set(&mut options);
+
         Registry::open(
             &format!("oci://{}/{repository}", self.address())
                 .parse()
                 .expect("the fixture named a usable repository"),
-            Options {
-                insecure: !self.tls,
-                scratch_dir,
-                auth,
-            },
+            options,
         )
         .unwrap()
     }
@@ -971,33 +1010,39 @@ impl Drop for Fixture {
 /// what goes in the index layer, which is how the delta test makes two steles
 /// that share a blob and differ in one.
 fn write_stele<W: SteleWriter>(stele: &W, chapter: u64) -> Inscription {
+    write_stele_fallibly(stele, chapter).unwrap()
+}
+
+/// The same publish, with every refusal handed back rather than unwrapped.
+///
+/// For the tests whose subject *is* a refusal. Split out rather than made the
+/// only spelling because the twenty callers that expect a stele would each
+/// grow an `.unwrap()` that says nothing, and the one that does not would stop
+/// standing out.
+fn write_stele_fallibly<W: SteleWriter>(stele: &W, chapter: u64) -> Result<Inscription, Error> {
     let (notes_header, notes_scope) = notes_scope(3);
     let (index_header, index_scope) = index_scope(chapter);
 
     let notes: Vec<CanonicalCbor> = (1..=3).map(note_record).collect();
 
-    let written_notes = stele
-        .write_layer(
-            &ToyProfile,
-            &LayerSpec::new("notes", notes_header, notes_scope),
-            COMPRESSION_LEVEL,
-            &notes,
-        )
-        .unwrap();
+    let written_notes = stele.write_layer(
+        &ToyProfile,
+        &LayerSpec::new("notes", notes_header, notes_scope),
+        COMPRESSION_LEVEL,
+        &notes,
+    )?;
 
-    let mut sink = stele
-        .layer_sink(
-            &ToyProfile,
-            &LayerSpec::new("index", index_header, index_scope),
-            COMPRESSION_LEVEL,
-        )
-        .unwrap();
+    let mut sink = stele.layer_sink(
+        &ToyProfile,
+        &LayerSpec::new("index", index_header, index_scope),
+        COMPRESSION_LEVEL,
+    )?;
 
     for id in 1..=chapter {
-        sink.write_record(&note_record(id)).unwrap();
+        sink.write_record(&note_record(id))?;
     }
 
-    let written_index = sink.finish().unwrap();
+    let written_index = sink.finish()?;
 
     let mut inscription = Inscription::new(
         &ToyProfile,
@@ -1012,9 +1057,9 @@ fn write_stele<W: SteleWriter>(stele: &W, chapter: u64) -> Inscription {
 
     inscription.layers = vec![written_notes.descriptor, written_index.descriptor];
 
-    stele.seal(&ToyProfile, &inscription).unwrap();
+    stele.seal(&ToyProfile, &inscription)?;
 
-    inscription
+    Ok(inscription)
 }
 
 /// Every record of every layer, read back through the streaming reader.
@@ -1247,10 +1292,16 @@ fn bulk_records() -> u64 {
 
 /// What either direction may hold at any one moment.
 ///
-/// Above the 1 MiB upload chunk because the HTTP client copies a body on its
-/// way to the socket and zstd buffers on either side of the codec. What matters
-/// is not the number but that it does not move when the layer does — the layer
-/// is fifty times it.
+/// The push peak is one upload chunk and a little change — 4 MiB and some
+/// tens of kilobytes, measured, and stable to a fraction of a percent across
+/// runs, because the client splits the chunk it is handed rather than copying
+/// it. The pull side sits far below that. 5 MiB is the larger of the two with
+/// room over it.
+///
+/// What matters is not the number but that it does not move when the layer
+/// does: the peak is bound by the chunk, and the layer here is ten times the
+/// budget. `STELAE_TEST_BULK_RECORDS` below asks the same question at a
+/// mainnet shard's scale and this constant does not follow it up.
 const TRANSPORT_BUDGET: usize = 5 * 1024 * 1024;
 
 /// A record whose body zstd cannot shrink.
@@ -1843,40 +1894,28 @@ fn the_read_only_pair_pulls_and_cannot_push() {
     assert_eq!(inscription, published);
     records_of(&stele, &inscription);
 
-    let (header, scope) = notes_scope(4);
-    let refused = reading
-        .layer_sink(
-            &ToyProfile,
-            &LayerSpec::new("notes", header, scope),
-            COMPRESSION_LEVEL,
-        )
-        .and_then(|mut sink| {
-            sink.write_record(&note_record(1))?;
-            sink.finish().map(|_| ())
-        })
-        .expect_err("a pull-only pair was allowed to upload a layer");
+    // Through the seal, because that is where an upload's refusal is now
+    // reported: `finish` closes the layer and hands the round trips to the
+    // pool, so the credential is not asked about them until they are joined.
+    // The claim is unchanged — this pair cannot put a stele in this
+    // repository — and the seal is the honest place to make it, since a
+    // publish that seals is a publish that happened.
+    let refused = write_stele_fallibly(&reading, 4)
+        .expect_err("a pull-only pair was allowed to publish a stele");
 
     println!("write through the pull-only pair: {refused}");
 }
 
-/// A layer cannot be carried forward into a repository that does not hold its
-/// blob.
+/// Carrying a layer forward costs nothing and asks nothing.
 ///
-/// The guard exists because the failure it prevents is invisible: a manifest
-/// pointing at a reclaimed blob is a perfectly well-formed stele that nobody
-/// can restore.
-///
-/// **Provoked with a second registry, not a second repository**, and the
-/// difference is a real one this test found. `zot` answers `HEAD` *and* `GET`
-/// for a blob under a repository it was never pushed to — its storage is
-/// content-addressed across the whole registry — while `distribution` 2.8 and
-/// 3.0 answer 404. So a sibling repository is not reliably a place a blob is
-/// absent from, and on `zot` it would not even be the wrong answer: a registry
-/// that will serve the blob is a registry where the manifest works. Only a
-/// separate server is absent everywhere.
+/// The default, and the reason the publish path stopped getting slower with
+/// every epoch behind it: `source` is a stele this transport pulled, its
+/// manifest is live under a tag, and a registry may not reclaim a blob in that
+/// position. So the layer is carried on the manifest's word — no round trip,
+/// no bytes — and only the counters move.
 #[test]
 #[ignore = "spawns a registry"]
-fn a_layer_whose_blob_is_not_there_cannot_be_carried_forward() {
+fn a_layer_is_carried_forward_on_the_manifest_that_names_it() {
     let _serial = exclusive();
 
     let fixture = Fixture::spawn();
@@ -1885,18 +1924,6 @@ fn a_layer_whose_blob_is_not_there_cannot_be_carried_forward() {
     let published = write_stele(&source, 3);
     let stele = source.latest(&ToyProfile).unwrap().unwrap();
 
-    let somewhere_else = Fixture::spawn();
-    let elsewhere = somewhere_else.registry("stelae/source");
-
-    let err = elsewhere
-        .adopt_layer(&stele, published.layers[0].clone())
-        .unwrap_err();
-
-    assert!(matches!(err, Error::BlobMissing { .. }), "{err:?}");
-    assert_eq!(elsewhere.transfer(), Transfer::default(), "nothing counted");
-
-    // The same call against the repository that does hold it is the whole
-    // operation: no bytes move, and the layer is counted as carried forward.
     // Reset first, so what is read back is this call's cost and not the two
     // layers `write_stele` pushed through the same transport.
     source.take_transfer();
@@ -1910,6 +1937,332 @@ fn a_layer_whose_blob_is_not_there_cannot_be_carried_forward() {
     assert_eq!(transfer.layers_reused, 1);
     assert_eq!(transfer.layers_uploaded, 0);
     assert!(transfer.bytes_reused > 0);
+}
+
+/// An operator who does not trust the repository's retention gets the check
+/// back, and it still lands before the manifest does.
+///
+/// This is the guarantee `verify_adopted` exists for, and the failure it
+/// prevents is invisible without it: a manifest pointing at a reclaimed blob is
+/// a perfectly well-formed stele that nobody can restore. What has moved is
+/// *when* the refusal is reported — the `HEAD` runs concurrently with the rest
+/// of the publish and is joined at the seal — and what has not moved is that
+/// the refusal comes before anything is tagged.
+///
+/// **Provoked with a second registry, not a second repository**, and the
+/// difference is a real one this test found. `zot` answers `HEAD` *and* `GET`
+/// for a blob under a repository it was never pushed to — its storage is
+/// content-addressed across the whole registry — while `distribution` 2.8 and
+/// 3.0 answer 404. So a sibling repository is not reliably a place a blob is
+/// absent from, and on `zot` it would not even be the wrong answer: a registry
+/// that will serve the blob is a registry where the manifest works. Only a
+/// separate server is absent everywhere.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_verified_carry_refuses_a_blob_the_repository_does_not_hold() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    let source = fixture.registry("stelae/source");
+    let published = write_stele(&source, 3);
+    let stele = source.latest(&ToyProfile).unwrap().unwrap();
+
+    let somewhere_else = Fixture::spawn();
+    let elsewhere = somewhere_else.verifying("stelae/source");
+
+    // The descriptor is handed back: nothing has been asked yet, and what the
+    // caller holds is a fact about bytes rather than a promise about a
+    // registry.
+    elsewhere
+        .adopt_layer(&stele, published.layers[0].clone())
+        .unwrap();
+
+    // The seal is where the promise is collected, and it is refused.
+    let mut inscription = published.clone();
+    inscription.layers = vec![published.layers[0].clone()];
+
+    let err = elsewhere.seal(&ToyProfile, &inscription).unwrap_err();
+
+    assert!(matches!(err, Error::BlobMissing { .. }), "{err:?}");
+
+    // And nothing was published: the moving tag in a repository that never had
+    // a stele still resolves to nothing.
+    assert!(
+        elsewhere.latest(&ToyProfile).unwrap().is_none(),
+        "a refused seal tagged a manifest anyway",
+    );
+}
+
+/// Concurrency changes what a publish costs and nothing about what it
+/// produces.
+///
+/// The claim the whole change rests on. The same records, published through the
+/// serial path and through eight-way concurrency, must give the same
+/// inscription — the same identity — the same manifest bytes, and the same
+/// transfer counters, because none of those is a function of the order the
+/// blobs happened to land in.
+///
+/// Two repositories in one registry rather than two registries, so the
+/// comparison is not also comparing two servers — with the one consequence
+/// that the *counters* cannot be compared to each other. `zot` addresses
+/// blobs across the whole registry rather than per repository, as
+/// [`a_verified_carry_refuses_a_blob_the_repository_does_not_hold`] documents
+/// at more length, so on that registry the second publish skips what the first
+/// one uploaded. What is asserted instead is the property that holds on either
+/// kind and is the one worth having: every layer and every byte the stele
+/// describes is accounted for, whichever way the registry answered.
+#[test]
+#[ignore = "spawns a registry"]
+fn concurrency_changes_the_cost_of_a_publish_and_not_the_stele() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    let serial = fixture.registry_at("stelae/serial", 1);
+    let concurrent = fixture.registry_at("stelae/concurrent", 8);
+
+    let one = write_stele(&serial, 5);
+    let other = write_stele(&concurrent, 5);
+
+    assert_eq!(one, other, "the inscriptions differ");
+    assert_eq!(
+        one.digest().unwrap(),
+        other.digest().unwrap(),
+        "the identities differ",
+    );
+
+    let from_serial = serial.pull_latest(&ToyProfile).unwrap();
+    let from_concurrent = concurrent.pull_latest(&ToyProfile).unwrap();
+
+    assert_eq!(
+        manifest_bytes(from_serial.manifest()).unwrap(),
+        manifest_bytes(from_concurrent.manifest()).unwrap(),
+        "the manifests differ",
+    );
+
+    // The serial publish is the first into this registry, so nothing can have
+    // been there before it: two layers, both uploaded.
+    let counted = serial.transfer();
+
+    assert_eq!(counted.layers_uploaded, one.layers.len() as u64);
+    assert_eq!(counted.layers_skipped, 0);
+
+    // And the concurrent one accounts for exactly the same layers and the same
+    // bytes, however the registry split them between "uploaded" and "the far
+    // side already had it".
+    let against = concurrent.transfer();
+
+    assert_eq!(
+        against.layers_uploaded + against.layers_skipped,
+        counted.layers_uploaded + counted.layers_skipped,
+        "a layer went unaccounted for",
+    );
+    assert_eq!(
+        against.bytes_uploaded + against.bytes_skipped,
+        counted.bytes_uploaded + counted.bytes_skipped,
+        "the bytes do not add up",
+    );
+    assert_eq!(against.layers_reused, 0, "nothing was carried forward");
+
+    // And it reads back, which is the property the manifest exists to serve.
+    let inscription = from_concurrent.read_inscription().unwrap();
+
+    assert_eq!(inscription, one);
+    records_of(&from_concurrent, &inscription);
+}
+
+/// A publish abandoned while its layers are still in flight leaves the stele
+/// before it standing.
+///
+/// The concurrent path's version of the ordering argument, and the reason the
+/// join is at the seal rather than anywhere later: layers go up in parallel,
+/// but nothing is tagged until all of them are up, so a publisher that dies in
+/// the middle — here, a transport dropped without a seal — leaves untagged
+/// blobs the registry reclaims and a moving tag still pointing at a stele that
+/// restores.
+#[test]
+#[ignore = "spawns a registry"]
+fn a_publish_dropped_mid_flight_leaves_the_previous_stele_standing() {
+    let _serial = exclusive();
+
+    let fixture = Fixture::spawn();
+
+    let standing = write_stele(&fixture.registry("stelae/abandoned"), 3);
+
+    {
+        let abandoning = fixture.registry_at("stelae/abandoned", 8);
+
+        let (header, scope) = notes_scope(4);
+        let mut sink = abandoning
+            .layer_sink(
+                &ToyProfile,
+                &LayerSpec::new("notes", header, scope),
+                COMPRESSION_LEVEL,
+            )
+            .unwrap();
+
+        for id in 1..=64 {
+            sink.write_record(&note_record(id)).unwrap();
+        }
+
+        sink.finish().unwrap();
+
+        // And dropped here, with the upload deferred and no seal to join it.
+    }
+
+    let reopened = fixture.registry("stelae/abandoned");
+    let stele = reopened.pull_latest(&ToyProfile).unwrap();
+
+    assert_eq!(stele.read_inscription().unwrap(), standing);
+}
+
+/// A deferred upload's failure is the seal's failure, and it stays the seal's
+/// failure.
+///
+/// No registry: the transport is pointed at a port nothing is listening on, so
+/// every round trip it defers is refused. That is enough to hold the two
+/// properties that matter about the deferral, and it holds them under plain
+/// `cargo test` rather than only where a container can be spawned.
+///
+/// 1. **`finish` succeeds.** Closing a layer is a fact about bytes the sink
+///    already has; a transport that could not reach the registry still hands
+///    back the descriptor, because the caller's next act is to read more of its
+///    store and not to wait on a socket.
+/// 2. **`seal` fails, and every seal after it fails too.** The join empties the
+///    handles it awaited, so a transport that forgot would find nothing
+///    outstanding the second time, agree that every layer was up, and publish a
+///    manifest naming a blob that never landed. That is the one document this
+///    transport must never write, and it is exactly the document a concurrent
+///    publish makes reachable — so the refusal is remembered rather than
+///    recomputed.
+/// 3. **The failure was retried first, and said so.** A connection nobody
+///    answers is the transient class, so the round trip is made again before it
+///    is anybody's failure — and the retry is announced, because a transport
+///    that absorbed a registry's bad minute in silence would have hidden the
+///    measurement that motivated absorbing it. Two attempts here rather than
+///    the default four, so the test proves the loop runs without waiting out
+///    the whole of its patience.
+#[test]
+fn a_deferred_upload_that_fails_fails_every_seal() {
+    let _serial = exclusive();
+
+    install_crypto_provider();
+
+    // Bound and dropped: the kernel just told us a port nobody has, and
+    // refusing a connection is faster and more portable than any other way of
+    // failing one.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = closed.local_addr().unwrap();
+    drop(closed);
+
+    let registry = Registry::open(
+        &format!("oci://{address}/stelae/nowhere").parse().unwrap(),
+        Options {
+            insecure: true,
+            concurrency: 4,
+            attempts: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let retries = std::sync::Arc::new(Retries::default());
+    registry.observe(Observer::new(retries.clone()));
+
+    let (header, scope) = notes_scope(1);
+    let notes: Vec<CanonicalCbor> = (1..=3).map(note_record).collect();
+
+    let written = registry
+        .write_layer(
+            &ToyProfile,
+            &LayerSpec::new("notes", header, scope),
+            COMPRESSION_LEVEL,
+            &notes,
+        )
+        .expect("closing a layer waited on the registry");
+
+    let mut inscription = Inscription::new(
+        &ToyProfile,
+        1,
+        json!({"chapter": 1}),
+        json!({"noteWidth": 40}),
+        Compression {
+            algo: "zstd".to_owned(),
+            level: COMPRESSION_LEVEL as i64,
+        },
+    );
+
+    inscription.layers = vec![written.descriptor];
+
+    let refused = registry
+        .seal(&ToyProfile, &inscription)
+        .expect_err("sealed against a port nothing is listening on");
+
+    // The *cause*, not the sticky refusal — and asserting which way round that
+    // is, is the point. `LayerNotWritten` is what every seal *after* this one
+    // answers; a first seal that reported it would have thrown away what the
+    // network actually said, leaving an operator to debug a connection failure
+    // from a message about a layer.
+    assert!(
+        matches!(refused, Error::Registry(_)),
+        "the first seal reported the refusal instead of its cause: {refused:?}",
+    );
+
+    println!("the seal collected the deferred failure: {refused}");
+
+    // And it is remembered: nothing is outstanding any more, so a transport
+    // that only asked what was in flight would seal this stele over a blob that
+    // never landed.
+    let again = registry
+        .seal(&ToyProfile, &inscription)
+        .expect_err("the second seal published a manifest over a blob that never landed");
+
+    assert!(
+        matches!(again, Error::LayerNotWritten(_)),
+        "the second seal did not remember the first: {again:?}",
+    );
+
+    // Carrying the cause, so the operator reading the second refusal is not
+    // told less than the one who read the first.
+    let Error::LayerNotWritten(why) = &again else {
+        unreachable!()
+    };
+
+    assert!(!why.is_empty(), "the refusal names no cause");
+
+    println!("and every seal after it: {again}");
+
+    // One round trip was deferred — the existence check for the one layer — and
+    // it was made twice. The second seal had nothing outstanding to retry, so
+    // this also says the sticky refusal is answered without touching the
+    // network again.
+    assert_eq!(
+        retries.seen(),
+        vec![(1, 1)],
+        "a refused connection was not retried before the layer was declared lost",
+    );
+}
+
+/// What a transport said about the round trips it made again.
+#[derive(Default)]
+struct Retries(Mutex<Vec<(u32, u32)>>);
+
+impl Progress for Retries {
+    fn on(&self, event: Event<'_>) {
+        if let Event::Retry {
+            attempt, remaining, ..
+        } = event
+        {
+            self.0.lock().unwrap().push((attempt, remaining));
+        }
+    }
+}
+
+impl Retries {
+    fn seen(&self) -> Vec<(u32, u32)> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 /// The annotation map is a `BTreeMap`, so the canonical JSON above is not

@@ -91,8 +91,8 @@
 //! file: a host-local note beside the stores, naming each **epoch layer** whose
 //! upload succeeded. A restart reads it and adopts those layers through
 //! [`Registry::adopt_carried`] — the same move an inherited layer makes, one
-//! `HEAD` and no store read. The sixteen state shards are never in it, for the
-//! reason they are never inherited.
+//! `HEAD` and no store read. The state layers are never in it, for the reason
+//! they are never inherited.
 //!
 //! The record is **a stand-in for the predecessor manifest an unfinished
 //! publish never got to write, and nothing more.** Four properties keep it from
@@ -134,10 +134,14 @@
 //! same goes for where the layers are staged on the way through.
 
 use std::{
-    cell::{Cell, RefCell},
     collections::BTreeMap,
     io::Write as _,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 
 use dolos_core::{ArchiveStore, IndexStore, StateStore};
@@ -163,13 +167,13 @@ use stelae::{
 /// [`Auth`] rides along for the same reason: a host resolving its own
 /// credentials should not have to name the protocol crate to say what it
 /// resolved them to.
-pub use stelae::oci::{Auth, Registry, Repository, SCHEME};
+pub use stelae::oci::{Auth, Registry, Repository, DEFAULT_CONCURRENCY, SCHEME};
 
 use crate::{
     export::{self, history_for, same_network, Plan, Predecessor, Standing},
     layers::digests,
     restore::{Outlook, Restoring, Summary, Target},
-    DolosProfile, Error, Scope as _, EPOCH_KINDS, STATE, STATE_SHARDS,
+    scope_key, DolosProfile, Error, Scope as _, DENSE_EPOCH_KINDS, EPOCH_KINDS,
 };
 
 /// Which stele in a repository a restore wants.
@@ -290,14 +294,19 @@ where
 /// `scratch_dir` is where layers are staged, in both directions. The transport
 /// creates it when the first layer needs it, so it need not exist yet.
 ///
+/// `tuning` is the publish path's concurrency and the one check an operator may
+/// want back; [`Tuning::default`] is what every caller that is not publishing
+/// wants.
+///
 /// **Never call any of this from inside an async context.** The transport owns
-/// a current-thread runtime and enters it with `block_on`; `stelae::oci`'s
-/// module documentation states the rule and the reason.
+/// a runtime and enters it with `block_on`; `stelae::oci`'s module
+/// documentation states the rule and the reason.
 pub fn open(
     repository: &Repository,
     insecure: bool,
     auth: Auth,
     scratch_dir: PathBuf,
+    tuning: Tuning,
 ) -> Result<Registry, Error> {
     Ok(Registry::open(
         repository,
@@ -305,8 +314,36 @@ pub fn open(
             insecure,
             scratch_dir: Some(scratch_dir),
             auth,
+            concurrency: tuning.concurrency.map_or(DEFAULT_CONCURRENCY, Into::into),
+            verify_adopted: tuning.verify_adopted,
+            // Not an operator's knob and deliberately not one: the number that
+            // absorbs a registry's transient `5xx` is the transport's own
+            // measurement, and an outage longer than it is answered a level up,
+            // where `snapshot backfill` re-runs the whole publish rather than
+            // dying into a pod restart.
+            attempts: stelae::oci::DEFAULT_ATTEMPTS,
         },
     )?)
+}
+
+/// What an operator may set about *how* a publish moves, as against where it
+/// goes.
+///
+/// Separated from [`open`]'s other arguments because it is the only one of them
+/// a caller can leave alone: a repository, a credential and a staging directory
+/// are facts a publish cannot be run without, and these two are a default and
+/// an escape hatch. A restore or an inspection passes [`Tuning::default`] and
+/// means it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Tuning {
+    /// How many layer round trips run at once; `None` is
+    /// [`DEFAULT_CONCURRENCY`].
+    pub concurrency: Option<NonZeroUsize>,
+
+    /// Re-prove that the registry still holds each blob carried forward out of
+    /// the predecessor's manifest. See [`stelae::oci::Options::verify_adopted`]
+    /// for why this is off.
+    pub verify_adopted: bool,
 }
 
 /// Where a publish is going, and what the host running it knows about itself.
@@ -409,7 +446,7 @@ impl Origin {
         Self {
             repository: registry.repository().to_string(),
             network_magic: plan.network.magic(),
-            parameters: crate::parameters(),
+            parameters: crate::parameters(&plan.retained),
             compression: crate::compression(),
         }
     }
@@ -526,14 +563,16 @@ impl PublishRecord {
         for layer in &self.layers {
             // The same filter `inheritable_layers` applies to a predecessor's
             // manifest, applied again on the way in: a record naming a state
-            // shard is a record nothing wrote, and honouring one would carry a
-            // stale tip into a manifest.
-            if !EPOCH_KINDS.contains(&layer.descriptor.kind.as_str()) {
+            // *tip* shard is a record nothing wrote, and honouring one would
+            // carry a stale tip into a manifest. A retained dump's scope names
+            // its epoch, so it passes here for the same reason an epoch layer
+            // does.
+            if !crate::is_inheritable(&layer.descriptor.kind, &layer.descriptor.scope) {
                 continue;
             }
 
             table.insert(
-                key(&layer.descriptor.kind, &layer.descriptor.scope)?,
+                scope_key(&layer.descriptor.kind, &layer.descriptor.scope)?,
                 layer.clone(),
             );
         }
@@ -808,16 +847,29 @@ pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
 /// What a publish holds staged on disk at its peak.
 ///
 /// Not the size of the stele: a publish never has the whole document on disk at
-/// once. What it does have at once is the state pass, which keeps all sixteen
-/// shard sinks open across a single walk of the store — see
-/// [`crate::export`] for why sixteen passes is the alternative — plus whatever
-/// epoch layer is in flight beside it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// once. What it does have at once is a state kind's pass, which keeps that
+/// kind's shard sinks open across a single walk of its namespace — see
+/// [`crate::export`] for why sixteen passes over `utxos` is the alternative —
+/// plus whatever epoch layers are in flight beside it. Summing *every* state
+/// layer rather than the widest kind's is deliberately conservative: the peak
+/// it prices is the pre-split one, an upper bound on any per-kind pass.
+///
+/// "Epoch layers beside it" is a handful and not one, because the transport
+/// uploads concurrently: a layer's staging file lives until its own round trip
+/// lands, so as many finished layers as the transport has permits can sit on
+/// disk at once alongside the pass. How many that is comes from
+/// [`stelae::oci::Registry::concurrency`] — asked of the transport rather than
+/// assumed here — and *which* ones is the largest that many, since the peak is
+/// the worst arrangement and nothing orders the uploads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StagingPeak {
-    /// The sixteen state shards, which are staged concurrently.
+    /// Every state layer, summed — the conservative reading above.
     pub state_bytes: u64,
-    /// The largest single non-state layer, which is staged alongside them.
-    pub largest_other_bytes: u64,
+    /// The non-state layers that can be staged at once, largest first: as many
+    /// as the transport uploads concurrently, or all of them where the stele
+    /// has fewer than that. Empty on a stele that is all state, and on a
+    /// [`StagingPeak::default`] nothing was measured into.
+    pub concurrent_other_bytes: Vec<u64>,
     /// Layers the predecessor's manifest stated no size for. Non-zero makes
     /// every number here a floor rather than an estimate.
     pub unsized_layers: usize,
@@ -825,8 +877,22 @@ pub struct StagingPeak {
 
 impl StagingPeak {
     /// Compressed bytes the scratch volume has to hold at once.
+    ///
+    /// Saturating throughout, because these are a manifest's numbers and a
+    /// manifest is not this node's document: a wrapped sum would be a *small*
+    /// need, which is the one direction a refusal must never be wrong in.
     pub fn bytes(&self) -> u64 {
-        self.state_bytes.saturating_add(self.largest_other_bytes)
+        self.concurrent_other_bytes
+            .iter()
+            .fold(self.state_bytes, |total, bytes| {
+                total.saturating_add(*bytes)
+            })
+    }
+
+    /// The largest non-state layer, which is the first of the ones staged at
+    /// once.
+    pub fn largest_other_bytes(&self) -> u64 {
+        self.concurrent_other_bytes.first().copied().unwrap_or(0)
     }
 }
 
@@ -855,23 +921,27 @@ pub fn staging_peak(registry: &Registry) -> Result<Option<StagingPeak>, Error> {
     let blobs = previous.blob_index()?;
 
     let mut peak = StagingPeak::default();
+    let mut others = Vec::new();
 
     for descriptor in &inscription.layers {
         match previous.compressed_size(&blobs, descriptor)? {
             None => peak.unsized_layers += 1,
-            // Every shard is open at once, so they add. Everything else is one
-            // layer at a time beside them, so only the biggest counts.
-            //
-            // Saturating because these are a manifest's numbers and a manifest
-            // is not this node's document: a wrapped sum would be a *small*
-            // need, which is the one direction a refusal must never be wrong
-            // in.
-            Some(bytes) if descriptor.kind == STATE => {
+            // Every state layer adds — the conservative sum-all-state rule the
+            // type documents.
+            Some(bytes) if crate::is_state_kind(&descriptor.kind) => {
                 peak.state_bytes = peak.state_bytes.saturating_add(bytes)
             }
-            Some(bytes) => peak.largest_other_bytes = peak.largest_other_bytes.max(bytes),
+            Some(bytes) => others.push(bytes),
         }
     }
+
+    // The largest as many as the transport stages at once, and no more: a stele
+    // with fewer non-state layers than the transport has permits cannot put
+    // more of them on disk than it has.
+    others.sort_unstable_by(|a, b| b.cmp(a));
+    others.truncate(registry.concurrency());
+
+    peak.concurrent_other_bytes = others;
 
     Ok(Some(peak))
 }
@@ -995,7 +1065,7 @@ pub fn publish_into<W, A, S, I>(
     observer: &Observer,
 ) -> Result<Published, Error>
 where
-    W: SteleWriter,
+    W: SteleWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
     I: IndexStore,
@@ -1025,7 +1095,7 @@ where
     previous.forget_record()?;
 
     let identity = inscription.digest()?;
-    let layers_reused = previous.adopted.get();
+    let layers_reused = previous.adopted.load(Ordering::Relaxed);
 
     Ok(Published {
         layers_built: inscription.layers.len() - layers_reused,
@@ -1044,20 +1114,31 @@ where
 /// follows it is the one number a publisher trusts, wrong. The two entry points
 /// read the same input so they cannot drift when Phase 4 gives the records a
 /// source.
-pub fn preview(
+///
+/// It takes the archive for the same reason again. Log layers are sparse — an
+/// epoch publishes one per namespace that wrote something — so the count is a
+/// property of the store, not arithmetic over the plan, and a dry run that did
+/// not look would report layers the publish then does not write.
+pub fn preview<A: ArchiveStore>(
     publishing: Publishing<'_>,
     plan: &Plan,
+    archive: &A,
     digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Preview, Error> {
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
     let previous = Chained::new(publishing, latest.as_ref(), plan)?;
 
-    // Every epoch selected contributes one layer per epoch kind, the state tip
-    // contributes its sixteen shards however the epochs were restricted, and
-    // the digests layer is there exactly when its records are.
-    let total = plan.epochs.len() * EPOCH_KINDS.len()
-        + STATE_SHARDS as usize
+    // Every epoch selected contributes one `blocks` and one `indexes` layer and
+    // as many log layers as it has namespaces with logs, the state tip
+    // contributes every shard of every kind however the epochs were restricted,
+    // the retained dumps contribute what `export::state_layers` counts, and the
+    // digests layer is there exactly when its records are.
+    let carried_dumps = export::carried_dumps(plan, &previous)?;
+
+    let total = plan.epochs.len() * DENSE_EPOCH_KINDS.len()
+        + export::log_layers(plan, archive, &previous)?
+        + export::state_layers(plan, &previous)?
         + usize::from(digest_records.is_some());
 
     // The same lookup `export` will make, through the same `layer_spec`, so a
@@ -1066,7 +1147,9 @@ pub fn preview(
     // not describe, and it propagates rather than counting as a miss: a dry run
     // that quietly reported "build it" for a layer nobody could build would be
     // the one number a publisher trusts, wrong.
-    let mut layers_reused = 0;
+    // A dump this publish adopts is a layer nothing walks a store for; the one
+    // it cuts out of its own tip is not, because the tip is walked either way.
+    let mut layers_reused = carried_dumps;
 
     for window in &plan.epochs {
         let scope = window.scope(plan.network.magic());
@@ -1080,6 +1163,8 @@ pub fn preview(
         }
     }
 
+    // A layer carried forward is a layer that exists, so `total` counted it
+    // too — see `export::log_layers`, which asks the predecessor first.
     Ok(Preview {
         sequence: plan.sequence,
         predecessor: previous.predecessor,
@@ -1111,7 +1196,9 @@ struct Chained<'a> {
     inheritable: BTreeMap<(String, String), LayerDescriptor>,
     resumable: BTreeMap<(String, String), WrittenLayer>,
     record: Option<Recording>,
-    adopted: Cell<usize>,
+    /// Atomic, like the record's lock below: [`export::export`] asks a
+    /// predecessor about layers from a pool of producer threads.
+    adopted: AtomicUsize,
 }
 
 /// The resumption record this publish is writing, open.
@@ -1120,10 +1207,15 @@ struct Chained<'a> {
 /// than the whole of what *this attempt* put up: an attempt that adopts twenty
 /// layers and adds one, then dies, has to leave twenty-one behind or the third
 /// attempt pays for the difference.
+///
+/// The lock is held across the file write as well as the map insert: each
+/// write rewrites the whole record, so two producers landing layers at once
+/// must serialize on the file or the later write would drop the earlier
+/// layer.
 struct Recording {
     path: PathBuf,
     origin: Origin,
-    layers: RefCell<BTreeMap<(String, String), WrittenLayer>>,
+    layers: Mutex<BTreeMap<(String, String), WrittenLayer>>,
 }
 
 impl<'a> Chained<'a> {
@@ -1141,6 +1233,9 @@ impl<'a> Chained<'a> {
         let inscription = latest.map(|stele| stele.read_inscription()).transpose()?;
 
         if let Some(previous) = &inscription {
+            // The pull that fetched this checked as a reader; this is the
+            // publish side, which inherits the chain and must attest it.
+            previous.check_profile_strict(&DolosProfile)?;
             same_network(previous, plan)?;
         }
 
@@ -1188,7 +1283,7 @@ impl<'a> Chained<'a> {
         let record = storage_path.map(|storage_path| Recording {
             path: record_path_in(storage_path),
             origin,
-            layers: RefCell::new(resumable.clone()),
+            layers: Mutex::new(resumable.clone()),
         });
 
         Ok(Self {
@@ -1199,22 +1294,8 @@ impl<'a> Chained<'a> {
             inheritable,
             resumable,
             record,
-            adopted: Cell::new(0),
+            adopted: AtomicUsize::new(0),
         })
-    }
-
-    /// Whether a layer of `kind` at `scope` would be carried forward rather
-    /// than built.
-    ///
-    /// What [`preview`] reports, and it spends no `HEAD`: the promise a dry run
-    /// makes is about what the scopes permit. The record's own gate — that the
-    /// registry still holds the blob — runs in [`Predecessor::adopt`] and can
-    /// turn one of these into a rebuild, which is the direction a dry run is
-    /// allowed to be wrong in.
-    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
-        let key = key(kind, scope)?;
-
-        Ok(self.inheritable.contains_key(&key) || self.resumable.contains_key(&key))
     }
 
     /// Delete the resumption record.
@@ -1234,12 +1315,23 @@ impl Predecessor for Chained<'_> {
         &self.history
     }
 
+    /// What [`preview`] reports, and it spends no `HEAD`: the promise a dry run
+    /// makes is about what the scopes permit. The record's own gate — that the
+    /// registry still holds the blob — runs in [`Predecessor::adopt`] and can
+    /// turn one of these into a rebuild, which is the direction a dry run is
+    /// allowed to be wrong in.
+    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
+        let key = scope_key(kind, scope)?;
+
+        Ok(self.inheritable.contains_key(&key) || self.resumable.contains_key(&key))
+    }
+
     fn adopt(
         &self,
         kind: &str,
         scope: &serde_json::Value,
     ) -> Result<Option<LayerDescriptor>, Error> {
-        let key = key(kind, scope)?;
+        let key = scope_key(kind, scope)?;
 
         // The arrangement and the answer are one act, in both branches: by the
         // time this returns a descriptor, the transport is already carrying the
@@ -1247,7 +1339,7 @@ impl Predecessor for Chained<'_> {
         // happened.
         if let (Some(source), Some(descriptor)) = (self.source, self.inheritable.get(&key)) {
             self.registry.adopt_layer(source, descriptor.clone())?;
-            self.adopted.set(self.adopted.get() + 1);
+            self.adopted.fetch_add(1, Ordering::Relaxed);
 
             return Ok(Some(descriptor.clone()));
         }
@@ -1266,7 +1358,7 @@ impl Predecessor for Chained<'_> {
             return Ok(None);
         }
 
-        self.adopted.set(self.adopted.get() + 1);
+        self.adopted.fetch_add(1, Ordering::Relaxed);
 
         Ok(Some(recorded.descriptor.clone()))
     }
@@ -1276,7 +1368,7 @@ impl Predecessor for Chained<'_> {
             return Ok(());
         };
 
-        if !EPOCH_KINDS.contains(&descriptor.kind.as_str()) {
+        if !crate::is_inheritable(&descriptor.kind, &descriptor.scope) {
             return Ok(());
         }
 
@@ -1291,9 +1383,24 @@ impl Predecessor for Chained<'_> {
             return Ok(());
         };
 
-        let mut layers = record.layers.borrow_mut();
+        // The transport is asked for its *measurement* and not for its
+        // descriptor. `carried` finds a layer by `diffId`, and one `diffId` can
+        // now wear two descriptors — the dump a publish cuts out of its own tip
+        // is the tip's bytes — so recording what the lookup returned verbatim
+        // would file the dump under the tip's scope, where nothing looks for it
+        // and where it would be discarded on the way back in.
+        let written = WrittenLayer {
+            descriptor: descriptor.clone(),
+            digests: written.digests,
+        };
 
-        layers.insert(key(&descriptor.kind, &descriptor.scope)?, written);
+        // Held across the save below, not just the insert — see [`Recording`].
+        let mut layers = record
+            .layers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        layers.insert(scope_key(&descriptor.kind, &descriptor.scope)?, written);
 
         PublishRecord {
             origin: record.origin.clone(),
@@ -1305,10 +1412,12 @@ impl Predecessor for Chained<'_> {
 
 /// The layers a new stele may inherit from `previous`, keyed by kind and scope.
 ///
-/// Only the epoch kinds are in it. A state shard is the tip and changes every
-/// publish, and — independently — its descriptor scope names no epoch, so scope
-/// equality could not tell one publish's shard from another's. `digests` has no
-/// source in this slice.
+/// [`crate::is_inheritable`] decides, and it decides on the scope as well as
+/// the kind. A state *tip* shard is out: it changes every publish, and —
+/// independently — its descriptor scope names no epoch, so scope equality
+/// could not tell one publish's shard from another's. A retained state dump is
+/// in: it is a closed epoch's state under a scope that names that epoch.
+/// `digests` has no source in this slice.
 ///
 /// Two layers of one kind claiming one scope, described differently in any
 /// respect, is a refusal rather than a first-wins: it means the stele being
@@ -1324,11 +1433,11 @@ fn inheritable_layers(
     let mut inheritable = BTreeMap::new();
 
     for layer in &previous.layers {
-        if !EPOCH_KINDS.contains(&layer.kind.as_str()) {
+        if !crate::is_inheritable(&layer.kind, &layer.scope) {
             continue;
         }
 
-        let key = key(&layer.kind, &layer.scope)?;
+        let key = scope_key(&layer.kind, &layer.scope)?;
 
         if let Some(existing) = inheritable.get(&key) {
             let existing: &LayerDescriptor = existing;
@@ -1372,20 +1481,6 @@ fn inheritable_layers(
     Ok(inheritable)
 }
 
-/// The table key: a layer's kind and the canonical encoding of its scope.
-///
-/// Canonical rather than `serde_json::Value` equality, so that two scopes are
-/// the same key exactly when they are the same bytes inside the canonical
-/// document — which is the only sense of "the same scope" the protocol has.
-fn key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
-    let canonical = stelae::inscription::canonical_json(scope)?;
-
-    let canonical = String::from_utf8(canonical)
-        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
-
-    Ok((kind.to_owned(), canonical))
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1397,8 +1492,8 @@ mod tests {
         let mut inscription = Inscription::new(
             &DolosProfile,
             sequence,
-            json!({"epoch": sequence.saturating_sub(1)}),
-            crate::parameters(),
+            json!({"epoch": sequence}),
+            crate::parameters(&Default::default()),
             crate::compression(),
         );
 
@@ -1418,7 +1513,11 @@ mod tests {
                 json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                 1,
             ),
-            layer(crate::STATE, json!({"shard": 0}), 2),
+            layer(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                json!({"shard": 0}),
+                2,
+            ),
             layer(crate::DIGESTS, json!({"lastImmutable": 7}), 3),
         ];
 
@@ -1426,7 +1525,7 @@ mod tests {
 
         assert_eq!(table.len(), 1);
         assert!(table.contains_key(
-            &key(
+            &scope_key(
                 crate::BLOCKS,
                 &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
             )
@@ -1449,7 +1548,7 @@ mod tests {
 
         let table = inheritable_layers(&previous).unwrap();
 
-        let full = key(
+        let full = scope_key(
             crate::BLOCKS,
             &json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
         )
@@ -1551,7 +1650,7 @@ mod tests {
         Origin {
             repository: repository.to_owned(),
             network_magic: 2,
-            parameters: crate::parameters(),
+            parameters: crate::parameters(&Default::default()),
             compression: crate::compression(),
         }
     }
@@ -1577,7 +1676,16 @@ mod tests {
                     json!({"epoch": 2, "startSlot": 200, "endSlot": 299}),
                     1,
                 ),
-                written(crate::STATE, json!({"shard": 0}), 2),
+                written(
+                    crate::state_kind_for(crate::UTXOS).unwrap(),
+                    json!({"shard": 0}),
+                    2,
+                ),
+                written(
+                    crate::state_kind_for(crate::UTXOS).unwrap(),
+                    json!({"epoch": 1, "shard": 0}),
+                    3,
+                ),
             ],
         }
     }
@@ -1618,17 +1726,43 @@ mod tests {
         PublishRecord::remove(&path).unwrap();
     }
 
-    /// Only the epoch kinds come out of a record, whatever went into one.
+    /// Only what a scope names an epoch for comes out of a record, whatever
+    /// went into one.
+    ///
+    /// Both halves of what [`crate::is_inheritable`] decides, and on the same
+    /// kind for the second: the fixture records shard 0 of one state kind
+    /// twice, once as the moving tip and once as a retained dump. The kind is
+    /// identical, so nothing but the scope can separate them — which is the
+    /// distinction decision 0026 moved from the kind to the scope, and the one
+    /// a record honouring a tip would publish a stale shard through.
     #[test]
     fn a_record_offers_epoch_layers_and_nothing_else() {
         let origin = origin("oci://example.test/dolos");
         let table = record(origin.clone()).table(&origin).unwrap();
 
-        assert_eq!(table.len(), 1);
+        assert_eq!(table.len(), 2);
         assert!(table.contains_key(
-            &key(
+            &scope_key(
                 crate::BLOCKS,
                 &json!({"epoch": 2, "startSlot": 200, "endSlot": 299})
+            )
+            .unwrap()
+        ));
+
+        // The dump is in.
+        assert!(table.contains_key(
+            &scope_key(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                &json!({"epoch": 1, "shard": 0})
+            )
+            .unwrap()
+        ));
+
+        // The tip of the same kind is not.
+        assert!(!table.contains_key(
+            &scope_key(
+                crate::state_kind_for(crate::UTXOS).unwrap(),
+                &json!({"shard": 0})
             )
             .unwrap()
         ));
@@ -1684,7 +1818,7 @@ mod tests {
             // And the same layers under the origin they were written for are
             // offered, so what the guard refuses is the mismatch and not the
             // record.
-            assert_eq!(record(theirs.clone()).table(&theirs).unwrap().len(), 1);
+            assert_eq!(record(theirs.clone()).table(&theirs).unwrap().len(), 2);
         }
 
         // An origin that matches names nothing, and one that differs in every
@@ -1736,7 +1870,7 @@ mod tests {
         // their sum and not on either alone.
         let err = check(Some(StagingPeak {
             state_bytes: u64::MAX / 2,
-            largest_other_bytes: u64::MAX / 2,
+            concurrent_other_bytes: vec![u64::MAX / 4, u64::MAX / 4],
             unsized_layers: 0,
         }))
         .unwrap_err();

@@ -71,10 +71,18 @@ pub fn make_conway_block_with_prev(
     (chain_point, Arc::new(raw_bytes))
 }
 
+/// Hard-fork-combinator variant index for a Conway block. `pallas`'s
+/// `probe::block_era` reads this to pick the decoder, and its numbering is
+/// offset by one from `Era` (`Era::Byron` is 0, but the Byron variant is 1),
+/// so `Era::Conway as u16` would tag the block as Babbage — which decodes an
+/// empty body fine and only fails once the body carries a Conway-only field.
+const CONWAY_BLOCK_WRAPPER: u16 = 7;
+
 pub fn make_conway_block_with_tx(
     slot: BlockSlot,
     tx_body: pallas::ledger::primitives::conway::TransactionBody<'static>,
     auxiliary_data: Option<alonzo::AuxiliaryData>,
+    valid: bool,
 ) -> (ChainPoint, RawBlock) {
     let header_body = HeaderBody {
         block_number: 1,
@@ -123,17 +131,69 @@ pub fn make_conway_block_with_tx(
             }
             None => BTreeMap::new(),
         },
-        invalid_transactions: None,
+        invalid_transactions: if valid { None } else { Some(vec![0]) },
     };
 
     let hash = block.header.compute_hash();
 
-    let wrapper = (Era::Conway as u16, block);
+    let wrapper = (CONWAY_BLOCK_WRAPPER, block);
 
     let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
     let chain_point = ChainPoint::Specific(slot, hash);
 
     (chain_point, Arc::new(raw_bytes))
+}
+
+/// Number of slots in a Byron epoch on the default genesis values pallas uses
+/// to resolve an epoch-boundary block's absolute slot.
+pub const BYRON_EPOCH_LENGTH: u64 = 21_600;
+
+/// The absolute slot a Byron epoch-boundary block for `epoch` lands on — the
+/// same slot the epoch's first main block carries, which is the collision the
+/// archive has to keep both sides of.
+pub fn byron_ebb_slot(epoch: u64) -> BlockSlot {
+    epoch * BYRON_EPOCH_LENGTH
+}
+
+/// Build a Byron epoch-boundary block opening `epoch`, chained onto
+/// `prev_hash`.
+///
+/// The body is empty: nothing downstream of the archive reads an EBB's
+/// stakeholder list, and what the tests need from it is the shape the era
+/// probe and the header hash see.
+pub fn make_byron_ebb(epoch: u64, prev_hash: Hash<32>) -> (ChainPoint, RawBlock) {
+    use pallas::codec::utils::{EmptyMap, MaybeIndefArray};
+    use pallas::ledger::primitives::byron::{EbBlock, EbbCons, EbbHead};
+
+    let header = KeepRaw::from(EbbHead {
+        protocol_magic: 764_824_073,
+        prev_block: prev_hash,
+        body_proof: Hash::new([0u8; 32]),
+        consensus_data: EbbCons {
+            epoch_id: epoch,
+            difficulty: MaybeIndefArray::Def(vec![epoch]),
+        },
+        extra_data: (EmptyMap,),
+    });
+
+    let block = EbBlock {
+        header,
+        body: MaybeIndefArray::Def(vec![]),
+        extra: MaybeIndefArray::Def(vec![]),
+    };
+
+    let wrapper = (0u16, block);
+    let raw_bytes = pallas::codec::minicbor::to_vec(&wrapper).unwrap();
+
+    // The header hash is taken off the encoded bytes rather than computed from
+    // the value, so it is the hash every reader of the archived block will
+    // arrive at.
+    let decoded = pallas::ledger::traverse::MultiEraBlock::decode(&raw_bytes).unwrap();
+    let point = ChainPoint::Specific(decoded.slot(), decoded.hash());
+
+    debug_assert_eq!(decoded.slot(), byron_ebb_slot(epoch));
+
+    (point, Arc::new(raw_bytes))
 }
 
 #[cfg(test)]

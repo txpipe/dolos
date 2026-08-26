@@ -1,7 +1,7 @@
 use dolos_core::config::RootConfig;
 use futures_util::stream::FuturesUnordered;
 use log::warn;
-use tracing::error;
+use miette::{Context as _, IntoDiagnostic as _};
 
 #[derive(Debug, clap::Args)]
 pub struct Args {}
@@ -25,16 +25,9 @@ pub async fn run(config: RootConfig, _args: &Args) -> miette::Result<()> {
         exit.clone(),
     );
 
-    for result in drivers {
-        if let Err(e) = result.await.unwrap() {
-            error!("driver error: {}", e);
-
-            warn!("cancelling remaining drivers");
-            exit.cancel();
-        }
-    }
+    let outcome = crate::common::monitor_drivers(drivers, exit.clone()).await;
 
     warn!("shutdown complete");
 
-    Ok(())
+    outcome.into_diagnostic().context("serving clients")
 }

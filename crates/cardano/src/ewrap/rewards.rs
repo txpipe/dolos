@@ -1,25 +1,20 @@
-use dolos_core::{ChainError, EntityKey};
+use dolos_core::ChainError;
 
 use tracing::debug;
 
 use crate::{
     ewrap::{AccountId, AppliedReward, BoundaryWork},
-    AccountState, AssignRewards, CardanoDelta, CardanoEntity, LeaderRewardLog, MemberRewardLog,
+    AccountState, AssignRewards, CardanoDelta,
 };
 
 #[derive(Default)]
 pub struct BoundaryVisitor {
     pub deltas: Vec<CardanoDelta>,
-    pub logs: Vec<(EntityKey, CardanoEntity)>,
 }
 
 impl BoundaryVisitor {
     fn change(&mut self, delta: impl Into<CardanoDelta>) {
         self.deltas.push(delta.into());
-    }
-
-    fn log(&mut self, key: EntityKey, log: impl Into<CardanoEntity>) {
-        self.logs.push((key, log.into()));
     }
 }
 
@@ -82,30 +77,16 @@ impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
             // Per-shard bookkeeping: each shard's applied_rewards is bounded
             // by the shard's account count, so holding it for the duration of
             // the shard is fine (the memory bound is per-shard, not epoch).
+            //
+            // Also the reward legs of the account's merged log row, which the
+            // shard loop assembles from the slice this visit appends —
+            // `BoundaryWork::account_epoch_row`.
             ctx.applied_rewards.push(AppliedReward {
                 credential: account.credential.clone(),
                 pool,
                 amount: value,
                 as_leader,
             });
-
-            if as_leader {
-                self.log(
-                    id.clone(),
-                    LeaderRewardLog {
-                        amount: value,
-                        pool_id: pool.to_vec(),
-                    },
-                );
-            } else {
-                self.log(
-                    id.clone(),
-                    MemberRewardLog {
-                        amount: value,
-                        pool_id: pool.to_vec(),
-                    },
-                );
-            }
         }
 
         Ok(())
@@ -179,10 +160,6 @@ impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
 
         for delta in self.deltas.drain(..) {
             ctx.add_delta(delta);
-        }
-
-        for (key, log) in self.logs.drain(..) {
-            ctx.logs.push((key, log));
         }
 
         Ok(())

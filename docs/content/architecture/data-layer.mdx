@@ -32,8 +32,8 @@ Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `
 
 Available backends:
 
-- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation), and can back state, archive, and indexes.
-- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys, available for the state and index stores.
+- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and remains a supported archive backend via explicit configuration; its state and index implementations are deprecated and refused at startup.
+- **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys. The default backend for the state, index, and archive stores. Both archive backends share the same flat block segment files; only the index format differs.
 - **no-op** — a store that silently discards writes, used to *disable* the archive and/or index stores.
 - **in-memory** — non-persistent stores for testing and ephemeral nodes. State and indexes have builtin implementations in `dolos-core` backed by ordered maps, which serve their traits in full; the WAL, archive, and mempool use redb's memory backend instead.
 

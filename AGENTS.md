@@ -18,7 +18,7 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 - **Purpose**: Historical block storage with temporal indexing
 - **Contents**: Raw blocks indexed by slot, entity logs keyed by `LogKey` (slot + entity key)
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
-- **Database**: `<storage.path>/chain`
+- **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
 ### WalStore (Write-Ahead Log)
 - **Purpose**: Crash recovery and rollback support
@@ -41,12 +41,12 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 <storage.path>/
 ├── wal      # Write-Ahead Log database
 ├── state    # Ledger state database
-├── chain    # Archive/block storage database
+├── archive  # Archive index plus flat block segment files
 ├── index    # Consolidated index database
 └── scratch  # not a store: stele layers staged in flight by a registry transfer
 ```
 
-Each database is a separate Redb or Fjall file with independent configuration for cache size and durability, depending on the chosen storage backend.
+Each database is a separate Redb or Fjall store with independent configuration for cache size and durability, depending on the chosen storage backend.
 
 ## Crate Architecture
 

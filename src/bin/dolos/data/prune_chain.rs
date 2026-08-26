@@ -50,6 +50,14 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
             info!("chain segment trimmed");
         }
+        ArchiveStoreBackend::Fjall(s) => {
+            // Background compaction would reclaim the space eventually; a
+            // major compaction makes the prune's effect immediate, matching
+            // what the command promises for redb.
+            s.compact().into_diagnostic()?;
+
+            info!("chain segment trimmed");
+        }
         ArchiveStoreBackend::NoOp(_) => {
             // No compaction needed for noop
             info!("noop archive, skipping compaction");
