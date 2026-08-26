@@ -114,8 +114,8 @@ fn scan_first_mints<D: Domain>(
 /// keep hashed keys too, so there is no store to enumerate subjects from. The
 /// listing therefore replays mints from the archive, starting where native
 /// assets begin (Mary) or, for `desc`, from the tip backwards, and stops as
-/// soon as the requested page is covered. Like the other scanning endpoints
-/// the reachable depth is bounded by `max_scan_items`.
+/// soon as the requested page is covered. `max_scan_items` caps the maximum
+/// page size, but the scan may still traverse many blocks if first mints are sparse.
 pub async fn all<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
