@@ -148,13 +148,20 @@ impl BlockVisitor for DRepStateVisitor {
             return Ok(());
         };
 
+        // The crawl still calls `visit_tx` for phase-2-invalid transactions
+        // (fees and collateral are priced there), but nothing below is a fee:
+        // votes, the dormancy release and the expiry refreshes are all CERTS
+        // and GOV effects, which run only under `IsValid True`.
+        if !tx.is_valid() {
+            return Ok(());
+        }
+
         // Dormancy release (research §3.3.1): the first proposal after a
         // dormant stretch folds the counter into every non-long-expired
         // DRep's stored expiry and resets it. In the Haskell CERTS rule this
         // runs in the terminal case *before* the certificates, so certs and
-        // votes of the same tx already see the reset counter. Phase-2-invalid
-        // transactions contribute nothing.
-        if tx.is_valid() && self.dormancy.dormant_epochs > 0 && !tx.gov_proposals().is_empty() {
+        // votes of the same tx already see the reset counter.
+        if self.dormancy.dormant_epochs > 0 && !tx.gov_proposals().is_empty() {
             for key in self.dormancy.release_targets() {
                 deltas.add_for_entity(DRepDormancyRelease::new(
                     key,
@@ -184,16 +191,14 @@ impl BlockVisitor for DRepStateVisitor {
 
             // Voting refresh (research §3.3.2): a registered DRep that votes
             // gets its expiry pushed out, exactly like an `UpdateDRepCert`
-            // heartbeat. Valid txs only.
-            if tx.is_valid() {
-                if let Some(expiry) = self.refresh_expiry() {
-                    deltas.add_for_entity(DRepExpiryUpdate::new(
-                        drep,
-                        expiry,
-                        self.current_epoch,
-                        true,
-                    ));
-                }
+            // heartbeat.
+            if let Some(expiry) = self.refresh_expiry() {
+                deltas.add_for_entity(DRepExpiryUpdate::new(
+                    drep,
+                    expiry,
+                    self.current_epoch,
+                    true,
+                ));
             }
         }
 
@@ -204,24 +209,23 @@ impl BlockVisitor for DRepStateVisitor {
         &mut self,
         deltas: &mut WorkDeltas,
         block: &MultiEraBlock,
-        tx: &MultiEraTx,
+        _: &MultiEraTx,
         order: &TxOrder,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
-        // Committee certificates target the governance singleton. Valid txs
-        // only — CERT state effects never apply for phase-2-invalid txs.
-        if tx.is_valid() {
-            if let Some(auth) = pallas_extras::cert_as_committee_auth(cert) {
-                deltas.add_for_entity(crate::CommitteeAuth::new(auth.cold, auth.hot, block.slot()));
-            }
+        // Committee certificates target the governance singleton. The crawl
+        // gates the whole certificate fan-out on `tx.is_valid()`, so CERT
+        // state effects never apply for a phase-2-invalid transaction.
+        if let Some(auth) = pallas_extras::cert_as_committee_auth(cert) {
+            deltas.add_for_entity(crate::CommitteeAuth::new(auth.cold, auth.hot, block.slot()));
+        }
 
-            if let Some(resign) = pallas_extras::cert_as_committee_resign(cert) {
-                deltas.add_for_entity(crate::CommitteeResign::new(
-                    resign.cold,
-                    resign.anchor,
-                    block.slot(),
-                ));
-            }
+        if let Some(resign) = pallas_extras::cert_as_committee_resign(cert) {
+            deltas.add_for_entity(crate::CommitteeResign::new(
+                resign.cold,
+                resign.anchor,
+                block.slot(),
+            ));
         }
 
         let Some(drep) = cert_drep(cert) else {
@@ -241,26 +245,24 @@ impl BlockVisitor for DRepStateVisitor {
 
                     deltas.add_for_entity(DRepAnchorUpdate::new(drep.clone(), anchor.clone()));
 
-                    if tx.is_valid() {
-                        if let Some(expiry) = self.registration_expiry() {
-                            deltas.add_for_entity(DRepExpiryUpdate::new(
-                                drep.clone(),
-                                expiry,
-                                self.current_epoch,
-                                false,
-                            ));
-                        }
+                    if let Some(expiry) = self.registration_expiry() {
+                        deltas.add_for_entity(DRepExpiryUpdate::new(
+                            drep.clone(),
+                            expiry,
+                            self.current_epoch,
+                            false,
+                        ));
+                    }
 
-                        // While a dormant stretch is open, a registration
-                        // creates a row the batch-start snapshot doesn't
-                        // have — remember it so a release later in the
-                        // batch still reaches it (Haskell folds over the
-                        // live DRep map, which includes it).
-                        if self.dormancy.dormant_epochs > 0 {
-                            self.dormancy
-                                .batch_registrations
-                                .push(drep_to_entity_key(&drep));
-                        }
+                    // While a dormant stretch is open, a registration creates
+                    // a row the batch-start snapshot doesn't have — remember
+                    // it so a release later in the batch still reaches it
+                    // (Haskell folds over the live DRep map, which includes
+                    // it).
+                    if self.dormancy.dormant_epochs > 0 {
+                        self.dormancy
+                            .batch_registrations
+                            .push(drep_to_entity_key(&drep));
                     }
                 }
                 conway::Certificate::UnRegDRepCert(_, _) => {
@@ -273,15 +275,13 @@ impl BlockVisitor for DRepStateVisitor {
                 conway::Certificate::UpdateDRepCert(_, anchor) => {
                     deltas.add_for_entity(DRepAnchorUpdate::new(drep.clone(), anchor.clone()));
 
-                    if tx.is_valid() {
-                        if let Some(expiry) = self.refresh_expiry() {
-                            deltas.add_for_entity(DRepExpiryUpdate::new(
-                                drep.clone(),
-                                expiry,
-                                self.current_epoch,
-                                false,
-                            ));
-                        }
+                    if let Some(expiry) = self.refresh_expiry() {
+                        deltas.add_for_entity(DRepExpiryUpdate::new(
+                            drep.clone(),
+                            expiry,
+                            self.current_epoch,
+                            false,
+                        ));
                     }
                 }
                 _ => (),
