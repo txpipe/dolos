@@ -1525,10 +1525,6 @@ fn neither_direction_holds_a_layer() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// One request, or a chain of them
-// ---------------------------------------------------------------------------
-
 /// Every [`Event::Bytes`] the transport emitted, in order.
 ///
 /// The only in-process view of *how many requests* an upload took. The
@@ -1588,10 +1584,14 @@ fn a_layer_under_the_threshold_goes_up_in_one_request() {
 
     let fixture = Fixture::spawn();
 
-    // Between the two layers below, and under the bulk layer by enough that it
-    // still takes more than one chunk: the claim is a chain against a single
-    // request, and a "chain" of one would prove nothing.
+    // Between the two layers below: the small one under it, the bulk one over.
     const THRESHOLD: u64 = 1024 * 1024;
+
+    // The transport's `UPLOAD_CHUNK`, which the crate keeps private. It is what
+    // sets the streamed event count — one per chunk handed to the client — and
+    // it is not the threshold: what makes the bulk layer a *chain* is being
+    // over this, and a "chain" of one would prove nothing.
+    const CHUNK: u64 = 4 * 1024 * 1024;
 
     // Comfortably over one upload chunk once compressed — the bodies are
     // incompressible, so this is close to what crosses the socket.
@@ -1661,9 +1661,10 @@ fn a_layer_under_the_threshold_goes_up_in_one_request() {
         "the small layer has to be under the threshold: {small_size} against {THRESHOLD}",
     );
     assert!(
-        bulk_size > 2 * THRESHOLD,
-        "the bulk layer has to be over the threshold by more than one chunk: \
-         {bulk_size} against {THRESHOLD}",
+        bulk_size > CHUNK,
+        "the bulk layer has to be over one upload chunk, or it streams as a \
+         single delta and the chain below is a chain of one: \
+         {bulk_size} against {CHUNK}",
     );
 
     let seen = chunks.seen();
@@ -1685,7 +1686,6 @@ fn a_layer_under_the_threshold_goes_up_in_one_request() {
         "the deltas do not add up to what was published: {seen:?}",
     );
 
-    // --- and the same layers, whichever way they went ----------------------
     let stele = registry.pull_latest(&ToyProfile).unwrap();
     let read = stele.read_inscription().unwrap();
 
