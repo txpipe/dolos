@@ -40,15 +40,28 @@
 //!
 //! ## Bounded by one layer, in both directions
 //!
-//! [`oci_client::Client::push_blob_stream`] needs the blob's digest *up front*,
-//! and a layer's digest is only known once its last record has been written. So
-//! a layer is staged into a temporary file exactly as a directory stages one,
-//! and then streamed up from it. A pulled layer is streamed to a temporary file
-//! and read back synchronously.
+//! Both push paths need the blob's digest *up front*, and a layer's digest is
+//! only known once its last record has been written. So a layer is staged into
+//! a temporary file exactly as a directory stages one, and then sent up from
+//! it. A pulled layer is streamed to a temporary file and read back
+//! synchronously.
 //!
-//! Neither direction ever holds a whole stele or a whole layer. The staging
-//! files are unlinked at creation, so an abandoned push or a failed pull leaves
-//! nothing behind and needs no cleanup path of its own.
+//! Neither direction ever holds a whole stele. The staging files are unlinked
+//! at creation, so an abandoned push or a failed pull leaves nothing behind and
+//! needs no cleanup path of its own.
+//!
+//! What the *upload* holds is decided by [`Options::monolithic_max`]. Above it,
+//! a layer is streamed and one [`UPLOAD_CHUNK`] is resident at a time. At or
+//! below it, the layer goes up as one request — a `POST` and a `PUT` carrying
+//! the whole body — and is resident in full while it does, because the client
+//! takes the body as bytes and there is no ordering in which it does not.
+//!
+//! That is bought deliberately: a `PATCH` costs the registry about three
+//! seconds whatever it carries, so a publish's wall clock is its request count,
+//! and 79 of mainnet's 81 layers fit under the threshold. What keeps the price
+//! bounded is [`Options::upload_memory`] — a budget in *bytes*, spent by the
+//! layers actually in flight rather than inferred from how many of them there
+//! are. See [`Shared::resident`].
 //!
 //! ## The async boundary, and the one rule it comes with
 //!
@@ -108,6 +121,13 @@
 //! than inside the task, so it is also what keeps the scratch directory from
 //! filling: at most [`Options::concurrency`] staged layers exist at once,
 //! whatever order the sinks finish in.
+//!
+//! It is not the bound on memory, and reading it as one is the mistake this
+//! paragraph exists to prevent. A layer count says nothing about bytes when the
+//! layers differ in size by three orders of magnitude — mainnet's median layer
+//! is 0.41 MB and its largest is 231 MB — and the single-request path spends
+//! bytes. So there is a second permit, taken in the task where the size is
+//! finally known, one per resident byte, against [`Options::upload_memory`].
 //!
 //! ## A round trip nobody answered is made again
 //!
@@ -200,7 +220,7 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, Mutex},
@@ -312,16 +332,18 @@ pub const DIFF_ID_ANNOTATION: &str = "store.stelae.layer.diffId";
 /// epoch or shard a blob covers without fetching the config blob.
 pub const SCOPE_ANNOTATION: &str = "store.stelae.layer.scope";
 
-/// How much of a staged layer is held in memory on the way up.
+/// How much of a *streamed* layer is held in memory on the way up.
 ///
-/// One chunk at a time, allocated and handed to the client, which sends it as
-/// one `PATCH` — and a `PATCH` costs the registry about three seconds
-/// *whatever it carries*, flat across an eightfold change in chunk size,
-/// because what it is spent on is the upload state the worker round-trips
-/// through its object store rather than the bytes. So the chunk count is the
-/// publish's wall clock, and this constant is what sets it: mainnet's largest
-/// layer is 231 MB, which at 1 MiB was 221 round trips and eleven minutes of a
-/// fifteen-minute publish.
+/// The layers too large for [`DEFAULT_MONOLITHIC_MAX`], and nothing else: a
+/// layer that fits goes up as one request and is resident in full while it
+/// does. What is left here is one chunk at a time, allocated and handed to the
+/// client, which sends it as one `PATCH` — and a `PATCH` costs the registry
+/// about three seconds *whatever it carries*, flat across an eightfold change
+/// in chunk size, because what it is spent on is the upload state the worker
+/// round-trips through its object store rather than the bytes. So the chunk
+/// count is the publish's wall clock, and this constant is what sets it:
+/// mainnet's largest layer is 231 MB, which at 1 MiB was 221 round trips and
+/// eleven minutes of a fifteen-minute publish.
 ///
 /// Concurrency is not the alternative. A `PATCH` answers with a `Location`
 /// carrying the session's state hash and the next one is refused unless it
@@ -333,6 +355,41 @@ pub const SCOPE_ANNOTATION: &str = "store.stelae.layer.scope";
 /// it at its own `PUSH_CHUNK_MAX_SIZE`, which is 4 MiB and has no setter.
 /// Anything larger here would go out as 4 MiB anyway, having cost the memory.
 const UPLOAD_CHUNK: usize = 4 * 1024 * 1024;
+
+/// The largest layer this transport will push as one request.
+///
+/// A `POST` followed by a `PUT` carrying the whole body skips the chunked
+/// session entirely — no `PATCH` chain, no upload state round-tripped through
+/// the registry's object store, no recombination — and measured against the
+/// live registry it moves **3.29 MB/s against 0.27**. It also covers most of a
+/// publish: 79 of mainnet's 81 layers are under this number, and the median
+/// layer is 0.41 MB.
+///
+/// 100 MB because that is what this registry advertises as
+/// `OCI-Chunk-Max-Length`, decimal as the header is
+/// (`registry/vendor/src/chunk.ts`, `MAXIMUM_CHUNK_UPLOAD_SIZE`). It is a
+/// property of *that* registry and not of registries in general, which is why
+/// it is [`Options::monolithic_max`] rather than a literal in the push path —
+/// but it cannot be read from the wire: the header rides on the upload
+/// session's response and `oci-client` extracts only the `Location` from it
+/// (`client.rs`, `extract_location_header`), so nothing this crate calls ever
+/// sees it. A default a caller can override is the whole of the honesty
+/// available here.
+pub const DEFAULT_MONOLITHIC_MAX: u64 = 1000 * 1000 * 100;
+
+/// How many bytes of layer a publish may hold in memory at once.
+///
+/// One gibibyte, and it exists because a monolithic push turns
+/// [`Options::concurrency`] into a claim on *memory* and not just on the
+/// scratch directory. A layer count is the wrong unit for that: thirty-two
+/// permits against a 100 MB threshold is 3.2 GB worst case, on a publisher pod
+/// requesting 12 GiB and already sitting at seven.
+///
+/// So the resident bytes are bounded directly rather than inferred from a
+/// layer count — see [`Shared::resident`]. At the default threshold this is ten
+/// large layers in flight at once, whatever the concurrency is set to, while
+/// the median 0.41 MB layer costs a permit it will never wait for.
+pub const DEFAULT_UPLOAD_MEMORY: u64 = 1024 * 1024 * 1024;
 
 /// What a push moved, and what it did not have to.
 ///
@@ -438,7 +495,8 @@ pub struct Options {
     /// configuration anybody means.
     ///
     /// It bounds the staging directory as well as the wire: see the module
-    /// documentation.
+    /// documentation. It does not bound memory — [`Options::upload_memory`]
+    /// does, and in the unit that one is spent in.
     pub concurrency: usize,
 
     /// Re-prove that the registry still holds a blob being adopted out of a
@@ -471,6 +529,29 @@ pub struct Options {
     /// registry's refusal of *this* request is never one of them, so raising
     /// this does not slow down a publish that was going to fail anyway.
     pub attempts: u32,
+
+    /// The largest layer to push as one request rather than as a `PATCH` chain.
+    ///
+    /// Defaults to [`DEFAULT_MONOLITHIC_MAX`], which is what the registry this
+    /// was measured against advertises. A registry that accepts less is a
+    /// registry an operator has to say so about, because the advertisement is
+    /// not reachable from here — see the constant.
+    ///
+    /// Clamped down to [`Options::upload_memory`] when it is larger, so that a
+    /// layer at the threshold always fits the budget that admits it. `0` is
+    /// read as "never", not as "layers of no bytes": it streams everything,
+    /// which is the escape hatch for a registry that answers a monolithic
+    /// `PUT` badly.
+    pub monolithic_max: u64,
+
+    /// How many bytes of layer this transport may hold in memory at once.
+    ///
+    /// Defaults to [`DEFAULT_UPLOAD_MEMORY`]. It bounds the single-request path
+    /// and nothing else — a streamed layer holds one [`UPLOAD_CHUNK`] whatever
+    /// this says — and it is a budget rather than a limit on any one layer:
+    /// several small layers share it, and a layer larger than the whole budget
+    /// cannot exist because the threshold is clamped to it.
+    pub upload_memory: u64,
 }
 
 impl Default for Options {
@@ -482,6 +563,8 @@ impl Default for Options {
             concurrency: DEFAULT_CONCURRENCY,
             verify_adopted: false,
             attempts: DEFAULT_ATTEMPTS,
+            monolithic_max: DEFAULT_MONOLITHIC_MAX,
+            upload_memory: DEFAULT_UPLOAD_MEMORY,
         }
     }
 }
@@ -639,6 +722,9 @@ struct Shared {
     /// many staged layers may exist at once. A permit is taken on the caller's
     /// thread before the staging file is handed over and released when the
     /// round trip is done. See [`Options::concurrency`].
+    ///
+    /// Layers, not bytes: what this bounds is the scratch directory. Memory is
+    /// `resident`, below.
     permits: Arc<tokio::sync::Semaphore>,
     /// The deferred layer round trips, waiting to be joined by
     /// [`SteleWriter::seal`].
@@ -662,6 +748,29 @@ struct Shared {
     concurrency: usize,
     /// [`Options::attempts`], as it was resolved.
     attempts: u32,
+    /// The resident-byte budget, one permit per byte.
+    ///
+    /// A second bound beside `permits`, and a different unit on purpose. That
+    /// one counts layers and bounds the scratch directory; this one counts
+    /// bytes and bounds *memory*, which is what the single-request path spends
+    /// and what a layer count cannot express — the layers differ in size by
+    /// three orders of magnitude.
+    ///
+    /// Taken inside the deferred task rather than on the caller's thread,
+    /// because that is where a layer's size is known: the permit in
+    /// [`RecordSink::finish`] is taken before the layer is closed, and its
+    /// size does not exist yet. Held for the upload and released before the
+    /// backoff between attempts, so a publish waiting on a failing registry
+    /// holds no bytes at all.
+    ///
+    /// Cannot deadlock: `monolithic_max` is clamped to the budget, so any
+    /// single acquisition can be satisfied by an empty semaphore, and
+    /// `tokio`'s is fair — a large waiter is not overtaken by the small ones
+    /// behind it.
+    resident: Arc<tokio::sync::Semaphore>,
+    /// [`Options::monolithic_max`], as it was resolved against
+    /// [`Options::upload_memory`].
+    monolithic_max: u64,
 }
 
 #[derive(Default)]
@@ -730,8 +839,21 @@ impl Registry {
             ClientProtocol::Https
         };
 
+        // `use_monolithic_push` is what makes `push_blob` send a `POST` and
+        // then one `PUT` carrying the whole body instead of opening a chunked
+        // session. It reaches two paths: the layers under `monolithic_max`
+        // below, which is the point, and `Shared::put_bytes`, which was already
+        // calling `push_blob` for the inscription — a document of a few
+        // kilobytes that now costs one round trip fewer.
+        //
+        // The flag also removes `push_blob`'s fallback: without it a chunked
+        // push that trips a spec violation retries monolithically, and with it
+        // there is nothing to fall back *from*. That is the trade this whole
+        // change is, and the single-request path is the one measured against
+        // the registry this publishes to.
         let client = Client::new(ClientConfig {
             protocol,
+            use_monolithic_push: true,
             ..Default::default()
         });
 
@@ -752,6 +874,20 @@ impl Registry {
         // pool to the bound is what keeps that from turning a concurrency of
         // eight into a concurrency of one on a slow volume.
         let concurrency = options.concurrency.max(1);
+
+        // The budget first, then the threshold against it: a layer at the
+        // threshold has to be admissible on an empty semaphore, or the task
+        // holding a layer larger than the whole budget would wait forever.
+        let upload_memory = options
+            .upload_memory
+            .min(tokio::sync::Semaphore::MAX_PERMITS as u64);
+        // `u32` because that is what one `acquire_many` can ask for; no layer
+        // this format cuts comes near it, and a threshold that did would be
+        // asking for four gibibytes of one blob in memory.
+        let monolithic_max = options
+            .monolithic_max
+            .min(upload_memory)
+            .min(u32::MAX as u64);
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(concurrency)
@@ -780,6 +916,8 @@ impl Registry {
                 verify_adopted: options.verify_adopted,
                 concurrency,
                 attempts: options.attempts.max(1),
+                resident: Arc::new(tokio::sync::Semaphore::new(upload_memory as usize)),
+                monolithic_max,
             }),
         })
     }
@@ -1287,6 +1425,33 @@ fn rewound(staged: &File) -> Result<File, Error> {
     Ok(again)
 }
 
+/// A staged layer, whole, for the single-request path.
+///
+/// Read on the runtime's own worker thread and synchronously, for the reason
+/// [`blob_stream`] reads that way: the file is local, the runtime is this
+/// transport's own, and it is sized one worker per permit so a thread inside a
+/// read cannot starve another upload.
+///
+/// Read fresh per attempt rather than held across the backoff — the caller has
+/// already taken the resident-byte permit that admits it, and holding the bytes
+/// through a wait would multiply the budget by the retry window at exactly the
+/// moment the registry is failing.
+///
+/// `size` is the compressed size the digest pipeline reported as it wrote this
+/// file, and the read is exact rather than to the end. One allocation of
+/// exactly the layer, so what the resident-byte permit admitted is what the
+/// upload actually holds — `read_to_end` would probe past the end and can grow
+/// the buffer past the permit that paid for it. A file that does not hold
+/// `size` bytes is a bug in this process and fails here rather than as a digest
+/// the registry rejects.
+fn staged_bytes(mut staged: File, size: u64) -> Result<bytes::Bytes, Error> {
+    let mut body = vec![0u8; size as usize];
+
+    staged.read_exact(&mut body)?;
+
+    Ok(bytes::Bytes::from(body))
+}
+
 /// A staged file, created where [`Options::scratch_dir`] said.
 ///
 /// Both calls that can fail against a *named* directory raise
@@ -1378,6 +1543,10 @@ impl Shared {
     /// task is what makes it back pressure at all: the caller does not get to
     /// stage a ninth layer while eight are still moving, so the scratch
     /// directory is bounded by the same number as the wire.
+    ///
+    /// The resident-byte permit cannot be taken here — the layer is not closed
+    /// yet and has no size — which is why there are two of them and why they
+    /// are taken in different places. See [`Shared::resident`].
     fn permit(&self) -> tokio::sync::OwnedSemaphorePermit {
         // The semaphore is never closed — nothing here closes one — so the only
         // error this call has is unreachable.
@@ -1489,6 +1658,8 @@ impl Shared {
         let client = self.client.clone();
         let repository = self.repository.clone();
         let state = Arc::clone(&self.state);
+        let resident = Arc::clone(&self.resident);
+        let monolithic_max = self.monolithic_max;
 
         self.defer(async move {
             let _permit = permit;
@@ -1537,24 +1708,59 @@ impl Shared {
             // The staged bytes are still in hand here, which is the whole
             // reason this is the right place for the retry: past the join the
             // layer's only copy is the store it was built from, and the
-            // recovery costs a publish. Rewound per attempt, because the stream
-            // consumes the handle it is given.
-            retrying_async(attempts, &observer, || {
-                let client = client.clone();
-                let repository = repository.clone();
-                let named = named.clone();
-                let observer = observer.clone();
-                let staged = rewound(&staged);
+            // recovery costs a publish. Rewound per attempt, because both paths
+            // consume the handle they are given.
+            if monolithic_max > 0 && size <= monolithic_max {
+                retrying_async(attempts, &observer, || {
+                    let client = client.clone();
+                    let repository = repository.clone();
+                    let named = named.clone();
+                    let resident = Arc::clone(&resident);
+                    let staged = rewound(&staged);
 
-                async move {
-                    client
-                        .push_blob_stream(&repository, blob_stream(staged?, observer), &named)
-                        .await?;
+                    async move {
+                        // Taken per attempt and released with the attempt, so
+                        // the doubling wait between two of them holds no bytes:
+                        // a registry answering `500` is exactly when this
+                        // transport should be at its smallest.
+                        let _bytes = resident
+                            .acquire_many_owned(size as u32)
+                            .await
+                            .expect("the transport's semaphore is never closed");
 
-                    Ok(())
-                }
-            })
-            .await?;
+                        client
+                            .push_blob(&repository, staged_bytes(staged?, size)?, &named)
+                            .await?;
+
+                        Ok(())
+                    }
+                })
+                .await?;
+
+                // Once, at the end, because there is nothing finer to say: the
+                // request either landed or it did not. A layer that took two
+                // attempts reports what it *is* rather than what crossed the
+                // wire, which is the opposite of the streamed path's answer and
+                // the honest one for a transfer with no intermediate states.
+                observer.emit(Event::Bytes(size));
+            } else {
+                retrying_async(attempts, &observer, || {
+                    let client = client.clone();
+                    let repository = repository.clone();
+                    let named = named.clone();
+                    let observer = observer.clone();
+                    let staged = rewound(&staged);
+
+                    async move {
+                        client
+                            .push_blob_stream(&repository, blob_stream(staged?, observer), &named)
+                            .await?;
+
+                        Ok(())
+                    }
+                })
+                .await?;
+            }
 
             let mut state = lock(&state);
             state.transfer.layers_uploaded += 1;
@@ -1609,6 +1815,14 @@ impl Shared {
 
     /// Upload a small blob a caller already holds — the inscription, and
     /// nothing else.
+    ///
+    /// Goes up in one request like a small layer does, and for the same reason:
+    /// `use_monolithic_push` is set on the client, so `push_blob` sends a
+    /// `POST` and a `PUT` rather than opening a chunked session for a
+    /// document of a few kilobytes. No resident-byte permit — the
+    /// inscription is bounded by [`MANIFEST_SIZE_LIMIT`]'s order of
+    /// magnitude and by being one document, not by a budget shared with the
+    /// layers.
     fn put_bytes(&self, digest: &Digest, bytes: Vec<u8>) -> Result<(), Error> {
         if self.blob_exists(digest)? {
             return Ok(());
@@ -1898,9 +2112,9 @@ impl Shared {
 /// A layer being written into a registry, one record at a time.
 ///
 /// Staged into a temporary file for a reason that is not a limitation of this
-/// implementation: `push_blob_stream` takes the digest up front, and a layer's
+/// implementation: both push paths take the digest up front, and a layer's
 /// digest is the digest of its own compressed bytes. There is no ordering of
-/// the operations in which a streaming upload learns the name first.
+/// the operations in which an upload learns the name first.
 ///
 /// The staging file is unlinked at creation, so a sink dropped without
 /// [`RecordSink::finish`] — an export that fails halfway with sixteen shards
@@ -2325,16 +2539,21 @@ pub fn read_manifest(
 
 /// A staged layer, as a stream of chunks.
 ///
+/// The path for the layers [`Options::monolithic_max`] excludes — on mainnet,
+/// `blocks` and one `state-accounts` shard. Everything smaller goes up whole
+/// through [`staged_bytes`], in one request rather than a `PATCH` chain.
+///
 /// Reads from the staging file synchronously. The runtime under it is this
 /// transport's own — the read is not waiting on anything it is responsible for
 /// driving — and it is sized so that a read blocking a worker cannot starve the
 /// other uploads: one worker per permit, decided in [`Registry::open`].
 ///
-/// One chunk is allocated at a time and handed over, so what the upload holds
-/// is [`UPLOAD_CHUNK`] and not the layer.
+/// One chunk is allocated at a time and handed over, so what a *streamed*
+/// upload holds is [`UPLOAD_CHUNK`] and not the layer.
 /// Each chunk is reported as it is handed over, which is the only resolution
 /// this loop has: a `PATCH` either went out or it did not, and the client does
-/// not say how much of one has reached the wire.
+/// not say how much of one has reached the wire. A single-request layer has no
+/// such resolution to report and announces itself once, at the end.
 fn blob_stream(
     file: File,
     observer: Observer,
