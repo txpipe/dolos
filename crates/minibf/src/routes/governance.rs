@@ -375,6 +375,13 @@ fn select_proposals<D: Domain>(
 
 /// The page of `GET /governance/proposals`, read off the state and ordered
 /// against the archive.
+///
+/// Every proposal is walked to build one page. The namespace holds one row per
+/// governance action ever submitted and each of those costs a deposit, so it
+/// grows in the hundreds — 155 rows on mainnet and 1536 on preview, the
+/// cheapest of the networks to propose on — against the million-row namespaces
+/// the other listings here already walk. What the page actually pays for is
+/// the archive, and that is bounded by the page size.
 fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<ProposalsInner>, Error> {
     let mut rows = Vec::new();
 
@@ -408,7 +415,10 @@ fn read_page<D: Domain>(domain: &D, pagination: &Pagination) -> Result<Vec<Propo
             Ok(ProposalsInner {
                 id: bech32_gov_action(&row.tx, row.idx)?,
                 tx_hash: hex::encode(row.tx),
-                cert_index: row.idx as i32,
+                cert_index: row
+                    .idx
+                    .try_into()
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
                 governance_type: row.governance_type,
             })
         })
