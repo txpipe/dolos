@@ -26,44 +26,66 @@ use crate::{
 /// bytes, so a plain byte comparison of the subject is exactly that). The
 /// ledger state decides what counts as a first mint: the tx must be the
 /// asset's `initial_tx`, which also keeps fully burned assets on the list.
+///
+/// The whole tx is resolved with a single state read: backends open a read
+/// transaction per call, and a scan that asks per minted asset would open one
+/// for every row of every mint it walks past.
 fn first_minted_subjects<D: Domain>(
     domain: &D,
     tx: &MultiEraTx<'_>,
-) -> Result<Vec<Vec<u8>>, StatusCode> {
-    let tx_hash = tx.hash();
+) -> Result<Vec<Vec<u8>>, Error> {
     let mut subjects = BTreeSet::new();
 
     for policy_assets in tx.mints() {
         for asset in policy_assets.assets() {
-            let subject = [policy_assets.policy().as_slice(), asset.name()].concat();
-            let key = EntityKey::from(
-                pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice()).as_slice(),
-            );
-
-            let state = domain
-                .state()
-                .read_entity_typed::<AssetState>(AssetState::NS, &key)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if state.and_then(|x| x.initial_tx) == Some(tx_hash) {
-                subjects.insert(subject);
-            }
+            subjects.insert([policy_assets.policy().as_slice(), asset.name()].concat());
         }
     }
 
-    Ok(subjects.into_iter().collect())
+    if subjects.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let subjects: Vec<_> = subjects.into_iter().collect();
+
+    let keys: Vec<EntityKey> = subjects
+        .iter()
+        .map(|subject| {
+            EntityKey::from(pallas::crypto::hash::Hasher::<256>::hash(subject).as_slice())
+        })
+        .collect();
+
+    let states = domain
+        .state()
+        .read_entities_typed::<AssetState>(AssetState::NS, &keys.iter().collect::<Vec<_>>())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let tx_hash = tx.hash();
+
+    Ok(subjects
+        .into_iter()
+        .zip(states)
+        .filter_map(|(subject, state)| {
+            (state.and_then(|x| x.initial_tx) == Some(tx_hash)).then_some(subject)
+        })
+        .collect())
 }
 
 /// Walk the archive in `order` collecting first-minted subjects until `needed`
-/// of them are known. The scan covers every block from `start` to the archive
-/// tip; the caller bounds the amount of work through the pagination scan
-/// limit.
+/// of them are known.
+///
+/// `needed` bounds the results, not the work: nothing forces mints to be dense,
+/// so any number of blocks can sit between two first mints and a page that the
+/// archive cannot fill would replay every block from `start` to the tip. The
+/// walk therefore also stops after `budget` blocks and says so, instead of
+/// holding a blocking query slot for the length of the chain.
 fn scan_first_mints<D: Domain>(
     domain: &D,
     start: BlockSlot,
     order: Order,
     needed: usize,
-) -> Result<Vec<Vec<u8>>, StatusCode> {
+    budget: usize,
+) -> Result<Vec<Vec<u8>>, Error> {
     let iter = domain
         .archive()
         .get_range(Some(start), None)
@@ -76,7 +98,13 @@ fn scan_first_mints<D: Domain>(
 
     let mut found = Vec::new();
 
-    for (_, body) in blocks {
+    for (scanned, (_, body)) in blocks.enumerate() {
+        // the iterator handed us another block while the budget is spent, so
+        // the answer is somewhere further in and out of reach for this request
+        if scanned == budget {
+            return Err(Error::ScanBudgetExceeded);
+        }
+
         let block = MultiEraBlock::decode(&body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         let txs = block.txs();
 
@@ -114,8 +142,12 @@ fn scan_first_mints<D: Domain>(
 /// keep hashed keys too, so there is no store to enumerate subjects from. The
 /// listing therefore replays mints from the archive, starting where native
 /// assets begin (Mary) or, for `desc`, from the tip backwards, and stops as
-/// soon as the requested page is covered. `max_scan_items` caps the maximum
-/// page size, but the scan may still traverse many blocks if first mints are sparse.
+/// soon as the requested page is covered.
+///
+/// `max_scan_items` bounds the request twice: it caps the page depth like on
+/// the other scanning endpoints, and it caps the blocks the replay may decode.
+/// A page the replay cannot reach within that many blocks is refused, because
+/// a short answer would read as the end of the list.
 pub async fn all<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -136,10 +168,11 @@ where
 
     let order = pagination.order;
     let needed = pagination.from() + pagination.count;
+    let budget = domain.config.max_scan_items() as usize;
 
     let subjects = domain
         .query()
-        .run_blocking(move |domain| Ok(scan_first_mints(&domain, start, order, needed)))
+        .run_blocking(move |domain| Ok(scan_first_mints(&domain, start, order, needed, budget)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
@@ -262,6 +295,32 @@ mod tests {
         // a page past the end is empty, not an error
         let page = get_assets(&app, "?page=4&count=1").await;
         assert!(page.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assets_all_stops_at_scan_budget() {
+        // four blocks minting the same asset: only the first block carries a
+        // first mint, so anything past one asset costs blocks and yields
+        // nothing
+        let app = TestApp::new_with_scan_limit(
+            SyntheticBlockConfig {
+                block_count: 4,
+                txs_per_block: 1,
+                asset_names_by_block: vec!["ONLY".to_string(); 4],
+                ..Default::default()
+            },
+            3,
+        );
+
+        // a page the scan covers before the budget runs out is served
+        let page = get_assets(&app, "?count=1").await;
+        assert_eq!(page.len(), 1);
+
+        // a page that would need a fourth block is refused, not truncated
+        let (status, bytes) = app.get_bytes("/assets?count=3").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let body = String::from_utf8_lossy(&bytes);
+        assert!(body.contains("archive blocks"), "unexpected body: {body}");
     }
 
     #[tokio::test]
