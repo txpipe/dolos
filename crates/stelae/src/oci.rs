@@ -315,9 +315,24 @@ pub const SCOPE_ANNOTATION: &str = "store.stelae.layer.scope";
 /// How much of a staged layer is held in memory on the way up.
 ///
 /// One chunk at a time, allocated and handed to the client, which sends it as
-/// one `PATCH`. Well under `oci-client`'s own 4 MiB ceiling per chunk, so this
-/// number — and not the layer's size — is what bounds the upload.
-const UPLOAD_CHUNK: usize = 1024 * 1024;
+/// one `PATCH` — and a `PATCH` costs the registry about three seconds
+/// *whatever it carries*, flat across an eightfold change in chunk size,
+/// because what it is spent on is the upload state the worker round-trips
+/// through its object store rather than the bytes. So the chunk count is the
+/// publish's wall clock, and this constant is what sets it: mainnet's largest
+/// layer is 231 MB, which at 1 MiB was 221 round trips and eleven minutes of a
+/// fifteen-minute publish.
+///
+/// Concurrency is not the alternative. A `PATCH` answers with a `Location`
+/// carrying the session's state hash and the next one is refused unless it
+/// presents the current value, so a blob is one serial chain —
+/// [`Options::concurrency`] bounds layers in flight, never chunks within a
+/// layer.
+///
+/// 4 MiB and not more because `oci-client` re-splits whatever this stream hands
+/// it at its own `PUSH_CHUNK_MAX_SIZE`, which is 4 MiB and has no setter.
+/// Anything larger here would go out as 4 MiB anyway, having cost the memory.
+const UPLOAD_CHUNK: usize = 4 * 1024 * 1024;
 
 /// What a push moved, and what it did not have to.
 ///

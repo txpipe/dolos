@@ -1292,10 +1292,16 @@ fn bulk_records() -> u64 {
 
 /// What either direction may hold at any one moment.
 ///
-/// Above the 1 MiB upload chunk because the HTTP client copies a body on its
-/// way to the socket and zstd buffers on either side of the codec. What matters
-/// is not the number but that it does not move when the layer does — the layer
-/// is fifty times it.
+/// The push peak is one upload chunk and a little change — 4 MiB and some
+/// tens of kilobytes, measured, and stable to a fraction of a percent across
+/// runs, because the client splits the chunk it is handed rather than copying
+/// it. The pull side sits far below that. 5 MiB is the larger of the two with
+/// room over it.
+///
+/// What matters is not the number but that it does not move when the layer
+/// does: the peak is bound by the chunk, and the layer here is ten times the
+/// budget. `STELAE_TEST_BULK_RECORDS` below asks the same question at a
+/// mainnet shard's scale and this constant does not follow it up.
 const TRANSPORT_BUDGET: usize = 5 * 1024 * 1024;
 
 /// A record whose body zstd cannot shrink.
