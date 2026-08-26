@@ -1783,7 +1783,22 @@ fn the_single_request_path_is_bounded_by_its_byte_budget() {
                 .unwrap();
         }
 
-        inscription.layers.push(sink.finish().unwrap().descriptor);
+        let written = sink.finish().unwrap();
+
+        // The threshold here is `BUDGET` — `monolithic_max` is left at its
+        // default and clamped down to it — so a layer over this line would
+        // stream, hold one chunk, and sail under the ceiling below without the
+        // byte budget ever being asked for. The assertion is what stops a
+        // change in what `bulk_record` compresses to from quietly turning this
+        // test into one that measures nothing.
+        assert!(
+            written.digests.compressed_size <= BUDGET,
+            "layer {layer} has to be resident for this to measure the budget: \
+             {} against {BUDGET}",
+            written.digests.compressed_size,
+        );
+
+        inscription.layers.push(written.descriptor);
     }
 
     registry.seal(&ToyProfile, &inscription).unwrap();
