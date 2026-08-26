@@ -811,7 +811,7 @@ impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
                 let pool_id = mapping::bech32_pool(operator)?;
 
                 Ok(AccountRewardContentInner {
-                    epoch: epoch as i32 - 1,
+                    epoch: epoch as i32,
                     amount: x.amount.to_string(),
                     pool_id,
                     r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Leader,
@@ -822,7 +822,7 @@ impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
                 let pool_id = mapping::bech32_pool(operator)?;
 
                 Ok(AccountRewardContentInner {
-                    epoch: epoch as i32 - 1,
+                    epoch: epoch as i32,
                     amount: x.amount.to_string(),
                     pool_id,
                     r#type: blockfrost_openapi::models::account_reward_content_inner::Type::Member,
@@ -833,7 +833,7 @@ impl TryFrom<AccountRewardWrapper> for AccountRewardContentInner {
                 let pool_id = mapping::bech32_pool(operator)?;
 
                 Ok(AccountRewardContentInner {
-                    epoch: epoch as i32 - 1,
+                    epoch: epoch as i32,
                     amount: x.amount.to_string(),
                     pool_id,
                     r#type: blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund,
@@ -867,13 +867,27 @@ where
     let mut skipped = 0;
     let skip = pagination.skip();
 
-    for reward_epoch in 0..epoch {
-        let slot = summary.epoch_start(reward_epoch);
-        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
+    // The ledger writes each reward log at an epoch-boundary slot. This slot
+    // is the key of the log, but it is not the reward epoch. Blockfrost reports
+    // the reward epoch as `earned_epoch`. The db-sync schema uses the same
+    // term. The three reward types use different slots:
+    //
+    //   * The ledger makes a leader or member reward for epoch `e` spendable
+    //     at epoch `e + 2`. The log for this reward is at `epoch_start(e + 1)`.
+    //   * When the ledger retires the pool at epoch `e`, it pays a pool-deposit
+    //     refund. The log for this refund is at `epoch_start(e - 1)`.
+    //
+    // The loop iterates by the reward epoch `e`. It combines the three reward
+    // types into one ascending sequence before pagination. Within one epoch,
+    // the order is leader, then member, then refund. This order matches the
+    // `type ASC` order in db-sync.
+    for reward_epoch in 0..=epoch {
+        let stake_slot = summary.epoch_start(reward_epoch + 1);
+        let stake_key: LogKey = (TemporalKey::from(stake_slot), entity_key.clone()).into();
 
         let leader = domain
             .archive()
-            .read_log_typed::<LeaderRewardLog>(LeaderRewardLog::NS, &log_key)
+            .read_log_typed::<LeaderRewardLog>(LeaderRewardLog::NS, &stake_key)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         if let Some(reward) = leader.filter(|reward| reward.amount > 0) {
@@ -890,7 +904,7 @@ where
 
         let member = domain
             .archive()
-            .read_log_typed::<MemberRewardLog>(MemberRewardLog::NS, &log_key)
+            .read_log_typed::<MemberRewardLog>(MemberRewardLog::NS, &stake_key)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         if let Some(reward) = member.filter(|reward| reward.amount > 0) {
@@ -905,16 +919,21 @@ where
             break;
         }
 
-        let pool_deposit_refund = domain
-            .archive()
-            .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &log_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if reward_epoch >= 1 {
+            let refund_slot = summary.epoch_start(reward_epoch - 1);
+            let refund_key: LogKey = (TemporalKey::from(refund_slot), entity_key.clone()).into();
 
-        if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {
-            if skipped < skip {
-                skipped += 1;
-            } else {
-                items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+            let pool_deposit_refund = domain
+                .archive()
+                .read_log_typed::<PoolDepositRefundLog>(PoolDepositRefundLog::NS, &refund_key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if let Some(reward) = pool_deposit_refund.filter(|reward| reward.amount > 0) {
+                if skipped < skip {
+                    skipped += 1;
+                } else {
+                    items.push(AccountRewardWrapper::from((reward_epoch, reward)).try_into()?);
+                }
             }
         }
 

@@ -65,12 +65,17 @@ impl TestDomainBuilder {
             seed_epoch_logs(&domain, &epochs).expect("failed to seed epoch logs");
         }
         if epoch >= 2 {
-            let reward_epochs = [epoch - 2, epoch - 1];
+            // The ledger stores a member reward for epoch `a` at the boundary
+            // slot `epoch_start(a + 1)`. The reward is spendable at epoch
+            // `a + 2`. This fixture seeds the boundary slots for the two most
+            // recent reward epochs. As a result, the endpoint reports the
+            // epochs as `[epoch - 2, epoch - 1]`.
+            let boundary_epochs = [epoch - 1, epoch];
             seed_reward_logs(
                 &domain,
                 &vectors.stake_address,
                 &vectors.pool_id,
-                &reward_epochs,
+                &boundary_epochs,
             )
             .expect("failed to seed reward logs");
         }
