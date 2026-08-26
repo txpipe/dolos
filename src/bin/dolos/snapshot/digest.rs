@@ -68,6 +68,13 @@ pub struct Args {
     #[arg(long, value_name = "EPOCHS")]
     index_band: Option<std::num::NonZeroUsize>,
 
+    /// how many layer producers run at once: the store traversals that fill,
+    /// frame and compress layers, one of them reserved for the index bands.
+    /// Changes nothing about the digest it computes. Defaults to 4; `1` is the
+    /// strictly serial walk
+    #[arg(long, value_name = "N")]
+    producers: Option<std::num::NonZeroUsize>,
+
     /// canonical inscription of the stele this one follows, as
     /// `inspect --json` or a published `inscription.json` holds it; without it
     /// the reproduction carries no history, which is a different digest
@@ -96,6 +103,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let plan = super::restrict(plan, args.epochs);
     let plan = super::banded(plan, args.index_band);
+    let plan = super::produced(plan, args.producers);
 
     super::report_plan(&plan)?;
 

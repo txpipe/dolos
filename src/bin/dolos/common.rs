@@ -4,13 +4,15 @@ use dolos_core::config::{
 };
 use dolos_core::BootstrapExt;
 use dolos_snapshot::registry::Auth;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
@@ -514,6 +516,40 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
     pipeline.teardown();
 }
 
+/// Drains the serving drivers, cancelling the rest once any one of them fails.
+///
+/// Returns the first failure instead of only logging it: the exit status is
+/// what a supervisor reads. Draining continues past that failure because
+/// cancellation is what winds the healthy drivers down and nothing else
+/// awaits them.
+pub async fn monitor_drivers(
+    mut drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>>,
+    exit: CancellationToken,
+) -> Result<(), ServeError> {
+    let mut first_failure = None;
+
+    while let Some(result) = drivers.next().await {
+        let failure = match result {
+            Ok(Ok(())) => continue,
+            Ok(Err(e)) => {
+                error!(error = %e, "driver failed");
+                e
+            }
+            Err(e) => {
+                error!(error = %e, "driver task failed");
+                ServeError::Internal(Box::new(e))
+            }
+        };
+
+        warn!("cancelling remaining drivers");
+        exit.cancel();
+
+        first_failure.get_or_insert(failure);
+    }
+
+    first_failure.map_or(Ok(()), Err)
+}
+
 pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
     let root = &config.storage.path;
 
@@ -535,6 +571,9 @@ pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use dolos_core::config::StelaeRegistryConfig;
+    use futures_util::stream::FuturesUnordered;
+    use std::io;
+    use tokio::task::JoinHandle;
 
     use super::*;
     use crate::init::OFFICIAL_REGISTRY_PASSWORD;
@@ -788,5 +827,82 @@ mod tests {
             },
             "the DOLOS_ prefix no longer reaches [stelae.registry]",
         );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_observes_a_failure_a_healthy_driver_would_hide() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        // `FuturesUnordered` links at the head, so the ordered drain this
+        // replaced reached the last push first.
+        drivers.push(tokio::spawn(async {
+            Err(ServeError::BindError(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "socket already exists",
+            )))
+        }));
+
+        let exit_for_healthy_driver = exit.clone();
+        drivers.push(tokio::spawn(async move {
+            exit_for_healthy_driver.cancelled().await;
+            Ok(())
+        }));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_drivers(drivers, exit.clone()),
+        )
+        .await
+        .expect("driver monitor should observe the bind failure promptly");
+
+        assert!(exit.is_cancelled());
+
+        assert!(
+            matches!(result, Err(ServeError::BindError(_))),
+            "the bind failure has to reach the caller, not just the log",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_propagates_a_panicking_driver() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        drivers.push(tokio::spawn(async { panic!("driver panicked") }));
+
+        let result = monitor_drivers(drivers, exit.clone()).await;
+
+        assert!(exit.is_cancelled());
+
+        assert!(
+            result.is_err(),
+            "a panicking driver must not report success",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_reports_a_clean_shutdown_as_success() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        for _ in 0..3 {
+            let exit_for_driver = exit.clone();
+            drivers.push(tokio::spawn(async move {
+                exit_for_driver.cancelled().await;
+                Ok(())
+            }));
+        }
+
+        exit.cancel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_drivers(drivers, exit.clone()),
+        )
+        .await
+        .expect("cancelled drivers should finish promptly");
+
+        assert!(result.is_ok(), "a signalled shutdown is not a failure");
     }
 }

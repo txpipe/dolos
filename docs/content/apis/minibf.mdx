@@ -138,9 +138,9 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/epochs/{epoch}`                          | Get information for a specific epoch                     |
 | `/epochs/{epoch}/blocks`                   | Get blocks in a specific epoch                           |
 | `/epochs/{epoch}/blocks/{pool_id}`         | Get blocks minted by a specific pool in a specific epoch |
-| `/epochs/{epoch}/next`                     | Get epochs following a specific epoch                    |
+| `/epochs/{epoch}/next`                     | Get the epochs following a specific epoch                |
 | `/epochs/{epoch}/parameters`               | Get epoch parameters                                     |
-| `/epochs/{epoch}/previous`                 | Get epochs preceding a specific epoch                    |
+| `/epochs/{epoch}/previous`                 | Get the epochs preceding a specific epoch                |
 | `/epochs/{epoch}/stakes`                   | Get epoch stake distribution                             |
 | `/epochs/{epoch}/stakes/{pool_id}`         | Get epoch stake distribution for a specific pool         |
 | `/genesis`                                 | Get genesis information                                  |
@@ -149,16 +149,16 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/metadata/txs/labels/{label}/cbor`        | Get CBOR metadata for transactions with a specific label |
 | `/network`                                 | Get network information                                  |
 | `/network/eras`                            | Get network eras information                             |
-| `/pools`                                   | Get list of registered stake pools                       |
+| `/pools`                                   | Get list of registered pools                             |
 | `/pools/extended`                          | Get extended pool information                            |
-| `/pools/retired`                           | Get list of retired stake pools                          |
-| `/pools/retiring`                          | Get stake pools retiring in upcoming epochs              |
+| `/pools/retired`                           | Get list of retired pools                                |
+| `/pools/retiring`                          | Get list of retiring pools                               |
 | `/pools/{id}`                              | Get information for a specific pool                      |
 | `/pools/{id}/delegators`                   | Get delegators for a specific pool                       |
 | `/pools/{id}/history`                      | Get history for a specific pool                          |
 | `/pools/{id}/metadata`                     | Get metadata for a specific pool                         |
 | `/pools/{id}/relays`                       | Get relays for a specific pool                           |
-| `/pools/{id}/updates`                      | Get updates for a specific pool                          |
+| `/pools/{id}/updates`                      | Get certificate updates for a specific pool              |
 | `/scripts/{script_hash}`                   | Get script information                                   |
 | `/scripts/{script_hash}/json`              | Get script JSON                                          |
 | `/scripts/{script_hash}/cbor`              | Get script CBOR                                          |

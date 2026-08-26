@@ -1070,7 +1070,7 @@ fn backends_agree_on_identical_writes() {
         .collect::<Result<_, _>>()
         .unwrap();
 
-    assert_eq!(from_redb.len(), seed_rows.len(), "the walk lost rows");
+    assert_eq!(from_redb, seed_rows, "the walk must return the seeded rows");
     assert_eq!(from_redb, from_fjall);
 }
 

@@ -12,13 +12,17 @@
 //! files are present. When none are — a cold container start, whose disk
 //! keeps nothing and whose store was just restored from the registry — the
 //! start is derived from the cursor's chunk file instead, a margin early,
-//! so a restart costs one window rather than the chain so far.
+//! so a restart costs one window rather than the chain so far. The chunk
+//! file's size is read from the chain's own shelley genesis rather than
+//! assumed: mainnet's chunk applied to preview is five times too wide and
+//! resumes thousands of files early.
 //!
 //! The reader never opens the highest downloaded file — pallas pops it as
 //! "not really immutable" — so at the aggregator tip the replay stands at
-//! most one chunk (~21600 slots, about six hours) behind the mithril beacon.
-//! That lag is steady state, not loss: the next run picks the chunk up once
-//! the beacon moves past it.
+//! most one chunk (`10k` slots — about six hours on mainnet and preprod,
+//! rather over an hour on preview) behind the mithril beacon. That lag is
+//! steady state, not loss: the next run picks the chunk up once the beacon
+//! moves past it.
 //!
 //! Each iteration *opens* by publishing the sequence the cursor already stands
 //! at, then extends the replay by one epoch. Publishing on entry rather than
@@ -57,6 +61,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
+use dolos_core::Genesis;
 use dolos_core::{Domain as _, DomainError, ImportExt as _, StateStore as _, WalStore as _};
 use dolos_snapshot::{
     export,
@@ -66,7 +71,7 @@ use indicatif::ProgressBar;
 use itertools::Itertools as _;
 use miette::{bail, Context as _, IntoDiagnostic as _};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::feedback::Feedback;
 use dolos::adapters::DomainAdapter;
@@ -82,13 +87,15 @@ const IMPORT_CHUNK: usize = 100;
 /// the immutable reader without the cursor's own chunk.
 const IMMUTABLE_FILE_MARGIN: u64 = 2;
 
-/// Slots per immutable chunk file — a node packaging convention, not a
-/// protocol invariant. Used to pick files safe to delete and, on a cold
-/// start whose download dir is empty, to derive where downloading resumes;
-/// never to plan how far a replay goes. Both uses carry
-/// [`IMMUTABLE_FILE_MARGIN`], and a derivation that still lands past the
-/// cursor's chunk is caught by the stalled-window check rather than trusted.
-const SLOTS_PER_IMMUTABLE_FILE: u64 = 21_600;
+/// Slots an immutable chunk file holds per unit of the security parameter:
+/// a chunk is `10k` slots wide. A packaging convention, not a protocol
+/// invariant.
+const SLOTS_PER_SECURITY_PARAM: u64 = 10;
+
+/// Slots per immutable chunk file when the shelley genesis names no
+/// `securityParam`: mainnet's `10k`. Guessing small resumes a cold start far
+/// behind its own cursor, so an unknown `k` keeps the old value.
+const FALLBACK_SLOTS_PER_IMMUTABLE_FILE: u64 = 21_600;
 
 /// Where the mithril window lands when the operator names nowhere: beside the
 /// stores, so the bytes stay on the data mount.
@@ -177,6 +184,21 @@ enum Import {
     Cancelled,
 }
 
+/// Slots per immutable chunk file on this chain: `10k`, read from the
+/// shelley genesis the run already loads.
+///
+/// Used to pick files safe to delete and, on a cold start whose download dir
+/// is empty, to derive where downloading resumes; never to plan how far a
+/// replay goes. Both uses carry [`IMMUTABLE_FILE_MARGIN`].
+fn slots_per_immutable_file(genesis: &Genesis) -> u64 {
+    genesis
+        .shelley
+        .security_param
+        .map_or(FALLBACK_SLOTS_PER_IMMUTABLE_FILE, |k| {
+            u64::from(k) * SLOTS_PER_SECURITY_PARAM
+        })
+}
+
 /// The epoch the next replay stops at: one past the cursor's, or 1 from a
 /// fresh store.
 fn target_epoch(cursor_epoch: Option<u64>) -> u64 {
@@ -191,11 +213,34 @@ fn target_epoch(cursor_epoch: Option<u64>) -> u64 {
 /// restored from the registry onto a disk that keeps nothing, and resuming
 /// from file zero would re-download the whole chain, so the start is derived
 /// from the cursor's own chunk file instead, a margin early.
-fn resume_file(highest: Option<u64>, cursor_slot: Option<u64>) -> Option<u64> {
+fn resume_file(
+    highest: Option<u64>,
+    cursor_slot: Option<u64>,
+    slots_per_immutable_file: u64,
+) -> Option<u64> {
     highest.or_else(|| {
         cursor_slot
-            .map(|slot| (slot / SLOTS_PER_IMMUTABLE_FILE).saturating_sub(IMMUTABLE_FILE_MARGIN))
+            .map(|slot| (slot / slots_per_immutable_file).saturating_sub(IMMUTABLE_FILE_MARGIN))
     })
+}
+
+/// Immutable files a resume start sits behind the cursor's own chunk, past
+/// the [`IMMUTABLE_FILE_MARGIN`], or `None` when it sits within the margin.
+///
+/// Early is the cheap direction only in the small: a resume many files behind
+/// the cursor re-downloads every file between before the replay can advance,
+/// so it is measured rather than left silent.
+fn resume_lag(
+    resume: Option<u64>,
+    cursor_slot: Option<u64>,
+    slots_per_immutable_file: u64,
+) -> Option<u64> {
+    let expected = (cursor_slot? / slots_per_immutable_file).saturating_sub(IMMUTABLE_FILE_MARGIN);
+
+    match expected.saturating_sub(resume.unwrap_or(0)) {
+        0 => None,
+        lag => Some(lag),
+    }
 }
 
 /// The next download round, as `(download_start, download_end)`, or `None`
@@ -230,8 +275,8 @@ fn fetch_advanced(before: Option<u64>, after: Option<u64>) -> bool {
 
 /// Immutable files strictly below this number sit wholly behind the cursor,
 /// margin included, and are safe to delete.
-fn consumed_below(cursor_slot: u64) -> u64 {
-    (cursor_slot / SLOTS_PER_IMMUTABLE_FILE).saturating_sub(IMMUTABLE_FILE_MARGIN)
+fn consumed_below(cursor_slot: u64, slots_per_immutable_file: u64) -> u64 {
+    (cursor_slot / slots_per_immutable_file).saturating_sub(IMMUTABLE_FILE_MARGIN)
 }
 
 /// What the immutable directory holds, for a diagnostic.
@@ -261,8 +306,12 @@ fn dir_contents(immutable_dir: &Path) -> String {
 }
 
 /// Delete the numbered immutable files the replay has consumed.
-fn cleanup_consumed(immutable_dir: &Path, cursor_slot: u64) -> miette::Result<()> {
-    let threshold = consumed_below(cursor_slot);
+fn cleanup_consumed(
+    immutable_dir: &Path,
+    cursor_slot: u64,
+    slots_per_immutable_file: u64,
+) -> miette::Result<()> {
+    let threshold = consumed_below(cursor_slot, slots_per_immutable_file);
 
     if threshold == 0 {
         return Ok(());
@@ -345,6 +394,9 @@ struct Driver<'a> {
     cancel: CancellationToken,
     download_dir: PathBuf,
     immutable_dir: PathBuf,
+    /// Settled once at startup: it cannot change under a running backfill,
+    /// and deriving it per round would only reread the same genesis.
+    slots_per_immutable_file: u64,
 }
 
 impl Driver<'_> {
@@ -569,7 +621,22 @@ impl Driver<'_> {
                 .context("reading the state cursor")?
                 .map(|cursor| cursor.slot());
 
-            let resume = resume_file(highest, cursor_slot);
+            let resume = resume_file(highest, cursor_slot, self.slots_per_immutable_file);
+
+            // Deliberately not a fallback: the round still runs, it just
+            // stops running silently. Inside a window is the margin working.
+            if let Some(lag) = resume_lag(resume, cursor_slot, self.slots_per_immutable_file)
+                .filter(|lag| *lag > self.args.window)
+            {
+                warn!(
+                    lag,
+                    ?resume,
+                    slots_per_immutable_file = self.slots_per_immutable_file,
+                    "the download resumes more than a window behind the cursor's own \
+                     immutable file; every file between is re-downloaded before the \
+                     replay can advance"
+                );
+            }
 
             let Some((start, end)) = next_window(resume, self.args.window, beacon) else {
                 break Advance::MithrilExhausted;
@@ -773,6 +840,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         bail!("missing mithril config");
     }
 
+    // Loaded here rather than at first use so a run whose genesis is missing
+    // fails before it downloads anything.
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let slots_per_immutable_file = slots_per_immutable_file(&genesis);
+
+    info!(
+        slots_per_immutable_file,
+        "derived the immutable chunk size from the shelley genesis"
+    );
+
     let download_dir = args
         .download_dir
         .clone()
@@ -792,6 +869,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         cancel: spawn_exit_watcher()?,
         immutable_dir: download_dir.join("immutable"),
         download_dir,
+        slots_per_immutable_file,
     };
 
     loop {
@@ -808,7 +886,11 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
         match driver.extend(target, prune)? {
             Advance::Boundary { cursor_slot } => {
-                cleanup_consumed(&driver.immutable_dir, cursor_slot)?;
+                cleanup_consumed(
+                    &driver.immutable_dir,
+                    cursor_slot,
+                    driver.slots_per_immutable_file,
+                )?;
             }
             Advance::MithrilExhausted => {
                 println!("the repository is up to date with mithril; nothing left to backfill");
@@ -823,6 +905,13 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 mod tests {
     use super::*;
 
+    /// Mainnet's `10k`, spelled out so the tests assert against a number
+    /// rather than against the constant they are checking.
+    const MAINNET_SLOTS_PER_FILE: u64 = 21_600;
+
+    /// The preview publisher's restore cursor on 2026-08-25.
+    const PREVIEW_RESTORE_CURSOR: u64 = 22_118_504;
+
     #[test]
     fn the_first_target_is_epoch_one_and_every_later_one_follows_the_cursor() {
         assert_eq!(target_epoch(None), 1);
@@ -831,35 +920,107 @@ mod tests {
     }
 
     #[test]
+    fn the_chunk_size_is_each_networks_own_ten_k() {
+        use dolos_cardano::include;
+
+        // preview is the reason this is derived: its `k` is 432, so its
+        // chunks are a fifth of mainnet's
+        assert_eq!(
+            slots_per_immutable_file(&include::mainnet::load()),
+            MAINNET_SLOTS_PER_FILE,
+        );
+        assert_eq!(
+            slots_per_immutable_file(&include::preprod::load()),
+            MAINNET_SLOTS_PER_FILE,
+        );
+        assert_eq!(slots_per_immutable_file(&include::preview::load()), 4_320);
+        assert_eq!(
+            slots_per_immutable_file(&include::devnet::load()),
+            MAINNET_SLOTS_PER_FILE,
+        );
+    }
+
+    #[test]
+    fn a_genesis_without_a_security_param_keeps_the_old_value() {
+        // guessing small is the expensive direction, so an unknown `k` falls back
+        let mut genesis = dolos_cardano::include::preview::load();
+        genesis.shelley.security_param = None;
+
+        assert_eq!(slots_per_immutable_file(&genesis), MAINNET_SLOTS_PER_FILE);
+    }
+
+    #[test]
+    fn a_cold_start_resumes_from_the_cursors_own_file_on_every_network() {
+        use dolos_cardano::include;
+
+        let resume = |genesis| {
+            resume_file(
+                None,
+                Some(PREVIEW_RESTORE_CURSOR),
+                slots_per_immutable_file(&genesis),
+            )
+        };
+
+        // the regression bar: 21600-slot chunks put this cursor in file 1024,
+        // a margin early is 1022 — unchanged from before the derivation
+        assert_eq!(resume(include::mainnet::load()), Some(1022));
+        assert_eq!(resume(include::preprod::load()), Some(1022));
+        assert_eq!(resume(include::devnet::load()), Some(1022));
+
+        // preview's 4320-slot chunks put the same cursor in file 5120
+        assert_eq!(resume(include::preview::load()), Some(5118));
+    }
+
+    #[test]
     fn an_empty_download_dir_resumes_from_the_cursors_own_file() {
+        let resume = |highest, cursor| resume_file(highest, cursor, MAINNET_SLOTS_PER_FILE);
+
         // empty dir with a cursor: the cursor's chunk file, a margin early
         assert_eq!(
-            resume_file(None, Some(SLOTS_PER_IMMUTABLE_FILE * 6000)),
-            Some(5998),
+            resume(None, Some(MAINNET_SLOTS_PER_FILE * 6000)),
+            Some(5998)
         );
 
         // mid-file slots land in the same file before the margin applies
         assert_eq!(
-            resume_file(None, Some(SLOTS_PER_IMMUTABLE_FILE * 6000 + 5)),
+            resume(None, Some(MAINNET_SLOTS_PER_FILE * 6000 + 5)),
             Some(5998),
         );
 
         // the margin floors at the first file
-        assert_eq!(resume_file(None, Some(SLOTS_PER_IMMUTABLE_FILE)), Some(0));
-        assert_eq!(resume_file(None, Some(0)), Some(0));
+        assert_eq!(resume(None, Some(MAINNET_SLOTS_PER_FILE)), Some(0));
+        assert_eq!(resume(None, Some(0)), Some(0));
 
         // empty dir, fresh store: the beginning
-        assert_eq!(resume_file(None, None), None);
-        assert_eq!(
-            next_window(resume_file(None, None), 40, 1000),
-            Some((None, 40))
-        );
+        assert_eq!(resume(None, None), None);
+        assert_eq!(next_window(resume(None, None), 40, 1000), Some((None, 40)));
 
         // files on disk stay authoritative, wherever the cursor is
         assert_eq!(
-            resume_file(Some(120), Some(SLOTS_PER_IMMUTABLE_FILE * 6000)),
+            resume(Some(120), Some(MAINNET_SLOTS_PER_FILE * 6000)),
             Some(120),
         );
+    }
+
+    #[test]
+    fn a_resume_far_behind_the_cursors_own_file_is_measured() {
+        let lag = |resume, cursor| resume_lag(resume, cursor, 4_320);
+
+        // the derivation's own answer sits exactly on the margin: no lag
+        let derived = resume_file(None, Some(PREVIEW_RESTORE_CURSOR), 4_320);
+        assert_eq!(lag(derived, Some(PREVIEW_RESTORE_CURSOR)), None);
+
+        // what the mainnet literal did to preview, in files
+        assert_eq!(lag(Some(1022), Some(PREVIEW_RESTORE_CURSOR)), Some(4_096));
+
+        // a stale download dir costs the same way, and is reported the same
+        assert_eq!(lag(Some(5), Some(PREVIEW_RESTORE_CURSOR)), Some(5_113));
+        assert_eq!(lag(None, Some(PREVIEW_RESTORE_CURSOR)), Some(5_118));
+
+        // ahead of the cursor is the stalled-window check's business, not
+        // this one's, and no cursor is nothing to measure against
+        assert_eq!(lag(Some(9_000), Some(PREVIEW_RESTORE_CURSOR)), None);
+        assert_eq!(lag(Some(0), None), None);
     }
 
     #[test]
@@ -902,10 +1063,16 @@ mod tests {
 
     #[test]
     fn cleanup_keeps_a_margin_behind_the_cursor() {
-        assert_eq!(consumed_below(0), 0);
-        assert_eq!(consumed_below(SLOTS_PER_IMMUTABLE_FILE * 2), 0);
-        assert_eq!(consumed_below(SLOTS_PER_IMMUTABLE_FILE * 3), 1);
-        assert_eq!(consumed_below(SLOTS_PER_IMMUTABLE_FILE * 10 + 5), 8);
+        let consumed = |slot| consumed_below(slot, MAINNET_SLOTS_PER_FILE);
+
+        assert_eq!(consumed(0), 0);
+        assert_eq!(consumed(MAINNET_SLOTS_PER_FILE * 2), 0);
+        assert_eq!(consumed(MAINNET_SLOTS_PER_FILE * 3), 1);
+        assert_eq!(consumed(MAINNET_SLOTS_PER_FILE * 10 + 5), 8);
+
+        // and the smaller chunks delete on their own scale, not mainnet's:
+        // the same slot is far more files in on preview
+        assert_eq!(consumed_below(MAINNET_SLOTS_PER_FILE * 3, 4_320), 13);
     }
 
     #[test]
@@ -921,7 +1088,12 @@ mod tests {
         std::fs::write(dir.path().join("lock"), []).unwrap();
 
         // threshold 3: files 0..=2 consumed, 3..=5 and non-numeric names stay
-        cleanup_consumed(dir.path(), SLOTS_PER_IMMUTABLE_FILE * 5).unwrap();
+        cleanup_consumed(
+            dir.path(),
+            MAINNET_SLOTS_PER_FILE * 5,
+            MAINNET_SLOTS_PER_FILE,
+        )
+        .unwrap();
 
         let mut remaining: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()

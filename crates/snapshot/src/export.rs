@@ -55,7 +55,12 @@
 //! records, but obtaining them means a Mithril aggregator and a certificate
 //! check, which is publisher plumbing. No restore, no signatures.
 
-use std::{collections::BTreeMap, num::NonZeroUsize, ops::Range};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroUsize,
+    ops::Range,
+    sync::{atomic::AtomicBool, Mutex},
+};
 
 use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
@@ -188,6 +193,69 @@ impl Default for IndexBand {
     }
 }
 
+/// How many layer producers one publish runs at once.
+///
+/// ## Why production is pooled at all
+///
+/// A publish's layers are independent by `(kind, scope)`: each is filled by its
+/// own store traversal, framed and compressed in isolation, and only joined at
+/// the seal. Driven one at a time on the caller's thread, the wall clock of a
+/// publish is the *sum* of every traversal — measured on the live backfill at
+/// one thread's worth of CPU against an idle link, with the per-layer cost flat
+/// against layer size. So the producers run on a pool of threads and the
+/// serial sum becomes a maximum: the index pass runs beside the state walks,
+/// which run beside each other.
+///
+/// ## What the pool must not change
+///
+/// Nothing about the bytes. Every layer is still filled by exactly one
+/// traversal, in the order that traversal promises, so its `diffId` is the one
+/// a serial walk computes; and the inscription lists layers by its own frozen
+/// rule rather than by completion order. Two runs at different worker counts —
+/// including one — produce the same document, which is what lets a
+/// reproduction pool differently than the publish it checks. The export golden
+/// and the cross-backend determinism test hold across every value of this.
+///
+/// ## Why the count is what it is
+///
+/// One worker is reserved for the index bands, which run in band order on that
+/// worker alone: a band holds [`IndexBand`]'s whole budget open at once, so two
+/// concurrent bands would be two copies of a budget that was sized as a
+/// ceiling, not as a share. Every other producer holds at most one state
+/// kind's shard sinks — sixteen, ~200 MiB by [`IndexBand::SINK_BYTES`] — so the
+/// pool's worst case beside the band's gigabyte is
+/// `(workers - 1) × 16 × 12 MiB`. The default of four keeps that under
+/// 600 MiB: a publish-wide resident peak around 1.6 GiB where the serial walk
+/// peaked at 1 GiB, on publishers measured well clear of either. An operator
+/// with less to spend narrows it with `--producers`, and `1` is the strictly
+/// serial walk this module always did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Producers(NonZeroUsize);
+
+impl Producers {
+    /// The pool a publish takes unless an operator resizes it.
+    pub const DEFAULT: Self = match NonZeroUsize::new(4) {
+        Some(workers) => Self(workers),
+        None => panic!("the default producer pool holds at least one worker"),
+    };
+
+    /// A pool of `workers` producers. Zero is not representable, which is the
+    /// refusal: a publish with no producer would write nothing.
+    pub fn new(workers: NonZeroUsize) -> Self {
+        Self(workers)
+    }
+
+    pub fn workers(&self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Default for Producers {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// What a publish covers: where the node stands, and which epochs its layers
 /// describe.
 ///
@@ -212,14 +280,19 @@ pub struct Plan {
     pub retained: RetainedEpochs,
     /// How many `indexes` layers one traversal of the index store fills.
     ///
-    /// Execution rather than geometry, and the one field here that is: it
-    /// changes neither which layers this publish writes nor a byte of what is
-    /// in them, only how many passes over the index store it takes to fill
-    /// them. It rides on the plan because every driver that walks these stores
-    /// — [`export`], [`reproduce`], [`verify_reproduction`] — pays the same
-    /// cost and should take the same band without each call site spelling it.
-    /// See [`IndexBand`].
+    /// Execution rather than geometry: it changes neither which layers this
+    /// publish writes nor a byte of what is in them, only how many passes over
+    /// the index store it takes to fill them. It rides on the plan because
+    /// every driver that walks these stores — [`export`], [`reproduce`],
+    /// [`verify_reproduction`] — pays the same cost and should take the same
+    /// band without each call site spelling it. See [`IndexBand`].
     pub band: IndexBand,
+    /// How many layer producers run at once.
+    ///
+    /// Execution rather than geometry, exactly as `band` is, and riding on the
+    /// plan for the same reason: every driver that walks these stores pays the
+    /// same serial cost without it. See [`Producers`].
+    pub producers: Producers,
 }
 
 impl Plan {
@@ -263,6 +336,7 @@ impl Plan {
             epochs,
             retained,
             band: IndexBand::DEFAULT,
+            producers: Producers::DEFAULT,
         })
     }
 
@@ -273,6 +347,16 @@ impl Plan {
     /// spelled, and it applies it to a plan the rules already built.
     pub fn with_band(mut self, band: IndexBand) -> Self {
         self.band = band;
+
+        self
+    }
+
+    /// Take a producer pool other than [`Producers::DEFAULT`].
+    ///
+    /// The same builder shape as [`with_band`](Plan::with_band), for the same
+    /// operator.
+    pub fn with_producers(mut self, producers: Producers) -> Self {
+        self.producers = producers;
 
         self
     }
@@ -370,7 +454,12 @@ pub fn plan<S: StateStore>(
 /// layers behind that a restart may carry forward on exactly the terms a
 /// predecessor's do. Nothing here decides where that is written down — that is
 /// the implementor's, as `adopt` already is.
-pub trait Predecessor {
+///
+/// `Sync`, because [`export`] drives its layer producers from a pool of
+/// threads and each producer asks these questions for its own layers. An
+/// implementor that keeps state — an adoption counter, a resumption record —
+/// keeps it behind its own synchronization.
+pub trait Predecessor: Sync {
     /// The history the new inscription carries: every prior publication,
     /// contiguous and ascending, ending at `sequence - 1`.
     ///
@@ -428,12 +517,14 @@ pub trait Predecessor {
     /// Note that `descriptor`'s layer is in the transport and will be in the
     /// manifest, whether it was built here or adopted.
     ///
-    /// Called once per epoch layer, as it lands and before the next one starts,
-    /// so an implementor writing it down leaves a record that means "this layer
-    /// is up" rather than "this layer was attempted" — the same boundary
-    /// [`crate::restore::Checkpoint`] records on its side. The state shards are
-    /// deliberately never offered: they describe a moving tip, and a restart
-    /// must rebuild them.
+    /// Called once per epoch layer, the moment it lands, so an implementor
+    /// writing it down leaves a record that means "this layer is up" rather
+    /// than "this layer was attempted" — the same boundary
+    /// [`crate::restore::Checkpoint`] records on its side. Layers land from
+    /// concurrent producers, so calls interleave; the record is keyed by kind
+    /// and scope, never by arrival order. The state shards are deliberately
+    /// never offered: they describe a moving tip, and a restart must rebuild
+    /// them.
     ///
     /// A failure here **fails the publish**. Recording is not a courtesy: a
     /// record that silently stopped being written would cost the hours it
@@ -790,7 +881,11 @@ impl Standing {
 ///
 /// Layers are listed in [`crate::KINDS`] order, and within a kind in ascending
 /// epoch or shard order. That order is part of the canonical document, so it is
-/// frozen by a golden rather than left to the loop that happens to write them.
+/// frozen by a golden rather than left to the pool that happens to write them:
+/// production is split into jobs that run concurrently under
+/// [`Plan::producers`], and each job's descriptors are reassembled by the
+/// position its layers hold in the document, whatever order the jobs finish
+/// in. See [`Producers`] for what the pool changes and what it must not.
 ///
 /// `digest_records` is optional and has no source in this slice — a stele
 /// without a `digests` layer is valid, since ADR-004 makes every layer
@@ -820,7 +915,7 @@ pub fn export<W, A, S, I>(
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
-    W: SteleWriter,
+    W: SteleWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
     I: IndexStore,
@@ -840,59 +935,70 @@ where
         + state_layers(plan, previous)?
         + usize::from(digest_records.is_some());
 
-    let mut cursor = Cursor::new(observer, total);
+    let cursor = Cursor::new(observer, total);
+    let cursor = &cursor;
 
-    let mut layers = Vec::new();
+    // One job per independent slice of the document, queued in the order the
+    // inscription lists layers. The queue order is what [`produce`] reassembles
+    // descriptors by, so the pool can run these however it likes without the
+    // document noticing.
+    let mut jobs: Vec<Job<'_>> = Vec::new();
 
     for window in &plan.epochs {
-        landed(
-            write_blocks(stele, plan, archive, window, previous, &mut cursor)?,
-            previous,
-            &mut layers,
-        )?;
+        jobs.push(Job::light(move || {
+            let descriptor = write_blocks(stele, plan, archive, window, previous, cursor)?;
+            previous.landed(&descriptor)?;
+
+            Ok(vec![descriptor])
+        }));
     }
 
     // Banded rather than one window at a time: an index layer costs a pass over
-    // the whole store, so this loop is where a first publish's O(N²) lives.
-    // See [`IndexBand`], and [`write_indexes`] for why no `landed` call sits
-    // here as it does in the loops around it.
+    // the whole store, so these jobs are where a first publish's O(N²) lives.
+    // They run on the band lane — in band order, one at a time, beside the
+    // light jobs rather than after them. See [`IndexBand`] and [`Producers`],
+    // and [`write_indexes`] for why no `landed` call sits here as it does in
+    // the jobs around it.
     for band in plan.epochs.chunks(plan.band.epochs()) {
-        layers.extend(write_indexes(
-            stele,
-            plan,
-            indexes,
-            band,
-            previous,
-            &mut cursor,
-        )?);
+        jobs.push(Job::band(move || {
+            write_indexes(stele, plan, indexes, band, previous, cursor)
+        }));
     }
 
-    // Kind-major, like the two loops above: the inscription lists layers in
-    // `KINDS` order and within a kind by ascending epoch.
+    // Kind-major, like the jobs above: the inscription lists layers in `KINDS`
+    // order and within a kind by ascending epoch.
     for (kind, ns) in LOG_KINDS {
         for window in &plan.epochs {
-            if let Some(descriptor) = write_logs(
-                stele,
-                plan,
-                archive,
-                window,
-                kind,
-                ns,
-                previous,
-                &mut cursor,
-            )? {
-                landed(descriptor, previous, &mut layers)?;
-            }
+            jobs.push(Job::light(move || {
+                match write_logs(stele, plan, archive, window, kind, ns, previous, cursor)? {
+                    Some(descriptor) => {
+                        previous.landed(&descriptor)?;
+
+                        Ok(vec![descriptor])
+                    }
+                    None => Ok(Vec::new()),
+                }
+            }));
         }
     }
 
-    // The tip shards are not offered to the predecessor; the dumps among them
-    // are. See [`Predecessor::landed`].
-    layers.extend(write_state(stele, plan, state, previous, &mut cursor)?);
+    // One job per state kind: each walks its own namespace once, so the
+    // seventeen walks that ran in sequence overlap instead. The tip shards are
+    // not offered to the predecessor; the dumps among them are. See
+    // [`Predecessor::landed`].
+    for (kind, ns, shards) in STATE_KINDS {
+        jobs.push(Job::light(move || {
+            write_state_kind(stele, plan, state, kind, ns, shards, previous, cursor)
+        }));
+    }
 
     if let Some(records) = digest_records {
-        layers.push(write_digests(stele, plan, records, &mut cursor)?);
+        jobs.push(Job::light(move || {
+            Ok(vec![write_digests(stele, plan, records, cursor)?])
+        }));
     }
+
+    let layers = produce(jobs, plan.producers)?;
 
     debug_assert_eq!(
         cursor.opened(),
@@ -1188,21 +1294,185 @@ fn sink<W: SteleWriter>(stele: &W, spec: &LayerSpec) -> Result<W::Sink, Error> {
     Ok(stele.layer_sink(&DolosProfile, spec, COMPRESSION_LEVEL)?)
 }
 
-/// One epoch layer is in the transport: tell the predecessor before counting
-/// it.
-///
-/// In that order, and one layer at a time, because the two together are what
-/// make the note honest — a record written after the loop would describe a
-/// publish that finished, which is the one case it is no use in.
-fn landed(
-    descriptor: LayerDescriptor,
-    previous: &dyn Predecessor,
-    layers: &mut Vec<LayerDescriptor>,
-) -> Result<(), Error> {
-    previous.landed(&descriptor)?;
-    layers.push(descriptor);
+/// What one production job returns: the descriptors for its slice of the
+/// document, in the order that slice lists them.
+type JobRun<'run> = Box<dyn FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run>;
 
-    Ok(())
+/// One independent slice of a publish's production: a traversal, the sinks it
+/// fills, and the `landed` notes for the layers it lands.
+///
+/// Jobs borrow the stores and the transport for the length of one [`produce`]
+/// call, which is why the lifetime is a run and not `'static`: the pool is
+/// scoped threads, not tasks.
+struct Job<'run> {
+    lane: Lane,
+    run: JobRun<'run>,
+}
+
+/// Which worker a job may run on. See [`Producers`] for why the bands have a
+/// lane of their own.
+enum Lane {
+    /// The index bands: one at a time, in band order, on the reserved worker —
+    /// each holds the whole of [`IndexBand`]'s budget open, so two at once
+    /// would be two copies of a ceiling.
+    Band,
+    /// Everything else: at most one state kind's shard sinks apiece, safe to
+    /// run as many at once as the pool has workers.
+    Light,
+}
+
+impl<'run> Job<'run> {
+    fn light(run: impl FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run) -> Self {
+        Self {
+            lane: Lane::Light,
+            run: Box::new(run),
+        }
+    }
+
+    fn band(run: impl FnOnce() -> Result<Vec<LayerDescriptor>, Error> + Send + 'run) -> Self {
+        Self {
+            lane: Lane::Band,
+            run: Box::new(run),
+        }
+    }
+}
+
+/// The shared side of one [`produce`] call: the queue the light workers pull
+/// from, the slots the results land in, and the first failure.
+struct Pool<'run> {
+    lights: Mutex<VecDeque<(usize, JobRun<'run>)>>,
+    slots: Mutex<Vec<Option<Vec<LayerDescriptor>>>>,
+    failed: AtomicBool,
+    error: Mutex<Option<Error>>,
+}
+
+/// A poisoned lock here means a job panicked, and the panic is already
+/// propagating through the thread scope; what is behind the lock is plain data
+/// that was never mutated mid-panic, so the other workers drain out through it
+/// rather than turning one panic into many.
+fn unpoisoned<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl<'run> Pool<'run> {
+    fn failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// File one job's outcome. The first error is the export's error; a job
+    /// that fails after it is the same walk failing again, and a job that
+    /// succeeds after it is work the seal will never name — either way the
+    /// flag stops the queues.
+    fn finish(&self, position: usize, outcome: Result<Vec<LayerDescriptor>, Error>) {
+        match outcome {
+            Ok(descriptors) => {
+                unpoisoned(&self.slots)[position] = Some(descriptors);
+            }
+            Err(error) => {
+                self.failed
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                unpoisoned(&self.error).get_or_insert(error);
+            }
+        }
+    }
+
+    /// Run light jobs until the queue is empty or the export has failed.
+    fn drain(&self) {
+        loop {
+            if self.failed() {
+                return;
+            }
+
+            let Some((position, run)) = unpoisoned(&self.lights).pop_front() else {
+                return;
+            };
+
+            self.finish(position, run());
+        }
+    }
+}
+
+/// Run every job and hand back the document's layers, in document order.
+///
+/// A pool of [`Producers::workers`] threads: one reserved for the band lane,
+/// which runs the index bands in order and then helps with the light queue;
+/// the rest on the light queue from the start. One worker is the strictly
+/// serial walk — every job inline, in document order, no threads at all —
+/// which is both the escape hatch and the baseline the concurrent path is
+/// tested against.
+///
+/// The first failure stops both queues and is the error the caller gets. Jobs
+/// already running finish first — a store iterator cannot be cancelled
+/// mid-record, and a sink dropped without [`RecordSink::finish`] cleans up
+/// after itself — so a failed export returns once the pool is quiet, with
+/// nothing staged left behind.
+fn produce(jobs: Vec<Job<'_>>, producers: Producers) -> Result<Vec<LayerDescriptor>, Error> {
+    if producers.workers() == 1 {
+        let mut layers = Vec::new();
+
+        for job in jobs {
+            layers.extend((job.run)()?);
+        }
+
+        return Ok(layers);
+    }
+
+    let mut bands = VecDeque::new();
+    let mut lights = VecDeque::new();
+    let mut slots = Vec::with_capacity(jobs.len());
+
+    for (position, job) in jobs.into_iter().enumerate() {
+        slots.push(None);
+
+        match job.lane {
+            Lane::Band => bands.push_back((position, job.run)),
+            Lane::Light => lights.push_back((position, job.run)),
+        }
+    }
+
+    let pool = Pool {
+        lights: Mutex::new(lights),
+        slots: Mutex::new(slots),
+        failed: AtomicBool::new(false),
+        error: Mutex::new(None),
+    };
+
+    std::thread::scope(|scope| {
+        let pool = &pool;
+
+        std::thread::Builder::new()
+            .name("stele-produce-bands".to_owned())
+            .spawn_scoped(scope, move || {
+                for (position, run) in bands {
+                    if pool.failed() {
+                        return;
+                    }
+
+                    pool.finish(position, run());
+                }
+
+                pool.drain();
+            })
+            .expect("spawning the band producer");
+
+        for worker in 1..producers.workers() {
+            std::thread::Builder::new()
+                .name(format!("stele-produce-{worker}"))
+                .spawn_scoped(scope, move || pool.drain())
+                .expect("spawning a layer producer");
+        }
+    });
+
+    if let Some(error) = unpoisoned(&pool.error).take() {
+        return Err(error);
+    }
+
+    let slots = std::mem::take(&mut *unpoisoned(&pool.slots));
+
+    Ok(slots
+        .into_iter()
+        .flat_map(|slot| slot.expect("a job neither failed the export nor filled its slot"))
+        .collect())
 }
 
 /// The layer spec for one epoch window, and what the predecessor says about it.
@@ -1232,7 +1502,7 @@ fn write_blocks<W: SteleWriter, A: ArchiveStore>(
     archive: &A,
     window: &EpochWindow,
     previous: &dyn Predecessor,
-    cursor: &mut Cursor<'_>,
+    cursor: &Cursor<'_>,
 ) -> Result<LayerDescriptor, Error> {
     let scope = window.scope(plan.network.magic());
 
@@ -1293,7 +1563,7 @@ fn write_logs<W: SteleWriter, A: ArchiveStore>(
     kind: &'static str,
     ns: Namespace,
     previous: &dyn Predecessor,
-    cursor: &mut Cursor<'_>,
+    cursor: &Cursor<'_>,
 ) -> Result<Option<LayerDescriptor>, Error> {
     let scope = window.scope(plan.network.magic());
 
@@ -1514,7 +1784,7 @@ fn write_indexes<W: SteleWriter, I: IndexStore>(
     store: &I,
     band: &[EpochWindow],
     previous: &dyn Predecessor,
-    cursor: &mut Cursor<'_>,
+    cursor: &Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
     let mut descriptors: Vec<Option<LayerDescriptor>> = Vec::with_capacity(band.len());
     let mut building = Vec::with_capacity(band.len());
@@ -1642,16 +1912,17 @@ fn route_index<K: RecordSink>(
     Ok(())
 }
 
-/// The state tip: seventeen kinds, walked one namespace at a time.
+/// One state kind: its namespace, walked once into its shard layers.
 ///
-/// Kinds go in [`STATE_KINDS`] order — the inscription's order — and within a
-/// kind every shard is written ascending. Per kind, that kind's shard sinks
-/// stay open while its namespace is walked once and each record is routed by
-/// [`crate::shard_of`]; the alternative — sixteen passes over `utxos`, or one
-/// pass buffering into sixteen buckets — is either sixteen full scans of a
-/// mainnet-sized set or the whole of it in memory. The I/O adds up to what the
-/// pre-split single walk cost, because that walk was already seventeen
-/// sequential per-namespace iterations under one loop.
+/// [`export`] queues one of these per [`STATE_KINDS`] entry, in table order —
+/// the inscription's order — and within a kind every shard is written
+/// ascending. The kind's shard sinks stay open while its namespace is walked
+/// once and each record is routed by [`crate::shard_of`]; the alternative —
+/// sixteen passes over `utxos`, or one pass buffering into sixteen buckets —
+/// is either sixteen full scans of a mainnet-sized set or the whole of it in
+/// memory. Each kind reads its own namespace and nothing else's, which is what
+/// lets the kinds run as concurrent jobs where they used to be sequential
+/// iterations under one loop.
 ///
 /// Every shard of every kind is written, including an empty one, so the layer
 /// set a reader sees is fixed by [`STATE_KINDS`] and never a function of what
@@ -1693,115 +1964,111 @@ fn route_index<K: RecordSink>(
 /// from the predecessor, or — where the predecessor has no such layer — warned
 /// about and left out, which is a publish that carries less history rather
 /// than a failure. Producing a missing one is a backfill run's job.
-fn write_state<W: SteleWriter, S: StateStore>(
+#[allow(clippy::too_many_arguments)]
+fn write_state_kind<W: SteleWriter, S: StateStore>(
     stele: &W,
     plan: &Plan,
     store: &S,
+    kind: &'static str,
+    ns: Namespace,
+    shards: u8,
     previous: &dyn Predecessor,
-    cursor: &mut Cursor<'_>,
+    cursor: &Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
-    // The tip, plus one full set per due dump. An adopt-miss makes this an
-    // overestimate, which is the direction a capacity hint is free to be wrong
-    // in.
-    let mut layers =
-        Vec::with_capacity(state_layer_count() * (1 + plan.retained.due(plan.sequence).count()));
+    // Ascending epoch, then the tip: the order the inscription lists a
+    // kind's layers in, fixed here rather than left to the loops below.
+    let mut dumps = Vec::new();
 
-    for (kind, ns, shards) in STATE_KINDS {
-        // Ascending epoch, then the tip: the order the inscription lists a
-        // kind's layers in, fixed here rather than left to the loops below.
-        let mut dumps = Vec::new();
-
-        for epoch in plan.adoptable_dumps() {
-            dumps.extend(adopt_dump(plan, kind, shards, epoch, previous, cursor)?);
-        }
-
-        let mut sinks = Vec::with_capacity(shards as usize);
-        let mut orders = Vec::with_capacity(shards as usize);
-        let mut positions = Vec::with_capacity(shards as usize);
-
-        // Announced before the tip's, because that is where they sit in the
-        // document; they are closed after it, because that is when the bytes
-        // they name exist.
-        let cut: Vec<LayerSpec> = match plan.cuts_a_dump() {
-            true => (0..shards)
-                .map(|shard| plan.dump_scope(plan.sequence, shard).layer_spec(kind))
-                .collect::<Result<_, Error>>()?,
-            false => Vec::new(),
-        };
-
-        let cut_positions: Vec<usize> = cut
-            .iter()
-            .map(|spec| cursor.open(kind, &spec.scope))
-            .collect();
-
-        for shard in 0..shards {
-            let spec = plan.state_scope(shard).layer_spec(kind)?;
-
-            positions.push(cursor.open(kind, &spec.scope));
-            sinks.push(sink(stele, &spec)?);
-            orders.push(state::OrderCheck::for_shard(shard, shards));
-        }
-
-        let mut records = cursor.records();
-
-        if ns == UTXOS {
-            for entry in store.iter_utxos()? {
-                let (txo, value) = entry?;
-
-                route(
-                    &mut sinks,
-                    &mut orders,
-                    ns,
-                    shards,
-                    state::utxo(&txo, &value)?,
-                )?;
-                records.tick();
-            }
-        } else {
-            // `full_range` is the store's own name for everything, and it ends
-            // *exclusively* at `[0xff; 32]` — so an entity keyed with
-            // thirty-two `0xff` bytes is invisible to it. That is a limit of a
-            // fixed-width key type rather than something export could route
-            // around: there is no representable exclusive bound above the
-            // maximum key. It is stated rather than silently inherited, because
-            // a state entity that no publisher can export is worth someone
-            // knowing about.
-            for entry in store.iter_entities(ns, EntityKey::full_range())? {
-                let (key, value) = entry?;
-
-                route(
-                    &mut sinks,
-                    &mut orders,
-                    ns,
-                    shards,
-                    state::entity(&key, &value),
-                )?;
-                records.tick();
-            }
-        }
-
-        records.flush();
-
-        let mut tip = Vec::with_capacity(shards as usize);
-
-        for (sink, at) in sinks.into_iter().zip(positions) {
-            let written = sink.finish()?;
-            cursor.close(at, kind, Outcome::Transferred);
-
-            tip.push(written);
-        }
-
-        for ((spec, at), written) in cut.iter().zip(cut_positions).zip(&tip) {
-            let again = stele.carry_again(written, spec.scope.clone())?;
-            cursor.close(at, kind, Outcome::Transferred);
-
-            previous.landed(&again.descriptor)?;
-            dumps.push(again.descriptor);
-        }
-
-        layers.append(&mut dumps);
-        layers.extend(tip.into_iter().map(|written| written.descriptor));
+    for epoch in plan.adoptable_dumps() {
+        dumps.extend(adopt_dump(plan, kind, shards, epoch, previous, cursor)?);
     }
+
+    let mut sinks = Vec::with_capacity(shards as usize);
+    let mut orders = Vec::with_capacity(shards as usize);
+    let mut positions = Vec::with_capacity(shards as usize);
+
+    // Announced before the tip's, because that is where they sit in the
+    // document; they are closed after it, because that is when the bytes
+    // they name exist.
+    let cut: Vec<LayerSpec> = match plan.cuts_a_dump() {
+        true => (0..shards)
+            .map(|shard| plan.dump_scope(plan.sequence, shard).layer_spec(kind))
+            .collect::<Result<_, Error>>()?,
+        false => Vec::new(),
+    };
+
+    let cut_positions: Vec<usize> = cut
+        .iter()
+        .map(|spec| cursor.open(kind, &spec.scope))
+        .collect();
+
+    for shard in 0..shards {
+        let spec = plan.state_scope(shard).layer_spec(kind)?;
+
+        positions.push(cursor.open(kind, &spec.scope));
+        sinks.push(sink(stele, &spec)?);
+        orders.push(state::OrderCheck::for_shard(shard, shards));
+    }
+
+    let mut records = cursor.records();
+
+    if ns == UTXOS {
+        for entry in store.iter_utxos()? {
+            let (txo, value) = entry?;
+
+            route(
+                &mut sinks,
+                &mut orders,
+                ns,
+                shards,
+                state::utxo(&txo, &value)?,
+            )?;
+            records.tick();
+        }
+    } else {
+        // `full_range` is the store's own name for everything, and it ends
+        // *exclusively* at `[0xff; 32]` — so an entity keyed with
+        // thirty-two `0xff` bytes is invisible to it. That is a limit of a
+        // fixed-width key type rather than something export could route
+        // around: there is no representable exclusive bound above the
+        // maximum key. It is stated rather than silently inherited, because
+        // a state entity that no publisher can export is worth someone
+        // knowing about.
+        for entry in store.iter_entities(ns, EntityKey::full_range())? {
+            let (key, value) = entry?;
+
+            route(
+                &mut sinks,
+                &mut orders,
+                ns,
+                shards,
+                state::entity(&key, &value),
+            )?;
+            records.tick();
+        }
+    }
+
+    records.flush();
+
+    let mut tip = Vec::with_capacity(shards as usize);
+
+    for (sink, at) in sinks.into_iter().zip(positions) {
+        let written = sink.finish()?;
+        cursor.close(at, kind, Outcome::Transferred);
+
+        tip.push(written);
+    }
+
+    for ((spec, at), written) in cut.iter().zip(cut_positions).zip(&tip) {
+        let again = stele.carry_again(written, spec.scope.clone())?;
+        cursor.close(at, kind, Outcome::Transferred);
+
+        previous.landed(&again.descriptor)?;
+        dumps.push(again.descriptor);
+    }
+
+    let mut layers = dumps;
+    layers.extend(tip.into_iter().map(|written| written.descriptor));
 
     Ok(layers)
 }
@@ -1826,7 +2093,7 @@ fn adopt_dump(
     shards: u8,
     epoch: u64,
     previous: &dyn Predecessor,
-    cursor: &mut Cursor<'_>,
+    cursor: &Cursor<'_>,
 ) -> Result<Vec<LayerDescriptor>, Error> {
     let mut adopted = Vec::with_capacity(shards as usize);
 
@@ -1892,7 +2159,7 @@ fn write_digests<W: SteleWriter>(
     stele: &W,
     plan: &Plan,
     records: &[digests::ImmutableDigests],
-    cursor: &mut Cursor<'_>,
+    cursor: &Cursor<'_>,
 ) -> Result<LayerDescriptor, Error> {
     let mut order = digests::OrderCheck::default();
 
@@ -2152,6 +2419,7 @@ mod chain_tests {
             epochs: vec![],
             retained: RetainedEpochs::default(),
             band: IndexBand::DEFAULT,
+            producers: Producers::DEFAULT,
         }
     }
 

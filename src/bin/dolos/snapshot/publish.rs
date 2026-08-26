@@ -63,6 +63,13 @@ pub struct Args {
     #[arg(long, value_name = "EPOCHS")]
     index_band: Option<std::num::NonZeroUsize>,
 
+    /// how many layer producers run at once: the store traversals that fill,
+    /// frame and compress layers, one of them reserved for the index bands.
+    /// Changes nothing about the stele it produces. Defaults to 4; `1` is the
+    /// strictly serial walk
+    #[arg(long, value_name = "N")]
+    producers: Option<std::num::NonZeroUsize>,
+
     /// how many layer round trips to run at once against the repository; a
     /// publish is a few hundred small transfers and its wall clock is their
     /// latency, not their bytes. Defaults to 8; `1` is the strictly serial
@@ -107,6 +114,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 
     let plan = super::restrict(plan, args.epochs);
     let plan = super::banded(plan, args.index_band);
+    let plan = super::produced(plan, args.producers);
 
     super::report_plan(&plan)?;
 

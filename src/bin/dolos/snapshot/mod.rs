@@ -23,7 +23,7 @@
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
-    export::{IndexBand, Plan},
+    export::{IndexBand, Plan, Producers},
     RetainedEpochs,
 };
 use miette::{Context as _, IntoDiagnostic as _};
@@ -194,6 +194,20 @@ pub fn restrict(plan: Plan, range: Option<EpochRange>) -> Plan {
 pub fn banded(plan: Plan, band: Option<std::num::NonZeroUsize>) -> Plan {
     match band {
         Some(band) => plan.with_band(IndexBand::new(band)),
+        None => plan,
+    }
+}
+
+/// Apply an operator's producer pool to a plan, or leave the sized default.
+///
+/// Shared for the reason [`banded`] is: the same three commands pay the same
+/// store walks, so the knob that pools them is spelled once. Like the band,
+/// this changes nothing about the document — layers are reassembled by their
+/// position in it, never by completion order — so a reproduction is free to
+/// pool differently than the publish it checks.
+pub fn produced(plan: Plan, producers: Option<std::num::NonZeroUsize>) -> Plan {
+    match producers {
+        Some(producers) => plan.with_producers(Producers::new(producers)),
         None => plan,
     }
 }

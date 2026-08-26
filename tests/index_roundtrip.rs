@@ -1093,6 +1093,12 @@ fn measure_one_epoch_iteration_cost() {
 /// The unit is not portable: macOS reports bytes and Linux kilobytes. Both are
 /// spelled out rather than papered over, because a figure that is a thousand
 /// times wrong is worse than no figure.
+///
+/// `getrusage` is POSIX and has no Windows counterpart, so this and everything
+/// downstream of it is unix-only. The gate has to match the one on `nix` in
+/// `Cargo.toml` exactly — a config where one applies and the other does not is
+/// the compile error this replaces.
+#[cfg(unix)]
 fn max_rss_bytes() -> u64 {
     let usage = nix::sys::resource::getrusage(nix::sys::resource::UsageWho::RUSAGE_SELF)
         .expect("getrusage failed");
@@ -1105,6 +1111,7 @@ fn max_rss_bytes() -> u64 {
     }
 }
 
+#[cfg(unix)]
 fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
@@ -1121,6 +1128,7 @@ fn mib(bytes: u64) -> f64 {
 /// Run with:
 /// `cargo test --release --test index_roundtrip -- --ignored --nocapture
 /// measure_layer_sink_residency`
+#[cfg(unix)]
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn measure_layer_sink_residency() {
@@ -1201,6 +1209,7 @@ fn measure_layer_sink_residency() {
 /// `cargo test --release --test index_roundtrip -- --ignored --nocapture
 /// measure_banded_publish_cost`, and `DOLOS_INDEX_COST_EPOCHS=32` for the
 /// deeper store [`measure_one_epoch_iteration_cost`] also reports.
+#[cfg(unix)]
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn measure_banded_publish_cost() {
@@ -1266,6 +1275,7 @@ fn measure_banded_publish_cost() {
 
 /// Publish the seeded index store at `band`, into a directory that lives as
 /// long as the returned guard.
+#[cfg(unix)]
 fn publish_at_band<S: CoreIndexStore>(
     store: &S,
     epochs: u64,
@@ -1323,6 +1333,7 @@ fn publish_at_band<S: CoreIndexStore>(
 
 /// One era of [`EPOCH_LEN`]-slot epochs from slot zero — the geometry
 /// [`epoch_slots`] already seeds against, stated in the form a [`Plan`] reads.
+#[cfg(unix)]
 fn cost_summary() -> dolos_cardano::eras::ChainSummary {
     let mut chain = dolos_cardano::eras::ChainSummary::default();
 
