@@ -82,10 +82,19 @@ fn build_epoch_content<D: Domain>(
         chain.slot_time(rolling.last_block_slot)
     };
 
-    let active_stake = match active_stake {
-        Some(active_stake) => Some(active_stake),
-        None => domain.sum_active_stake_for_epoch(epoch, chain)?,
-    };
+    // The early history of preprod has a gap in the stake snapshot. The
+    // reference reports `null` active stake for epochs 13-28. The value can
+    // come from the current-epoch snapshot or the StakeLogs. This override
+    // resets those epochs to `null` in both cases (see `null_active_stake`).
+    let active_stake =
+        if crate::hacks::null_active_stake::contains(domain.genesis().network_magic(), epoch) {
+            None
+        } else {
+            match active_stake {
+                Some(active_stake) => Some(active_stake),
+                None => domain.sum_active_stake_for_epoch(epoch, chain)?,
+            }
+        };
 
     Ok(mapping::EpochContentModelBuilder {
         state,
@@ -1270,6 +1279,104 @@ mod tests {
         let content: EpochContent =
             serde_json::from_slice(&bytes).expect("failed to parse epoch content");
         assert!(content.active_stake.is_some());
+    }
+
+    /// A caller can pass a computed active stake for an epoch. The builder
+    /// resets that value to null inside the preprod gap and keeps it elsewhere.
+    /// This test calls the real builder for epochs inside the gap, on the
+    /// bounds, and on each side. It also uses a preview epoch and a mainnet
+    /// epoch, so the reset depends on the network magic. The `next` and
+    /// `previous` handlers build each array item through this same builder, so
+    /// this test covers them too.
+    #[test]
+    fn build_epoch_content_nulls_active_stake_across_the_preprod_gap() {
+        use std::sync::Arc;
+
+        use dolos_core::config::{CardanoConfig, MinibfConfig};
+        use dolos_testing::toy_domain::ToyDomain;
+
+        use crate::mapping::IntoModel as _;
+
+        // This helper builds a minibf facade over a fresh domain for one
+        // network. The genesis work unit runs during construction, so the era
+        // summary and the base epoch load without an imported block.
+        fn facade_for(genesis: dolos_core::Genesis) -> Facade<ToyDomain> {
+            let domain = ToyDomain::new_with_genesis_and_config(
+                Arc::new(genesis),
+                CardanoConfig::default(),
+                None,
+                None,
+            );
+            Facade {
+                inner: domain,
+                config: MinibfConfig::new("[::]:0".parse().expect("valid listen address")),
+                cache: crate::cache::CacheService::default(),
+            }
+        }
+
+        // This value is a non-null figure. The builder keeps it outside the gap
+        // and resets it to null inside the gap. The value matches the genesis
+        // stake sum of preprod.
+        const ACTIVE_STAKE: u64 = 300_000_000_000_000;
+
+        // This helper resolves one epoch through the real builder. It returns
+        // the mapped `active_stake`, exactly as a handler serializes it.
+        fn active_stake_for(facade: &Facade<ToyDomain>, epoch: Epoch) -> Option<String> {
+            let chain = facade.get_chain_summary().expect("era summary");
+            let state =
+                dolos_cardano::load_epoch::<ToyDomain>(facade.state()).expect("base epoch state");
+            build_epoch_content(facade, &chain, epoch, state, Some(ACTIVE_STAKE))
+                .expect("build epoch content")
+                .into_model()
+                .expect("map epoch content")
+                .active_stake
+        }
+
+        let with_value = || Some(ACTIVE_STAKE.to_string());
+
+        let preprod = facade_for(dolos_cardano::include::preprod::load());
+
+        // The gap runs from epoch 13 to epoch 28. Epochs 5 and 12 are before
+        // the gap. Epochs 29 and 100 are after it. All of these epochs keep the
+        // value. Epochs 13, 20, and 28 are inside the gap, so they reset to
+        // null.
+        assert_eq!(active_stake_for(&preprod, 5), with_value());
+        assert_eq!(active_stake_for(&preprod, 12), with_value());
+        assert_eq!(active_stake_for(&preprod, 13), None);
+        assert_eq!(active_stake_for(&preprod, 20), None);
+        assert_eq!(active_stake_for(&preprod, 28), None);
+        assert_eq!(active_stake_for(&preprod, 29), with_value());
+        assert_eq!(active_stake_for(&preprod, 100), with_value());
+
+        // Preview shares the endpoint but has no gap, so the same epoch keeps
+        // its value.
+        let preview = facade_for(dolos_cardano::include::preview::load());
+        assert_eq!(active_stake_for(&preview, 20), with_value());
+
+        // Mainnet also has no gap, so the same epoch keeps its value.
+        let mainnet = facade_for(dolos_cardano::include::mainnet::load());
+        assert_eq!(active_stake_for(&mainnet, 20), with_value());
+
+        // The archive fault proves that gap epochs do not read the StakeLogs.
+        // The builder still returns null when the caller supplies no value.
+        let faulty_preprod = Facade {
+            inner: dolos_testing::faults::FaultyToyDomain::new(
+                preprod.inner.clone(),
+                TestFault::ArchiveStoreError,
+            ),
+            config: preprod.config.clone(),
+            cache: preprod.cache.clone(),
+        };
+        let chain = faulty_preprod.get_chain_summary().expect("era summary");
+        let state = dolos_cardano::load_epoch::<dolos_testing::faults::FaultyToyDomain>(
+            faulty_preprod.state(),
+        )
+        .expect("base epoch state");
+        let content = build_epoch_content(&faulty_preprod, &chain, 20, state, None)
+            .expect("build epoch content")
+            .into_model()
+            .expect("map epoch content");
+        assert_eq!(content.active_stake, None);
     }
 
     #[tokio::test]
