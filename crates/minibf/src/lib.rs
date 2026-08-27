@@ -609,6 +609,10 @@ where
             "/governance/dreps/{drep_id}",
             get(routes::governance::drep_by_id::<D>),
         )
+        .route(
+            "/governance/proposals",
+            get(routes::governance::proposals::<D>),
+        )
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()

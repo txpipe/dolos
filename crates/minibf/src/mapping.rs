@@ -87,6 +87,7 @@ const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
+const GOV_ACTION_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("gov_action");
 
 #[inline]
 pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -122,6 +123,22 @@ pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
 
 pub fn bech32_calidus(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
     bech32(CALIDUS_HRP, key)
+}
+
+/// CIP-129 governance action id: the proposing tx hash followed by the index
+/// of the action inside that tx.
+///
+/// Blockfrost writes the index as the shortest big-endian byte string that
+/// holds it, so index 0 still costs a byte and an index past 255 costs two.
+/// No tx comes close to 256 proposals, but matching the rule is free.
+pub fn bech32_gov_action(tx: &Hash<32>, idx: u32) -> Result<String, StatusCode> {
+    let bytes = idx.to_be_bytes();
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len() - 1);
+
+    bech32(GOV_ACTION_HRP, [tx.as_slice(), &bytes[first..]].concat())
 }
 
 pub fn asset_fingerprint(subject: &[u8]) -> Result<String, StatusCode> {

@@ -23,8 +23,9 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Certificate, DatumOption, PlutusData, PostAlonzoTransactionOutput, ScriptRef,
-                TransactionBody, TransactionOutput, Value, WitnessSet,
+                Anchor, Certificate, DatumOption, GovAction, PlutusData,
+                PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef, TransactionBody,
+                TransactionOutput, Value, WitnessSet,
             },
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
@@ -55,6 +56,8 @@ pub struct SyntheticBlockConfig {
     pub pool_relays: Vec<Relay>,
     pub drep_keyhash: [u8; 28],
     pub drep_deposit: u64,
+    pub gov_actions_by_block: Vec<BlockGovActions>,
+    pub proposal_deposit: u64,
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -111,9 +114,13 @@ impl Default for SyntheticBlockConfig {
             pool_relays: vec![],
             drep_keyhash: [7u8; 28],
             drep_deposit: 1000,
+            gov_actions_by_block: vec![],
+            proposal_deposit: 100_000_000,
         }
     }
 }
+
+pub type BlockGovActions = Vec<Vec<GovAction>>;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticVectors {
@@ -236,6 +243,17 @@ pub fn build_synthetic_blocks(
         );
         cfg.asset_names_by_block.clone()
     };
+
+    let gov_actions_by_block = if cfg.gov_actions_by_block.is_empty() {
+        vec![vec![]; block_count]
+    } else {
+        assert_eq!(
+            cfg.gov_actions_by_block.len(),
+            block_count,
+            "gov_actions_by_block must contain one entry per block"
+        );
+        cfg.gov_actions_by_block.clone()
+    };
     let policy_id_hex = hex::encode(cfg.policy_id);
     let asset_name_hex = hex::encode(asset_names[0].as_bytes());
     let fixture_extras = Some(build_datum_and_script_fixture());
@@ -339,6 +357,11 @@ pub fn build_synthetic_blocks(
             let withdrawal_amount = (tx_offset == 0).then_some(1_000_000 + block_number);
             withdrawal_amounts.push(withdrawal_amount);
 
+            let gov_actions = gov_actions_by_block[offset]
+                .get(tx_offset)
+                .cloned()
+                .unwrap_or_default();
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -355,6 +378,8 @@ pub fn build_synthetic_blocks(
                 withdrawal_amount,
                 if tx_offset == 0 { Some(aux_hash) } else { None },
                 extras,
+                gov_actions,
+                cfg.proposal_deposit,
             ));
         }
 
@@ -642,6 +667,8 @@ fn sample_transaction(
     withdrawal_amount: Option<u64>,
     auxiliary_data_hash: Option<Hash<32>>,
     extras: Option<&SyntheticFixtureExtras>,
+    gov_actions: Vec<GovAction>,
+    proposal_deposit: u64,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
@@ -684,6 +711,24 @@ fn sample_transaction(
     let reward_account = StakeAddress::new(Network::Testnet, reward_payload);
     let withdrawals = withdrawal_amount
         .map(|amount| BTreeMap::from_iter([(Bytes::from(reward_account.to_vec()), amount)]));
+
+    // `try_from` only fails on an empty vec, which is exactly the no-proposals
+    // case the body wants as `None`
+    let proposal_procedures = NonEmptySet::try_from(
+        gov_actions
+            .into_iter()
+            .map(|gov_action| ProposalProcedure {
+                deposit: proposal_deposit,
+                reward_account: Bytes::from(reward_account.to_vec()),
+                gov_action,
+                anchor: Anchor {
+                    url: "https://dolos.test/proposal".to_string(),
+                    content_hash: Hash::from([6u8; 32]),
+                },
+            })
+            .collect::<Vec<_>>(),
+    )
+    .ok();
     let pool_cert = Certificate::PoolRegistration {
         operator: pool_keyhash,
         vrf_keyhash,
@@ -729,7 +774,7 @@ fn sample_transaction(
         total_collateral: None,
         reference_inputs: None,
         voting_procedures: None,
-        proposal_procedures: None,
+        proposal_procedures,
         treasury_value: None,
         donation: None,
     };
