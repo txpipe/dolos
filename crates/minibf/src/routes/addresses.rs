@@ -333,7 +333,7 @@ where
         refs_for_address(&domain, &address)?
     } else {
         let refs = refs_for_address(&domain, &address)?;
-        let asset = hex::decode(asset).map_err(|_| Error::InvalidAsset)?;
+        let asset = super::assets::decode_asset_subject(&asset)?;
         let asset_refs = domain
             .indexes()
             .utxos_by_asset(&asset)

@@ -472,22 +472,45 @@ impl AssetModelBuilder {
     }
 }
 
+/// Decodes an asset subject: a 56 hex char policy id plus up to 64 hex chars
+/// of asset name. Blockfrost rejects any other shape with 400 before looking
+/// the asset up.
+pub(crate) fn decode_asset_subject(subject: &str) -> Result<Vec<u8>, Error> {
+    if !(56..=120).contains(&subject.len()) {
+        return Err(Error::InvalidAsset);
+    }
+
+    hex::decode(subject).map_err(|_| Error::InvalidAsset)
+}
+
+/// Decodes the subject and loads its state. Blockfrost returns 404 for a
+/// valid but unknown asset.
+fn resolve_asset_state<D>(domain: &Facade<D>, subject: &str) -> Result<(Vec<u8>, AssetState), Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
+{
+    let subject = decode_asset_subject(subject)?;
+
+    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let state = domain
+        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok((subject, state))
+}
+
 pub async fn by_subject<D>(
     Path(unit): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Asset>, StatusCode>
+) -> Result<Json<Asset>, Error>
 where
     Option<AssetState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let subject = hex::decode(&unit).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(subject.as_slice());
+    let (subject, asset_state) = resolve_asset_state(&domain, &unit)?;
 
     let registry_url = domain.config.token_registry_url.clone();
-
-    let asset_state = domain
-        .read_cardano_entity::<AssetState>(entity_key.as_slice())?
-        .ok_or(StatusCode::NOT_FOUND)?;
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
         domain
@@ -520,12 +543,7 @@ where
     Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
-    let asset = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
-
-    let entity_key = pallas::crypto::hash::Hasher::<256>::hash(asset.as_slice());
-    if !domain.cardano_entity_exists::<AssetState>(entity_key.as_slice())? {
-        return Err(StatusCode::NOT_FOUND.into());
-    }
+    let (asset, _) = resolve_asset_state(&domain, &subject)?;
 
     let utxoset = domain
         .indexes()
@@ -681,11 +699,12 @@ pub async fn by_subject_transactions<D>(
 ) -> Result<Json<Vec<AssetTransactionsInner>>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let subject = hex::decode(&subject).map_err(|_| Error::InvalidAsset)?;
+    let (subject, _) = resolve_asset_state(&domain, &subject)?;
 
     let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
     let stream = domain.query().blocks_by_asset_stream(
@@ -727,6 +746,29 @@ where
         .collect();
 
     Ok(Json(transactions))
+}
+
+/// Alias of `/assets/{subject}/transactions` that returns only the tx hashes.
+/// Same scan, same order/count/page pagination, thinner payload.
+pub async fn by_subject_txs<D>(
+    path: Path<String>,
+    Query(mut params): Query<PaginationParameters>,
+    state: State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
+{
+    // Blockfrost does not define `from`/`to` for this variant and ignores any
+    // supplied values, so the alias drops them before delegating.
+    params.from = None;
+    params.to = None;
+
+    let Json(transactions) = by_subject_transactions(path, Query(params), state).await?;
+
+    let hashes = transactions.into_iter().map(|x| x.tx_hash).collect();
+
+    Ok(Json(hashes))
 }
 
 fn collect_minted_subjects(
@@ -832,8 +874,17 @@ mod tests {
     use blockfrost_openapi::models::asset::Asset;
     use dolos_testing::synthetic::SyntheticBlockConfig;
 
-    fn invalid_asset() -> &'static str {
-        "not-hex-asset"
+    fn invalid_assets() -> Vec<String> {
+        vec![
+            // non-hex characters
+            "not-hex-asset".to_string(),
+            // valid hex, shorter than a policy id
+            "abcd".to_string(),
+            // valid hex, longer than a policy id plus the longest asset name
+            "f".repeat(122),
+            // valid length, non-hex characters
+            "z".repeat(56),
+        ]
     }
 
     fn missing_asset() -> &'static str {
@@ -869,8 +920,10 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_bad_request() {
         let app = TestApp::new();
-        let path = format!("/assets/{}", invalid_asset());
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[tokio::test]
@@ -909,8 +962,10 @@ mod tests {
     #[tokio::test]
     async fn assets_by_subject_addresses_bad_request() {
         let app = TestApp::new();
-        let path = format!("/assets/{}/addresses", invalid_asset());
-        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}/addresses");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[tokio::test]
@@ -925,6 +980,262 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}/addresses");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_happy_path() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/transactions");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let items: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset transactions");
+        assert!(!items.is_empty());
+
+        // every tx must sit exactly where the synthetic chain placed it
+        for item in items {
+            let (block_number, tx_index) = app.vectors().tx_position(&item.tx_hash);
+            assert_eq!(item.block_height as u64, block_number);
+            assert_eq!(item.tx_index as usize, tx_index);
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_slot_constrained() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+        let path = format!(
+            "/assets/{asset}/transactions?from={}&to={}",
+            block.block_number, block.block_number
+        );
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let items: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset transactions");
+        assert!(!items.is_empty());
+        for item in items {
+            assert!(block.tx_hashes.contains(&item.tx_hash));
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_paginated() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path_page_1 = format!("/assets/{asset}/transactions?page=1&count=2");
+        let path_page_2 = format!("/assets/{asset}/transactions?page=2&count=2");
+
+        let (status_1, bytes_1) = app.get_bytes(&path_page_1).await;
+        let (status_2, bytes_2) = app.get_bytes(&path_page_2).await;
+
+        assert_eq!(status_1, StatusCode::OK);
+        assert_eq!(status_2, StatusCode::OK);
+
+        let page_1: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes_1).expect("failed to parse transactions page 1");
+        let page_2: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes_2).expect("failed to parse transactions page 2");
+
+        assert_eq!(page_1.len(), 2);
+        assert_eq!(page_2.len(), 2);
+
+        let page_1_hashes: std::collections::HashSet<_> =
+            page_1.into_iter().map(|x| x.tx_hash).collect();
+        let page_2_hashes: std::collections::HashSet<_> =
+            page_2.into_iter().map(|x| x.tx_hash).collect();
+        assert!(page_1_hashes.is_disjoint(&page_2_hashes));
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_order_asc() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/transactions?order=asc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let asc: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse transactions asc");
+        assert!(!asc.is_empty());
+        let asc_pos: Vec<_> = asc.iter().map(|x| (x.block_height, x.tx_index)).collect();
+        assert!(asc_pos.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_order_desc() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/transactions?order=desc&count=5");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let desc: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse transactions desc");
+        assert!(!desc.is_empty());
+        let desc_pos: Vec<_> = desc.iter().map(|x| (x.block_height, x.tx_index)).collect();
+        assert!(desc_pos.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_bad_request() {
+        let app = TestApp::new();
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}/transactions");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_not_found() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}/transactions", missing_asset());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_transactions_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/transactions");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_txs_happy_path() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/txs");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let hashes: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+        assert!(!hashes.is_empty());
+
+        let known: std::collections::HashSet<&String> = app
+            .vectors()
+            .blocks
+            .iter()
+            .flat_map(|block| block.tx_hashes.iter())
+            .collect();
+        for hash in &hashes {
+            assert!(known.contains(hash), "unknown tx hash {hash}");
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_txs_matches_transactions() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+
+        for query in [
+            "",
+            "?order=desc",
+            "?page=2&count=2",
+            "?order=desc&page=1&count=3",
+        ] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/assets/{asset}/transactions{query}"))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let expected: Vec<String> =
+                serde_json::from_slice::<Vec<AssetTransactionsInner>>(&bytes)
+                    .expect("failed to parse asset transactions")
+                    .into_iter()
+                    .map(|x| x.tx_hash)
+                    .collect();
+
+            assert!(!expected.is_empty(), "no transactions for query {query:?}");
+
+            let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/txs{query}")).await;
+            assert_eq!(status, StatusCode::OK);
+            let actual: Vec<String> =
+                serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+
+            assert_eq!(actual, expected, "mismatch for query {query:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_txs_ignores_from_to() {
+        let app = TestApp::new();
+        let asset = app.vectors().asset_unit.as_str();
+        let block = app.vectors().blocks.first().expect("missing block vectors");
+
+        let (status, bytes) = app.get_bytes(&format!("/assets/{asset}/txs")).await;
+        assert_eq!(status, StatusCode::OK);
+        let all: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+
+        // the range must actually constrain `/transactions`, otherwise the
+        // comparison below proves nothing
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/assets/{asset}/transactions?from={}&to={}",
+                block.block_number, block.block_number
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let constrained: Vec<AssetTransactionsInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset transactions");
+        assert!(constrained.len() < all.len());
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/assets/{asset}/txs?from={}&to={}",
+                block.block_number, block.block_number
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let ranged: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+        assert_eq!(ranged, all);
+
+        // a malformed range is ignored as well, never validated
+        let (status, bytes) = app
+            .get_bytes(&format!("/assets/{asset}/txs?from=not-a-number"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let ranged: Vec<String> =
+            serde_json::from_slice(&bytes).expect("failed to parse asset txs");
+        assert_eq!(ranged, all);
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_txs_bad_request() {
+        let app = TestApp::new();
+        for asset in invalid_assets() {
+            let path = format!("/assets/{asset}/txs");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_txs_not_found() {
+        let app = TestApp::new();
+        let path = format!("/assets/{}/txs", missing_asset());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_txs_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/txs");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
