@@ -776,20 +776,17 @@ where
     Ok(Json(items))
 }
 
-/// The reward entries one epoch's merged row renders as.
+/// Build the reward entries for one reward epoch.
 ///
-/// A row can hold several: the four namespaces this reads in place of could
-/// carry at most one of each type per account per epoch, and a multi-pool
-/// operator's leader rewards past the first were lost to the shared `LogKey`.
-/// Here each element of `leader_rewards` is its own entry, which is where that
-/// defect stops being possible.
+/// `stake` contains the leader and member rewards for this epoch. `refund`
+/// contains the deposit refunds from the row two epochs before this epoch.
 ///
-/// The `> 0` filter is the one the three reward namespaces already applied on
-/// read, kept as it was — and deliberately not extended to `active_stake`,
-/// which this route does not render at all and where zero is meaningful.
+/// Each `leader_rewards` item becomes a separate entry. This preserves all
+/// leader rewards when one account operates more than one pool.
 fn reward_entries(
     epoch: Epoch,
-    log: &AccountEpochLog,
+    stake: Option<&AccountEpochLog>,
+    refund: Option<&AccountEpochLog>,
 ) -> Result<Vec<AccountRewardContentInner>, StatusCode> {
     use blockfrost_openapi::models::account_reward_content_inner::Type;
 
@@ -800,9 +797,6 @@ fn reward_entries(
         r#type: Type,
     ) -> Result<AccountRewardContentInner, StatusCode> {
         Ok(AccountRewardContentInner {
-            // Verbatim: the merged row is stored under the stake temporal key,
-            // so the epoch it is filed under is the epoch it describes. The
-            // `- 1` the reward namespaces needed went with their key.
             epoch: epoch as i32,
             amount: amount.to_string(),
             pool_id: mapping::bech32_pool(pool)?,
@@ -812,21 +806,25 @@ fn reward_entries(
 
     let mut out = Vec::new();
 
-    for (pool, amount) in &log.leader_rewards {
-        if *amount > 0 {
-            out.push(entry(epoch, pool, *amount, Type::Leader)?);
+    if let Some(stake) = stake {
+        for (pool, amount) in &stake.leader_rewards {
+            if *amount > 0 {
+                out.push(entry(epoch, pool, *amount, Type::Leader)?);
+            }
+        }
+
+        if let (Some(pool), Some(amount)) = (stake.pool_id.as_ref(), stake.member_reward) {
+            if amount > 0 {
+                out.push(entry(epoch, pool, amount, Type::Member)?);
+            }
         }
     }
 
-    if let (Some(pool), Some(amount)) = (log.pool_id.as_ref(), log.member_reward) {
-        if amount > 0 {
-            out.push(entry(epoch, pool, amount, Type::Member)?);
-        }
-    }
-
-    for (pool, amount) in &log.deposit_refunds {
-        if *amount > 0 {
-            out.push(entry(epoch, pool, *amount, Type::PoolDepositRefund)?);
+    if let Some(refund) = refund {
+        for (pool, amount) in &refund.deposit_refunds {
+            if *amount > 0 {
+                out.push(entry(epoch, pool, *amount, Type::PoolDepositRefund)?);
+            }
         }
     }
 
@@ -857,19 +855,43 @@ where
     let mut skipped = 0;
     let skip = pagination.skip();
 
-    for reward_epoch in 0..epoch {
-        let slot = summary.epoch_start(reward_epoch);
-        let log_key: LogKey = (TemporalKey::from(slot), entity_key.clone()).into();
+    // Blockfrost reports the reward epoch as `earned_epoch`. The db-sync schema
+    // uses the same term. Each reward epoch uses two merged rows:
+    //
+    //   * Row `e` contains the leader and member rewards for epoch `e`.
+    //   * Row `e - 2` contains refunds that become spendable in epoch `e`.
+    //
+    // This order matches the db-sync order: leader, member, then refund.
+    for reward_epoch in 0..=epoch {
+        let stake_slot = summary.epoch_start(reward_epoch);
+        let stake_key: LogKey = (TemporalKey::from(stake_slot), entity_key.clone()).into();
 
-        let Some(log) = domain
-            .archive()
-            .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        else {
-            continue;
+        // This call reads both rows at the same time. `read_logs_typed`
+        // returns one result for each key, in the order of the keys. The last
+        // result is the refund row. The result before it is the stake row.
+        // Before epoch 2 there is no refund row. In that case the call reads
+        // only the stake row.
+        let (stake, refund) = if reward_epoch >= 2 {
+            let refund_slot = summary.epoch_start(reward_epoch - 2);
+            let refund_key: LogKey = (TemporalKey::from(refund_slot), entity_key.clone()).into();
+
+            let mut rows = domain
+                .archive()
+                .read_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, &[&stake_key, &refund_key])
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            let refund = rows.pop().flatten();
+            let stake = rows.pop().flatten();
+            (stake, refund)
+        } else {
+            let stake = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &stake_key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            (stake, None)
         };
 
-        for item in reward_entries(reward_epoch, &log)? {
+        for item in reward_entries(reward_epoch, stake.as_ref(), refund.as_ref())? {
             if skipped < skip {
                 skipped += 1;
                 continue;
@@ -1108,8 +1130,10 @@ mod tests {
         account_transactions_content_inner::AccountTransactionsContentInner,
         account_withdrawal_content_inner::AccountWithdrawalContentInner,
     };
-    use dolos_core::{EraCbor, StateWriter as _, UtxoSetDelta};
-    use dolos_testing::{synthetic::SyntheticBlockConfig, utxo_with_value, MIN_UTXO_AMOUNT};
+    use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta};
+    use dolos_testing::{
+        synthetic::SyntheticBlockConfig, toy_domain::ToyDomain, utxo_with_value, MIN_UTXO_AMOUNT,
+    };
     use pallas::ledger::primitives::conway::{PositiveCoin, Value};
     use std::{collections::BTreeMap, sync::Arc};
 
@@ -1831,6 +1855,70 @@ mod tests {
         );
         let _: Vec<AccountRewardContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_rewards_reports_refund_at_spendable_epoch() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+                .expect("era summary");
+            let tip = domain
+                .state()
+                .read_cursor()
+                .expect("cursor read failed")
+                .expect("missing tip")
+                .slot();
+            let (tip_epoch, _) = summary.slot_epoch(tip);
+            let source_epoch = tip_epoch.checked_sub(2).expect("tip before epoch 2");
+            let account = parse_account_key_param(&vectors.stake_address, Network::Testnet)
+                .expect("invalid fixture stake address");
+            let log_key: LogKey = (
+                TemporalKey::from(summary.epoch_start(source_epoch)),
+                EntityKey::from(account.entity_key),
+            )
+                .into();
+            let mut log = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
+                .expect("reward log read failed")
+                .expect("missing reward log");
+            let pool = log.pool_id.expect("missing reward pool");
+            log.deposit_refunds.push((pool, 500));
+            log.sort();
+
+            let writer = domain.archive().start_writer().expect("archive writer");
+            writer
+                .write_log_typed(&log_key, &log)
+                .expect("refund log write failed");
+            writer.commit().expect("refund log commit failed");
+        });
+
+        let tip_epoch = app.tip_epoch();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/rewards");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let items: Vec<AccountRewardContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account rewards");
+        let refunds: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.r#type,
+                    blockfrost_openapi::models::account_reward_content_inner::Type::PoolDepositRefund
+                )
+            })
+            .collect();
+
+        assert_eq!(refunds.len(), 1);
+        assert_eq!(refunds[0].epoch, tip_epoch as i32);
+        assert_eq!(refunds[0].amount, "500");
     }
 
     #[tokio::test]
