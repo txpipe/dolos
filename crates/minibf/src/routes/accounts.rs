@@ -866,21 +866,29 @@ where
         let stake_slot = summary.epoch_start(reward_epoch);
         let stake_key: LogKey = (TemporalKey::from(stake_slot), entity_key.clone()).into();
 
-        let stake = domain
-            .archive()
-            .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &stake_key)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let refund = if reward_epoch >= 2 {
+        // This call reads both rows at the same time. `read_logs_typed`
+        // returns one result for each key, in the order of the keys. The last
+        // result is the refund row. The result before it is the stake row.
+        // Before epoch 2 there is no refund row. In that case the call reads
+        // only the stake row.
+        let (stake, refund) = if reward_epoch >= 2 {
             let refund_slot = summary.epoch_start(reward_epoch - 2);
             let refund_key: LogKey = (TemporalKey::from(refund_slot), entity_key.clone()).into();
 
-            domain
+            let mut rows = domain
                 .archive()
-                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &refund_key)
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .read_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, &[&stake_key, &refund_key])
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            let refund = rows.pop().flatten();
+            let stake = rows.pop().flatten();
+            (stake, refund)
         } else {
-            None
+            let stake = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &stake_key)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            (stake, None)
         };
 
         for item in reward_entries(reward_epoch, stake.as_ref(), refund.as_ref())? {
