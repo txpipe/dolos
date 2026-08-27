@@ -62,7 +62,7 @@ fn derive_base_address(
 }
 
 pub async fn xpub_address<D>(
-    Path((xpub, role, index)): Path<(String, u32, u32)>,
+    Path((xpub, role, index)): Path<(String, String, String)>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<UtilsAddressesXpub>, Error>
 where
@@ -70,10 +70,12 @@ where
 {
     let account_xpub = parse_account_xpub(&xpub)?;
 
+    let role: u32 = role.parse().map_err(|_| Error::InvalidDerivationRole)?;
     if role >= HARDENED_OFFSET {
         return Err(Error::InvalidDerivationRole);
     }
 
+    let index: u32 = index.parse().map_err(|_| Error::InvalidDerivationIndex)?;
     if index >= HARDENED_OFFSET {
         return Err(Error::InvalidDerivationIndex);
     }
@@ -95,6 +97,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestApp;
 
     /// This pure function derives an address in the same way as the handler.
     /// Thus, the test does not require a domain.
@@ -153,5 +156,69 @@ mod tests {
             parse_account_xpub(&"ab".repeat(63)),
             Err(Error::InvalidXpub)
         ));
+    }
+
+    #[tokio::test]
+    async fn invalid_role_and_index_return_blockfrost_errors() {
+        let app = TestApp::new();
+        let cases = [
+            (
+                "-1",
+                "0",
+                "The role is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "not-a-number",
+                "0",
+                "The role is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "2147483648",
+                "0",
+                "The role is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "4294967296",
+                "0",
+                "The role is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "0",
+                "-1",
+                "The index is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "0",
+                "not-a-number",
+                "The index is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "0",
+                "2147483648",
+                "The index is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+            (
+                "0",
+                "4294967296",
+                "The index is missing or is not valid. Use an integer from 0 through 2147483647.",
+            ),
+        ];
+
+        for (role, index, message) in cases {
+            let path = format!("/utils/addresses/xpub/{XPUB}/{role}/{index}");
+            let (status, bytes) = app.get_bytes(&path).await;
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("The response body must contain valid JSON.");
+
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "status_code": 400,
+                    "error": "Bad Request",
+                    "message": message,
+                })
+            );
+        }
     }
 }
