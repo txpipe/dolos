@@ -432,6 +432,10 @@ where
             get(routes::addresses::total::<D>),
         )
         .route("/addresses/{address}/txs", get(routes::addresses::txs::<D>))
+        .route(
+            "/utils/addresses/xpub/{xpub}/{role}/{index}",
+            get(routes::utils::xpub_address::<D>),
+        )
         .route("/blocks/latest", get(routes::blocks::latest::<D>))
         .route("/blocks/latest/txs", get(routes::blocks::latest_txs::<D>))
         .route(

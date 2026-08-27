@@ -1560,6 +1560,7 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "dolos-testing",
+ "ed25519-bip32",
  "futures",
  "futures-core",
  "futures-util",

@@ -13,6 +13,7 @@ pub mod pools;
 pub mod scripts;
 pub mod tx;
 pub mod txs;
+pub mod utils;
 pub mod utxos;
 
 use std::env;
