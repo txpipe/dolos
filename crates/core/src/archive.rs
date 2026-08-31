@@ -83,8 +83,8 @@ impl From<(TemporalKey, EntityKey)> for LogKey {
 
 impl From<TemporalKey> for LogKey {
     fn from(value: TemporalKey) -> Self {
-        // Safe to unwrap, we know the length matches. We extend the key with 0 to match
-        // length.
+        // Safe to unwrap, we know the length matches. We extend the key with 0
+        // to match length.
         let bytes: [u8; LOG_KEY_SIZE] = [value.as_ref(), &[0; KEY_SIZE]]
             .concat()
             .try_into()

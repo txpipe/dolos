@@ -53,8 +53,8 @@ impl<D: Domain> SyncExt for D {
     fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
         let mut chain = self.write_chain();
 
-        // Drain first in case there's previous work that needs to be applied (eg:
-        // initialization)
+        // Drain first in case there's previous work that needs to be applied
+        // (eg: initialization)
         drain_pending_work::<D>(&mut *chain, self)?;
 
         let last = chain.receive_block(block)?;
@@ -78,7 +78,8 @@ impl<D: Domain> SyncExt for D {
 
         for (point, log) in undo_blocks.rev() {
             if point == *to {
-                // Final cursor update - build an empty delta with just the cursor
+                // Final cursor update - build an empty delta with just the
+                // cursor
                 let empty_delta = crate::IndexDelta {
                     cursor: point.clone(),
                     ..Default::default()

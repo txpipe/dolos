@@ -83,7 +83,8 @@ pub trait WalStore: Clone + Send + Sync + 'static {
 
         // crawl the wal exponentially
         while let Some((point, _)) = iter.next() {
-            // Skip synthetic entries with zero hash (from reset_to with ChainPoint::Slot)
+            // Skip synthetic entries with zero hash (from reset_to with
+            // ChainPoint::Slot)
             if !point.is_fully_defined() {
                 continue;
             }

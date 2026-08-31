@@ -78,9 +78,10 @@ pub fn encode(record: &IndexRecord) -> Result<CanonicalCbor, Error> {
 }
 
 fn encode_tag(record: &TagRecord) -> Result<CanonicalCbor, Error> {
-    // Resolved rather than trusted: a `TagRecord` decoded from an outside source
-    // carries an owned dimension string, and shipping one no store has a table
-    // for would produce a layer that restores cleanly and can never be queried.
+    // Resolved rather than trusted: a `TagRecord` decoded from an outside
+    // source carries an owned dimension string, and shipping one no store
+    // has a table for would produce a layer that restores cleanly and can
+    // never be queried.
     let dimension = resolve_dimension(record.dimension())?;
 
     Ok(frame::encode(|e| {

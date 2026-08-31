@@ -203,7 +203,8 @@ pub fn setup_domain_with_stop_epoch(
         tip_broadcast,
     };
 
-    // this will make sure the domain is correctly initialized and in a valid state.
+    // this will make sure the domain is correctly initialized and in a valid
+    // state.
     domain.bootstrap().map_err(|e| match e {
         dolos_core::DomainError::InconsistentState { ref wal, ref state } => {
             let msg = match (wal, state) {
@@ -330,9 +331,9 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
             .init();
     }
 
-    // Initialize the log-to-tracing bridge AFTER the tracing subscriber is set up.
-    // This allows crates using the `log` crate (like fjall) to have their messages
-    // forwarded to the tracing subscriber.
+    // Initialize the log-to-tracing bridge AFTER the tracing subscriber is set
+    // up. This allows crates using the `log` crate (like fjall) to have
+    // their messages forwarded to the tracing subscriber.
     tracing_log::LogTracer::init().ok();
 
     Ok(())

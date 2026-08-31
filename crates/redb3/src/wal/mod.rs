@@ -84,7 +84,8 @@ impl DbChainPoint {
         use std::ops::Bound;
 
         // Map bounds to key bounds directly; no `+1`/`-1` shift (would overflow
-        // at BlockSlot::MAX / underflow at MIN). Excluded flips the hash extreme.
+        // at BlockSlot::MAX / underflow at MIN). Excluded flips the hash
+        // extreme.
         let start = match range.start_bound() {
             Bound::Included(x) => Bound::Included(DbChainPoint::min_bound(*x)),
             Bound::Excluded(x) => Bound::Excluded(DbChainPoint::max_bound(*x)),
@@ -998,7 +999,8 @@ mod tests {
         // First open: stamps current version.
         open_test_store(&path).unwrap();
 
-        // Second open: should succeed without rewriting (no panic, version intact).
+        // Second open: should succeed without rewriting (no panic, version
+        // intact).
         let store = open_test_store(&path).unwrap();
         assert_eq!(store.read_version().unwrap(), Some(CURRENT_WAL_VERSION));
     }

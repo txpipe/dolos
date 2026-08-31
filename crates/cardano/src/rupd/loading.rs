@@ -189,8 +189,9 @@ impl StakeSnapshot {
             // the admission window is caught rather than silently dropped.
             ensure_pool_aligned(&pool.operator, &pool.snapshot, current_epoch)?;
 
-            // Sum blocks from ALL pools that have mark() data for the performance epoch.
-            // This is needed for epoch_blocks() denominator in apparent performance.
+            // Sum blocks from ALL pools that have mark() data for the
+            // performance epoch. This is needed for epoch_blocks()
+            // denominator in apparent performance.
             if let Some(mark_snapshot) = pool.snapshot.mark() {
                 snapshot.performance_epoch_pool_blocks += mark_snapshot.blocks_minted as u64;
             }
@@ -402,8 +403,8 @@ impl RupdWork {
 
         let pots = epoch.initial_pots.clone();
 
-        // Use non-overlay block count for eta calculation (matches ledger BlocksMade
-        // total).
+        // Use non-overlay block count for eta calculation (matches ledger
+        // BlocksMade total).
         let blocks_made_total = epoch
             .rolling
             .mark()
@@ -439,10 +440,11 @@ impl RupdWork {
         };
 
         if let Some((snapshot_epoch, performance_epoch)) = work.relevant_epochs() {
-            // The snapshot data was "live" at snapshot_epoch and becomes the "mark"
-            // snapshot at snapshot_epoch + 1. The Haskell ledger computes the mark
-            // snapshot under the entering epoch's protocol rules, so we use
-            // snapshot_epoch + 1 to determine the era (e.g., Conway excludes pointer
+            // The snapshot data was "live" at snapshot_epoch and becomes the
+            // "mark" snapshot at snapshot_epoch + 1. The Haskell
+            // ledger computes the mark snapshot under the entering
+            // epoch's protocol rules, so we use snapshot_epoch + 1
+            // to determine the era (e.g., Conway excludes pointer
             // address UTxOs from stake).
             let era = work.chain.era_for_epoch(snapshot_epoch + 1);
             let protocol = EraProtocol::from(era.protocol);
@@ -564,7 +566,8 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn pool_blocks(&self, pool: PoolHash) -> u64 {
-        // As in `pool_params`: an aligned pool always has a mark (E-1) snapshot.
+        // As in `pool_params`: an aligned pool always has a mark (E-1)
+        // snapshot.
         self.snapshot
             .pools
             .get(&pool)

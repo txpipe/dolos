@@ -346,8 +346,9 @@ impl TableRow for AccountEpochRewards {
         let entity = EntityKey::from(key.clone());
         let slot = u64::from_be_bytes(temporal.as_ref().try_into().unwrap());
 
-        // A slot under a column headed `epoch` is off by orders of magnitude and
-        // says nothing about being wrong, so absence renders as absence.
+        // A slot under a column headed `epoch` is off by orders of magnitude
+        // and says nothing about being wrong, so absence renders as
+        // absence.
         let epoch = ctx
             .summary
             .as_ref()

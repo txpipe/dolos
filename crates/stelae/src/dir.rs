@@ -344,8 +344,8 @@ impl SteleWriter for SteleDir {
         // byte is written, so it is staged first. The counter keeps two writers
         // of the same kind apart — a profile sharding one logical layer into
         // many is the normal case, not an edge one. Staging sits beside
-        // `sha256/` rather than in it, so a half-written layer is never mistaken
-        // for a blob.
+        // `sha256/` rather than in it, so a half-written layer is never
+        // mistaken for a blob.
         static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
         let staging = Staging::new(self.root.join(BLOBS_DIR).join(format!(
@@ -590,11 +590,11 @@ impl SteleDir {
 
         check_header(&header, profile, descriptor)?;
 
-        // Counted by iterating rather than with `count()`: `SeqReader` reports a
-        // malformed record as one `Err` item and then ends, so counting items
-        // would tally the failure as a record and drop the error with it. A
-        // descriptor written to match that inflated number would then read back
-        // clean.
+        // Counted by iterating rather than with `count()`: `SeqReader` reports
+        // a malformed record as one `Err` item and then ends, so
+        // counting items would tally the failure as a record and drop
+        // the error with it. A descriptor written to match that
+        // inflated number would then read back clean.
         let mut records = 1u64;
 
         for record in SeqReader::new(&content[header_len..]) {

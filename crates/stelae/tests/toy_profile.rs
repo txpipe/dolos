@@ -313,7 +313,8 @@ fn writes_a_stele_and_reads_it_back() {
         assert_eq!(*record, note_record(note).as_bytes());
     }
 
-    // And the profile can decode its own records, which the protocol never does.
+    // And the profile can decode its own records, which the protocol never
+    // does.
     let mut decoder = minicbor::Decoder::new(records[1]);
     assert_eq!(decoder.array().unwrap(), Some(3));
     assert_eq!(decoder.u64().unwrap(), 2);
@@ -463,8 +464,8 @@ fn layers_round_trip_byte_identically() {
         let layer = stele.read_layer(&index, &ToyProfile, descriptor).unwrap();
 
         // Re-frame the records that came back and compare the whole sequence.
-        // The header is re-encoded from its parsed form, so a field that did not
-        // survive parsing would show up as a byte difference here.
+        // The header is re-encoded from its parsed form, so a field that did
+        // not survive parsing would show up as a byte difference here.
         let mut rewritten = Vec::new();
         let mut writer = stelae::SeqWriter::new(&mut rewritten);
 

@@ -225,7 +225,8 @@ fn test_prune_history_no_excess_is_noop() {
     }
     writer.commit().unwrap();
 
-    // History (300 - 100 = 200) is within the 1000-slot window: nothing to prune.
+    // History (300 - 100 = 200) is within the 1000-slot window: nothing to
+    // prune.
     let done = store.prune_history(1_000, Some(10)).unwrap();
     assert!(done, "no-excess prune must report done");
     assert_eq!(stored_slots(&store), vec![100, 200, 300], "nothing removed");

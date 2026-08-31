@@ -115,7 +115,8 @@ mod tests {
             domain.roll_forward(block).unwrap();
         }
 
-        // this point was never rolled forward, so the domain can't intersect it.
+        // this point was never rolled forward, so the domain can't intersect
+        // it.
         let unknown_point = make_conway_block(9999).0;
 
         let result = ChainStream::start::<ToyDomain, CancelTokenImpl>(

@@ -322,9 +322,11 @@ impl WorkBatch {
                 let to_apply = block.deltas.entities.get_mut(key);
 
                 if let Some(to_apply) = to_apply {
-                    // Deltas are applied in their natural order from block traversal.
-                    // This matches the Haskell ledger which processes certificates
-                    // sequentially in the order they appear (no priority logic).
+                    // Deltas are applied in their natural order from block
+                    // traversal. This matches the Haskell
+                    // ledger which processes certificates
+                    // sequentially in the order they appear (no priority
+                    // logic).
                     for delta in to_apply {
                         delta.apply(entity);
                     }
@@ -348,8 +350,8 @@ impl WorkBatch {
             writer.save_entity_typed(ns, key, entity.as_ref())?;
         }
 
-        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system. (#1042)
+        // TODO: we treat the UTxO set differently due to tech-debt. We should
+        // migrate this into the entity system. (#1042)
         for block in self.blocks.iter() {
             if let Some(utxo_delta) = &block.utxo_delta {
                 writer.apply_utxoset(utxo_delta)?;

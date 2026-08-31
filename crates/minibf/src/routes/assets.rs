@@ -816,8 +816,8 @@ where
     }
 
     // Pagination depends on first-mint order. An ascending scan stops after it
-    // collects the requested prefix. A descending scan reads all asset names and
-    // then reverses them, because one name can occur in many blocks.
+    // collects the requested prefix. A descending scan reads all asset names
+    // and then reverses them, because one name can occur in many blocks.
     let end_slot = domain.get_tip_slot()?;
     let stream = domain
         .query()

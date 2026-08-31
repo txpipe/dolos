@@ -65,8 +65,8 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
 
     assert_eq!(epoch, 0, "the fixture left the epoch it was built for");
 
-    // What makes the `logs` layer non-empty, which the export's done criterion 2
-    // asks for by name: an all-empty layer set would prove nothing about
+    // What makes the `logs` layer non-empty, which the export's done criterion
+    // 2 asks for by name: an all-empty layer set would prove nothing about
     // ordering.
     seed_epoch_logs(&domain, &[epoch]).unwrap();
     seed_reward_logs(&domain, &vectors.stake_address, &vectors.pool_id, &[epoch]).unwrap();

@@ -165,7 +165,8 @@ impl FromStr for ChainPoint {
             return Ok(ChainPoint::Origin);
         }
 
-        // Regex to match slot(hash) format where hash is 64 hex characters (32 bytes)
+        // Regex to match slot(hash) format where hash is 64 hex characters (32
+        // bytes)
         let re = Regex::new(r"^(\d+)\(([0-9a-fA-F]{64})\)$").unwrap();
 
         if let Some(caps) = re.captures(s) {

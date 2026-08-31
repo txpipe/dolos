@@ -256,9 +256,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     dispatch(config, &command, feedback, args.r#continue)?;
 
     // Reset WAL after any successful bootstrap so that `find_intersect` works.
-    // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty
-    // or stale. This ensures the WAL tip matches the state cursor regardless of
-    // which bootstrap method was used.
+    // Some bootstrap mechanisms skip WAL commits for performance, leaving it
+    // empty or stale. This ensures the WAL tip matches the state cursor
+    // regardless of which bootstrap method was used.
     if let Err(e) = seed_wal_from_state(config) {
         tracing::error!("failed to seed WAL from state: {}", e);
     }

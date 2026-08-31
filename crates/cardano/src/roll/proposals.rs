@@ -84,8 +84,8 @@ fn conway_to_pparamset(update: &ProtocolParamUpdate) -> PParamsSet {
         drep_inactivity_period => DrepInactivityPeriod
     };
 
-    // TODO: these are special cases where we don't have automatic type mappings. We
-    // should fix this at the Pallas level.
+    // TODO: these are special cases where we don't have automatic type
+    // mappings. We should fix this at the Pallas level.
 
     if let Some(updated) = update.max_tx_ex_units {
         let value = PParamValue::MaxTxExUnits(pallas::ledger::primitives::ExUnits {

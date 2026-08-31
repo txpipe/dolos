@@ -14,7 +14,8 @@ fn search_state_utxos<D: Domain>(
     pattern: &UtxoPattern<'_>,
     store: &MempoolAwareUtxoStore<D>,
 ) -> Result<HashSet<TxoRef>, IndexError> {
-    // Dummy filter that always returns true (we want all UTxOs matching the index)
+    // Dummy filter that always returns true (we want all UTxOs matching the
+    // index)
     let no_filter = |_: &MultiEraOutput<'_>| true;
 
     let refs = match pattern {

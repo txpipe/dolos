@@ -779,11 +779,12 @@ impl dolos_core::EntityDelta for DRepDelegatorDrop {
         // save undo info
         self.prev_drep = Some(entity.drep.clone());
 
-        // TODO: guard the `schedule` call on `entity.drep.epoch() == Some(self.epoch)`
-        // with skip-on-mismatch, mirroring the planned hardening in
-        // `PoolDelegatorRetire::apply`. `schedule` writes to `next` regardless
-        // of the entity's current epoch; if the entity has been rotated past
-        // `self.epoch`, this scheduling lands on the wrong boundary.
+        // TODO: guard the `schedule` call on `entity.drep.epoch() ==
+        // Some(self.epoch)` with skip-on-mismatch, mirroring the
+        // planned hardening in `PoolDelegatorRetire::apply`. `schedule`
+        // writes to `next` regardless of the entity's current epoch; if
+        // the entity has been rotated past `self.epoch`, this
+        // scheduling lands on the wrong boundary.
         entity
             .drep
             .schedule(self.epoch, Some(DRepDelegation::NotDelegated));

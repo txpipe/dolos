@@ -305,9 +305,9 @@ pub fn calculate_eta(minted_blocks: u64, d: Ratio, f: f32, epoch_length: u64) ->
 
     let expected_non_obft_blocks = expected_blocks * (&one - d);
 
-    // eta is the ratio between the number of blocks that have been produced during
-    // the epoch, and the expectation value of blocks that should have been
-    // produced during the epoch under ideal conditions.
+    // eta is the ratio between the number of blocks that have been produced
+    // during the epoch, and the expectation value of blocks that should
+    // have been produced during the epoch under ideal conditions.
 
     let minted_blocks = ratio!(minted_blocks);
 
@@ -417,9 +417,9 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.rewards = add!(pots.rewards, delta.treasury_mirs);
     pots.rewards = add!(pots.rewards, delta.treasury_withdrawals);
 
-    // we don't need to return account deposit refunds to the rewards pot because
-    // these refunds are returned directly as utxos in the deregistration
-    // transaction.
+    // we don't need to return account deposit refunds to the rewards pot
+    // because these refunds are returned directly as utxos in the
+    // deregistration transaction.
 
     // utxos pot
     pots.utxos = add!(pots.utxos, delta.produced_utxos);
@@ -439,8 +439,8 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.account_count = add!(pots.account_count, delta.new_accounts);
     pots.account_count = sub!(pots.account_count, delta.removed_accounts);
 
-    // for governance, since each cert contains the specific deposit amount, we deal
-    // directly with lovelace values.
+    // for governance, since each cert contains the specific deposit amount, we
+    // deal directly with lovelace values.
 
     pots.drep_deposits = add!(pots.drep_deposits, delta.drep_deposits);
     pots.drep_deposits = sub!(pots.drep_deposits, delta.drep_refunds);

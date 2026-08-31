@@ -290,9 +290,9 @@ impl<D: Domain> Facade<D> {
     // Dolos starts to write `StakeLog`s only after the stake-snapshot pipeline
     // is ready. So the first snapshot epoch has logs, but the epoch just before
     // it has none. Both epochs share the same genesis stake distribution, and
-    // the reference implementation reports the same value for both. For that one
-    // epoch, this function reads the logs of the next epoch instead. Each
-    // earlier epoch has no active stake and stays `None`.
+    // the reference implementation reports the same value for both. For that
+    // one epoch, this function reads the logs of the next epoch instead.
+    // Each earlier epoch has no active stake and stays `None`.
     pub fn sum_active_stake_for_epoch(
         &self,
         epoch: Epoch,

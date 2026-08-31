@@ -339,8 +339,8 @@ mod tests {
     use super::*;
 
     async fn setup_test_context() -> Arc<Context<ToyDomain>> {
-        // Use devnet genesis (protocol 9 = Conway, has Plutus cost models needed by tx3
-        // compiler)
+        // Use devnet genesis (protocol 9 = Conway, has Plutus cost models
+        // needed by tx3 compiler)
         let genesis = std::sync::Arc::new(dolos_cardano::include::devnet::load());
 
         // Compute minimum slot for the genesis era summary
@@ -365,9 +365,10 @@ mod tests {
         };
         let (blocks, _vectors, chain_config) = build_synthetic_blocks(cfg);
 
-        // Build sender/receiver UTxOs with offset hashes (100+) to avoid collision
-        // with synthetic block sequences (1-7).
-        // Use Carol/Dave to avoid colliding with synthetic block addresses (Alice/Bob).
+        // Build sender/receiver UTxOs with offset hashes (100+) to avoid
+        // collision with synthetic block sequences (1-7).
+        // Use Carol/Dave to avoid colliding with synthetic block addresses
+        // (Alice/Bob).
         let delta = {
             let sender = TestAddress::Carol;
             let receiver = TestAddress::Dave;
@@ -388,7 +389,8 @@ mod tests {
             }
         };
 
-        // Pass delta through domain — applied after genesis, before block import
+        // Pass delta through domain — applied after genesis, before block
+        // import
         let domain =
             ToyDomain::new_with_genesis_and_config(genesis, chain_config, Some(delta), None);
 

@@ -610,7 +610,8 @@ mod tests {
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
 
-        // Should skip both non-matching items and return Pending from the inner stream.
+        // Should skip both non-matching items and return Pending from the inner
+        // stream.
         let result = poll_once(&mut filter, &mut cx);
         assert!(result.is_pending());
     }

@@ -235,7 +235,8 @@ fn an_over_wide_exact_key_survives_the_layer_and_is_refused_by_the_codec() {
     let err = indexes::decode(&raw[0]).unwrap_err();
     assert!(matches!(err, Error::Index(_)), "{err:?}");
 
-    // And the width the type does accept is refused when it is the wrong kind's.
+    // And the width the type does accept is refused when it is the wrong
+    // kind's.
     assert!(ExactRecord::new(ExactKind::TxHash, &4242u64.to_be_bytes(), 1).is_err());
 }
 

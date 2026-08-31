@@ -51,14 +51,16 @@ impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
         if !account.is_registered() {
             let total = reward.total_value();
 
-            // Accounts that were registered at RUPD startStep time but deregistered
-            // before EWRAP. Their rewards go to treasury per the Haskell ledger's
-            // applyRUpdFiltered (frTotalUnregistered → casTreasury).
+            // Accounts that were registered at RUPD startStep time but
+            // deregistered before EWRAP. Their rewards go to
+            // treasury per the Haskell ledger's applyRUpdFiltered
+            // (frTotalUnregistered → casTreasury).
             //
             // Note: accounts deregistered BEFORE the RUPD startStep slot
-            // (epoch_start + randomness_stability_window) are pre-filtered during
-            // reward computation and never appear here. Their share stays in reserves
-            // implicitly through returned_rewards.
+            // (epoch_start + randomness_stability_window) are pre-filtered
+            // during reward computation and never appear here.
+            // Their share stays in reserves implicitly through
+            // returned_rewards.
             debug!(
                 account=%id,
                 credential=?account.credential,
@@ -103,8 +105,8 @@ impl crate::ewrap::BoundaryVisitor for BoundaryVisitor {
 
         let pending_before_drain = ctx.rewards.len();
 
-        // Log any remaining pending rewards before draining (spendable rewards for
-        // accounts not visited)
+        // Log any remaining pending rewards before draining (spendable rewards
+        // for accounts not visited)
         if pending_before_drain > 0 {
             let pending_spendable: u64 = ctx
                 .rewards

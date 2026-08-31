@@ -292,9 +292,9 @@ fn a_registry_restore_is_a_directory_restore() {
     // The *cursor* is deliberately not in this comparison. `Node::build` stands
     // at a synthetic epoch boundary so that epoch 0's window publishes
     // unclamped, which is a chain point the harness ledger never reached; the
-    // restored node carries the stele's position, correctly, and that is not the
-    // domain's. What a stele has to reproduce is the data, and that is what is
-    // asserted.
+    // restored node carries the stele's position, correctly, and that is not
+    // the domain's. What a stele has to reproduce is the data, and that is
+    // what is asserted.
     assert_eq!(
         utxos_of(from_registry.state()),
         utxos_of(node.domain.state()),
@@ -891,8 +891,8 @@ fn a_registry_restore_reports_every_byte_it_pulls() {
         "the blobs announced, against what the plan said was left to fetch"
     );
 
-    // And the deltas — reported as the bytes were written, one `poll_write` at a
-    // time — sum to the same total.
+    // And the deltas — reported as the bytes were written, one `poll_write` at
+    // a time — sum to the same total.
     assert_eq!(
         watcher.bytes(),
         outlook.remaining.compressed_bytes,
@@ -932,8 +932,9 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
     let blank = Blank::<MemoryStores>::open();
 
     // The interruption, at the second epoch layer the driver reaches — the same
-    // deterministic placement `a_killed_registry_restore_resumes_where_it_stopped`
-    // uses, and for the same reason: a wall-clock kill against a loopback
+    // deterministic placement
+    // `a_killed_registry_restore_resumes_where_it_stopped` uses, and for
+    // the same reason: a wall-clock kill against a loopback
     // registry holding a kilobyte-scale stele interrupts nothing.
     {
         let stele = Point::Latest.pull(&repository).unwrap();

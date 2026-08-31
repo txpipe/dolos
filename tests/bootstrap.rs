@@ -432,9 +432,10 @@ fn test_bootstrap_origin_cursor_is_noop() {
 
     domain.wal().reset_to(&ChainPoint::Origin).unwrap();
 
-    // bootstrap() should succeed without crashing on the empty Origin WAL entry.
-    // Previously this would fail with UnknownCbor("") when catch_up_stores tried
-    // to CBOR-decode the synthetic Origin entry's empty block bytes.
+    // bootstrap() should succeed without crashing on the empty Origin WAL
+    // entry. Previously this would fail with UnknownCbor("") when
+    // catch_up_stores tried to CBOR-decode the synthetic Origin entry's
+    // empty block bytes.
     domain.bootstrap().unwrap();
 
     // Archive should still be empty — no real blocks were processed.

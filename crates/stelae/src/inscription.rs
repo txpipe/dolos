@@ -850,7 +850,8 @@ mod tests {
         );
 
         // `56.0` is an integral value but a JSON float, and RFC 8785 renders it
-        // through the float path. The rule is about the encoding, not the value.
+        // through the float path. The rule is about the encoding, not the
+        // value.
         let mut inscription = sample();
         inscription.parameters = json!({"whole": 56.0});
         assert!(matches!(

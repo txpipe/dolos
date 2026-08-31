@@ -132,9 +132,10 @@ pub fn indexes() -> Vec<IndexRecord> {
         .enumerate()
         .map(|(i, dimension)| {
             let stored = if dimension == VERBATIM_KEY_DIMENSION {
-                // The exception, and the only place the fixture derives a stored
-                // key rather than pinning one: the point of this record is that
-                // the label survives untouched.
+                // The exception, and the only place the fixture derives a
+                // stored key rather than pinning one: the point
+                // of this record is that the label survives
+                // untouched.
                 key_hash(dimension, &METADATA_LABEL.to_be_bytes()).unwrap()
             } else {
                 [0x10 + i as u8; 8]

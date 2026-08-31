@@ -91,20 +91,21 @@ impl Worker {
         if stage.mempool.has_pending() {
             debug!(request, "found txs to fulfill request");
 
-            // we have txs available so we process the work unit as a new one. We don't
-            // acknowledge anything because that already happened on the initial attempt to
-            // fulfill the request.
+            // we have txs available so we process the work unit as a new one.
+            // We don't acknowledge anything because that already
+            // happened on the initial attempt to fulfill the
+            // request.
             Ok(WorkSchedule::Unit(Request::TxIds(0, request as u16)))
         } else {
             debug!(request, "still not enough txs to fulfill request");
 
             // we wait a few secs to avoid turning this stage into a hot loop.
-            // TODO: we need to watch the mempool and abort the wait if there's a change in
-            // the list of available txs.
+            // TODO: we need to watch the mempool and abort the wait if there's
+            // a change in the list of available txs.
             tokio::time::sleep(Duration::from_secs(10)).await;
 
-            // we store the request again so that the next schedule knows we're still
-            // waiting for new transactions.
+            // we store the request again so that the next schedule knows we're
+            // still waiting for new transactions.
             self.unfulfilled_request = Some(request);
 
             Ok(WorkSchedule::Idle)

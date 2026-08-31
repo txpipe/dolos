@@ -405,9 +405,9 @@ fn do_import(
     .map_err(|err| miette::miette!(err.to_string()))
     .context("reading immutable db tip")?;
 
-    // unless we're starting from the origin of the chain, we need to skip the first
-    // result since the iterator will be standing in the last slot already
-    // processed, we don't want to import it twice.
+    // unless we're starting from the origin of the chain, we need to skip the
+    // first result since the iterator will be standing in the last slot
+    // already processed, we don't want to import it twice.
     if cursor != pallas::network::miniprotocols::Point::Origin {
         iter.next();
     }
@@ -423,8 +423,8 @@ fn do_import(
             .into_diagnostic()
             .context("reading block data")?;
 
-        // we need to wrap them on a ref counter since bytes are going to be shared
-        // around throughout the pipeline
+        // we need to wrap them on a ref counter since bytes are going to be
+        // shared around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
         let last = domain

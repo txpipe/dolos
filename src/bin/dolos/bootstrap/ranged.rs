@@ -121,8 +121,9 @@ impl RangedReader {
     fn finish_current(&mut self) {
         if let Some((_, path)) = self.current.take() {
             let _ = std::fs::remove_file(&path);
-            // Returning a permit lets the downloader stage one more chunk. If the
-            // downloader is already gone, the send simply fails and we ignore it.
+            // Returning a permit lets the downloader stage one more chunk. If
+            // the downloader is already gone, the send simply fails
+            // and we ignore it.
             if let Some(tx) = self.permits_tx.as_ref() {
                 let _ = tx.send(());
             }
@@ -138,7 +139,8 @@ impl Read for RangedReader {
                 if n > 0 {
                     return Ok(n);
                 }
-                // Current chunk exhausted: delete it, free a permit, fetch next.
+                // Current chunk exhausted: delete it, free a permit, fetch
+                // next.
                 self.finish_current();
                 continue;
             }
@@ -164,9 +166,10 @@ impl Drop for RangedReader {
         self.finish_current();
 
         // Release the permit sender first. A downloader blocked waiting for a
-        // free slot will see `permits_rx.recv()` fail and wind down; one blocked
-        // on `data_tx.send()` unblocks as we drain below. Either way it stops
-        // issuing requests and eventually drops `data_tx`, ending the drain.
+        // free slot will see `permits_rx.recv()` fail and wind down; one
+        // blocked on `data_tx.send()` unblocks as we drain below.
+        // Either way it stops issuing requests and eventually drops
+        // `data_tx`, ending the drain.
         self.permits_tx = None;
 
         // Drain and delete any chunks already staged so nothing lingers, then
@@ -299,9 +302,9 @@ pub fn ranged_reader_with_chunk(
         let mut idx = 0u64;
 
         while offset < total_size {
-            // Backpressure point: block here, with NO connection open, until the
-            // extractor frees a slot. This is what keeps R2 from ever seeing an
-            // idle/slow-drained connection.
+            // Backpressure point: block here, with NO connection open, until
+            // the extractor frees a slot. This is what keeps R2
+            // from ever seeing an idle/slow-drained connection.
             if permits_rx.recv().is_err() {
                 // Reader dropped; stop downloading.
                 return;

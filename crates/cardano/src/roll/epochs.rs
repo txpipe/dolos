@@ -167,10 +167,10 @@ impl BlockVisitor for EpochStateVisitor {
         let amount = output.value().coin();
         let stats = self.stats_delta.as_mut().unwrap();
         stats.utxo_delta += amount as i64;
-        // Gross, unsigned sum of all produced outputs (db-sync `epoch.out_sum`).
-        // The driver iterates `tx.produces()`. So this sum includes the regular
-        // outputs of valid transactions and the collateral-return outputs of
-        // phase-2 failures.
+        // Gross, unsigned sum of all produced outputs (db-sync
+        // `epoch.out_sum`). The driver iterates `tx.produces()`. So
+        // this sum includes the regular outputs of valid transactions
+        // and the collateral-return outputs of phase-2 failures.
         stats.output += amount;
 
         Ok(())

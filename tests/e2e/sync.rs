@@ -211,8 +211,8 @@ fn fork_simulation_applies_canonical_after_rollback() {
         "cursor should be at A after rollback"
     );
 
-    // Canonical sibling C: same parent (A), same slot (2), different block_number
-    // → different hash than O'.
+    // Canonical sibling C: same parent (A), same slot (2), different
+    // block_number → different hash than O'.
     let (point_c, block_c) = make_conway_block_with_prev(2, Some(hash_a), 2);
     assert_ne!(
         point_c.hash(),

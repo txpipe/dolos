@@ -1097,9 +1097,9 @@ where
         observer,
     )?;
 
-    // Only here: the stele is sealed, so the note about what was uploaded on the
-    // way to it has nothing left to say. Before the seal it would be a record
-    // that outlived neither the run nor its usefulness.
+    // Only here: the stele is sealed, so the note about what was uploaded on
+    // the way to it has nothing left to say. Before the seal it would be a
+    // record that outlived neither the run nor its usefulness.
     previous.forget_record()?;
 
     let identity = inscription.digest()?;
@@ -1343,8 +1343,8 @@ impl Predecessor for Chained<'_> {
 
         // The arrangement and the answer are one act, in both branches: by the
         // time this returns a descriptor, the transport is already carrying the
-        // blob, and the `HEAD` that proves the registry still has it has already
-        // happened.
+        // blob, and the `HEAD` that proves the registry still has it has
+        // already happened.
         if let (Some(source), Some(descriptor)) = (self.source, self.inheritable.get(&key)) {
             self.registry.adopt_layer(source, descriptor.clone())?;
             self.adopted.fetch_add(1, Ordering::Relaxed);

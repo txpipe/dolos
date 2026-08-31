@@ -58,7 +58,8 @@ pub fn bootstrap_epoch<D: Domain>(
         pparams = crate::forks::force_pparams_version(&pparams, genesis, 0, force_protocol as u16)?;
 
         if force_protocol >= 2 {
-            // When we start on Shelley or beyond, we need to bootstrap the nonces.
+            // When we start on Shelley or beyond, we need to bootstrap the
+            // nonces.
             nonces = Some(Nonces::bootstrap(genesis.shelley_hash));
         }
     }

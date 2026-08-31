@@ -20,7 +20,8 @@ pub(super) fn fetch(dbsync_url: &str, epoch: u64) -> Result<Vec<PoolDelegationRo
     let epoch = i32::try_from(epoch)
         .map_err(|_| anyhow::anyhow!("epoch out of range for dbsync (expected i32)"))?;
 
-    // Aggregate client-side in pages to avoid server-side timeout on large epochs.
+    // Aggregate client-side in pages to avoid server-side timeout on large
+    // epochs.
     let query = r#"
         SELECT
             ph.view AS pool_bech32,

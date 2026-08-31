@@ -397,9 +397,10 @@ impl<'a> Scanner<'a> {
                 Ok(())
             }
             4 => {
-                // `remaining` counts the elements *after* the one being scanned,
-                // so a truncation deep inside can be charged for the ones that
-                // never got their turn.
+                // `remaining` counts the elements *after* the one being
+                // scanned, so a truncation deep inside can be
+                // charged for the ones that never got their
+                // turn.
                 for remaining in (0..arg).rev() {
                     if let Err(e) = self.item(depth + 1) {
                         self.note_pending(&e, remaining);

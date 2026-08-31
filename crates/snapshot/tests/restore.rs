@@ -1379,8 +1379,9 @@ fn the_remaining_download_excludes_what_is_already_done() {
     // The tip is still in it, always.
     assert_eq!(resumed.layers, state_layer_count());
 
-    // So the peak a resumed run stages is the widest state layer, not the widest
-    // layer of the stele — the epoch layers it skips are not staged either.
+    // So the peak a resumed run stages is the widest state layer, not the
+    // widest layer of the stele — the epoch layers it skips are not staged
+    // either.
     assert_eq!(resumed.largest_compressed, widest(&mut plan.tip_layers()));
     assert!(resumed.largest_compressed <= fresh.largest_compressed);
 }

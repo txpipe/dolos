@@ -26,8 +26,8 @@ impl<D: Domain> Batch<D> {
             .take(LOAD_BATCH_SIZE)
             .collect::<VecDeque<_>>();
 
-        // if the wal page is empty, this means we reached the end and we need to
-        // await the next tip change.
+        // if the wal page is empty, this means we reached the end and we need
+        // to await the next tip change.
         if page.is_empty() {
             return Self::from_tip(point, domain);
         }
@@ -45,8 +45,8 @@ impl<D: Domain> Batch<D> {
             .map(|(slot, body)| (ChainPoint::Slot(slot), Arc::new(body)))
             .collect::<VecDeque<_>>();
 
-        // if the archive page is empty, this means we reached the end of the archive
-        // store and we need to transition to the wal.
+        // if the archive page is empty, this means we reached the end of the
+        // archive store and we need to transition to the wal.
         if page.is_empty() {
             let intersect = domain.wal().find_intersect(&[last_point])?;
 

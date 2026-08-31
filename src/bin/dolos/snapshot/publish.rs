@@ -257,10 +257,10 @@ pub(super) fn to_repository(
 
     // And on the same terms, for the same reason. A dry run that reported the
     // layers and said nothing about the volume they would be staged on would be
-    // the one rehearsal a publisher does, missing the failure it exists to find.
-    // After `standing`, because a repository holding another network's chain is
-    // refused there and sizing against it would be sizing against the wrong
-    // stele.
+    // the one rehearsal a publisher does, missing the failure it exists to
+    // find. After `standing`, because a repository holding another
+    // network's chain is refused there and sizing against it would be
+    // sizing against the wrong stele.
     registry::preflight(&registry)
         .into_diagnostic()
         .context("sizing the staging directory")?;
@@ -350,7 +350,8 @@ pub(super) fn to_repository(
 ///   publisher has been down for a month" do not read the same.
 fn standing(registry: &Registry, plan: &export::Plan, require_new: bool) -> miette::Result<bool> {
     // A read of the latest manifest and the one network call a publish makes
-    // before it commits to anything, so running it again is free of consequence.
+    // before it commits to anything, so running it again is free of
+    // consequence.
     //
     // `&|| false` for every caller, `snapshot backfill`'s driver included: the
     // publish that follows this read observes no cancellation for as long as it
@@ -453,8 +454,8 @@ mod tests {
             });
         }
 
-        // The state pass: sixteen layers open at once, closed in order, with one
-        // record stream feeding all of them.
+        // The state pass: sixteen layers open at once, closed in order, with
+        // one record stream feeding all of them.
         for index in 3..PER_PUBLISH {
             progress.on(Event::LayerStarted {
                 index,

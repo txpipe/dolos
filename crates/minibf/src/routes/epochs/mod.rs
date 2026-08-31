@@ -66,10 +66,11 @@ fn build_epoch_content<D: Domain>(
     // had no block.
     //
     // A Byron epoch boundary block (EBB) does not pass through the roll
-    // pipeline. So `first_block_slot` is the first *regular* block of the epoch.
-    // Every Byron epoch opens with an EBB. For these epochs, Blockfrost reports
-    // the time of the EBB, so `first_block_time` differs. See the systemic EBB
-    // omission tracked for `/epochs/{n}/blocks` and `/blocks/{block}`.
+    // pipeline. So `first_block_slot` is the first *regular* block of the
+    // epoch. Every Byron epoch opens with an EBB. For these epochs,
+    // Blockfrost reports the time of the EBB, so `first_block_time`
+    // differs. See the systemic EBB omission tracked for
+    // `/epochs/{n}/blocks` and `/blocks/{block}`.
     let rolling = state.rolling.live().cloned().unwrap_or_default();
     let first_block_time = if rolling.first_block_slot == 0 {
         0
@@ -1395,8 +1396,9 @@ mod tests {
 
     #[tokio::test]
     async fn epochs_by_number_out_of_range() {
-        // An epoch number greater than the `i32` range of the reference API gets a
-        // bad-request error, not a 404 error for a missing epoch.
+        // An epoch number greater than the `i32` range of the reference API
+        // gets a bad-request error, not a 404 error for a missing
+        // epoch.
         let app = TestApp::new();
         assert_status(&app, "/epochs/696969696969", StatusCode::BAD_REQUEST).await;
         assert_status(&app, "/epochs/696969696969/next", StatusCode::BAD_REQUEST).await;
@@ -1431,8 +1433,8 @@ mod tests {
         let content: Vec<EpochContent> =
             serde_json::from_slice(&bytes).expect("failed to parse epoch content array");
 
-        // The result is in strict ascending order. Every epoch is greater than the
-        // requested epoch.
+        // The result is in strict ascending order. Every epoch is greater than
+        // the requested epoch.
         let mut prev = None;
         for item in &content {
             assert!(item.epoch > 0);

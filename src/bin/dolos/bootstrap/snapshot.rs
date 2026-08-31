@@ -134,7 +134,8 @@ fn fetch_snapshot_ranged(
 ) -> miette::Result<()> {
     let staging = root.join(".dolos-snapshot-tmp");
 
-    // Start from a clean staging dir in case a previous attempt left chunks behind.
+    // Start from a clean staging dir in case a previous attempt left chunks
+    // behind.
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)
         .into_diagnostic()
@@ -178,8 +179,9 @@ fn fetch_snapshot_streaming(
     snapshot_url: String,
     feedback: &Feedback,
 ) -> miette::Result<()> {
-    // A single full-body stream must NOT carry an overall request timeout, which
-    // would cap the entire multi-GB transfer. Use a dedicated untimed client.
+    // A single full-body stream must NOT carry an overall request timeout,
+    // which would cap the entire multi-GB transfer. Use a dedicated untimed
+    // client.
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()

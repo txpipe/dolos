@@ -457,13 +457,14 @@ impl BoundaryWork {
                         }
                     }
                 }
-                // HACK: rewards must apply before drops. Rewards update the live
-                // value before the snapshot; drops schedule refunds for after the
-                // snapshot. If reordered, the rewards would be overwritten by the
+                // HACK: rewards must apply before drops. Rewards update the
+                // live value before the snapshot; drops
+                // schedule refunds for after the snapshot. If
+                // reordered, the rewards would be overwritten by the
                 // refund schedule. With this order, the refund clones the live
                 // values with rewards already applied.
-                // TODO: move retires to ESTART (after the snapshot has been taken)
-                // and drop this ordering hack. (#1037)
+                // TODO: move retires to ESTART (after the snapshot has been
+                // taken) and drop this ordering hack. (#1037)
                 let rewards_before = visitor_rewards.deltas.len();
                 let applied_before = self.applied_rewards.len();
                 visitor_rewards.visit_account(self, &account_id, &account)?;
@@ -561,11 +562,12 @@ impl BoundaryWork {
         state: &D::State,
         pool: &PoolState,
     ) -> Result<Option<AccountState>, ChainError> {
-        // Use scheduled (next) params if available, matching the Haskell ledger's
-        // SNAP → POOLREAP ordering where future pool params become current before
-        // pool reaping. This ensures the deposit refund goes to the correct reward
-        // account when a pool is re-registered with a new reward account and then
-        // retired in the same epoch.
+        // Use scheduled (next) params if available, matching the Haskell
+        // ledger's SNAP → POOLREAP ordering where future pool params
+        // become current before pool reaping. This ensures the deposit
+        // refund goes to the correct reward account when a pool is
+        // re-registered with a new reward account and then retired in
+        // the same epoch.
         let snapshot = pool
             .snapshot
             .next()
@@ -904,7 +906,8 @@ impl BoundaryWork {
                         );
                     }
                 } else {
-                    // Account is unregistered at epoch boundary - MIR stays in source pot
+                    // Account is unregistered at epoch boundary - MIR stays in
+                    // source pot
                     self.invalid_treasury_mirs += pending_mir.from_treasury;
                     self.invalid_reserve_mirs += pending_mir.from_reserves;
 

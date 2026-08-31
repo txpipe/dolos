@@ -268,8 +268,8 @@ impl<C: RewardsContext> RewardMap<C> {
         }
     }
 
-    // TODO: this is very inefficient. We should should probably revisit the data
-    // structure.
+    // TODO: this is very inefficient. We should should probably revisit the
+    // data structure.
     pub fn aggregate_pool_rewards(&self) -> HashMap<PoolHash, (TotalPoolRewards, OperatorShare)> {
         let mut rewards = HashMap::new();
 

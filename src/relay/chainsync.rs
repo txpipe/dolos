@@ -77,9 +77,10 @@ impl<D: Domain> Session<D> {
 
         let point = Point::try_from(point).map_err(|_| Error::custom("invalid point"))?;
 
-        // Ouroboros chain-sync always starts by sending the intersection point as an
-        // initial rollback event. The `is_new_intersection`` flag allows us to track if
-        // we have already sent that initial rollback or not
+        // Ouroboros chain-sync always starts by sending the intersection point
+        // as an initial rollback event. The `is_new_intersection`` flag
+        // allows us to track if we have already sent that initial
+        // rollback or not
         if self.is_new_intersection {
             self.connection
                 .send_roll_backward(point, tip)
@@ -140,8 +141,8 @@ impl<D: Domain> Session<D> {
 
         let tip = self.prepare_tip()?;
 
-        // TODO: if points are empty it means that client wants to start sync from
-        // origin?.
+        // TODO: if points are empty it means that client wants to start sync
+        // from origin?.
         if points.is_empty() {
             debug!("intersect candidates empty, using origin");
             points.push(Point::Origin);

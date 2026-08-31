@@ -93,8 +93,8 @@ impl<D: Domain, C: CancelToken> dolos_core::Driver<D, C> for Driver {
             }
         }
 
-        // notify the tracker that we're done receiving new tasks. Without this explicit
-        // close, the wait will block forever.
+        // notify the tracker that we're done receiving new tasks. Without this
+        // explicit close, the wait will block forever.
         debug!("closing task manger");
         tasks.close();
 

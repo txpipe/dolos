@@ -265,8 +265,8 @@ fn digest_blob<R: Read, W: Write>(
 
     // Decoding runs to EOF, so the tap has already seen the whole blob; the
     // drain is a safety net in case a future decoder stops at a frame boundary
-    // instead. Either way the blob digest must cover every byte of the file, not
-    // only the part decompression happened to need.
+    // instead. Either way the blob digest must cover every byte of the file,
+    // not only the part decompression happened to need.
     std::io::copy(&mut tap, &mut std::io::sink())?;
 
     let (_, blob_digest, compressed_size) = tap.finish();

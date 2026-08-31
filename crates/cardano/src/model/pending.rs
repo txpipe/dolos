@@ -250,9 +250,10 @@ impl dolos_core::EntityDelta for EnqueueMir {
         self.prev = entity.clone();
 
         // Behavior depends on overwrite flag (determined by protocol version):
-        // - Pre-Alonzo (overwrite=true): Later MIRs overwrite earlier ones (Map.union
+        // - Pre-Alonzo (overwrite=true): Later MIRs overwrite earlier ones
+        //   (Map.union semantics)
+        // - Alonzo+ (overwrite=false): MIRs accumulate (Map.unionWith (<>)
         //   semantics)
-        // - Alonzo+ (overwrite=false): MIRs accumulate (Map.unionWith (<>) semantics)
         if self.overwrite {
             // Pre-Alonzo: overwrite with new values
             *entity = Some(PendingMirState {

@@ -147,17 +147,20 @@ impl BlockVisitor for AccountVisitor {
             let MoveInstantaneousReward { source, target, .. } = cert;
 
             if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
-                // Pre-Alonzo (protocol < 5): MIRs overwrite previous values (Map.union
-                // semantics) Alonzo+ (protocol >= 5): MIRs accumulate
-                // (Map.unionWith (<>) semantics) TODO: move this logic out of
+                // Pre-Alonzo (protocol < 5): MIRs overwrite previous values
+                // (Map.union semantics) Alonzo+ (protocol >=
+                // 5): MIRs accumulate (Map.unionWith (<>)
+                // semantics) TODO: move this logic out of
                 // the visitor and into a module more ledger-related.
                 let overwrite = self.protocol_version.unwrap_or(0) < 5;
 
                 for (cred, amount) in creds {
                     let amount = amount.max(0) as u64;
-                    // Store pending MIR to be applied at EWRAP (not immediately)
-                    // This ensures MIRs are only applied to accounts that are
-                    // registered at epoch boundary, matching the Cardano ledger.
+                    // Store pending MIR to be applied at EWRAP (not
+                    // immediately) This ensures MIRs are
+                    // only applied to accounts that are
+                    // registered at epoch boundary, matching the Cardano
+                    // ledger.
                     match source {
                         InstantaneousRewardSource::Reserves => {
                             deltas

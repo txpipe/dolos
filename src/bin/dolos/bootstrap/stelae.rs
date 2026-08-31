@@ -466,8 +466,8 @@ mod progress_tests {
         let epoch = serde_json::json!({"networkMagic": 2, "epoch": 0});
         let shard = serde_json::json!({"networkMagic": 2, "epoch": 0, "shard": 0});
 
-        // The layer an earlier attempt had already committed: announced, closed,
-        // nothing pulled for it.
+        // The layer an earlier attempt had already committed: announced,
+        // closed, nothing pulled for it.
         progress.on(Event::LayerStarted {
             index: 0,
             total: PER_RESTORE,

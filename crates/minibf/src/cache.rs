@@ -214,7 +214,8 @@ impl CacheService {
                 {
                     return entry.clone();
                 } else {
-                    // This path theoretically shouldn't happen if T maps 1:1 to TypeId
+                    // This path theoretically shouldn't happen if T maps 1:1 to
+                    // TypeId
                     eprintln!("CacheService: downcast failed for type {:?}", type_id);
                 }
             }
@@ -272,7 +273,8 @@ mod tests {
         // 2. Wait for TTL to expire
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // 3. Fetch again - should return stale "initial" but trigger background refresh
+        // 3. Fetch again - should return stale "initial" but trigger background
+        //    refresh
         let c = counter.clone();
         let fetcher = move || {
             c.fetch_add(1, Ordering::SeqCst);

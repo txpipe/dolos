@@ -155,8 +155,8 @@ pub fn into_alonzo(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PPar
 
 pub fn into_babbage(previous: &PParamsSet, genesis: &alonzo::GenesisFile) -> PParamsSet {
     // In the hardfork, the value got translated from words to bytes
-    // Since the transformation from words to bytes is hardcoded, the transformation
-    // here is also hardcoded
+    // Since the transformation from words to bytes is hardcoded, the
+    // transformation here is also hardcoded
     let ada_per_utxo_byte = previous.ada_per_utxo_byte().unwrap_or_default() / 8;
 
     let set = previous

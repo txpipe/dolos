@@ -438,7 +438,8 @@ mod tests {
 
     #[test]
     fn test_utxo_block_separation() {
-        // UTxO and block tags with same dimension name should have different prefixes
+        // UTxO and block tags with same dimension name should have different
+        // prefixes
         let utxo_dim_hash = hash_dimension(dim_prefix::UTXO, "address");
         let block_key = build_block_tag_key("address", stored("address", b"addr"), 0);
 

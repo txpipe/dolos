@@ -642,8 +642,8 @@ pub(crate) fn compute_delta<D: Domain>(
 
         dormancy = builder.take_dormancy();
 
-        // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system. (#1042)
+        // TODO: we treat the UTxO set differently due to tech-debt. We should
+        // migrate this into the entity system. (#1042)
         let blockd = block.decoded();
         let blockd = blockd.view();
         let utxos = utxoset::compute_apply_delta(blockd, &batch.utxos_decoded)?;

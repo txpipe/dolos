@@ -113,7 +113,8 @@ fn test_redb3_lazy_iter() {
 // ---------------------------------------------------------------------------
 
 const SHARD_ENTITY_COUNT: u64 = 50_000;
-const SHARD_KEY_PREFIX_RANGE: std::ops::Range<u8> = 0x10..0x20; // one 16-bucket shard
+const SHARD_KEY_PREFIX_RANGE: std::ops::Range<u8> = 0x10..0x20; // one 16-bucket
+                                                                // shard
 
 fn seed_account_namespace<S: CoreStateStore>(store: &S) {
     let value = vec![0xABu8; ENTITY_SIZE];

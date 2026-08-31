@@ -179,8 +179,8 @@ mod tests {
         let mut produced = Vec::new();
         let mut consumed = Vec::new();
 
-        // Handle forward operations: produced_utxo -> add to index, consumed_utxo ->
-        // remove from index
+        // Handle forward operations: produced_utxo -> add to index,
+        // consumed_utxo -> remove from index
         for (txo_ref, era_cbor) in utxo_delta.produced_utxo.iter() {
             if let Ok(output) = MultiEraOutput::try_from(era_cbor.as_ref()) {
                 let tags = extract_utxo_tags(&output);
@@ -283,9 +283,10 @@ mod tests {
         let genesis = fake_genesis_delta(1_000_000_000);
         apply_utxoset!(store, &indexes, [&genesis]);
 
-        // TODO: the store is not persisting the cursor unless it's a specific point. We
-        // need to fix this in the next breaking change version. (#1035)
-        //assert_eq!(store.cursor().unwrap(), Some(ChainPoint::Origin));
+        // TODO: the store is not persisting the cursor unless it's a specific
+        // point. We need to fix this in the next breaking change
+        // version. (#1035) assert_eq!(store.cursor().unwrap(),
+        // Some(ChainPoint::Origin));
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
         assert_eq!(bobs.len(), 1);
@@ -332,8 +333,9 @@ mod tests {
         let undo = revert_delta(forward);
         apply_utxoset!(store, &indexes, [&undo]);
 
-        // TODO: the store is not persisting the origin cursor, instead it's keeping it
-        // empty. We should fix this in the next breaking change version. (#1035)
+        // TODO: the store is not persisting the origin cursor, instead it's
+        // keeping it empty. We should fix this in the next breaking
+        // change version. (#1035)
         assert_eq!(store.read_cursor().unwrap(), None);
 
         let bobs = get_test_address_utxos(&store, &indexes, TestAddress::Bob);
@@ -349,8 +351,8 @@ mod tests {
     fn test_apply_in_batch() {
         let mut batch = Vec::new();
 
-        // first we do a step-by-step apply to use as reference. We keep the deltas in a
-        // vector to apply them in batch later.
+        // first we do a step-by-step apply to use as reference. We keep the
+        // deltas in a vector to apply them in batch later.
         let store = StateStore::in_memory(StateSchema::default()).unwrap();
         let indexes = build_indexes(&store);
 

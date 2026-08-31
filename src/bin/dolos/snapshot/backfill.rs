@@ -942,7 +942,8 @@ mod tests {
 
     #[test]
     fn a_genesis_without_a_security_param_keeps_the_old_value() {
-        // guessing small is the expensive direction, so an unknown `k` falls back
+        // guessing small is the expensive direction, so an unknown `k` falls
+        // back
         let mut genesis = dolos_cardano::include::preview::load();
         genesis.shelley.security_param = None;
 

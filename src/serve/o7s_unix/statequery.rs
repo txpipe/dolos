@@ -114,11 +114,13 @@ impl<D: Domain> Session<D> {
     /// Decode cardano-cli tagged query format.
     /// cardano-cli wraps queries like: [0, [0, [era, [era, tag(258), data]]]]
     fn decode_cardano_cli_tagged_query(raw_bytes: &[u8]) -> Result<q16::Request, ()> {
-        // Look for tag marker (0xd9 = tag with 2-byte value) within array structure
+        // Look for tag marker (0xd9 = tag with 2-byte value) within array
+        // structure
         if raw_bytes.len() >= 10 && raw_bytes[0] == 0x82 {
             if let Some(tag_pos) = raw_bytes.iter().position(|&b| b == 0xd9) {
                 if tag_pos + 3 < raw_bytes.len() {
-                    // Extract era from position 5 (the first era byte in the structure)
+                    // Extract era from position 5 (the first era byte in the
+                    // structure)
                     let era = raw_bytes.get(5).ok_or(())?.to_owned() as u16;
 
                     let after_tag = &raw_bytes[tag_pos + 3..];

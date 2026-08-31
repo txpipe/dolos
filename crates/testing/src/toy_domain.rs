@@ -360,9 +360,10 @@ impl<B: ToyStores> ToyDomain<B> {
         ));
         execute_work_unit(&domain, &mut genesis_work).unwrap();
 
-        // Manually refresh the chain cache after genesis since we bypassed pop_work.
-        // In normal operation, the cache refresh happens automatically via the
-        // needs_cache_refresh flag in CardanoLogic::pop_work.
+        // Manually refresh the chain cache after genesis since we bypassed
+        // pop_work. In normal operation, the cache refresh happens
+        // automatically via the needs_cache_refresh flag in
+        // CardanoLogic::pop_work.
         {
             let mut chain = domain.chain.write().expect("chain lock poisoned");
             chain.refresh_cache::<Self>(domain.stores.state()).unwrap();

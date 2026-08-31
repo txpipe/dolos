@@ -544,7 +544,8 @@ mod tests {
     fn restart_safety_no_skipped_work() {
         let eras = test_chain_summary();
         let stability_window = 40;
-        // Sequence that crosses RUPD boundary (slot 40) and epoch boundary (slot 100)
+        // Sequence that crosses RUPD boundary (slot 40) and epoch boundary
+        // (slot 100)
         let slots: Vec<BlockSlot> = vec![0, 10, 30, 50, 70, 90, 110, 130];
 
         let full =
@@ -557,9 +558,10 @@ mod tests {
             let (_, ref cursor) = full[i];
 
             // Mirror real initialization: Origin → Empty, otherwise → Restart.
-            // Slot cursors mean "epoch boundary processed, block not yet rolled",
-            // so we replay from that slot inclusive. Specific cursors mean the block
-            // at that slot was fully committed, so we replay strictly after.
+            // Slot cursors mean "epoch boundary processed, block not yet
+            // rolled", so we replay from that slot inclusive.
+            // Specific cursors mean the block at that slot was
+            // fully committed, so we replay strictly after.
             let (restart_buf, replay_slots) = match cursor {
                 ChainPoint::Origin => (WorkBuffer::Empty, slots.to_vec()),
                 ChainPoint::Slot(s) => {
@@ -725,7 +727,8 @@ mod tests {
             let restart_tags =
                 feed_and_drain(restart_buf, &replay_slots, &eras, stability_window, None);
 
-            // The boundary block (110) should be the start of a Blocks work unit
+            // The boundary block (110) should be the start of a Blocks work
+            // unit
             assert!(
                 restart_tags.iter().any(|t| matches!(t, WorkTag::Blocks { first, .. } if *first == 110)),
                 "Boundary block 110 should be the start of a Blocks unit after restart from EStart. Got: {:?}",

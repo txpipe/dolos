@@ -73,9 +73,10 @@ where
             &mut self.batch,
         )?;
 
-        // Load entities here so `compute` can apply deltas before WAL serialization;
-        // this is what populates each delta's `prev_*` undo state in time for
-        // `commit_wal` to capture it on the wire.
+        // Load entities here so `compute` can apply deltas before WAL
+        // serialization; this is what populates each delta's `prev_*`
+        // undo state in time for `commit_wal` to capture it on the
+        // wire.
         self.batch.load_entities(domain)?;
 
         debug!("roll batch loaded and deltas computed");
@@ -83,10 +84,11 @@ where
     }
 
     fn compute(&mut self, _shard_index: u32) -> Result<(), DomainError> {
-        // Apply deltas to in-memory entities BEFORE the WAL commit. This captures
-        // each delta's `prev_*` undo state on the in-memory delta instances; the
-        // subsequent `commit_wal` then serializes deltas that already carry the
-        // information `delta.undo()` needs during a future rollback.
+        // Apply deltas to in-memory entities BEFORE the WAL commit. This
+        // captures each delta's `prev_*` undo state on the in-memory
+        // delta instances; the subsequent `commit_wal` then serializes
+        // deltas that already carry the information `delta.undo()`
+        // needs during a future rollback.
         self.batch.sort_by_slot();
         self.batch.apply_entities()?;
         Ok(())

@@ -65,7 +65,8 @@ fn check_wal_in_sync_with_state<D: Domain>(domain: &D) -> Result<(), DomainError
     match (wal, state) {
         (Some(ref wal_tip), Some(ref state)) if wal_tip.slot() >= state.slot() => {
             // WAL is at or ahead of state. Normal case (including post-crash
-            // where WAL committed but state didn't). catch_up_stores handles it.
+            // where WAL committed but state didn't). catch_up_stores handles
+            // it.
             info!(%wal_tip, %state, "WAL is in sync with state");
         }
         (Some(ref wal_tip), Some(ref state)) => {
@@ -315,7 +316,8 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
     let mut count = 0u64;
 
     for (point, block) in blocks {
-        // Skip the start point itself (already in archive) and anything at or before it
+        // Skip the start point itself (already in archive) and anything at or
+        // before it
         if Some(point.slot()) <= archive_tip {
             continue;
         }

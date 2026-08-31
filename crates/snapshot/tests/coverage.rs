@@ -77,9 +77,10 @@ fn every_dimension_resolves_and_nothing_else_does() {
         assert_eq!(indexes::resolve_dimension(dimension).unwrap(), dimension);
     }
 
-    // The UTxO filter dimensions are live-state indexes, rebuilt at restore from
-    // the UTxO set rather than shipped — so they are deliberately not archive
-    // dimensions, and `spent_txo` is the archive one whose name is nearest.
+    // The UTxO filter dimensions are live-state indexes, rebuilt at restore
+    // from the UTxO set rather than shipped — so they are deliberately not
+    // archive dimensions, and `spent_txo` is the archive one whose name is
+    // nearest.
     for absent in ["utxo::address", "spent-txo", "", "Address"] {
         assert!(indexes::resolve_dimension(absent).is_err(), "{absent:?}");
     }
@@ -226,9 +227,9 @@ fn log_kinds_derive_from_their_namespaces() {
         kinds.push(kind);
     }
 
-    // Injective in both columns. Two namespaces sharing a kind would publish one
-    // namespace's logs under another's name; two kinds sharing a namespace would
-    // restore the same records twice.
+    // Injective in both columns. Two namespaces sharing a kind would publish
+    // one namespace's logs under another's name; two kinds sharing a
+    // namespace would restore the same records twice.
     let distinct_kinds: BTreeSet<&str> = kinds.iter().copied().collect();
     let distinct_namespaces: BTreeSet<Namespace> =
         LOG_KINDS.into_iter().map(|(_, ns)| ns).collect();
@@ -236,8 +237,8 @@ fn log_kinds_derive_from_their_namespaces() {
     assert_eq!(distinct_kinds.len(), LOG_KINDS.len());
     assert_eq!(distinct_namespaces.len(), LOG_KINDS.len());
 
-    // Ascending, in both columns: the inscription lists layers in `KINDS` order,
-    // so the table's order is published order.
+    // Ascending, in both columns: the inscription lists layers in `KINDS`
+    // order, so the table's order is published order.
     let mut sorted = kinds.clone();
     sorted.sort_unstable();
     assert_eq!(kinds, sorted, "LOG_KINDS must be in byte order");
@@ -317,9 +318,9 @@ fn state_kinds_derive_from_their_namespaces() {
     );
     assert_eq!(state_kind_for("pending_mirs"), Some("state-pending-mirs"));
 
-    // Injective in both columns. Two namespaces sharing a kind would publish one
-    // namespace's tip under another's name; two kinds sharing a namespace would
-    // restore the same records twice.
+    // Injective in both columns. Two namespaces sharing a kind would publish
+    // one namespace's tip under another's name; two kinds sharing a
+    // namespace would restore the same records twice.
     let distinct_kinds: BTreeSet<&str> = kinds.iter().copied().collect();
     let distinct_namespaces: BTreeSet<Namespace> =
         STATE_KINDS.into_iter().map(|(_, ns, _)| ns).collect();
@@ -327,8 +328,8 @@ fn state_kinds_derive_from_their_namespaces() {
     assert_eq!(distinct_kinds.len(), STATE_KINDS.len());
     assert_eq!(distinct_namespaces.len(), STATE_KINDS.len());
 
-    // Ascending, in both columns: the inscription lists layers in `KINDS` order,
-    // so the table's order is published order.
+    // Ascending, in both columns: the inscription lists layers in `KINDS`
+    // order, so the table's order is published order.
     let mut sorted = kinds.clone();
     sorted.sort_unstable();
     assert_eq!(kinds, sorted, "STATE_KINDS must be in byte order");
@@ -341,8 +342,8 @@ fn state_kinds_derive_from_their_namespaces() {
 
     // The shard map is the spec's, not the data's: four chain-scale namespaces
     // split sixteen ways, and every other namespace is a single blob. Changing
-    // one of these is a media-type-version event for that kind, so it is spelled
-    // out here rather than derived from the table it is checking.
+    // one of these is a media-type-version event for that kind, so it is
+    // spelled out here rather than derived from the table it is checking.
     for (_, ns, shards) in STATE_KINDS {
         let expected = match ns {
             "utxos" | "accounts" | "assets" | "datums" => 16,

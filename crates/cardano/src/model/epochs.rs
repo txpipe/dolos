@@ -660,8 +660,8 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     }
 
     fn undo(&self, entity: &mut Option<EpochState>) {
-        // apply is a no-op when entity was None or when nonces were None, so in those
-        // cases undo is also a no-op.
+        // apply is a no-op when entity was None or when nonces were None, so in
+        // those cases undo is also a no-op.
         let Some(entity) = entity else { return };
         if self.previous.is_some() {
             entity.nonces = self.previous.clone();
@@ -1389,8 +1389,8 @@ impl dolos_core::EntityDelta for EpochTransition {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
-        // save undo info (snapshot whole EpochValues so rotation + any era migration
-        // are both covered)
+        // save undo info (snapshot whole EpochValues so rotation + any era
+        // migration are both covered)
         self.prev_number = entity.number;
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());
@@ -1497,8 +1497,8 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
-        // save undo info (snapshot whole EpochValues so rotation + any era migration
-        // are both covered)
+        // save undo info (snapshot whole EpochValues so rotation + any era
+        // migration are both covered)
         self.prev_number = entity.number;
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());

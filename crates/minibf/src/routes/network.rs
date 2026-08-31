@@ -225,8 +225,8 @@ impl<'a> IntoModel<Network> for NetworkModelBuilder<'a> {
         let max_supply = self.genesis.shelley.max_lovelace_supply.unwrap_or_default();
 
         // TODO: check why we have this semantic discrepancy. BF uses the name
-        // `total_supply` for what we call `circulating`. For BF, the `circulating`
-        // supply is total supply minus deposits.
+        // `total_supply` for what we call `circulating`. For BF, the
+        // `circulating` supply is total supply minus deposits.
         let total_supply = self.active.initial_pots.circulating();
         let circulating = self.active.initial_pots.utxos + self.active.initial_pots.rewards;
 

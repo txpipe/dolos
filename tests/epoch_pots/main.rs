@@ -458,7 +458,8 @@ fn run_epoch_pots_test(
     let cardano_network = dolos_cardano::network_from_genesis(&harness.domain().genesis());
 
     // Capture the completed subject epoch via the estart callback.
-    // When estart fires for epoch N+1, ended_state() holds the completed epoch N.
+    // When estart fires for epoch N+1, ended_state() holds the completed epoch
+    // N.
     let mut captured_epoch: Option<EpochState> = None;
 
     // Accumulate applied rewards across all Ewrap work units for the

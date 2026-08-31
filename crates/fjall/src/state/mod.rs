@@ -85,12 +85,14 @@ impl StateStore {
 
         let mut builder = Database::builder(path.as_ref()).cache_size(cache_bytes);
 
-        // Apply optional max journal size (otherwise use Fjall default of 512 MiB)
+        // Apply optional max journal size (otherwise use Fjall default of 512
+        // MiB)
         if let Some(journal_mb) = config.max_journal_size {
             builder = builder.max_journaling_size((journal_mb as u64) * 1024 * 1024);
         }
 
-        // Apply optional worker threads (otherwise use Fjall default of min(cores, 4))
+        // Apply optional worker threads (otherwise use Fjall default of
+        // min(cores, 4))
         if let Some(threads) = config.worker_threads {
             builder = builder.worker_threads(threads);
         }

@@ -347,8 +347,8 @@ fn per_kind_diff_ids_are_pinned() {
     let layers = all_layers();
 
     // Before the zip, not after: `zip` stops at the shorter side, so a dropped
-    // layer would quietly shorten the loop rather than fail it — in the one test
-    // whose whole job is to notice a layer changing.
+    // layer would quietly shorten the loop rather than fail it — in the one
+    // test whose whole job is to notice a layer changing.
     assert_eq!(
         layers.len(),
         GOLDEN_LAYERS.len(),

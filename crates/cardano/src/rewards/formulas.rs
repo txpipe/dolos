@@ -176,8 +176,8 @@ pub fn pool_operator_share(
     let s = ratio!(live_pledge, circulating_supply);
     let theta = ratio!(pool_stake, circulating_supply);
 
-    // s/σ — ratio of owner's pledge to pool stake (denominator cancels, so we can
-    // use amounts)
+    // s/σ — ratio of owner's pledge to pool stake (denominator cancels, so we
+    // can use amounts)
     let s_over_sigma = s / theta;
 
     let one = ratio!(1);
@@ -257,7 +257,8 @@ mod tests {
 
         //let expected = 367414432; <- what BF returns
         //let expected = 372133077; <- what we see in DBSync
-        let expected = 372133076; // <- what we're getting right now which is close enough
+        let expected = 372133076; // <- what we're getting right now which is
+                                  // close enough
 
         assert_eq!(out, expected);
     }

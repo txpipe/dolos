@@ -98,9 +98,9 @@ pub fn run(args: &GenerateArgs) -> Result<()> {
     println!("  DBSync URL: {}", dbsync_url);
     println!("  Output dir: {}", output_dir.display());
 
-    // performance_epoch = subject_epoch - 2: the epoch where rewards were earned.
-    // RUPD at subject_epoch uses the mark snapshot (subject - 1) to compute rewards
-    // for performance done in subject - 2.
+    // performance_epoch = subject_epoch - 2: the epoch where rewards were
+    // earned. RUPD at subject_epoch uses the mark snapshot (subject - 1) to
+    // compute rewards for performance done in subject - 2.
     let performance_epoch = args.subject_epoch.saturating_sub(2);
 
     // Conditionally fetch and write each dataset

@@ -1571,9 +1571,9 @@ impl IntoModel<Vec<TxContentDelegationsInner>> for TxModelBuilder<'_> {
 
         let network = self.network.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // TODO: we're hardcoding a ledger rule here by saying that the active epoch is
-        // the epoch number + 1. Although this is correct, the mapping layer
-        // shouldn't be the one defining this.
+        // TODO: we're hardcoding a ledger rule here by saying that the active
+        // epoch is the epoch number + 1. Although this is correct, the
+        // mapping layer shouldn't be the one defining this.
         let active_epoch = self
             .chain
             .as_ref()
