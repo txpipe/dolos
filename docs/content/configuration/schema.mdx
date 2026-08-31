@@ -12,7 +12,7 @@ peer_address = "preprod-node.world.dev.cardano.org:30000"
 # block_production_interval = 5
 
 [storage]
-version = "v3"
+version = "v4"
 path = "data"
 
 [genesis]
@@ -106,10 +106,12 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | property | type   | example |
 | -------- | ------ | ------- |
 | path     | string | "data" |
-| version  | string | "v3"   |
+| version  | string | "v4"   |
 
 - `path`: root directory where all data will be stored.
-- `version`: storage schema version (`v0` - `v3`).
+- `version`: storage schema version (`v0` - `v4`). This release reads `v4`
+  only; a configuration naming an older version is refused at startup, and
+  `dolos init` rewrites the config and offers to clear the old data.
 
 Besides the stores, this directory holds `scratch/`: where `dolos snapshot
 publish`, `dolos snapshot backfill`, `dolos bootstrap stelae` and `dolos

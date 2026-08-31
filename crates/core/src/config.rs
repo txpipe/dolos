@@ -112,9 +112,10 @@ pub enum StorageVersion {
     V0,
     V1,
     V2,
+    V3,
 
     #[default]
-    V3,
+    V4,
 }
 
 impl<'de> Deserialize<'de> for StorageVersion {
@@ -129,6 +130,7 @@ impl<'de> Deserialize<'de> for StorageVersion {
                 "v1" => Ok(StorageVersion::V1),
                 "v2" => Ok(StorageVersion::V2),
                 "v3" => Ok(StorageVersion::V3),
+                "v4" => Ok(StorageVersion::V4),
                 _ => Err(<D::Error as serde::de::Error>::custom("Invalid version")),
             },
             None => Ok(StorageVersion::V0),
@@ -146,6 +148,7 @@ impl Display for StorageVersion {
                 Self::V1 => "v1",
                 Self::V2 => "v2",
                 Self::V3 => "v3",
+                Self::V4 => "v4",
             }
         )
     }
@@ -1364,6 +1367,35 @@ mod tests {
             ArchiveStoreConfig::default(),
             ArchiveStoreConfig::Fjall(cfg) if cfg.is_default()
         ));
+    }
+
+    /// Every spelling the config accepts round-trips, and the default is the
+    /// version this release reads. A *missing* value stays `V0` on purpose:
+    /// it is what makes an un-versioned config fail the startup gate rather
+    /// than inherit whatever the current default happens to be.
+    #[test]
+    fn storage_versions_round_trip_and_default_to_the_current_one() {
+        use serde_json::json;
+
+        for (spelling, expected) in [
+            ("v0", StorageVersion::V0),
+            ("v1", StorageVersion::V1),
+            ("v2", StorageVersion::V2),
+            ("v3", StorageVersion::V3),
+            ("v4", StorageVersion::V4),
+        ] {
+            let parsed: StorageVersion = serde_json::from_value(json!(spelling)).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(parsed.to_string(), spelling);
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), json!(spelling));
+        }
+
+        assert_eq!(StorageVersion::default(), StorageVersion::V4);
+
+        let missing: StorageVersion = serde_json::from_value(json!(null)).unwrap();
+        assert_eq!(missing, StorageVersion::V0);
+
+        assert!(serde_json::from_value::<StorageVersion>(json!("v5")).is_err());
     }
 
     /// The docs spell the opt-out backend `no_op`; the historical serde

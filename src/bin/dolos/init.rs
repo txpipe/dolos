@@ -16,7 +16,26 @@ use std::{
     str::FromStr,
 };
 
+use dolos::storage::CURRENT_STORAGE_VERSION;
+
 use crate::{common::cleanup_data, feedback::Feedback};
+
+/// The config file `dolos init` writes, and the one whose failure to parse
+/// tells us an older setup is present.
+const CONFIG_FILE: &str = "dolos.toml";
+
+/// Whether `dolos init` must offer the delete-and-bootstrap step.
+///
+/// Two ways a setup fails to carry forward. The config names an older storage
+/// version — the ordinary upgrade. Or the existing config did not parse at
+/// all (`unparseable_existing`), which is what a v1.6 TOML naming a removed
+/// backend variant looks like from here: the editor falls back to defaults,
+/// so without this branch init would write a current-version config over a
+/// store this binary never built and never offer to clear it — the silent
+/// mismatch the version gate exists to prevent.
+fn needs_storage_upgrade(version: &StorageVersion, unparseable_existing: bool) -> bool {
+    unparseable_existing || *version != CURRENT_STORAGE_VERSION
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -410,7 +429,7 @@ impl Default for ConfigEditor {
                 // the same from here, and overwriting would undo the first.
                 stelae: official_stelae(),
                 storage: StorageConfig {
-                    version: StorageVersion::V3,
+                    version: CURRENT_STORAGE_VERSION,
                     ..Default::default()
                 },
                 genesis: Default::default(),
@@ -575,9 +594,9 @@ impl ConfigEditor {
             .apply_enable_relay(args.enable_relay)
     }
 
-    fn prompt_storage_upgrade(mut self) -> miette::Result<Self> {
-        if self.0.storage.version != StorageVersion::V3 {
-            self.0.storage.version = StorageVersion::V3;
+    fn prompt_storage_upgrade(mut self, unparseable_existing: bool) -> miette::Result<Self> {
+        if needs_storage_upgrade(&self.0.storage.version, unparseable_existing) {
+            self.0.storage.version = CURRENT_STORAGE_VERSION;
 
             let delete = Confirm::new("Your storage is incompatible with the current version. Do you want to delete data and bootstrap?")
                 .with_default(true)
@@ -739,9 +758,9 @@ impl ConfigEditor {
         Ok(self.apply_history_pruning(value))
     }
 
-    fn confirm_values(mut self) -> miette::Result<ConfigEditor> {
+    fn confirm_values(mut self, storage_upgrade: bool) -> miette::Result<ConfigEditor> {
         self = self
-            .prompt_storage_upgrade()?
+            .prompt_storage_upgrade(storage_upgrade)?
             .prompt_known_network()?
             .prompt_include_genesis()?
             .prompt_remote_peer()?
@@ -780,15 +799,21 @@ pub fn run(
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
 
+    // A `dolos.toml` that exists but did not parse is the v1.6-era setup this
+    // release refuses: the editor below falls back to defaults, so without
+    // this the operator would get a current-version config written over the
+    // old store with no chance to clear it.
+    let unparseable_existing = config.is_err() && Path::new(CONFIG_FILE).exists();
+
     config
         .map(|x| ConfigEditor(x, None))
         .unwrap_or_default()
         .fill_values_from_args(args)
-        .confirm_values()?
+        .confirm_values(unparseable_existing)?
         .include_genesis_files()?
-        .save(&PathBuf::from("dolos.toml"))?;
+        .save(&PathBuf::from(CONFIG_FILE))?;
 
-    println!("config saved to dolos.toml");
+    println!("config saved to {CONFIG_FILE}");
 
     let config = crate::common::load_config(&None)
         .into_diagnostic()
@@ -807,6 +832,24 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh config is seeded at the version this binary reads, so the
+    /// upgrade prompt does not fire on a node init just created.
+    #[test]
+    fn a_fresh_config_is_seeded_at_the_current_storage_version() {
+        let editor = ConfigEditor::default();
+
+        assert_eq!(editor.0.storage.version, CURRENT_STORAGE_VERSION);
+        assert!(!needs_storage_upgrade(&editor.0.storage.version, false));
+    }
+
+    /// An existing config that does not parse reaches the delete-and-bootstrap
+    /// offer, even though the defaults filled in for it already say v4.
+    #[test]
+    fn an_unparseable_existing_config_still_offers_the_upgrade() {
+        assert!(needs_storage_upgrade(&CURRENT_STORAGE_VERSION, true));
+        assert!(needs_storage_upgrade(&StorageVersion::V3, false));
+    }
 
     /// A freshly initialized node carries the stelae registry section the
     /// official registry needs, and no password.
