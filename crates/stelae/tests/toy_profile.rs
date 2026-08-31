@@ -956,10 +956,306 @@ fn tampering_is_caught_on_read() {
     bytes[middle] ^= 0xff;
     std::fs::write(&path, &bytes).unwrap();
 
+    // Where that is caught depends on which map the reader had. A sidecar
+    // states the map without opening a blob, so the corruption surfaces on the
+    // read of the layer itself — against the identity the inscription pins,
+    // which is the stronger claim of the two.
+    let index = stele.blob_index().unwrap();
+    assert_eq!(index.blob_for(&inscription.layers[0].diff_id), Some(blob));
+    assert!(stele
+        .read_layer(&index, &ToyProfile, &inscription.layers[0])
+        .is_err());
+
+    // The scan does look, and refuses before a descriptor is consulted at all.
+    std::fs::remove_file(temp.path().join(stelae::dir::BLOB_INDEX_FILE)).unwrap();
     assert!(
         stele.blob_index().is_err(),
         "a blob that disagrees with its name must not index"
     );
+}
+
+// --------------------------------------------------------------------------
+// The blob-index sidecar
+// --------------------------------------------------------------------------
+
+/// A seal writes the map, and it is the map the scan would have rebuilt.
+#[test]
+fn a_sealed_directory_states_its_blob_map() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let sidecar = temp.path().join(stelae::dir::BLOB_INDEX_FILE);
+    assert!(
+        sidecar.is_file(),
+        "a seal writes the map beside the document"
+    );
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let stated = stele.blob_index().unwrap();
+    let scanned = without_sidecar(temp.path(), || stele.blob_index().unwrap());
+
+    assert_eq!(stated.len(), scanned.len());
+
+    for descriptor in &inscription.layers {
+        assert!(stated.blob_for(&descriptor.diff_id).is_some());
+        assert_eq!(
+            stated.blob_for(&descriptor.diff_id),
+            scanned.blob_for(&descriptor.diff_id),
+            "layer {:?}",
+            descriptor.kind,
+        );
+    }
+}
+
+/// The saving, stated as the only thing that can prove it: with the map on
+/// disk, not one blob is opened.
+///
+/// Every blob is emptied in place — corruption the scan is documented to refuse
+/// — and the sidecar path hands the same map over regardless, because it never
+/// looks. That pass is what a directory restore used to pay before it read the
+/// layers it actually wanted.
+#[test]
+fn the_sidecar_is_read_instead_of_the_blobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let before = stele.blob_index().unwrap();
+
+    for descriptor in &inscription.layers {
+        let blob = before.blob_for(&descriptor.diff_id).unwrap();
+        std::fs::write(stele.blob_path(&blob), b"").unwrap();
+    }
+
+    let after = stele.blob_index().unwrap();
+
+    for descriptor in &inscription.layers {
+        assert_eq!(
+            after.blob_for(&descriptor.diff_id),
+            before.blob_for(&descriptor.diff_id),
+            "layer {:?}",
+            descriptor.kind,
+        );
+    }
+
+    let err = without_sidecar(temp.path(), || stele.blob_index().unwrap_err());
+    assert!(matches!(err, Error::DigestMismatch { .. }), "{err:?}");
+}
+
+/// Absence is the older format; a file that does not parse is a fault.
+///
+/// One line apart in the reader and far apart for an operator: a corrupt
+/// sidecar read as an absent one restores correctly while silently paying the
+/// scan it was written to remove, and nothing ever says so.
+#[test]
+fn a_corrupt_sidecar_is_not_an_absent_one() {
+    let temp = tempfile::tempdir().unwrap();
+    write_stele(temp.path());
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let sidecar = temp.path().join(stelae::dir::BLOB_INDEX_FILE);
+
+    std::fs::write(&sidecar, br#"{"layers": [{"diffId": "#).unwrap();
+    let err = stele.blob_index().unwrap_err();
+    assert!(matches!(err, Error::Json(_)), "{err:?}");
+
+    std::fs::remove_file(&sidecar).unwrap();
+    stele.blob_index().unwrap();
+}
+
+/// A stele whose layers this writer did not all produce gets no sidecar.
+///
+/// The file's meaning is that it is complete: a reader that finds one stops
+/// looking at blobs, so a map missing an entry would read as a stele missing a
+/// layer rather than as a sidecar missing a line. No map is the honest answer,
+/// and the scan behind it was always correct.
+#[test]
+fn an_incomplete_map_is_not_written() {
+    let temp = tempfile::tempdir().unwrap();
+    let stele = SteleDir::create(temp.path()).unwrap();
+
+    let (header_scope, scope) = notes_scopes();
+    let notes: Vec<CanonicalCbor> = NOTES.iter().map(note_record).collect();
+
+    let written = stele
+        .write_layer(
+            &ToyProfile,
+            &LayerSpec::new("notes", header_scope, scope),
+            COMPRESSION_LEVEL,
+            &notes,
+        )
+        .unwrap();
+
+    // A second descriptor, for a layer nothing here ever wrote.
+    let mut absent = written.descriptor.clone();
+    absent.diff_id = stelae::Digest::from_bytes([0xcd; 32]);
+
+    let mut inscription = bulk_inscription();
+    inscription.layers = vec![written.descriptor, absent];
+
+    stele.seal(&ToyProfile, &inscription).unwrap();
+
+    assert!(!temp.path().join(stelae::dir::BLOB_INDEX_FILE).exists());
+
+    // And the scan still places the layer that is there.
+    let index = SteleDir::open(temp.path()).unwrap().blob_index().unwrap();
+    assert!(index.blob_for(&inscription.layers[0].diff_id).is_some());
+}
+
+/// The saving, measured rather than asserted.
+///
+/// One stele read both ways, and the numbers go to stdout — `cargo test -p
+/// stelae the_scan_the_sidecar_removes -- --nocapture`. What they say depends
+/// on the machine; what this test *checks* does not, so the timings are printed
+/// and the agreement between the two maps is asserted.
+#[test]
+fn the_scan_the_sidecar_removes() {
+    const LAYERS: u64 = 8;
+    const RECORDS: u64 = 64;
+    const BODY: usize = 16 * 1024;
+
+    let temp = tempfile::tempdir().unwrap();
+    let inscription = bulk_stele(temp.path(), LAYERS, RECORDS, BODY);
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+
+    let start = std::time::Instant::now();
+    let stated = stele.blob_index().unwrap();
+    let by_sidecar = start.elapsed();
+
+    let (scanned, by_scan) = without_sidecar(temp.path(), || {
+        let start = std::time::Instant::now();
+        let scanned = stele.blob_index().unwrap();
+        (scanned, start.elapsed())
+    });
+
+    for descriptor in &inscription.layers {
+        assert_eq!(
+            stated.blob_for(&descriptor.diff_id),
+            scanned.blob_for(&descriptor.diff_id),
+            "layer {:?}",
+            descriptor.kind,
+        );
+    }
+
+    let uncompressed: u64 = inscription
+        .layers
+        .iter()
+        .map(|layer| layer.uncompressed_size)
+        .sum();
+
+    let compressed: u64 = inscription
+        .layers
+        .iter()
+        .map(|layer| {
+            let blob = stated.blob_for(&layer.diff_id).unwrap();
+            std::fs::metadata(stele.blob_path(&blob)).unwrap().len()
+        })
+        .sum();
+
+    println!(
+        "{} layers, {compressed} compressed / {uncompressed} uncompressed bytes\n\
+         blob_index by scan:    {by_scan:?}\n\
+         blob_index by sidecar: {by_sidecar:?}",
+        inscription.layers.len(),
+    );
+}
+
+/// Run `read` against the same stele with [`stelae::dir::BLOB_INDEX_FILE`]
+/// moved out of the way, then put it back.
+///
+/// Renamed rather than deleted so that one stele answers both ways in one test:
+/// what is being compared is two readers over identical bytes, and rebuilding
+/// the stele in between would compare two steles instead.
+fn without_sidecar<T>(root: &std::path::Path, read: impl FnOnce() -> T) -> T {
+    let sidecar = root.join(stelae::dir::BLOB_INDEX_FILE);
+    let aside = root.join("blobs.json.aside");
+
+    std::fs::rename(&sidecar, &aside).unwrap();
+    let outcome = read();
+    std::fs::rename(&aside, &sidecar).unwrap();
+
+    outcome
+}
+
+/// An inscription of this profile with nothing in it yet.
+fn bulk_inscription() -> Inscription {
+    Inscription::new(
+        &ToyProfile,
+        3,
+        json!({"chapter": 3, "shelf": "east"}),
+        json!({"noteWidth": 40, "titleOrder": "byte"}),
+        Compression {
+            algo: "zstd".to_owned(),
+            level: COMPRESSION_LEVEL as i64,
+        },
+    )
+}
+
+/// A stele of `layers` note layers, each `records` records of `body`
+/// incompressible bytes.
+///
+/// Incompressible on purpose: the scan's cost is a decompression pass, and junk
+/// that zstd folds to nothing would measure the compressor rather than the
+/// pass.
+fn bulk_stele(root: &std::path::Path, layers: u64, records: u64, body: usize) -> Inscription {
+    let stele = SteleDir::create(root).unwrap();
+
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+
+    let mut descriptors = Vec::new();
+
+    for chapter in 0..layers {
+        let header_scope = encode(|e| {
+            e.array(3)?.u64(chapter)?.u64(1)?.u64(records)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let mut sink = stele
+            .layer_sink(
+                &ToyProfile,
+                &LayerSpec::new(
+                    "notes",
+                    header_scope,
+                    json!({"chapter": chapter, "firstId": 1, "lastId": records}),
+                ),
+                COMPRESSION_LEVEL,
+            )
+            .unwrap();
+
+        for id in 0..records {
+            let mut bytes = vec![0u8; body];
+
+            for chunk in bytes.chunks_mut(8) {
+                let word = next().to_le_bytes();
+                chunk.copy_from_slice(&word[..chunk.len()]);
+            }
+
+            let record = encode(|e| {
+                e.array(3)?.u64(id)?.str("bulk")?.bytes(&bytes)?;
+                Ok(())
+            })
+            .unwrap();
+
+            sink.write_record(&record).unwrap();
+        }
+
+        descriptors.push(sink.finish().unwrap().descriptor);
+    }
+
+    let mut inscription = bulk_inscription();
+    inscription.layers = descriptors;
+
+    stele.seal(&ToyProfile, &inscription).unwrap();
+
+    inscription
 }
 
 /// A descriptor that lies about its layer is refused even when the blob itself
@@ -1048,7 +1344,9 @@ fn a_malformed_record_is_reported_not_counted() {
         ..descriptor
     };
 
-    let index = stele.blob_index().unwrap();
+    // Placed by hand and named in no inscription, so the sealed map does not
+    // carry it; the scan, which knows only what is on disk, does.
+    let index = without_sidecar(temp.path(), || stele.blob_index().unwrap());
     let err = read_both_ways(&stele, &index, &corrupt).unwrap_err();
 
     assert!(matches!(err, Error::TruncatedCbor { .. }), "{err:?}");

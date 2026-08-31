@@ -29,7 +29,9 @@
 //! compressed digests and sizes, which are what a registry addresses a blob by
 //! and are not stable across zstd versions. Neither is derivable from the
 //! other, which is why [`crate::BlobIndex`] exists at all, and why a directory
-//! has to reconstruct by brute force what a manifest states.
+//! has to write the same map down for itself in
+//! [`crate::dir::BLOB_INDEX_FILE`] — or, lacking one, reconstruct by brute
+//! force what a manifest states.
 //!
 //! Because they are two views of one stele, **a disagreement between them is a
 //! refusal**, in either direction: a layer the inscription describes and the
@@ -2469,8 +2471,9 @@ fn check_envelope(manifest: &OciImageManifest) -> Result<(), Error> {
 /// Read the identity→blob map off a manifest, holding it against the
 /// inscription.
 ///
-/// This is the function that replaces a directory's `blob_index` scan, and the
-/// reason a registry restore reads every blob once instead of twice.
+/// The registry's answer to the question [`crate::dir::BLOB_INDEX_FILE`]
+/// answers for a directory, and the reason a registry restore has always read
+/// every blob once instead of twice.
 ///
 /// Both correspondences are checked, and they are not the same check: the
 /// `diffId` annotation is what the map is *built* from, and positional

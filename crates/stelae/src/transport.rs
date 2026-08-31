@@ -25,14 +25,18 @@
 //! and *how it obtains that map* is the sharpest difference between the two
 //! transports there is:
 //!
-//! - a directory has no manifest, so [`crate::dir::SteleDir::blob_index`]
-//!   rebuilds the map by decompressing every blob — a full verification pass
-//!   over the stele, paid before the restore reads any of it;
-//! - a registry has a manifest, and reads the map straight off it.
+//! - a registry has a manifest, and reads the map straight off it;
+//! - a directory has one too, now: [`crate::dir::BLOB_INDEX_FILE`], written
+//!   beside the inscription by the seal that closed the stele. Before it
+//!   existed — and for any stele published before it did —
+//!   [`crate::dir::SteleDir::blob_index`] rebuilds the map by decompressing
+//!   every blob, a full verification pass over the stele paid before the
+//!   restore reads any of it.
 //!
-//! Same type, same meaning, one scan versus one HTTP GET. Keeping [`BlobIndex`]
-//! rather than parameterizing the reader on "how to find a blob" is what makes
-//! that difference a cost and not an interface.
+//! Same type, same meaning, one file read versus one HTTP GET — and, for the
+//! steles that predate the sidecar, the scan. Keeping [`BlobIndex`] rather than
+//! parameterizing the reader on "how to find a blob" is what let a directory
+//! close that gap without a reader anywhere learning a new shape.
 //!
 //! ## A third implementation that stores nothing
 //!

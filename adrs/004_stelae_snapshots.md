@@ -276,7 +276,7 @@ The per-layer annotation keys are reverse-DNS under `stelae.store`, a domain TxP
 | `store.stelae.layer.kind` | informational | the layer's profile-defined kind |
 | `store.stelae.layer.scope` | informational | the layer's scope object as stringified canonical JSON (annotation values are strings) |
 
-`store.stelae.layer.diffId` is the identity→blob map — the thing a registry hands over for free and a directory has to rebuild by decompressing every blob. A client that does not read it cannot fetch a layer; it is the one annotation a reader must understand. The other two exist so a human or a generic registry tool can see what a blob covers without fetching the config blob, and a client may ignore them.
+`store.stelae.layer.diffId` is the identity→blob map — the thing a registry hands over for free. A directory has no manifest to carry it, so a publish writes the same map to a `blobs.json` sidecar beside `inscription.json`; it is transport and not identity — unsigned, outside the inscription digest, and fully recoverable from the blobs — so a stele without one still restores, by decompressing every blob to rebuild it. A client that does not read it cannot fetch a layer; it is the one annotation a reader must understand. The other two exist so a human or a generic registry tool can see what a blob covers without fetching the config blob, and a client may ignore them.
 
 #### Manifest–inscription agreement
 
@@ -340,7 +340,7 @@ Everything is built against the engine-agnostic core traits. Existing APIs used:
 
 ### CLI and configuration
 
-- `dolos snapshot publish [--repo oci://…] [--output-dir DIR] [--epochs N..M] [--dry-run]` — export layers; `--output-dir` writes blobs + inscription to disk, `--repo` pushes with blob-skip and moves tags.
+- `dolos snapshot publish [--repo oci://…] [--output-dir DIR] [--epochs N..M] [--dry-run]` — export layers; `--output-dir` writes blobs + inscription + the `blobs.json` sidecar to disk, `--repo` pushes with blob-skip and moves tags.
 - `dolos snapshot digest` — compute and print the canonical inscription and its sha256 from local stores (what independent verifiers run and sign).
 - `dolos snapshot verify | sign --key FILE | inspect`.
 - `dolos bootstrap snapshot` gains source-scheme dispatch: `oci://` → new path; https template / `--file` → legacy tarball, unchanged. `--point epoch-E|latest`; existing `--continue` drives resume; `sync.max_history` bounds how much history is fetched (subsumes the old `full`/`ledger` variants).

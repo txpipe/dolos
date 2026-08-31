@@ -21,15 +21,26 @@
 //! It is not `dolos snapshot publish --output-dir`: that command belongs to the
 //! Dolos profile and carries its own layer-selection and progress semantics.
 //!
-//! ## The one thing this layout cannot do
+//! ## The manifest a directory grew
 //!
 //! An inscription lists `diffId`s — identity — and deliberately not compressed
-//! digests, which are transport and live in the OCI manifest. Without a
-//! manifest there is no map from a layer descriptor to the file holding it, so
-//! [`SteleDir::blob_index`] rebuilds it by scanning: every blob is decompressed
-//! once and indexed by the `diffId` it yields. That is a full verification pass
-//! over the stele, which is the right cost for a fixture and the wrong one for
-//! a registry — where the manifest supplies the map for free.
+//! digests, which are transport and live in the OCI manifest. With no map from
+//! a layer descriptor to the file holding it, [`SteleDir::blob_index`] has to
+//! rebuild one by scanning: every blob decompressed once, in full, before the
+//! restore goes on to read them all again. A directory restore therefore
+//! decompressed the whole stele twice.
+//!
+//! So [`SteleWriter::seal`] writes the map down beside the inscription —
+//! [`BLOB_INDEX_FILE`], `diffId` → blob digest, which is the one thing a
+//! registry's manifest supplies that this layout did not. A directory that
+//! carries it is a degenerate registry: the map is read, no blob is opened, and
+//! each blob is decompressed exactly once — by the restore that wanted it.
+//!
+//! The sidecar is **transport and never identity**. Nothing signs it, nothing
+//! hashes it into the stele's digest, and both halves of every entry are
+//! recoverable from the blobs themselves — which is exactly why a stele without
+//! one still reads, by the scan that was the only way before it. Absence is the
+//! older format; a file that does not parse is a fault and not an absence.
 //!
 //! ## Where the seam moved to
 //!
@@ -43,7 +54,10 @@ use std::{
     fs, io,
     io::Write,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
+
+use serde::{Deserialize, Serialize};
 
 pub use crate::transport::{BlobIndex, LayerSpec, WrittenLayer};
 
@@ -62,6 +76,10 @@ pub const INSCRIPTION_FILE: &str = "inscription.json";
 
 /// Directory holding content-addressed blobs, in OCI image-layout shape.
 pub const BLOBS_DIR: &str = "blobs";
+
+/// File name of the `diffId` → blob digest map at the root of a stele
+/// directory: what this layout has instead of a registry's manifest.
+pub const BLOB_INDEX_FILE: &str = "blobs.json";
 
 /// A layer read back from disk, verified against its descriptor.
 pub struct Layer {
@@ -137,6 +155,9 @@ pub struct LayerSink {
     kind: String,
     media_type: String,
     scope: serde_json::Value,
+    /// Where [`LayerSink::finish`] leaves the pair the sidecar is made of, for
+    /// the seal that writes [`BLOB_INDEX_FILE`] out of them.
+    written: Written,
 }
 
 impl RecordSink for LayerSink {
@@ -194,6 +215,7 @@ impl RecordSink for LayerSink {
             kind,
             media_type,
             scope,
+            written,
         } = self;
 
         let count = sequence.count();
@@ -210,6 +232,14 @@ impl RecordSink for LayerSink {
             fs::rename(&staging.path, &blob)?;
             staging.published();
         }
+
+        // The two names of one layer, caught here because this is the only
+        // place both are in hand: identity goes on to the inscription and
+        // transport does not, so a `seal` that wanted the pair back would have
+        // to recompute it — which is the scan this record exists to remove.
+        // Recorded whether or not the rename happened, since a destination that
+        // already existed already holds these very bytes.
+        lock(&written).insert(digests.diff_id, digests.blob_digest);
 
         Ok(WrittenLayer {
             descriptor: LayerDescriptor {
@@ -277,9 +307,132 @@ fn blob_path(root: &Path, digest: &Digest) -> PathBuf {
         .join(digest.to_hex())
 }
 
+/// Rebuild the `diffId` → blob map by scanning and verifying every blob.
+///
+/// What a directory did before it carried [`BLOB_INDEX_FILE`], and what one
+/// published before that file existed still does. Two distinct checks, in this
+/// order, because conflating them is how corruption gets skipped as "not a
+/// layer":
+///
+/// 1. **Content addressing** — a file named by a digest must hash to that
+///    digest. This holds for every blob in the directory, layer or not, and a
+///    mismatch is corruption and fails the whole index.
+/// 2. **Readability** — only then is the blob decompressed. A file that is not
+///    a zstd frame is simply not a layer and is skipped, which leaves room for
+///    a future OCI layout's manifest and config blobs beside these.
+///
+/// Costs one raw pass plus one decompressing pass per blob, over the whole
+/// stele, before the restore has read a record. That is what the sidecar
+/// removes; see the module documentation.
+fn scan_blobs(root: &Path) -> Result<BlobIndex, Error> {
+    let mut index = BTreeMap::new();
+    let dir = root.join(BLOBS_DIR).join(Digest::ALGORITHM);
+
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+
+        // A file whose name is not a digest was not put here by this
+        // protocol; leave it alone.
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+
+        let Ok(expected) = format!("{}:{name}", Digest::ALGORITHM).parse::<Digest>() else {
+            continue;
+        };
+
+        let (actual, _) = digest_reader(fs::File::open(&path)?)?;
+
+        if actual != expected {
+            return Err(Error::DigestMismatch {
+                subject: format!("blob {name}"),
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+
+        match scan_blob(fs::File::open(&path)?) {
+            Ok(digests) => {
+                index.insert(digests.diff_id, digests.blob_digest);
+            }
+            // Content-addressed and intact, but not a compressed layer.
+            //
+            // Only the kinds zstd raises for input it cannot decode count
+            // as "not a layer": the bindings map every libzstd error code
+            // to `Other`, and a frame that ends early surfaces as
+            // `UnexpectedEof`. A `PermissionDenied` or a device error is a
+            // real failure, and skipping on it would drop a blob that does
+            // exist from the index — resurfacing later as a `LayerNotFound`
+            // that points at the wrong problem.
+            Err(Error::Io(e))
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::InvalidData
+                        | io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::Other
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok(index.into_iter().collect())
+}
+
+/// The `diffId` → blob digest pairs a directory has learned by writing them.
+///
+/// Shared rather than owned because the sinks that fill it outlive the borrow
+/// that made them: several layers are open at once, on several threads, which
+/// is the normal case for a profile that shards.
+type Written = Arc<Mutex<BTreeMap<Digest, Digest>>>;
+
+/// A poisoned lock means a layer panicked mid-write. What is behind it is a map
+/// of pairs each written in one `insert`, so it is still coherent, and the
+/// failed layer is reported by the `?` that carried its error out — refusing to
+/// look would turn one failed layer into a stele that cannot be sealed.
+fn lock(written: &Written) -> std::sync::MutexGuard<'_, BTreeMap<Digest, Digest>> {
+    written
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// One layer's two names: its identity, and the blob that holds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlobRef {
+    diff_id: Digest,
+    blob: Digest,
+}
+
+/// [`BLOB_INDEX_FILE`]'s document.
+///
+/// An array of pairs rather than an object keyed by `diffId`, for the reason an
+/// OCI manifest's `layers` is one: this is a transport artifact nobody hashes,
+/// so it is shaped for a reader and not for a canonicalizer. The object wrapper
+/// is what leaves room to add a key later without every older reader having to
+/// be taught the difference.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BlobIndexFile {
+    layers: Vec<BlobRef>,
+}
+
 /// A stele directory.
 pub struct SteleDir {
     root: PathBuf,
+    /// The pairs this directory's own [`LayerSink`]s produced, kept so
+    /// [`SteleWriter::seal`] can write [`BLOB_INDEX_FILE`] out of them.
+    ///
+    /// Empty on a directory that is only being read, which costs nothing: a
+    /// reader never seals.
+    written: Written,
 }
 
 impl SteleDir {
@@ -296,7 +449,10 @@ impl SteleDir {
 
         fs::create_dir_all(root.join(BLOBS_DIR).join(Digest::ALGORITHM))?;
 
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            written: Written::default(),
+        })
     }
 
     /// Open an existing stele directory.
@@ -310,7 +466,10 @@ impl SteleDir {
             )));
         }
 
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            written: Written::default(),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -319,6 +478,113 @@ impl SteleDir {
 
     pub fn blob_path(&self, digest: &Digest) -> PathBuf {
         blob_path(&self.root, digest)
+    }
+
+    /// Where [`BLOB_INDEX_FILE`] lives, and the staging name it is renamed
+    /// from.
+    fn blob_index_paths(&self) -> (PathBuf, PathBuf) {
+        (
+            self.root.join(format!(".{BLOB_INDEX_FILE}.staging")),
+            self.root.join(BLOB_INDEX_FILE),
+        )
+    }
+
+    /// Write the `diffId` → blob sidecar, if this directory wrote every layer
+    /// the inscription lists.
+    ///
+    /// That condition is the file's whole meaning. A reader that finds one uses
+    /// it *instead of* looking at the blobs, so a map missing an entry does not
+    /// read as an incomplete index — it reads as a stele missing a layer. A
+    /// directory whose blobs came from somewhere this writer never saw gets no
+    /// sidecar and keeps the scan it always had, which is the same fallback a
+    /// stele published before this file existed relies on.
+    ///
+    /// One `diffId` may carry several descriptors — a retained state dump and
+    /// the tip shard it was cut from are one blob under two scopes — so the map
+    /// is keyed by identity and the file lists each blob once.
+    ///
+    /// Declining **removes** any sidecar already there, which is the half that
+    /// makes the postcondition worth having: after a seal the file describes
+    /// *this* inscription or does not exist. A directory sealed a second time
+    /// through a second handle — the first handle's layers already on disk and
+    /// unknown to this one — would otherwise keep a map that is complete for a
+    /// document nobody published any more.
+    ///
+    /// Written through a staging file and renamed, so the name never exists
+    /// over half a document: the reader's rule is that a file which is there
+    /// parses, and the only way to keep that promise across a crash is to
+    /// publish the name atomically. A failure to write it fails the seal — the
+    /// inscription is already down, and a stele whose sidecar quietly did not
+    /// land is one that quietly costs every later restore the scan.
+    fn write_blob_index(&self, inscription: &Inscription) -> Result<(), Error> {
+        let mut layers = BTreeMap::new();
+
+        {
+            let written = lock(&self.written);
+
+            for descriptor in &inscription.layers {
+                match written.get(&descriptor.diff_id) {
+                    Some(blob) => layers.insert(descriptor.diff_id, *blob),
+                    None => return self.remove_blob_index(),
+                };
+            }
+        }
+
+        let document = BlobIndexFile {
+            layers: layers
+                .into_iter()
+                .map(|(diff_id, blob)| BlobRef { diff_id, blob })
+                .collect(),
+        };
+
+        let (staging, path) = self.blob_index_paths();
+
+        let mut file = fs::File::create(&staging)?;
+        file.write_all(&serde_json::to_vec(&document)?)?;
+        file.sync_all()?;
+        drop(file);
+
+        fs::rename(&staging, &path)?;
+
+        Ok(())
+    }
+
+    /// Drop the sidecar, if there is one to drop.
+    fn remove_blob_index(&self) -> Result<(), Error> {
+        let (_, path) = self.blob_index_paths();
+
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Read the sidecar, or `None` if this stele does not carry one.
+    ///
+    /// Absence and corruption are deliberately not the same answer. Absence is
+    /// the format before [`BLOB_INDEX_FILE`] existed, and the scan reads those
+    /// steles correctly; a file that is there and does not parse is a fault in
+    /// something that wrote it, and falling back to the scan would restore
+    /// successfully while hiding it.
+    fn read_blob_index(&self) -> Result<Option<BlobIndex>, Error> {
+        let (_, path) = self.blob_index_paths();
+
+        let raw = match fs::read(&path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+
+        let document: BlobIndexFile = serde_json::from_slice(&raw)?;
+
+        let mut index = BlobIndex::default();
+
+        for entry in document.layers {
+            index.insert(entry.diff_id, entry.blob);
+        }
+
+        Ok(Some(index))
     }
 }
 
@@ -367,6 +633,7 @@ impl SteleWriter for SteleDir {
             kind: spec.kind.clone(),
             media_type,
             scope: spec.scope.clone(),
+            written: Arc::clone(&self.written),
         })
     }
 
@@ -375,12 +642,18 @@ impl SteleWriter for SteleDir {
     ///
     /// A directory names nothing, so the profile goes unused here: there are no
     /// tags to render and the file has one name the layout fixes.
+    ///
+    /// The sidecar lands after it, and in that order on purpose: the
+    /// inscription is the stele and the sidecar is an index over it, so a
+    /// directory is never one without being the other first.
     fn seal(&self, _profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
         let canonical = inscription.canonicalize()?;
 
         let mut file = fs::File::create(self.root.join(INSCRIPTION_FILE))?;
         file.write_all(&canonical)?;
         file.sync_all()?;
+
+        self.write_blob_index(inscription)?;
 
         Ok(Digest::compute(&canonical))
     }
@@ -406,81 +679,23 @@ impl SteleReader for SteleDir {
         Ok(inscription)
     }
 
-    /// Rebuild the `diffId` → blob map by scanning and verifying every blob.
+    /// The `diffId` → blob map: read off [`BLOB_INDEX_FILE`] if this stele
+    /// carries one, and otherwise rebuilt by [`scan_blobs`].
     ///
-    /// Two distinct checks, in this order, because conflating them is how
-    /// corruption gets skipped as "not a layer":
-    ///
-    /// 1. **Content addressing** — a file named by a digest must hash to that
-    ///    digest. This holds for every blob in the directory, layer or not, and
-    ///    a mismatch is corruption and fails the whole index.
-    /// 2. **Readability** — only then is the blob decompressed. A file that is
-    ///    not a zstd frame is simply not a layer and is skipped, which leaves
-    ///    room for a future OCI layout's manifest and config blobs beside
-    ///    these.
-    ///
-    /// Costs one raw pass plus one decompressing pass per blob. That is the
-    /// fixture's price for having no manifest; see the module documentation.
+    /// The sidecar is the whole difference between a restore that decompresses
+    /// this stele once and one that decompresses it twice, so it is preferred
+    /// wherever it exists — which, for anything [`SteleWriter::seal`] wrote, is
+    /// everywhere. What the scan checked on the way past is not lost, only
+    /// moved: a layer's identity, size and record count are proven by
+    /// [`LayerReader::finish`] as the restore reads it, against the descriptor
+    /// the signed inscription carries. What a directory stops paying for is
+    /// verifying blobs *nobody asked for*, which is exactly the position a
+    /// registry has always been in.
     fn blob_index(&self) -> Result<BlobIndex, Error> {
-        let mut index = BTreeMap::new();
-        let dir = self.root.join(BLOBS_DIR).join(Digest::ALGORITHM);
-
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-
-            // A file whose name is not a digest was not put here by this
-            // protocol; leave it alone.
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-
-            let Ok(expected) = format!("{}:{name}", Digest::ALGORITHM).parse::<Digest>() else {
-                continue;
-            };
-
-            let (actual, _) = digest_reader(fs::File::open(&path)?)?;
-
-            if actual != expected {
-                return Err(Error::DigestMismatch {
-                    subject: format!("blob {name}"),
-                    expected: expected.to_string(),
-                    actual: actual.to_string(),
-                });
-            }
-
-            match scan_blob(fs::File::open(&path)?) {
-                Ok(digests) => {
-                    index.insert(digests.diff_id, digests.blob_digest);
-                }
-                // Content-addressed and intact, but not a compressed layer.
-                //
-                // Only the kinds zstd raises for input it cannot decode count
-                // as "not a layer": the bindings map every libzstd error code
-                // to `Other`, and a frame that ends early surfaces as
-                // `UnexpectedEof`. A `PermissionDenied` or a device error is a
-                // real failure, and skipping on it would drop a blob that does
-                // exist from the index — resurfacing later as a `LayerNotFound`
-                // that points at the wrong problem.
-                Err(Error::Io(e))
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::InvalidData
-                            | io::ErrorKind::UnexpectedEof
-                            | io::ErrorKind::Other
-                    ) =>
-                {
-                    continue
-                }
-                Err(e) => return Err(e),
-            }
+        match self.read_blob_index()? {
+            Some(index) => Ok(index),
+            None => scan_blobs(&self.root),
         }
-
-        Ok(index.into_iter().collect())
     }
 
     /// Ask the filesystem how big the blob holding this layer is.
@@ -527,9 +742,12 @@ impl SteleReader for SteleDir {
         descriptor: &LayerDescriptor,
         limits: Limits,
     ) -> Result<LayerReader<fs::File>, Error> {
-        let path = self.blob_of(index, descriptor)?;
-
-        LayerReader::new(fs::File::open(&path)?, profile, descriptor, limits)
+        LayerReader::new(
+            self.open_blob(index, descriptor)?,
+            profile,
+            descriptor,
+            limits,
+        )
     }
 }
 
@@ -545,6 +763,31 @@ impl SteleDir {
                 })?;
 
         Ok(self.blob_path(&blob_digest))
+    }
+
+    /// Open the blob holding a layer.
+    ///
+    /// A map that places the layer and a file that is not there are one
+    /// condition — the layer is not in this stele — and they report as one
+    /// [`Error::LayerNotFound`]. The two used to be indistinguishable because
+    /// the map was *built* by reading the directory, so a missing file was a
+    /// missing entry; a map stated by [`BLOB_INDEX_FILE`] can place a layer the
+    /// directory no longer holds, and an operator told `No such file or
+    /// directory` learns strictly less than one told which layer is gone.
+    fn open_blob(
+        &self,
+        index: &BlobIndex,
+        descriptor: &LayerDescriptor,
+    ) -> Result<fs::File, Error> {
+        let path = self.blob_of(index, descriptor)?;
+
+        fs::File::open(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => Error::LayerNotFound {
+                kind: descriptor.kind.clone(),
+                diff_id: descriptor.diff_id.to_string(),
+            },
+            _ => e.into(),
+        })
     }
 
     /// Read one layer, verifying it against its descriptor and its own header.
@@ -565,13 +808,14 @@ impl SteleDir {
         profile: &dyn Profile,
         descriptor: &LayerDescriptor,
     ) -> Result<Layer, Error> {
-        let path = self.blob_of(index, descriptor)?;
-
         // The descriptor's claim doubles as the ceiling on decompression. A
         // blob that expands past it is refused mid-stream instead of being
         // buffered whole and rejected by the size check below — same verdict,
         // bounded cost.
-        let (content, digests) = read_blob(fs::File::open(&path)?, descriptor.uncompressed_size)?;
+        let (content, digests) = read_blob(
+            self.open_blob(index, descriptor)?,
+            descriptor.uncompressed_size,
+        )?;
 
         check_identity(&digests, descriptor)?;
 

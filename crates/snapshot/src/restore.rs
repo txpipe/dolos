@@ -1121,7 +1121,7 @@ where
     // *actually* pull, which is a question about the resume and so cannot be
     // asked before the checkpoint is open. Nothing between the plan and here
     // writes — `Checkpoint::open` only reads the progress file and
-    // `blob_index` only reads blobs — so the preflight still refuses before
+    // `blob_index` only reads the stele — so the preflight still refuses before
     // the first byte is written, which is the whole of its promise.
     let staging = scratch_dir.map(|dir| Staging {
         dir,
@@ -1146,10 +1146,12 @@ where
 
 /// Restore from a stele directory.
 ///
-/// `blob_index` is the expensive part and is unavoidable for a directory: an
-/// inscription names layers by identity and a directory has no manifest, so the
-/// map from a descriptor to the file holding it is rebuilt by decompressing
-/// every blob once. A registry supplies it off its manifest instead.
+/// An inscription names layers by identity, so a reader needs a map from a
+/// descriptor to the file holding it. A stele sealed by this implementation
+/// carries one — `stelae::dir::BLOB_INDEX_FILE`, the sidecar that makes a
+/// directory a degenerate registry — and `blob_index` reads it. One published
+/// before that file existed has none, and the map is rebuilt by decompressing
+/// every blob once *before* the restore decompresses the ones it wants.
 pub fn restore_dir<A, S, I>(
     root: impl Into<std::path::PathBuf>,
     node: Restoring<'_>,
