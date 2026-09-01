@@ -8,6 +8,7 @@ use miette::{Context as _, IntoDiagnostic as _};
 use dolos_snapshot::{
     export::Standing,
     registry::{self, Registry, Repository},
+    DolosProfile,
 };
 
 use super::EpochRange;
@@ -246,7 +247,7 @@ pub(super) fn to_repository(
     // already uploaded instead of rebuilding them. `--rebuild` starts it over
     // along with everything else.
     let publishing = registry::Publishing::new(&registry)
-        .recording_in(&config.storage.path)
+        .recording_in(registry::record_path_in(&config.storage.path))
         .rebuilding(publish.rebuild);
 
     // Before anything is built, and before the dry run too: a publisher asking
@@ -261,7 +262,7 @@ pub(super) fn to_repository(
     // After `standing`, because a repository holding another network's chain is
     // refused there and sizing against it would be sizing against the wrong
     // stele.
-    registry::preflight(&registry)
+    registry::preflight(&registry, &DolosProfile)
         .into_diagnostic()
         .context("sizing the staging directory")?;
 
