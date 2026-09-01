@@ -2,13 +2,12 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
-use dolos_snapshot::export;
 use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::{
-    export::Standing,
-    registry::{self, Registry, Repository},
-    DolosProfile,
+    export, node,
+    publisher::{Next, Publisher, RepositoryPublish},
+    registry::{self, Repository},
 };
 
 use super::EpochRange;
@@ -103,19 +102,13 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         .into_diagnostic()
         .context("opening the data stores")?;
 
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let selection = super::Selection {
+        epochs: args.epochs,
+        index_band: args.index_band,
+        producers: args.producers,
+    };
 
-    let plan = export::plan(
-        &stores.state,
-        u64::from(genesis.network_magic()),
-        super::retained_epochs(config)?,
-    )
-    .into_diagnostic()
-    .context("planning the publish")?;
-
-    let plan = super::restrict(plan, args.epochs);
-    let plan = super::banded(plan, args.index_band);
-    let plan = super::produced(plan, args.producers);
+    let plan = super::planned(config, &stores, &selection, "planning the publish")?;
 
     super::report_plan(&plan)?;
 
@@ -140,35 +133,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
     }
-}
-
-/// The repository arm's settings, freed of the CLI that spelled them.
-///
-/// Factored so `snapshot backfill` publishes through exactly the code path
-/// `snapshot publish --repo` does — same standing check, same preflight, same
-/// chained predecessor, same report — rather than a second telling of it that
-/// would drift.
-pub(super) struct RepositoryPublish<'a> {
-    /// The repository to publish into.
-    pub repo: &'a Repository,
-
-    /// Talk plaintext HTTP rather than HTTPS.
-    pub insecure: bool,
-
-    /// Where to stage layers; `None` takes `<storage.path>/scratch`.
-    pub scratch_dir: Option<&'a std::path::Path>,
-
-    /// Build every layer instead of carrying forward published ones.
-    pub rebuild: bool,
-
-    /// Report what would be written and stop.
-    pub dry_run: bool,
-
-    /// Fail when the repository is already at this node's sequence.
-    pub require_new: bool,
-
-    /// How the publish moves: concurrency, and the carried-layer check.
-    pub tuning: registry::Tuning,
 }
 
 fn to_directory(
@@ -217,9 +181,12 @@ fn to_directory(
 
 /// Publish into an OCI repository, chained to whatever is already in it.
 ///
-/// The report is what a publisher wants to check rather than trust: how much of
-/// this stele was inherited rather than built, and how much of it moved. Both
-/// are numbers the code counted, not an inference from a duration.
+/// Parse and render: [`Publisher`] is the lifecycle, [`Next`] is what each
+/// reading of the repository means for it, and what is here is the order the
+/// operator sees it in. The report is what a publisher wants to check rather
+/// than trust: how much of this stele was inherited rather than built, and how
+/// much of it moved. Both are numbers the code counted, not an inference from a
+/// duration.
 pub(super) fn to_repository(
     config: &RootConfig,
     publish: &RepositoryPublish,
@@ -229,48 +196,34 @@ pub(super) fn to_repository(
 ) -> miette::Result<()> {
     let repo = publish.repo;
 
-    // A publisher's credentials come from `STELAE_REGISTRY_USER` /
-    // `STELAE_REGISTRY_PASSWORD`, which override anything configured. The
-    // configured user is still the fallback: it is read-only, so authenticating
-    // with it fails the push at the registry rather than a step earlier — which
-    // is the honest place for "these credentials cannot publish" to be said.
-    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
 
-    let scratch = crate::common::stele_scratch_dir(&config.storage, publish.scratch_dir);
-
-    let registry = registry::open(repo, publish.insecure, auth, scratch, publish.tuning)
+    let publisher = Publisher::open(config, publish, auth)
         .into_diagnostic()
         .context("opening the repository")?;
 
-    // The resumption record sits beside the stores, so an interrupted publish
-    // restarted against this repository carries forward the epoch layers it
-    // already uploaded instead of rebuilding them. `--rebuild` starts it over
-    // along with everything else.
-    let publishing = registry::Publishing::new(&registry)
-        .recording_in(registry::record_path_in(&config.storage.path))
-        .rebuilding(publish.rebuild);
+    let standing = publisher
+        .standing(plan)
+        .into_diagnostic()
+        .context("reading the repository's latest stele")?;
 
-    // Before anything is built, and before the dry run too: a publisher asking
-    // what a publish would do wants the same answer the publish gives.
-    if !standing(&registry, plan, publish.require_new)? {
-        return Ok(());
+    match Next::read(standing, plan.sequence, publish.require_new).into_diagnostic()? {
+        Next::First => println!("follows:  nothing; this repository holds no stele"),
+        Next::After { latest } => println!("follows:  sequence {latest}"),
+        Next::Nothing(message) => {
+            println!("{message}");
+            return Ok(());
+        }
     }
 
-    // And on the same terms, for the same reason. A dry run that reported the
-    // layers and said nothing about the volume they would be staged on would be
-    // the one rehearsal a publisher does, missing the failure it exists to find.
-    // After `standing`, because a repository holding another network's chain is
-    // refused there and sizing against it would be sizing against the wrong
-    // stele.
-    registry::preflight(&registry, &DolosProfile)
+    publisher
+        .preflight()
         .into_diagnostic()
         .context("sizing the staging directory")?;
 
     if publish.dry_run {
-        // `None` here and `None` at the `publish` below are one decision: a dry
-        // run describes the publish that follows it, so the two calls are
-        // handed the same digest records or the number is about something else.
-        let preview = registry::preview(publishing, plan, &stores.archive, None)
+        let preview = publisher
+            .preview(plan, &stores.archive)
             .into_diagnostic()
             .context("planning the publish")?;
 
@@ -292,17 +245,16 @@ pub(super) fn to_repository(
     // under the report.
     let progress = SteleProgress::publishing(feedback);
 
-    let published = registry::publish(
-        publishing,
-        plan,
-        &stores.archive,
-        &stores.state,
-        &stores.indexes,
-        None,
-        &progress.observer(),
-    )
-    .into_diagnostic()
-    .context("publishing the stele")?;
+    let published = publisher
+        .publish(
+            plan,
+            &stores.archive,
+            &stores.state,
+            &stores.indexes,
+            &progress.observer(),
+        )
+        .into_diagnostic()
+        .context("publishing the stele")?;
 
     progress.finish();
 
@@ -331,69 +283,6 @@ pub(super) fn to_repository(
     println!("identity: {}", published.identity);
 
     Ok(())
-}
-
-/// Read where this node stands against the repository, and report it.
-///
-/// Returns whether the publish should go on. Three of the four readings are
-/// terminal here, and it is the *middle* one that this exists for:
-///
-/// - **nothing published, or exactly one sequence behind** — carry on.
-/// - **the repository has already reached this node** — there is nothing to
-///   publish. A job on a timer that runs more often than epochs close arrives
-///   here every time it runs, and that is not a failure, so it is reported and
-///   the process exits zero. `--require-new` makes the same case an error, for
-///   an operator who ran it expecting a stele.
-/// - **the node is further ahead than one sequence** — refused, and the refusal
-///   stands: whether a deliberate gap ever gets a policy is not this command's
-///   to invent. What is new is that the message names the distance alongside
-///   both sequences, so "the publisher has been down for a day" and "the
-///   publisher has been down for a month" do not read the same.
-fn standing(registry: &Registry, plan: &export::Plan, require_new: bool) -> miette::Result<bool> {
-    // A read of the latest manifest and the one network call a publish makes
-    // before it commits to anything, so running it again is free of consequence.
-    //
-    // `&|| false` for every caller, `snapshot backfill`'s driver included: the
-    // publish that follows this read observes no cancellation for as long as it
-    // runs, so a predicate threaded in here would cut a shutdown's wait by the
-    // backoff and leave the minutes on either side of it untouched.
-    let standing =
-        crate::common::retry_transient("reading the repository's latest stele", &|| false, || {
-            registry::standing(registry, plan)
-        })
-        .into_diagnostic()
-        .context("reading the repository's latest stele")?;
-
-    match standing {
-        Standing::Empty => {
-            println!("follows:  nothing; this repository holds no stele");
-            Ok(true)
-        }
-        Standing::Next { latest } => {
-            println!("follows:  sequence {latest}");
-            Ok(true)
-        }
-        Standing::UpToDate { latest } => {
-            let message = format!(
-                "nothing to publish: this repository is at sequence {latest} and this node is at \
-                 sequence {}",
-                plan.sequence,
-            );
-
-            if require_new {
-                return Err(miette::miette!("{message}"));
-            }
-
-            println!("{message}");
-            Ok(false)
-        }
-        Standing::Ahead { latest, distance } => Err(miette::miette!(
-            "this repository's latest stele is sequence {latest} and this node is at sequence \
-             {}, {distance} sequences ahead: a publish must follow the repository's latest \
-             stele, and this one would leave a gap no later stele could close",
-            plan.sequence,
-        )),
-    }
 }
 
 #[cfg(test)]

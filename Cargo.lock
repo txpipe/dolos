@@ -1648,6 +1648,7 @@ dependencies = [
  "stelae-driver",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.20",
  "tracing",
 ]
 

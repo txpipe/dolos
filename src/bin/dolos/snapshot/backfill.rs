@@ -40,7 +40,7 @@
 //! the same shape on the other external — eight transient registry `500`s in
 //! eleven hours, each costing an epoch, ~7% of the night's wall clock spent
 //! redoing work over a failure class that lasts milliseconds. The patience is
-//! bounded at [`common::retry_transient`](crate::common::retry_transient)'s
+//! bounded at [`dolos_snapshot::retry::transient`]'s
 //! four attempts, so an aggregator that is wrong rather than flaky still
 //! fails, and fails while an operator is watching.
 //!
@@ -469,14 +469,14 @@ impl Driver<'_> {
         let plan = export::plan(
             &stores.state,
             u64::from(genesis.network_magic()),
-            super::retained_epochs(self.config)?,
+            dolos_snapshot::planning::retained_epochs(self.config).into_diagnostic()?,
         )
         .into_diagnostic()
         .context("planning the publish")?;
 
         super::report_plan(&plan)?;
 
-        let publish = super::publish::RepositoryPublish {
+        let publish = dolos_snapshot::publisher::RepositoryPublish {
             repo: &self.args.repo,
             insecure: self.args.insecure,
             scratch_dir: self.args.scratch_dir.as_deref(),
@@ -502,7 +502,7 @@ impl Driver<'_> {
         // the whole publish where it can be, per this method's own note — so a
         // SIGTERM arriving during a backoff ends the run on the failure in hand
         // rather than after the remaining patience.
-        crate::common::retry_transient(
+        dolos_snapshot::retry::transient(
             "publishing the pending sequence",
             &|| self.cancel.is_cancelled(),
             || super::publish::to_repository(self.config, &publish, &plan, &stores, self.feedback),
@@ -591,7 +591,7 @@ impl Driver<'_> {
 
             // A cancellation resolves to `Ok(None)` rather than an error, so
             // a shutdown is never something the retry waits out.
-            let Some(beacon) = crate::common::retry_transient(
+            let Some(beacon) = dolos_snapshot::retry::transient(
                 "listing mithril snapshots",
                 &|| self.cancel.is_cancelled(),
                 || {
@@ -657,7 +657,7 @@ impl Driver<'_> {
 
             // Safe to run again: the explicit `download_start`/`download_end`
             // make a retry plan the identical download over the same files.
-            let fetched = crate::common::retry_transient(
+            let fetched = dolos_snapshot::retry::transient(
                 "fetching a mithril immutable window",
                 &|| self.cancel.is_cancelled(),
                 || {

@@ -52,10 +52,20 @@
 //!   that cannot fit its volume says so at minute zero.
 //! - `registry` (feature `oci`) — publishing into an OCI repository: the
 //!   history chain, and the layers a publish inherits instead of rebuilding.
+//! - [`planning`] — the epoch selection every command that walks these stores
+//!   takes, and the arithmetic each of them reports.
+//! - [`node`] — what a node's own configuration says about reaching a registry:
+//!   which identity, and where it stages.
+//! - `publisher` (feature `oci`) — the order a repository publish's steps go
+//!   in, and what each reading of the repository means for one.
 
 pub mod export;
 pub mod layers;
 pub mod namespaces;
+pub mod node;
+pub mod planning;
+#[cfg(feature = "oci")]
+pub mod publisher;
 #[cfg(feature = "oci")]
 pub mod registry;
 pub mod restore;
@@ -64,6 +74,12 @@ pub mod restore;
 /// paths and byte counts and knows nothing about what fills them. Re-exported
 /// at its old path.
 pub use stelae_driver::preflight;
+
+/// The bounded patience a run spends on an external that fails in bursts, which
+/// is [`stelae_driver`]'s: one policy over attempts and a clock, and nothing
+/// about what is being retried. Re-exported so a binary reaching for it never
+/// has to name the driver crate.
+pub use stelae_driver::retry;
 
 /// The layer and record arithmetic both drivers report through, which is
 /// [`stelae_driver`]'s for the same reason. Not public here, because it never
@@ -676,6 +692,45 @@ pub enum Error {
     /// shard would already have attested it.
     #[error("snapshot.state_epochs is not a list of retained epochs: {0}")]
     RetainedEpochs(String),
+
+    /// `[stelae.registry]` naming two identities at once.
+    ///
+    /// Not a precedence rule, because on a registry whose credentials carry
+    /// different capabilities, guessing is the difference between a publish and
+    /// a 403 nobody can explain.
+    #[error(
+        "[stelae.registry] sets both `token` and `user`; a registry client authenticates as one \
+         identity and which one was meant is not something to guess at — drop the one you did not \
+         mean, or unset DOLOS_STELAE_REGISTRY_TOKEN / DOLOS_STELAE_REGISTRY_USER"
+    )]
+    AmbiguousRegistryIdentity,
+
+    /// A secret that arrived with nobody to be. Anonymous would be the quiet
+    /// answer and the wrong one: the operator supplied a secret and it would go
+    /// unused.
+    #[error(
+        "[stelae.registry] sets `password` with no `user`; basic registry credentials are a pair"
+    )]
+    OrphanRegistryPassword,
+
+    /// The repository has already reached this node, and `--require-new` said
+    /// that is a failure. The ordinary reading of the same standing is
+    /// [`publisher::Next::Nothing`], which carries this exact sentence.
+    #[error("{0}")]
+    NothingToPublish(String),
+
+    /// A publish further ahead than one sequence, which would leave a gap no
+    /// later stele could close.
+    #[error(
+        "this repository's latest stele is sequence {latest} and this node is at sequence \
+         {sequence}, {distance} sequences ahead: a publish must follow the repository's latest \
+         stele, and this one would leave a gap no later stele could close"
+    )]
+    PublishWouldGap {
+        latest: u64,
+        sequence: u64,
+        distance: u64,
+    },
 }
 
 impl Error {

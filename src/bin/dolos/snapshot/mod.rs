@@ -15,17 +15,17 @@
 //!
 //! ## One epoch selection, however many commands take one
 //!
-//! [`EpochRange`] lives here rather than in either command, because a publisher
-//! that names "epochs 500 through 519" to one and gets a different window from
-//! the other is a publisher verifying a different stele than the one they
-//! published — and being told it matches. One parser, one restriction, applied
-//! by [`restrict`].
+//! [`EpochRange`] is the profile crate's rather than either command's, because
+//! a publisher that names "epochs 500 through 519" to one and gets a different
+//! window from the other is a publisher verifying a different stele than the
+//! one they published — and being told it matches. One parser, one restriction,
+//! one reading of the plan they produce: [`dolos_snapshot::planning`].
 
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
-    export::{IndexBand, Plan, Producers},
-    RetainedEpochs,
+    export::{self, Plan},
+    planning::{self, PlanReport},
 };
 use miette::{Context as _, IntoDiagnostic as _};
 
@@ -37,6 +37,8 @@ mod digest;
 mod inspect;
 mod publish;
 mod verify;
+
+pub use dolos_snapshot::planning::EpochRange;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -80,219 +82,84 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 }
 
-/// An epoch selection, in Rust's own range spellings.
+/// The three knobs every command that walks these stores takes.
 ///
-/// Spelled the way a reader already knows how to read: `..` excludes its end,
-/// `..=` includes it. Both are accepted because a publisher naming "epochs 500
-/// through 519" and one naming "up to and including 519" are both natural, and
-/// silently picking one of the two meanings is how an operator publishes an
-/// epoch short.
-#[derive(Debug, Clone, Copy)]
-pub struct EpochRange {
-    first: Option<u64>,
-    last: Option<u64>,
+/// Spelled per command rather than flattened into one clap group, because the
+/// help text is not the same everywhere: `verify` takes all three only under
+/// `--reproduce`, and says so. What is shared is what they mean, which is
+/// [`dolos_snapshot::planning`]'s.
+pub struct Selection {
+    pub epochs: Option<EpochRange>,
+    pub index_band: Option<std::num::NonZeroUsize>,
+    pub producers: Option<std::num::NonZeroUsize>,
 }
 
-impl std::str::FromStr for EpochRange {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        let bad = |why: &str| format!("{raw:?} is not an epoch range: {why}");
-
-        let parse = |part: &str| -> Result<Option<u64>, String> {
-            match part.trim() {
-                "" => Ok(None),
-                value => value
-                    .parse::<u64>()
-                    .map(Some)
-                    .map_err(|e| bad(&format!("{value:?}: {e}"))),
-            }
-        };
-
-        // `..=` first: `..` is a prefix of it, so testing in the other order
-        // would read `500..=520` as a range ending at `=520`.
-        let (raw, inclusive) = match raw.split_once("..=") {
-            Some(_) => (raw.replacen("..=", "..", 1), true),
-            None => (raw.to_owned(), false),
-        };
-
-        let Some((start, end)) = raw.split_once("..") else {
-            // A bare number: exactly that epoch.
-            let only = parse(&raw)?.ok_or_else(|| bad("it is empty"))?;
-
-            return Ok(Self {
-                first: Some(only),
-                last: Some(only),
-            });
-        };
-
-        let first = parse(start)?;
-        let end = parse(end)?;
-
-        let last = match (end, inclusive) {
-            (Some(end), false) => Some(
-                end.checked_sub(1)
-                    .ok_or_else(|| bad("an exclusive end of 0 selects nothing"))?,
-            ),
-            (None, true) => return Err(bad("`..=` needs an end")),
-            (end, _) => end,
-        };
-
-        if let (Some(first), Some(last)) = (first, last) {
-            if first > last {
-                return Err(bad("it starts after it ends"));
-            }
-        }
-
-        Ok(Self { first, last })
-    }
-}
-
-/// The retained state-dump epochs this node publishes under.
+/// This node's plan, narrowed by the operator's selection.
 ///
-/// Read here rather than in each command for the same reason [`restrict`] is:
-/// `publish`, `digest` and `verify --reproduce` all put this list in
-/// `parameters`, and a node that gave them different lists would be verifying
-/// a different document than the one it published — and being told it does not
-/// match. An absent `[snapshot]` section means an empty list, which is a
-/// publisher that retains the tip alone.
-pub fn retained_epochs(config: &RootConfig) -> miette::Result<RetainedEpochs> {
-    let configured = config
-        .snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.state_epochs.clone())
-        .unwrap_or_default();
+/// One sequence for `publish`, `digest` and `verify --reproduce`, because a
+/// node that gave them different plans would be verifying a different document
+/// than the one it published — and being told it does not match. `what` is the
+/// word the failing command uses for the plan it was building.
+pub fn planned(
+    config: &RootConfig,
+    stores: &crate::common::Stores,
+    selection: &Selection,
+    what: &'static str,
+) -> miette::Result<Plan> {
+    let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    RetainedEpochs::new(configured)
+    let retained = planning::retained_epochs(config)
         .into_diagnostic()
-        .context("reading snapshot.state_epochs")
-}
+        .context("reading snapshot.state_epochs")?;
 
-/// Apply an operator's selection to a plan, or leave it whole.
-///
-/// The one place either command narrows a plan. `restrict_epochs` takes two
-/// options and a caller could always inline the call; the point is that neither
-/// command gets to spell the mapping from a range to those two options its own
-/// way.
-pub fn restrict(plan: Plan, range: Option<EpochRange>) -> Plan {
-    match range {
-        Some(range) => plan.restrict_epochs(range.first, range.last),
-        None => plan,
-    }
-}
+    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()), retained)
+        .into_diagnostic()
+        .context(what)?;
 
-/// Apply an operator's index band to a plan, or leave the measured default.
-///
-/// The one place any command spells the mapping, for the reason [`restrict`] is
-/// shared: `publish`, `digest` and `verify --reproduce` all pay the same index
-/// traversals, and a knob one of them spelled its own way would be a knob an
-/// operator has to learn three times.
-///
-/// Unlike [`restrict`], this changes nothing about the document: banding
-/// reorders when index records are read, never which layer they land in. Two
-/// runs at different bands produce the same digest, which is why a
-/// reproduction is free to band differently than the publish it checks.
-pub fn banded(plan: Plan, band: Option<std::num::NonZeroUsize>) -> Plan {
-    match band {
-        Some(band) => plan.with_band(IndexBand::new(band)),
-        None => plan,
-    }
-}
+    let plan = planning::restrict(plan, selection.epochs);
+    let plan = planning::banded(plan, selection.index_band);
 
-/// Apply an operator's producer pool to a plan, or leave the sized default.
-///
-/// Shared for the reason [`banded`] is: the same three commands pay the same
-/// store walks, so the knob that pools them is spelled once. Like the band,
-/// this changes nothing about the document — layers are reassembled by their
-/// position in it, never by completion order — so a reproduction is free to
-/// pool differently than the publish it checks.
-pub fn produced(plan: Plan, producers: Option<std::num::NonZeroUsize>) -> Plan {
-    match producers {
-        Some(producers) => plan.with_producers(Producers::new(producers)),
-        None => plan,
-    }
+    Ok(planning::produced(plan, selection.producers))
 }
 
 /// The report every command opens with: where the node stands and what the
 /// selection covers.
 ///
-/// Shared so that a publisher comparing a `digest` run against the `publish`
-/// that produced a stele is comparing the same four lines. Written to `stderr`,
-/// because `digest` puts a document on `stdout` and a report interleaved with
-/// it would not be one.
+/// The numbers are [`PlanReport`]'s, so a publisher comparing a `digest` run
+/// against the `publish` that produced a stele is comparing the same
+/// arithmetic. What is here is the four lines it is said in. Written to
+/// `stderr`, because `digest` puts a document on `stdout` and a report
+/// interleaved with it would not be one.
 pub fn report_plan(plan: &Plan) -> miette::Result<()> {
-    let tag = plan.tag().into_diagnostic()?;
+    let report = PlanReport::read(plan).into_diagnostic()?;
+
+    eprintln!("network:  {} ({})", report.network, report.magic);
+    eprintln!("cursor:   {}", report.cursor);
+    eprintln!("sequence: {} (tag {})", report.sequence, report.tag);
 
     eprintln!(
-        "network:  {} ({})",
-        plan.network.name(),
-        plan.network.magic()
-    );
-    eprintln!("cursor:   {}", plan.cursor);
-    eprintln!("sequence: {} (tag {tag})", plan.sequence);
-
-    // Clamped to the epochs actually selected, because the band chunks them:
-    // a `--epochs 500..502` publish opens three sinks whatever the band says,
-    // and the unclamped budget would overstate it by orders of magnitude.
-    let band = plan.band.epochs().min(plan.epochs.len());
-
-    eprintln!(
-        "band:     {band} epochs per index traversal ({} MiB budgeted)",
-        band.saturating_mul(IndexBand::SINK_BYTES) / (1024 * 1024),
+        "band:     {} epochs per index traversal ({} MiB budgeted)",
+        report.band_epochs, report.band_budget_mib,
     );
 
-    match (plan.epochs.first(), plan.epochs.last()) {
-        (Some(first), Some(last)) => eprintln!(
+    match report.epochs {
+        Some(span) => eprintln!(
             "epochs:   {}..={} ({} of them, slots {}..={})",
-            first.epoch,
-            last.epoch,
-            plan.epochs.len(),
-            first.start_slot,
-            last.end_slot,
+            span.first, span.last, span.count, span.start_slot, span.end_slot,
         ),
         // The state tip alone is a legitimate publish; say so rather than
         // printing an empty range and looking like a mistake.
-        _ => eprintln!("epochs:   none selected; the state tip only"),
+        None => eprintln!("epochs:   none selected; the state tip only"),
     }
 
     // Printed always and not only when it is set, because an empty list is a
     // choice with consequences — it is what makes this publisher's parameters
     // differ from a co-signer's that retains dumps, and the line is where an
     // operator sees the two do not match.
-    let due = plan.retained.due(plan.sequence).count();
-
     eprintln!(
-        "dumps:    {:?} retained ({due} due at this sequence)",
-        plan.retained.as_slice(),
+        "dumps:    {:?} retained ({} due at this sequence)",
+        report.retained, report.dumps_due,
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(raw: &str) -> (Option<u64>, Option<u64>) {
-        let range: EpochRange = raw.parse().unwrap();
-        (range.first, range.last)
-    }
-
-    #[test]
-    fn epoch_ranges_read_the_way_rust_ranges_do() {
-        assert_eq!(parse("500..520"), (Some(500), Some(519)));
-        assert_eq!(parse("500..=520"), (Some(500), Some(520)));
-        assert_eq!(parse("500.."), (Some(500), None));
-        assert_eq!(parse("..520"), (None, Some(519)));
-        assert_eq!(parse("..=520"), (None, Some(520)));
-        assert_eq!(parse(".."), (None, None));
-        assert_eq!(parse("500"), (Some(500), Some(500)));
-    }
-
-    #[test]
-    fn a_nonsensical_range_is_refused() {
-        for raw in ["520..500", "..0", "abc", "", "500..abc", "500..=", "-1"] {
-            assert!(raw.parse::<EpochRange>().is_err(), "{raw:?}");
-        }
-    }
 }
