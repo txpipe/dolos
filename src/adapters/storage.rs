@@ -53,11 +53,20 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
     Ok(config.storage.path.clone())
 }
 
-fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
-    if config.storage.version != StorageVersion::V3 {
+/// The storage version this binary reads. A store built by an older dolos is
+/// not migrated in place: the supported path off it is a fresh `dolos init`
+/// followed by a restore or a re-sync.
+pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
+
+/// The migration guide the refusal points an operator at.
+pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v1-7";
+
+fn check_storage_version(version: &StorageVersion) -> Result<(), Error> {
+    if *version != CURRENT_STORAGE_VERSION {
         return Err(Error::StorageError(format!(
-            "unsupported storage version {:?}, only V3 is supported",
-            config.storage.version
+            "unsupported storage version `{version}`, this dolos only supports \
+             `{CURRENT_STORAGE_VERSION}`; run `dolos init` to upgrade the configuration and \
+             re-bootstrap the data — see the migration guide at {MIGRATION_GUIDE_URL}"
         )));
     }
     Ok(())
@@ -162,7 +171,7 @@ pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    check_storage_version(config)?;
+    check_storage_version(&config.storage.version)?;
 
     Ok(Stores {
         wal: open_wal_store(config)?,
@@ -1510,6 +1519,39 @@ mod tests {
             message.contains("fjall"),
             "refusal must name the supported backend"
         );
+    }
+
+    /// A v1.6-era configuration is refused, and the refusal names both the
+    /// tool that performs the migration and the guide that describes it.
+    #[test]
+    fn older_storage_versions_are_refused_with_the_remedy() {
+        for stale in [
+            StorageVersion::V0,
+            StorageVersion::V1,
+            StorageVersion::V2,
+            StorageVersion::V3,
+        ] {
+            let message = refusal(check_storage_version(&stale));
+
+            assert!(
+                message.contains(&stale.to_string()),
+                "refusal must name the version found: {message}"
+            );
+            assert!(
+                message.contains("v4"),
+                "refusal must name the supported version: {message}"
+            );
+            assert!(
+                message.contains("dolos init"),
+                "refusal must name the remedy: {message}"
+            );
+            assert!(
+                message.contains(MIGRATION_GUIDE_URL),
+                "refusal must point at the migration guide: {message}"
+            );
+        }
+
+        check_storage_version(&CURRENT_STORAGE_VERSION).unwrap();
     }
 
     #[test]

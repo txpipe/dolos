@@ -2,7 +2,7 @@
 peer_address = "relay.cnode-m1.demeter.run:3001"
 
 [storage]
-version = "v3"
+version = "v4"
 path = "data"
 
 [genesis]
