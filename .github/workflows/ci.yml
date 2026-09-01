@@ -148,6 +148,31 @@ jobs:
           save-if: false
       - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
+  # `dolos-snapshot` carries two default-off halves — the OCI transport (`oci`)
+  # and the mithril fetch plus the backfill daemon (`mithril`) — and every job
+  # above builds them the one way the `dolos` binary does, with both on. A
+  # `cfg` that only compiles under that combination passes all of them and
+  # breaks a build nobody here runs. This checks the combinations the crate
+  # promises instead, at `cargo check` depth: the guard is that each compiles,
+  # not that it passes a suite the jobs above already run.
+  snapshot-features:
+    name: Check (dolos-snapshot ${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [oci, mithril, "oci,mithril"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo check -p dolos-snapshot --all-targets --features ${{ matrix.features }}
+
   # These sleep on a real relay rather than compute, so they are slow and only
   # as reliable as the relay. Run them on merges to main; smoke stays on the
   # matrix everywhere and covers ports, socket and shutdown on every PR.

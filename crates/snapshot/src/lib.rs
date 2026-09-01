@@ -58,9 +58,17 @@
 //!   which identity, and where it stages.
 //! - `publisher` (feature `oci`) — the order a repository publish's steps go
 //!   in, and what each reading of the repository means for one.
+//! - `mithril` (feature `mithril`) — acquiring immutable chain data from a
+//!   mithril aggregator: one client, one download plan, one verification.
+//! - `backfill` (feature `mithril`) — the publisher daemon that replays that
+//!   data one epoch at a time and publishes a stele at each boundary.
 
+#[cfg(feature = "mithril")]
+pub mod backfill;
 pub mod export;
 pub mod layers;
+#[cfg(feature = "mithril")]
+pub mod mithril;
 pub mod namespaces;
 pub mod node;
 pub mod planning;

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
+use dolos_core::{ArchiveStore, IndexStore, StateStore};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::{
@@ -127,7 +128,15 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 },
             };
 
-            to_repository(config, &publish, &plan, &stores, feedback)
+            to_repository(
+                config,
+                &publish,
+                &plan,
+                &stores.archive,
+                &stores.state,
+                &stores.indexes,
+                feedback,
+            )
         }
         (None, Some(dir)) => to_directory(args, dir, &plan, &stores, feedback),
         // The required `destination` group already refuses this.
@@ -187,11 +196,13 @@ fn to_directory(
 /// than trust: how much of this stele was inherited rather than built, and how
 /// much of it moved. Both are numbers the code counted, not an inference from a
 /// duration.
-pub(super) fn to_repository(
+pub(super) fn to_repository<A: ArchiveStore, S: StateStore, I: IndexStore>(
     config: &RootConfig,
     publish: &RepositoryPublish,
     plan: &export::Plan,
-    stores: &crate::common::Stores,
+    archive: &A,
+    state: &S,
+    indexes: &I,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     let repo = publish.repo;
@@ -223,7 +234,7 @@ pub(super) fn to_repository(
 
     if publish.dry_run {
         let preview = publisher
-            .preview(plan, &stores.archive)
+            .preview(plan, archive)
             .into_diagnostic()
             .context("planning the publish")?;
 
@@ -246,13 +257,7 @@ pub(super) fn to_repository(
     let progress = SteleProgress::publishing(feedback);
 
     let published = publisher
-        .publish(
-            plan,
-            &stores.archive,
-            &stores.state,
-            &stores.indexes,
-            &progress.observer(),
-        )
+        .publish(plan, archive, state, indexes, &progress.observer())
         .into_diagnostic()
         .context("publishing the stele")?;
 

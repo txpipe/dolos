@@ -163,7 +163,11 @@ path = "tests/bootstrap.rs"
 
 [features]
 strict = ["dolos-cardano/strict"]
-mithril = ["mithril-client"]
+# The aggregator fetch and the backfill daemon both live in `dolos-snapshot`
+# now, so this forwards rather than gating code of its own: `mithril-client` is
+# still a direct dependency because the CLI builds the client's feedback
+# receiver — the progress bars a download draws.
+mithril = ["mithril-client", "dolos-snapshot/mithril"]
 
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
