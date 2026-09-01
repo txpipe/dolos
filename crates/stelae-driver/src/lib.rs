@@ -21,12 +21,25 @@
 //!   sha256 over immutable-database files, which is a Cardano shape described
 //!   in Cardano words; the code depends on nothing but this crate and the
 //!   protocol, which is why it sits here.
+//! - [`profile`] — [`DriverProfile`], the little a lifecycle has to ask a
+//!   profile that the protocol's own trait deliberately does not answer.
+//! - [`predecessor`] — the publish a publish follows, and what it may carry
+//!   forward from it.
+//! - [`publish`] — the chained-publish lifecycle against a repository, behind
+//!   the `oci` feature because that is where a repository lives.
 //! - [`Standing`] — where a node stands against a repository's latest stele.
 //! - [`scope_key`] — the pair that identifies one layer.
 
 pub mod digests;
+pub mod predecessor;
 pub mod preflight;
+pub mod profile;
+#[cfg(feature = "oci")]
+pub mod publish;
 pub mod reporting;
+
+pub use predecessor::{First, Predecessor};
+pub use profile::DriverProfile;
 
 /// Errors raised by the driver.
 ///
@@ -59,6 +72,16 @@ pub enum Error {
     /// `scope` — is not a shape that canonicalizes.
     #[error("the inscription's {field} is not the shape this profile writes: {reason}")]
     MalformedInscription { field: String, reason: String },
+
+    /// A predecessor describing a different dataset than the one being
+    /// published, as [`DriverProfile::check_same_dataset`] judged it.
+    ///
+    /// The two identities are the profile's own — this crate carries the
+    /// numbers and composes no sentence about what they name — so a profile
+    /// that spells the refusal itself keeps the message it always had, the way
+    /// every other shared refusal here does.
+    #[error("this stele describes dataset {found}, but this node is configured for {expected}")]
+    DatasetMismatch { expected: u64, found: u64 },
 
     /// A publish that would not extend the repository's chain. Raised by
     /// [`stelae::inscription::history_for`] and carried here unchanged.

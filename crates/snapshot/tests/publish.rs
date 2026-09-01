@@ -1318,7 +1318,7 @@ fn publishing<'a>(
     repository: &'a registry::Registry,
     storage: &'a tempfile::TempDir,
 ) -> registry::Publishing<'a> {
-    registry::Publishing::new(repository).recording_in(storage.path())
+    registry::Publishing::new(repository).recording_in(record_path(storage))
 }
 
 fn record_path(storage: &tempfile::TempDir) -> std::path::PathBuf {

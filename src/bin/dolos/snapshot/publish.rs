@@ -246,7 +246,7 @@ pub(super) fn to_repository(
     // already uploaded instead of rebuilding them. `--rebuild` starts it over
     // along with everything else.
     let publishing = registry::Publishing::new(&registry)
-        .recording_in(&config.storage.path)
+        .recording_in(registry::record_path_in(&config.storage.path))
         .rebuilding(publish.rebuild);
 
     // Before anything is built, and before the dry run too: a publisher asking

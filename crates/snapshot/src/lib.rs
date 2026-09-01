@@ -756,6 +756,9 @@ impl From<stelae_driver::Error> for Error {
                 publishing,
                 reason,
             },
+            stelae_driver::Error::DatasetMismatch { expected, found } => {
+                Self::NetworkMismatch { expected, found }
+            }
         }
     }
 }
@@ -804,6 +807,63 @@ impl Profile for DolosProfile {
 
     fn max_record(&self) -> usize {
         MAX_RECORD
+    }
+}
+
+/// The lifecycle's half of the same answer.
+///
+/// Four questions [`Profile`] deliberately does not ask, because none of them
+/// is about naming: which kinds a closed window produces, which layers may be
+/// carried forward, and whether two documents stand on one chain. Every one of
+/// them is already decided somewhere in this crate — the constants, the
+/// inheritance rule and the position check — so this is delegation and not a
+/// second statement of any of it.
+impl stelae_driver::DriverProfile for DolosProfile {
+    fn epoch_kinds(&self) -> &[&str] {
+        &EPOCH_KINDS
+    }
+
+    fn dense_epoch_kinds(&self) -> &[&str] {
+        &DENSE_EPOCH_KINDS
+    }
+
+    fn is_inheritable(&self, kind: &str, scope: &serde_json::Value) -> bool {
+        is_inheritable(kind, scope)
+    }
+
+    /// Two steles stand on the same dataset when their `position` names the
+    /// same network magic. The check a publish and a reproduction share, and
+    /// the refusal an operator reads is still [`Error::NetworkMismatch`] — the
+    /// driver carries the two numbers and this crate spells the sentence.
+    fn check_same_dataset(
+        &self,
+        previous: &stelae::inscription::Inscription,
+        position: &serde_json::Value,
+    ) -> Result<(), stelae_driver::Error> {
+        // Read on the driver's terms and refused in this crate's words. The
+        // only failure `read_position` has is a malformed field, which is a
+        // refusal the driver names too — so the round trip back through
+        // `From<stelae_driver::Error>` restores the very variant and message
+        // this crate would have raised on its own.
+        let magic = |value: &serde_json::Value| match read_position(value) {
+            Ok(position) => Ok(position.network.magic()),
+            Err(Error::MalformedInscription { field, reason }) => {
+                Err(stelae_driver::Error::MalformedInscription { field, reason })
+            }
+            Err(other) => Err(stelae_driver::Error::MalformedInscription {
+                field: "position".to_owned(),
+                reason: other.to_string(),
+            }),
+        };
+
+        let found = magic(&previous.position)?;
+        let expected = magic(position)?;
+
+        if found != expected {
+            return Err(stelae_driver::Error::DatasetMismatch { expected, found });
+        }
+
+        Ok(())
     }
 }
 
