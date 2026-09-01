@@ -799,10 +799,8 @@ pub fn run(
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
 
-    // A `dolos.toml` that exists but did not parse is the v1.6-era setup this
-    // release refuses: the editor below falls back to defaults, so without
-    // this the operator would get a current-version config written over the
-    // old store with no chance to clear it.
+    // A config that exists but did not parse is an older setup, not a missing
+    // one; `needs_storage_upgrade` records what follows from that.
     let unparseable_existing = config.is_err() && Path::new(CONFIG_FILE).exists();
 
     config
