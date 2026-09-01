@@ -10,17 +10,17 @@ edition.workspace = true
 # only writes steles to a directory keeps the dependency tree it had, which is
 # the whole reason the protocol's transport is behind a feature in the first
 # place. `dolos`'s own `registry` feature is what turns this on.
-oci = ["stelae/oci"]
+oci = ["stelae/oci", "stelae-driver/oci"]
 
 # This crate is the *profile* half of the Stelae boundary: it may depend on
 # `stelae` and on `dolos-*`, never the other way around. See
 # adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
 stelae = { path = "../stelae" }
+stelae-driver = { path = "../stelae-driver" }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 
-fs4.workspace = true
 hex.workspace = true
 minicbor.workspace = true
 serde.workspace = true

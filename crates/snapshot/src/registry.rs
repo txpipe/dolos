@@ -978,7 +978,10 @@ pub fn preflight(registry: &Registry) -> Result<(), Error> {
         return Ok(());
     };
 
-    crate::preflight::check(&[staging_need(staging_peak(registry)?, scratch_dir)])
+    Ok(crate::preflight::check(&[staging_need(
+        staging_peak(registry)?,
+        scratch_dir,
+    )])?)
 }
 
 /// What the staging asks of its volume, as [`crate::preflight`] takes it.
@@ -1867,7 +1870,9 @@ mod tests {
     fn a_measured_staging_shortfall_refuses_and_a_first_publish_does_not() {
         let temp = tempfile::tempdir().unwrap();
 
-        let check = |peak| crate::preflight::check(&[staging_need(peak, temp.path())]);
+        let check = |peak| -> Result<(), Error> {
+            Ok(crate::preflight::check(&[staging_need(peak, temp.path())])?)
+        };
 
         // No predecessor, so nothing sized it, so nothing refuses.
         check(None).unwrap();

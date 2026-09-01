@@ -1639,13 +1639,13 @@ dependencies = [
  "dolos-core",
  "dolos-redb3",
  "dolos-testing",
- "fs4",
  "hex",
  "minicbor 0.26.4",
  "rustls",
  "serde",
  "serde_json",
  "stelae",
+ "stelae-driver",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -5383,6 +5383,19 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "zstd",
+]
+
+[[package]]
+name = "stelae-driver"
+version = "1.7.0-alpha.1"
+dependencies = [
+ "fs4",
+ "minicbor 0.26.4",
+ "serde_json",
+ "stelae",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

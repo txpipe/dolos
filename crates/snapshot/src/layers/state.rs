@@ -50,8 +50,8 @@
 use dolos_core::{state::KEY_SIZE, EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef};
 use stelae::frame::{self, CanonicalCbor};
 
-use super::{blob, close, open, uint};
 use crate::{namespaces, Error, UTXOS};
+use stelae::codec::{blob, close, open, uint};
 
 /// The name this codec refuses under.
 ///
