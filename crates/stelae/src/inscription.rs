@@ -403,6 +403,71 @@ impl Inscription {
     }
 }
 
+/// The history a stele at `sequence` carries when it follows `previous`.
+///
+/// The constructive half of the invariant [`Inscription::validate`] checks: one
+/// builds the chain, the other refuses a document whose chain is broken.
+///
+/// The three legal readings of what came before, and the one refusal:
+///
+/// - **nothing there** — an empty history, which the protocol permits at any
+///   sequence. The first stele of a repository carries no history, and so does
+///   a publisher deliberately starting a new one at sequence 500;
+/// - **the stele before this one** — the old history plus an entry naming it.
+///   Contiguous by construction, so the protocol's invariant passes rather than
+///   being relied upon;
+/// - **anything else** — refused, naming both sequences and, for a gap, the
+///   distance between them. A gap means a publisher skipped sequences, an equal
+///   sequence means it is republishing one, and a higher one means the
+///   repository is ahead of this node. All three are operational faults with
+///   different fixes, so the message says which.
+///
+/// Whether a deliberate gap ever gets a policy is not this function's to
+/// invent; there is no flag here that overrides the refusal.
+///
+/// It lives beside the invariant rather than beside a transport because a
+/// verifier reaches it without one, and a rule this load-bearing should not be
+/// compiled out of a build that still has to reproduce a chained digest.
+pub fn history_for(
+    previous: Option<&Inscription>,
+    sequence: u64,
+) -> Result<Vec<HistoryEntry>, Error> {
+    let Some(previous) = previous else {
+        return Ok(Vec::new());
+    };
+
+    let latest = previous.sequence;
+
+    let reason = match latest.checked_add(1) {
+        Some(next) if next == sequence => {
+            let mut history = previous.history.clone();
+
+            history.push(HistoryEntry {
+                sequence: latest,
+                inscription_digest: previous.digest()?,
+            });
+
+            return Ok(history);
+        }
+        _ if latest >= sequence => {
+            "this stele is at or behind the repository's latest; a republish would restart the \
+             chain rather than extend it"
+                .to_owned()
+        }
+        _ => format!(
+            "this node is {} sequences ahead, and a publish must follow the repository's latest \
+             stele: this one would leave a gap no later stele could close",
+            sequence - latest,
+        ),
+    };
+
+    Err(Error::HistoryBreak {
+        latest,
+        publishing: sequence,
+        reason,
+    })
+}
+
 /// RFC 8785 canonical JSON encoding of an arbitrary value.
 ///
 /// Exposed so the conformance vectors exercise the same code path the
@@ -523,6 +588,114 @@ mod tests {
         }];
 
         inscription
+    }
+
+    /// An inscription at `sequence` carrying `history`, for the chain rules
+    /// below: the fields `history_for` reads and nothing else.
+    fn at(sequence: u64, history: Vec<HistoryEntry>) -> Inscription {
+        let mut inscription = Inscription::new(
+            &Toy,
+            sequence,
+            json!({"chapter": sequence}),
+            json!({"noteWidth": 40}),
+            Compression {
+                algo: "zstd".to_owned(),
+                level: 9,
+            },
+        );
+
+        inscription.history = history;
+        inscription
+    }
+
+    fn entry(sequence: u64) -> HistoryEntry {
+        HistoryEntry {
+            sequence,
+            inscription_digest: Digest::compute(sequence.to_be_bytes()),
+        }
+    }
+
+    /// The first stele of a repository carries no history, at any sequence.
+    #[test]
+    fn an_empty_repository_starts_a_history() {
+        assert!(history_for(None, 0).unwrap().is_empty());
+        assert!(history_for(None, 500).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_publish_that_follows_latest_extends_the_chain() {
+        let previous = at(3, vec![entry(1), entry(2)]);
+
+        let history = history_for(Some(&previous), 4).unwrap();
+
+        assert_eq!(
+            history.iter().map(|e| e.sequence).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "the old history plus an entry naming the stele it came from"
+        );
+
+        assert_eq!(history[2].inscription_digest, previous.digest().unwrap());
+
+        // The invariant holds by construction rather than by inspection: a
+        // document built on this history validates.
+        at(4, history).validate().unwrap();
+    }
+
+    /// All three refusals name both sequences, because which of the three it is
+    /// decides what the publisher does about it.
+    #[test]
+    fn a_publish_that_does_not_follow_latest_is_refused() {
+        let previous = at(497, vec![]);
+
+        for publishing in [500, 497, 496] {
+            let err = history_for(Some(&previous), publishing).unwrap_err();
+            let message = err.to_string();
+
+            assert!(
+                matches!(err, Error::HistoryBreak { .. }),
+                "{publishing}: {err:?}"
+            );
+
+            assert!(message.contains("497"), "{publishing}: {message}");
+            assert!(
+                message.contains(&publishing.to_string()),
+                "{publishing}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gap_and_a_republish_are_told_apart() {
+        let previous = at(497, vec![]);
+
+        assert!(history_for(Some(&previous), 500)
+            .unwrap_err()
+            .to_string()
+            .contains("gap"));
+
+        assert!(history_for(Some(&previous), 497)
+            .unwrap_err()
+            .to_string()
+            .contains("republish"));
+
+        assert!(history_for(Some(&previous), 496)
+            .unwrap_err()
+            .to_string()
+            .contains("republish"));
+    }
+
+    /// A gap says how far. "The repository is at 497 and you are at 500" is a
+    /// different incident from being one epoch out, and the operator reading
+    /// the message should not have to subtract to find out which they have.
+    #[test]
+    fn a_gap_names_the_distance_alongside_both_sequences() {
+        let previous = at(497, vec![]);
+
+        let message = history_for(Some(&previous), 500).unwrap_err().to_string();
+
+        assert!(message.contains("497"), "{message}");
+        assert!(message.contains("500"), "{message}");
+        assert!(message.contains("3 sequences ahead"), "{message}");
     }
 
     #[test]

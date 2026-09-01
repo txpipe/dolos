@@ -39,8 +39,8 @@ use dolos_core::{
 };
 use stelae::frame::{self, CanonicalCbor};
 
-use super::{blob, close, fixed, open, text, uint};
 use crate::{Error, INDEXES};
+use stelae::codec::{blob, close, fixed, open, text, uint};
 
 /// Leading discriminant of a tag record.
 pub const TAG_DISCRIMINANT: u64 = 0;

@@ -361,7 +361,7 @@ impl Plan {
             ));
         }
 
-        preflight::check(&needs)
+        Ok(preflight::check(&needs)?)
     }
 }
 

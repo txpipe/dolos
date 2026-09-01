@@ -5,7 +5,7 @@
 //! fill one in — which layer of how many is in flight, and how often a long
 //! scan is worth mentioning.
 //!
-//! Shared by [`crate::export`] and [`crate::restore`] because the two count the
+//! Shared by a profile's export and restore drivers because the two count the
 //! same thing and a second copy would be a second answer to "how far along is
 //! this". Both types are call-scoped: they live on a stack frame for the length
 //! of one publish or one restore, and neither outlives it.
@@ -33,14 +33,14 @@ const RECORD_CADENCE: u64 = 4096;
 /// one cursor. Positions are display order, nothing else: the inscription
 /// lists layers by its own rule, so two runs that announce in different
 /// interleavings still publish the same document.
-pub(crate) struct Cursor<'a> {
+pub struct Cursor<'a> {
     observer: &'a Observer,
     next: std::sync::atomic::AtomicUsize,
     total: usize,
 }
 
 impl<'a> Cursor<'a> {
-    pub(crate) fn new(observer: &'a Observer, total: usize) -> Self {
+    pub fn new(observer: &'a Observer, total: usize) -> Self {
         Self {
             observer,
             next: std::sync::atomic::AtomicUsize::new(0),
@@ -49,7 +49,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// Announce a layer and take its position in the run.
-    pub(crate) fn open(&self, kind: &str, scope: &serde_json::Value) -> usize {
+    pub fn open(&self, kind: &str, scope: &serde_json::Value) -> usize {
         let index = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         self.observer.emit(Event::LayerStarted {
@@ -63,7 +63,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// Close the layer `index` was handed out for.
-    pub(crate) fn close(&self, index: usize, kind: &str, outcome: Outcome) {
+    pub fn close(&self, index: usize, kind: &str, outcome: Outcome) {
         self.observer.emit(Event::LayerFinished {
             index,
             total: self.total,
@@ -73,7 +73,7 @@ impl<'a> Cursor<'a> {
     }
 
     /// A record counter reporting to the same place.
-    pub(crate) fn records(&self) -> Records<'a> {
+    pub fn records(&self) -> Records<'a> {
         Records {
             observer: self.observer,
             pending: 0,
@@ -82,7 +82,7 @@ impl<'a> Cursor<'a> {
 
     /// Layers announced so far — what a caller cross-checks its own total
     /// against once the run is over.
-    pub(crate) fn opened(&self) -> usize {
+    pub fn opened(&self) -> usize {
         self.next.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -93,13 +93,13 @@ impl<'a> Cursor<'a> {
 /// matters is *before* the layer closes: an observer that saw a layer finish
 /// and then received records for it would have to know which layer they
 /// belonged to, and the seam deliberately does not carry that.
-pub(crate) struct Records<'a> {
+pub struct Records<'a> {
     observer: &'a Observer,
     pending: u64,
 }
 
 impl Records<'_> {
-    pub(crate) fn tick(&mut self) {
+    pub fn tick(&mut self) {
         self.pending += 1;
 
         if self.pending >= RECORD_CADENCE {
@@ -107,7 +107,7 @@ impl Records<'_> {
         }
     }
 
-    pub(crate) fn flush(&mut self) {
+    pub fn flush(&mut self) {
         if self.pending > 0 {
             self.observer.emit(Event::Records(self.pending));
             self.pending = 0;

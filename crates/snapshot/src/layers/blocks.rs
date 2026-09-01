@@ -27,8 +27,8 @@
 use dolos_core::{BlockHash, BlockSlot};
 use stelae::frame::{self, CanonicalCbor};
 
-use super::{blob, close, fixed, open, uint};
 use crate::{Error, BLOCKS};
+use stelae::codec::{blob, close, fixed, open, uint};
 
 /// One block, as the layer carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]

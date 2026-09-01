@@ -9,8 +9,9 @@
 //! without pulling a layer. `sign` is the rest of the
 //! publisher-productization slice, and restore is its own.
 //!
-//! Publishing into a registry is behind the `registry` feature, which is
-//! default-off; `--repo` in a build without it is a refusal naming the feature.
+//! Publishing into a registry is the OCI transport, behind `dolos-snapshot`'s
+//! `oci` feature — which this binary's dependency enables unconditionally (root
+//! `Cargo.toml`), so every shipped `dolos` has `--repo`.
 //!
 //! ## One epoch selection, however many commands take one
 //!

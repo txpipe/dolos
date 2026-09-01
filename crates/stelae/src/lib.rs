@@ -52,6 +52,7 @@
 //! - It has no `dolos-*` dependency, so extracting it later is a directory move
 //!   rather than a refactor.
 
+pub mod codec;
 pub mod digest;
 pub mod dir;
 pub mod frame;
@@ -205,6 +206,33 @@ pub enum Error {
     #[error("history invariant violated: {0}")]
     HistoryInvariant(String),
 
+    /// A publish that would not extend the repository's chain.
+    ///
+    /// Both sequences are in the message because the fix depends on which of
+    /// them is wrong: a gap means a publisher skipped epochs, an equal or lower
+    /// sequence means it is republishing one. There is deliberately no flag
+    /// that overrides this — see [`inscription::history_for`].
+    ///
+    /// `reason` is owned rather than static so a gap can state its *distance*.
+    /// "The repository is at 500 and you are at 540" is a different incident
+    /// from being one epoch out, and an operator reading the message should not
+    /// have to subtract.
+    #[error(
+        "this repository's latest stele is sequence {latest} and this publish is sequence \
+         {publishing}: {reason}"
+    )]
+    HistoryBreak {
+        latest: u64,
+        publishing: u64,
+        reason: String,
+    },
+
+    /// A profile's content record whose shape is not the one its kind declares
+    /// — the field count, a field's type or width, or bytes trailing the
+    /// record. Raised by [`codec`], which is where every profile checks it.
+    #[error("malformed {kind} record: {reason}")]
+    MalformedRecord { kind: &'static str, reason: String },
+
     #[error("invalid digest {value:?}: {reason}")]
     InvalidDigest { value: String, reason: String },
 
@@ -338,4 +366,13 @@ pub enum Error {
     #[cfg(feature = "oci")]
     #[error("registry error: {0}")]
     Registry(#[from] oci_client::errors::OciDistributionError),
+}
+
+impl Error {
+    pub(crate) fn malformed(kind: &'static str, reason: impl Into<String>) -> Self {
+        Self::MalformedRecord {
+            kind,
+            reason: reason.into(),
+        }
+    }
 }

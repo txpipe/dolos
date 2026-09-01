@@ -56,11 +56,24 @@
 pub mod export;
 pub mod layers;
 pub mod namespaces;
-pub mod preflight;
 #[cfg(feature = "oci")]
 pub mod registry;
-mod reporting;
 pub mod restore;
+
+/// The free-space policy, which is [`stelae_driver`]'s: it is one rule over
+/// paths and byte counts and knows nothing about what fills them. Re-exported
+/// at its old path.
+pub use stelae_driver::preflight;
+
+/// The layer and record arithmetic both drivers report through, which is
+/// [`stelae_driver`]'s for the same reason. Not public here, because it never
+/// was.
+pub(crate) use stelae_driver::reporting;
+
+/// The pair that identifies one layer, which is [`stelae_driver::scope_key`]:
+/// canonical-JSON equality over a scope this crate composed but the driver only
+/// compares.
+pub(crate) use stelae_driver::scope_key;
 
 /// The observer seam both drivers report through, re-exported so a binary
 /// rendering one never has to name the protocol crate — the same property
@@ -92,7 +105,10 @@ pub const PROFILE_VERSION: u64 = 1;
 
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
-pub const DIGESTS: &str = "digests";
+
+/// Spelled by the codec that reads and writes the kind, so the vocabulary has
+/// one definition on both sides of the crate boundary.
+pub use layers::digests::DIGESTS;
 
 /// The namespaces the ledger writes epoch-boundary logs under, byte-sorted.
 ///
@@ -340,30 +356,6 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
             .is_some()
 }
 
-/// The pair that identifies one layer: its kind, and the canonical encoding of
-/// its profile-owned scope.
-///
-/// Canonical rather than [`serde_json::Value`] equality, because two scopes are
-/// one layer exactly when they are the same bytes inside the canonical
-/// document — the only sense of "the same scope" the protocol has.
-///
-/// One function rather than three, and that is the point of it being here
-/// instead of beside any one caller. Every table keyed this way is compared
-/// against another table keyed this way: the predecessor's inheritable layers
-/// against what a publish asks for, an interrupted publish's record against the
-/// same, a reproduction's layers against the published ones. Three copies of
-/// four lines would agree until one of them was corrected, and the failure that
-/// follows is silent — a layer rebuilt instead of inherited, or a divergence
-/// reported between two documents that say the same thing.
-pub(crate) fn scope_key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
-    let canonical = stelae::inscription::canonical_json(scope)?;
-
-    let canonical = String::from_utf8(canonical)
-        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
-
-    Ok((kind.to_owned(), canonical))
-}
-
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
@@ -497,8 +489,11 @@ pub const COMPRESSION_LEVEL: i32 = 9;
 /// Errors raised by this profile.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Anything the protocol refused that this enum does not name itself. The
+    /// driver's refusals arrive here too, through the same flattening — see the
+    /// two [`From`] implementations below.
     #[error("stelae error: {0}")]
-    Stelae(#[from] stelae::Error),
+    Stelae(stelae::Error),
 
     /// Raised where a record's validity is the index store's judgement rather
     /// than this crate's — exact-key widths, above all. Surfacing the store's
@@ -619,8 +614,9 @@ pub enum Error {
     /// Raised only from a number that was actually measured against free space
     /// that was actually read — everything else warns and proceeds. One
     /// variant for both directions because it is one policy; see
-    /// [`crate::preflight`]. There is deliberately no flag that overrides it:
-    /// `--scratch-dir` pointed at a bigger volume is the escape hatch.
+    /// [`crate::preflight`], where it is raised. There is deliberately no flag
+    /// that overrides it: `--scratch-dir` pointed at a bigger volume is the
+    /// escape hatch.
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
@@ -629,7 +625,8 @@ pub enum Error {
     /// Both sequences are in the message because the fix depends on which of
     /// them is wrong: a gap means a publisher skipped epochs, an equal or lower
     /// sequence means it is republishing one. There is deliberately no flag
-    /// that overrides this — see [`crate::registry`].
+    /// that overrides this — see [`stelae::inscription::history_for`], where it
+    /// is raised.
     ///
     /// `reason` is owned rather than static so a gap can state its *distance*.
     /// "The repository is at 500 and you are at 540" is a different incident
@@ -702,6 +699,63 @@ impl Error {
         Self::MalformedInscription {
             field: field.into(),
             reason: reason.into(),
+        }
+    }
+}
+
+/// Refusals the protocol and the driver raise on this crate's behalf keep the
+/// variant they had before those crates existed.
+///
+/// `?` still converts, so no caller changed; what does not change either is
+/// what a caller *matches* or an operator *reads*. The record-shape checks
+/// ([`stelae::codec`]), the free-space policy ([`stelae_driver::preflight`]),
+/// the ordering contracts and the history rule
+/// ([`stelae::inscription::history_for`]) were all this crate's errors before
+/// they moved, and each is matched on somewhere — a test, or the CLI's
+/// exit-code mapping. Wrapping them would have renamed every one of those
+/// refusals and prefixed every message; a `match` arm apiece is what a move
+/// that changes nothing observable costs.
+impl From<stelae::Error> for Error {
+    fn from(error: stelae::Error) -> Self {
+        match error {
+            stelae::Error::MalformedRecord { kind, reason } => {
+                Self::MalformedRecord { kind, reason }
+            }
+            stelae::Error::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            } => Self::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            },
+            other => Self::Stelae(other),
+        }
+    }
+}
+
+impl From<stelae_driver::Error> for Error {
+    fn from(error: stelae_driver::Error) -> Self {
+        match error {
+            stelae_driver::Error::Stelae(error) => error.into(),
+            stelae_driver::Error::NotEnoughSpace(reason) => Self::NotEnoughSpace(reason),
+            stelae_driver::Error::MalformedRecord { kind, reason } => {
+                Self::MalformedRecord { kind, reason }
+            }
+            stelae_driver::Error::OutOfOrder { kind, reason } => Self::OutOfOrder { kind, reason },
+            stelae_driver::Error::MalformedInscription { field, reason } => {
+                Self::MalformedInscription { field, reason }
+            }
+            stelae_driver::Error::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            } => Self::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            },
         }
     }
 }

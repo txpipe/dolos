@@ -748,68 +748,11 @@ fn retained_dumps(
         .collect()
 }
 
-/// The history a stele at `sequence` carries when it follows `previous`.
-///
-/// The three legal readings of what came before, and the one refusal:
-///
-/// - **nothing there** — an empty history, which the protocol permits at any
-///   sequence. The first stele of a repository carries no history, and so does
-///   a publisher deliberately starting a new one at epoch 500;
-/// - **the stele before this one** — the old history plus an entry naming it.
-///   Contiguous by construction, so the protocol's invariant passes rather than
-///   being relied upon;
-/// - **anything else** — refused, naming both sequences and, for a gap, the
-///   distance between them. A gap means a publisher skipped epochs, an equal
-///   sequence means it is republishing one, and a higher one means the
-///   repository is ahead of this node. All three are operational faults with
-///   different fixes, so the message says which.
-///
-/// Whether a deliberate gap ever gets a policy is not this function's to
-/// invent; there is no flag here that overrides the refusal.
-///
-/// It lives here rather than in [`crate::registry`] because a verifier reaches
-/// it without a registry, and because that module is behind a feature: a rule
-/// this load-bearing should not be compiled out of a build that still has to
-/// reproduce a chained digest.
-pub fn history_for(
-    previous: Option<&Inscription>,
-    sequence: u64,
-) -> Result<Vec<HistoryEntry>, Error> {
-    let Some(previous) = previous else {
-        return Ok(Vec::new());
-    };
-
-    let latest = previous.sequence;
-
-    let reason = match latest.checked_add(1) {
-        Some(next) if next == sequence => {
-            let mut history = previous.history.clone();
-
-            history.push(HistoryEntry {
-                sequence: latest,
-                inscription_digest: previous.digest()?,
-            });
-
-            return Ok(history);
-        }
-        _ if latest >= sequence => {
-            "this stele is at or behind the repository's latest; a republish would restart the \
-             chain rather than extend it"
-                .to_owned()
-        }
-        _ => format!(
-            "this node is {} sequences ahead, and a publish must follow the repository's latest \
-             stele: this one would leave a gap no later stele could close",
-            sequence - latest,
-        ),
-    };
-
-    Err(Error::HistoryBreak {
-        latest,
-        publishing: sequence,
-        reason,
-    })
-}
+/// The history rule, which is [`stelae::inscription::history_for`]: it reads a
+/// predecessor's sequence and digest and composes nothing this profile owns.
+/// Re-exported at its old path, where every caller and the module documentation
+/// above already name it.
+pub use stelae::inscription::history_for;
 
 /// Refuse a predecessor from another chain.
 ///
@@ -829,53 +772,10 @@ pub fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
     Ok(())
 }
 
-/// Where a node stands relative to the newest stele already published.
-///
-/// The comparison a publisher on a timer needs *before* anything is built, and
-/// both halves of it are already in hand: the sequence a repository's latest
-/// stele carries, and the sequence [`plan`] derived from the node's cursor.
-/// Without it the ordinary case — nothing has closed since last time — arrives
-/// as the [`Error::HistoryBreak`] refusal a skipped epoch does, and a job on a
-/// timer cannot tell the two apart.
-///
-/// A pure comparison over two numbers rather than a method on a transport, so
-/// the cases can be checked without one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
-    /// Nothing has been published; this stele would start the chain.
-    Empty,
-    /// The published chain has already reached this node. Not an error: a
-    /// publisher whose node has not entered a new epoch has nothing to do.
-    UpToDate { latest: u64 },
-    /// The chain ends exactly one sequence back; this stele extends it.
-    Next { latest: u64 },
-    /// The node is further ahead than one sequence, so a publish would leave a
-    /// gap. `distance` is how far — the number the refusal reports alongside
-    /// both sequences, because "you skipped some" and "you skipped forty" are
-    /// different incidents.
-    Ahead { latest: u64, distance: u64 },
-}
-
-impl Standing {
-    /// Read a node at `sequence` against a repository whose latest stele is
-    /// `latest`.
-    pub fn read(latest: Option<u64>, sequence: u64) -> Self {
-        let Some(latest) = latest else {
-            return Self::Empty;
-        };
-
-        match sequence.checked_sub(latest) {
-            None | Some(0) => Self::UpToDate { latest },
-            Some(1) => Self::Next { latest },
-            Some(distance) => Self::Ahead { latest, distance },
-        }
-    }
-
-    /// Whether a publish should go ahead.
-    pub fn publishable(&self) -> bool {
-        matches!(self, Self::Empty | Self::Next { .. })
-    }
-}
+/// Where a node stands against the repository's newest stele, which is
+/// [`stelae_driver::Standing`]: a comparison over two sequence numbers.
+/// Re-exported at its old path.
+pub use stelae_driver::Standing;
 
 /// Export a complete stele into `stele`: every layer, then the inscription.
 ///
@@ -2423,89 +2323,6 @@ mod chain_tests {
         }
     }
 
-    /// The first stele of a repository carries no history, at any sequence.
-    #[test]
-    fn an_empty_repository_starts_a_history() {
-        assert!(history_for(None, 0).unwrap().is_empty());
-        assert!(history_for(None, 500).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_publish_that_follows_latest_extends_the_chain() {
-        let previous = inscription(3, vec![entry(1), entry(2)]);
-
-        let history = history_for(Some(&previous), 4).unwrap();
-
-        assert_eq!(
-            history.iter().map(|e| e.sequence).collect::<Vec<_>>(),
-            vec![1, 2, 3],
-            "the old history plus an entry naming the stele it came from"
-        );
-
-        assert_eq!(history[2].inscription_digest, previous.digest().unwrap());
-
-        // The invariant holds by construction rather than by inspection: a
-        // document built on this history validates.
-        inscription(4, history).validate().unwrap();
-    }
-
-    /// All three refusals name both sequences, because which of the three it is
-    /// decides what the publisher does about it.
-    #[test]
-    fn a_publish_that_does_not_follow_latest_is_refused() {
-        let previous = inscription(497, vec![]);
-
-        for publishing in [500, 497, 496] {
-            let err = history_for(Some(&previous), publishing).unwrap_err();
-            let message = err.to_string();
-
-            assert!(
-                matches!(err, Error::HistoryBreak { .. }),
-                "{publishing}: {err:?}"
-            );
-
-            assert!(message.contains("497"), "{publishing}: {message}");
-            assert!(
-                message.contains(&publishing.to_string()),
-                "{publishing}: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_gap_and_a_republish_are_told_apart() {
-        let previous = inscription(497, vec![]);
-
-        assert!(history_for(Some(&previous), 500)
-            .unwrap_err()
-            .to_string()
-            .contains("gap"));
-
-        assert!(history_for(Some(&previous), 497)
-            .unwrap_err()
-            .to_string()
-            .contains("republish"));
-
-        assert!(history_for(Some(&previous), 496)
-            .unwrap_err()
-            .to_string()
-            .contains("republish"));
-    }
-
-    /// A gap says how far. "The repository is at 497 and you are at 500" is a
-    /// different incident from being one epoch out, and the operator reading
-    /// the message should not have to subtract to find out which they have.
-    #[test]
-    fn a_gap_names_the_distance_alongside_both_sequences() {
-        let previous = inscription(497, vec![]);
-
-        let message = history_for(Some(&previous), 500).unwrap_err().to_string();
-
-        assert!(message.contains("497"), "{message}");
-        assert!(message.contains("500"), "{message}");
-        assert!(message.contains("3 sequences ahead"), "{message}");
-    }
-
     /// The only thing standing between a publisher and a history chained onto
     /// another chain's stele.
     ///
@@ -2700,53 +2517,6 @@ mod chain_tests {
             ),
             "{err:?}"
         );
-    }
-
-    /// The four readings of a repository a publisher on a timer meets, and the
-    /// one that used to arrive as a refusal.
-    #[test]
-    fn a_repository_is_read_as_empty_current_next_or_ahead() {
-        assert_eq!(Standing::read(None, 500), Standing::Empty);
-
-        // The ordinary case for a job that runs more often than epochs close.
-        assert_eq!(
-            Standing::read(Some(500), 500),
-            Standing::UpToDate { latest: 500 }
-        );
-
-        // And a node genuinely behind the repository, which is up to date in
-        // the only sense this comparison is for: there is nothing to publish.
-        assert_eq!(
-            Standing::read(Some(501), 500),
-            Standing::UpToDate { latest: 501 }
-        );
-
-        assert_eq!(
-            Standing::read(Some(499), 500),
-            Standing::Next { latest: 499 }
-        );
-
-        assert_eq!(
-            Standing::read(Some(497), 500),
-            Standing::Ahead {
-                latest: 497,
-                distance: 3
-            }
-        );
-
-        for standing in [Standing::Empty, Standing::Next { latest: 1 }] {
-            assert!(standing.publishable(), "{standing:?}");
-        }
-
-        for standing in [
-            Standing::UpToDate { latest: 1 },
-            Standing::Ahead {
-                latest: 1,
-                distance: 2,
-            },
-        ] {
-            assert!(!standing.publishable(), "{standing:?}");
-        }
     }
 
     /// A verifier chains with the chain the stele attests, exactly as written.

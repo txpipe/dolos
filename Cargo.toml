@@ -204,6 +204,7 @@ members = [
     "crates/flatfiles",
     "crates/snapshot",
     "crates/stelae",
+    "crates/stelae-driver",
     "crates/testing",
     "crates/minibf",
     "crates/redb3",
