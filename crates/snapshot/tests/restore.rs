@@ -7,7 +7,9 @@
 //!    one refusal whose timing is part of the requirement: half a mainnet
 //!    ledger under a preprod configuration is not a state a node recovers from.
 //! 2. **A failed restore leaves no cursor**, so `has_existing_data()` reports
-//!    an empty node rather than a half-restored one.
+//!    an empty node rather than a half-restored one — including a restore that
+//!    stopped in the live-UTxO rebuild, the one step that runs after the ledger
+//!    is whole.
 //! 3. **Roundtrip.** A node built by the harness, exported, and restored into
 //!    an empty store set is the node it came from: same cursor, same entities,
 //!    same UTxO set, same archive, same index records, same tag queries. And it
@@ -51,7 +53,10 @@ use dolos_snapshot::{
     state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
     NAMESPACES, STATE_KINDS, UTXOS,
 };
-use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
+use dolos_testing::{
+    faults::{FaultyIndexStore, TestFault},
+    toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
+};
 use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
@@ -352,7 +357,7 @@ fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
 ///
 /// One state layer's blob is removed, so the restore fails partway through the
 /// tip — after epochs and other layers have landed. `set_cursor` is the last
-/// thing a restore does, so what it leaves behind is a store set with data in
+/// write a restore makes, so what it leaves behind is a store set with data in
 /// it and no cursor, which is what `bootstrap`'s `has_existing_data()` reads.
 #[test]
 fn a_restore_that_fails_partway_leaves_no_cursor() {
@@ -401,6 +406,56 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
             .next()
             .is_some(),
         "the restore failed before it wrote anything, so the cursor proves nothing"
+    );
+}
+
+/// Done criterion 1: the state cursor is the last write of the restore.
+///
+/// The failure is injected into `IndexWriter::apply`, which the restore calls
+/// in exactly one place — the live-UTxO rebuild of step 6, after every layer
+/// including the state tip has committed. So this is the interruption ADR-004's
+/// old step order could not survive: the ledger is whole, the `utxo::*`
+/// dimensions are not, and what says so is that there is no cursor.
+#[test]
+fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
+    let domain: ToyDomain = harness();
+
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+
+    let blank = Blank::<MemoryStores>::open();
+    let indexes = FaultyIndexStore::new(blank.indexes().clone(), TestFault::IndexApplyError);
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let index = stele.blob_index().unwrap();
+
+    let err = restore::restore(
+        &stele,
+        &index,
+        &plan,
+        restore::Target::new(&blank.archive, blank.state(), &indexes),
+        Budget::default(),
+        &mut Checkpoint::none(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Index(dolos_core::IndexError::DbError(reason)) if reason.contains("fault injection")),
+        "{err:?}"
+    );
+
+    assert!(
+        blank.state().read_cursor().unwrap().is_none(),
+        "a restore that never finished rebuilding the live-utxo indexes left a cursor behind"
+    );
+
+    // The tip did land, or the assertion above would hold of a restore that
+    // failed long before the rebuild and would prove nothing about its order.
+    assert!(
+        blank.state().iter_utxos().unwrap().next().is_some(),
+        "the state tip was never restored, so the missing cursor proves nothing"
     );
 }
 
