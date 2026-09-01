@@ -166,6 +166,9 @@ pub enum Error {
         contents: String,
     },
 
+    #[error("the download window must be at least 1 immutable file")]
+    EmptyWindow,
+
     #[error("{INTERRUPTED}")]
     Interrupted,
 }
@@ -465,7 +468,10 @@ pub struct Driver<'a, D: Domain> {
     /// subdirectory is what the replay reads.
     pub download_dir: PathBuf,
 
-    /// Immutable files fetched per download round.
+    /// Immutable files fetched per download round. At least 1: a window of
+    /// zero never advances the downloaded files, so the run would end on
+    /// [`Error::StalledWindow`] a download later rather than on the
+    /// misconfiguration itself.
     pub window: u64,
 
     /// Stop after publishing this sequence; for smoke tests.
@@ -527,6 +533,10 @@ impl<D: Domain> Driver<'_, D> {
     /// Run until the aggregator is exhausted, `until_epoch` is published, or a
     /// signal arrives.
     pub fn run(&self) -> Result<Outcome, Error> {
+        if self.window == 0 {
+            return Err(Error::EmptyWindow);
+        }
+
         let slots_per_immutable_file = slots_per_immutable_file(self.genesis);
         let immutable_dir = self.immutable_dir();
 
