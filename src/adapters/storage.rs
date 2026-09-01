@@ -59,7 +59,7 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
 pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
 
 /// The migration guide the refusal points an operator at.
-pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/operations/migration";
+pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v1-7";
 
 fn check_storage_version(version: &StorageVersion) -> Result<(), Error> {
     if *version != CURRENT_STORAGE_VERSION {
