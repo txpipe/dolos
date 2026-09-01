@@ -1,14 +1,14 @@
 //! `dolos bootstrap mithril` — the interactive fetch-and-import.
 //!
 //! Parse and render: the download, its plan and its verification are
-//! [`dolos_snapshot::mithril`]'s, shared with the backfill daemon. What is
+//! [`dolos_mithril`]'s, shared with the backfill daemon. What is
 //! here is the operator's arguments, the runtime the async fetch is driven
 //! on, the progress bars it reports through, and the import into a domain the
 //! root library assembles.
 
 use dolos_core::config::RootConfig;
 use dolos_core::ImportExt;
-use dolos_snapshot::mithril::{fetch_snapshot, Fetch};
+use dolos_mithril::{fetch_snapshot, mithril_client, Fetch};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use std::{path::Path, sync::Arc};

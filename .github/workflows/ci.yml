@@ -149,7 +149,7 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
   # `dolos-snapshot` carries two default-off halves — the OCI transport (`oci`)
-  # and the mithril fetch plus the backfill daemon (`mithril`) — and every job
+  # and the backfill daemon (`backfill`) — and every job
   # above builds them the one way the `dolos` binary does, with both on. A
   # `cfg` that only compiles under that combination passes all of them and
   # breaks a build nobody here runs. This checks the combinations the crate
@@ -161,7 +161,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: [oci, mithril, "oci,mithril"]
+        features: [oci, backfill, "oci,backfill"]
     steps:
       - uses: actions/checkout@v4
         with:

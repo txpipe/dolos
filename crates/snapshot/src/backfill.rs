@@ -72,12 +72,13 @@ use dolos_core::{
     seed_wal_from_state, BlockSlot, Domain, DomainError, Genesis, ImportExt as _, StateStore as _,
     WalSeedError,
 };
+use dolos_mithril as mithril;
+use dolos_mithril::mithril_client::feedback::FeedbackReceiver;
 use itertools::Itertools as _;
-use mithril_client::feedback::FeedbackReceiver;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::{export::Plan, mithril, planning, retry};
+use crate::{export::Plan, planning, retry};
 
 /// Blocks handed to `import_blocks` per batch.
 const IMPORT_CHUNK: usize = 100;

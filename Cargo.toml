@@ -45,6 +45,7 @@ dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
 dolos-snapshot = { path = "crates/snapshot", features = ["oci"] }
+dolos-mithril = { path = "crates/mithril", optional = true }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-minikupo = { path = "crates/minikupo", optional = true }
 dolos-trp = { path = "crates/trp", optional = true }
@@ -87,14 +88,6 @@ tonic-reflection = { version = "0.12.3", optional = true }
 http = "1.3.1"
 hyper = "1.5"
 
-# `rustls-no-provider` keeps reqwest 0.13's hard-wired aws-lc-rs crypto provider
-# (a large C dependency requiring cmake) out of the build; main() installs ring
-# as the process-default provider instead.
-mithril-client = { version = "0.14.5", optional = true, default-features = false, features = [
-    "fs",
-    "num-integer-backend",
-    "rustls-no-provider",
-] }
 rustls = { version = "0.23", default-features = false, features = [
     "ring",
     "logging",
@@ -163,11 +156,12 @@ path = "tests/bootstrap.rs"
 
 [features]
 strict = ["dolos-cardano/strict"]
-# The aggregator fetch and the backfill daemon both live in `dolos-snapshot`
-# now, so this forwards rather than gating code of its own: `mithril-client` is
-# still a direct dependency because the CLI builds the client's feedback
-# receiver — the progress bars a download draws.
-mithril = ["mithril-client", "dolos-snapshot/mithril"]
+# The aggregator fetch lives in `dolos-mithril` — a plain dolos capability
+# that knows nothing of steles — and `dolos-snapshot`'s backfill daemon is
+# what composes it with the publish lifecycle. The CLI reaches the client (for
+# the feedback receiver a download draws through) via
+# `dolos_mithril::mithril_client`.
+mithril = ["dep:dolos-mithril", "dolos-snapshot/backfill"]
 
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]
@@ -206,6 +200,7 @@ members = [
     "crates/core",
     "crates/fjall",
     "crates/flatfiles",
+    "crates/mithril",
     "crates/snapshot",
     "crates/stelae",
     "crates/stelae-driver",

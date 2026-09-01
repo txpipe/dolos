@@ -1,9 +1,9 @@
 //! Acquiring immutable chain data from a mithril aggregator.
 //!
-//! One aggregator client, one download plan, one verification, for both
-//! callers that fetch: the daemon in [`backfill`](crate::backfill), and the
-//! `dolos bootstrap mithril` command that wraps [`fetch_snapshot`] in a
-//! runtime of its own.
+//! One aggregator client, one download plan, one verification, for any
+//! caller that fetches — `dolos bootstrap mithril` wrapping [`fetch_snapshot`]
+//! in a runtime of its own, or a daemon replaying immutable files in bounded
+//! windows. What the bytes are for is no concern of this crate's.
 //!
 //! Rendering is the binary's. The client reports through `mithril_client`'s
 //! own [`FeedbackReceiver`], which arrives here as an argument and is `None`
@@ -19,6 +19,8 @@ use mithril_client::{
     AggregatorDiscoveryType, ClientBuilder, MessageBuilder, MithrilError, MithrilResult,
 };
 use tracing::{info, warn};
+
+pub use mithril_client;
 
 /// One download round, freed of the CLI that spelled it.
 pub struct Fetch<'a> {

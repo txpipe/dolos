@@ -1414,6 +1414,7 @@ dependencies = [
  "dolos-fjall",
  "dolos-minibf",
  "dolos-minikupo",
+ "dolos-mithril",
  "dolos-redb3",
  "dolos-snapshot",
  "dolos-testing",
@@ -1432,7 +1433,6 @@ dependencies = [
  "lazy_static",
  "log",
  "miette",
- "mithril-client",
  "nix",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -1605,6 +1605,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dolos-mithril"
+version = "1.7.0-alpha.1"
+dependencies = [
+ "dolos-core",
+ "mithril-client",
+ "rustls",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "dolos-redb3"
 version = "1.7.0-alpha.1"
 dependencies = [
@@ -1637,12 +1648,12 @@ version = "1.7.0-alpha.1"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
+ "dolos-mithril",
  "dolos-redb3",
  "dolos-testing",
  "hex",
  "itertools 0.14.0",
  "minicbor 0.26.4",
- "mithril-client",
  "pallas",
  "rustls",
  "serde",

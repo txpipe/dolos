@@ -247,7 +247,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         mithril_feedback: &|| {
             Some(
                 Arc::new(crate::bootstrap::mithril::MithrilFeedback::new(feedback))
-                    as Arc<dyn mithril_client::feedback::FeedbackReceiver>,
+                    as Arc<dyn dolos_mithril::mithril_client::feedback::FeedbackReceiver>,
             )
         },
         replay: &replay,
