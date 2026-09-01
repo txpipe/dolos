@@ -276,5 +276,14 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         publish: &publish,
     };
 
-    driver.run().into_diagnostic()
+    match driver.run().into_diagnostic()? {
+        backfill::Outcome::UntilEpoch { sequence } => {
+            println!("sequence {sequence} published; stopping at --until-epoch");
+        }
+        backfill::Outcome::UpToDate => {
+            println!("the repository is up to date with mithril; nothing left to backfill");
+        }
+    }
+
+    Ok(())
 }

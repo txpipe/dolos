@@ -235,6 +235,19 @@ pub trait Publish<D: Domain> {
     ) -> Result<(), Error>;
 }
 
+/// How a run ended, for a caller that has something to say about it.
+///
+/// Returned rather than printed: this module draws nothing and writes nothing
+/// to a stream, which is the same rule [`Replay`] and [`Publish`] keep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// `until_epoch`'s sequence is published and the run stopped there.
+    UntilEpoch { sequence: u64 },
+
+    /// The aggregator has nothing past what the repository already holds.
+    UpToDate,
+}
+
 /// What an iteration's opening publish decided about the run.
 enum Step {
     /// Replay toward `target`'s boundary. `prune` says whether history behind
@@ -242,8 +255,8 @@ enum Step {
     /// run, because pruning at tip T is safe exactly when everything below T
     /// is already in the repository.
     Extend { target: u64, prune: bool },
-    /// `until_epoch` is published; the run is over.
-    Done,
+    /// `until_epoch`'s sequence is published; the run is over.
+    Done { sequence: u64 },
 }
 
 /// How an epoch's replay ended.
@@ -513,7 +526,7 @@ impl<D: Domain> Driver<'_, D> {
 
     /// Run until the aggregator is exhausted, `until_epoch` is published, or a
     /// signal arrives.
-    pub fn run(&self) -> Result<(), Error> {
+    pub fn run(&self) -> Result<Outcome, Error> {
         let slots_per_immutable_file = slots_per_immutable_file(self.genesis);
         let immutable_dir = self.immutable_dir();
 
@@ -528,7 +541,7 @@ impl<D: Domain> Driver<'_, D> {
             }
 
             let (target, prune) = match self.publish_pending()? {
-                Step::Done => return Ok(()),
+                Step::Done { sequence } => return Ok(Outcome::UntilEpoch { sequence }),
                 Step::Extend { target, prune } => (target, prune),
             };
 
@@ -538,10 +551,7 @@ impl<D: Domain> Driver<'_, D> {
                 Advance::Boundary { cursor_slot } => {
                     cleanup_consumed(&immutable_dir, cursor_slot, slots_per_immutable_file)?;
                 }
-                Advance::MithrilExhausted => {
-                    println!("the repository is up to date with mithril; nothing left to backfill");
-                    return Ok(());
-                }
+                Advance::MithrilExhausted => return Ok(Outcome::UpToDate),
                 Advance::Cancelled => return Err(Error::Interrupted),
             }
         }
@@ -638,12 +648,9 @@ impl<D: Domain> Driver<'_, D> {
         )?;
 
         if self.until_epoch.is_some_and(|until| plan.sequence >= until) {
-            println!(
-                "sequence {} published; stopping at --until-epoch",
-                plan.sequence
-            );
-
-            return Ok(Step::Done);
+            return Ok(Step::Done {
+                sequence: plan.sequence,
+            });
         }
 
         Ok(Step::Extend {
