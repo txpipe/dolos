@@ -443,9 +443,7 @@ pub fn plan<S: StateStore>(
 /// The publish this one follows, which is [`stelae_driver::Predecessor`]: two
 /// questions — what a new inscription attests about the steles before it, and
 /// which of their layers it may carry forward — over documents, and nothing a
-/// store or a profile owns. Re-exported at its old path, with [`First`]
-/// alongside it, where every caller and the module documentation above already
-/// name them.
+/// store or a profile owns.
 pub use stelae_driver::{First, Predecessor};
 
 /// The stele this one follows, held as a document rather than as a repository.
@@ -653,8 +651,6 @@ fn retained_dumps(
 
 /// The history rule, which is [`stelae::inscription::history_for`]: it reads a
 /// predecessor's sequence and digest and composes nothing this profile owns.
-/// Re-exported at its old path, where every caller and the module documentation
-/// above already name it.
 pub use stelae::inscription::history_for;
 
 /// Refuse a predecessor from another chain.
@@ -677,7 +673,6 @@ pub fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
 
 /// Where a node stands against the repository's newest stele, which is
 /// [`stelae_driver::Standing`]: a comparison over two sequence numbers.
-/// Re-exported at its old path.
 pub use stelae_driver::Standing;
 
 /// Export a complete stele into `stele`: every layer, then the inscription.

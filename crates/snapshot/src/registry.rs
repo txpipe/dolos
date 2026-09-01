@@ -269,9 +269,8 @@ where
 }
 
 /// Open a repository in a registry, which is [`stelae_driver::publish::open`]:
-/// a transport's own configuration, and nothing this profile decides.
-/// Re-exported at its old path, with [`Tuning`] alongside it, and wrapped only
-/// to keep this crate's error at the boundary.
+/// a transport's own configuration, and nothing this profile decides. Wrapped
+/// only to keep this crate's error at the boundary.
 ///
 /// **Never call any of this from inside an async context.** The transport owns
 /// a runtime and enters it with `block_on`; `stelae::oci`'s module
@@ -295,14 +294,11 @@ pub fn open(
 pub use stelae_driver::publish::Tuning;
 
 /// Where a publish is going and what the host running it knows about itself,
-/// which is [`stelae_driver::publish::Publishing`]. Re-exported at its old
-/// path.
+/// which is [`stelae_driver::publish::Publishing`].
 ///
-/// The one thing that changed on the way down is `storage_path`, which is now
-/// `record_path`: the driver takes the resumption record's path rather than a
-/// node's storage directory, because deriving one from the other is this
-/// profile's layout and not a lifecycle's. [`record_path_in`] is the
-/// derivation, and it stays here.
+/// It takes the resumption record's path rather than a node's storage
+/// directory, because deriving one from the other is this profile's layout and
+/// not a lifecycle's. [`record_path_in`] is the derivation, and it stays here.
 pub use stelae_driver::publish::Publishing;
 
 /// Name of the resumption record inside a node's storage directory.
@@ -321,8 +317,8 @@ pub fn record_path_in(storage_path: &Path) -> PathBuf {
 /// What an interrupted publish left behind and what it has to agree with
 /// before a single layer of it is adopted, which is
 /// [`stelae_driver::publish`]'s: a note about blobs in a repository, keyed by
-/// the pair that identifies a layer. Re-exported at their old paths, and their
-/// serialized shape is frozen by the fixtures that carry it.
+/// the pair that identifies a layer. Their serialized shape is frozen by the
+/// fixtures that carry it.
 pub use stelae_driver::publish::{Origin, PublishRecord};
 
 /// What a publish into a repository did.
@@ -549,8 +545,7 @@ pub fn inspect(registry: &Registry, point: Point) -> Result<Inspected, Error> {
 /// layers is lifecycle arithmetic, and the only thing about it that was ever
 /// this profile's is which kinds carry the tip. That is now
 /// [`stelae_driver::DriverProfile::is_state_kind`], answered by
-/// [`crate::is_state_kind`]. Re-exported at their old paths; the profile they
-/// need is supplied by the caller.
+/// [`crate::is_state_kind`]. The profile they need is supplied by the caller.
 pub use stelae_driver::publish::{preflight, staging_peak, StagingPeak};
 
 /// Publish `plan` into the repository `publishing` names, chained to whatever
