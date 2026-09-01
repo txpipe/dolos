@@ -16,7 +16,7 @@ use std::{
     str::FromStr,
 };
 
-use dolos::storage::CURRENT_STORAGE_VERSION;
+use dolos::storage::{CURRENT_STORAGE_VERSION, MIGRATION_GUIDE_URL};
 
 use crate::{common::cleanup_data, feedback::Feedback};
 
@@ -24,17 +24,32 @@ use crate::{common::cleanup_data, feedback::Feedback};
 /// tells us an older setup is present.
 const CONFIG_FILE: &str = "dolos.toml";
 
-/// Whether `dolos init` must offer the delete-and-bootstrap step.
+/// What `dolos init` may do about the storage of a setup it found on disk.
 ///
-/// Two ways a setup fails to carry forward. The config names an older storage
-/// version — the ordinary upgrade. Or the existing config did not parse at
-/// all (`unparseable_existing`), which is what a v1.6 TOML naming a removed
-/// backend variant looks like from here: the editor falls back to defaults,
-/// so without this branch init would write a current-version config over a
-/// store this binary never built and never offer to clear it — the silent
-/// mismatch the version gate exists to prevent.
-fn needs_storage_upgrade(version: &StorageVersion, unparseable_existing: bool) -> bool {
-    unparseable_existing || *version != CURRENT_STORAGE_VERSION
+/// The distinction that matters is whether init knows where the old store
+/// lives. A config that parses names its path, so the delete-and-bootstrap
+/// step can be offered. A config that did not parse — which is what a v1.6
+/// TOML naming a removed backend variant looks like from here — leaves the
+/// editor filled from defaults, and the default path is a guess: deleting on
+/// a guess would aim at a directory the operator never named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageUpgrade {
+    /// The config already reads at the version this binary carries.
+    NotNeeded,
+    /// An older version, at a path init knows: offer to delete and bootstrap.
+    Offer,
+    /// An existing config init cannot read, so the store's path is unknown.
+    Unreadable,
+}
+
+fn storage_upgrade(version: &StorageVersion, unparseable_existing: bool) -> StorageUpgrade {
+    if unparseable_existing {
+        StorageUpgrade::Unreadable
+    } else if *version != CURRENT_STORAGE_VERSION {
+        StorageUpgrade::Offer
+    } else {
+        StorageUpgrade::NotNeeded
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -594,22 +609,48 @@ impl ConfigEditor {
             .apply_enable_relay(args.enable_relay)
     }
 
-    fn prompt_storage_upgrade(mut self, unparseable_existing: bool) -> miette::Result<Self> {
-        if needs_storage_upgrade(&self.0.storage.version, unparseable_existing) {
-            self.0.storage.version = CURRENT_STORAGE_VERSION;
-
-            let delete = Confirm::new("Your storage is incompatible with the current version. Do you want to delete data and bootstrap?")
-                .with_default(true)
-                .prompt()
-                .into_diagnostic()
-                .context("asking for storage version upgrade")?;
-
-            if delete {
-                cleanup_data(&self.0)
+    fn prompt_storage_upgrade(self, unparseable_existing: bool) -> miette::Result<Self> {
+        match storage_upgrade(&self.0.storage.version, unparseable_existing) {
+            StorageUpgrade::NotNeeded => Ok(self),
+            StorageUpgrade::Unreadable => Err(miette!(
+                "found a `{CONFIG_FILE}` this dolos cannot read, so the storage it configures \
+                 cannot be located. Remove the data directory your existing `{CONFIG_FILE}` \
+                 names, then delete the file and run `dolos init` again — see the migration \
+                 guide at {MIGRATION_GUIDE_URL}"
+            )),
+            StorageUpgrade::Offer => {
+                let delete = Confirm::new("Your storage is incompatible with the current version. Do you want to delete data and bootstrap?")
+                    .with_default(true)
+                    .prompt()
                     .into_diagnostic()
-                    .context("cleaning up data")?;
+                    .context("asking for storage version upgrade")?;
+
+                self.apply_storage_upgrade(delete)
             }
         }
+    }
+
+    /// Carry out the operator's answer to the delete-and-bootstrap offer.
+    ///
+    /// Declining is declining the upgrade: init writes nothing and touches no
+    /// data, so the setup stays exactly as it was found and the daemon keeps
+    /// refusing it. Recording the new version without performing the migration
+    /// would be the tool producing the config/data mismatch the version gate
+    /// puts on the operator alone.
+    fn apply_storage_upgrade(mut self, delete: bool) -> miette::Result<Self> {
+        if !delete {
+            return Err(miette!(
+                "storage upgrade declined, leaving the existing setup untouched. Dolos will \
+                 keep refusing to start against it until the data is re-bootstrapped — see \
+                 the migration guide at {MIGRATION_GUIDE_URL}"
+            ));
+        }
+
+        cleanup_data(&self.0)
+            .into_diagnostic()
+            .context("cleaning up data")?;
+
+        self.0.storage.version = CURRENT_STORAGE_VERSION;
 
         Ok(self)
     }
@@ -800,7 +841,7 @@ pub fn run(
     crate::banner::print_init_banner();
 
     // A config that exists but did not parse is an older setup, not a missing
-    // one; `needs_storage_upgrade` records what follows from that.
+    // one; `storage_upgrade` records what follows from that.
     let unparseable_existing = config.is_err() && Path::new(CONFIG_FILE).exists();
 
     config
@@ -838,15 +879,102 @@ mod tests {
         let editor = ConfigEditor::default();
 
         assert_eq!(editor.0.storage.version, CURRENT_STORAGE_VERSION);
-        assert!(!needs_storage_upgrade(&editor.0.storage.version, false));
+        assert_eq!(
+            storage_upgrade(&editor.0.storage.version, false),
+            StorageUpgrade::NotNeeded
+        );
     }
 
-    /// An existing config that does not parse reaches the delete-and-bootstrap
-    /// offer, even though the defaults filled in for it already say v4.
+    /// An older version at a path init can read is the case the offer exists
+    /// for; a config that did not parse is not, whatever version the defaults
+    /// filled in for it say.
     #[test]
-    fn an_unparseable_existing_config_still_offers_the_upgrade() {
-        assert!(needs_storage_upgrade(&CURRENT_STORAGE_VERSION, true));
-        assert!(needs_storage_upgrade(&StorageVersion::V3, false));
+    fn an_unreadable_config_is_never_the_deletable_case() {
+        assert_eq!(
+            storage_upgrade(&StorageVersion::V3, false),
+            StorageUpgrade::Offer
+        );
+        assert_eq!(
+            storage_upgrade(&CURRENT_STORAGE_VERSION, true),
+            StorageUpgrade::Unreadable
+        );
+        assert_eq!(
+            storage_upgrade(&StorageVersion::V3, true),
+            StorageUpgrade::Unreadable
+        );
+    }
+
+    /// An editor pointed at `path` as its storage root, at the version a v1.6
+    /// setup carries.
+    fn editor_over(path: &Path) -> ConfigEditor {
+        let mut editor = ConfigEditor::default();
+        editor.0.storage.path = path.to_path_buf();
+        editor.0.storage.version = StorageVersion::V3;
+        editor
+    }
+
+    /// Declining the offer costs the operator nothing: no data removed, and no
+    /// version recorded that the data does not back.
+    #[test]
+    fn declining_the_upgrade_touches_neither_data_nor_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("state"), b"a store built by v1.6").unwrap();
+
+        let error = editor_over(&data)
+            .apply_storage_upgrade(false)
+            .err()
+            .expect("declining aborts the init");
+
+        assert!(
+            error.to_string().contains(MIGRATION_GUIDE_URL),
+            "the abort must point at the migration guide: {error}"
+        );
+        assert!(
+            data.join("state").exists(),
+            "declining must leave the store in place"
+        );
+    }
+
+    /// Accepting is the only path that deletes, and it records the new version
+    /// only once the data it describes is gone.
+    #[test]
+    fn accepting_the_upgrade_clears_the_data_and_records_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("state"), b"a store built by v1.6").unwrap();
+
+        let editor = editor_over(&data).apply_storage_upgrade(true).unwrap();
+
+        assert!(!data.exists(), "accepting must clear the store");
+        assert_eq!(editor.0.storage.version, CURRENT_STORAGE_VERSION);
+    }
+
+    /// A config init cannot read never reaches the deletion: the store's path
+    /// is whatever that config named, and the defaults filled in for it point
+    /// somewhere else.
+    #[test]
+    fn an_unreadable_config_aborts_without_deleting_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("state"), b"a store built by v1.6").unwrap();
+
+        let error = editor_over(&data)
+            .prompt_storage_upgrade(true)
+            .err()
+            .expect("an unreadable config aborts the init");
+
+        assert!(
+            error.to_string().contains(MIGRATION_GUIDE_URL),
+            "the abort must point at the migration guide: {error}"
+        );
+        assert!(
+            data.join("state").exists(),
+            "an unreadable config must leave every directory alone"
+        );
     }
 
     /// A freshly initialized node carries the stelae registry section the
