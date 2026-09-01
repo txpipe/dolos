@@ -26,17 +26,25 @@ jobs:
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
+    # rustfmt.toml enables `wrap_comments`, an unstable option that only the
+    # nightly rustfmt applies — stable silently ignores it. Run nightly here so
+    # the check actually enforces comment wrapping.
+    #
+    # Pinned, because unstable options give no output-stability guarantee: the
+    # nightly published 2026-08-30 rewraps comments across 85 files. Held at the
+    # last nightly that formats `main` clean; taking that rewrap is #1280.
+    # Local devs: `cargo +nightly-2026-08-27 fmt`.
+    env:
+      RUSTFMT_NIGHTLY: nightly-2026-08-27
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      # rustfmt.toml enables `wrap_comments`, an unstable option that only the
-      # nightly rustfmt applies — stable silently ignores it. Run nightly here so
-      # the check actually enforces comment wrapping. Local devs: `cargo +nightly fmt`.
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUSTFMT_NIGHTLY }}
           components: rustfmt
-      - run: cargo +nightly fmt --all -- --check
+      - run: cargo +$RUSTFMT_NIGHTLY fmt --all -- --check
 
   clippy:
     name: cargo clippy
