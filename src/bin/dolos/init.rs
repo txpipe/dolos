@@ -199,29 +199,12 @@ impl From<&KnownNetwork> for MithrilConfig {
 /// Issued by the official registry at `oci.stelae.store`.
 const OFFICIAL_REGISTRY_USER: &str = "stelae";
 
-/// The password that goes with [`OFFICIAL_REGISTRY_USER`], compiled in rather
-/// than written to `dolos.toml`.
-///
-/// **Deliberately a published secret**, and the only one this project has:
-/// stele distribution is free and identity-less, but never unrestricted — the
-/// registry authenticates every request, and this is what a consumer
-/// authenticates with. So it gates out-of-band tooling and nothing else.
-///
-/// Compiled in rather than seeded into the file because a password copied into
-/// every generated `dolos.toml` is a password that has to be found again in
-/// every one of them. Here, a rotation reaches every node that takes the
-/// release; a node that overrode it in its own config keeps its override.
-///
-/// That makes this the one default here with a runtime reader as well as an
-/// init-time one: [`crate::common::stele_registry_auth`] answers a section that
-/// names a user and no password with it, reaching into this module the way
-/// `doctor` reaches into it for [`KnownNetwork`] rather than keeping a second
-/// account of what the defaults are.
-///
-/// Rotating the pair is a change here and nowhere else — paired with a release
-/// and comms, because generated configs and released binaries carry the old one
-/// until their nodes update.
-pub const OFFICIAL_REGISTRY_PASSWORD: &str = "7214892e36157f4051677b51526382cc96693d45eda4e4cd";
+// The password that goes with `OFFICIAL_REGISTRY_USER` is not here: it is
+// `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`, compiled in beside the
+// code that reads it rather than written into every generated `dolos.toml`.
+// Rotating the pair is a change in both places, paired with a release and
+// comms, because generated configs and released binaries carry the old one
+// until their nodes update.
 
 /// `[stelae]` as a generated config carries it: the official registry's user,
 /// and no password.
@@ -843,9 +826,9 @@ mod tests {
     /// configurable in the file the same command generates.
     ///
     /// Only the round trip is asserted here. What a section with *no* password
-    /// authenticates with is [`crate::common::stele_registry_auth`]'s question,
-    /// and is answered by its tests against
-    /// [`OFFICIAL_REGISTRY_PASSWORD`].
+    /// authenticates with is [`dolos_snapshot::node::registry_auth`]'s
+    /// question, and is answered by its tests against
+    /// [`dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`].
     #[test]
     fn a_configured_password_survives_the_round_trip() {
         let dir = tempfile::tempdir().unwrap();

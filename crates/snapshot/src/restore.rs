@@ -251,6 +251,27 @@ pub struct Plan {
     pub skipped_unknown: Vec<LayerDescriptor>,
 }
 
+/// One retained state dump a stele carries, as a report counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarriedDump {
+    /// The epoch the dump's scope names.
+    pub epoch: u64,
+    /// How many state layers it carries.
+    pub carried: usize,
+}
+
+impl CarriedDump {
+    /// Whether the dump carries every state layer an epoch has.
+    pub fn is_whole(&self) -> bool {
+        self.carried == crate::state_layer_count()
+    }
+
+    /// How many it would carry if it were.
+    pub fn expected() -> usize {
+        crate::state_layer_count()
+    }
+}
+
 impl Plan {
     /// Every layer this restore will read.
     pub fn layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
@@ -273,6 +294,45 @@ impl Plan {
     /// documentation for the two independent reasons it holds.
     pub fn tip_layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
         self.state.values().flatten()
+    }
+
+    /// The distinct layer kinds this restore skipped for want of a codec,
+    /// byte-sorted.
+    ///
+    /// Derived here rather than in a report, because it is what an operator
+    /// acts on: an epoch dropped by `sync.max_history` is this node's own
+    /// configuration, and a layer dropped for a kind this build does not
+    /// implement is a stele from a publisher ahead of it. Empty for every stele
+    /// this profile publishes today.
+    pub fn skipped_kinds(&self) -> Vec<&str> {
+        let mut kinds: Vec<&str> = self
+            .skipped_unknown
+            .iter()
+            .map(|layer| layer.kind.as_str())
+            .collect();
+
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        kinds
+    }
+
+    /// The retained dumps this stele carries, each with whether it is whole.
+    ///
+    /// A dump may be short of a whole epoch: only the tip is checked for
+    /// completeness — a publisher whose predecessor did not carry every shard
+    /// of an epoch warns and publishes the short dump anyway — so an epoch
+    /// that restores and an epoch missing nine of its shards would
+    /// otherwise be indistinguishable in a report, and the second is not a
+    /// repository that restores that epoch.
+    pub fn carried_dumps(&self) -> Vec<CarriedDump> {
+        self.state_dumps
+            .iter()
+            .map(|(epoch, kinds)| CarriedDump {
+                epoch: *epoch,
+                carried: kinds.values().map(Vec::len).sum(),
+            })
+            .collect()
     }
 
     /// The retained dumps this stele carries and this restore does not read.
@@ -1471,6 +1531,118 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
 /// `digests` is verification metadata about Mithril immutable files; ADR-004 is
 /// explicit that nothing is written to the stores from it.
 pub const UNRESTORED_KINDS: [&str; 1] = [DIGESTS];
+
+/// Where a `--source` points.
+///
+/// The scheme is what selects a restore path, which is why this is parsed
+/// rather than sniffed: a directory that happens to look like a stele and a URL
+/// that says it is one are different claims, and only the second is the
+/// operator's.
+///
+/// Parsed by a command's argument parser rather than inside its body, so an
+/// unusable source is refused before `--force` has cleared anything. The flags
+/// that decide what to do with existing data are handled a layer above, and a
+/// source rejected any later would have cost the operator the node they still
+/// had.
+#[cfg(feature = "oci")]
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A stele directory on this filesystem.
+    Dir(std::path::PathBuf),
+    /// A stele repository in an OCI registry.
+    Repo(crate::registry::Repository),
+}
+
+#[cfg(feature = "oci")]
+impl std::str::FromStr for Source {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        use crate::registry::{Repository, SCHEME};
+
+        // `file:///abs/path` is the spelled-out form and leaves a leading slash
+        // behind, which is the absolute path. `file://relative/path` is the one
+        // an operator actually types, and leaves a relative one. Both work, and
+        // neither is guessed at: what follows the scheme is the path.
+        if let Some(path) = raw.strip_prefix("file://") {
+            if path.is_empty() {
+                return Err(format!("{raw:?} names no directory"));
+            }
+
+            return Ok(Self::Dir(std::path::PathBuf::from(path)));
+        }
+
+        if raw.starts_with(SCHEME) {
+            return raw
+                .parse::<Repository>()
+                .map(Self::Repo)
+                .map_err(|e| e.to_string());
+        }
+
+        Err(format!(
+            "{raw:?} is not a stele source; it is `file://DIR` or `{SCHEME}HOST/PATH`",
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "oci"))]
+mod source_tests {
+    use std::path::PathBuf;
+
+    use super::Source;
+
+    #[test]
+    fn a_file_source_names_a_directory() {
+        for (raw, expected) in [
+            ("file:///var/lib/dolos/stele", "/var/lib/dolos/stele"),
+            ("file://stele", "stele"),
+            ("file://./stele", "./stele"),
+        ] {
+            let Source::Dir(dir) = raw.parse::<Source>().unwrap() else {
+                panic!("{raw:?} did not parse as a directory");
+            };
+
+            assert_eq!(dir, PathBuf::from(expected), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_oci_source_names_a_repository() {
+        let Source::Repo(repo) = "oci://ghcr.io/txpipe/dolos-snapshots/mainnet"
+            .parse::<Source>()
+            .unwrap()
+        else {
+            panic!("an oci url did not parse as a repository");
+        };
+
+        assert_eq!(repo.registry(), "ghcr.io");
+        assert_eq!(repo.repository(), "txpipe/dolos-snapshots/mainnet");
+    }
+
+    /// A source a restore cannot use is refused by the parse, not carried to
+    /// the registry — the whole reason `--source` is a parsed type, and what
+    /// makes the refusal land before `--force` clears anything.
+    ///
+    /// Only the scheme dispatch is this type's. What makes a *repository*
+    /// usable is the transport's and is tested there; these are the two cases
+    /// that get here either way, plus one that proves an unusable repository
+    /// does propagate.
+    #[test]
+    fn an_unusable_source_is_refused() {
+        for raw in [
+            "https://example.invalid/snapshot", // not a scheme this understands
+            "/var/lib/dolos/stele",             // a path is not a URL
+            "file://",
+            "",
+            // And a repository the transport refuses is refused here too,
+            // rather than being carried as far as a connection.
+            "oci://ghcr.io",
+            "oci://ghcr.io/txpipe/dolos:v1",
+        ] {
+            assert!(raw.parse::<Source>().is_err(), "{raw:?}");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

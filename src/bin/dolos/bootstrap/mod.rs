@@ -2,11 +2,12 @@ use std::io::IsTerminal;
 
 use clap::{Parser, Subcommand};
 use inquire::list_option::ListOption;
-use miette::{bail, Context, IntoDiagnostic};
+use miette::{bail, IntoDiagnostic};
 use tracing::info;
 
 use crate::feedback::Feedback;
-use dolos_core::{StateStore, WalStore};
+use dolos::storage::{Existing, ExistingDataPolicy};
+use dolos_core::{seed_wal_from_state, WalSeed};
 
 pub(crate) mod mithril;
 mod ranged;
@@ -87,82 +88,19 @@ pub struct Args {
 
 use dolos_core::config::RootConfig;
 
-fn has_existing_data(config: &RootConfig) -> miette::Result<bool> {
-    let state = crate::common::open_state_store(config)?;
-    let cursor = state
-        .read_cursor()
-        .into_diagnostic()
-        .context("reading state cursor")?;
-
-    Ok(cursor.is_some())
-}
-
-/// Empty the storage directory.
+/// What to do about data already in storage, and the flags that say it.
 ///
-/// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
-/// for one thing that is not a store: a stele restore's progress file lives
-/// inside `storage.path`, and a progress file that outlived the stores it
-/// describes would tell the next `--continue` to skip layers whose data is
-/// gone. Anything that clears storage has to clear that too, and taking the
-/// directory is how this does it without having to remember.
-fn clear_storage(config: &RootConfig) -> miette::Result<()> {
-    info!("existing data detected, clearing storage due to --force");
-
-    clear_storage_path(&config.storage.path)
-}
-
-fn clear_storage_path(storage_path: &std::path::Path) -> miette::Result<()> {
-    std::fs::remove_dir_all(storage_path)
-        .into_diagnostic()
-        .context("removing existing storage")?;
-
-    std::fs::create_dir_all(storage_path)
-        .into_diagnostic()
-        .context("recreating storage directory")?;
-
-    Ok(())
-}
-
-/// What to do about data already in storage.
-///
-/// Deciding is separated from doing because only one of the outcomes is
-/// destructive, and it must not happen until the run is fully known. An
-/// interactive bootstrap asks which method to use — and, for a stele, where the
-/// stele is — *after* the flags are parsed, so a `--force` that cleared first
-/// would take a working node away on a typo, a cancel, or a machine with no
-/// terminal, and hand back nothing in its place.
-enum Existing {
-    /// Data is there and `--skip-if-data` says to leave it alone.
-    Skip,
-    /// Go ahead, but clear storage first.
-    Clear,
-    /// Go ahead as things are.
-    Proceed,
-}
-
-/// Read what is in storage and decide, without touching any of it.
-///
-/// The refusals happen here — a skip, and the bail for existing data with no
-/// flag saying what to do about it — so neither is a question asked of an
-/// operator whose answer is then thrown away.
+/// The decision is [`dolos::storage::inspect_existing_data`]'s — a wipe is
+/// storage lifecycle rather than anything a bootstrap method knows about — and
+/// what is here is the three flags that reach it.
 fn inspect_existing_data(config: &RootConfig, args: &Args) -> miette::Result<Existing> {
-    if args.r#continue {
-        return Ok(Existing::Proceed);
-    }
+    let policy = ExistingDataPolicy {
+        force: args.force,
+        skip_if_data: args.skip_if_data,
+        r#continue: args.r#continue,
+    };
 
-    if !has_existing_data(config)? {
-        return Ok(Existing::Proceed);
-    }
-
-    if args.skip_if_data {
-        return Ok(Existing::Skip);
-    }
-
-    if args.force {
-        return Ok(Existing::Clear);
-    }
-
-    bail!("existing data detected in storage. Use --force to clear and re-bootstrap, --skip-if-data to skip, or --continue to resume");
+    dolos::storage::inspect_existing_data(config, policy).into_diagnostic()
 }
 
 fn dispatch(
@@ -188,35 +126,17 @@ fn dispatch(
 /// Seed the WAL from the state cursor so that `find_intersect` works after
 /// bootstrap.
 ///
-/// Some bootstrap mechanisms skip WAL commits for performance, leaving it
-/// empty. This ensures the WAL tip matches the state cursor regardless of which
-/// bootstrap method was used.
-fn seed_wal_from_state(config: &RootConfig) -> miette::Result<()> {
+/// The seed itself is [`dolos_core::seed_wal_from_state`], beside the bulk
+/// import that leaves the gap; what is here is opening the two stores and
+/// saying what happened.
+fn seed_wal(config: &RootConfig) -> miette::Result<()> {
     let state = crate::common::open_state_store(config)?;
     let wal = crate::common::open_wal_store(config)?;
 
-    let cursor = state
-        .read_cursor()
-        .into_diagnostic()
-        .context("reading state cursor")?;
-
-    let Some(cursor) = cursor else {
-        info!("no state cursor after bootstrap, skipping WAL seed");
-        return Ok(());
-    };
-
-    if !cursor.is_fully_defined() {
-        return Err(miette::miette!(
-            "state cursor at slot {} has no block hash, cannot seed WAL",
-            cursor.slot(),
-        ));
+    match seed_wal_from_state(&state, &wal).into_diagnostic()? {
+        WalSeed::NoCursor => info!("no state cursor after bootstrap, skipping WAL seed"),
+        WalSeed::Seeded(cursor) => info!(%cursor, "seeded WAL from state cursor"),
     }
-
-    wal.reset_to(&cursor)
-        .into_diagnostic()
-        .context("seeding WAL from state cursor")?;
-
-    info!(%cursor, "seeded WAL from state cursor");
 
     Ok(())
 }
@@ -250,7 +170,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     // everything that could still refuse — the flags, the prompts, the source a
     // stele restore was given — has already had its say.
     if matches!(existing, Existing::Clear) {
-        clear_storage(config)?;
+        info!("existing data detected, clearing storage due to --force");
+
+        dolos::storage::clear_storage(&config.storage.path).into_diagnostic()?;
     }
 
     dispatch(config, &command, feedback, args.r#continue)?;
@@ -259,73 +181,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     // Some bootstrap mechanisms skip WAL commits for performance, leaving it empty
     // or stale. This ensures the WAL tip matches the state cursor regardless of
     // which bootstrap method was used.
-    if let Err(e) = seed_wal_from_state(config) {
+    if let Err(e) = seed_wal(config) {
         tracing::error!("failed to seed WAL from state: {}", e);
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use dolos_snapshot::restore::Checkpoint;
-
-    /// A `--force` wipe takes the progress file with the data it describes.
-    ///
-    /// The hazard this rules out is specific and quiet. `--continue` reads the
-    /// progress file and skips every layer it names; `--force` clears the
-    /// stores. A progress file that survived a wipe would therefore tell the
-    /// next run that layers it has no data for are already done, and the node
-    /// that came out would be missing a slice of chain with nothing reporting
-    /// it.
-    ///
-    /// Asserted against [`clear_storage`]'s actual behaviour rather than
-    /// against the fact that it happens to call `remove_dir_all`: what has to
-    /// stay true is the outcome, however the wipe is later spelled.
-    #[test]
-    fn clearing_storage_removes_a_restore_in_progress() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = temp.path().join("data");
-
-        std::fs::create_dir_all(&storage).unwrap();
-
-        let progress = Checkpoint::path_in(&storage);
-        std::fs::write(&progress, b"{}").unwrap();
-
-        // A stand-in for the stores the progress file describes, so the
-        // assertion is about a directory that had a node in it.
-        std::fs::write(storage.join("state"), b"a store").unwrap();
-
-        assert!(progress.exists());
-
-        super::clear_storage_path(&storage).unwrap();
-
-        assert!(
-            !progress.exists(),
-            "a progress file outlived the stores it describes"
-        );
-
-        assert!(
-            storage.is_dir(),
-            "the storage directory itself has to come back, empty"
-        );
-
-        assert_eq!(
-            std::fs::read_dir(&storage).unwrap().count(),
-            0,
-            "and come back empty"
-        );
-    }
-
-    /// The progress file is *inside* the storage path.
-    ///
-    /// The other half of the test above, and the half that would fail first if
-    /// the file were ever moved: a wipe of `storage.path` only takes it while
-    /// it lives there.
-    #[test]
-    fn the_progress_file_lives_inside_the_storage_path() {
-        let storage = std::path::Path::new("/var/lib/dolos/data");
-
-        assert!(Checkpoint::path_in(storage).starts_with(storage));
-    }
 }

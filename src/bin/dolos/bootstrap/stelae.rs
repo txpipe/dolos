@@ -39,7 +39,11 @@ use std::path::PathBuf;
 use dolos_core::config::RootConfig;
 use miette::{Context as _, IntoDiagnostic as _};
 
-use dolos_snapshot::registry::{self, Point, Repository};
+use dolos_snapshot::{
+    node,
+    registry::{self, Point, Repository},
+    restore::Source,
+};
 
 use crate::feedback::{Feedback, SteleProgress};
 
@@ -85,55 +89,6 @@ impl Args {
             insecure: false,
             scratch_dir: None,
         })
-    }
-}
-
-/// Where a `--source` points.
-///
-/// The scheme is what selects a restore path, which is why this is parsed
-/// rather than sniffed: a directory that happens to look like a stele and a URL
-/// that says it is one are different claims, and only the second is the
-/// operator's.
-///
-/// Parsed by clap rather than inside [`run`], so an unusable source is refused
-/// before `--force` has cleared anything. The flags that decide what to do with
-/// existing data are handled a layer above this command, and a source rejected
-/// any later would have cost the operator the node they still had.
-#[derive(Debug, Clone)]
-pub enum Source {
-    /// A stele directory on this filesystem.
-    Dir(PathBuf),
-    /// A stele repository in an OCI registry.
-    Repo(Repository),
-}
-
-impl std::str::FromStr for Source {
-    type Err = String;
-
-    fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        // `file:///abs/path` is the spelled-out form and leaves a leading slash
-        // behind, which is the absolute path. `file://relative/path` is the one
-        // an operator actually types, and leaves a relative one. Both work, and
-        // neither is guessed at: what follows the scheme is the path.
-        if let Some(path) = raw.strip_prefix("file://") {
-            if path.is_empty() {
-                return Err(format!("{raw:?} names no directory"));
-            }
-
-            return Ok(Self::Dir(PathBuf::from(path)));
-        }
-
-        if raw.starts_with(registry::SCHEME) {
-            return raw
-                .parse::<Repository>()
-                .map(Self::Repo)
-                .map_err(|e| e.to_string());
-        }
-
-        Err(format!(
-            "{raw:?} is not a stele source; it is `file://DIR` or `{}HOST/PATH`",
-            registry::SCHEME,
-        ))
     }
 }
 
@@ -232,11 +187,11 @@ fn restore_repo(
     let node = Node::open(config)?;
 
     // Resolved here rather than inside the transport: which identity this node
-    // reads a registry as is the node's policy, and `crate::common` is where
-    // this program keeps its own. Where it stages comes from the same place.
-    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+    // reads a registry as is the node's policy, and `dolos_snapshot::node` is
+    // where that policy lives. Where it stages comes from the same place.
+    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
 
-    let scratch = crate::common::stele_scratch_dir(&config.storage, scratch_dir);
+    let scratch = node::scratch_dir(&config.storage, scratch_dir);
 
     let registry = registry::open(repo, insecure, auth, scratch, registry::Tuning::default())
         .into_diagnostic()
@@ -298,19 +253,10 @@ fn report(
     // a layer dropped for a kind this build does not implement is a stele from
     // a publisher ahead of it. An operator acts on the second by upgrading.
     if !plan.skipped_unknown.is_empty() {
-        let mut kinds: Vec<&str> = plan
-            .skipped_unknown
-            .iter()
-            .map(|layer| layer.kind.as_str())
-            .collect();
-
-        kinds.sort_unstable();
-        kinds.dedup();
-
         println!(
             "skipped:  {} layer(s) this build has no kind for ({}); upgrade to restore them",
             plan.skipped_unknown.len(),
-            kinds.join(", "),
+            plan.skipped_kinds().join(", "),
         );
     }
 
@@ -326,26 +272,25 @@ fn report(
     // short dump anyway — so an epoch listed bare here and an epoch missing
     // nine of its shards would otherwise read identically, and the second is
     // not a repository that restores that epoch.
-    if !plan.state_dumps.is_empty() {
-        let epochs: Vec<String> = plan
-            .state_dumps
-            .iter()
-            .map(|(epoch, kinds)| {
-                let carried: usize = kinds.values().map(Vec::len).sum();
+    let dumps = plan.carried_dumps();
 
-                match carried == dolos_snapshot::state_layer_count() {
-                    true => epoch.to_string(),
-                    false => format!(
-                        "{epoch} (partial: {carried} of {} layers)",
-                        dolos_snapshot::state_layer_count(),
-                    ),
-                }
+    if !dumps.is_empty() {
+        let epochs: Vec<String> = dumps
+            .iter()
+            .map(|dump| match dump.is_whole() {
+                true => dump.epoch.to_string(),
+                false => format!(
+                    "{} (partial: {} of {} layers)",
+                    dump.epoch,
+                    dump.carried,
+                    dolos_snapshot::restore::CarriedDump::expected(),
+                ),
             })
             .collect();
 
         println!(
             "dumps:    {} retained state dump(s) carried and not restored (epochs {})",
-            plan.state_dumps.len(),
+            dumps.len(),
             epochs.join(", "),
         );
     }
@@ -385,63 +330,6 @@ pub fn run(
             feedback,
             resume,
         ),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_file_source_names_a_directory() {
-        for (raw, expected) in [
-            ("file:///var/lib/dolos/stele", "/var/lib/dolos/stele"),
-            ("file://stele", "stele"),
-            ("file://./stele", "./stele"),
-        ] {
-            let Source::Dir(dir) = raw.parse::<Source>().unwrap() else {
-                panic!("{raw:?} did not parse as a directory");
-            };
-
-            assert_eq!(dir, PathBuf::from(expected), "{raw:?}");
-        }
-    }
-
-    #[test]
-    fn an_oci_source_names_a_repository() {
-        let Source::Repo(repo) = "oci://ghcr.io/txpipe/dolos-snapshots/mainnet"
-            .parse::<Source>()
-            .unwrap()
-        else {
-            panic!("an oci url did not parse as a repository");
-        };
-
-        assert_eq!(repo.registry(), "ghcr.io");
-        assert_eq!(repo.repository(), "txpipe/dolos-snapshots/mainnet");
-    }
-
-    /// A source this command cannot use is refused by the parse, not carried to
-    /// the registry — the whole reason `--source` is a parsed type, and what
-    /// makes the refusal land before `--force` clears anything.
-    ///
-    /// Only the scheme dispatch is this module's. What makes a *repository*
-    /// usable is the transport's and is tested there; these are the two cases
-    /// that get here either way, plus one that proves an unusable repository
-    /// does propagate.
-    #[test]
-    fn an_unusable_source_is_refused() {
-        for raw in [
-            "https://example.invalid/snapshot", // not a scheme this understands
-            "/var/lib/dolos/stele",             // a path is not a URL
-            "file://",
-            "",
-            // And a repository the transport refuses is refused here too,
-            // rather than being carried as far as a connection.
-            "oci://ghcr.io",
-            "oci://ghcr.io/txpipe/dolos:v1",
-        ] {
-            assert!(raw.parse::<Source>().is_err(), "{raw:?}");
-        }
     }
 }
 

@@ -53,6 +53,91 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
     Ok(config.storage.path.clone())
 }
 
+/// Empty the storage directory.
+///
+/// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
+/// for one thing that is not a store: a stele restore's progress file lives
+/// inside `storage.path`, and a progress file that outlived the stores it
+/// describes would tell the next `--continue` to skip layers whose data is
+/// gone. Anything that clears storage has to clear that too, and taking the
+/// directory is how this does it without having to remember.
+pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
+    std::fs::remove_dir_all(storage_path)
+        .map_err(|e| Error::StorageError(format!("removing existing storage: {e}")))?;
+
+    std::fs::create_dir_all(storage_path)
+        .map_err(|e| Error::StorageError(format!("recreating storage directory: {e}")))?;
+
+    Ok(())
+}
+
+/// What to do about data already in storage.
+///
+/// Deciding is separated from doing because only one of the outcomes is
+/// destructive, and it must not happen until the run is fully known. An
+/// interactive bootstrap asks which method to use — and, for a stele, where the
+/// stele is — *after* the flags are parsed, so a `--force` that cleared first
+/// would take a working node away on a typo, a cancel, or a machine with no
+/// terminal, and hand back nothing in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// Data is there and `--skip-if-data` says to leave it alone.
+    Skip,
+    /// Go ahead, but clear storage first.
+    Clear,
+    /// Go ahead as things are.
+    Proceed,
+}
+
+/// The three flags that say what to do about data already in storage.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExistingDataPolicy {
+    /// `--force`: clear storage and re-bootstrap.
+    pub force: bool,
+    /// `--skip-if-data`: leave it alone and exit zero.
+    pub skip_if_data: bool,
+    /// `--continue`: go ahead, trusting the run to resume.
+    pub r#continue: bool,
+}
+
+/// Whether storage already holds a node: a state cursor is the whole test.
+pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
+    let state = open_state_store(config)?;
+
+    Ok(state.read_cursor()?.is_some())
+}
+
+/// Read what is in storage and decide, without touching any of it.
+///
+/// The refusals happen here — a skip, and the refusal for existing data with no
+/// flag saying what to do about it — so neither is a question asked of an
+/// operator whose answer is then thrown away.
+pub fn inspect_existing_data(
+    config: &RootConfig,
+    policy: ExistingDataPolicy,
+) -> Result<Existing, Error> {
+    if policy.r#continue {
+        return Ok(Existing::Proceed);
+    }
+
+    if !has_existing_data(config)? {
+        return Ok(Existing::Proceed);
+    }
+
+    if policy.skip_if_data {
+        return Ok(Existing::Skip);
+    }
+
+    if policy.force {
+        return Ok(Existing::Clear);
+    }
+
+    Err(Error::message(
+        "existing data detected in storage. Use --force to clear and re-bootstrap, \
+         --skip-if-data to skip, or --continue to resume",
+    ))
+}
+
 fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
     if config.storage.version != StorageVersion::V3 {
         return Err(Error::StorageError(format!(
@@ -1527,5 +1612,69 @@ mod tests {
             message.contains("fjall"),
             "refusal must name the supported backend"
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use dolos_snapshot::restore::Checkpoint;
+
+    /// A `--force` wipe takes the progress file with the data it describes.
+    ///
+    /// The hazard this rules out is specific and quiet. `--continue` reads the
+    /// progress file and skips every layer it names; `--force` clears the
+    /// stores. A progress file that survived a wipe would therefore tell the
+    /// next run that layers it has no data for are already done, and the node
+    /// that came out would be missing a slice of chain with nothing reporting
+    /// it.
+    ///
+    /// Asserted against [`super::clear_storage`]'s actual behaviour rather than
+    /// against the fact that it happens to call `remove_dir_all`: what has to
+    /// stay true is the outcome, however the wipe is later spelled.
+    #[test]
+    fn clearing_storage_removes_a_restore_in_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("data");
+
+        std::fs::create_dir_all(&storage).unwrap();
+
+        let progress = Checkpoint::path_in(&storage);
+        std::fs::write(&progress, b"{}").unwrap();
+
+        // A stand-in for the stores the progress file describes, so the
+        // assertion is about a directory that had a node in it.
+        std::fs::write(storage.join("state"), b"a store").unwrap();
+
+        assert!(progress.exists());
+
+        super::clear_storage(&storage).unwrap();
+
+        assert!(
+            !progress.exists(),
+            "a progress file outlived the stores it describes"
+        );
+
+        assert!(
+            storage.is_dir(),
+            "the storage directory itself has to come back, empty"
+        );
+
+        assert_eq!(
+            std::fs::read_dir(&storage).unwrap().count(),
+            0,
+            "and come back empty"
+        );
+    }
+
+    /// The progress file is *inside* the storage path.
+    ///
+    /// The other half of the test above, and the half that would fail first if
+    /// the file were ever moved: a wipe of `storage.path` only takes it while
+    /// it lives there.
+    #[test]
+    fn the_progress_file_lives_inside_the_storage_path() {
+        let storage = std::path::Path::new("/var/lib/dolos/data");
+
+        assert!(Checkpoint::path_in(storage).starts_with(storage));
     }
 }

@@ -21,7 +21,10 @@
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
-use dolos_snapshot::registry::{self, Point, Repository};
+use dolos_snapshot::{
+    node,
+    registry::{self, Point, Repository},
+};
 use miette::{Context as _, IntoDiagnostic as _};
 
 #[derive(Debug, Parser)]
@@ -51,11 +54,11 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
 
     // An inspection reads two small blobs into memory, so nothing is staged
     // and this directory is never created here.
-    let scratch = crate::common::stele_scratch_dir(&config.storage, None);
+    let scratch = node::scratch_dir(&config.storage, None);
 
     let registry = registry::open(
         &args.repo,

@@ -91,19 +91,13 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("opening the data stores")?;
 
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let selection = super::Selection {
+        epochs: args.epochs,
+        index_band: args.index_band,
+        producers: args.producers,
+    };
 
-    let plan = export::plan(
-        &stores.state,
-        u64::from(genesis.network_magic()),
-        super::retained_epochs(config)?,
-    )
-    .into_diagnostic()
-    .context("planning the reproduction")?;
-
-    let plan = super::restrict(plan, args.epochs);
-    let plan = super::banded(plan, args.index_band);
-    let plan = super::produced(plan, args.producers);
+    let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
 
     super::report_plan(&plan)?;
 
@@ -126,34 +120,29 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         None => eprintln!("history:  none; this reproduction starts a chain"),
     }
 
-    let inscription = export::reproduce(
+    // The bytes, not a re-encoding of the content: they are what a verifier
+    // hashes, so anything that pretty-printed them would carry a digest nobody
+    // else computes. The identity is their sha256.
+    let document = export::digest_document(
         &plan,
         &stores.archive,
         &stores.state,
         &stores.indexes,
-        None,
         predecessor,
     )
     .into_diagnostic()
     .context("reproducing the stele")?;
 
-    // The bytes, not a re-encoding of the content: they are what a verifier
-    // hashes, so anything that pretty-printed them would carry a digest nobody
-    // else computes. The identity is their sha256, which is what
-    // `Inscription::digest` is.
-    let canonical = inscription.canonicalize().into_diagnostic()?;
-    let identity = inscription.digest().into_diagnostic()?;
-
-    eprintln!("layers:   {}", inscription.layers.len());
+    eprintln!("layers:   {}", document.layers);
     eprintln!(
         "size:     {} uncompressed bytes",
-        inscription.uncompressed_size()
+        document.uncompressed_size
     );
-    eprintln!("identity: {identity}");
+    eprintln!("identity: {}", document.identity);
 
     match args.output.as_deref() {
         Some(path) => {
-            std::fs::write(path, &canonical)
+            std::fs::write(path, &document.canonical)
                 .into_diagnostic()
                 .with_context(|| format!("writing {}", path.display()))?;
 
@@ -176,7 +165,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             let mut stdout = std::io::stdout();
 
             stdout
-                .write_all(&canonical)
+                .write_all(&document.canonical)
                 .into_diagnostic()
                 .context("writing the inscription to stdout")?;
 

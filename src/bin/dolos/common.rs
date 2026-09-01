@@ -1,9 +1,5 @@
-use dolos_core::config::{
-    ChainConfig, GenesisConfig, LoggingConfig, RootConfig, StelaeConfig, StorageConfig,
-    TelemetryConfig,
-};
+use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
 use dolos_core::BootstrapExt;
-use dolos_snapshot::registry::Auth;
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
@@ -65,88 +61,6 @@ pub fn load_config(
     s = s.add_source(::config::Environment::with_prefix("DOLOS").separator("_"));
 
     s.build()?.try_deserialize()
-}
-
-/// Who this node authenticates to a stele registry as.
-///
-/// A pure function of `[stelae.registry]`, and deliberately nothing more.
-/// **Dolos reads no environment variable of its own here**, because it does not
-/// have to: `load_config` layers `config::Environment` with the `DOLOS` prefix
-/// over every setting, so `DOLOS_STELAE_REGISTRY_USER` and
-/// `DOLOS_STELAE_REGISTRY_PASSWORD` already override what the file says, by the
-/// same mechanism and with the same precedence as every other field. A second,
-/// hand-rolled set of variables would be a second answer to a question the
-/// configuration has already answered — and this binary has no other.
-///
-/// So the two sources the operator sees are the two the configuration has: a
-/// consumer's published user in `dolos.toml`, and a publisher's real
-/// credentials exported into the environment and never written down.
-///
-/// Two refusals, because both are operator mistakes worth a sentence rather
-/// than a precedence rule:
-///
-/// - **a token and a user together** — two identities, and which was meant is
-///   not something to guess at. On a registry whose credentials carry different
-///   capabilities, guessing is the difference between a publish and a 403
-///   nobody can explain.
-/// - **a password with no user** — a secret that arrived with nobody to be. It
-///   is a typo or half an export, and the half that arrived cannot be sent on
-///   its own.
-pub fn stele_registry_auth(config: &StelaeConfig) -> miette::Result<Auth> {
-    let Some(registry) = &config.registry else {
-        return Ok(Auth::Anonymous);
-    };
-
-    if registry.token.is_some() && registry.user.is_some() {
-        miette::bail!(
-            "[stelae.registry] sets both `token` and `user`; a registry client authenticates as \
-             one identity and which one was meant is not something to guess at — drop the one \
-             you did not mean, or unset DOLOS_STELAE_REGISTRY_TOKEN / DOLOS_STELAE_REGISTRY_USER"
-        );
-    }
-
-    if let Some(token) = &registry.token {
-        return Ok(Auth::Bearer(token.clone()));
-    }
-
-    match &registry.user {
-        Some(user) => Ok(Auth::Basic {
-            user: user.clone(),
-            // A user and no password means the official registry's, which is
-            // compiled in beside the rest of the hardcoded defaults rather than
-            // written into every generated `dolos.toml`.
-            password: registry
-                .password
-                .clone()
-                .unwrap_or_else(|| crate::init::OFFICIAL_REGISTRY_PASSWORD.to_owned()),
-        }),
-        // A password with nobody to be. Anonymous would be the quiet answer and
-        // the wrong one: the operator supplied a secret and it would go unused.
-        None if registry.password.is_some() => miette::bail!(
-            "[stelae.registry] sets `password` with no `user`; basic registry credentials are a \
-             pair"
-        ),
-        None => Ok(Auth::Anonymous),
-    }
-}
-
-/// The directory a registry transfer stages in when the operator names none.
-///
-/// A child of `storage.path` rather than a sibling of it: on a host where the
-/// data lives on a dedicated mount, a sibling is on the *parent* filesystem —
-/// the small root volume this default exists to keep bytes off.
-pub const STELE_SCRATCH_DIR: &str = "scratch";
-
-/// Where this node stages the layers of a registry transfer.
-///
-/// An explicit `--scratch-dir` is taken literally, relative paths included:
-/// it is resolved against the working directory like every other path this
-/// binary takes from a command line.
-pub fn stele_scratch_dir(config: &StorageConfig, chosen: Option<&std::path::Path>) -> PathBuf {
-    match chosen {
-        Some(dir) => dir.to_path_buf(),
-        None => config.path.join(STELE_SCRATCH_DIR),
-    }
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
@@ -385,114 +299,6 @@ pub fn hook_exit_token() -> CancellationToken {
     cancel
 }
 
-/// Attempts a transient-prone external gets before its failure is fatal.
-///
-/// Bounded on purpose. The preprod G1 backfill measured why the retry exists —
-/// four container exits between 06:39Z and 08:53Z on 2026-08-23, each one
-/// paying a store restore, a window re-download and the in-flight epoch's
-/// re-replay for what a half-minute wait would have absorbed — and the same
-/// measurement is why it is not open-ended: a misconfigured aggregator or a
-/// repository the credentials cannot read has to keep failing, and keep
-/// failing while whoever launched the run is still watching.
-const RETRY_ATTEMPTS: u32 = 4;
-
-/// The first wait between attempts; each later one doubles it. Three waits of
-/// 5s, 10s and 20s put the ceiling at 35 seconds of patience.
-const RETRY_BASE_DELAY: Duration = Duration::from_secs(5);
-
-/// Sleep, unless a shutdown is requested first. `false` means it was.
-///
-/// Sliced rather than slept in one call so a signal that arrives during a
-/// backoff is honoured at the next slice instead of at the end of the wait —
-/// the driver's whole shutdown budget is a container's SIGTERM grace period,
-/// which a 20-second sleep would eat.
-fn sleep_unless_aborted(delay: Duration, abort: &dyn Fn() -> bool) -> bool {
-    const SLICE: Duration = Duration::from_millis(250);
-
-    let mut left = delay;
-
-    while !left.is_zero() {
-        if abort() {
-            return false;
-        }
-
-        let slice = left.min(SLICE);
-        std::thread::sleep(slice);
-        left -= slice;
-    }
-
-    !abort()
-}
-
-/// Run `op`, retrying a failure with exponential backoff, then let it be fatal.
-///
-/// The last attempt's error is returned untouched, so every caller keeps the
-/// diagnostic it had before the retry was wrapped around it — the retry moves
-/// where the fatal path is reached, never what it says. Nothing here decides a
-/// failure is transient: the classification the alternative would need does not
-/// exist at these seams (an aggregator's errors arrive as opaque strings), and
-/// guessing it wrong reinstates exactly the fatal exits this is here to absorb.
-/// What bounds the patience is [`RETRY_ATTEMPTS`], not a judgement about the
-/// error.
-///
-/// `abort` is polled between and during the waits, so a shutdown ends the run
-/// on the failure in hand rather than after the remaining backoff. Callers with
-/// no shutdown to observe pass `&|| false`.
-///
-/// Only for operations that are safe to simply run again: reads, and downloads
-/// whose destination is rewritten from the same arguments.
-pub fn retry_transient<T, E, F>(what: &str, abort: &dyn Fn() -> bool, op: F) -> Result<T, E>
-where
-    F: FnMut() -> Result<T, E>,
-    E: std::fmt::Display,
-{
-    retry_bounded(what, RETRY_ATTEMPTS, RETRY_BASE_DELAY, abort, op)
-}
-
-/// [`retry_transient`] with its two constants spelled out, so the tests can
-/// exercise the loop without waiting out a real backoff.
-fn retry_bounded<T, E, F>(
-    what: &str,
-    attempts: u32,
-    base_delay: Duration,
-    abort: &dyn Fn() -> bool,
-    mut op: F,
-) -> Result<T, E>
-where
-    F: FnMut() -> Result<T, E>,
-    E: std::fmt::Display,
-{
-    let mut delay = base_delay;
-
-    for attempt in 1..attempts {
-        match op() {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if abort() {
-                    return Err(err);
-                }
-
-                tracing::warn!(
-                    what,
-                    attempt,
-                    remaining = attempts - attempt,
-                    backoff_secs = delay.as_secs(),
-                    error = %err,
-                    "transient failure; retrying",
-                );
-
-                if !sleep_unless_aborted(delay, abort) {
-                    return Err(err);
-                }
-
-                delay = delay.saturating_mul(2);
-            }
-        }
-    }
-
-    op()
-}
-
 pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationToken) {
     loop {
         tokio::select! {
@@ -570,208 +376,22 @@ pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use dolos_core::config::StelaeRegistryConfig;
+    use dolos_core::config::StelaeConfig;
+    use dolos_snapshot::{node::registry_auth, registry::Auth};
     use futures_util::stream::FuturesUnordered;
     use std::io;
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::init::OFFICIAL_REGISTRY_PASSWORD;
 
-    /// The retry loop, with the real backoff replaced by none of it.
-    fn retried<T, E: std::fmt::Display>(
-        abort: &dyn Fn() -> bool,
-        op: impl FnMut() -> Result<T, E>,
-    ) -> Result<T, E> {
-        super::retry_bounded("a test", super::RETRY_ATTEMPTS, Duration::ZERO, abort, op)
-    }
-
-    #[test]
-    fn a_call_that_succeeds_is_made_once() {
-        let mut calls = 0;
-
-        let result: Result<u8, String> = retried(&|| false, || {
-            calls += 1;
-            Ok(7)
-        });
-
-        assert_eq!(result.unwrap(), 7);
-        assert_eq!(calls, 1, "a success must not be retried");
-    }
-
-    #[test]
-    fn a_transient_failure_is_absorbed() {
-        let mut calls = 0;
-
-        let result: Result<u8, String> = retried(&|| false, || {
-            calls += 1;
-
-            if calls < 3 {
-                Err("the aggregator hung up".to_owned())
-            } else {
-                Ok(7)
-            }
-        });
-
-        assert_eq!(result.unwrap(), 7);
-        assert_eq!(calls, 3, "the loop stops at the first success");
-    }
-
-    #[test]
-    fn patience_is_bounded_and_the_last_error_is_the_one_raised() {
-        let mut calls = 0;
-
-        let result: Result<u8, String> = retried(&|| false, || {
-            calls += 1;
-            Err(format!("attempt {calls} failed"))
-        });
-
-        assert_eq!(
-            calls, RETRY_ATTEMPTS as usize,
-            "a persistent failure must still reach the fatal path",
-        );
-
-        assert_eq!(
-            result.unwrap_err(),
-            format!("attempt {RETRY_ATTEMPTS} failed"),
-            "the caller keeps the diagnostic the final attempt produced",
-        );
-    }
-
-    #[test]
-    fn a_shutdown_ends_the_run_on_the_failure_in_hand() {
-        let mut calls = 0;
-
-        let result: Result<u8, String> = retried(&|| true, || {
-            calls += 1;
-            Err("interrupted".to_owned())
-        });
-
-        assert_eq!(calls, 1, "a requested shutdown is not waited out");
-        assert_eq!(result.unwrap_err(), "interrupted");
-    }
-
-    #[test]
-    fn a_shutdown_during_a_backoff_cuts_the_wait_short() {
-        assert!(!sleep_unless_aborted(Duration::from_secs(60), &|| true));
-        assert!(sleep_unless_aborted(Duration::ZERO, &|| false));
-    }
-
-    fn storage(path: &str) -> StorageConfig {
-        let document = format!(
-            "version = \"v3\"\npath = {}\n",
-            toml::Value::String(path.to_owned()),
-        );
-
-        toml::from_str(&document).expect("a storage section with a path")
-    }
-
-    #[test]
-    fn staging_defaults_inside_the_storage_path_and_takes_a_named_one_literally() {
-        let config = storage("/var/lib/dolos/data");
-
-        assert_eq!(
-            stele_scratch_dir(&config, None),
-            PathBuf::from("/var/lib/dolos/data/scratch"),
-        );
-
-        for named in ["/mnt/big/staging", "staging", "../staging"] {
-            assert_eq!(
-                stele_scratch_dir(&config, Some(std::path::Path::new(named))),
-                PathBuf::from(named),
-                "{named}",
-            );
-        }
-    }
-
-    fn config(registry: Option<StelaeRegistryConfig>) -> StelaeConfig {
-        StelaeConfig { registry }
-    }
-
-    fn basic(user: &str, password: Option<&str>) -> StelaeRegistryConfig {
-        StelaeRegistryConfig {
-            user: Some(user.to_owned()),
-            password: password.map(str::to_owned),
-            token: None,
-        }
-    }
-
-    /// The three shapes `[stelae.registry]` can name, and the one it names by
-    /// saying nothing.
-    #[test]
-    fn the_section_names_a_user_a_token_or_nobody() {
-        assert_eq!(stele_registry_auth(&config(None)).unwrap(), Auth::Anonymous);
-
-        assert_eq!(
-            stele_registry_auth(&config(Some(basic("dolos-reader", Some("published"))))).unwrap(),
-            Auth::Basic {
-                user: "dolos-reader".to_owned(),
-                password: "published".to_owned(),
-            }
-        );
-
-        let bearer = StelaeRegistryConfig {
-            token: Some("ghp_x".to_owned()),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            stele_registry_auth(&config(Some(bearer))).unwrap(),
-            Auth::Bearer("ghp_x".to_owned())
-        );
-    }
-
-    /// A user with no password is the shape `dolos init` seeds: the file says
-    /// who, the binary says with what.
-    #[test]
-    fn a_seeded_user_takes_the_compiled_in_password() {
-        assert_eq!(
-            stele_registry_auth(&config(Some(basic("dolos-reader", None)))).unwrap(),
-            Auth::Basic {
-                user: "dolos-reader".to_owned(),
-                password: OFFICIAL_REGISTRY_PASSWORD.to_owned(),
-            }
-        );
-    }
-
-    #[test]
-    fn two_identities_at_once_are_refused() {
-        let both = StelaeRegistryConfig {
-            user: Some("dolos-reader".to_owned()),
-            password: None,
-            token: Some("ghp_x".to_owned()),
-        };
-
-        let message = stele_registry_auth(&config(Some(both)))
-            .unwrap_err()
-            .to_string();
-
-        assert!(message.contains("token"), "{message}");
-        assert!(message.contains("user"), "{message}");
-    }
-
-    /// A password with nobody to be. Anonymous would be the quiet answer and
-    /// the wrong one: the operator supplied a secret and it would go unused.
-    #[test]
-    fn a_password_with_no_user_is_refused() {
-        let orphan = StelaeRegistryConfig {
-            password: Some("full-access".to_owned()),
-            ..Default::default()
-        };
-
-        let message = stele_registry_auth(&config(Some(orphan)))
-            .unwrap_err()
-            .to_string();
-
-        assert!(message.contains("password"), "{message}");
-        assert!(message.contains("user"), "{message}");
-    }
-
-    /// The environment reaches this section by the same route as every other
-    /// setting, and *this* is the assertion that says so.
+    /// The environment reaches `[stelae.registry]` by the same route as every
+    /// other setting, and *this* is the assertion that says so.
     ///
-    /// It is the whole of Dolos's registry-credential environment story — a
-    /// publisher exports `DOLOS_STELAE_REGISTRY_USER` and
+    /// It stays here, beside [`load_config`], while the credential policy it
+    /// feeds is [`dolos_snapshot::node::registry_auth`]'s: what is being pinned
+    /// is this binary's configuration sources, not what the profile crate makes
+    /// of them. It is the whole of Dolos's registry-credential environment
+    /// story — a publisher exports `DOLOS_STELAE_REGISTRY_USER` and
     /// `DOLOS_STELAE_REGISTRY_PASSWORD` and nothing in this binary reads them —
     /// so it is worth pinning rather than trusting. The source is built exactly
     /// as [`load_config`] builds it; only the file layers are left off, because
@@ -820,7 +440,7 @@ mod tests {
         }
 
         assert_eq!(
-            stele_registry_auth(&built.stelae).unwrap(),
+            registry_auth(&built.stelae).unwrap(),
             Auth::Basic {
                 user: "publisher".to_owned(),
                 password: "full-access".to_owned(),

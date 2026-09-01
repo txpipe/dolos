@@ -903,6 +903,53 @@ where
     )
 }
 
+/// A reproduced stele's document: the bytes a verifier hashes, and what they
+/// hash to.
+///
+/// The canonical encoding rather than the [`Inscription`], because that is what
+/// `dolos snapshot digest` writes and what `--chain-from` reads back: anything
+/// that re-encoded it would carry a digest nobody else computes.
+#[derive(Debug, Clone)]
+pub struct Document {
+    /// The canonical inscription, byte for byte.
+    pub canonical: Vec<u8>,
+    /// Its sha256, which is the stele's identity.
+    pub identity: stelae::Digest,
+    pub layers: usize,
+    pub uncompressed_size: u64,
+}
+
+/// Reproduce a stele from local stores and canonicalize it, writing nothing.
+///
+/// What a publish costs, minus the I/O and the upload: every layer is
+/// compressed, because a reproduction that skipped compression would not be
+/// doing the work a publish does.
+///
+/// `previous` is the chain this reproduction is told to follow. It is an input
+/// and not an inference — `history` rides inside the canonical document, so the
+/// same stores chained differently are two different digests, deliberately.
+pub fn digest_document<A, S, I>(
+    plan: &Plan,
+    archive: &A,
+    state: &S,
+    indexes: &I,
+    previous: &dyn Predecessor,
+) -> Result<Document, Error>
+where
+    A: ArchiveStore,
+    S: StateStore,
+    I: IndexStore,
+{
+    let inscription = reproduce(plan, archive, state, indexes, None, previous)?;
+
+    Ok(Document {
+        canonical: inscription.canonicalize()?,
+        identity: inscription.digest()?,
+        layers: inscription.layers.len(),
+        uncompressed_size: inscription.uncompressed_size(),
+    })
+}
+
 /// Reproduce `published` from local stores and hold the two documents against
 /// each other.
 ///

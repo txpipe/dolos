@@ -27,6 +27,8 @@
 //!   forward from it.
 //! - [`publish`] — the chained-publish lifecycle against a repository, behind
 //!   the `oci` feature because that is where a repository lives.
+//! - [`retry`] — the bounded patience a run spends on an external that fails in
+//!   bursts.
 //! - [`Standing`] — where a node stands against a repository's latest stele.
 //! - [`scope_key`] — the pair that identifies one layer.
 
@@ -37,6 +39,7 @@ pub mod profile;
 #[cfg(feature = "oci")]
 pub mod publish;
 pub mod reporting;
+pub mod retry;
 
 pub use predecessor::{First, Predecessor};
 pub use profile::DriverProfile;
