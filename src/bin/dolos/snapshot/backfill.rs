@@ -245,10 +245,10 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         cancel: spawn_exit_watcher()?,
         // A receiver per round, so a window's bars are its own.
         mithril_feedback: &|| {
-            Some(
-                Arc::new(crate::bootstrap::mithril::MithrilFeedback::new(feedback))
-                    as Arc<dyn dolos_mithril::mithril_client::feedback::FeedbackReceiver>,
-            )
+            Some(Arc::new(crate::feedback::MithrilFeedback::new(feedback))
+                as Arc<
+                    dyn dolos_mithril::mithril_client::feedback::FeedbackReceiver,
+                >)
         },
         replay: &replay,
         open_stores: &|| {

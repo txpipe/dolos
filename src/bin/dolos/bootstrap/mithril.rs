@@ -8,13 +8,13 @@
 
 use dolos_core::config::RootConfig;
 use dolos_core::ImportExt;
-use dolos_mithril::{fetch_snapshot, mithril_client, Fetch};
+use dolos_mithril::{fetch_snapshot, Fetch};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use crate::feedback::Feedback;
+use crate::feedback::{Feedback, MithrilFeedback};
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
@@ -62,114 +62,6 @@ impl Default for Args {
             start_from: None,
             download_start: None,
             download_end: None,
-        }
-    }
-}
-
-pub(crate) struct MithrilFeedback {
-    aggregate_pb: indicatif::ProgressBar,
-    validate_pb: indicatif::ProgressBar,
-}
-
-impl MithrilFeedback {
-    pub(crate) fn new(feedback: &Feedback) -> Self {
-        let multi = feedback.multi_progress();
-
-        let aggregate_pb = multi.add(indicatif::ProgressBar::hidden());
-        aggregate_pb.set_style(
-            indicatif::ProgressStyle::with_template(
-                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} files {msg}",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
-        );
-        aggregate_pb.set_message("downloading immutable files");
-
-        let validate_pb = multi.add(indicatif::ProgressBar::new_spinner());
-        validate_pb.set_style(
-            indicatif::ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
-                .unwrap(),
-        );
-
-        Self {
-            aggregate_pb,
-            validate_pb,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
-    async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
-        match event {
-            mithril_client::feedback::MithrilEvent::CardanoDatabase(db_event) => match db_event {
-                mithril_client::feedback::MithrilEventCardanoDatabase::Started {
-                    total_immutable_files,
-                    ..
-                } => {
-                    self.aggregate_pb
-                        .set_draw_target(indicatif::ProgressDrawTarget::stderr());
-                    self.aggregate_pb.set_length(total_immutable_files);
-                    self.aggregate_pb.set_position(0);
-                }
-                mithril_client::feedback::MithrilEventCardanoDatabase::ImmutableDownloadCompleted {
-                    ..
-                } => {
-                    self.aggregate_pb.inc(1);
-                }
-                mithril_client::feedback::MithrilEventCardanoDatabase::Completed { .. } => {
-                    self.aggregate_pb.finish_with_message("download completed");
-                }
-                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadStarted {
-                    size,
-                    ..
-                } => {
-                    self.validate_pb.set_length(size);
-                    self.validate_pb.set_position(0);
-                    self.validate_pb.set_message("downloading digests");
-                }
-                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadProgress {
-                    downloaded_bytes,
-                    size,
-                    ..
-                } => {
-                    self.validate_pb.set_length(size);
-                    self.validate_pb.set_position(downloaded_bytes);
-                    self.validate_pb.set_message("downloading digests");
-                }
-                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadCompleted {
-                    ..
-                } => {
-                    self.validate_pb
-                        .finish_with_message("digests downloaded");
-                }
-                _ => {
-                    tracing::debug!("unhandled mithril event: {db_event:?}");
-                }
-            },
-            mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
-                ..
-            } => {
-                self.validate_pb
-                    .set_message("certificate chain validation started");
-            }
-            mithril_client::feedback::MithrilEvent::CertificateValidated {
-                certificate_hash: hash,
-                ..
-            } => {
-                self.validate_pb
-                    .set_message(format!("validating cert: {hash}"));
-            }
-            mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
-                self.validate_pb.set_message("certificate chain validated");
-            }
-            mithril_client::feedback::MithrilEvent::CertificateFetchedFromCache { .. } => {
-                self.validate_pb
-                    .set_message("certificate fetched from cache");
-            }
-            x => {
-                tracing::debug!("unhandled mithril event: {x:?}");
-            }
         }
     }
 }
