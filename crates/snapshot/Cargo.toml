@@ -12,6 +12,19 @@ edition.workspace = true
 # place. `dolos`'s own `registry` feature is what turns this on.
 oci = ["stelae/oci", "stelae-driver/oci"]
 
+# The backfill daemon (`src/backfill.rs`): the publisher loop that composes
+# the mithril fetch with the publish lifecycle. Default-off, and the only
+# reason this crate ever pulls the aggregator client, pallas or a tokio
+# runtime handle — a build that only writes steles keeps the dependency tree it
+# had. `dolos`'s own `mithril` feature is what turns this on.
+backfill = [
+    "dep:dolos-mithril",
+    "dep:pallas",
+    "dep:itertools",
+    "dep:tokio",
+    "dep:tokio-util",
+]
+
 # This crate is the *profile* half of the Stelae boundary: it may depend on
 # `stelae` and on `dolos-*`, never the other way around. See
 # adrs/004_stelae_snapshots.md, "Code layout".
@@ -27,6 +40,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+# Feature `backfill` only.
+dolos-mithril = { path = "../mithril", optional = true }
+pallas = { workspace = true, optional = true }
+itertools = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros"] }
+tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.20.0"

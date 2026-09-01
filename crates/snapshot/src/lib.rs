@@ -58,7 +58,13 @@
 //!   which identity, and where it stages.
 //! - `publisher` (feature `oci`) — the order a repository publish's steps go
 //!   in, and what each reading of the repository means for one.
+//! - `backfill` (feature `backfill`) — the publisher daemon that replays
+//!   mithril immutable data one epoch at a time and publishes a stele at each
+//!   boundary. The fetch itself is `dolos-mithril`'s, which knows nothing of
+//!   steles.
 
+#[cfg(feature = "backfill")]
+pub mod backfill;
 pub mod export;
 pub mod layers;
 pub mod namespaces;

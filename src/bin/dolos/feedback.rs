@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 use dolos_snapshot::progress::{Event, Observer, Outcome, Progress};
 
+#[cfg(feature = "mithril")]
+use dolos_mithril::mithril_client;
+
 pub struct ProgressReader<R> {
     inner: R,
     progress: ProgressBar,
@@ -309,6 +312,121 @@ impl Progress for SteleProgress {
                 reason,
                 "the registry failed a round trip; making it again",
             ),
+        }
+    }
+}
+
+/// The mithril client's download and validation as progress bars.
+///
+/// Built fresh per download round by both callers that fetch — `bootstrap
+/// mithril` and `snapshot backfill` — so a window's bars are its own.
+#[cfg(feature = "mithril")]
+pub struct MithrilFeedback {
+    aggregate_pb: indicatif::ProgressBar,
+    validate_pb: indicatif::ProgressBar,
+}
+
+#[cfg(feature = "mithril")]
+impl MithrilFeedback {
+    pub fn new(feedback: &Feedback) -> Self {
+        let multi = feedback.multi_progress();
+
+        let aggregate_pb = multi.add(indicatif::ProgressBar::hidden());
+        aggregate_pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} files {msg}",
+            )
+            .unwrap()
+            .progress_chars("#>-"),
+        );
+        aggregate_pb.set_message("downloading immutable files");
+
+        let validate_pb = multi.add(indicatif::ProgressBar::new_spinner());
+        validate_pb.set_style(
+            indicatif::ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .unwrap(),
+        );
+
+        Self {
+            aggregate_pb,
+            validate_pb,
+        }
+    }
+}
+
+#[cfg(feature = "mithril")]
+#[async_trait::async_trait]
+impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
+    async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
+        match event {
+            mithril_client::feedback::MithrilEvent::CardanoDatabase(db_event) => match db_event {
+                mithril_client::feedback::MithrilEventCardanoDatabase::Started {
+                    total_immutable_files,
+                    ..
+                } => {
+                    self.aggregate_pb
+                        .set_draw_target(indicatif::ProgressDrawTarget::stderr());
+                    self.aggregate_pb.set_length(total_immutable_files);
+                    self.aggregate_pb.set_position(0);
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::ImmutableDownloadCompleted {
+                    ..
+                } => {
+                    self.aggregate_pb.inc(1);
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::Completed { .. } => {
+                    self.aggregate_pb.finish_with_message("download completed");
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadStarted {
+                    size,
+                    ..
+                } => {
+                    self.validate_pb.set_length(size);
+                    self.validate_pb.set_position(0);
+                    self.validate_pb.set_message("downloading digests");
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadProgress {
+                    downloaded_bytes,
+                    size,
+                    ..
+                } => {
+                    self.validate_pb.set_length(size);
+                    self.validate_pb.set_position(downloaded_bytes);
+                    self.validate_pb.set_message("downloading digests");
+                }
+                mithril_client::feedback::MithrilEventCardanoDatabase::DigestDownloadCompleted {
+                    ..
+                } => {
+                    self.validate_pb
+                        .finish_with_message("digests downloaded");
+                }
+                _ => {
+                    tracing::debug!("unhandled mithril event: {db_event:?}");
+                }
+            },
+            mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
+                ..
+            } => {
+                self.validate_pb
+                    .set_message("certificate chain validation started");
+            }
+            mithril_client::feedback::MithrilEvent::CertificateValidated {
+                certificate_hash: hash,
+                ..
+            } => {
+                self.validate_pb
+                    .set_message(format!("validating cert: {hash}"));
+            }
+            mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
+                self.validate_pb.set_message("certificate chain validated");
+            }
+            mithril_client::feedback::MithrilEvent::CertificateFetchedFromCache { .. } => {
+                self.validate_pb
+                    .set_message("certificate fetched from cache");
+            }
+            x => {
+                tracing::debug!("unhandled mithril event: {x:?}");
+            }
         }
     }
 }
