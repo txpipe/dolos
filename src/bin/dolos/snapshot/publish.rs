@@ -8,6 +8,7 @@ use miette::{Context as _, IntoDiagnostic as _};
 use dolos_snapshot::{
     export::Standing,
     registry::{self, Registry, Repository},
+    DolosProfile,
 };
 
 use super::EpochRange;
@@ -261,7 +262,7 @@ pub(super) fn to_repository(
     // After `standing`, because a repository holding another network's chain is
     // refused there and sizing against it would be sizing against the wrong
     // stele.
-    registry::preflight(&registry)
+    registry::preflight(&registry, &DolosProfile)
         .into_diagnostic()
         .context("sizing the staging directory")?;
 

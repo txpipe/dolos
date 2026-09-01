@@ -214,7 +214,8 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
 }
 
 /// Whether `kind` is one of the fourteen state kinds — the tip predicate the
-/// staging arithmetic in [`registry`] sums under.
+/// driver's staging arithmetic sums under, reaching it through
+/// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
     state_ns_for(kind).is_some()
 }
@@ -812,12 +813,13 @@ impl Profile for DolosProfile {
 
 /// The lifecycle's half of the same answer.
 ///
-/// Four questions [`Profile`] deliberately does not ask, because none of them
-/// is about naming: which kinds a closed window produces, which layers may be
-/// carried forward, and whether two documents stand on one chain. Every one of
-/// them is already decided somewhere in this crate — the constants, the
-/// inheritance rule and the position check — so this is delegation and not a
-/// second statement of any of it.
+/// Five questions [`Profile`] deliberately does not ask, because none of them
+/// is about naming: which kinds a closed window produces, which of them carry
+/// the tip, which layers may be carried forward, and whether two documents
+/// stand on one chain. Every one of them is already decided somewhere in this
+/// crate — the constants, the state split, the inheritance rule and the
+/// position check — so this is delegation and not a second statement of any of
+/// it.
 impl stelae_driver::DriverProfile for DolosProfile {
     fn epoch_kinds(&self) -> &[&str] {
         &EPOCH_KINDS
@@ -825,6 +827,10 @@ impl stelae_driver::DriverProfile for DolosProfile {
 
     fn dense_epoch_kinds(&self) -> &[&str] {
         &DENSE_EPOCH_KINDS
+    }
+
+    fn is_state_kind(&self, kind: &str) -> bool {
+        is_state_kind(kind)
     }
 
     fn is_inheritable(&self, kind: &str, scope: &serde_json::Value) -> bool {

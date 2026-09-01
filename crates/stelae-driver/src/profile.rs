@@ -9,10 +9,11 @@ use crate::Error;
 /// [`stelae::Profile`] answers what the *protocol* needs — naming, kinds, tags,
 /// the record ceiling — and deliberately has no hook for anything
 /// dataset-shaped. The lifecycle needs a little more than that and strictly
-/// less than a dataset: which kinds an epoch produces, whether a layer may be
-/// carried forward, and whether two documents describe the same dataset at all.
-/// None of those answers reaches into a store, a chain or a node, which is why
-/// they can live on a companion trait here rather than growing the protocol's.
+/// less than a dataset: which kinds an epoch produces, which kinds carry the
+/// tip, whether a layer may be carried forward, and whether two documents
+/// describe the same dataset at all. None of those answers reaches into a
+/// store, a chain or a node, which is why they can live on a companion trait
+/// here rather than growing the protocol's.
 ///
 /// Everything crossing this boundary in either direction is opaque: a `scope`
 /// and a `position` are [`serde_json::Value`], composed by the profile and
@@ -33,6 +34,20 @@ pub trait DriverProfile: stelae::Profile {
     /// arities: the dense kinds multiply out by the number of windows, and the
     /// sparse ones have to be counted against the data.
     fn dense_epoch_kinds(&self) -> &[&str];
+
+    /// Whether `kind` carries the dataset's tip rather than one window of its
+    /// history.
+    ///
+    /// Kind classification like [`DriverProfile::epoch_kinds`], and asked for
+    /// one reason: the staging arithmetic sizes the two halves of a stele
+    /// differently. A tip is rewritten whole by every publish, so all of it is
+    /// staged together and every such layer sums; anything else is staged a few
+    /// at a time and only the largest few count. [`is_inheritable`] cannot
+    /// stand in for this — it answers a different question, and a stele has
+    /// layers that are neither inheritable nor tip.
+    ///
+    /// [`is_inheritable`]: DriverProfile::is_inheritable
+    fn is_state_kind(&self, kind: &str) -> bool;
 
     /// Whether a layer of `kind` at `scope` may be carried forward from an
     /// earlier publish rather than built again.

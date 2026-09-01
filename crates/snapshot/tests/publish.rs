@@ -967,12 +967,17 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
 
     // The no-predecessor path: an empty repository states no sizes, so nothing
     // can be measured, so nothing is refused. A first publish runs.
-    assert_eq!(registry::staging_peak(&repository).unwrap(), None);
-    registry::preflight(&repository).unwrap();
+    assert_eq!(
+        registry::staging_peak(&repository, &DolosProfile).unwrap(),
+        None
+    );
+    registry::preflight(&repository, &DolosProfile).unwrap();
 
     node.publish(&repository, &node.first, false);
 
-    let peak = registry::staging_peak(&repository).unwrap().unwrap();
+    let peak = registry::staging_peak(&repository, &DolosProfile)
+        .unwrap()
+        .unwrap();
 
     assert_eq!(
         peak.unsized_layers, 0,
@@ -1056,14 +1061,16 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
         },
     );
 
-    let alone = registry::staging_peak(&serial).unwrap().unwrap();
+    let alone = registry::staging_peak(&serial, &DolosProfile)
+        .unwrap()
+        .unwrap();
 
     assert_eq!(alone.bytes(), state_bytes + others[0]);
     assert!(alone.bytes() < inspected.total_compressed);
 
     // And the volume the fixture stages on holds it, so the publish that
     // follows is not refused.
-    registry::preflight(&repository).unwrap();
+    registry::preflight(&repository, &DolosProfile).unwrap();
 
     eprintln!(
         "staging peak: {} bytes ({state_bytes} across sixteen shards, {:?} for the {staged} \

@@ -172,10 +172,10 @@ impl<'a> Publishing<'a> {
 ///
 /// - **the repository**, because a blob digest is an address in one repository
 ///   and means nothing in another;
-/// - **the network magic**, because two chains' epoch 500 are different bytes
-///   under one key. The descriptor scope deliberately carries no magic — the
-///   layer's own header record does — so this is the only place the record can
-///   hold it;
+/// - **the dataset**, because one sequence of two different datasets is two
+///   different sets of bytes under one key. A descriptor scope names a window
+///   and not a dataset — the layer's own header record carries that — so this
+///   is the only place the record can hold it;
 /// - **the parameters and the compression**, which are the inscription's own
 ///   statement of how its layers were built. A binary that changed either would
 ///   rebuild a recorded layer into different bytes, and the record would be
@@ -190,8 +190,13 @@ impl<'a> Publishing<'a> {
 pub struct Origin {
     /// The repository the layers were uploaded to, as the transport names it.
     pub repository: String,
-    /// The network the stores stood on.
-    pub network_magic: u64,
+    /// The dataset the layers were built from, as the profile identifies it.
+    ///
+    /// Opaque here: this crate compares it and never reads it. A profile that
+    /// numbers its datasets one way and a profile that numbers them another
+    /// both fit, which is the whole reason the field is not named after
+    /// either.
+    pub dataset_id: u64,
     /// The inscription parameters the layers were built under.
     pub parameters: serde_json::Value,
     /// The compression they were built with.
@@ -199,21 +204,20 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// What a publish into `registry` of a dataset identified by
-    /// `network_magic`, under `parameters` and `compression`, records under.
+    /// What a publish into `registry` of the dataset `dataset_id` identifies,
+    /// under `parameters` and `compression`, records under.
     ///
     /// Rebuilt from parts rather than read off a plan: every one of them is the
-    /// profile's own statement about the publish, and the record's field names
-    /// are frozen by the fixtures that already carry them.
+    /// profile's own statement about the publish.
     pub fn of(
         registry: &Registry,
-        network_magic: u64,
+        dataset_id: u64,
         parameters: serde_json::Value,
         compression: Compression,
     ) -> Self {
         Self {
             repository: registry.repository().to_string(),
-            network_magic,
+            dataset_id,
             parameters,
             compression,
         }
@@ -230,7 +234,7 @@ impl Origin {
     pub fn differences_from(&self, other: &Self) -> Vec<&'static str> {
         [
             (self.repository != other.repository, "repository"),
-            (self.network_magic != other.network_magic, "network magic"),
+            (self.dataset_id != other.dataset_id, "dataset id"),
             (self.parameters != other.parameters, "parameters"),
             (self.compression != other.compression, "compression"),
         ]
@@ -751,4 +755,212 @@ pub fn inheritable_layers(
     }
 
     Ok(inheritable)
+}
+
+/// What a publish holds staged on disk at its peak.
+///
+/// Not the size of the stele: a publish never has the whole document on disk at
+/// once. What it does have at once is a *tip* pass — the profile's export keeps
+/// one state kind's shard sinks open across a single walk of its namespace —
+/// plus whatever other layers are in flight beside it. Summing *every* state
+/// layer rather than the widest kind's is deliberately conservative: the peak
+/// it prices is the pre-split one, an upper bound on any per-kind pass.
+///
+/// Which layers are the tip is [`DriverProfile::is_state_kind`]'s answer and
+/// not one this crate could reach: it is the one place the arithmetic has to
+/// know something about a kind beyond its name.
+///
+/// "Layers beside it" is a handful and not one, because the transport uploads
+/// concurrently: a layer's staging file lives until its own round trip lands,
+/// so as many finished layers as the transport has permits can sit on disk at
+/// once alongside the pass. How many that is comes from
+/// [`stelae::oci::Registry::concurrency`] — asked of the transport rather than
+/// assumed here — and *which* ones is the largest that many, since the peak is
+/// the worst arrangement and nothing orders the uploads.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StagingPeak {
+    /// Every state layer, summed — the conservative reading above.
+    pub state_bytes: u64,
+    /// The non-state layers that can be staged at once, largest first: as many
+    /// as the transport uploads concurrently, or all of them where the stele
+    /// has fewer than that. Empty on a stele that is all state, and on a
+    /// [`StagingPeak::default`] nothing was measured into.
+    pub concurrent_other_bytes: Vec<u64>,
+    /// Layers the predecessor's manifest stated no size for. Non-zero makes
+    /// every number here a floor rather than an estimate.
+    pub unsized_layers: usize,
+}
+
+impl StagingPeak {
+    /// Compressed bytes the scratch volume has to hold at once.
+    ///
+    /// Saturating throughout, because these are a manifest's numbers and a
+    /// manifest is not this node's document: a wrapped sum would be a *small*
+    /// need, which is the one direction a refusal must never be wrong in.
+    pub fn bytes(&self) -> u64 {
+        self.concurrent_other_bytes
+            .iter()
+            .fold(self.state_bytes, |total, bytes| {
+                total.saturating_add(*bytes)
+            })
+    }
+
+    /// The largest non-state layer, which is the first of the ones staged at
+    /// once.
+    pub fn largest_other_bytes(&self) -> u64 {
+        self.concurrent_other_bytes.first().copied().unwrap_or(0)
+    }
+}
+
+/// Size the staging peak of the next publish from the stele before it.
+///
+/// A proxy, and deliberately so: the numbers are the *predecessor's* layers,
+/// not this publish's, because this publish's layers do not exist until it
+/// builds them and sizing them would mean building them. One sequence of drift
+/// is what the proxy costs, against a check that otherwise cannot exist at all
+/// — and the refuse/warn split is what keeps it honest, since a shortfall
+/// against the last publish's sizes is still a measured shortfall.
+///
+/// Off the manifest the pull already fetched, and no per-layer `HEAD`: the
+/// promise a profile's dry run makes about touching nothing holds here too.
+///
+/// `Ok(None)` is a first publish — no predecessor, nothing to size from — which
+/// [`preflight`] turns into a warning rather than a refusal.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn staging_peak(
+    registry: &Registry,
+    profile: &dyn DriverProfile,
+) -> Result<Option<StagingPeak>, Error> {
+    let Some(previous) = registry.latest(profile)? else {
+        return Ok(None);
+    };
+
+    let inscription = previous.read_inscription()?;
+    let blobs = previous.blob_index()?;
+
+    let mut peak = StagingPeak::default();
+    let mut others = Vec::new();
+
+    for descriptor in &inscription.layers {
+        match previous.compressed_size(&blobs, descriptor)? {
+            None => peak.unsized_layers += 1,
+            // Every state layer adds — the conservative sum-all-state rule the
+            // type documents.
+            Some(bytes) if profile.is_state_kind(&descriptor.kind) => {
+                peak.state_bytes = peak.state_bytes.saturating_add(bytes)
+            }
+            Some(bytes) => others.push(bytes),
+        }
+    }
+
+    // The largest as many as the transport stages at once, and no more: a stele
+    // with fewer non-state layers than the transport has permits cannot put
+    // more of them on disk than it has.
+    others.sort_unstable_by(|a, b| b.cmp(a));
+    others.truncate(registry.concurrency());
+
+    peak.concurrent_other_bytes = others;
+
+    Ok(Some(peak))
+}
+
+/// Refuse a publish whose scratch volume cannot hold what it stages at once.
+///
+/// The publish side of [`crate::preflight`]'s one policy, which a profile's
+/// restore is the other side of: a measured shortfall refuses, naming the
+/// volume and the shortfall, and what cannot be sized warns and proceeds.
+///
+/// The volume is the transport's own — [`stelae::oci::Registry::scratch_dir`] —
+/// so the directory sized here and the directory written to cannot come apart.
+/// A transport opened without one stages in the platform temporary directory,
+/// which it does not name, so there is nothing to size and nothing to refuse;
+/// [`open`] always sets one, so no caller that came through it reaches that
+/// case.
+///
+/// **Never call this from inside an async context.** See [`open`].
+pub fn preflight(registry: &Registry, profile: &dyn DriverProfile) -> Result<(), Error> {
+    let Some(scratch_dir) = registry.scratch_dir() else {
+        tracing::warn!(
+            "this transport stages in the platform temporary directory, which it does not name; \
+             skipping the free-space check for {STAGING}"
+        );
+
+        return Ok(());
+    };
+
+    crate::preflight::check(&[staging_need(staging_peak(registry, profile)?, scratch_dir)])
+}
+
+/// What the staging asks of its volume, as [`crate::preflight`] takes it.
+///
+/// Split out of [`preflight`] so the demand and the transport that produced it
+/// can be tested apart: sizing a peak needs a registry, and deciding what a
+/// peak means for a volume needs none.
+const STAGING: &str = "staging this publish";
+
+fn staging_need(peak: Option<StagingPeak>, scratch_dir: &Path) -> crate::preflight::Need {
+    let Some(peak) = peak else {
+        return crate::preflight::Need::unsized_because(
+            STAGING,
+            scratch_dir,
+            "this repository holds no stele to size the staging from",
+        );
+    };
+
+    if peak.unsized_layers > 0 {
+        tracing::warn!(
+            unsized_layers = peak.unsized_layers,
+            "the predecessor's manifest states no size for some of its layers; the staging \
+             estimate is a floor"
+        );
+    }
+
+    crate::preflight::Need::of(STAGING, scratch_dir, peak.bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The publish half of the one policy, over a peak this test supplies.
+    ///
+    /// The other half of the chain — that the peak is the predecessor's tip
+    /// shards plus its largest other layer — needs a registry to state a
+    /// manifest, so it lives with a profile that can build one. Between them
+    /// the composition [`preflight`] performs is covered: this end decides,
+    /// that end measures.
+    #[test]
+    fn a_measured_staging_shortfall_refuses_and_a_first_publish_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let check = |peak| -> Result<(), Error> {
+            crate::preflight::check(&[staging_need(peak, temp.path())])
+        };
+
+        // No predecessor, so nothing sized it, so nothing refuses.
+        check(None).unwrap();
+
+        check(Some(StagingPeak::default())).unwrap();
+
+        // A peak no volume holds. Both halves are set, so the refusal is on
+        // their sum and not on either alone.
+        let err = check(Some(StagingPeak {
+            state_bytes: u64::MAX / 2,
+            concurrent_other_bytes: vec![u64::MAX / 4, u64::MAX / 4],
+            unsized_layers: 0,
+        }))
+        .unwrap_err();
+
+        let Error::NotEnoughSpace(message) = &err else {
+            panic!("{err:?}");
+        };
+
+        assert!(message.contains(STAGING), "{message}");
+        assert!(
+            message.contains(&temp.path().display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("short"), "{message}");
+    }
 }
