@@ -503,12 +503,11 @@ impl SteleDir {
     /// the tip shard it was cut from are one blob under two scopes — so the map
     /// is keyed by identity and the file lists each blob once.
     ///
-    /// Declining **removes** any sidecar already there, which is the half that
-    /// makes the postcondition worth having: after a seal the file describes
-    /// *this* inscription or does not exist. A directory sealed a second time
-    /// through a second handle — the first handle's layers already on disk and
-    /// unknown to this one — would otherwise keep a map that is complete for a
-    /// document nobody published any more.
+    /// Declining leaves the stele with no sidecar, which [`SteleWriter::seal`]
+    /// has already seen to: a directory sealed a second time through a second
+    /// handle — the first handle's layers already on disk and unknown to this
+    /// one — would otherwise keep a map that is complete for a document nobody
+    /// publishes any more.
     ///
     /// Written through a staging file and renamed, so the name never exists
     /// over half a document: the reader's rule is that a file which is there
@@ -646,8 +645,18 @@ impl SteleWriter for SteleDir {
     /// The sidecar lands after it, and in that order on purpose: the
     /// inscription is the stele and the sidecar is an index over it, so a
     /// directory is never one without being the other first.
+    ///
+    /// Any sidecar already there is dropped before the inscription it indexes
+    /// is replaced, which is what makes "describes this inscription or is not
+    /// there" hold for a seal that *fails* as well as one that returns. Written
+    /// the other way round, a seal interrupted between the two writes would
+    /// leave the previous document's map over the new inscription — and a
+    /// reader that finds a map stops looking at blobs, so it would place layers
+    /// this stele no longer holds and report the ones it does as missing.
     fn seal(&self, _profile: &dyn Profile, inscription: &Inscription) -> Result<Digest, Error> {
         let canonical = inscription.canonicalize()?;
+
+        self.remove_blob_index()?;
 
         let mut file = fs::File::create(self.root.join(INSCRIPTION_FILE))?;
         file.write_all(&canonical)?;

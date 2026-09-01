@@ -1098,6 +1098,40 @@ fn an_incomplete_map_is_not_written() {
     assert!(index.blob_for(&inscription.layers[0].diff_id).is_some());
 }
 
+/// A seal that fails publishes no map rather than the last one.
+///
+/// The sidecar's postcondition is that it describes the inscription beside it,
+/// and a seal is two writes — so the only way to hold that across a failure
+/// between them is to drop the old map before the inscription moves. Here the
+/// inscription write is the one that fails, because a file cannot be created
+/// over a directory; what that stands in for is a full disk.
+#[test]
+fn a_seal_that_fails_leaves_no_stale_map() {
+    let temp = tempfile::tempdir().unwrap();
+    let (inscription, _) = write_stele(temp.path());
+
+    let sidecar = temp.path().join(stelae::dir::BLOB_INDEX_FILE);
+    assert!(
+        sidecar.is_file(),
+        "a seal writes the map beside the document"
+    );
+
+    // Opened while the inscription is still readable, since that is what a
+    // reseal of a published stele would have done.
+    let stele = SteleDir::open(temp.path()).unwrap();
+
+    let path = temp.path().join(stelae::dir::INSCRIPTION_FILE);
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+
+    stele.seal(&ToyProfile, &inscription).unwrap_err();
+
+    assert!(
+        !sidecar.exists(),
+        "a seal that could not publish its inscription left the previous map behind"
+    );
+}
+
 /// The saving, measured rather than asserted.
 ///
 /// One stele read both ways, and the numbers go to stdout — `cargo test -p
