@@ -974,10 +974,6 @@ fn tampering_is_caught_on_read() {
     );
 }
 
-// --------------------------------------------------------------------------
-// The blob-index sidecar
-// --------------------------------------------------------------------------
-
 /// A seal writes the map, and it is the map the scan would have rebuilt.
 #[test]
 fn a_sealed_directory_states_its_blob_map() {
