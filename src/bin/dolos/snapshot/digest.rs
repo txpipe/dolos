@@ -120,9 +120,6 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         None => eprintln!("history:  none; this reproduction starts a chain"),
     }
 
-    // The bytes, not a re-encoding of the content: they are what a verifier
-    // hashes, so anything that pretty-printed them would carry a digest nobody
-    // else computes. The identity is their sha256.
     let document = export::digest_document(
         &plan,
         &stores.archive,

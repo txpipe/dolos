@@ -86,15 +86,11 @@ mod auth {
         match &registry.user {
             Some(user) => Ok(Auth::Basic {
                 user: user.clone(),
-                // A user and no password means the official registry's.
                 password: registry
                     .password
                     .clone()
                     .unwrap_or_else(|| OFFICIAL_REGISTRY_PASSWORD.to_owned()),
             }),
-            // A password with nobody to be. Anonymous would be the quiet answer
-            // and the wrong one: the operator supplied a secret and it would go
-            // unused.
             None if registry.password.is_some() => Err(Error::OrphanRegistryPassword),
             None => Ok(Auth::Anonymous),
         }
@@ -208,9 +204,6 @@ mod tests {
             assert!(message.contains("user"), "{message}");
         }
 
-        /// A password with nobody to be. Anonymous would be the quiet answer
-        /// and the wrong one: the operator supplied a secret and it
-        /// would go unused.
         #[test]
         fn a_password_with_no_user_is_refused() {
             let orphan = StelaeRegistryConfig {

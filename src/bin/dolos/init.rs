@@ -199,12 +199,9 @@ impl From<&KnownNetwork> for MithrilConfig {
 /// Issued by the official registry at `oci.stelae.store`.
 const OFFICIAL_REGISTRY_USER: &str = "stelae";
 
-// The password that goes with `OFFICIAL_REGISTRY_USER` is not here: it is
-// `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`, compiled in beside the
-// code that reads it rather than written into every generated `dolos.toml`.
-// Rotating the pair is a change in both places, paired with a release and
-// comms, because generated configs and released binaries carry the old one
-// until their nodes update.
+// The password that goes with `OFFICIAL_REGISTRY_USER` is
+// `dolos_snapshot::node::OFFICIAL_REGISTRY_PASSWORD`, which is where rotating
+// the pair is documented.
 
 /// `[stelae]` as a generated config carries it: the official registry's user,
 /// and no password.

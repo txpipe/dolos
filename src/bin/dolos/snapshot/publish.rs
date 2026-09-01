@@ -202,8 +202,6 @@ pub(super) fn to_repository(
         .into_diagnostic()
         .context("opening the repository")?;
 
-    // Before anything is built, and before the dry run too: a publisher asking
-    // what a publish would do wants the same answer the publish gives.
     let standing = publisher
         .standing(plan)
         .into_diagnostic()
@@ -212,9 +210,6 @@ pub(super) fn to_repository(
     match Next::read(standing, plan.sequence, publish.require_new).into_diagnostic()? {
         Next::First => println!("follows:  nothing; this repository holds no stele"),
         Next::After { latest } => println!("follows:  sequence {latest}"),
-        // Not a failure, and not this command's to dress up as one: the message
-        // is the crate's, the exit code is zero, and `--require-new` is what
-        // turns the same reading into the refusal above.
         Next::Nothing(message) => {
             println!("{message}");
             return Ok(());
