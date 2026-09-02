@@ -58,6 +58,15 @@ pub struct SyntheticBlockConfig {
     pub drep_deposit: u64,
     pub gov_actions_by_block: Vec<BlockGovActions>,
     pub proposal_deposit: u64,
+    /// Fund each tx from the previous block's tx at the same index instead of
+    /// from a fresh `seed_address` UTxO.
+    ///
+    /// Seed UTxOs are injected as custom UTxOs, so the tx that produced them
+    /// is not in the archive and an endpoint scanning the chain cannot resolve
+    /// them. Spending an earlier synthetic output instead gives the account a
+    /// resolvable input, which is what the endpoints reading the spent side of
+    /// a tx need.
+    pub spend_previous_outputs: bool,
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -116,6 +125,7 @@ impl Default for SyntheticBlockConfig {
             drep_deposit: 1000,
             gov_actions_by_block: vec![],
             proposal_deposit: 100_000_000,
+            spend_previous_outputs: false,
         }
     }
 }
@@ -294,6 +304,7 @@ pub fn build_synthetic_blocks(
         cbor: submit_cbor,
     });
     let mut prev_block_hash: Option<Hash<32>> = None;
+    let mut prev_block_tx_hashes: Vec<Hash<32>> = Vec::new();
 
     for (offset, asset_name) in asset_names.iter().enumerate() {
         let slot = cfg.slot + offset as u64;
@@ -312,16 +323,32 @@ pub fn build_synthetic_blocks(
         let aux_hash = aux_data.compute_hash();
 
         for tx_offset in 0..txs_per_block {
-            let seed_tx_hash = tx_sequence_to_hash(1 + (offset * txs_per_block + tx_offset) as u64);
-            let seed_ref = TxoRef(seed_tx_hash, 0);
-            let seed_utxo = utxo_with_value(cfg.seed_address.clone(), Value::Coin(cfg.seed_amount));
-            let crate::EraCbor(_, seed_cbor) = seed_utxo;
+            // the previous block's tx at this index paid an account address,
+            // and unlike a seed UTxO it was produced by a tx the archive holds
+            let funded_by_account = cfg
+                .spend_previous_outputs
+                .then(|| prev_block_tx_hashes.get(tx_offset).copied())
+                .flatten();
 
-            chain_config.custom_utxos.push(CustomUtxo {
-                ref_: seed_ref,
-                era: Some(pallas::ledger::traverse::Era::Conway.into()),
-                cbor: seed_cbor,
-            });
+            let seed_tx_hash = match funded_by_account {
+                Some(hash) => hash,
+                None => {
+                    let seed_tx_hash =
+                        tx_sequence_to_hash(1 + (offset * txs_per_block + tx_offset) as u64);
+                    let seed_ref = TxoRef(seed_tx_hash, 0);
+                    let seed_utxo =
+                        utxo_with_value(cfg.seed_address.clone(), Value::Coin(cfg.seed_amount));
+                    let crate::EraCbor(_, seed_cbor) = seed_utxo;
+
+                    chain_config.custom_utxos.push(CustomUtxo {
+                        ref_: seed_ref,
+                        era: Some(pallas::ledger::traverse::Era::Conway.into()),
+                        cbor: seed_cbor,
+                    });
+
+                    seed_tx_hash
+                }
+            };
 
             let output_address = if tx_offset == 0 {
                 address_bytes.clone()
@@ -402,6 +429,7 @@ pub fn build_synthetic_blocks(
 
         let block_hash = block.header.compute_hash();
         prev_block_hash = Some(block_hash);
+        prev_block_tx_hashes = hashes.clone();
         let wrapper = (7, block);
         let raw_block = Arc::new(minicbor::to_vec(wrapper).unwrap());
 
