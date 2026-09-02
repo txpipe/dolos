@@ -15,6 +15,7 @@ base64.workspace = true
 bech32.workspace = true
 bincode.workspace = true
 chrono.workspace = true
+libc = "0.2"
 futures-core.workspace = true
 futures-util.workspace = true
 hex.workspace = true
