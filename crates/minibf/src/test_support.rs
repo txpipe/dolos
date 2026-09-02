@@ -121,6 +121,18 @@ impl TestApp {
         Self::from_domain(domain, vectors, fault)
     }
 
+    /// Same as [`TestApp::new`], with the minibf config adjusted before the
+    /// router is built — for routes whose behaviour is config-driven.
+    pub fn new_with_minibf_config(tweak: impl FnOnce(MinibfConfig) -> MinibfConfig) -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain_with_config(domain, vectors, None, tweak)
+    }
+
     pub fn new_with_cfg_and_setup(
         cfg: SyntheticBlockConfig,
         setup: impl FnOnce(&ToyDomain, &SyntheticVectors),
@@ -131,12 +143,23 @@ impl TestApp {
     }
 
     fn from_domain(domain: ToyDomain, vectors: SyntheticVectors, fault: Option<TestFault>) -> Self {
+        Self::from_domain_with_config(domain, vectors, fault, |cfg| cfg)
+    }
+
+    fn from_domain_with_config(
+        domain: ToyDomain,
+        vectors: SyntheticVectors,
+        fault: Option<TestFault>,
+        tweak: impl FnOnce(MinibfConfig) -> MinibfConfig,
+    ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        let cfg = tweak(MinibfConfig::new(
+            "[::]:0".parse().expect("invalid listen address"),
+        ));
 
         let facade = Facade {
             inner: domain.clone(),

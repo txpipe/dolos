@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use dolos_cardano::consensus::{ChainFragment, RollbackResult};
 use dolos_core::config::{PeerConfig, SyncConfig, SyncLimit};
@@ -26,6 +27,17 @@ fn to_traverse(header: &HeaderContent) -> Result<MultiEraHeader<'_>, WorkerError
 // ============================================================================
 // Pull stage
 // ============================================================================
+
+/// Ceiling on a single attempt to open a chainsync session with the upstream
+/// peer, covering both the TCP connect and the N2N handshake.
+///
+/// Neither has a deadline of its own, so an address that resolves but never
+/// answers leaves the stage parked in `bootstrap` forever — no error, no log
+/// line, and no signal to the supervising daemon, which sees a stage that is
+/// merely still starting up. The node then serves whatever it had on disk
+/// indefinitely. Bounding the attempt turns that silence into a retry we can
+/// warn about.
+const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type DownstreamPort = gasket::messaging::OutputPort<PullEvent>;
 
@@ -221,9 +233,31 @@ impl gasket::framework::Worker<Stage> for Worker {
 
         debug!("connecting to peer");
 
-        let mut peer_session = PeerClient::connect(&stage.peer_address, stage.network_magic)
-            .await
-            .or_retry()?;
+        let connect = PeerClient::connect(&stage.peer_address, stage.network_magic);
+
+        let mut peer_session = match tokio::time::timeout(PEER_CONNECT_TIMEOUT, connect).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(err)) => {
+                warn!(
+                    address = stage.peer_address,
+                    magic = stage.network_magic,
+                    %err,
+                    "could not reach upstream peer, will retry"
+                );
+
+                return Err(WorkerError::Retry);
+            }
+            Err(_) => {
+                warn!(
+                    address = stage.peer_address,
+                    magic = stage.network_magic,
+                    timeout_sec = PEER_CONNECT_TIMEOUT.as_secs(),
+                    "upstream peer did not answer within the connect timeout, will retry"
+                );
+
+                return Err(WorkerError::Retry);
+            }
+        };
 
         info!(
             address = stage.peer_address,

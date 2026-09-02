@@ -369,9 +369,10 @@ where
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
-        .route("/health", get(routes::health::naked))
+        .route("/health", get(routes::health::naked::<D>))
         .route("/metrics", get(routes::metrics::metrics::<D>))
         .route("/health/clock", get(routes::health::clock))
+        .route("/health/tip", get(routes::health::tip::<D>))
         .route("/genesis", get(routes::genesis::naked::<D>))
         .route("/network", get(routes::network::naked::<D>))
         .route("/network/eras", get(routes::network::eras::<D>))

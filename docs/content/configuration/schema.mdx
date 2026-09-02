@@ -317,12 +317,14 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 | token_registry_url | string  | "https://token-registry.io"     |
 | url                | string  | "https://minibf.local"          |
 | max_scan_items     | integer | 3000                             |
+| max_tip_age_sec    | integer | 300                              |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `max_tip_age_sec`: how far behind the wall clock the node's tip may fall before `/health` starts answering `503`. Unset by default, in which case `/health` keeps reporting healthy no matter how stale the node is — a node catching up from a bootstrap is hours behind by design, so a default threshold would pull it out of a load balancer mid-sync. Regardless of this setting, `/health/tip` reports `tip_slot` and `tip_age_seconds` whenever the tip is readable — they are omitted when it is not — so staleness is observable without opting into the gate.
 
 ## `serve.minikupo` section
 

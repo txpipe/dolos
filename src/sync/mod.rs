@@ -58,7 +58,11 @@ pub fn sync(
 ) -> Result<Vec<gasket::runtime::Tether>, Error> {
     let mut pull = pull::Stage::new(config, upstream, network_magic, domain.wal().clone());
 
-    let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
+    let mut apply = apply::Stage::new(
+        domain.clone(),
+        HOUSEKEEPING_INTERVAL,
+        Some(upstream.peer_address.clone()),
+    );
 
     let submit = submit::Stage::new(
         upstream.peer_address.clone(),
@@ -94,7 +98,7 @@ pub fn devnet(
         emulator_cfg.block_production_interval,
     );
 
-    let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL);
+    let mut apply = apply::Stage::new(domain.clone(), HOUSEKEEPING_INTERVAL, None);
 
     let (to_apply, from_pull) = gasket::messaging::tokio::mpsc_channel(50);
     emulator.downstream.connect(to_apply);

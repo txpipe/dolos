@@ -73,12 +73,14 @@ The `serve.minibf` section controls the options for the MiniBF endpoint that can
 | token_registry_url | string  | "https://token-registry.io"     |
 | url                | string  | "https://minibf.local"          |
 | max_scan_items     | integer | 3000                             |
+| max_tip_age_sec    | integer | 300                              |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin.
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata. 
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `max_tip_age_sec`: opts into the health gate described under "Health and staleness" below — past this many seconds of tip age, `/health` answers `503`. Unset by default, in which case `/health` keeps reporting healthy however far behind the node has fallen.
 
 This is an example of the `serve.minibf` fragment with a `dolos.toml` configuration file.
 
@@ -89,6 +91,7 @@ permissive_cors = true
 token_registry_url = "https://token-registry.io"
 url = "https://minibf.local"
 max_scan_items = 3000
+max_tip_age_sec = 300
 ```
 
 Check the [Configuration Schema](../configuration/schema) for detailed info on how to set this up.
@@ -102,6 +105,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/`                                        | Service info (version, revision)                         |
 | `/health`                                  | Health check                                             |
 | `/health/clock`                            | Clock health                                             |
+| `/health/tip`                              | Tip age and staleness verdict                            |
 | `/metrics`                                 | Prometheus metrics                                       |
 | `/accounts/{stake_address}`                | Get account information for a stake address              |
 | `/accounts/{stake_address}/addresses`      | Get addresses for a stake address                        |
@@ -180,3 +184,41 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/stakes`                    | Get stakes for a specific transaction                    |
 | `/txs/{tx_hash}/utxos`                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`               | Get withdrawals for a specific transaction               |
+
+## Health and staleness
+
+`/health` answers the Blockfrost question — is this node fit to serve? — and
+nothing else:
+
+```json
+{ "is_healthy": true }
+```
+
+`/health/tip` answers the more useful one: how current is it?
+
+```json
+{
+  "tip_slot": 84916321,
+  "tip_age_seconds": 34,
+  "max_tip_age_seconds": 300,
+  "is_stale": false
+}
+```
+
+`tip_age_seconds` is the wall-clock gap between the node's tip and now. It is
+the field that distinguishes a node tracking the chain from one that has been
+serving the same block for hours — a distinction a caller otherwise cannot make
+without a second, independent opinion about where the chain actually is.
+
+By default dolos measures but does not judge: `is_stale` and
+`max_tip_age_seconds` are omitted, and `/health` keeps answering `200` however
+far behind the node has fallen, since a node catching up from a bootstrap is
+hours behind by design. Set `serve.minibf.max_tip_age_sec` to opt into a gate:
+past that many seconds `/health` answers `503` with `is_healthy: false`, which
+is what lets a load balancer or supervisor take a stale node out of rotation,
+while `/health/tip` reports `is_stale: true` alongside the age that earned the
+verdict.
+
+`tip_slot` and `tip_age_seconds` are omitted when the tip cannot be read at
+all — an unmeasurable node is reported as unmeasurable rather than as unhealthy,
+so `/health` keeps its original meaning.

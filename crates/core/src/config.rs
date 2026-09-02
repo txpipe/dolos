@@ -945,6 +945,8 @@ pub struct MinibfConfig {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_scan_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_tip_age_sec: Option<u64>,
 }
 
 impl MinibfConfig {
@@ -955,6 +957,7 @@ impl MinibfConfig {
             token_registry_url: None,
             url: None,
             max_scan_items: None,
+            max_tip_age_sec: None,
         }
     }
 
@@ -974,6 +977,22 @@ impl MinibfConfig {
 
     pub fn max_scan_items(&self) -> u64 {
         self.max_scan_items.unwrap_or(default_max_scan_items())
+    }
+
+    pub fn with_max_tip_age_sec(mut self, max_tip_age_sec: u64) -> Self {
+        self.max_tip_age_sec = Some(max_tip_age_sec);
+        self
+    }
+
+    /// Age, in seconds, past which the node's tip is considered too stale to
+    /// serve and `/health` starts answering `503`.
+    ///
+    /// Unset by default: a node that has fallen behind still reports healthy,
+    /// because a node catching up from a bootstrap is hours behind by design.
+    /// `/health/tip` reports `tip_age_seconds` whenever the tip is readable, so
+    /// staleness is observable whether or not an operator opts into the gate.
+    pub fn max_tip_age_sec(&self) -> Option<u64> {
+        self.max_tip_age_sec
     }
 }
 
