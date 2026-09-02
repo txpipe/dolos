@@ -6,7 +6,7 @@
 //!
 //! ## The order is the specification
 //!
-//! ADR-004 §"Restore pipeline" fixes the sequence, and it is not an
+//! PROFILE.md §"Restore pipeline" fixes the sequence, and it is not an
 //! implementation preference — each step exists because of what the one before
 //! it established:
 //!
@@ -45,8 +45,8 @@
 //! the tip is never checkpointed — so the partial-`utxo::*` node is repairable
 //! by an operator who resumes, where before it could only be thrown away. What
 //! it does not answer is whether `set_cursor` should move *after* step 6. That
-//! is ADR-004's ordering, it is an open question with its owner, and nothing
-//! here reorders the pipeline to pre-empt it.
+//! is the profile spec's ordering, it is an open question with its owner, and
+//! nothing here reorders the pipeline to pre-empt it.
 //!
 //! ## Resume, and where the checkpoint goes
 //!
@@ -768,7 +768,7 @@ fn scope_uint(descriptor: &LayerDescriptor, field: &str) -> Result<u64, Error> {
 
 /// Name of the progress file inside a node's storage directory.
 ///
-/// ADR-004's, spelled exactly as it spells it. "Snapshot" is this profile's
+/// PROFILE.md's, spelled exactly as it spells it. "Snapshot" is this profile's
 /// word for a stele — Dolos says `dolos snapshot`, the protocol says *stele* —
 /// which is why the name lives here and not in `stelae`, whose
 /// [`stelae::plan::RestoreProgress`] takes a path a caller chose.

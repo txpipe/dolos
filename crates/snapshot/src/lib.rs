@@ -8,8 +8,8 @@
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
-//! The normative specification is `adrs/004_stelae_snapshots.md`; this crate is
-//! that document's record table (§"Layer formats") made executable.
+//! The normative specification is `PROFILE.md` beside this crate; this crate
+//! is that document's record table (§"Layer formats") made executable.
 //!
 //! ## What is here, and what is deliberately not
 //!
