@@ -385,6 +385,13 @@ fn account_amounts(totals: AssetTotals) -> Vec<AccountAddressesTotalReceivedSumI
 /// stele and every state rebuild. The account therefore pays the same full
 /// scan `/addresses/{address}/total` already pays for a single address, which
 /// also means the answer only covers the history the archive still holds.
+///
+/// Pointer-delegated addresses are out of scope. The archive's stake tag and
+/// this fold both resolve an output's account through
+/// `pallas_extras::shelley_address_to_stake_address`, which has no answer for
+/// a pointer, so those blocks are never tagged and so never scanned. Every
+/// other account endpoint reads that same tag, so the blind spot is the
+/// family's, not this endpoint's.
 pub async fn by_stake_addresses_total<D>(
     Path(stake_address): Path<String>,
     State(domain): State<Facade<D>>,
