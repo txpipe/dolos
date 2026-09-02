@@ -3,7 +3,10 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::proposals_inner::{GovernanceType, ProposalsInner};
+use blockfrost_openapi::models::{
+    proposal_withdrawals_inner::ProposalWithdrawalsInner,
+    proposals_inner::{GovernanceType, ProposalsInner},
+};
 use dolos_cardano::{
     model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
     pallas_extras, ChainSummary, PParamsSet,
@@ -11,13 +14,17 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
 use pallas::{
     crypto::hash::Hash,
-    ledger::{primitives::Epoch, traverse::MultiEraBlock},
+    ledger::{
+        addresses::Network,
+        primitives::{Coin, Epoch, StakeCredential},
+        traverse::MultiEraBlock,
+    },
 };
 use std::collections::HashMap;
 
 use crate::{
     error::Error,
-    mapping::{bech32, bech32_gov_action, IntoModel},
+    mapping::{bech32, bech32_gov_action, parse_gov_action_id, stake_cred_to_address, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -445,6 +452,118 @@ where
         .run_blocking(move |domain| Ok(read_page(&domain, &pagination)))
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// One page of a proposal's treasury withdrawals, ordered the way the action
+/// itself lists them.
+///
+/// A proposal procedure carries its withdrawals as a map keyed by reward
+/// account, so their on-chain order is the raw reward-account bytes ascending.
+/// That is the order dolos keeps in the action, and the one Blockfrost's own
+/// listing — by the db-sync row id the rows were inserted with — lands in.
+fn withdrawals_page(
+    state: &ProposalState,
+    network: Network,
+    pagination: &Pagination,
+) -> Result<Vec<ProposalWithdrawalsInner>, StatusCode> {
+    let ProposalAction::TreasuryWithdrawal(withdrawals) = &state.action else {
+        return Ok(vec![]);
+    };
+
+    // desc is the whole ascending listing read backwards
+    let ordered: Box<dyn Iterator<Item = &(StakeCredential, Coin)>> = match pagination.order {
+        Order::Asc => Box::new(withdrawals.iter()),
+        Order::Desc => Box::new(withdrawals.iter().rev()),
+    };
+
+    ordered
+        .skip(pagination.from())
+        .take(pagination.count)
+        .map(|(credential, amount)| {
+            let stake_address = stake_cred_to_address(credential, network)
+                .to_bech32()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            Ok(ProposalWithdrawalsInner {
+                stake_address,
+                amount: amount.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The withdrawals of the proposal `tx` proposed at action index `idx`.
+///
+/// Blockfrost reads this off a join with db-sync's `treasury_withdrawal`
+/// table and sends whatever rows come back, so a proposal it has never heard
+/// of and a proposal that asks for no withdrawal are the same empty listing
+/// rather than a 404.
+fn read_withdrawals<D: Domain>(
+    domain: &Facade<D>,
+    tx: Hash<32>,
+    idx: u32,
+    pagination: &Pagination,
+) -> Result<Vec<ProposalWithdrawalsInner>, Error> {
+    let key = ProposalState::build_entity_key(tx, idx);
+
+    let state = domain
+        .state()
+        .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some(state) = state else {
+        return Ok(vec![]);
+    };
+
+    let network = domain.get_network_id()?;
+
+    Ok(withdrawals_page(&state, network, pagination)?)
+}
+
+/// `GET /governance/proposals/{tx_hash}/{cert_index}/withdrawals`: the
+/// treasury payouts a withdrawal proposal asks for, oldest first.
+pub async fn proposal_withdrawals<D>(
+    Path((tx_hash, cert_index)): Path<(String, String)>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<ProposalWithdrawalsInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let cert_index = cert_index
+        .parse::<u32>()
+        .map_err(|_| Error::InvalidCertIndex)?;
+
+    // Blockfrost matches the hash as text against db-sync, so a malformed one
+    // is a listing that matches nothing rather than a bad request.
+    let Ok(tx) = tx_hash.parse::<Hash<32>>() else {
+        return Ok(Json(vec![]));
+    };
+
+    let page = read_withdrawals(&domain, tx, cert_index, &pagination)?;
+
+    Ok(Json(page))
+}
+
+/// `GET /governance/proposals/{gov_action_id}/withdrawals`: the same listing,
+/// addressed by CIP-129 id instead of by tx hash and action index.
+pub async fn proposal_withdrawals_by_gov_action<D>(
+    Path(gov_action_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<ProposalWithdrawalsInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
+
+    let page = read_withdrawals(&domain, tx, idx, &pagination)?;
 
     Ok(Json(page))
 }
