@@ -148,7 +148,9 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/genesis`                                                 | Get genesis information                                  |
 | `/governance/dreps/{drep_id}`                              | Get DRep information                                     |
 | `/governance/proposals`                                    | Get list of governance proposals                         |
+| `/governance/proposals/{gov_action_id}/parameters`         | Get parameter change of a proposal by CIP-129 id         |
 | `/governance/proposals/{gov_action_id}/withdrawals`        | Get withdrawals of a proposal by CIP-129 id              |
+| `/governance/proposals/{tx_hash}/{cert_index}/parameters`  | Get parameter change of a specific proposal              |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
