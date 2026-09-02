@@ -266,7 +266,7 @@ The `sync` section controls how Dolos synchronizes the chain from upstream peers
 | sync_limit      | string  | "NoLimit" (default) |
 
 - `pull_batch_size`: the number of blocks that are fetched per batch (defaults to `100`).
-- `max_history`: maximum number of slots to keep in archive history before housekeeping prunes old data.
+- `max_history`: maximum number of slots to keep in archive history before housekeeping prunes old data. Pruned blocks are also out of reach for the MiniBF endpoints that fold lifetime totals (`/addresses/{address}/total`, `/accounts/{stake_address}/addresses/total`), whose sums then only cover the retained window.
 - `max_rollback`: maximum number of slots to keep in WAL history before housekeeping prunes old entries.
 - `sync_limit`: one of `"NoLimit"`, `"UntilTip"`, or `{ MaxBlocks = <number> }` (defaults to `"NoLimit"`).
 
