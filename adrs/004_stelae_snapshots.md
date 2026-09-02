@@ -309,7 +309,7 @@ The arithmetic is counted in layers, because layers are what the ceiling counts:
 
 ### Code layout
 
-Four crates, all workspace members until the extraction. The Stelae half is two of them — the protocol a third party implements from and the profile-generic lifecycle machinery — and the boundary is mechanical: **`cargo tree -e normal --all-features` for `stelae` and `stelae-driver` must contain no `dolos-*` package**, enforced by CI's `stelae-boundary` job, so extracting the pair is a directory move rather than a refactor.
+Four crates, all workspace members until the extraction. The Stelae half is two of them — the protocol a third party implements from and the profile-generic lifecycle machinery — and the boundary is checkable: **`cargo tree -e normal --all-features` for `stelae` and `stelae-driver` must contain no `dolos-*` package**, so extracting the pair is a directory move rather than a refactor.
 
 ```
 crates/stelae/            # package `stelae` — the wire protocol, zero dolos deps

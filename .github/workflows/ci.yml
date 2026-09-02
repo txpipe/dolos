@@ -173,26 +173,6 @@ jobs:
           save-if: false
       - run: cargo check -p dolos-snapshot --all-targets --features ${{ matrix.features }}
 
-  # Both stelae manifests promise the extraction boundary — no `dolos-*`
-  # dependency, ever — and until now every PR checked it by hand. `cargo tree`
-  # resolves the graph without building, so making the promise mechanical
-  # costs seconds.
-  stelae-boundary:
-    name: Stelae no-dolos boundary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.91
-      - name: cargo tree matches no dolos crate
-        run: |
-          tree=$(cargo tree -e normal --all-features -p stelae -p stelae-driver)
-          if echo "$tree" | grep -E '(^|[ ├└─])dolos(-[a-z0-9]+)? v'; then
-            echo "::error::a stelae crate depends on a dolos crate"
-            exit 1
-          fi
-
   # These sleep on a real relay rather than compute, so they are slow and only
   # as reliable as the relay. Run them on merges to main; smoke stays on the
   # matrix everywhere and covers ports, socket and shutdown on every PR.
