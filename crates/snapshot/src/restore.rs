@@ -20,33 +20,39 @@
 //! 3. [`dolos_core::IndexStore::initialize_schema`].
 //! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes`.
-//! 5. The state tip — every shard of every `state-{ns}` kind — with
-//!    `set_cursor` **last**.
+//! 5. The state tip — every shard of every `state-{ns}` kind.
 //! 6. Rebuild the live-UTxO index dimensions from the restored UTxO set. They
 //!    are never shipped — ADR-004's Amendment 2 — so this is where they come
-//!    back.
+//!    back, and `set_cursor` lands after them, as the last write of the
+//!    restore.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
 //!
-//! ## Why `set_cursor` is last, and what that does and does not buy
+//! ## Why `set_cursor` is the last write
 //!
-//! `has_existing_data()` reads the state cursor and nothing else, so writing it
-//! only after every shard has landed means an interrupted restore leaves a
-//! store set the next `bootstrap` treats as empty rather than as a node.
+//! `has_existing_data()` reads the state cursor and nothing else, so a node
+//! reads as restored exactly when that cursor is there. Writing it after step 6
+//! makes it the completion marker for the whole restore rather than for the
+//! state tip alone: a node whose ledger is complete and whose live-UTxO
+//! dimensions are not has no cursor, and the next `bootstrap` treats it as
+//! empty — which is what it is.
 //!
-//! It buys that and no more. Step 6 runs *after* the cursor is set, so an
-//! interruption between the two leaves a node whose ledger is complete and
-//! whose live-UTxO indexes are not — and `has_existing_data()` will say it is
-//! restored.
+//! PROFILE.md §"Restore pipeline" moves the cursor rather than marking
+//! completeness a second time in the progress file, and the implementation is
+//! why it can: [`rebuild_utxo_indexes`] takes the chain point as an argument
+//! and never reads it back off the state store, so nothing between the tip and
+//! the rebuild consumes the cursor and the write moves on its own. It also
+//! costs nothing on resume — the tip is never checkpointed and the rebuild is
+//! unconditional, so a resumed restore already redoes precisely the work that
+//! now follows the cursor.
 //!
-//! `--continue` **improves** that and does not close it. A resumed restore
-//! always redoes the state tip and always rebuilds the live-UTxO index, because
-//! the tip is never checkpointed — so the partial-`utxo::*` node is repairable
-//! by an operator who resumes, where before it could only be thrown away. What
-//! it does not answer is whether `set_cursor` should move *after* step 6. That
-//! is the profile spec's ordering, it is an open question with its owner, and
-//! nothing here reorders the pipeline to pre-empt it.
+//! What it leaves is worth stating rather than discovering: an interruption
+//! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
+//! `--continue` repairs it cheaply, because the epoch layers stay checkpointed;
+//! without it the stele is restored again from the top over keyed writes, which
+//! is a rewrite and not a duplication — the behaviour every interruption before
+//! the tip already had.
 //!
 //! ## Resume, and where the checkpoint goes
 //!
@@ -978,19 +984,20 @@ where
         }
     }
 
-    // Last, so that until this commit lands `has_existing_data()` reports an
-    // empty node rather than a half-restored one.
-    let writer = state.start_writer()?;
-    writer.set_cursor(plan.position.point.clone())?;
-    writer.commit()?;
-
     info!(utxos = summary.utxos, "rebuilding the live-utxo indexes");
 
     rebuild_utxo_indexes(state, indexes, &plan.position.point, budget)?;
 
-    // Here and not one step earlier. The window between `set_cursor` and the
-    // rebuild above is the one an operator repairs by resuming, and a progress
-    // file deleted at the cursor would have taken that away.
+    // The last write of the restore, the live-utxo dimensions above included:
+    // until this commit lands `has_existing_data()` reports an empty node
+    // rather than a half-restored one.
+    let writer = state.start_writer()?;
+    writer.set_cursor(plan.position.point.clone())?;
+    writer.commit()?;
+
+    // After the cursor, because the cursor is what says the restore finished.
+    // A progress file deleted before it would take away the resume that makes
+    // an interruption cheap.
     checkpoint.clear()?;
 
     Ok(summary)
