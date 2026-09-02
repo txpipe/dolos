@@ -454,7 +454,8 @@ where
     Ok(Json(page))
 }
 
-/// This function converts a CIP-129 governance-action ID to a transaction hash and action index.
+/// This function converts a CIP-129 governance-action ID to a transaction hash
+/// and action index.
 ///
 /// The payload contains the 32-byte transaction hash.
 /// It then contains the shortest big-endian byte string for the action index.
@@ -508,11 +509,13 @@ async fn proposal_metadata_parts(
     Ok((id, hash, metadata, error))
 }
 
-/// This endpoint returns proposal metadata by transaction hash and certificate index.
+/// This endpoint returns proposal metadata by transaction hash and certificate
+/// index.
 ///
 /// An absent anchor causes a 404 response.
 /// A failed metadata fetch causes a 404 response.
-/// The `/{gov_action_id}/metadata` endpoint returns the anchor and an error object.
+/// The `/{gov_action_id}/metadata` endpoint returns the anchor and an error
+/// object.
 pub async fn proposal_metadata<D: Domain>(
     Path((tx_hash, cert_index)): Path<(String, u32)>,
     State(domain): State<Facade<D>>,

@@ -211,7 +211,8 @@ pub struct AnchorMetadata {
     pub json: serde_json::Value,
 
     /// This field contains the raw body in the PostgreSQL `bytea` format.
-    /// The value starts with `\x` and then contains lowercase hexadecimal bytes.
+    /// The value starts with `\x` and then contains lowercase hexadecimal
+    /// bytes.
     pub bytes: String,
 }
 
