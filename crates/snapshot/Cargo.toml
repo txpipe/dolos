@@ -5,13 +5,6 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-# Publishing into an OCI registry (`src/registry.rs`). Default-off, and it
-# forwards to `stelae/oci` rather than adding anything of its own: a build that
-# only writes steles to a directory keeps the dependency tree it had, which is
-# the whole reason the protocol's transport is behind a feature in the first
-# place. `dolos`'s own `registry` feature is what turns this on.
-oci = ["stelae/oci", "stelae-driver/oci"]
-
 # The backfill daemon (`src/backfill.rs`): the publisher loop that composes
 # the mithril fetch with the publish lifecycle. Default-off, and the only
 # reason this crate ever pulls the aggregator client, pallas or a tokio
@@ -25,12 +18,20 @@ backfill = [
     "dep:tokio-util",
 ]
 
-# This crate is the *profile* half of the Stelae boundary: it may depend on
-# `stelae` and on `dolos-*`, never the other way around. See
+# This crate is the *profile* half of the Stelae boundary: it depends on the
+# stelae crates and on `dolos-*`, never the other way around — structural now
+# that the protocol lives in its own repository. This is the workspace's one
+# pin point: the CLI and root lib reach protocol and driver types through
+# this crate's re-exports, and a stelae release lands here as one tag bump
+# for both crates (they version in lockstep; never pin a branch). See
 # adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
-stelae = { path = "../stelae" }
-stelae-driver = { path = "../stelae-driver" }
+# The protocol crates keep their own default-off `oci` feature for third
+# parties; this profile publishes into registries as a matter of course, so
+# it turns the transport on unconditionally rather than forwarding a feature
+# nothing in dolos ever left off.
+stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.1.0", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.1.0", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

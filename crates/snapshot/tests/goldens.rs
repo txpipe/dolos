@@ -395,7 +395,7 @@ fn a_complete_stele_reads_back_and_reproduces_its_digest() {
     read.check_profile(&DolosProfile).unwrap();
 
     // Every layer streams back under the *default* record ceiling — the
-    // confirmation `crates/stelae`'s streaming reader was left waiting for from
+    // confirmation the stelae crate's streaming reader was left waiting for from
     // its first real profile.
     let index = stele.blob_index().unwrap();
     assert_eq!(index.len(), GOLDEN_LAYERS.len());

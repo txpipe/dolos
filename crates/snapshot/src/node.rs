@@ -28,7 +28,6 @@ pub fn scratch_dir(config: &StorageConfig, chosen: Option<&Path>) -> PathBuf {
     }
 }
 
-#[cfg(feature = "oci")]
 mod auth {
     use dolos_core::config::StelaeConfig;
 
@@ -97,7 +96,6 @@ mod auth {
     }
 }
 
-#[cfg(feature = "oci")]
 pub use auth::{registry_auth, OFFICIAL_REGISTRY_PASSWORD};
 
 #[cfg(test)]
@@ -131,7 +129,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "oci")]
     mod auth {
         use dolos_core::config::{StelaeConfig, StelaeRegistryConfig};
 

@@ -350,8 +350,8 @@ pub fn all_layers() -> Vec<(&'static str, Box<dyn Scope>, Vec<CanonicalCbor>)> {
 
 /// Read a layer both ways and insist the two paths agree.
 ///
-/// The same discipline `crates/stelae/tests/toy_profile.rs` applies to the toy
-/// profile: a layer that reads back through one path and not the other is a
+/// The same discipline the stelae repo's `tests/toy_profile.rs` applies to the
+/// toy profile: a layer that reads back through one path and not the other is a
 /// determinism bug in the format, and this profile is the first real one to put
 /// that to the test.
 pub fn read_both_ways(

@@ -108,7 +108,6 @@ impl<B: ToyStores> Blank<B> {
 // The re-export mirrors the module's own rule stated above: every test binary
 // compiles this file in full, so the suites that never open a registry see an
 // import they do not use.
-#[cfg(feature = "oci")]
 #[allow(unused_imports)]
 pub use registry_node::Node;
 
@@ -119,7 +118,6 @@ pub use registry_node::Node;
 /// stele the one suite publishes is what the other verifies, and a second
 /// copy of the fixture would be a second answer to "where do the two plans
 /// stand".
-#[cfg(feature = "oci")]
 mod registry_node {
     use dolos_core::{BlockHash, ChainPoint, Domain as _};
     use dolos_snapshot::{

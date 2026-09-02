@@ -44,7 +44,7 @@ dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
-dolos-snapshot = { path = "crates/snapshot", features = ["oci"] }
+dolos-snapshot = { path = "crates/snapshot" }
 dolos-mithril = { path = "crates/mithril", optional = true }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-minikupo = { path = "crates/minikupo", optional = true }
@@ -201,8 +201,6 @@ members = [
     "crates/flatfiles",
     "crates/mithril",
     "crates/snapshot",
-    "crates/stelae",
-    "crates/stelae-driver",
     "crates/testing",
     "crates/minibf",
     "crates/redb3",
@@ -262,19 +260,12 @@ opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 tracing-opentelemetry = "0.33"
 
-# Stelae (crates/stelae). `minicbor` is pinned to the 0.26 line that Pallas
-# already pulls in, so the protocol crate adds no new CBOR implementation to the
-# tree and encodes against the same codec the Dolos profile will use.
+# `minicbor` is pinned to the 0.26 line that Pallas already pulls in, so the
+# Dolos profile (crates/snapshot) encodes against the same codec the stelae
+# protocol crates do — the same pallas-alignment convention the stelae
+# repository states in its own manifests. Moving this line is a
+# byte-compatibility question, not a dependency bump.
 minicbor = { version = "0.26", features = ["std"] }
-serde_jcs = "0.2.0"
-sha2 = "0.10.9"
-zstd = "0.13.3"
-
-# The restore path's disk preflight, and nothing else. `default-features =
-# false` drops the file-locking half of the crate, leaving the free-space
-# query, which is a `statvfs`/`GetDiskFreeSpaceExW` call over `rustix` and
-# `windows-sys` — both already in this tree.
-fs4 = { version = "1.1.0", default-features = false }
 
 [workspace.metadata.release]
 push = false

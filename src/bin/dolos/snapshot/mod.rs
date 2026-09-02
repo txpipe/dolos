@@ -1,7 +1,7 @@
 //! Publishing this node's data as a Stelae snapshot.
 //!
 //! Dolos's own word is "snapshot"; the protocol's is "stele". The translation
-//! happens here and nowhere else — see `solution/stelae` and
+//! happens here and nowhere else — see `crates/snapshot/PROFILE.md` and
 //! `adrs/004_stelae_snapshots.md`.
 //!
 //! `publish` writes one; `digest` says what one *would* be; `verify` checks a

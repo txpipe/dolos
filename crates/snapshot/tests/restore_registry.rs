@@ -6,11 +6,11 @@
 //! nothing — run it with:
 //!
 //! ```text
-//! cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture
+//! cargo test -p dolos-snapshot --test restore_registry -- --ignored --nocapture
 //! ```
 //!
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
-//! same knob `tests/publish.rs` and `crates/stelae/tests/oci.rs` use.
+//! same knob `tests/publish.rs` and the stelae repo's `tests/oci.rs` use.
 //!
 //! ## The four properties
 //!
@@ -40,8 +40,6 @@
 //! the test named, so the interruption lands where the test meant it to. A kill
 //! after a wall-clock delay would sometimes interrupt nothing over a loopback
 //! registry — the fixture stele is kilobytes — and pass for the wrong reason.
-
-#![cfg(feature = "oci")]
 
 mod node;
 mod registry_fixture;

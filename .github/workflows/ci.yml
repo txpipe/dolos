@@ -148,20 +148,17 @@ jobs:
           save-if: false
       - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
-  # `dolos-snapshot` carries two default-off halves — the OCI transport (`oci`)
-  # and the backfill daemon (`backfill`) — and every job
-  # above builds them the one way the `dolos` binary does, with both on. A
-  # `cfg` that only compiles under that combination passes all of them and
-  # breaks a build nobody here runs. This checks the combinations the crate
-  # promises instead, at `cargo check` depth: the guard is that each compiles,
-  # not that it passes a suite the jobs above already run.
+  # `dolos-snapshot` carries one default-off half — the backfill daemon
+  # (`backfill`) — and every job above builds it the one way the `dolos`
+  # binary does, with it on (the default `mithril` feature forwards to it).
+  # Feature unification means no workspace job ever constructs the
+  # backfill-off build, so a `cfg` mistake there passes everything and breaks
+  # only a consumer. This checks that one configuration, at `cargo check`
+  # depth: the guard is that it compiles, not that it passes a suite the jobs
+  # above already run.
   snapshot-features:
-    name: Check (dolos-snapshot ${{ matrix.features }})
+    name: Check (dolos-snapshot default features)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        features: [oci, backfill, "oci,backfill"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -171,7 +168,7 @@ jobs:
         with:
           shared-key: test-ubuntu-latest
           save-if: false
-      - run: cargo check -p dolos-snapshot --all-targets --features ${{ matrix.features }}
+      - run: cargo check -p dolos-snapshot --all-targets
 
   # These sleep on a real relay rather than compute, so they are slow and only
   # as reliable as the relay. Run them on merges to main; smoke stays on the
