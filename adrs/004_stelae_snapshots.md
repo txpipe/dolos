@@ -4,6 +4,18 @@
 
 Proposed
 
+> **Where the normative text lives.** The protocol half of this document —
+> envelope media types and coexistence rules, layer framing, the inscription
+> schema and history invariant, the manifest shape and its agreement rules,
+> the size ceiling, and what the transport requires of its host — is
+> normative in [`SPEC.md` of
+> `txpipe/stelae`](https://github.com/txpipe/stelae/blob/main/SPEC.md), the
+> repository the `stelae` and `stelae-driver` crates extracted to. This ADR
+> remains the decision record, and it remains the normative home of the
+> **Dolos profile**: `io.txpipe.dolos.cardano`'s layer kinds, record shapes,
+> scopes, parameters, cut point and pipelines. Where the two overlap, the
+> protocol text here is retained as decision history and `SPEC.md` wins.
+
 ## Context
 
 - Dolos snapshots are currently a gzip tarball of the raw `archive/`, `state/` and `index/` database directories, uploaded to publicly accessible storage (Cloudflare R2) and addressed by a URL template (`https://dolos-snapshots.txpipe.cloud/${VERSION}/${NETWORK}/${VARIANT}/${POINT}.tar.gz`). There is no manifest, no checksum and no signature; the only integrity check is that gzip/tar fail on corrupt data.
@@ -257,87 +269,48 @@ History invariant: `history` contains exactly one entry per published sequence, 
 
 Note: a side-effect of anchoring identity on uncompressed content digests is that layer *content* can be mirrored over any content-addressed transport (e.g. IPFS) — or re-compressed with a different algorithm — and still be verified against the same signed inscription via diffIds. Consumption is stricter than verification: the restore client expects the canonical zstd blobs referenced by the OCI manifest, so re-encoded mirrors serve archival and verification, not direct restore. This is a property of the format, not a requirement of the protocol; the OCI registry remains the canonical distribution channel.
 
-#### The manifest
+#### The manifest, its agreement rules, and the transport's host requirements
 
-A stele in a registry is one OCI image manifest, and its shape is closed: a conforming publisher writes exactly the fields below, and a conforming client refuses anything else.
+Normative in `SPEC.md` (`txpipe/stelae`): the closed manifest shape and its
+canonical bytes, the three `store.stelae.layer.*` annotation keys, the
+manifest–inscription agreement refusals in both directions, the 4 MiB
+manifest size ceiling (`stelae::MANIFEST_SIZE_LIMIT`), and the two
+requirements the transport puts on its host — an installed process-default
+rustls `CryptoProvider` (Dolos's `main()` installs `ring`) and
+caller-supplied credentials (`stelae::oci::Options::auth`; Dolos's own
+credential policy is under "CLI and configuration" below).
 
-- `schemaVersion: 2`; `mediaType: application/vnd.oci.image.manifest.v1+json`; `artifactType: application/vnd.stelae.stele.v1`.
-- `config` is the inscription's descriptor: `mediaType` is `application/vnd.stelae.inscription.v1+json`, `digest` is the sha256 of the canonical inscription bytes — the same digest independent parties reproduce and sign — and `size` is those bytes' length.
-- `layers`: one descriptor per inscription layer, **in inscription order**. Each carries the layer's `mediaType` exactly as the inscription states it, the compressed blob's `digest` and `size`, and the three annotations below.
-- No `subject` and no manifest-level `annotations`.
-
-The manifest bytes are canonical JSON per RFC 8785, through the same canonicalizer as the inscription, and are pushed verbatim: the protocol has one answer to "what are the bytes of this JSON document", not two that agree until they do not.
-
-The per-layer annotation keys are reverse-DNS under `stelae.store`, a domain TxPipe owns:
-
-| Key | Status | Value |
-| --- | --- | --- |
-| `store.stelae.layer.diffId` | **normative** | the layer's `diffId`, exactly as the inscription states it |
-| `store.stelae.layer.kind` | informational | the layer's profile-defined kind |
-| `store.stelae.layer.scope` | informational | the layer's scope object as stringified canonical JSON (annotation values are strings) |
-
-`store.stelae.layer.diffId` is the identity→blob map — the thing a registry hands over for free and a directory has to rebuild by decompressing every blob. A client that does not read it cannot fetch a layer; it is the one annotation a reader must understand. The other two exist so a human or a generic registry tool can see what a blob covers without fetching the config blob, and a client may ignore them.
-
-#### Manifest–inscription agreement
-
-The manifest and the inscription are two views of one stele — the inscription holds identity, the manifest holds transport — and a disagreement between them, in either direction, is a refusal, never a preference.
-
-A publisher refuses to build a manifest — before anything is pushed — when the inscription describes a layer that was never written, or a layer was written that the inscription does not describe: a blob nothing attests must not be published.
-
-A client refuses a manifest — before any blob is fetched — when:
-
-- `artifactType` is missing. This fails closed by choice: a registry that strips the OCI 1.1 discovery field has published something a client cannot recognize as a stele, and reading it anyway would make the discovery contract advisory.
-- `artifactType` is present and is not `application/vnd.stelae.stele.v1`.
-- the config descriptor's media type is not the inscription's.
-- the manifest's layer count differs from the inscription's.
-- a layer carries no `store.stelae.layer.diffId` annotation, so nothing says which layer it holds.
-- a layer's `diffId` annotation disagrees with the inscription's layer *at that position*. Positional correspondence is a check of its own: a manifest carrying the right blobs in the wrong order passes the map and fails the order.
-- a layer's media type disagrees with the inscription's at that position.
-
-#### The manifest size ceiling
-
-A manifest past **4 MiB** (`stelae::MANIFEST_SIZE_LIMIT`) is refused before the push. The figure is not a limit the OCI specification imposes; it is the ceiling registries converge on, and the refusal is measured on the exact canonical bytes that would have been pushed, so it names the document and its layer count instead of arriving later as a registry's `413`.
-
-The arithmetic is counted in layers, because layers are what the ceiling counts: a descriptor with its annotations costs ~350 bytes, so the ceiling falls near 12,000 layers. A mainnet stele is bounded above by ~600 epochs × 5 per-epoch kinds (`blocks`, `indexes` and the three `log-{ns}`), plus the state tip's 74 layers (4 namespaces × 16 shards + 10 single blobs), plus 74 more for every retained state dump — at 20 retained epochs, the ceiling of what a publisher is expected to configure, that is ~4,554 layers and a manifest of roughly 1.6 MB, still comfortably inside the ceiling. The bound is loose in the direction that helps: the log kinds are omitted when empty, and Byron's ~200 epochs carry no reward or stake logs at all, so the realized count sits near ~4,150. **This is the arithmetic that bounds the retained list**, and the reason per-epoch dumps were rejected: ~580 of them would be ~43,000 state layers on their own, more than three times the ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time sizing of the pre-split artifact; this paragraph is the authoritative count, and it counts layers rather than epochs.)
-
-#### What the transport requires of its host
-
-- **A process that opens a registry client must have installed a process-default rustls `CryptoProvider` first.** The transport ships no crypto backend of its own (`reqwest/rustls-no-provider`): the backend the client library would otherwise pick, `aws-lc-rs`, wants `cmake` on every build machine — the dependency this workspace already goes out of its way to avoid — so it stays out of the tree and the choice of provider moves to the program. In Dolos, `main()` installs `ring`. Omitting the install is a panic when the registry client opens, not a link error.
-- **Authentication is the host's decision, in one of three shapes.** The client is opened with credentials its caller supplies — anonymous, a bearer token, or an HTTP Basic pair — and never sources them itself. Which identity a program authenticates as is that program's credential policy, and where it keeps its credentials is that program's deployment: a protocol library that read an environment variable would be deciding both on its host's behalf, and naming the variable would freeze that decision into a published API. **So this specification names no environment variable and no configuration key**, and `stelae::oci::Options::auth` is the whole of the interface. Dolos's own answer is under "CLI and configuration" below.
-
-  Anonymous remains legitimate and is what a genuinely public repository wants. It is not what a registry that authenticates every request wants, and that is the deployment Dolos is heading for: read access to a stele repository is free and identity-less, and still credentialed.
+What is profile-owned is the arithmetic that keeps a Dolos stele inside the
+ceiling, and it stays here: a descriptor with its annotations costs ~350
+bytes, so the ceiling falls near 12,000 layers. A mainnet stele is bounded
+above by ~600 epochs × 5 per-epoch kinds (`blocks`, `indexes` and the three
+`log-{ns}`), plus the state tip's 74 layers (4 namespaces × 16 shards + 10
+single blobs), plus 74 more for every retained state dump — at 20 retained
+epochs, the ceiling of what a publisher is expected to configure, that is
+~4,554 layers and a manifest of roughly 1.6 MB, comfortably inside. The
+bound is loose in the direction that helps: the log kinds are omitted when
+empty, and Byron's ~200 epochs carry no reward or stake logs at all, so the
+realized count sits near ~4,150. **This is the arithmetic that bounds the
+retained list**, and the reason per-epoch dumps were rejected: ~580 of them
+would be ~43,000 state layers on their own, more than three times the
+ceiling. (The Rationale's "~1,700 manifest descriptors" is decision-time
+sizing of the pre-split artifact; this paragraph is the authoritative count,
+and it counts layers rather than epochs.)
 
 ### Code layout
 
-Four crates, all workspace members until the extraction. The Stelae half is two of them — the protocol a third party implements from and the profile-generic lifecycle machinery — and the boundary is checkable: **`cargo tree -e normal --all-features` for `stelae` and `stelae-driver` must contain no `dolos-*` package**, so extracting the pair is a directory move rather than a refactor.
+The extraction has happened: the protocol crate (`stelae`) and the
+profile-generic lifecycle machinery (`stelae-driver`) live in
+[`github.com/txpipe/stelae`](https://github.com/txpipe/stelae), history
+preserved, and this workspace consumes them as one pinned git tag (both
+crates version in lockstep; the pin lives in `crates/snapshot/Cargo.toml`
+and nowhere else). Their module layout is documented in that repository;
+"no `dolos-*` dependency" is enforced there by its cargo-deny bans — the
+boundary this section once asked contributors to keep is structural now.
+
+What remains here is the profile side:
 
 ```text
-crates/stelae/            # package `stelae` — the wire protocol, zero dolos deps
-  lib.rs          # errors, protocol constants, envelope media types
-  frame.rs        # deterministic CBOR-seq record read/write, Limits
-  codec.rs        # fixed-arity decode helpers for layer content records
-  inscription.rs  # schema, JCS encode/verify, digest, history invariant (history_for)
-  profile.rs      # Profile trait, layer-kind registry, media-type & tag naming rules
-  digest.rs       # streaming sha256 + zstd (diffId + blob digest in one pass)
-  layer.rs        # reading a layer without holding it
-  plan.rs         # progress file, resume, remaining-bytes accounting
-  progress.rs     # Observer: what a transfer says about itself while running
-  transport.rs    # the SteleReader/SteleWriter seam and the blob index
-  dir.rs          # a stele on a local filesystem
-  oci.rs          # feature `oci`: push with blob-skip, pull missing-only, tags, referrers
-  tests/toy_profile.rs   # a second, trivial profile — proves the core carries no Dolos assumption
-
-crates/stelae-driver/     # package `stelae-driver` — profile-generic lifecycle, zero dolos deps
-  lib.rs          # the driver's Error
-  profile.rs      # DriverProfile: the dataset policy stelae::Profile deliberately refuses
-  predecessor.rs  # Predecessor/First: what a publish follows and may carry forward
-  publish.rs      # the chained-publish lifecycle: open, Tuning, Publishing, Chained, standing
-  restore.rs      # Budget/Checkpoint/Outlook: restore bounds and the resume checkpoint
-  preflight.rs    # one free-space policy, in both directions
-  reporting.rs    # counting layers and records for the two drivers to report
-  retry.rs        # bounded patience for an external that fails in bursts
-  digests.rs      # the digests-layer codec (Cardano immutable-DB file hashes)
-
 crates/snapshot/          # package `dolos-snapshot` — the io.txpipe.dolos.cardano profile
   lib.rs          # DolosProfile, driver re-exports, profile constants, error mapping
   namespaces.rs   # the closed set of state namespaces a Dolos stele carries

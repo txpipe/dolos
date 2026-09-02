@@ -1,10 +1,7 @@
-# The #[ignore]d registry suites, in a workflow of their own. Stelae is a
-# supporting module of this repository and is expected to move to its own
-# repository one day (ADR-004 names the extraction condition); keeping its
-# registry gate out of ci.yml keeps the main workflow about this repo's own
-# purpose, and lets the gate travel with the crate when it goes. The two
-# dolos-snapshot suites ride along because they exercise the same round trip
-# from the profile's side; they stay behind when the crate leaves.
+# The #[ignore]d registry suites, in a workflow of their own. The stelae
+# transport's own round trip travelled with the crate to txpipe/stelae when
+# it left this workspace; what stays is the profile's side of the same round
+# trip — publish and restore through a real registry.
 name: Registry
 
 on:
@@ -78,9 +75,6 @@ jobs:
             sleep $((attempt * 30))
           done
           exit 1
-
-      - name: Stelae transport round trip
-        run: cargo test -p stelae --all-features --test oci -- --ignored --nocapture --test-threads=1
 
       - name: Snapshot publish over a registry
         run: cargo test -p dolos-snapshot --features oci --test publish -- --ignored --nocapture --test-threads=1

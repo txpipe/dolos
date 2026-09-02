@@ -10,7 +10,7 @@
 //! ```
 //!
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
-//! same knob `tests/publish.rs` and `crates/stelae/tests/oci.rs` use.
+//! same knob `tests/publish.rs` and the stelae repo's `tests/oci.rs` use.
 //!
 //! ## The four properties
 //!

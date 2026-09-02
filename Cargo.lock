@@ -5380,7 +5380,8 @@ checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "stelae"
-version = "1.7.0-alpha.1"
+version = "0.1.0"
+source = "git+https://github.com/txpipe/stelae?tag=v0.1.0#23496793cb1f86240f03e008f342f65238ffbb6e"
 dependencies = [
  "bytes",
  "futures-util",
@@ -5389,12 +5390,10 @@ dependencies = [
  "minicbor 0.26.4",
  "oci-client",
  "reqwest 0.13.4",
- "rustls",
  "serde",
  "serde_jcs",
  "serde_json",
  "sha2 0.10.9",
- "stats_alloc",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5403,14 +5402,14 @@ dependencies = [
 
 [[package]]
 name = "stelae-driver"
-version = "1.7.0-alpha.1"
+version = "0.1.0"
+source = "git+https://github.com/txpipe/stelae?tag=v0.1.0#23496793cb1f86240f03e008f342f65238ffbb6e"
 dependencies = [
  "fs4",
  "minicbor 0.26.4",
  "serde",
  "serde_json",
  "stelae",
- "tempfile",
  "thiserror 2.0.18",
  "tracing",
 ]

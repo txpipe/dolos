@@ -25,12 +25,16 @@ backfill = [
     "dep:tokio-util",
 ]
 
-# This crate is the *profile* half of the Stelae boundary: it may depend on
-# `stelae` and on `dolos-*`, never the other way around. See
+# This crate is the *profile* half of the Stelae boundary: it depends on the
+# stelae crates and on `dolos-*`, never the other way around — structural now
+# that the protocol lives in its own repository. This is the workspace's one
+# pin point: the CLI and root lib reach protocol and driver types through
+# this crate's re-exports, and a stelae release lands here as one tag bump
+# for both crates (they version in lockstep; never pin a branch). See
 # adrs/004_stelae_snapshots.md, "Code layout".
 [dependencies]
-stelae = { path = "../stelae" }
-stelae-driver = { path = "../stelae-driver" }
+stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.1.0" }
+stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.1.0" }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 

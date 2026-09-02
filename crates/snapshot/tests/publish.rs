@@ -10,8 +10,8 @@
 //! ```
 //!
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
-//! same knob `crates/stelae/tests/oci.rs` uses, so this suite can be pointed at
-//! another implementation.
+//! same knob the stelae repo's `tests/oci.rs` uses, so this suite can be
+//! pointed at another implementation.
 //!
 //! ## The properties
 //!
