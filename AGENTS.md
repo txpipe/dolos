@@ -340,13 +340,18 @@ All agents working on this repository must verify their modifications by running
    Each test spawns its own registry container via `docker run` and tears it
    down on the way out; the suites are `#[ignore]`d so plain `cargo test`
    stays green without a container runtime. Run them when touching the
-   stelae pin or `crates/snapshot`'s registry publish/restore paths.
-   `STELAE_TEST_REGISTRY_IMAGE` selects the server; the `Registry` workflow
-   (`.github/workflows/registry.yml`) runs these suites on Linux (with
-   `--nocapture`) against `registry:2`, `registry:3` and a pinned `zot`, so
-   the round trip against a real registry never depends on someone
-   remembering to run it. The transport's own round trip lives with the
-   protocol in `github.com/txpipe/stelae` and runs in that repository's CI.
+   stelae pin or `crates/snapshot`'s registry publish/restore paths;
+   `STELAE_TEST_REGISTRY_IMAGE` selects the server.
+
+   These are local verification tools, deliberately not a CI job here.
+   Registry interaction — transport and publish lifecycle — is implemented
+   by the stelae crates, so testing that integration in CI is
+   `github.com/txpipe/stelae`'s responsibility, and its `Registry` workflow
+   runs against `registry:2`, `registry:3` and a pinned `zot`. Dolos's test
+   subject is the profile, and the profile is transport-blind by
+   construction: the directory-transport suites in the workspace gate cover
+   it, and these two suites exist to double-check the composition when the
+   seam itself is in question.
 
 ### Code Quality Standards
 
