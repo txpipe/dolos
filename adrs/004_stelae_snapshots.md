@@ -179,7 +179,7 @@ Everything is built against the engine-agnostic core traits (`ArchiveStore`, `St
 
 ### CLI and configuration
 
-- `dolos snapshot publish [--repo oci://…] [--output-dir DIR] [--epochs N..M] [--dry-run]` — export layers; `--output-dir` writes blobs + inscription to disk, `--repo` pushes with blob-skip and moves tags.
+- `dolos snapshot publish [--repo oci://…] [--output-dir DIR] [--epochs N..M] [--dry-run]` — export layers; `--output-dir` writes blobs + inscription + the `blobs.json` sidecar to disk, `--repo` pushes with blob-skip and moves tags.
 - `dolos snapshot digest` — compute and print the canonical inscription and its sha256 from local stores (what independent verifiers run and sign).
 - `dolos snapshot verify | inspect`; `sign --key FILE` belongs to the signature
   phase, which is specified and not yet built ("Code layout" above).
