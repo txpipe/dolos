@@ -311,7 +311,7 @@ The arithmetic is counted in layers, because layers are what the ceiling counts:
 
 Four crates, all workspace members until the extraction. The Stelae half is two of them — the protocol a third party implements from and the profile-generic lifecycle machinery — and the boundary is checkable: **`cargo tree -e normal --all-features` for `stelae` and `stelae-driver` must contain no `dolos-*` package**, so extracting the pair is a directory move rather than a refactor.
 
-```
+```text
 crates/stelae/            # package `stelae` — the wire protocol, zero dolos deps
   lib.rs          # errors, protocol constants, envelope media types
   frame.rs        # deterministic CBOR-seq record read/write, Limits
@@ -361,7 +361,8 @@ Everything is built against the engine-agnostic core traits (`ArchiveStore`, `St
 
 - `dolos snapshot publish [--repo oci://…] [--output-dir DIR] [--epochs N..M] [--dry-run]` — export layers; `--output-dir` writes blobs + inscription to disk, `--repo` pushes with blob-skip and moves tags.
 - `dolos snapshot digest` — compute and print the canonical inscription and its sha256 from local stores (what independent verifiers run and sign).
-- `dolos snapshot verify | sign --key FILE | inspect`.
+- `dolos snapshot verify | inspect`; `sign --key FILE` belongs to the signature
+  phase, which is specified and not yet built ("Code layout" above).
 - `dolos bootstrap snapshot` gains source-scheme dispatch: `oci://` → new path; https template / `--file` → legacy tarball, unchanged. `--point epoch-E|latest`; existing `--continue` drives resume; `sync.max_history` bounds how much history is fetched (subsumes the old `full`/`ledger` variants).
 
 ```toml
