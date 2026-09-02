@@ -3,7 +3,11 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::proposals_inner::{GovernanceType, ProposalsInner};
+use blockfrost_openapi::models::{
+    proposal_parameters::ProposalParameters,
+    proposal_parameters_parameters::ProposalParametersParameters,
+    proposals_inner::{GovernanceType, ProposalsInner},
+};
 use dolos_cardano::{
     model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
     pallas_extras, ChainSummary, PParamsSet,
@@ -11,14 +15,18 @@ use dolos_cardano::{
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
 use pallas::{
     crypto::hash::Hash,
-    ledger::{primitives::Epoch, traverse::MultiEraBlock},
+    ledger::{
+        primitives::{Epoch, RationalNumber},
+        traverse::MultiEraBlock,
+    },
 };
 use std::collections::HashMap;
 
 use crate::{
     error::Error,
-    mapping::{bech32, bech32_gov_action, IntoModel},
+    mapping::{bech32, bech32_gov_action, parse_gov_action_id, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
+    routes::epochs::mapping::map_cost_models_raw,
     Facade,
 };
 
@@ -447,6 +455,219 @@ where
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
 
     Ok(Json(page))
+}
+
+/// A ratio as the plain quotient, without the rounding
+/// `/epochs/{n}/parameters` applies to the same parameters.
+///
+/// Blockfrost serves this endpoint from db-sync's `param_proposal` columns,
+/// which hold the quotient at full `double precision`: a proposal setting tau
+/// to 1/6 comes back as 0.16666666666666666, not 0.167.
+fn ratio_to_f64(value: &RationalNumber) -> f64 {
+    value.numerator as f64 / value.denominator as f64
+}
+
+/// The parameter change one proposal asks for, as the nullable delta
+/// Blockfrost returns.
+///
+/// Every field is a change the proposal names, so an untouched parameter is
+/// `null` rather than the value in force — the opposite of
+/// `/epochs/{n}/parameters`, which reports the parameters actually effective.
+/// The two Blockfrost renders from the same db-sync column each appear twice
+/// here, once under each name: `coins_per_utxo_word` repeats
+/// `coins_per_utxo_size`, and `pvt_p_p_security_group` repeats
+/// `pvtpp_security_group`.
+struct ProposalParametersBuilder {
+    tx: Hash<32>,
+    idx: u32,
+    params: PParamsSet,
+}
+
+impl IntoModel<ProposalParameters> for ProposalParametersBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<ProposalParameters, StatusCode> {
+        let Self { tx, idx, params } = self;
+
+        let parameters = ProposalParametersParameters {
+            // A Conway proposal names no epoch: db-sync fills the column only
+            // for the pre-Conway update proposals it keeps in the same table.
+            epoch: Some(None),
+            min_fee_a: params.min_fee_a().map(|x| x as i32),
+            min_fee_b: params.min_fee_b().map(|x| x as i32),
+            max_block_size: params.max_block_body_size().map(|x| x as i32),
+            max_tx_size: params.max_transaction_size().map(|x| x as i32),
+            max_block_header_size: params.max_block_header_size().map(|x| x as i32),
+            key_deposit: params.key_deposit().map(|x| x.to_string()),
+            pool_deposit: params.pool_deposit().map(|x| x.to_string()),
+            e_max: params.maximum_epoch().map(|x| x as i32),
+            n_opt: params.desired_number_of_stake_pools().map(|x| x as i32),
+            a0: params.a0().map(|x| ratio_to_f64(&x)),
+            rho: params.rho().map(|x| ratio_to_f64(&x)),
+            tau: params.tau().map(|x| ratio_to_f64(&x)),
+            // Both are pre-Conway knobs that a Conway proposal cannot name.
+            decentralisation_param: None,
+            extra_entropy: None,
+            // A version bump is a hard fork, never a parameter change.
+            protocol_major_ver: None,
+            protocol_minor_ver: None,
+            min_utxo: params.ada_per_utxo_byte().map(|x| x.to_string()),
+            min_pool_cost: params.min_pool_cost().map(|x| x.to_string()),
+            // Blockfrost tells "set to the empty map" (`{}`) apart from "not
+            // named at all" (`null`) because db-sync keys a row per cost
+            // model. `PParamsSet` records a language at a time, so a change
+            // naming no language leaves nothing behind to tell the two apart
+            // and both read as `null` here.
+            cost_models: map_cost_models_raw(&params.cost_models_for_script_languages()).flatten(),
+            price_mem: params.execution_costs().map(|x| ratio_to_f64(&x.mem_price)),
+            price_step: params
+                .execution_costs()
+                .map(|x| ratio_to_f64(&x.step_price)),
+            max_tx_ex_mem: params.max_tx_ex_units().map(|x| x.mem.to_string()),
+            max_tx_ex_steps: params.max_tx_ex_units().map(|x| x.steps.to_string()),
+            max_block_ex_mem: params.max_block_ex_units().map(|x| x.mem.to_string()),
+            max_block_ex_steps: params.max_block_ex_units().map(|x| x.steps.to_string()),
+            max_val_size: params.max_value_size().map(|x| x.to_string()),
+            collateral_percent: params.collateral_percentage().map(|x| x as i32),
+            max_collateral_inputs: params.max_collateral_inputs().map(|x| x as i32),
+            coins_per_utxo_size: params.ada_per_utxo_byte().map(|x| x.to_string()),
+            coins_per_utxo_word: params.ada_per_utxo_byte().map(|x| x.to_string()),
+            pvt_motion_no_confidence: params
+                .pool_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.motion_no_confidence)),
+            pvt_committee_normal: params
+                .pool_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.committee_normal)),
+            pvt_committee_no_confidence: params
+                .pool_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.committee_no_confidence)),
+            pvt_hard_fork_initiation: params
+                .pool_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.hard_fork_initiation)),
+            pvtpp_security_group: params
+                .pool_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.security_voting_threshold)),
+            pvt_p_p_security_group: params
+                .pool_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.security_voting_threshold)),
+            dvt_motion_no_confidence: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.motion_no_confidence)),
+            dvt_committee_normal: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.committee_normal)),
+            dvt_committee_no_confidence: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.committee_no_confidence)),
+            dvt_update_to_constitution: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.update_constitution)),
+            dvt_hard_fork_initiation: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.hard_fork_initiation)),
+            dvt_p_p_network_group: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.pp_network_group)),
+            dvt_p_p_economic_group: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.pp_economic_group)),
+            dvt_p_p_technical_group: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.pp_technical_group)),
+            dvt_p_p_gov_group: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.pp_governance_group)),
+            dvt_treasury_withdrawal: params
+                .drep_voting_thresholds()
+                .map(|x| ratio_to_f64(&x.treasury_withdrawal)),
+            committee_min_size: params.min_committee_size().map(|x| x.to_string()),
+            committee_max_term_length: params.committee_term_limit().map(|x| x.to_string()),
+            gov_action_lifetime: params
+                .governance_action_validity_period()
+                .map(|x| x.to_string()),
+            gov_action_deposit: params.governance_action_deposit().map(|x| x.to_string()),
+            drep_deposit: params.drep_deposit().map(|x| x.to_string()),
+            drep_activity: params.drep_inactivity_period().map(|x| x.to_string()),
+            min_fee_ref_script_cost_per_byte: params
+                .min_fee_ref_script_cost_per_byte()
+                .map(|x| ratio_to_f64(&x)),
+        };
+
+        Ok(ProposalParameters {
+            id: bech32_gov_action(&tx, idx)?,
+            tx_hash: hex::encode(tx),
+            cert_index: idx.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
+            parameters: Box::new(parameters),
+        })
+    }
+}
+
+/// The parameter change proposed by `tx` at action index `idx`.
+///
+/// Blockfrost joins the proposal against db-sync's `param_proposal` table, so
+/// a proposal of any other kind has no row to return and is a 404 — unlike the
+/// withdrawal listing beside it, which answers with an empty array.
+fn read_parameters<D: Domain>(
+    domain: &Facade<D>,
+    tx: Hash<32>,
+    idx: u32,
+) -> Result<ProposalParameters, Error> {
+    let key = ProposalState::build_entity_key(tx, idx);
+
+    let state = domain
+        .state()
+        .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // A pre-Conway update proposal is a parameter change too, but db-sync
+    // keeps those out of the governance table this endpoint reads.
+    if !is_gov_action(&state) {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let ProposalAction::ParamChange(params) = state.action else {
+        return Err(StatusCode::NOT_FOUND.into());
+    };
+
+    let model = ProposalParametersBuilder { tx, idx, params };
+
+    Ok(model.into_model()?)
+}
+
+/// `GET /governance/proposals/{tx_hash}/{cert_index}/parameters`.
+pub async fn proposal_parameters<D>(
+    Path((tx_hash, cert_index)): Path<(String, String)>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<ProposalParameters>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let cert_index = cert_index
+        .parse::<u32>()
+        .map_err(|_| Error::InvalidCertIndex)?;
+
+    // Blockfrost matches the hash as text against db-sync, so a malformed one
+    // finds nothing rather than failing the request.
+    let tx = tx_hash
+        .parse::<Hash<32>>()
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(Json(read_parameters(&domain, tx, cert_index)?))
+}
+
+/// `GET /governance/proposals/{gov_action_id}/parameters`: the same change,
+/// addressed by CIP-129 id instead of by tx hash and action index.
+pub async fn proposal_parameters_by_gov_action<D>(
+    Path(gov_action_id): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<ProposalParameters>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
+
+    Ok(Json(read_parameters(&domain, tx, idx)?))
 }
 
 #[cfg(test)]
