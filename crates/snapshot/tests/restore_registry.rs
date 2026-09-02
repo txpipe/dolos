@@ -55,7 +55,7 @@ use dolos_core::{
 use dolos_snapshot::{
     export::Plan,
     registry::{self, Point},
-    restore::{self, Budget, Checkpoint},
+    restore::{self, default_budget, progress_path_in, Checkpoint},
     state_layer_count, Error, Network, NAMESPACES, UTXOS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
@@ -352,7 +352,8 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
     assert!(epoch_layers.len() >= 2);
 
     // The interruption, at the second epoch layer the driver reaches.
-    let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+    let mut checkpoint =
+        Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
 
     let err = restore::restore(
         &Interrupted {
@@ -362,7 +363,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
         &index,
         &plan,
         target(&blank),
-        Budget::default(),
+        default_budget(),
         &mut checkpoint,
         &Observer::silent(),
     )
@@ -373,7 +374,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
         "{err:?}"
     );
 
-    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let progress = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .expect("a killed restore left no progress file");
 
@@ -400,7 +401,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
     assert_eq!(resumed.layers_fetched, PER_PUBLISH - 1);
 
     assert_eq!(
-        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
         None,
         "a finished restore left its progress file behind"
     );
@@ -463,7 +464,8 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
     let epoch_layers = plan.immutable_layers().count();
 
-    let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+    let mut checkpoint =
+        Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
 
     restore::restore(
         &Interrupted {
@@ -473,13 +475,13 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         &index,
         &plan,
         target(&blank),
-        Budget::default(),
+        default_budget(),
         &mut checkpoint,
         &Observer::silent(),
     )
     .unwrap_err();
 
-    let seeded = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let seeded = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .unwrap()
         .completed
@@ -565,7 +567,7 @@ fn a_point_that_names_no_stele_is_refused() {
     );
 
     assert_eq!(
-        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
         None,
         "a restore that never started left a progress file"
     );
@@ -944,7 +946,8 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
         let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
         assert!(epoch_layers.len() >= 2);
 
-        let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+        let mut checkpoint =
+            Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
 
         restore::restore(
             &Interrupted {
@@ -954,7 +957,7 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
             &index,
             &plan,
             target(&blank),
-            Budget::default(),
+            default_budget(),
             &mut checkpoint,
             &Observer::silent(),
         )

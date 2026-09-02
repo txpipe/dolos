@@ -1132,13 +1132,13 @@ fn mib(bytes: u64) -> f64 {
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn measure_layer_sink_residency() {
+    use dolos_snapshot::transport::{RecordSink as _, SteleWriter as _};
     use dolos_snapshot::{DolosProfile, EpochScope, Scope as _, COMPRESSION_LEVEL, INDEXES};
-    use stelae::transport::{RecordSink as _, SteleWriter as _};
 
     const SINKS: u64 = 32;
 
     let temp = tempfile::tempdir().expect("tempdir");
-    let stele = stelae::dir::SteleDir::create(temp.path()).expect("create stele");
+    let stele = dolos_snapshot::dir::SteleDir::create(temp.path()).expect("create stele");
 
     // A record for every sink to chew on, built once: the point is the
     // compressor's resident state, not the bytes handed to it.
@@ -1280,7 +1280,7 @@ fn publish_at_band<S: CoreIndexStore>(
     store: &S,
     epochs: u64,
     band: usize,
-) -> (stelae::inscription::Inscription, tempfile::TempDir) {
+) -> (dolos_snapshot::inscription::Inscription, tempfile::TempDir) {
     use dolos_core::{StateStore as _, StateWriter as _};
     use dolos_snapshot::{
         export::{IndexBand, Plan},
@@ -1324,7 +1324,7 @@ fn publish_at_band<S: CoreIndexStore>(
         &state,
         store,
         None,
-        &stelae::progress::Observer::silent(),
+        &dolos_snapshot::progress::Observer::silent(),
     )
     .expect("publish");
 

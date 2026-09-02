@@ -47,7 +47,7 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     is_state_kind,
-    restore::{self, Budget, Checkpoint},
+    restore::{self, default_budget, progress_path_in, Budget, Checkpoint},
     state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
     NAMESPACES, STATE_KINDS, UTXOS,
 };
@@ -161,7 +161,7 @@ fn a_stele_for_another_network_is_refused_before_anything_is_written() {
         temp.path(),
         dolos_snapshot::MAINNET_MAGIC,
         &blank,
-        Budget::default(),
+        default_budget(),
     )
     .unwrap_err();
 
@@ -312,7 +312,7 @@ fn an_unknown_layer_kind_is_skipped_and_reported() {
     assert_eq!(stele.blob_index().unwrap().len(), inscription.layers.len());
 
     let blank = Blank::<MemoryStores>::open();
-    let summary = restore_into(temp.path(), magic, &blank, Budget::default()).unwrap();
+    let summary = restore_into(temp.path(), magic, &blank, default_budget()).unwrap();
 
     assert_eq!(summary.layers_fetched, plan.layers().count());
 
@@ -336,7 +336,7 @@ fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
     export_one_kind_ahead(temp.path(), &domain, json!({"epoch": 0, "required": true}));
 
     let blank = Blank::<MemoryStores>::open();
-    let err = restore_into(temp.path(), magic, &blank, Budget::default()).unwrap_err();
+    let err = restore_into(temp.path(), magic, &blank, default_budget()).unwrap_err();
 
     let Error::RequiredUnknownLayer { kind, scope } = &err else {
         panic!("{err:?}");
@@ -379,7 +379,7 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
     std::fs::remove_file(stele.blob_path(&blob)).unwrap();
 
     let blank = Blank::<MemoryStores>::open();
-    let err = restore_into(temp.path(), magic_of(&domain), &blank, Budget::default()).unwrap_err();
+    let err = restore_into(temp.path(), magic_of(&domain), &blank, default_budget()).unwrap_err();
 
     assert!(
         matches!(err, Error::Stelae(stelae::Error::LayerNotFound { .. })),
@@ -518,7 +518,7 @@ fn a_restored_node_is_the_node_it_came_from_on_fjall() {
 /// restore against the export it came from and so cannot tell a faithful
 /// restore from one that reproduced the export's own mistake; this can.
 fn cross_check<B: ToyStores>() {
-    let (_, blank, _) = round_trip::<B>(Budget::default());
+    let (_, blank, _) = round_trip::<B>(default_budget());
     let replayed: ToyDomain<B> = harness();
 
     assert_stores_match(&blank, &replayed);
@@ -805,7 +805,7 @@ fn restore_watched<B: ToyStores>(
     let plan = restore::plan(&stele, magic, None)?;
     let index = stele.blob_index()?;
 
-    let mut checkpoint = Checkpoint::open(storage, identity, resume)?;
+    let mut checkpoint = Checkpoint::open(progress_path_in(storage), identity, resume)?;
 
     match stop_at {
         Some(stop_at) => restore::restore(
@@ -816,7 +816,7 @@ fn restore_watched<B: ToyStores>(
             &index,
             &plan,
             target(blank),
-            Budget::default(),
+            default_budget(),
             &mut checkpoint,
             observer,
         ),
@@ -825,7 +825,7 @@ fn restore_watched<B: ToyStores>(
             &index,
             &plan,
             target(blank),
-            Budget::default(),
+            default_budget(),
             &mut checkpoint,
             observer,
         ),
@@ -877,7 +877,7 @@ fn kill_and_resume<B: ToyStores>() {
 
     // What the killed run left behind: a progress file naming exactly the
     // layers that committed, and no cursor.
-    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let progress = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .expect("a killed restore left no progress file");
 
@@ -909,7 +909,7 @@ fn kill_and_resume<B: ToyStores>() {
 
     // The progress file is gone: the restore finished.
     assert_eq!(
-        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
         None,
         "a finished restore left its progress file behind"
     );
@@ -984,9 +984,9 @@ fn a_stele_with_retained_dumps_restores_the_tip_and_reports_the_dumps() {
     let dumped_blank = Blank::<MemoryStores>::open();
 
     let from_plain =
-        restore_into(plain_root.path(), magic, &plain_blank, Budget::default()).unwrap();
+        restore_into(plain_root.path(), magic, &plain_blank, default_budget()).unwrap();
     let from_dumped =
-        restore_into(dumped_root.path(), magic, &dumped_blank, Budget::default()).unwrap();
+        restore_into(dumped_root.path(), magic, &dumped_blank, default_budget()).unwrap();
 
     assert_eq!(from_plain, from_dumped);
     assert_state_matches(dumped_blank.state(), plain_blank.state());
@@ -1036,7 +1036,7 @@ fn a_resumed_restore_of_a_dumped_stele_records_only_the_epoch_layers() {
         "{err:?}"
     );
 
-    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let progress = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .expect("a killed restore left no progress file");
 
@@ -1068,7 +1068,7 @@ fn a_resumed_restore_of_a_dumped_stele_records_only_the_epoch_layers() {
     );
 
     assert_eq!(
-        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
         None,
         "a finished restore left its progress file behind"
     );
@@ -1171,7 +1171,7 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
         "{err:?}"
     );
 
-    let seeded = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let seeded = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .expect("the interrupted restore left no progress file")
         .completed
@@ -1289,7 +1289,7 @@ fn a_restore_that_is_not_resuming_honours_no_progress_file() {
     let inscription = export_to(stele.path(), &domain);
 
     let storage = tempfile::tempdir().unwrap();
-    let path = Checkpoint::path_in(storage.path());
+    let path = progress_path_in(storage.path());
 
     // A progress file claiming every epoch layer is done, over empty stores.
     let mut progress = RestoreProgress::new(inscription.digest().unwrap());

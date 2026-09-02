@@ -309,34 +309,53 @@ The arithmetic is counted in layers, because layers are what the ceiling counts:
 
 ### Code layout
 
-Two crates, both workspace members. The split is the protocol/profile boundary made mechanical: **`cargo tree -p stelae` must contain no `dolos-*` package**, so extracting the protocol later is a directory move rather than a refactor.
+Four crates, all workspace members until the extraction. The Stelae half is two of them — the protocol a third party implements from and the profile-generic lifecycle machinery — and the boundary is mechanical: **`cargo tree -e normal --all-features` for `stelae` and `stelae-driver` must contain no `dolos-*` package**, enforced by CI's `stelae-boundary` job, so extracting the pair is a directory move rather than a refactor.
 
 ```
-crates/stelae/            # package `stelae` — protocol, zero dolos deps
+crates/stelae/            # package `stelae` — the wire protocol, zero dolos deps
   lib.rs          # errors, protocol constants, envelope media types
-  frame.rs        # deterministic CBOR-seq record read/write
-  inscription.rs  # schema, JCS encode/verify, digest, history invariant
+  frame.rs        # deterministic CBOR-seq record read/write, Limits
+  codec.rs        # fixed-arity decode helpers for layer content records
+  inscription.rs  # schema, JCS encode/verify, digest, history invariant (history_for)
   profile.rs      # Profile trait, layer-kind registry, media-type & tag naming rules
   digest.rs       # streaming sha256 + zstd (diffId + blob digest in one pass)
-  sign.rs         # Ed25519 detached signatures, trusted keys, k-of-n
-  plan.rs         # restore planning: layer selection, progress file, resume, preflight
+  layer.rs        # reading a layer without holding it
+  plan.rs         # progress file, resume, remaining-bytes accounting
+  progress.rs     # Observer: what a transfer says about itself while running
+  transport.rs    # the SteleReader/SteleWriter seam and the blob index
+  dir.rs          # a stele on a local filesystem
   oci.rs          # feature `oci`: push with blob-skip, pull missing-only, tags, referrers
   tests/toy_profile.rs   # a second, trivial profile — proves the core carries no Dolos assumption
 
+crates/stelae-driver/     # package `stelae-driver` — profile-generic lifecycle, zero dolos deps
+  lib.rs          # the driver's Error
+  profile.rs      # DriverProfile: the dataset policy stelae::Profile deliberately refuses
+  predecessor.rs  # Predecessor/First: what a publish follows and may carry forward
+  publish.rs      # the chained-publish lifecycle: open, Tuning, Publishing, Chained, standing
+  restore.rs      # Budget/Checkpoint/Outlook: restore bounds and the resume checkpoint
+  preflight.rs    # one free-space policy, in both directions
+  reporting.rs    # counting layers and records for the two drivers to report
+  retry.rs        # bounded patience for an external that fails in bursts
+  digests.rs      # the digests-layer codec (Cardano immutable-DB file hashes)
+
 crates/snapshot/          # package `dolos-snapshot` — the io.txpipe.dolos.cardano profile
-  lib.rs          # DolosProfile: name/version, media types, tag rendering, position/parameters
+  lib.rs          # DolosProfile, driver re-exports, profile constants, error mapping
+  namespaces.rs   # the closed set of state namespaces a Dolos stele carries
   layers/{blocks,indexes,logs,state,digests}.rs
   export.rs       # stores -> layers, generic over dolos_core::Domain
-  restore.rs      # layers -> store writes, per-epoch checkpointing
+  restore.rs      # layer selection and restore into store writes
+  planning.rs     # one epoch selection, one reading of the plan it produces
+  registry.rs     # store-typed publish/preview/restore over OCI; Point, verify, inspect
+  publisher.rs    # publishing as a sequence of steps a command drives
+  node.rs         # registry auth and scratch-dir policy from node configuration
+  backfill.rs     # feature `backfill`: the epoch-at-a-time publisher daemon
+
+crates/mithril/           # package `dolos-mithril` — the aggregator fetch; no stelae dependency
 ```
 
-New deps: `zstd`, `serde_jcs`, `ed25519-dalek`, `oci-client`. The Dolos-side crate keeps the name `snapshot` because that is this project's word for the artifact (`dolos snapshot`, `[snapshot]`, `tests/e2e/snapshot.rs`); `stele` is the protocol's word for the same thing.
+The Dolos-side crate keeps the name `snapshot` because that is this project's word for the artifact (`dolos snapshot`, `[snapshot]`, `tests/e2e/snapshot.rs`); `stele` is the protocol's word for the same thing. The planned `sign.rs` (Ed25519 detached signatures, trusted keys, k-of-n) has not been built: signing stays specified above and unimplemented, and nothing else in this section is aspirational.
 
-Everything is built against the engine-agnostic core traits. Existing APIs used: `ArchiveStore::get_range` / `iter_logs`, `StateStore::iter_entities` / `read_cursor`, `ArchiveWriter::apply` / `write_log`, `StateWriter::write_entity` / `apply_utxoset` / `set_cursor`, `IndexStore::initialize_schema`, `index_delta_from_utxo_delta`, `seed_wal_from_state`, `CardanoConfig.stop_epoch`. Missing APIs to add (thin wrappers over existing backend internals in both redb and fjall):
-
-1. `StateStore::iter_utxos()` — full UTxO-set iteration (export + live-UTxO index rebuild).
-2. `IndexStore` iteration of archive tag/exact records by epoch range (export).
-3. `IndexWriter::append_prehashed(records)` — direct insertion of pre-hashed records (restore).
+Everything is built against the engine-agnostic core traits (`ArchiveStore`, `StateStore`, `IndexStore` and their writers, `seed_wal_from_state`, `CardanoConfig.stop_epoch`). The store APIs the initial design listed as missing — `StateStore::iter_utxos()`, epoch-ranged iteration of archive tag/exact records, `IndexWriter::append_prehashed` — have all since landed in `dolos-core` and its backends.
 
 ### CLI and configuration
 

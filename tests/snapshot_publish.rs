@@ -9,8 +9,8 @@
 
 mod node;
 
+use dolos_snapshot::{dir::SteleDir, SteleReader};
 use node::{assert_ok, toml_string, Node};
-use stelae::{dir::SteleDir, SteleReader};
 
 /// Done criterion 5.
 #[test]
