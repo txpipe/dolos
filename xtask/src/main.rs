@@ -4,6 +4,7 @@ use xshell::{cmd, Shell};
 
 mod bootstrap;
 mod config;
+mod fixture;
 mod ground_truth;
 mod test_instance;
 mod util;
@@ -31,6 +32,10 @@ enum Commands {
     /// Test instance management commands (create, delete)
     #[command(subcommand)]
     TestInstance(test_instance::TestInstanceCmd),
+
+    /// Fixture artifact commands (push, pull via OCI/GHCR)
+    #[command(subcommand)]
+    Fixture(fixture::FixtureCmd),
 }
 
 fn main() -> Result<()> {
@@ -48,6 +53,7 @@ fn main() -> Result<()> {
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,
+        Commands::Fixture(cmd) => fixture::run(&sh, cmd)?,
     }
 
     Ok(())
