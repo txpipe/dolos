@@ -158,7 +158,7 @@ pub fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    if idx.len() > 4 {
+    if idx.len() > 4 || (idx.len() > 1 && idx[0] == 0) {
         return Err(StatusCode::BAD_REQUEST);
     }
 
