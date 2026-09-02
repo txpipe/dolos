@@ -39,6 +39,7 @@ pub mod profile;
 #[cfg(feature = "oci")]
 pub mod publish;
 pub mod reporting;
+pub mod restore;
 pub mod retry;
 
 pub use predecessor::{First, Predecessor};

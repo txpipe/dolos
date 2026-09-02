@@ -102,6 +102,13 @@ pub(crate) use stelae_driver::scope_key;
 /// [`export::publish`] and [`restore::restore_dir`] hold for the transports.
 pub use stelae::progress;
 
+/// The protocol surface a host reaches through this crate rather than by
+/// naming `stelae` itself: only this crate depends on the stelae crates, so
+/// there is one pin point and one place to absorb upstream churn. These cover
+/// what a test or a binary opens a stele with; anything else a consumer needs
+/// joins the list rather than justifying a second dependency edge.
+pub use stelae::{dir, inscription, transport, SteleReader};
+
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
     FixedNamespace, GovState, PendingMirState, PendingRewardState, PoolState, ProposalState,

@@ -354,6 +354,21 @@ impl MithrilFeedback {
     }
 }
 
+/// A round's bars leave the terminal with the round.
+///
+/// Both callers build a receiver per download round against one shared
+/// [`MultiProgress`], and a finished bar stays drawn until it is cleared — so
+/// without this, a backfill daemon accumulates two dead bars per window for
+/// as long as it runs. Tied to drop rather than to a method because the
+/// receiver crosses the daemon seam as an opaque `Arc` and never comes back.
+#[cfg(feature = "mithril")]
+impl Drop for MithrilFeedback {
+    fn drop(&mut self) {
+        self.aggregate_pb.finish_and_clear();
+        self.validate_pb.finish_and_clear();
+    }
+}
+
 #[cfg(feature = "mithril")]
 #[async_trait::async_trait]
 impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {

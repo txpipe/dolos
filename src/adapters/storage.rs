@@ -1617,7 +1617,7 @@ mod tests {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use dolos_snapshot::restore::Checkpoint;
+    use dolos_snapshot::restore::progress_path_in;
 
     /// A `--force` wipe takes the progress file with the data it describes.
     ///
@@ -1638,7 +1638,7 @@ mod lifecycle_tests {
 
         std::fs::create_dir_all(&storage).unwrap();
 
-        let progress = Checkpoint::path_in(&storage);
+        let progress = progress_path_in(&storage);
         std::fs::write(&progress, b"{}").unwrap();
 
         // A stand-in for the stores the progress file describes, so the
@@ -1675,6 +1675,6 @@ mod lifecycle_tests {
     fn the_progress_file_lives_inside_the_storage_path() {
         let storage = std::path::Path::new("/var/lib/dolos/data");
 
-        assert!(Checkpoint::path_in(storage).starts_with(storage));
+        assert!(progress_path_in(storage).starts_with(storage));
     }
 }

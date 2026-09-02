@@ -1448,7 +1448,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "stats_alloc",
- "stelae",
  "tar",
  "tempfile",
  "thiserror 2.0.18",
