@@ -11,11 +11,5 @@ pub fn print_init_banner() {
 
     println!("\x1b[90moooooooooooooooooooooooooooooooooooooooo\x1b[0m");
 
-    let git_sha = option_env!("VERGEN_GIT_SHA").unwrap_or("unknown");
-
-    println!(
-        "\x1b[1;95mv{} ({})\x1b[0m\n",
-        env!("CARGO_PKG_VERSION"),
-        git_sha
-    );
+    println!("\x1b[1;95mv{}\x1b[0m\n", env!("DOLOS_VERSION"));
 }
