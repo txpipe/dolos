@@ -1405,7 +1405,6 @@ pub const UNRESTORED_KINDS: [&str; 1] = [DIGESTS];
 /// that decide what to do with existing data are handled a layer above, and a
 /// source rejected any later would have cost the operator the node they still
 /// had.
-#[cfg(feature = "oci")]
 #[derive(Debug, Clone)]
 pub enum Source {
     /// A stele directory on this filesystem.
@@ -1414,7 +1413,6 @@ pub enum Source {
     Repo(crate::registry::Repository),
 }
 
-#[cfg(feature = "oci")]
 impl std::str::FromStr for Source {
     type Err = String;
 
@@ -1446,7 +1444,7 @@ impl std::str::FromStr for Source {
     }
 }
 
-#[cfg(all(test, feature = "oci"))]
+#[cfg(test)]
 mod source_tests {
     use std::path::PathBuf;
 

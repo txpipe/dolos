@@ -6,7 +6,7 @@
 //! nothing — run it with:
 //!
 //! ```text
-//! cargo test -p dolos-snapshot --features oci --test publish -- --ignored --nocapture
+//! cargo test -p dolos-snapshot --test publish -- --ignored --nocapture
 //! ```
 //!
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
@@ -54,8 +54,6 @@
 //! published later in full has a *different scope* and is correctly rebuilt
 //! rather than inherited. Reuse across a sequence is a property of a publisher
 //! that stops on epoch boundaries, which is what ADR-004's pipeline does.
-
-#![cfg(feature = "oci")]
 
 mod node;
 mod registry_fixture;

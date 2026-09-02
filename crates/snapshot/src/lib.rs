@@ -70,9 +70,7 @@ pub mod layers;
 pub mod namespaces;
 pub mod node;
 pub mod planning;
-#[cfg(feature = "oci")]
 pub mod publisher;
-#[cfg(feature = "oci")]
 pub mod registry;
 pub mod restore;
 

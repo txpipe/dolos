@@ -44,7 +44,7 @@ dolos-core = { path = "crates/core" }
 dolos-cardano = { path = "crates/cardano", features = ["include-genesis"] }
 dolos-redb3 = { path = "crates/redb3" }
 dolos-fjall = { path = "crates/fjall" }
-dolos-snapshot = { path = "crates/snapshot", features = ["oci"] }
+dolos-snapshot = { path = "crates/snapshot" }
 dolos-mithril = { path = "crates/mithril", optional = true }
 dolos-minibf = { path = "crates/minibf", optional = true }
 dolos-minikupo = { path = "crates/minikupo", optional = true }

@@ -333,8 +333,8 @@ All agents working on this repository must verify their modifications by running
 4. **Registry round trip** (requires Docker): the `#[ignore]`d suites that
    spawn a real OCI registry
    ```bash
-   cargo test -p dolos-snapshot --features oci --test publish -- --ignored --test-threads=1
-   cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --test-threads=1
+   cargo test -p dolos-snapshot --test publish -- --ignored --test-threads=1
+   cargo test -p dolos-snapshot --test restore_registry -- --ignored --test-threads=1
    ```
 
    Each test spawns its own registry container via `docker run` and tears it
