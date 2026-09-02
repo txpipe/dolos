@@ -400,6 +400,10 @@ where
             get(routes::accounts::by_stake_utxos::<D>),
         )
         .route(
+            "/accounts/{stake_address}/history",
+            get(routes::accounts::by_stake_history::<D>),
+        )
+        .route(
             "/accounts/{stake_address}/rewards",
             get(routes::accounts::by_stake_rewards::<D>),
         )

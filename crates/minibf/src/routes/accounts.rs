@@ -13,6 +13,7 @@ use blockfrost_openapi::models::{
     account_addresses_content_inner::AccountAddressesContentInner,
     account_content::AccountContent,
     account_delegation_content_inner::AccountDelegationContentInner,
+    account_history_content_inner::AccountHistoryContentInner,
     account_registration_content_inner::{AccountRegistrationContentInner, Action},
     account_reward_content_inner::AccountRewardContentInner,
     account_transactions_content_inner::AccountTransactionsContentInner,
@@ -829,6 +830,90 @@ fn reward_entries(
     }
 
     Ok(out)
+}
+
+/// `GET /accounts/{stake_address}/history`: the stake this account had active
+/// in each epoch, and the pool that stake was delegated to.
+///
+/// The row is the one `/epochs/{epoch}/stakes` reads, kept under the start
+/// slot of the epoch the stake is active in, so the two endpoints are two cuts
+/// of one table: that one fixes the epoch and walks accounts, this one fixes
+/// the account and walks epochs.
+///
+/// A row with no stake leg belongs to a reward-only account, and a zero-stake
+/// row belongs to a delegator the distribution never carried — the same two
+/// the epoch endpoint filters out before paginating.
+pub async fn by_stake_history<D>(
+    Path(stake_address): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<AccountHistoryContentInner>>, Error>
+where
+    Option<AccountState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+    let network = domain.get_network_id()?;
+    let account_key = parse_account_key_param(&stake_address, network)?;
+
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (current, _) = summary.slot_epoch(tip);
+
+    let entity_key: EntityKey = account_key.entity_key.into();
+
+    // one key per epoch the chain has reached, read in a single batch: the log
+    // is keyed by `(epoch start, credential)`, so an account's own row sits in
+    // a different place in every epoch and no range covers them.
+    let keys: Vec<LogKey> = (0..=current)
+        .map(|epoch| {
+            let slot = summary.epoch_start(epoch);
+            LogKey::from((TemporalKey::from(slot), entity_key.clone()))
+        })
+        .collect();
+
+    let rows = domain
+        .archive()
+        .read_logs_typed::<AccountEpochLog>(AccountEpochLog::NS, &keys.iter().collect::<Vec<_>>())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut history = Vec::new();
+
+    for (epoch, row) in rows.into_iter().enumerate() {
+        let Some(log) = row else {
+            continue;
+        };
+
+        let Some(amount) = log.active_stake.filter(|stake| *stake > 0) else {
+            continue;
+        };
+
+        let Some(pool) = log.pool_id else {
+            continue;
+        };
+
+        history.push(AccountHistoryContentInner {
+            active_epoch: epoch as i32,
+            amount: amount.to_string(),
+            pool_id: bech32_pool(pool)?,
+        });
+    }
+
+    if matches!(pagination.order, Order::Desc) {
+        history.reverse();
+    }
+
+    let page = history
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .collect();
+
+    Ok(Json(page))
 }
 
 pub async fn by_stake_rewards<D>(
