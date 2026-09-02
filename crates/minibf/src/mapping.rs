@@ -35,6 +35,7 @@ use blockfrost_openapi::models::{
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    dreps_inner_metadata_error::{Code, DrepsInnerMetadataError},
     script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
@@ -202,6 +203,117 @@ pub async fn pool_offchain_metadata(
     let body = res.bytes().await.ok()?;
 
     parse_pool_offchain_metadata(body.as_ref(), expected_hash)
+}
+
+/// This structure contains governance metadata from an anchor.
+pub struct AnchorMetadata {
+    /// This field contains the JSON body for `json_metadata`.
+    pub json: serde_json::Value,
+
+    /// This field contains the raw body in the PostgreSQL `bytea` format.
+    /// The value starts with `\x` and then contains lowercase hexadecimal bytes.
+    pub bytes: String,
+}
+
+fn offchain_hash_mismatch_error(
+    url: &str,
+    expected_hash: &[u8],
+    actual_hash: &[u8],
+) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HashMismatch,
+        format!(
+            "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
+            hex::encode(expected_hash),
+            hex::encode(actual_hash),
+        ),
+    )
+}
+
+fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
+    let reason = status.canonical_reason().unwrap_or("Unknown");
+
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
+        format!(
+            "The server at {url} returned HTTP status {} \"{reason}\".",
+            status.as_u16(),
+        ),
+    )
+}
+
+fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::ConnectionError,
+        format!("The client cannot connect to {url}."),
+    )
+}
+
+fn offchain_decode_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::DecodeError,
+        format!("The client cannot parse JSON from {url}."),
+    )
+}
+
+/// This function gets metadata from a governance-anchor URL.
+///
+/// The function makes sure that the body hash matches `expected_hash`.
+/// It returns the JSON body and raw bytes, or a typed error.
+pub async fn anchor_offchain_metadata(
+    url: &str,
+    expected_hash: &[u8],
+) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .user_agent("Dolos MiniBF")
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return (None, None),
+    };
+
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(_) => return (None, Some(offchain_connection_error(url))),
+    };
+
+    if response.status() != StatusCode::OK {
+        return (
+            None,
+            Some(offchain_http_response_error(url, response.status())),
+        );
+    }
+
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(_) => return (None, Some(offchain_connection_error(url))),
+    };
+
+    let actual_hash = Hasher::<256>::hash(body.as_ref());
+
+    if actual_hash.as_ref() != expected_hash {
+        return (
+            None,
+            Some(offchain_hash_mismatch_error(
+                url,
+                expected_hash,
+                actual_hash.as_ref(),
+            )),
+        );
+    }
+
+    match serde_json::from_slice(body.as_ref()) {
+        Ok(json) => (
+            Some(AnchorMetadata {
+                json,
+                bytes: format!("\\x{}", hex::encode(body.as_ref())),
+            }),
+            None,
+        ),
+        Err(_) => (None, Some(offchain_decode_error(url))),
+    }
 }
 
 pub trait IntoModel<T>
