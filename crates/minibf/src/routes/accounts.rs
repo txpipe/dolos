@@ -1210,6 +1210,7 @@ mod tests {
         account_addresses_content_inner::AccountAddressesContentInner,
         account_content::AccountContent,
         account_delegation_content_inner::AccountDelegationContentInner,
+        account_history_content_inner::AccountHistoryContentInner,
         account_registration_content_inner::AccountRegistrationContentInner,
         account_reward_content_inner::AccountRewardContentInner,
         account_transactions_content_inner::AccountTransactionsContentInner,
@@ -1922,6 +1923,129 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/registrations");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// The harness seeds one epoch of active stake for the account, so the
+    /// history is that single row: 7 ADA delegated to the fixture pool.
+    #[tokio::test]
+    async fn accounts_by_stake_history_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/history");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let items: Vec<AccountHistoryContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account history");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].amount, "7000000");
+        assert_eq!(items[0].pool_id, app.vectors().pool_id);
+    }
+
+    /// Epochs come back oldest first, newest first under `order=desc`, and the
+    /// page is cut after the ordering rather than before it.
+    #[tokio::test]
+    async fn accounts_by_stake_history_orders_and_paginates() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+                .expect("era summary");
+            let tip = domain
+                .state()
+                .read_cursor()
+                .expect("cursor read failed")
+                .expect("missing tip")
+                .slot();
+            let (tip_epoch, _) = summary.slot_epoch(tip);
+            let earlier = tip_epoch.checked_sub(2).expect("tip before epoch 2");
+
+            // the harness already seeded `tip_epoch - 1`; a second epoch is
+            // what makes an order observable
+            dolos_testing::synthetic::seed_account_stake_logs(
+                domain,
+                &vectors.stake_address,
+                &vectors.pool_id,
+                &[earlier],
+            )
+            .expect("failed to seed account stake logs");
+        });
+
+        let stake_address = app.vectors().stake_address.to_string();
+
+        let app = &app;
+        let history = |query: &str| {
+            let path = format!("/accounts/{stake_address}/history{query}");
+            async move {
+                let (status, bytes) = app.get_bytes(&path).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "unexpected status {status} with body: {}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                serde_json::from_slice::<Vec<AccountHistoryContentInner>>(&bytes)
+                    .expect("failed to parse account history")
+            }
+        };
+
+        let asc = history("").await;
+        assert_eq!(asc.len(), 2);
+        assert!(asc[0].active_epoch < asc[1].active_epoch);
+
+        let desc = history("?order=desc").await;
+        assert_eq!(
+            desc.iter().map(|x| x.active_epoch).collect::<Vec<_>>(),
+            asc.iter().rev().map(|x| x.active_epoch).collect::<Vec<_>>()
+        );
+
+        // the first page of one is the oldest epoch ascending and the newest
+        // descending, so the cut follows the order instead of preceding it
+        let first_asc = history("?count=1&page=1").await;
+        assert_eq!(first_asc.len(), 1);
+        assert_eq!(first_asc[0].active_epoch, asc[0].active_epoch);
+
+        let first_desc = history("?count=1&page=1&order=desc").await;
+        assert_eq!(first_desc[0].active_epoch, asc[1].active_epoch);
+
+        let second_asc = history("?count=1&page=2").await;
+        assert_eq!(second_asc[0].active_epoch, asc[1].active_epoch);
+
+        // a page past the end is empty, not an error
+        assert!(history("?count=1&page=3").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_history_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/history", invalid_stake_address());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_history_not_found() {
+        let app = TestApp::new();
+        let path = format!("/accounts/{}/history", missing_stake_address());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_history_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/history");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
