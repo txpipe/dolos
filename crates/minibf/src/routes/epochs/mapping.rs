@@ -24,7 +24,11 @@ fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i6
         .collect()
 }
 
-fn map_cost_models_raw(
+/// Cost models as the raw operation-cost vectors the chain carries.
+///
+/// `/governance/proposals/…/parameters` returns exactly this, while the epoch
+/// endpoints run the vectors through [`map_cost_models_named`] first.
+pub(crate) fn map_cost_models_raw(
     cost_models: &CostModels,
 ) -> Option<Option<HashMap<String, serde_json::Value>>> {
     let as_vec = cost_models_to_key_value(cost_models);
