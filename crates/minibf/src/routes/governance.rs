@@ -1430,6 +1430,15 @@ mod tests {
         assert!(parse_gov_action_id(&missing_drep()).is_err());
         let short = bech32(bech32::Hrp::parse("gov_action").unwrap(), [0u8; 31]).unwrap();
         assert!(parse_gov_action_id(&short).is_err());
+
+        // the index is written in the shortest big-endian form, so a padded
+        // one is a second spelling of an id that already has a canonical form
+        let padded = bech32(
+            bech32::Hrp::parse("gov_action").unwrap(),
+            [tx.as_slice(), &[0x00, 0x01]].concat(),
+        )
+        .unwrap();
+        assert!(parse_gov_action_id(&padded).is_err());
     }
 
     /// CIP-129: the id is the proposing tx hash with the action index
