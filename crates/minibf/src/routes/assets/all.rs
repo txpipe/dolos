@@ -318,7 +318,7 @@ mod tests {
 
         // a page that would need a fourth block is refused, not truncated
         let (status, bytes) = app.get_bytes("/assets?count=3").await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         let body = String::from_utf8_lossy(&bytes);
         assert!(body.contains("archive blocks"), "unexpected body: {body}");
     }

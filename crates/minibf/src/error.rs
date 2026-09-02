@@ -23,6 +23,10 @@ pub enum Error {
     InvalidDerivationRole,
     InvalidDerivationIndex,
     /// An archive scan ran out of block budget before covering the page.
+    ///
+    /// The budget is a fixed property of the node, so the same request always
+    /// runs out at the same point: it is the page that has to shrink, not the
+    /// node that has to recover.
     ScanBudgetExceeded,
 }
 
@@ -162,11 +166,11 @@ impl IntoResponse for Error {
             )
                 .into_response(),
             Error::ScanBudgetExceeded => (
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::BAD_REQUEST,
                 Json(ErrorBody::new(
-                    503,
-                    "Service Unavailable",
-                    "The requested page needs more archive blocks than this node is willing to scan.",
+                    400,
+                    "Bad Request",
+                    "The requested page needs more archive blocks than this node is willing to scan, reduce page number or count.",
                 )),
             )
                 .into_response(),
