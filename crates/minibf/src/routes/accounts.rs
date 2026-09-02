@@ -842,7 +842,8 @@ fn reward_entries(
 ///
 /// A row with no stake leg belongs to a reward-only account, and a zero-stake
 /// row belongs to a delegator the distribution never carried — the same two
-/// the epoch endpoint filters out before paginating.
+/// the epoch endpoint filters out before paginating. What is left has to carry
+/// a pool, so a row that does not is an error here exactly as it is there.
 pub async fn by_stake_history<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -892,9 +893,14 @@ where
             continue;
         };
 
-        let Some(pool) = log.pool_id else {
-            continue;
-        };
+        // a stake row with no pool is broken archive data, and
+        // `/epochs/{epoch}/stakes` already refuses to render it; skipping it
+        // here would leave the two views of one row disagreeing, and hand back
+        // a short history as if it were the whole one
+        let pool = log.pool_id.ok_or_else(|| {
+            tracing::error!("account epoch log carries stake with no pool");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
         history.push(AccountHistoryContentInner {
             active_epoch: epoch as i32,
@@ -2025,6 +2031,58 @@ mod tests {
 
         // a page past the end is empty, not an error
         assert!(history("?count=1&page=3").await.is_empty());
+    }
+
+    /// A row that kept its stake but lost its pool is broken archive data.
+    /// `/epochs/{epoch}/stakes` refuses to render it, so this endpoint refuses
+    /// it too — a short history that looks whole is the worse answer.
+    #[tokio::test]
+    async fn accounts_by_stake_history_rejects_stake_without_pool() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+                .expect("era summary");
+            let tip = domain
+                .state()
+                .read_cursor()
+                .expect("cursor read failed")
+                .expect("missing tip")
+                .slot();
+            let (tip_epoch, _) = summary.slot_epoch(tip);
+            let seeded = tip_epoch.checked_sub(1).expect("tip before epoch 1");
+
+            let account = parse_account_key_param(&vectors.stake_address, Network::Testnet)
+                .expect("invalid fixture stake address");
+            let log_key: LogKey = (
+                TemporalKey::from(summary.epoch_start(seeded)),
+                EntityKey::from(account.entity_key),
+            )
+                .into();
+
+            let mut log = domain
+                .archive()
+                .read_log_typed::<AccountEpochLog>(AccountEpochLog::NS, &log_key)
+                .expect("stake log read failed")
+                .expect("missing stake log");
+
+            assert!(log.active_stake.is_some_and(|stake| stake > 0));
+            log.pool_id = None;
+
+            let writer = domain.archive().start_writer().expect("archive writer");
+            writer
+                .write_log_typed(&log_key, &log)
+                .expect("stake log write failed");
+            writer.commit().expect("stake log commit failed");
+        });
+
+        let stake_address = app.vectors().stake_address.as_str();
+        let path = format!("/accounts/{stake_address}/history");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     #[tokio::test]
