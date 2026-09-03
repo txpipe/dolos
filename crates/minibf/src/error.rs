@@ -22,6 +22,12 @@ pub enum Error {
     InvalidXpub,
     InvalidDerivationRole,
     InvalidDerivationIndex,
+    /// An archive scan ran out of block budget before covering the page.
+    ///
+    /// The budget is a fixed property of the node, so the same request always
+    /// runs out at the same point: it is the page that has to shrink, not the
+    /// node that has to recover.
+    ScanBudgetExceeded,
 }
 
 #[derive(Serialize)]
@@ -156,6 +162,15 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "The index is missing or is not valid. Use an integer from 0 through 2147483647.",
+                )),
+            )
+                .into_response(),
+            Error::ScanBudgetExceeded => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "The requested page needs more archive blocks than this node is willing to scan, reduce page number or count.",
                 )),
             )
                 .into_response(),

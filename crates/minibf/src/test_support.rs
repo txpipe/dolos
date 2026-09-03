@@ -156,6 +156,15 @@ impl TestApp {
         Self::from_domain(domain, vectors, None, minibf).expect("build_router_with_facade")
     }
 
+    /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
+    /// can be exercised without building a chain of thousands of blocks.
+    pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_max_scan_items(max_scan_items);
+        Self::from_domain(domain, vectors, None, minibf).expect("build_router_with_facade")
+    }
+
     fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,

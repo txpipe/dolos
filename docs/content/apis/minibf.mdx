@@ -110,6 +110,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/accounts/{stake_address}/addresses`      | Get addresses for a stake address                        |
 | `/accounts/{stake_address}/addresses/assets` | Get assets held across a stake address's addresses     |
 | `/accounts/{stake_address}/delegations`    | Get delegations for a stake address                      |
+| `/accounts/{stake_address}/history`        | Get the per-epoch stake history for a stake address      |
 | `/accounts/{stake_address}/registrations`  | Get registrations for a stake address                    |
 | `/accounts/{stake_address}/rewards`        | Get rewards for a stake address                          |
 | `/accounts/{stake_address}/transactions`   | Get transactions for a stake address                     |
@@ -121,6 +122,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/addresses/{address}/txs`                 | Alias of `/addresses/{address}/transactions`             |
 | `/addresses/{address}/utxos`               | Get UTXOs for a specific address                         |
 | `/addresses/{address}/utxos/{asset}`       | Get UTXOs for a specific address and asset               |
+| `/assets`                                  | List assets in order of first mint                       |
 | `/assets/policy/{policy_id}`               | Get assets minted under a specific policy                |
 | `/assets/{subject}`                        | Get asset information                                    |
 | `/assets/{subject}/addresses`              | Get addresses holding a specific asset                   |
