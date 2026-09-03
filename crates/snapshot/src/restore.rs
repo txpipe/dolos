@@ -99,9 +99,8 @@
 //! so a redone `blocks` layer leaves the superseded bodies in the segment file
 //! with nothing pointing at them. Reads go through the table, so the node is
 //! correct; the dead space is bounded by one layer and is the price of not
-//! starting over. [`Plan::preflight`] carries no addend for it: free space is
-//! read at check time, so an interrupted attempt's dead bytes are already out
-//! of what the check compares against.
+//! starting over. The preflight carries no addend for it; the reason is on
+//! [`Plan::remaining_uncompressed_size`].
 //!
 //! ## Memory
 //!
