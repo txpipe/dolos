@@ -3,7 +3,12 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use blockfrost_openapi::models::proposals_inner::{GovernanceType, ProposalsInner};
+use blockfrost_openapi::models::{
+    proposal_metadata::ProposalMetadata,
+    proposal_metadata_v2::ProposalMetadataV2,
+    proposals_inner::{GovernanceType, ProposalsInner},
+    DrepsInnerMetadataError,
+};
 use dolos_cardano::{
     model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
     pallas_extras, ChainSummary, PParamsSet,
@@ -17,7 +22,7 @@ use std::collections::HashMap;
 
 use crate::{
     error::Error,
-    mapping::{bech32, bech32_gov_action, IntoModel},
+    mapping::{anchor_offchain_metadata, bech32, bech32_gov_action, AnchorMetadata, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -449,6 +454,142 @@ where
     Ok(Json(page))
 }
 
+/// This function converts a CIP-129 governance-action ID to a transaction hash
+/// and action index.
+///
+/// The function accepts only the Bech32 checksum.
+/// The payload contains the 32-byte transaction hash.
+/// It then contains a big-endian byte string for the action index.
+fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
+    // `bech32::decode` also accepts the Bech32m checksum. CIP-129 identifiers use
+    // only the Bech32 checksum. This code decodes with the Bech32 checksum and
+    // rejects Bech32m.
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if parsed.hrp().as_str() != "gov_action" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let payload: Vec<u8> = parsed.byte_iter().collect();
+
+    // The payload must contain the hash and one to four index bytes.
+    if payload.len() < 33 || payload.len() > 36 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let (tx_bytes, idx_bytes) = payload.split_at(32);
+
+    let tx = Hash::<32>::from(<[u8; 32]>::try_from(tx_bytes).map_err(|_| StatusCode::BAD_REQUEST)?);
+
+    let idx = idx_bytes
+        .iter()
+        .fold(0u32, |acc, byte| (acc << 8) | u32::from(*byte));
+
+    Ok((tx, idx))
+}
+
+/// This function builds the common fields for a proposal metadata response.
+///
+/// The anchor contains the metadata URL and hash from the proposal procedure.
+/// The function returns metadata or an error, but not both.
+async fn proposal_metadata_parts(
+    tx: &Hash<32>,
+    idx: u32,
+    anchor: &pallas::ledger::primitives::conway::Anchor,
+) -> Result<
+    (
+        String,
+        String,
+        Option<AnchorMetadata>,
+        Option<DrepsInnerMetadataError>,
+    ),
+    StatusCode,
+> {
+    let id = bech32_gov_action(tx, idx)?;
+    let hash = hex::encode(anchor.content_hash);
+
+    let (metadata, error) =
+        anchor_offchain_metadata(&anchor.url, anchor.content_hash.as_ref()).await;
+
+    Ok((id, hash, metadata, error))
+}
+
+/// This endpoint returns proposal metadata by transaction hash and certificate
+/// index.
+///
+/// An absent anchor causes a 404 response.
+/// A failed metadata fetch causes a 404 response.
+/// The `/{gov_action_id}/metadata` endpoint returns the anchor and an error
+/// object.
+pub async fn proposal_metadata<D: Domain>(
+    Path((tx_hash, cert_index)): Path<(String, u32)>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<ProposalMetadata>, Error>
+where
+    Option<ProposalState>: From<D::Entity>,
+{
+    let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let state = domain
+        .read_cardano_entity::<ProposalState>(ProposalState::build_entity_key(tx, cert_index))?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let (id, hash, metadata, _error) = proposal_metadata_parts(&tx, cert_index, anchor).await?;
+
+    let metadata = metadata.ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(ProposalMetadata {
+        id,
+        tx_hash: hex::encode(tx),
+        cert_index: cert_index.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
+        url: anchor.url.clone(),
+        hash,
+        json_metadata: Some(metadata.json),
+        bytes: metadata.bytes,
+    }))
+}
+
+/// This endpoint returns proposal metadata by CIP-129 governance-action ID.
+///
+/// The endpoint returns the anchor for a failed metadata fetch.
+/// It returns null metadata fields and an error object.
+pub async fn proposal_metadata_by_gov_action<D: Domain>(
+    Path(gov_action_id): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<ProposalMetadataV2>, Error>
+where
+    Option<ProposalState>: From<D::Entity>,
+{
+    let (tx, idx) = parse_gov_action_id(&gov_action_id)?;
+
+    let state = domain
+        .read_cardano_entity::<ProposalState>(ProposalState::build_entity_key(tx, idx))?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
+
+    let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, anchor).await?;
+
+    let (json_metadata, bytes) = match metadata {
+        Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),
+        None => (None, None),
+    };
+
+    Ok(Json(ProposalMetadataV2 {
+        id,
+        tx_hash: hex::encode(tx),
+        cert_index: idx.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
+        url: anchor.url.clone(),
+        hash,
+        json_metadata,
+        bytes,
+        error: error.map(Box::new),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +712,98 @@ mod tests {
         // the id names the same proposal as the tx hash and the cert index
         let tx: Hash<32> = first_tx.parse().expect("failed to parse tx hash");
         assert_eq!(proposals[1].id, bech32_gov_action(&tx, 1).unwrap());
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_metadata_returns_404_when_fetch_fails() {
+        let app = proposal_app();
+        let tx = tx_hash_of_block(&app, 0);
+
+        assert_status(
+            &app,
+            &format!("/governance/proposals/{tx}/0/metadata"),
+            StatusCode::NOT_FOUND,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_metadata_by_gov_action_returns_anchor_error() {
+        let app = proposal_app();
+        let tx = tx_hash_of_block(&app, 0);
+        let tx_hash: Hash<32> = tx.parse().expect("Cannot parse the transaction hash.");
+        let id = bech32_gov_action(&tx_hash, 0).expect("Cannot encode the governance action ID.");
+
+        let (status, body) = app
+            .get_bytes(&format!("/governance/proposals/{id}/metadata"))
+            .await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let metadata: ProposalMetadataV2 =
+            serde_json::from_slice(&body).expect("Cannot parse the proposal metadata.");
+
+        assert_eq!(metadata.id, id);
+        assert_eq!(metadata.tx_hash, tx);
+        assert_eq!(metadata.cert_index, 0);
+        assert_eq!(metadata.url, "https://dolos.test/proposal");
+        assert_eq!(metadata.hash, hex::encode([6u8; 32]));
+        assert!(metadata.json_metadata.is_none());
+        assert!(metadata.bytes.is_none());
+        assert_eq!(
+            metadata.error.expect("The fetch error is absent.").code,
+            blockfrost_openapi::models::dreps_inner_metadata_error::Code::ConnectionError
+        );
+    }
+
+    #[test]
+    fn governance_action_id_decodes_cip129() {
+        let tx = Hash::<32>::from([0x11u8; 32]);
+
+        assert_eq!(
+            parse_gov_action_id(
+                "gov_action1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsq6dmejn"
+            )
+            .unwrap(),
+            (tx, 0)
+        );
+        assert_eq!(
+            parse_gov_action_id(&bech32_gov_action(&tx, 256).unwrap()).unwrap(),
+            (tx, 256)
+        );
+
+        let tx_only = bech32::encode::<Bech32>(Hrp::parse_unchecked("gov_action"), tx.as_slice())
+            .expect("Cannot encode the transaction-only governance action ID.");
+        assert_eq!(parse_gov_action_id(&tx_only), Err(StatusCode::BAD_REQUEST));
+
+        let padded_payload = [tx.as_slice(), &[0, 1]].concat();
+        let padded = bech32::encode::<Bech32>(
+            Hrp::parse_unchecked("gov_action"),
+            padded_payload.as_slice(),
+        )
+        .expect("Cannot encode the padded governance action ID.");
+        assert_eq!(parse_gov_action_id(&padded).unwrap(), (tx, 1));
+
+        assert_eq!(
+            parse_gov_action_id("not-a-gov-action"),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn governance_action_id_rejects_bech32m() {
+        let tx = Hash::<32>::from([0x11u8; 32]);
+        let payload = [tx.as_slice(), &[0]].concat();
+        let hrp = Hrp::parse_unchecked("gov_action");
+
+        let bech32m = bech32::encode::<bech32::Bech32m>(hrp, payload.as_slice())
+            .expect("Cannot encode the Bech32m governance action ID.");
+        assert_eq!(parse_gov_action_id(&bech32m), Err(StatusCode::BAD_REQUEST));
+
+        // The same payload with the Bech32 checksum still parses.
+        let canonical = bech32::encode::<Bech32>(hrp, payload.as_slice())
+            .expect("Cannot encode the Bech32 governance action ID.");
+        assert_eq!(parse_gov_action_id(&canonical).unwrap(), (tx, 0));
     }
 
     #[tokio::test]

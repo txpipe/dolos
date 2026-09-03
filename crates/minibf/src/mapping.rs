@@ -23,6 +23,8 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ops::Deref,
     sync::Arc,
     time::Duration,
@@ -35,6 +37,7 @@ use blockfrost_openapi::models::{
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    dreps_inner_metadata_error::{Code, DrepsInnerMetadataError},
     script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
@@ -202,6 +205,431 @@ pub async fn pool_offchain_metadata(
     let body = res.bytes().await.ok()?;
 
     parse_pool_offchain_metadata(body.as_ref(), expected_hash)
+}
+
+/// This structure contains governance metadata from an anchor.
+pub struct AnchorMetadata {
+    /// This field contains the JSON body for `json_metadata`.
+    pub json: serde_json::Value,
+
+    /// This field contains the raw body in the PostgreSQL `bytea` format.
+    /// The value starts with `\x` and then contains lowercase hexadecimal
+    /// bytes.
+    pub bytes: String,
+}
+
+const MAX_ANCHOR_METADATA_BYTES: usize = 3_000_000;
+const MAX_ANCHOR_REDIRECTS: usize = 3;
+
+struct PublicDnsResolver;
+
+impl reqwest::dns::Resolve for PublicDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+                .filter(|address| is_public_ip(address.ip()))
+                .collect::<Vec<_>>();
+
+            if addresses.is_empty() {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the host has no public IP address",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+
+    !(a == 0
+        || a == 10
+        || (a == 100 && (64..=127).contains(&b))
+        || a == 127
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(ip) = ip.to_ipv4() {
+        return is_public_ipv4(ip);
+    }
+
+    let [a, b, ..] = ip.segments();
+
+    (a & 0xe000) == 0x2000
+        && !(a == 0x2001 && b < 0x0200)
+        && !(a == 0x2001 && b == 0x0db8)
+        && a != 0x2002
+        && !(a == 0x3fff && (b & 0xf000) == 0)
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_http_url(url: &reqwest::Url) -> bool {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+
+    let host = host.trim_end_matches('.');
+
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return false;
+    }
+
+    // `host_str` keeps the brackets around an IPv6 literal, so the client never
+    // resolves it through the DNS filter. Strip them to classify the literal.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+
+    literal.parse::<IpAddr>().map(is_public_ip).unwrap_or(true)
+}
+
+fn anchor_http_client() -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .no_proxy()
+        .dns_resolver(Arc::new(PublicDnsResolver))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() > MAX_ANCHOR_REDIRECTS {
+                attempt.error("too many redirects")
+            } else if is_public_http_url(attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.error("the redirect target is not public")
+            }
+        }))
+        .user_agent("Dolos MiniBF")
+        .build()
+}
+
+fn offchain_hash_mismatch_error(
+    url: &str,
+    expected_hash: &[u8],
+    actual_hash: &[u8],
+) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HashMismatch,
+        format!(
+            "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
+            hex::encode(expected_hash),
+            hex::encode(actual_hash),
+        ),
+    )
+}
+
+fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
+    let reason = status.canonical_reason().unwrap_or("Unknown");
+
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
+        format!(
+            "The server at {url} returned HTTP status {} \"{reason}\".",
+            status.as_u16(),
+        ),
+    )
+}
+
+fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::ConnectionError,
+        format!("The client cannot connect to {url}."),
+    )
+}
+
+fn offchain_decode_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::DecodeError,
+        format!("The client cannot parse JSON from {url}."),
+    )
+}
+
+fn offchain_size_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::SizeExceeded,
+        format!("The response from {url} is larger than {MAX_ANCHOR_METADATA_BYTES} bytes."),
+    )
+}
+
+fn offchain_unknown_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::UnknownError,
+        format!("The API cannot create an HTTP client for {url}."),
+    )
+}
+
+async fn read_anchor_body(
+    mut response: reqwest::Response,
+    url: &str,
+) -> Result<Vec<u8>, DrepsInnerMetadataError> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_ANCHOR_METADATA_BYTES as u64)
+    {
+        return Err(offchain_size_error(url));
+    }
+
+    let capacity = response
+        .content_length()
+        .unwrap_or_default()
+        .min(MAX_ANCHOR_METADATA_BYTES as u64) as usize;
+    let mut body = Vec::with_capacity(capacity);
+
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|_| offchain_connection_error(url))?;
+
+        let Some(chunk) = chunk else {
+            break;
+        };
+
+        if chunk.len() > MAX_ANCHOR_METADATA_BYTES - body.len() {
+            return Err(offchain_size_error(url));
+        }
+
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+/// This function gets metadata from a governance-anchor URL.
+///
+/// The function makes sure that the body hash matches `expected_hash`.
+/// It returns the JSON body and raw bytes, or a typed error.
+pub async fn anchor_offchain_metadata(
+    url: &str,
+    expected_hash: &[u8],
+) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
+    let request_url = match reqwest::Url::parse(url) {
+        Ok(url) if is_public_http_url(&url) => url,
+        _ => return (None, Some(offchain_connection_error(url))),
+    };
+
+    let client = match anchor_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(%error, "cannot create the HTTP client for governance metadata");
+            return (None, Some(offchain_unknown_error(url)));
+        }
+    };
+
+    let response = match client.get(request_url).send().await {
+        Ok(response) => response,
+        Err(_) => return (None, Some(offchain_connection_error(url))),
+    };
+
+    if response.status() != StatusCode::OK {
+        return (
+            None,
+            Some(offchain_http_response_error(url, response.status())),
+        );
+    }
+
+    let body = match read_anchor_body(response, url).await {
+        Ok(body) => body,
+        Err(error) => return (None, Some(error)),
+    };
+
+    let actual_hash = Hasher::<256>::hash(body.as_ref());
+
+    if actual_hash.as_ref() != expected_hash {
+        return (
+            None,
+            Some(offchain_hash_mismatch_error(
+                url,
+                expected_hash,
+                actual_hash.as_ref(),
+            )),
+        );
+    }
+
+    match serde_json::from_slice(body.as_ref()) {
+        Ok(json) => (
+            Some(AnchorMetadata {
+                json,
+                bytes: format!("\\x{}", hex::encode(body.as_slice())),
+            }),
+            None,
+        ),
+        Err(_) => (None, Some(offchain_decode_error(url))),
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread::{self, JoinHandle},
+    };
+
+    fn serve_body(body: Vec<u8>, content_length: Option<usize>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Cannot bind the test server.");
+        let address = listener
+            .local_addr()
+            .expect("Cannot read the test server address.");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Cannot accept the test request.");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+
+            let content_length = content_length
+                .map(|size| format!("Content-Length: {size}\r\n"))
+                .unwrap_or_default();
+            let headers = format!("HTTP/1.1 200 OK\r\n{content_length}Connection: close\r\n\r\n");
+
+            stream
+                .write_all(headers.as_bytes())
+                .expect("Cannot write the test response headers.");
+            let _ = stream.write_all(&body);
+        });
+
+        (format!("http://{address}/metadata"), server)
+    }
+
+    async fn get_local_response(url: &str) -> reqwest::Response {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("Cannot create the test HTTP client.")
+            .get(url)
+            .send()
+            .await
+            .expect("Cannot get the test response.")
+    }
+
+    #[tokio::test]
+    async fn anchor_fetch_rejects_loopback_before_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Cannot bind the test server.");
+        listener
+            .set_nonblocking(true)
+            .expect("Cannot configure the test server.");
+        let url = format!(
+            "http://{}/metadata",
+            listener
+                .local_addr()
+                .expect("Cannot read the test server address.")
+        );
+
+        let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32]).await;
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            error.expect("The connection error is absent.").code,
+            Code::ConnectionError
+        );
+        assert_eq!(
+            listener
+                .accept()
+                .expect_err("The client made a connection.")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_body_rejects_oversized_content_length() {
+        let (url, server) = serve_body(Vec::new(), Some(MAX_ANCHOR_METADATA_BYTES + 1));
+        let response = get_local_response(&url).await;
+
+        let error = read_anchor_body(response, &url)
+            .await
+            .expect_err("The oversized response was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::SizeExceeded);
+    }
+
+    #[tokio::test]
+    async fn anchor_body_rejects_oversized_stream() {
+        let body = vec![b'x'; MAX_ANCHOR_METADATA_BYTES + 1];
+        let (url, server) = serve_body(body, None);
+        let response = get_local_response(&url).await;
+
+        let error = read_anchor_body(response, &url)
+            .await
+            .expect_err("The oversized response was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::SizeExceeded);
+    }
+
+    #[tokio::test]
+    async fn anchor_body_accepts_size_limit() {
+        let mut body = Vec::with_capacity(MAX_ANCHOR_METADATA_BYTES);
+        body.push(b'"');
+        body.resize(MAX_ANCHOR_METADATA_BYTES - 1, b'x');
+        body.push(b'"');
+        let (url, server) = serve_body(body, Some(MAX_ANCHOR_METADATA_BYTES));
+        let response = get_local_response(&url).await;
+
+        let body = read_anchor_body(response, &url)
+            .await
+            .expect("The response at the size limit was rejected.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(body.len(), MAX_ANCHOR_METADATA_BYTES);
+    }
+
+    #[test]
+    fn public_url_predicate_blocks_non_public_targets() {
+        let public = [
+            "https://example.com/metadata",
+            "http://1.1.1.1/metadata",
+            "https://[2606:4700:4700::1111]/metadata",
+        ];
+        for url in public {
+            let url = reqwest::Url::parse(url).expect("Cannot parse the URL.");
+            assert!(is_public_http_url(&url), "{url} is not public");
+        }
+
+        let blocked = [
+            "ftp://example.com/metadata",
+            "https://localhost/metadata",
+            "https://service.localhost/metadata",
+            "http://127.0.0.1/metadata",
+            "http://10.0.0.1/metadata",
+            "http://169.254.169.254/metadata",
+            "http://[::1]/metadata",
+            "http://[::ffff:127.0.0.1]/metadata",
+            "http://[fd00::1]/metadata",
+        ];
+        for url in blocked {
+            let url = reqwest::Url::parse(url).expect("Cannot parse the URL.");
+            assert!(!is_public_http_url(&url), "{url} is public");
+        }
+    }
 }
 
 pub trait IntoModel<T>
