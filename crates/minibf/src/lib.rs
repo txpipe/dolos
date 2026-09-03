@@ -621,6 +621,14 @@ where
             "/governance/proposals",
             get(routes::governance::proposals::<D>),
         )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/withdrawals",
+            get(routes::governance::proposal_withdrawals::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/withdrawals",
+            get(routes::governance::proposal_withdrawals_by_gov_action::<D>),
+        )
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
