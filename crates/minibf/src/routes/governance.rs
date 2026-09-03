@@ -457,14 +457,21 @@ where
 /// This function converts a CIP-129 governance-action ID to a transaction hash
 /// and action index.
 ///
+/// The function accepts only the Bech32 checksum.
 /// The payload contains the 32-byte transaction hash.
 /// It then contains a big-endian byte string for the action index.
 fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
-    let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    // `bech32::decode` also accepts the Bech32m checksum. CIP-129 identifiers use
+    // only the Bech32 checksum. This code decodes with the Bech32 checksum and
+    // rejects Bech32m.
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    if hrp.as_str() != "gov_action" {
+    if parsed.hrp().as_str() != "gov_action" {
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    let payload: Vec<u8> = parsed.byte_iter().collect();
 
     // The payload must contain the hash and one to four index bytes.
     if payload.len() < 33 || payload.len() > 36 {
@@ -568,6 +575,11 @@ where
 
     let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, anchor).await?;
 
+    let (json_metadata, bytes) = match metadata {
+        Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),
+        None => (None, None),
+    };
+
     Ok(Json(ProposalMetadataV2 {
         id,
         tx_hash: hex::encode(tx),
@@ -576,8 +588,8 @@ where
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         url: anchor.url.clone(),
         hash,
-        json_metadata: metadata.as_ref().map(|x| x.json.clone()),
-        bytes: metadata.map(|x| x.bytes),
+        json_metadata,
+        bytes,
         error: error.map(Box::new),
     }))
 }
@@ -780,6 +792,22 @@ mod tests {
             parse_gov_action_id("not-a-gov-action"),
             Err(StatusCode::BAD_REQUEST)
         );
+    }
+
+    #[test]
+    fn governance_action_id_rejects_bech32m() {
+        let tx = Hash::<32>::from([0x11u8; 32]);
+        let payload = [tx.as_slice(), &[0]].concat();
+        let hrp = Hrp::parse_unchecked("gov_action");
+
+        let bech32m = bech32::encode::<bech32::Bech32m>(hrp, payload.as_slice())
+            .expect("Cannot encode the Bech32m governance action ID.");
+        assert_eq!(parse_gov_action_id(&bech32m), Err(StatusCode::BAD_REQUEST));
+
+        // The same payload with the Bech32 checksum still parses.
+        let canonical = bech32::encode::<Bech32>(hrp, payload.as_slice())
+            .expect("Cannot encode the Bech32 governance action ID.");
+        assert_eq!(parse_gov_action_id(&canonical).unwrap(), (tx, 0));
     }
 
     #[tokio::test]
