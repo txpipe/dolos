@@ -93,6 +93,14 @@ pub struct StakeSnapshot {
     pub registered_accounts: HashSet<StakeCredential>,
     pub pools: HashMap<PoolHash, EpochValue<PoolSnapshot>>,
     pub pool_stake: HashMap<PoolHash, u64>,
+    /// Per-pool delegator count over the *whole* snapshot, filled by
+    /// `load_globals` alongside `pool_stake`.
+    ///
+    /// Counted globally rather than summed from each shard's
+    /// `accounts_by_pool`, so it survives a mid-RUPD restart: `initialize`
+    /// rebuilds it, whereas a per-shard accumulator would only cover the
+    /// shards that actually ran after the resume cursor.
+    pub pool_delegator_counts: HashMap<PoolHash, u64>,
     /// Per-pool live pledge: sum of stake delegated to the pool by its
     /// declared owners, computed in `load_globals` over every account.
     /// Owner credentials can land in any shard, so a per-shard
@@ -102,9 +110,10 @@ pub struct StakeSnapshot {
     /// `live_pledge < declared_pledge` guard. The live pledge depends
     /// only on global stake, so we precompute it once.
     pub pool_live_pledges: HashMap<PoolHash, u64>,
-    /// Total blocks minted by ALL pools in the performance epoch (mark snapshot).
-    /// This includes blocks from pools created after the stake snapshot epoch.
-    /// Used for the `epoch_blocks` denominator in apparent performance calculation.
+    /// Total blocks minted by ALL pools in the performance epoch (mark
+    /// snapshot). This includes blocks from pools created after the stake
+    /// snapshot epoch. Used for the `epoch_blocks` denominator in apparent
+    /// performance calculation.
     pub performance_epoch_pool_blocks: u64,
 }
 
@@ -116,6 +125,10 @@ impl StakeSnapshot {
 
     pub fn iter_accounts(&self) -> impl Iterator<Item = (&PoolHash, &StakeCredential, &u64)> {
         self.accounts_by_pool.iter_all()
+    }
+
+    pub fn get_pool_delegator_count(&self, pool: &PoolHash) -> u64 {
+        *self.pool_delegator_counts.get(pool).unwrap_or(&0)
     }
 }
 
@@ -138,4 +151,3 @@ pub struct RupdWork {
     /// emits only rewards owned by this shard.
     pub shard_ranges: Option<Vec<Range<EntityKey>>>,
 }
-

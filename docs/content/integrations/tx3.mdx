@@ -62,8 +62,7 @@ trix invoke --profile local
 ### Using the Rust SDK
 
 ```rust
-use tx3_sdk::{tii::Protocol, trp::Client, trp::ClientOptions, Tx3Client, Party};
-use tx3_sdk::signer::CardanoSigner;
+use tx3_sdk::{tii::Protocol, trp::Client, trp::ClientOptions, CardanoSigner, Tx3Client, Party};
 use serde_json::json;
 
 let protocol = Protocol::from_file("./my-protocol.tii")?;

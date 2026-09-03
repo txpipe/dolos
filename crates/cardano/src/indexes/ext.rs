@@ -9,8 +9,9 @@ use super::dimensions::{archive, utxo};
 
 /// Extension trait providing Cardano-specific index queries.
 ///
-/// This trait is automatically implemented for all types implementing `IndexStore`.
-/// It provides convenient methods that map Cardano concepts to generic tag lookups.
+/// This trait is automatically implemented for all types implementing
+/// `IndexStore`. It provides convenient methods that map Cardano concepts to
+/// generic tag lookups.
 ///
 /// # Example
 ///
@@ -49,9 +50,15 @@ pub trait CardanoIndexExt: IndexStore {
         self.utxos_by_tag(utxo::ASSET, asset)
     }
 
+    /// Get UTxOs that carry a script as their reference script.
+    fn utxos_by_script_ref(&self, script_hash: &[u8]) -> Result<UtxoSet, IndexError> {
+        self.utxos_by_tag(utxo::SCRIPT_REF, script_hash)
+    }
+
     // ============ Archive Slot Queries ============
 
-    /// Iterate over slots of blocks containing transactions involving an address.
+    /// Iterate over slots of blocks containing transactions involving an
+    /// address.
     fn slots_by_address(
         &self,
         address: &[u8],
@@ -61,7 +68,8 @@ pub trait CardanoIndexExt: IndexStore {
         self.slots_by_tag(archive::ADDRESS, address, start, end)
     }
 
-    /// Iterate over slots of blocks containing transactions involving a payment credential.
+    /// Iterate over slots of blocks containing transactions involving a payment
+    /// credential.
     fn slots_by_payment(
         &self,
         payment: &[u8],
@@ -71,7 +79,8 @@ pub trait CardanoIndexExt: IndexStore {
         self.slots_by_tag(archive::PAYMENT, payment, start, end)
     }
 
-    /// Iterate over slots of blocks containing transactions involving a stake credential.
+    /// Iterate over slots of blocks containing transactions involving a stake
+    /// credential.
     fn slots_by_stake(
         &self,
         stake: &[u8],
@@ -89,6 +98,17 @@ pub trait CardanoIndexExt: IndexStore {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
         self.slots_by_tag(archive::ASSET, asset, start, end)
+    }
+
+    /// Iterate over slots of blocks that contain transactions for assets of a
+    /// policy.
+    fn slots_by_policy(
+        &self,
+        policy: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, IndexError> {
+        self.slots_by_tag(archive::POLICY, policy, start, end)
     }
 
     /// Iterate over slots of blocks containing a datum hash.
@@ -141,7 +161,8 @@ pub trait CardanoIndexExt: IndexStore {
         self.slots_by_tag(archive::ACCOUNT_WITHDRAWALS, account, start, end)
     }
 
-    /// Iterate over slots of blocks containing transactions with a specific metadata label.
+    /// Iterate over slots of blocks containing transactions with a specific
+    /// metadata label.
     fn slots_by_metadata(
         &self,
         label: u64,
@@ -149,6 +170,26 @@ pub trait CardanoIndexExt: IndexStore {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, IndexError> {
         self.slots_by_tag(archive::METADATA, &label.to_be_bytes(), start, end)
+    }
+
+    // ============ Bulk Export ============
+
+    /// Iterate every archive tag record in `slots`, across every Cardano
+    /// archive dimension.
+    ///
+    /// [`IndexStore::iter_archive_tags`] takes the dimension list because the
+    /// storage layer is chain-agnostic and cannot know it — stores keep a hash
+    /// of the dimension name, not the name. That makes `archive::ALL` the
+    /// caller's to supply, and every export call site a place the list can
+    /// drift out of.
+    ///
+    /// This is that list, once. `slots` is half-open, as it is on the method
+    /// underneath.
+    fn iter_all_archive_tags(
+        &self,
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        self.iter_archive_tags(&archive::ALL, slots)
     }
 }
 

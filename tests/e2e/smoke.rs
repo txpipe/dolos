@@ -8,20 +8,20 @@ mod common;
 
 use common::*;
 
-fn daemon_runs(scenario: &Scenario) {
-    println!("e2e smoke start: {}", scenario.name);
+fn daemon_runs(workspace: &ScenarioWorkspace) {
+    println!("e2e smoke start: {}", workspace.name());
 
-    if scenario.expect_ports {
-        assert_port_released(scenario, 0);
-        assert_port_released(scenario, 1);
-        assert_port_released(scenario, 2);
+    if workspace.expect_ports() {
+        assert_port_released(workspace, 0);
+        assert_port_released(workspace, 1);
+        assert_port_released(workspace, 2);
     }
 
-    assert_file_released(scenario, "dolos.socket");
+    assert_file_released(workspace, "dolos.socket");
 
-    reset_and_bootstrap(scenario);
+    reset_and_bootstrap(workspace);
 
-    let mut cmd = prepare_scenario_process(scenario);
+    let mut cmd = prepare_scenario_process(workspace);
 
     let handle = cmd
         .args(["daemon"])
@@ -32,11 +32,11 @@ fn daemon_runs(scenario: &Scenario) {
 
     let mut guard = ProcessGuard::new(handle);
 
-    if scenario.expect_ports {
-        wait_for_tcp_port(scenario, 0, Duration::from_secs(30));
-        wait_for_tcp_port(scenario, 1, Duration::from_secs(30));
-        wait_for_tcp_port(scenario, 2, Duration::from_secs(30));
-        wait_for_socket_file(scenario, "dolos.socket", Duration::from_secs(30));
+    if workspace.expect_ports() {
+        wait_for_tcp_port(workspace, 0, Duration::from_secs(30));
+        wait_for_tcp_port(workspace, 1, Duration::from_secs(30));
+        wait_for_tcp_port(workspace, 2, Duration::from_secs(30));
+        wait_for_socket_file(workspace, "dolos.socket", Duration::from_secs(30));
     }
 
     std::thread::sleep(Duration::from_secs(10));
@@ -48,12 +48,12 @@ fn daemon_runs(scenario: &Scenario) {
 
     shutdown_gracefully(&mut guard);
 
-    if scenario.expect_ports {
-        assert_port_released(scenario, 0);
-        assert_port_released(scenario, 1);
-        assert_port_released(scenario, 2);
+    if workspace.expect_ports() {
+        assert_port_released(workspace, 0);
+        assert_port_released(workspace, 1);
+        assert_port_released(workspace, 2);
     }
-    assert_file_released(scenario, "dolos.socket");
+    assert_file_released(workspace, "dolos.socket");
 }
 
 macro_rules! test_for_scenario {
@@ -61,7 +61,7 @@ macro_rules! test_for_scenario {
         #[test]
         #[ignore]
         fn $name() {
-            $func(&SCENARIOS[$scenario]);
+            $func(&ScenarioWorkspace::new(&SCENARIOS[$scenario]));
         }
     };
 }

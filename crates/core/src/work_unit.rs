@@ -26,10 +26,9 @@ pub struct MempoolUpdate {
 /// 1. **Definition** - Lightweight construction with required parameters.
 ///    Happens when the work unit is created by the chain logic.
 ///
-/// 2. **Initialize** - Shard-agnostic setup that runs once before any
-///    shard. The implementation can use this to compute and cache its
-///    `total_shards()` value, hoist boundary-wide reads out of the
-///    per-shard loop, etc.
+/// 2. **Initialize** - Shard-agnostic setup that runs once before any shard.
+///    The implementation can use this to compute and cache its `total_shards()`
+///    value, hoist boundary-wide reads out of the per-shard loop, etc.
 ///
 /// 3. **Per-shard loop**, repeated `total_shards()` times with `shard_index`
 ///    advancing from `0` to `total_shards() - 1`:
@@ -41,8 +40,13 @@ pub struct MempoolUpdate {
 ///    e. **Commit Archive** - Apply changes to the archive store.
 ///    f. **Commit Indexes** - Apply changes to index stores.
 ///
-/// 4. **Finalize** - Shard-agnostic teardown that runs once after the
-///    last shard's commits succeed.
+///    Each commit phase owns its own transaction, so the order above is a
+///    durability order, not an atomic one. Work units that persist a resume
+///    cursor in `commit_state` must respect the ordering rule documented on
+///    [`WorkUnit::commit_state`].
+///
+/// 4. **Finalize** - Shard-agnostic teardown that runs once after the last
+///    shard's commits succeed.
 ///
 /// 5. **Tip notifications + mempool updates** - shard-agnostic, fired once
 ///    after `finalize()`.
@@ -143,6 +147,21 @@ pub trait WorkUnit<D: Domain>: Send {
     /// It should be called after `commit_wal()` to ensure crash recovery
     /// is possible.
     ///
+    /// # Durability ordering
+    ///
+    /// The commit phases name stores, not transactions: each one opens and
+    /// commits its own, so a crash between two phases leaves the earlier
+    /// store written and the later one not. A work unit that persists a
+    /// resume cursor here — see [`WorkUnit::start_shard`] — therefore has to
+    /// make everything that cursor implies durable *before* this phase's
+    /// transaction commits. Otherwise the restart skips a shard whose
+    /// remaining outputs never landed, and nothing re-derives them.
+    ///
+    /// So the shard-resumable Cardano work units (`ewrap`, `estart`, `rupd`)
+    /// write their per-shard archive logs from `commit_state`, ahead of the
+    /// state commit, and leave `commit_archive` empty. Work units without a
+    /// resume cursor (`roll`) are free to use the phases as named.
+    ///
     /// # Errors
     ///
     /// Returns an error if state persistence fails.
@@ -151,7 +170,10 @@ pub trait WorkUnit<D: Domain>: Send {
     /// Apply computed changes to the archive store.
     ///
     /// This phase persists historical data and logs to the archive.
-    /// It is called after `commit_state()`.
+    /// It is called after `commit_state()` — which means data that must be
+    /// durable before a resume cursor written in `commit_state` advances
+    /// cannot be written here. See the durability-ordering note on
+    /// [`WorkUnit::commit_state`].
     ///
     /// # Errors
     ///

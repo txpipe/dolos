@@ -7,14 +7,14 @@ use pallas::ledger::addresses::{
 };
 use pallas::ledger::primitives::alonzo::MoveInstantaneousReward;
 use pallas::ledger::primitives::conway::{
-    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds,
+    CostModels, DRep, DRepVotingThresholds, PoolVotingThresholds, ScriptRef,
 };
 use pallas::ledger::primitives::{
     alonzo::Certificate as AlonzoCert, conway::Certificate as ConwayCert, PoolMetadata,
     RationalNumber, Relay, StakeCredential,
 };
 use pallas::ledger::primitives::{Epoch, ExUnitPrices, ExUnits, Nonce, NonceVariant};
-use pallas::ledger::traverse::{MultiEraCert, MultiEraTx};
+use pallas::ledger::traverse::{ComputeHash, MultiEraCert, MultiEraTx, OriginalHash};
 use serde::{Deserialize, Serialize};
 
 use crate::eras::ChainSummary;
@@ -133,6 +133,10 @@ pub fn cert_as_vote_delegation(cert: &MultiEraCert) -> Option<MultiEraVoteDelega
                 delegator: delegator.clone(),
                 drep: drep.clone(),
             }),
+            ConwayCert::StakeVoteDeleg(delegator, _, drep) => Some(MultiEraVoteDelegation {
+                delegator: delegator.clone(),
+                drep: drep.clone(),
+            }),
             _ => None,
         },
         _ => None,
@@ -165,6 +169,42 @@ pub fn cert_as_drep_unregistration(cert: &MultiEraCert) -> Option<MultiEraDRepUn
             ConwayCert::UnRegDRepCert(cred, deposit) => Some(MultiEraDRepRegistration {
                 cred: cred.clone(),
                 deposit: *deposit,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub struct MultiEraCommitteeAuth {
+    pub cold: StakeCredential,
+    pub hot: StakeCredential,
+}
+
+pub fn cert_as_committee_auth(cert: &MultiEraCert) -> Option<MultiEraCommitteeAuth> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::AuthCommitteeHot(cold, hot) => Some(MultiEraCommitteeAuth {
+                cold: cold.clone(),
+                hot: hot.clone(),
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub struct MultiEraCommitteeResign {
+    pub cold: StakeCredential,
+    pub anchor: Option<pallas::ledger::primitives::conway::Anchor>,
+}
+
+pub fn cert_as_committee_resign(cert: &MultiEraCert) -> Option<MultiEraCommitteeResign> {
+    match cert {
+        MultiEraCert::Conway(cow) => match cow.deref().deref() {
+            ConwayCert::ResignCommitteeCold(cold, anchor) => Some(MultiEraCommitteeResign {
+                cold: cold.clone(),
+                anchor: anchor.clone(),
             }),
             _ => None,
         },
@@ -393,6 +433,19 @@ pub fn default_cost_models() -> CostModels {
         plutus_v2: None,
         plutus_v3: None,
         unknown: Default::default(),
+    }
+}
+
+/// Compute the on-chain script hash of a reference script.
+///
+/// Each language hashes its own tagged serialization, so the match must stay
+/// per-variant instead of hashing the raw bytes once.
+pub fn script_ref_hash(script_ref: &ScriptRef) -> Hash<28> {
+    match script_ref {
+        ScriptRef::NativeScript(x) => x.original_hash(),
+        ScriptRef::PlutusV1Script(x) => x.compute_hash(),
+        ScriptRef::PlutusV2Script(x) => x.compute_hash(),
+        ScriptRef::PlutusV3Script(x) => x.compute_hash(),
     }
 }
 

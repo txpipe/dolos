@@ -5,9 +5,23 @@ use tokio::sync::Semaphore;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
-    archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension, TxOrder,
+    archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockHash, BlockHeight,
+    BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension,
+    TxHash, TxOrder,
 };
+
+/// Lightweight block metadata for a transaction, extracted via a single decode.
+///
+/// Returned by `block_meta_by_tx_hash`. Callers that need the full block body
+/// should use `block_by_tx_hash` instead.
+#[derive(Debug, Clone)]
+pub struct BlockRefMeta {
+    pub slot: BlockSlot,
+    pub hash: BlockHash,
+    pub height: BlockHeight,
+    pub tx_hash: TxHash,
+    pub tx_index: TxOrder,
+}
 
 #[derive(Debug, Clone)]
 pub struct AsyncQueryOptions {
@@ -18,6 +32,26 @@ impl Default for AsyncQueryOptions {
     fn default() -> Self {
         Self { max_blocking: 16 }
     }
+}
+
+/// Pick the block a hash names out of the blocks recorded at one slot.
+///
+/// The index answers with a slot, and a slot usually holds one block, which is
+/// then the answer without a decode. Where the chain put two blocks on one
+/// slot — a Byron epoch-boundary block and the first main block of the epoch
+/// it opens — the hash is what tells them apart.
+///
+/// A body that will not decode is not the block the hash names, so it is
+/// passed over rather than failing the lookup: the caller asked for one block,
+/// and the one it asked for may be the sibling.
+fn pick_by_hash(candidates: Vec<BlockBody>, hash: &[u8]) -> Option<BlockBody> {
+    if candidates.len() <= 1 {
+        return candidates.into_iter().next();
+    }
+
+    candidates.into_iter().find(|body| {
+        MultiEraBlock::decode(body).is_ok_and(|decoded| decoded.hash().as_ref() == hash)
+    })
 }
 
 #[derive(Clone)]
@@ -78,7 +112,10 @@ where
         self.run_blocking(move |domain| {
             let slot = domain.indexes().slot_by_block_hash(&hash)?;
             match slot {
-                Some(slot) => Ok(domain.archive().get_block_by_slot(&slot)?),
+                Some(slot) => {
+                    let candidates = domain.archive().get_blocks_by_slot(&slot)?;
+                    Ok(pick_by_hash(candidates, &hash))
+                }
                 None => Ok(None),
             }
         })
@@ -134,6 +171,43 @@ where
         Ok(None)
     }
 
+    /// Look up the block containing a given transaction hash and return only
+    /// chain-point metadata, decoding the block once inside the blocking task.
+    ///
+    /// Prefer this over `block_by_tx_hash` when only the chain point is needed
+    /// — it avoids a second `MultiEraBlock::decode` in the caller.
+    pub async fn block_meta_by_tx_hash(
+        &self,
+        tx_hash: Vec<u8>,
+    ) -> Result<Option<BlockRefMeta>, DomainError> {
+        self.run_blocking(move |domain| {
+            let Some(slot) = domain.indexes().slot_by_tx_hash(&tx_hash)? else {
+                return Ok(None);
+            };
+            let Some(raw) = domain.archive().get_block_by_slot(&slot)? else {
+                return Ok(None);
+            };
+            let block = MultiEraBlock::decode(raw.as_slice())
+                .map_err(|e| DomainError::ChainError(ChainError::DecodingError(e)))?;
+            let Some((tx_index, _)) = block
+                .txs()
+                .iter()
+                .enumerate()
+                .find(|(_, tx)| tx.hash().as_slice() == tx_hash.as_slice())
+            else {
+                return Ok(None);
+            };
+            Ok(Some(BlockRefMeta {
+                slot: block.slot(),
+                hash: block.hash(),
+                height: block.number(),
+                tx_hash: tx_hash.as_slice().into(),
+                tx_index,
+            }))
+        })
+        .await
+    }
+
     pub async fn tx_cbor(&self, tx_hash: Vec<u8>) -> Result<Option<EraCbor>, DomainError> {
         let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
@@ -182,5 +256,63 @@ where
     ) -> Result<Option<ChainPoint>, DomainError> {
         self.run_blocking(move |domain| Ok(domain.archive().find_intersect(&intersect)?))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
+
+    use super::*;
+
+    /// The case the plural read exists for: a Byron epoch-boundary block and
+    /// the first main block of the epoch it opens share a slot, so resolving a
+    /// hash through the index lands on both and only the hash tells them
+    /// apart.
+    #[test]
+    fn a_shared_slot_is_resolved_by_hash() {
+        let (ebb_point, ebb) = make_byron_ebb(1, pallas::crypto::hash::Hash::new([7u8; 32]));
+        let (main_point, main) =
+            make_conway_block_with_prev(byron_ebb_slot(1), ebb_point.hash(), 1);
+
+        let candidates = vec![ebb.as_ref().clone(), main.as_ref().clone()];
+
+        let ebb_hash = ebb_point.hash().unwrap();
+        let main_hash = main_point.hash().unwrap();
+
+        assert_eq!(
+            pick_by_hash(candidates.clone(), ebb_hash.as_ref()),
+            Some(ebb.as_ref().clone())
+        );
+
+        assert_eq!(
+            pick_by_hash(candidates, main_hash.as_ref()),
+            Some(main.as_ref().clone())
+        );
+    }
+
+    /// A body that will not decode must not take its sibling down with it: the
+    /// hash asked for here belongs to the block that is fine.
+    #[test]
+    fn an_undecodable_candidate_does_not_hide_its_sibling() {
+        let (ebb_point, ebb) = make_byron_ebb(1, pallas::crypto::hash::Hash::new([7u8; 32]));
+        let ebb_hash = ebb_point.hash().unwrap();
+
+        let candidates = vec![b"not a block".to_vec(), ebb.as_ref().clone()];
+
+        assert_eq!(
+            pick_by_hash(candidates, ebb_hash.as_ref()),
+            Some(ebb.as_ref().clone())
+        );
+    }
+
+    /// The ordinary slot holds one block and the index already named it, so
+    /// the answer costs no decode — which an undecodable body is enough to
+    /// show.
+    #[test]
+    fn a_lone_candidate_is_returned_undecoded() {
+        let body = b"not a block".to_vec();
+
+        assert_eq!(pick_by_hash(vec![body.clone()], &[0u8; 32]), Some(body));
     }
 }

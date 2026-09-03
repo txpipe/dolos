@@ -1,0 +1,72 @@
+[package]
+name = "dolos-snapshot"
+description = "The io.txpipe.dolos.cardano Stelae profile"
+version.workspace = true
+edition.workspace = true
+
+[features]
+# The backfill daemon (`src/backfill.rs`): the publisher loop that composes
+# the mithril fetch with the publish lifecycle. Default-off, and the only
+# reason this crate ever pulls the aggregator client, pallas or a tokio
+# runtime handle — a build that only writes steles keeps the dependency tree it
+# had. `dolos`'s own `mithril` feature is what turns this on.
+backfill = [
+    "dep:dolos-mithril",
+    "dep:pallas",
+    "dep:itertools",
+    "dep:tokio",
+    "dep:tokio-util",
+]
+
+# This crate is the *profile* half of the Stelae boundary: it depends on the
+# stelae crates and on `dolos-*`, never the other way around — structural now
+# that the protocol lives in its own repository. This is the workspace's one
+# pin point: the CLI and root lib reach protocol and driver types through
+# this crate's re-exports, and a stelae release lands here as one tag bump
+# for both crates (they version in lockstep; never pin a branch). See
+# adrs/004_stelae_snapshots.md, "Code layout".
+[dependencies]
+# The protocol crates keep their own default-off `oci` feature for third
+# parties; this profile publishes into registries as a matter of course, so
+# it turns the transport on unconditionally rather than forwarding a feature
+# nothing in dolos ever left off.
+stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.2.0", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.2.0", features = ["oci"] }
+dolos-core = { path = "../core" }
+dolos-cardano = { path = "../cardano" }
+
+hex.workspace = true
+minicbor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Feature `backfill` only.
+dolos-mithril = { path = "../mithril", optional = true }
+pallas = { workspace = true, optional = true }
+itertools = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros"] }
+tokio-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+# `node`'s tests build a `[storage]` section the way an operator writes one.
+toml = "0.8.13"
+
+# The registry suites install `ring` as the process-default crypto provider —
+# the precondition `stelae::oci` puts on whatever process opens a `Registry`.
+# The `dolos` binary does it in `main()`; under `cargo test` the test binary
+# is the program, so it does it in the fixture. Mirrors the same
+# dev-dependency in `crates/stelae`.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }
+
+# The export tests drive real store sets: `dolos-testing` for the harness
+# domain and its two backend bindings, `dolos-redb3` for the archive, which is
+# the one store with no builtin backend.
+dolos-testing = { path = "../testing" }
+dolos-redb3 = { path = "../redb3" }

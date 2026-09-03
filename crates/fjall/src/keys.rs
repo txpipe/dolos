@@ -25,8 +25,12 @@ pub const TXO_REF_SIZE: usize = 36;
 /// Size of encoded slot: 8-byte u64
 pub const SLOT_SIZE: usize = 8;
 
-/// Size of encoded hash key: 8-byte u64
-pub const HASH_KEY_SIZE: usize = 8;
+/// Size of encoded hash key: 8-byte u64.
+///
+/// Defined as core's [`dolos_core::KEY_HASH_SIZE`] so the width asserted by
+/// the record types ([`dolos_core::KeyHash`]) and the width used in on-disk
+/// keys cannot drift apart.
+pub const HASH_KEY_SIZE: usize = dolos_core::KEY_HASH_SIZE;
 
 /// Size of dimension hash: 8 bytes
 pub const DIM_HASH_SIZE: usize = 8;
@@ -52,7 +56,8 @@ pub mod dim_prefix {
 /// Hash a qualified dimension string to 8 bytes.
 ///
 /// Combines prefix and dimension with ":" separator, then hashes with xxh3.
-/// This ensures dimensions with the same name but different types don't collide.
+/// This ensures dimensions with the same name but different types don't
+/// collide.
 ///
 /// # Examples
 ///

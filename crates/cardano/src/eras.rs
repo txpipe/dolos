@@ -50,6 +50,12 @@ impl EraSummary {
 
 pub type Timestamp = u64;
 
+/// Milliseconds per second.
+///
+/// [`ChainSummary`] stores time in seconds; Plutus `POSIXTime` is in
+/// milliseconds. Used when crossing that boundary.
+const MS_PER_SECOND: u64 = 1000;
+
 #[derive(Debug, Default, Clone)]
 pub struct ChainSummary {
     past: Vec<EraSummary>,
@@ -72,6 +78,27 @@ impl ChainSummary {
     pub fn slot_time(&self, slot: u64) -> Timestamp {
         let era = self.era_for_slot(slot);
         era.slot_time(slot)
+    }
+
+    /// Build a Plutus [`SlotConfig`] from the edge era.
+    ///
+    /// [`ChainSummary`] keeps `slot_length` and `timestamp` in **seconds**
+    /// (the Ouroboros era-summary convention), but a Plutus `ScriptContext`
+    /// expects `POSIXTime` in **milliseconds**. Pallas' `SlotConfig` does no
+    /// scaling of its own (`zero_time + (slot - zero_slot) * slot_length`), so
+    /// both fields must already be in milliseconds. Convert here, at the seam
+    /// between dolos' seconds-world and pallas' ms-world, so no call site has
+    /// to remember the unit mismatch.
+    pub fn to_pallas_slot_config(
+        &self,
+    ) -> pallas::ledger::validate::phase2::script_context::SlotConfig {
+        let edge = self.edge();
+
+        pallas::ledger::validate::phase2::script_context::SlotConfig {
+            slot_length: edge.slot_length * MS_PER_SECOND,
+            zero_slot: edge.start.slot,
+            zero_time: edge.start.timestamp * MS_PER_SECOND,
+        }
     }
 
     pub fn append_era(&mut self, protocol: u16, era: EraSummary) {
@@ -185,6 +212,22 @@ impl ChainSummary {
         }
         0
     }
+
+    /// Epoch at which the chain entered Conway — the first era with
+    /// protocol >= 9 (a hard fork can jump over 9, mirroring
+    /// `EraTransition::entering_conway`). `None` when no known era has
+    /// reached Conway.
+    pub fn first_conway_epoch(&self) -> Option<u64> {
+        for (protocol, era) in self.iter_past_with_protocol() {
+            if *protocol >= 9 {
+                return Some(era.start.epoch);
+            }
+        }
+        match self.protocols.last() {
+            Some(last) if *last >= 9 => Some(self.edge().start.epoch),
+            _ => None,
+        }
+    }
 }
 
 pub fn load_era_summary<D: Domain>(state: &D::State) -> Result<ChainSummary, ChainError> {
@@ -251,5 +294,77 @@ pub fn load_active_era<D: Domain>(
             Err(_) => Err(ChainError::EraNotFound),
         },
         None => Err(ChainError::EraNotFound),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_config_is_in_milliseconds() {
+        // Mainnet Shelley edge era: time in seconds, slot length of 1 second.
+        let mut summary = ChainSummary::default();
+        summary.append_era(
+            2,
+            EraSummary {
+                start: EraBoundary {
+                    epoch: 208,
+                    slot: 4_492_800,
+                    timestamp: 1_596_059_091,
+                },
+                end: None,
+                epoch_length: 432_000,
+                slot_length: 1,
+                protocol: 2,
+            },
+        );
+
+        let sc = summary.to_pallas_slot_config();
+
+        // POSIXTime must be milliseconds; this matches pallas' mainnet default.
+        assert_eq!(sc.slot_length, 1_000);
+        assert_eq!(sc.zero_slot, 4_492_800);
+        assert_eq!(sc.zero_time, 1_596_059_091_000);
+    }
+
+    fn era(protocol: u16, start_epoch: u64) -> EraSummary {
+        EraSummary {
+            start: EraBoundary {
+                epoch: start_epoch,
+                slot: start_epoch * 100,
+                timestamp: 0,
+            },
+            end: None,
+            epoch_length: 100,
+            slot_length: 1,
+            protocol,
+        }
+    }
+
+    #[test]
+    fn first_conway_epoch_finds_conway_entry() {
+        // empty summary
+        assert_eq!(ChainSummary::default().first_conway_epoch(), None);
+
+        // no era reached Conway
+        let mut summary = ChainSummary::default();
+        summary.append_era(2, era(2, 0));
+        summary.append_era(8, era(8, 300));
+        assert_eq!(summary.first_conway_epoch(), None);
+
+        // Conway at the edge
+        summary.append_era(9, era(9, 507));
+        assert_eq!(summary.first_conway_epoch(), Some(507));
+
+        // Conway in the past with a later intra-Conway edge
+        summary.append_era(10, era(10, 600));
+        assert_eq!(summary.first_conway_epoch(), Some(507));
+
+        // a fork that jumps over protocol 9 still enters Conway
+        let mut jumped = ChainSummary::default();
+        jumped.append_era(8, era(8, 300));
+        jumped.append_era(10, era(10, 480));
+        assert_eq!(jumped.first_conway_epoch(), Some(480));
     }
 }

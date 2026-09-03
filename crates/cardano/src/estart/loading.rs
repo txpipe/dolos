@@ -5,19 +5,20 @@
 //! `compute_shard_deltas`) and the finalize-time global pass
 //! (`compute_global_deltas` / `load_finalize`). The shared boundary state
 //! (ended_state + chain summary + AVVM reclamation) is built by
-//! `new_empty_with_avvm`; `compute_boundary_avvm` exposes the once-per-
-//! boundary AVVM lookup so the work unit can hoist it into `initialize`.
+//! `new_empty_with_avvm`; the once-per-boundary AVVM lookup itself is
+//! `AvvmReclamation::at_boundary`, which the work unit hoists into
+//! `initialize`.
 
 use std::{ops::Range, sync::Arc};
 
-use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore, TxoRef};
+use dolos_core::{ChainError, Domain, EntityKey, Genesis, StateStore};
 
 use crate::{
-    estart::{BoundaryVisitor as _, WorkContext},
-    load_era_summary,
+    estart::{avvm::AvvmReclamation, BoundaryVisitor as _, WorkContext},
+    gov_from_conway_genesis, load_era_summary,
     roll::WorkDeltas,
-    AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, PoolState,
-    ProposalState,
+    AccountState, DRepState, EStartProgress, EraProtocol, FixedNamespace as _, GovGenesisInit,
+    PoolState, ProposalState,
 };
 
 impl WorkContext {
@@ -29,10 +30,7 @@ impl WorkContext {
     ///
     /// Account-keyed transitions are handled by `compute_shard_deltas`,
     /// which the executor runs once per shard ahead of this finalize pass.
-    pub fn compute_global_deltas<D: Domain>(
-        &mut self,
-        state: &D::State,
-    ) -> Result<(), ChainError> {
+    pub fn compute_global_deltas<D: Domain>(&mut self, state: &D::State) -> Result<(), ChainError> {
         let mut visitor_nonces = super::nonces::BoundaryVisitor;
         let mut visitor_reset = super::reset::BoundaryVisitor;
 
@@ -70,58 +68,24 @@ impl WorkContext {
         // all per-entity transitions have been queued.
         super::reset::emit_epoch_transition(self);
 
-        Ok(())
-    }
-
-    /// Compute the value of unredeemed AVVM UTxOs at the Shelley→Allegra
-    /// boundary. These UTxOs are removed from the UTxO set and their value
-    /// returned to reserves, matching the Haskell ledger's `translateEra`.
-    fn compute_avvm_reclamation<D: Domain>(
-        state: &D::State,
-        genesis: &Genesis,
-    ) -> Result<u64, ChainError> {
-        let avvm_utxos = pallas::interop::hardano::configs::byron::genesis_avvm_utxos(&genesis.byron);
-
-        // Collect all Byron genesis AVVM UTxO refs (bootstrap redeemer addresses)
-        let refs: Vec<TxoRef> = avvm_utxos.iter().map(|(tx, _, _)| TxoRef(*tx, 0)).collect();
-
-        // Query the UTxO set to find which are still unspent
-        let remaining = state.get_utxos(refs)?;
-
-        // Sum the remaining values
-        let total: u64 = remaining
-            .values()
-            .map(|utxo| {
-                pallas::ledger::traverse::MultiEraOutput::try_from(utxo.as_ref())
-                    .map(|o| o.value().coin())
-                    .unwrap_or(0)
-            })
-            .sum();
-
-        tracing::debug!(
-            remaining_count = remaining.len(),
-            total_avvm = total,
-            "AVVM reclamation at Shelley→Allegra boundary"
-        );
-
-        Ok(total)
-    }
-
-    /// Compute the AVVM reclamation total for the boundary closing the
-    /// current epoch. Returns `0` outside the Shelley→Allegra transition.
-    /// Exposed so the work unit can hoist this once-per-boundary state read
-    /// out of the per-shard `load` calls.
-    pub(crate) fn compute_boundary_avvm<D: Domain>(
-        state: &D::State,
-        genesis: &Genesis,
-    ) -> Result<u64, ChainError> {
-        let ended_state = crate::load_epoch::<D>(state)?;
-        if let Some(transition) = ended_state.pparams.era_transition() {
-            if transition.entering_allegra() {
-                return Self::compute_avvm_reclamation::<D>(state, genesis);
+        // Entering Conway (the Chang hard fork) activates the governance
+        // singleton with the genesis constitution + committee — the initial
+        // enact-state every later governance action evolves from. The row
+        // itself exists on every store (bootstrap / migration invariant);
+        // stores upgraded in place past the boundary never see this event,
+        // so their enact-state stays unset until a fresh sync.
+        if let Some(transition) = self.ended_state().pparams.era_transition() {
+            if transition.entering_conway() {
+                let (constitution, committee) = gov_from_conway_genesis(&self.genesis.conway)?;
+                self.add_delta(GovGenesisInit::new(
+                    constitution,
+                    committee,
+                    self.starting_epoch_no(),
+                ));
             }
         }
-        Ok(0)
+
+        Ok(())
     }
 
     /// Build a fresh `WorkContext` (ended_state + chain summary + AVVM
@@ -132,17 +96,17 @@ impl WorkContext {
         state: &D::State,
         genesis: Arc<Genesis>,
     ) -> Result<Self, ChainError> {
-        let avvm_reclamation = Self::compute_boundary_avvm::<D>(state, &genesis)?;
+        let avvm_reclamation = AvvmReclamation::at_boundary::<D>(state, &genesis)?;
         Self::new_empty_with_avvm::<D>(state, genesis, avvm_reclamation)
     }
 
-    /// Variant of `new_empty` that takes a precomputed AVVM reclamation
-    /// total. Used by the per-shard loader so the AVVM state read happens
-    /// once per boundary (in `initialize`) rather than once per shard.
+    /// Variant of `new_empty` that takes a precomputed AVVM reclamation.
+    /// Used by the per-shard loader so the AVVM state read happens once per
+    /// boundary (in `initialize`) rather than once per shard.
     pub(crate) fn new_empty_with_avvm<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-        avvm_reclamation: u64,
+        avvm_reclamation: AvvmReclamation,
     ) -> Result<Self, ChainError> {
         let ended_state = crate::load_epoch::<D>(state)?;
         let chain_summary = load_era_summary::<D>(state)?;
@@ -207,7 +171,7 @@ impl WorkContext {
     pub fn load_shard<D: Domain>(
         state: &D::State,
         genesis: Arc<Genesis>,
-        avvm_reclamation: u64,
+        avvm_reclamation: AvvmReclamation,
         shard_index: u32,
         total_shards: u32,
         ranges: Vec<Range<EntityKey>>,

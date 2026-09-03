@@ -1,7 +1,6 @@
 .DS_Store
 /target
 tmp
-benches
 /data
 .env
 .opencode

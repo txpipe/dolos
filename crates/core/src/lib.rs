@@ -31,6 +31,7 @@ pub mod archive;
 pub mod async_query;
 pub mod bootstrap;
 pub mod builtin;
+pub mod cbor;
 pub mod config;
 pub mod crawl;
 pub mod import;
@@ -44,7 +45,7 @@ pub mod wal;
 pub mod work_unit;
 
 pub use bootstrap::BootstrapExt;
-pub use import::ImportExt;
+pub use import::{seed_wal_from_state, ImportExt, WalSeed, WalSeedError};
 pub use submit::SubmitExt;
 pub use sync::SyncExt;
 pub use work_unit::{MempoolUpdate, WorkUnit};
@@ -188,7 +189,11 @@ impl From<TxoRef> for Vec<u8> {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Hash, Clone, Serialize, Deserialize)]
+/// Ordered by `(tx_hash, index)`, which is what every backend's UTxO key
+/// encodes: fjall's `[tx_hash:32][index:4]` big-endian bytes sort this way, so
+/// a store keyed on the ref directly iterates in the same order as one keyed on
+/// the encoded form.
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Clone, Serialize, Deserialize)]
 pub struct TxoRef(pub TxHash, pub TxoIdx);
 
 impl From<(TxHash, TxoIdx)> for TxoRef {
@@ -250,8 +255,14 @@ pub enum BrokenInvariant {
     #[error("missing pool {}", hex::encode(.0))]
     MissingPool(Vec<u8>),
 
-    #[error("epoch boundary incomplete")]
-    EpochBoundaryIncomplete,
+    #[error(
+        "CARDANO-002: epoch boundary {epoch} incomplete (estart shards {committed:?}/{total:?})"
+    )]
+    EpochBoundaryIncomplete {
+        epoch: Epoch,
+        committed: Option<u32>,
+        total: Option<u32>,
+    },
 }
 
 pub type UtxoMap = HashMap<TxoRef, Arc<EraCbor>>;
@@ -329,11 +340,11 @@ pub enum ServeError {
     #[error("invalid configuration: {0}")]
     ConfigError(String),
 
-    #[error("failed to bind listener")]
-    BindError(std::io::Error),
+    #[error("failed to bind listener: {0}")]
+    BindError(#[source] std::io::Error),
 
-    #[error("failed to shutdown")]
-    ShutdownError(std::io::Error),
+    #[error("failed to shutdown: {0}")]
+    ShutdownError(#[source] std::io::Error),
 
     #[error(transparent)]
     Internal(#[from] Box<dyn std::error::Error + Send + Sync>),
@@ -438,11 +449,21 @@ pub enum ChainError {
     #[error("no active epoch")]
     NoActiveEpoch,
 
+    #[error("CARDANO-007: governance state missing from store; storage is corrupt or the startup migration did not run")]
+    MissingGovState,
+
     #[error("era not found")]
     EraNotFound,
 
     #[error("epoch value version not found for epoch {0}")]
     EpochValueVersionNotFound(Epoch),
+
+    #[error("CARDANO-001: pool {pool} snapshot at epoch {pool_epoch:?}, expected {current_epoch}")]
+    PoolSnapshotLagging {
+        pool: String,
+        pool_epoch: Option<Epoch>,
+        current_epoch: Epoch,
+    },
 
     #[error("missing rewards")]
     MissingRewards,
@@ -461,6 +482,18 @@ pub enum ChainError {
 
     #[error("phase-2 script rejected the transaction")]
     Phase2ValidationRejected(Phase2Log),
+
+    #[error("consensus error: {0}")]
+    Consensus(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl ChainError {
+    pub fn consensus<T>(value: T) -> Self
+    where
+        T: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        ChainError::Consensus(value.into())
+    }
 }
 
 // Note: The WorkUnit trait is now defined in work_unit.rs
@@ -509,7 +542,8 @@ pub trait ChainLogic: Sized + Send + Sync {
     /// Returns the next work unit to execute, or `None` if no work is
     /// currently ready.
     ///
-    /// The returned work unit should be executed using `executor::execute_work_unit()`.
+    /// The returned work unit should be executed using
+    /// `executor::execute_work_unit()`.
     fn pop_work<D>(&mut self, domain: &D) -> Option<Self::WorkUnit<D>>
     where
         D: Domain<Chain = Self, Entity = Self::Entity, EntityDelta = Self::Delta>;
@@ -676,6 +710,32 @@ pub trait Domain: Send + Sync + Clone + 'static {
         }
 
         Ok(archive_pruned && wal_pruned)
+    }
+
+    /// Runs [`Self::housekeeping`] repeatedly until it reports no remaining
+    /// backlog (each call prunes at most `MAX_PRUNE_SLOTS_PER_HOUSEKEEPING`).
+    /// `max_rounds` is an upper bound, not a fixed count: a converged run stops
+    /// early. Returns the number of rounds executed.
+    fn drain_housekeeping(&self, max_rounds: Option<u64>) -> Result<u64, DomainError> {
+        let mut rounds = 0;
+
+        loop {
+            // Check the budget before running so `Some(0)` is a genuine no-op.
+            if let Some(max) = max_rounds {
+                if rounds >= max {
+                    break;
+                }
+            }
+
+            let done = self.housekeeping()?;
+            rounds += 1;
+
+            if done {
+                break;
+            }
+        }
+
+        Ok(rounds)
     }
 }
 

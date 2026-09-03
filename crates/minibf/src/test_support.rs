@@ -12,8 +12,8 @@ use dolos_core::{
 };
 use dolos_testing::{
     synthetic::{
-        build_synthetic_blocks, seed_epoch_logs, seed_reward_logs, SyntheticBlockConfig,
-        SyntheticVectors,
+        build_synthetic_blocks, seed_account_stake_logs, seed_epoch_logs, seed_reward_logs,
+        SyntheticBlockConfig, SyntheticVectors,
     },
     toy_domain::ToyDomain,
 };
@@ -73,6 +73,15 @@ impl TestDomainBuilder {
                 &reward_epochs,
             )
             .expect("failed to seed reward logs");
+        }
+        if epoch >= 1 {
+            seed_account_stake_logs(
+                &domain,
+                &vectors.stake_address,
+                &vectors.pool_id,
+                &[epoch - 1],
+            )
+            .expect("failed to seed account stake logs");
         }
 
         Self { domain, vectors }
@@ -134,7 +143,25 @@ impl TestApp {
         minibf: MinibfConfig,
     ) -> Result<Self, dolos_core::ServeError> {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(domain, vectors, fault, minibf)
+    }
 
+    pub fn new_with_cfg_and_setup(
+        cfg: SyntheticBlockConfig,
+        setup: impl FnOnce(&ToyDomain, &SyntheticVectors),
+    ) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        setup(&domain, &vectors);
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(domain, vectors, None, minibf).expect("build_router_with_facade")
+    }
+
+    fn from_domain(
+        domain: ToyDomain,
+        vectors: SyntheticVectors,
+        fault: Option<TestFault>,
+        minibf: MinibfConfig,
+    ) -> Result<Self, dolos_core::ServeError> {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
@@ -211,5 +238,37 @@ impl TestApp {
 
     pub fn vectors(&self) -> &SyntheticVectors {
         &self.vectors
+    }
+
+    /// Epoch at the domain's tip. Only usable on fault-free apps — fault
+    /// wrappers make the underlying state reads fail.
+    pub fn tip_epoch(&self) -> u64 {
+        let summary =
+            dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
+                self._domain.state(),
+            )
+            .expect("era summary");
+
+        let tip = self
+            ._domain
+            .state()
+            .read_cursor()
+            .expect("cursor read failed")
+            .expect("missing tip")
+            .slot();
+
+        summary.slot_epoch(tip).0
+    }
+
+    /// First slot of the given epoch. Only usable on fault-free apps — fault
+    /// wrappers make the underlying state reads fail.
+    pub fn epoch_start(&self, epoch: u64) -> u64 {
+        let summary =
+            dolos_cardano::eras::load_era_summary::<dolos_testing::faults::FaultyToyDomain>(
+                self._domain.state(),
+            )
+            .expect("era summary");
+
+        summary.epoch_start(epoch)
     }
 }

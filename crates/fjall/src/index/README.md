@@ -179,6 +179,38 @@ let slots = store.slots_by_tag("address", &addr_bytes, start_slot, end_slot)?;
 let slots = store.slots_by_tag("metadata", &label_bytes, start_slot, end_slot)?;
 ```
 
+### Bulk Record Traversal (Export) and Pre-Hashed Append (Restore)
+
+```rust
+// Every archive tag record in a slot range, sorted by (dimension, key_hash, slot)
+let tags = store.iter_archive_tags(&archive_dimensions::ALL, epoch_start..epoch_end)?;
+
+// Every exact record in a slot range, sorted by (kind, key)
+let exacts = store.iter_exact_records(epoch_start..epoch_end)?;
+
+// ...and back into another store, byte for byte
+let writer = target.start_writer()?;
+writer.append_prehashed(&records)?;
+writer.commit()?;
+```
+
+Three things about this pair:
+
+- **Records carry the stored key form, not the logical key.** The logical key is
+  not on disk — only its hash is — so this is the most a reader can produce.
+  Consumers must copy those 8 bytes through unchanged: for every dimension but
+  `metadata` they are `xxh3_64(key)` big-endian, while `metadata` keys are u64
+  labels that the store keeps verbatim rather than hashing.
+
+- **The traversal is driven by a caller-supplied list.** Dimension and kind
+  names are hashed into keys, so neither is discoverable from disk. The
+  canonical archive list is `dolos_cardano::indexes::archive_dimensions::ALL`.
+
+- **Order is part of the contract**, because these records become snapshot
+  layers and the layer *is* a sorted sequence. On-disk order is by dimension
+  *hash*, so the traversal walks the dimension list in name order and relies on
+  lexicographic order within each prefix.
+
 ## Performance Considerations
 
 1. **Snapshot reads** - All read operations use MVCC snapshots to avoid blocking concurrent writes.
@@ -190,3 +222,14 @@ let slots = store.slots_by_tag("metadata", &label_bytes, start_slot, end_slot)?;
 4. **Flush on commit** - Configurable journal flushing prevents unbounded memory growth during bulk imports.
 
 5. **Graceful shutdown** - Call `shutdown()` before dropping to ensure all background work completes.
+
+6. **A slot range is not a seek** - Slot is the *last* component of an archive
+   tag key and is not part of an exact key at all (it is the value), so
+   `iter_archive_tags` and `iter_exact_records` both scan and filter: the cost
+   of slicing one epoch is O(store), not O(epoch). Measured on a synthetic
+   mainnet-shaped store (648k tag + 108k exact records per epoch): ~0.13 s per
+   epoch of stored history, i.e. ~0.25 s at 2 epochs of depth, ~0.87 s at 8 and
+   ~3.1 s at 24. `tests/index_roundtrip.rs` carries the measurement
+   (`measure_one_epoch_iteration_cost`, `--ignored`). A backfill over deep
+   history wants a single pass bucketing records by epoch rather than one slice
+   per epoch.

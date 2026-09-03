@@ -1,38 +1,54 @@
-use dolos_core::config::{MithrilConfig, RootConfig};
+//! `dolos bootstrap mithril` — the interactive fetch-and-import.
+//!
+//! Parse and render: the download, its plan and its verification are
+//! [`dolos_mithril`]'s, shared with the backfill daemon. What is
+//! here is the operator's arguments, the runtime the async fetch is driven
+//! on, the progress bars it reports through, and the import into a domain the
+//! root library assembles.
+
+use dolos_core::config::RootConfig;
 use dolos_core::ImportExt;
+use dolos_mithril::{fetch_snapshot, Fetch};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
-use mithril_client::{ClientBuilder, MessageBuilder, MithrilError, MithrilResult};
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
-use crate::feedback::Feedback;
+use crate::feedback::{Feedback, MithrilFeedback};
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct Args {
     #[arg(long, default_value = "./snapshot")]
-    download_dir: String,
+    pub(crate) download_dir: String,
 
     /// Skip the Mithril certificate validation
     #[arg(long, action)]
-    skip_validation: bool,
+    pub(crate) skip_validation: bool,
 
     /// Assume the snapshot is already available in the download dir
     #[arg(long, action)]
-    skip_download: bool,
+    pub(crate) skip_download: bool,
 
     /// Retain downloaded snapshot instead of deleting it
     #[arg(long, action)]
-    retain_snapshot: bool,
+    pub(crate) retain_snapshot: bool,
 
     /// Number of blocks to process in each chunk, more is faster but uses more
     /// memory
     #[arg(long, default_value = "500")]
-    chunk_size: usize,
+    pub(crate) chunk_size: usize,
 
     #[arg(long)]
-    start_from: Option<ChainPoint>,
+    pub(crate) start_from: Option<ChainPoint>,
+
+    /// Start downloading from this immutable file number (inclusive)
+    #[arg(long)]
+    pub(crate) download_start: Option<u64>,
+
+    /// Download up to this immutable file number (inclusive)
+    #[arg(long)]
+    pub(crate) download_end: Option<u64>,
 }
 
 impl Default for Args {
@@ -44,118 +60,10 @@ impl Default for Args {
             retain_snapshot: Default::default(),
             chunk_size: 500,
             start_from: None,
+            download_start: None,
+            download_end: None,
         }
     }
-}
-
-struct MithrilFeedback {
-    download_pb: indicatif::ProgressBar,
-    validate_pb: indicatif::ProgressBar,
-}
-
-#[async_trait::async_trait]
-impl mithril_client::feedback::FeedbackReceiver for MithrilFeedback {
-    async fn handle_event(&self, event: mithril_client::feedback::MithrilEvent) {
-        match event {
-            mithril_client::feedback::MithrilEvent::SnapshotDownloadStarted { .. } => {
-                self.download_pb.set_message("snapshot download started")
-            }
-            mithril_client::feedback::MithrilEvent::SnapshotDownloadProgress {
-                downloaded_bytes,
-                size,
-                ..
-            } => {
-                self.download_pb.set_length(size);
-                self.download_pb.set_position(downloaded_bytes);
-                self.download_pb.set_message("downloading Mithril snapshot");
-            }
-            mithril_client::feedback::MithrilEvent::SnapshotDownloadCompleted { .. } => {
-                self.download_pb.set_message("snapshot download completed");
-            }
-            mithril_client::feedback::MithrilEvent::CertificateChainValidationStarted {
-                ..
-            } => {
-                self.validate_pb
-                    .set_message("certificate chain validation started");
-            }
-            mithril_client::feedback::MithrilEvent::CertificateValidated {
-                certificate_hash: hash,
-                ..
-            } => {
-                self.validate_pb
-                    .set_message(format!("validating cert: {hash}"));
-            }
-            mithril_client::feedback::MithrilEvent::CertificateChainValidated { .. } => {
-                self.validate_pb.set_message("certificate chain validated");
-            }
-            mithril_client::feedback::MithrilEvent::CertificateFetchedFromCache { .. } => {
-                self.validate_pb
-                    .set_message("certificate fetched from cache");
-            }
-            x => {
-                self.validate_pb.set_message(format!("{x:?}"));
-            }
-        }
-    }
-}
-
-async fn fetch_snapshot(
-    args: &Args,
-    config: &MithrilConfig,
-    feedback: &Feedback,
-) -> MithrilResult<()> {
-    let feedback = MithrilFeedback {
-        download_pb: feedback.bytes_progress_bar(),
-        validate_pb: feedback.indeterminate_progress_bar(),
-    };
-
-    let client = ClientBuilder::aggregator(&config.aggregator, &config.genesis_key)
-        .add_feedback_receiver(Arc::new(feedback))
-        .set_ancillary_verification_key(config.ancillary_key.clone())
-        .build()?;
-
-    let snapshots = client.cardano_database().list().await?;
-
-    let last_digest = snapshots
-        .first()
-        .ok_or(MithrilError::msg("no snapshot available"))?
-        .digest
-        .as_ref();
-
-    let snapshot = client
-        .cardano_database()
-        .get(last_digest)
-        .await?
-        .ok_or(MithrilError::msg("no snapshot available"))?;
-
-    let certificate = client
-        .certificate()
-        .verify_chain(&snapshot.certificate_hash)
-        .await?;
-
-    let target_directory = Path::new(&args.download_dir);
-
-    client
-        .cardano_database()
-        .download_unpack(&snapshot, target_directory)
-        .await?;
-
-    if let Err(e) = client.cardano_database().add_statistics(&snapshot).await {
-        warn!("failed incrementing snapshot download statistics: {:?}", e);
-    }
-
-    if !args.skip_validation {
-        warn!("skipping validation, assuming snapshot is already validated");
-        return Ok(());
-    }
-
-    let message = MessageBuilder::new()
-        .compute_snapshot_message(&certificate, target_directory)
-        .await?;
-
-    assert!(certificate.match_message(&message));
-
-    Ok(())
 }
 
 fn define_starting_point(
@@ -196,13 +104,16 @@ fn do_import(
 
     let cursor = define_starting_point(args, domain.state())?;
 
-    let mut iter =
-        pallas::interop::hardano::storage::immutable::read_blocks_from_point(immutable_path, cursor.clone())
-            .map_err(|err| miette::miette!(err.to_string()))
-            .context("reading immutable db tip")?;
+    let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
+        immutable_path,
+        cursor.clone(),
+    )
+    .map_err(|err| miette::miette!(err.to_string()))
+    .context("reading immutable db tip")?;
 
-    // unless we're starting from the origin of the chain, we need to skip the first result since
-    // the iterator will be standing in the last slot already processed, we don't want to import it twice.
+    // unless we're starting from the origin of the chain, we need to skip the first
+    // result since the iterator will be standing in the last slot already
+    // processed, we don't want to import it twice.
     if cursor != pallas::network::miniprotocols::Point::Origin {
         iter.next();
     }
@@ -277,7 +188,16 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             .into_diagnostic()
             .context("creating tokio runtime for download")?;
 
-        rt.block_on(fetch_snapshot(args, mithril, feedback))
+        let fetch = Fetch {
+            download_dir: target_directory,
+            skip_validation: args.skip_validation,
+            download_start: args.download_start,
+            download_end: args.download_end,
+        };
+
+        let receiver = Arc::new(MithrilFeedback::new(feedback));
+
+        rt.block_on(fetch_snapshot(&fetch, mithril, Some(receiver)))
             .map_err(|err| miette::miette!(err.to_string()))
             .context("fetching and validating mithril snapshot")?;
     } else {

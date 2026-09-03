@@ -9,13 +9,16 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
-    drep_metadata_error::{Code as MetadataErrorCode, DrepMetadataError},
+    dreps_inner_metadata_error::Code,
     pool::Pool,
     pool_calidus_key::PoolCalidusKey,
     pool_delegators_inner::PoolDelegatorsInner,
     pool_history_inner::PoolHistoryInner,
     pool_list_extended_inner::PoolListExtendedInner,
-    PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
+    pool_list_retire_inner::PoolListRetireInner,
+    pool_updates_inner::{Action, PoolUpdatesInner},
+    tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
+    DrepsInnerMetadataError, PoolListExtendedInnerMetadata, PoolMetadata as PoolMetadataModel,
 };
 use dolos_cardano::{
     cip151,
@@ -239,7 +242,7 @@ where
     Ok(metrics)
 }
 
-fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
+pub(crate) fn decode_pool_id(pool_id: &str) -> Result<Vec<u8>, Error> {
     if pool_id.starts_with("pool1") {
         let (_, operator) = bech32::decode(pool_id).map_err(|_| Error::InvalidPoolId)?;
         return Ok(operator);
@@ -324,6 +327,76 @@ where
     }
 
     Ok((registrations, retirements))
+}
+
+fn scan_pool_updates_in_block(
+    block: &MultiEraBlock,
+    target_pool: &PoolHash,
+) -> Vec<(String, i32, Action)> {
+    let mut updates = Vec::new();
+
+    for tx in block.txs() {
+        let tx_hash = tx.hash().to_string();
+
+        for (cert_index, cert) in tx.certs().iter().enumerate() {
+            let action = if pallas_extras::cert_as_pool_registration(cert)
+                .is_some_and(|cert| &cert.operator == target_pool)
+            {
+                Some(Action::Registered)
+            } else if pallas_extras::cert_as_pool_retirement(cert)
+                .is_some_and(|cert| &cert.operator == target_pool)
+            {
+                Some(Action::Deregistered)
+            } else {
+                None
+            };
+
+            if let Some(action) = action {
+                updates.push((tx_hash.clone(), cert_index as i32, action));
+            }
+        }
+    }
+
+    updates
+}
+
+async fn load_pool_updates<D>(
+    domain: &Facade<D>,
+    pool: PoolHash,
+    order: SlotOrder,
+) -> Result<Vec<(String, i32, Action)>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let tip = domain.get_tip_slot()?;
+    let stream = domain
+        .query()
+        .blocks_by_pool_certs_stream(pool.as_slice(), 0, tip, order);
+
+    let mut stream = Box::pin(stream);
+    let mut updates = Vec::new();
+
+    while let Some(item) = stream.next().await {
+        let (_, block) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Some(block) = block else {
+            continue;
+        };
+
+        let block = MultiEraBlock::decode(block.as_slice())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut block_updates = scan_pool_updates_in_block(&block, &pool);
+
+        // For descending order, the stream gives blocks from the tip backward.
+        // Reverse the certs in each block. Then the full list follows the
+        // chain position in reverse.
+        if matches!(order, SlotOrder::Desc) {
+            block_updates.reverse();
+        }
+
+        updates.append(&mut block_updates);
+    }
+
+    Ok(updates)
 }
 
 async fn load_pool_calidus_key<D>(
@@ -530,7 +603,7 @@ fn build_pool_metadata_response(
     operator: impl AsRef<[u8]>,
     onchain: Option<&pallas::ledger::primitives::PoolMetadata>,
     offchain: Option<crate::mapping::PoolOffchainMetadata>,
-    error: Option<DrepMetadataError>,
+    error: Option<DrepsInnerMetadataError>,
 ) -> Result<PoolMetadataResponse, StatusCode> {
     let operator = operator.as_ref();
 
@@ -551,9 +624,13 @@ fn build_pool_metadata_response(
     }))
 }
 
-fn hash_mismatch_error(url: &str, expected_hash: &[u8], actual_hash: &[u8]) -> DrepMetadataError {
-    DrepMetadataError::new(
-        MetadataErrorCode::HashMismatch,
+fn hash_mismatch_error(
+    url: &str,
+    expected_hash: &[u8],
+    actual_hash: &[u8],
+) -> blockfrost_openapi::models::DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HashMismatch,
         format!(
             "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
             hex::encode(expected_hash),
@@ -562,11 +639,11 @@ fn hash_mismatch_error(url: &str, expected_hash: &[u8], actual_hash: &[u8]) -> D
     )
 }
 
-fn http_response_error(url: &str, status: StatusCode) -> DrepMetadataError {
+fn http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
     let reason = status.canonical_reason().unwrap_or("Unknown");
 
-    DrepMetadataError::new(
-        MetadataErrorCode::HttpResponseError,
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
         format!(
             "Error Offchain Pool: HTTP Response error from {url} resulted in HTTP status code : {} \"{reason}\"",
             status.as_u16(),
@@ -574,9 +651,9 @@ fn http_response_error(url: &str, status: StatusCode) -> DrepMetadataError {
     )
 }
 
-fn connection_error(url: &str) -> DrepMetadataError {
-    DrepMetadataError::new(
-        MetadataErrorCode::ConnectionError,
+fn connection_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::ConnectionError,
         format!("Error Offchain Pool: Connection failure error when fetching metadata from {url}."),
     )
 }
@@ -601,7 +678,7 @@ async fn fetch_pool_metadata_with_error(
     pool: &PoolState,
 ) -> (
     Option<crate::mapping::PoolOffchainMetadata>,
-    Option<DrepMetadataError>,
+    Option<DrepsInnerMetadataError>,
 ) {
     let Some(metadata) = pool
         .snapshot
@@ -657,6 +734,58 @@ async fn fetch_pool_metadata_with_error(
     }
 }
 
+fn select_pools(
+    pools: impl IntoIterator<Item = (BlockSlot, PoolHash)>,
+    pagination: &Pagination,
+) -> Vec<PoolHash> {
+    let mut pools: Vec<(BlockSlot, PoolHash)> = pools.into_iter().collect();
+
+    pools.sort_unstable_by_key(|(slot, operator)| (*slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    pools
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(_, operator)| operator)
+        .collect()
+}
+
+pub async fn all<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<String>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .filter_map(|x| {
+            let (_, state) = match x {
+                Ok(item) => item,
+                Err(_) => return Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
+            };
+            if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
+                return None;
+            }
+            Some(Ok((state.register_slot, state.operator)))
+        })
+        .collect::<Result<Vec<(BlockSlot, PoolHash)>, StatusCode>>()?;
+
+    let out = select_pools(pools, &pagination)
+        .into_iter()
+        .map(bech32_pool)
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 pub async fn all_extended<D: Domain>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
@@ -698,7 +827,7 @@ where
         .ensure_k()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let pools = domain
+    let mut pools = domain
         .iter_cardano_entities::<PoolState>(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .flat_map(|x| {
@@ -708,11 +837,18 @@ where
             if state.snapshot.live().map(|x| x.is_retired).unwrap_or(false) {
                 return None;
             }
-            Some(Ok((state.register_slot, (key, state))))
+            Some(Ok(((state.register_slot, state.operator), (key, state))))
         })
-        .collect::<Result<Vec<(BlockSlot, (EntityKey, PoolState))>, StatusCode>>()?
+        .collect::<Result<Vec<((BlockSlot, PoolHash), (EntityKey, PoolState))>, StatusCode>>()?;
+
+    pools.sort_by(|a, b| Ord::cmp(&a.0, &b.0));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        pools.reverse();
+    }
+
+    let pools = pools
         .into_iter()
-        .sorted_by(|a, b| Ord::cmp(&a.0, &b.0))
         .map(|(_, x)| x)
         .skip(pagination.skip())
         .take(pagination.count)
@@ -766,6 +902,126 @@ where
     Ok(Json(out))
 }
 
+fn select_retiring_pools(
+    pools: impl IntoIterator<Item = PoolState>,
+    current_epoch: u64,
+    pagination: &Pagination,
+) -> Vec<(u64, PoolHash)> {
+    let mut retiring: Vec<(u64, BlockSlot, PoolHash)> = pools
+        .into_iter()
+        .filter_map(|pool| {
+            let retiring_epoch = pool.retiring_epoch?;
+            (retiring_epoch > current_epoch).then_some((
+                retiring_epoch,
+                pool.register_slot,
+                pool.operator,
+            ))
+        })
+        .collect();
+
+    retiring.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        retiring.reverse();
+    }
+
+    retiring
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
+        .collect()
+}
+
+pub async fn all_retiring<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolListRetireInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let tip = domain.get_tip_slot()?;
+    let summary = domain.get_chain_summary()?;
+    let (current_epoch, _) = summary.slot_epoch(tip);
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(|item| item.map(|(_, pool)| pool))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let out = select_retiring_pools(pools, current_epoch, &pagination)
+        .into_iter()
+        .map(|(retiring_epoch, operator)| {
+            Ok(PoolListRetireInner {
+                pool_id: bech32_pool(operator)?,
+                epoch: retiring_epoch as i32,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
+fn select_retired_pools(
+    pools: impl IntoIterator<Item = PoolState>,
+    pagination: &Pagination,
+) -> Vec<(u64, PoolHash)> {
+    let mut retired: Vec<(u64, BlockSlot, PoolHash)> = pools
+        .into_iter()
+        .filter_map(|pool| {
+            let is_retired = pool.snapshot.live().map(|x| x.is_retired).unwrap_or(false);
+            let retiring_epoch = pool.retiring_epoch?;
+            is_retired.then_some((retiring_epoch, pool.register_slot, pool.operator))
+        })
+        .collect();
+
+    retired.sort_unstable_by_key(|(epoch, slot, operator)| (*epoch, *slot, *operator));
+
+    if matches!(pagination.order, crate::pagination::Order::Desc) {
+        retired.reverse();
+    }
+
+    retired
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(retiring_epoch, _, operator)| (retiring_epoch, operator))
+        .collect()
+}
+
+pub async fn all_retired<D: Domain>(
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolListRetireInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let pools = domain
+        .iter_cardano_entities::<PoolState>(None)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(|item| item.map(|(_, pool)| pool))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let out = select_retired_pools(pools, &pagination)
+        .into_iter()
+        .map(|(retiring_epoch, operator)| {
+            Ok(PoolListRetireInner {
+                pool_id: bech32_pool(operator)?,
+                epoch: retiring_epoch as i32,
+            })
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
+}
+
 pub async fn by_id_metadata<D: Domain>(
     Path(id): Path<String>,
     State(domain): State<Facade<D>>,
@@ -787,6 +1043,34 @@ where
     Ok(Json(build_pool_metadata_response(
         operator, onchain, offchain, error,
     )?))
+}
+
+pub async fn by_id_relays<D: Domain>(
+    Path(id): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<TxContentPoolCertsInnerRelaysInner>>, Error>
+where
+    Option<PoolState>: From<D::Entity>,
+{
+    let operator = decode_pool_id(&id)?;
+    let pool = domain
+        .read_cardano_entity::<PoolState>(operator.as_slice())?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let relays = pool
+        .snapshot
+        .live()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .params
+        .relays
+        .clone();
+
+    let out = relays
+        .into_iter()
+        .map(|relay| relay.into_model())
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(out))
 }
 
 struct PoolDelegatorModelBuilder {
@@ -945,6 +1229,51 @@ where
     Ok(Json(mapped))
 }
 
+pub async fn by_id_updates<D>(
+    Path(id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<PoolUpdatesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<PoolState>: From<D::Entity>,
+{
+    let operator = decode_pool_id(&id)?;
+
+    // Make sure that the decoded id is 28 bytes before the existence check.
+    // A short or long bech32 payload pads into a valid EntityKey. The check
+    // then returns a 404 for a malformed id, but the caller expects a 400.
+    let pool: PoolHash = <[u8; 28]>::try_from(operator.as_slice())
+        .map_err(|_| Error::InvalidPoolId)?
+        .into();
+
+    if !domain.cardano_entity_exists::<PoolState>(pool)? {
+        return Err(StatusCode::NOT_FOUND.into());
+    }
+
+    let pagination = Pagination::try_from(params)?;
+
+    let order = match pagination.order {
+        crate::pagination::Order::Asc => SlotOrder::Asc,
+        crate::pagination::Order::Desc => SlotOrder::Desc,
+    };
+
+    let updates = load_pool_updates(&domain, pool, order).await?;
+
+    let out = updates
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|(tx_hash, cert_index, action)| PoolUpdatesInner {
+            tx_hash,
+            cert_index,
+            action,
+        })
+        .collect();
+
+    Ok(Json(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -952,14 +1281,15 @@ mod tests {
     use blockfrost_openapi::models::{
         pool::Pool, pool_delegators_inner::PoolDelegatorsInner,
         pool_list_extended_inner::PoolListExtendedInner,
+        pool_list_retire_inner::PoolListRetireInner,
     };
     use dolos_cardano::cip151;
-    use dolos_cardano::model::{DRepDelegation, EpochValue, Stake};
+    use dolos_cardano::model::{DRepDelegation, EpochValue, PoolParams, PoolSnapshot, Stake};
     use dolos_testing::synthetic::SyntheticBlockConfig;
     use pallas::{
         codec::utils::Bytes,
         crypto::hash::Hash,
-        ledger::primitives::{alonzo, Int, PoolMetadata, StakeCredential},
+        ledger::primitives::{alonzo, Int, PoolMetadata, Relay, StakeCredential},
     };
     use serde_json::Value;
 
@@ -1372,6 +1702,405 @@ mod tests {
         assert_status(&app, "/pools/extended", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
+    #[tokio::test]
+    async fn pools_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+
+        let pool_id = app.vectors().pool_id.as_str();
+        assert!(
+            pools.iter().any(|candidate| candidate == pool_id),
+            "expected pool {pool_id} in list, got {pools:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_matches_extended_ids() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?page=1&count=100").await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?page=1&count=100").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
+
+        assert_eq!(pools, extended_ids);
+    }
+
+    #[tokio::test]
+    async fn pools_order_desc_reverses_asc() {
+        let app = TestApp::new();
+        let (asc_status, asc_bytes) = app.get_bytes("/pools?order=asc&count=100").await;
+        let (desc_status, desc_bytes) = app.get_bytes("/pools?order=desc&count=100").await;
+
+        assert_eq!(asc_status, StatusCode::OK);
+        assert_eq!(desc_status, StatusCode::OK);
+
+        let asc: Vec<String> =
+            serde_json::from_slice(&asc_bytes).expect("failed to parse asc pool list");
+        let mut desc: Vec<String> =
+            serde_json::from_slice(&desc_bytes).expect("failed to parse desc pool list");
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_matches_extended_ids_desc() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?order=desc&count=100").await;
+        let (extended_status, extended_bytes) =
+            app.get_bytes("/pools/extended?order=desc&count=100").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(extended_status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        let extended: Vec<PoolListExtendedInner> =
+            serde_json::from_slice(&extended_bytes).expect("failed to parse pool list extended");
+
+        let extended_ids: Vec<String> = extended.into_iter().map(|pool| pool.pool_id).collect();
+
+        assert_eq!(pools, extended_ids);
+    }
+
+    #[tokio::test]
+    async fn pools_empty_out_of_range_page() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools?page=694269").await;
+
+        assert_eq!(status, StatusCode::OK);
+
+        let pools: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse pool list");
+        assert!(pools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_bad_request() {
+        let app = TestApp::new();
+        assert_status(&app, "/pools?count=invalid", StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn pools_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools/retiring").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let retiring: Vec<PoolListRetireInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool list retire");
+
+        assert!(
+            retiring.is_empty(),
+            "synthetic ledger registers pools but never schedules a future retirement, so the list is expected to be empty"
+        );
+    }
+
+    fn retiring_pool(
+        operator: [u8; 28],
+        register_slot: u64,
+        retiring_epoch: Option<u64>,
+    ) -> PoolState {
+        let params = PoolParams {
+            vrf_keyhash: Hash::from([0u8; 32]),
+            pledge: 0,
+            cost: 0,
+            margin: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account: vec![0u8; 29],
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let snapshot = PoolSnapshot {
+            is_retired: false,
+            blocks_minted: 0,
+            params,
+            is_new: false,
+        };
+        PoolState {
+            operator: Hash::from(operator),
+            snapshot: EpochValue::with_live(3, snapshot),
+            blocks_minted_total: 0,
+            register_slot,
+            retiring_epoch,
+            deposit: 0,
+        }
+    }
+
+    #[test]
+    fn select_pools_orders_and_paginates() {
+        let pools = vec![
+            (30, Hash::from([3u8; 28])),
+            (10, Hash::from([1u8; 28])),
+            (20, Hash::from([2u8; 28])),
+            // same register slot as [2u8; 28]: stable tie-break on operator
+            (20, Hash::from([9u8; 28])),
+        ];
+
+        let asc = select_pools(pools.clone(), &Pagination::default());
+        assert_eq!(
+            asc,
+            vec![
+                Hash::from([1u8; 28]),
+                Hash::from([2u8; 28]),
+                Hash::from([9u8; 28]),
+                Hash::from([3u8; 28]),
+            ]
+        );
+
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let ordered_desc = select_pools(pools.clone(), &desc);
+        assert_eq!(
+            ordered_desc,
+            vec![
+                Hash::from([3u8; 28]),
+                Hash::from([9u8; 28]),
+                Hash::from([2u8; 28]),
+                Hash::from([1u8; 28]),
+            ]
+        );
+
+        let paged = Pagination {
+            count: 2,
+            page: 2,
+            ..Pagination::default()
+        };
+        let second_page = select_pools(pools, &paged);
+        assert_eq!(
+            second_page,
+            vec![Hash::from([9u8; 28]), Hash::from([3u8; 28])]
+        );
+    }
+
+    #[test]
+    fn select_retiring_pools_filters_and_orders() {
+        let pools = vec![
+            // scheduled in the past/current: excluded
+            retiring_pool([1u8; 28], 10, Some(5)),
+            retiring_pool([2u8; 28], 20, Some(10)),
+            // not retiring: excluded
+            retiring_pool([3u8; 28], 30, None),
+            // future retirements: included
+            retiring_pool([4u8; 28], 40, Some(12)),
+            retiring_pool([5u8; 28], 50, Some(11)),
+            // same epoch as above, later register_slot -> stable tie-break
+            retiring_pool([6u8; 28], 60, Some(11)),
+        ];
+
+        let pagination = Pagination::default();
+        let selected = select_retiring_pools(pools.clone(), 10, &pagination);
+
+        assert_eq!(
+            selected,
+            vec![
+                (11, Hash::from([5u8; 28])),
+                (11, Hash::from([6u8; 28])),
+                (12, Hash::from([4u8; 28])),
+            ]
+        );
+
+        // Descending order reverses the listing.
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let selected_desc = select_retiring_pools(pools, 10, &desc);
+        assert_eq!(
+            selected_desc,
+            vec![
+                (12, Hash::from([4u8; 28])),
+                (11, Hash::from([6u8; 28])),
+                (11, Hash::from([5u8; 28])),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_retiring_pools_paginates() {
+        let pools = vec![
+            retiring_pool([1u8; 28], 10, Some(11)),
+            retiring_pool([2u8; 28], 20, Some(12)),
+            retiring_pool([3u8; 28], 30, Some(13)),
+        ];
+
+        let params = PaginationParameters {
+            count: Some("1".to_string()),
+            page: Some("2".to_string()),
+            order: None,
+            from: None,
+            to: None,
+        };
+        let pagination = Pagination::try_from(params).expect("valid pagination");
+
+        let selected = select_retiring_pools(pools, 10, &pagination);
+        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_bad_request() {
+        let app = TestApp::new();
+        assert_status(
+            &app,
+            "/pools/retiring?count=invalid",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pools_retiring_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools/retiring", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_retired_happy_path() {
+        let app = TestApp::new();
+        let (status, bytes) = app.get_bytes("/pools/retired").await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let retired: Vec<PoolListRetireInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool list retire");
+
+        assert!(
+            retired.is_empty(),
+            "the synthetic ledger registers pools but never retires them, so the list is empty"
+        );
+    }
+
+    fn retired_pool(
+        operator: [u8; 28],
+        register_slot: u64,
+        retiring_epoch: Option<u64>,
+        is_retired: bool,
+    ) -> PoolState {
+        let mut pool = retiring_pool(operator, register_slot, retiring_epoch);
+        pool.snapshot.unwrap_live_mut().is_retired = is_retired;
+        pool
+    }
+
+    #[test]
+    fn select_retired_pools_filters_and_orders() {
+        let pools = vec![
+            // These pools are retired. The sort key is
+            // (retiring_epoch, register_slot, operator).
+            retired_pool([1u8; 28], 10, Some(5), true),
+            retired_pool([2u8; 28], 20, Some(10), true),
+            // This pool has the same epoch but a later register_slot.
+            // The register_slot makes the tie-break stable.
+            retired_pool([6u8; 28], 60, Some(10), true),
+            // This pool has a retirement epoch but is not retired. The scan
+            // removes it.
+            retired_pool([3u8; 28], 30, Some(12), false),
+            // This pool has no retirement. The scan removes it.
+            retired_pool([4u8; 28], 40, None, false),
+        ];
+
+        let pagination = Pagination::default();
+        let selected = select_retired_pools(pools.clone(), &pagination);
+
+        assert_eq!(
+            selected,
+            vec![
+                (5, Hash::from([1u8; 28])),
+                (10, Hash::from([2u8; 28])),
+                (10, Hash::from([6u8; 28])),
+            ]
+        );
+
+        // A descending order reverses the list.
+        let desc = Pagination {
+            order: crate::pagination::Order::Desc,
+            ..Pagination::default()
+        };
+        let selected_desc = select_retired_pools(pools, &desc);
+        assert_eq!(
+            selected_desc,
+            vec![
+                (10, Hash::from([6u8; 28])),
+                (10, Hash::from([2u8; 28])),
+                (5, Hash::from([1u8; 28])),
+            ]
+        );
+    }
+
+    #[test]
+    fn select_retired_pools_paginates() {
+        let pools = vec![
+            retired_pool([1u8; 28], 10, Some(11), true),
+            retired_pool([2u8; 28], 20, Some(12), true),
+            retired_pool([3u8; 28], 30, Some(13), true),
+        ];
+
+        let params = PaginationParameters {
+            count: Some("1".to_string()),
+            page: Some("2".to_string()),
+            order: None,
+            from: None,
+            to: None,
+        };
+        let pagination = Pagination::try_from(params).expect("valid pagination");
+
+        let selected = select_retired_pools(pools, &pagination);
+        assert_eq!(selected, vec![(12, Hash::from([2u8; 28]))]);
+    }
+
+    #[tokio::test]
+    async fn pools_retired_bad_request() {
+        let app = TestApp::new();
+        assert_status(
+            &app,
+            "/pools/retired?count=invalid",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pools_retired_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        assert_status(&app, "/pools/retired", StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
     #[test]
     fn pool_metadata_response_empty_without_onchain_metadata() {
         let response =
@@ -1449,7 +2178,7 @@ mod tests {
         };
 
         let error = response.error.expect("expected error");
-        assert_eq!(error.code, MetadataErrorCode::HashMismatch);
+        assert_eq!(error.code, Code::HashMismatch);
         assert!(error
             .message
             .contains("Hash mismatch when fetching metadata"));
@@ -1460,7 +2189,7 @@ mod tests {
         let error =
             http_response_error("https://blockfrost.io/fakemetadata", StatusCode::NOT_FOUND);
 
-        assert_eq!(error.code, MetadataErrorCode::HttpResponseError);
+        assert_eq!(error.code, Code::HttpResponseError);
         assert_eq!(
             error.message,
             "Error Offchain Pool: HTTP Response error from https://blockfrost.io/fakemetadata resulted in HTTP status code : 404 \"Not Found\""
@@ -1472,7 +2201,7 @@ mod tests {
         let error =
             connection_error("http://localhost:23009/p/pool_clai_registration_metadata.json");
 
-        assert_eq!(error.code, MetadataErrorCode::ConnectionError);
+        assert_eq!(error.code, Code::ConnectionError);
         assert_eq!(
             error.message,
             "Error Offchain Pool: Connection failure error when fetching metadata from http://localhost:23009/p/pool_clai_registration_metadata.json."
@@ -1517,6 +2246,121 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/metadata");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[test]
+    fn relay_ipv6_words_swapped_to_network_order() {
+        // On-chain bytes of a real preview relay (pool1drrylt...): the ledger
+        // serializes relay IPv6 as four little-endian 32-bit words, so the
+        // mapped address must match what dbsync/Blockfrost display.
+        let onchain: [u8; 16] = [
+            0x61, 0x08, 0x01, 0x20, 0x80, 0x2b, 0x00, 0x40, 0xff, 0x3e, 0x16, 0x02, 0x09, 0x90,
+            0x05, 0xfe,
+        ];
+
+        let relay = Relay::SingleHostAddr(Some(3001), None, Some(Bytes::from(onchain.to_vec())));
+        let model = relay.into_model().expect("relay model");
+
+        assert_eq!(
+            model.ipv6.as_deref(),
+            Some("2001:861:4000:2b80:216:3eff:fe05:9009")
+        );
+        assert_eq!(model.ipv4, None);
+        assert_eq!(model.port, 3001);
+    }
+
+    #[tokio::test]
+    async fn pools_relays_happy_path() {
+        let app = TestApp::new_with_cfg(SyntheticBlockConfig {
+            pool_relays: vec![
+                Relay::SingleHostAddr(Some(3001), Some(Bytes::from(vec![192, 168, 0, 1])), None),
+                Relay::SingleHostName(Some(3002), "relay.example.com".to_string()),
+                Relay::MultiHostName("_relays._tcp.example.com".to_string()),
+            ],
+            ..Default::default()
+        });
+
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/relays");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let relays: Vec<TxContentPoolCertsInnerRelaysInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool relays");
+
+        assert_eq!(
+            relays,
+            vec![
+                TxContentPoolCertsInnerRelaysInner {
+                    ipv4: Some("192.168.0.1".to_string()),
+                    ipv6: None,
+                    dns: None,
+                    dns_srv: None,
+                    port: 3001,
+                },
+                TxContentPoolCertsInnerRelaysInner {
+                    ipv4: None,
+                    ipv6: None,
+                    dns: Some("relay.example.com".to_string()),
+                    dns_srv: None,
+                    port: 3002,
+                },
+                TxContentPoolCertsInnerRelaysInner {
+                    ipv4: None,
+                    ipv6: None,
+                    dns: None,
+                    dns_srv: Some("_relays._tcp.example.com".to_string()),
+                    port: 0,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pools_relays_empty_without_registered_relays() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/relays");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let relays: Vec<TxContentPoolCertsInnerRelaysInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool relays");
+        assert!(relays.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pools_relays_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/relays", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_relays_not_found() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/relays", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_relays_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/relays");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
@@ -1577,6 +2421,95 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let pool_id = app.vectors().pool_id.as_str();
         let path = format!("/pools/{pool_id}/delegators");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_happy_path() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/updates");
+        let (status, bytes) = app.get_bytes(&path).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let updates: Vec<PoolUpdatesInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse pool updates");
+
+        // The synthetic chain registers the pool. The list has one
+        // registration update or more.
+        assert!(!updates.is_empty());
+        assert!(updates
+            .iter()
+            .any(|update| matches!(update.action, Action::Registered)));
+
+        for update in &updates {
+            assert!(!update.tx_hash.is_empty());
+            assert!(update.cert_index >= 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn pools_updates_order_desc_reverses_asc() {
+        let app = TestApp::new();
+        let pool_id = app.vectors().pool_id.as_str();
+
+        let (asc_status, asc_bytes) = app
+            .get_bytes(&format!("/pools/{pool_id}/updates?order=asc&count=100"))
+            .await;
+        let (desc_status, desc_bytes) = app
+            .get_bytes(&format!("/pools/{pool_id}/updates?order=desc&count=100"))
+            .await;
+
+        assert_eq!(asc_status, StatusCode::OK);
+        assert_eq!(desc_status, StatusCode::OK);
+
+        let asc: Vec<PoolUpdatesInner> =
+            serde_json::from_slice(&asc_bytes).expect("failed to parse asc updates");
+        let mut desc: Vec<PoolUpdatesInner> =
+            serde_json::from_slice(&desc_bytes).expect("failed to parse desc updates");
+
+        desc.reverse();
+        assert_eq!(asc, desc);
+    }
+
+    #[tokio::test]
+    async fn pools_updates_bad_request() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/updates", invalid_pool_id());
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_wrong_length_bech32_is_bad_request() {
+        let app = TestApp::new();
+
+        // A pool1 string that decodes but carries 27 bytes, not 28.
+        let hrp = bech32::Hrp::parse("pool").expect("invalid hrp");
+        let short = bech32::encode::<bech32::Bech32>(hrp, &[0u8; 27])
+            .expect("failed to encode short pool id");
+
+        let path = format!("/pools/{short}/updates");
+        assert_error_message(&app, &path, "Invalid or malformed pool id format.").await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_not_found() {
+        let app = TestApp::new();
+        let path = format!("/pools/{}/updates", missing_pool_id());
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn pools_updates_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let pool_id = app.vectors().pool_id.as_str();
+        let path = format!("/pools/{pool_id}/updates");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

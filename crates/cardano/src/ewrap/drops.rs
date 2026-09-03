@@ -25,7 +25,9 @@ impl super::BoundaryVisitor for BoundaryVisitor {
     ) -> Result<(), ChainError> {
         let current_epoch = ctx.ending_state.number;
 
-        // Notice that instead of dropping delegators when a pool is retired, we're moving the data to a different field to be able to still track the relationsihp between the pool and the delegators.
+        // Notice that instead of dropping delegators when a pool is retired, we're
+        // moving the data to a different field to be able to still track the
+        // relationsihp between the pool and the delegators.
 
         if let Some(pool) = account.delegated_pool_at(current_epoch) {
             if ctx.retiring_pools.contains_key(pool) {
@@ -34,22 +36,7 @@ impl super::BoundaryVisitor for BoundaryVisitor {
         }
 
         if let Some(drep) = account.delegated_drep_at(current_epoch) {
-            let mut should_drop = ctx.retiring_dreps.contains(drep);
-
-            // Check for reregistrations
-            if !should_drop {
-                if let Some((_, registered_at)) =
-                    ctx.reregistrating_dreps.iter().find(|(x, _)| x == drep)
-                {
-                    if let Some(vote_delegated_at) = account.vote_delegated_at {
-                        if vote_delegated_at < *registered_at {
-                            should_drop = true;
-                        }
-                    }
-                }
-            }
-
-            if should_drop {
+            if ctx.clears_drep_delegation(drep, account) {
                 self.change(DRepDelegatorDrop::new(id.clone(), current_epoch));
             }
         }

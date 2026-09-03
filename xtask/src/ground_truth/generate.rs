@@ -16,7 +16,8 @@ pub struct GenerateArgs {
     #[arg(long, value_enum)]
     pub network: Network,
 
-    /// Subject epoch: the epoch being analyzed (ground-truth covers epochs 1..=subject_epoch)
+    /// Subject epoch: the epoch being analyzed (ground-truth covers epochs
+    /// 1..=subject_epoch)
     #[arg(long)]
     pub subject_epoch: u64,
 

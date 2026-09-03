@@ -270,6 +270,18 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     }
 
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError>;
+
+    /// Every block the archive holds at `slot`, in chain order.
+    ///
+    /// A slot is not always a unique chain position — a Byron epoch-boundary
+    /// block shares its slot with the first main block of the epoch it opens —
+    /// and [`Self::get_block_by_slot`] answers with only the block the slot
+    /// resolves to. A caller that reached the slot from a block hash needs the
+    /// candidates instead. A store that cannot hold two blocks at one slot
+    /// inherits the single-block answer.
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        Ok(self.get_block_by_slot(slot)?.into_iter().collect())
+    }
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,

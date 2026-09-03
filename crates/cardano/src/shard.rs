@@ -172,24 +172,24 @@ mod tests {
             let curr = shard_key_ranges(i, 16);
             let next = shard_key_ranges(i + 1, 16);
             for v in 0..2 {
+                assert_eq!(first_bytes(&curr[v], 5), {
+                    // start of curr[v]: [0x82, variant, 0x58, 0x1c, i*16]
+                    let mut e = vec![0u8; 5];
+                    e[0] = CRED_KEY_ARRAY_TAG;
+                    e[1] = if v == 0 {
+                        CRED_KEY_VARIANT_ADDRKEYHASH
+                    } else {
+                        CRED_KEY_VARIANT_SCRIPTHASH
+                    };
+                    e[2] = CRED_KEY_BYTES_HEADER[0];
+                    e[3] = CRED_KEY_BYTES_HEADER[1];
+                    e[4] = (i * 16) as u8;
+                    e
+                });
                 assert_eq!(
-                    first_bytes(&curr[v], 5),
-                    {
-                        // start of curr[v]: [0x82, variant, 0x58, 0x1c, i*16]
-                        let mut e = vec![0u8; 5];
-                        e[0] = CRED_KEY_ARRAY_TAG;
-                        e[1] = if v == 0 {
-                            CRED_KEY_VARIANT_ADDRKEYHASH
-                        } else {
-                            CRED_KEY_VARIANT_SCRIPTHASH
-                        };
-                        e[2] = CRED_KEY_BYTES_HEADER[0];
-                        e[3] = CRED_KEY_BYTES_HEADER[1];
-                        e[4] = (i * 16) as u8;
-                        e
-                    }
+                    curr[v].end.as_ref()[CRED_KEY_HASH_OFFSET],
+                    next[v].start.as_ref()[CRED_KEY_HASH_OFFSET]
                 );
-                assert_eq!(curr[v].end.as_ref()[CRED_KEY_HASH_OFFSET], next[v].start.as_ref()[CRED_KEY_HASH_OFFSET]);
             }
         }
     }
@@ -237,8 +237,14 @@ mod tests {
         // it, this test fires before anything else does.
         let dummy: Hash<28> = Hash::new([0u8; 28]);
         for (cred, expected_variant) in [
-            (StakeCredential::AddrKeyhash(dummy), CRED_KEY_VARIANT_ADDRKEYHASH),
-            (StakeCredential::ScriptHash(dummy), CRED_KEY_VARIANT_SCRIPTHASH),
+            (
+                StakeCredential::AddrKeyhash(dummy),
+                CRED_KEY_VARIANT_ADDRKEYHASH,
+            ),
+            (
+                StakeCredential::ScriptHash(dummy),
+                CRED_KEY_VARIANT_SCRIPTHASH,
+            ),
         ] {
             let enc = minicbor::to_vec(&cred).unwrap();
             assert_eq!(enc.len(), KEY_SIZE);
@@ -265,6 +271,9 @@ mod tests {
                 }
             }
         }
-        assert_eq!(hits, 1, "credential key must belong to exactly one shard range");
+        assert_eq!(
+            hits, 1,
+            "credential key must belong to exactly one shard range"
+        );
     }
 }

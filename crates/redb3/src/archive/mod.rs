@@ -1,7 +1,9 @@
 use ::redb::{Database, ReadableDatabase};
-use redb::ReadTransaction;
+use redb::{
+    MultimapTableHandle as _, ReadTransaction, ReadableTableMetadata as _, TableHandle as _,
+};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -9,7 +11,7 @@ use tracing::{debug, info, warn};
 
 use dolos_core::{
     config::RedbArchiveConfig, ArchiveError, BlockBody, BlockSlot, ChainPoint, EntityValue,
-    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TxHash, TxOrder, TxoRef,
+    EraCbor, LogKey, Namespace, RawBlock, StateSchema, TemporalKey, TxHash, TxOrder, TxoRef,
 };
 
 use ::redb::Durability;
@@ -20,14 +22,24 @@ use pallas::{
         traverse::{ComputeHash, MultiEraBlock, OriginalHash},
     },
 };
+use rand::{rngs::SmallRng, seq::SliceRandom as _, SeedableRng as _};
 use redb::WriteTransaction;
 use redb_extras::buckets::BucketError;
 
-use crate::{build_tables, Error, Table};
+use crate::{build_tables, Error, Table, TableFootprint};
 
-pub(crate) mod flatfiles;
+// The one-time Byron EBB recovery scan (`examples/heal-byron-ebbs.rs`) reuses
+// these index definitions rather than restating them. It is the only thing
+// that ever enables `maintenance`; the `dolos` binary does not, so the
+// crate's ordinary surface keeps them private.
+use dolos_flatfiles as flatfiles;
+
 pub(crate) mod indexes;
+
+#[cfg(not(feature = "maintenance"))]
 pub(crate) mod tables;
+#[cfg(feature = "maintenance")]
+pub mod tables;
 
 #[cfg(test)]
 mod tests;
@@ -129,7 +141,8 @@ impl ArchiveStore {
     ///
     /// `path` is the archive **directory** (e.g. `<storage.path>/archive/`).
     /// The redb index is stored at `<path>/index`.
-    /// Segment files are stored in `config.blocks_path` if set, otherwise in `<path>/`.
+    /// Segment files are stored in `config.blocks_path` if set, otherwise in
+    /// `<path>/`.
     pub fn open(
         schema: StateSchema,
         path: impl AsRef<Path>,
@@ -223,6 +236,8 @@ impl ArchiveStore {
         let range = tables::BlocksTable::get_range(&rx, from, to)?;
         Ok(ArchiveRangeIter {
             range,
+            front: VecDeque::new(),
+            back: VecDeque::new(),
             flatfiles: self.flatfiles.clone(),
         })
     }
@@ -237,6 +252,7 @@ impl ArchiveStore {
             tables: self.tables.clone(),
             flatfiles: self.flatfiles.clone(),
             pending_blocks: Mutex::new(Vec::new()),
+            pending_logs: Mutex::new(Vec::new()),
         })
     }
 
@@ -251,7 +267,9 @@ impl ArchiveStore {
                 return Ok(Some(ChainPoint::Origin));
             };
 
-            if let Some(body) = tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)? {
+            // A slot can hold more than one block, and an intersect names one
+            // of them by hash, so every block recorded there is a candidate.
+            for body in tables::BlocksTable::get_all_by_slot(&rx, &self.flatfiles, *slot)? {
                 let decoded =
                     MultiEraBlock::decode(&body).map_err(ArchiveError::BlockDecodingError)?;
 
@@ -583,6 +601,16 @@ impl ArchiveStore {
         tables::BlocksTable::get_by_slot(&rx, &self.flatfiles, *slot)
     }
 
+    /// Every block recorded at `slot`, in chain order.
+    ///
+    /// [`Self::get_block_by_slot`] answers with the block the slot resolves
+    /// to; this answers with all of them, which is what a caller holding a
+    /// hash needs when the chain put two blocks on one slot.
+    pub fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+        tables::BlocksTable::get_all_by_slot(&rx, &self.flatfiles, *slot)
+    }
+
     pub fn get_block_by_hash(
         &self,
         block_hash: &[u8],
@@ -704,6 +732,41 @@ impl ArchiveStore {
         tables::BlocksTable::get_tip(&rx, &self.flatfiles)
     }
 
+    /// Per-table storage statistics for every table in the archive index.
+    ///
+    /// Enumerated from the database itself rather than from a list of known
+    /// definitions, so the derived-log namespaces — which are named by the
+    /// state schema at open time and carry the bulk of the file — are covered
+    /// alongside the block and index tables without a second registry to keep
+    /// in sync.
+    pub fn stats(&self) -> Result<Vec<(String, TableFootprint)>, RedbArchiveError> {
+        let rx = self.db().begin_read()?;
+
+        let mut out = vec![];
+
+        for handle in rx.list_tables()?.collect::<Vec<_>>() {
+            let name = handle.name().to_string();
+            let table = rx.open_untyped_table(handle)?;
+            out.push((
+                name,
+                TableFootprint::new(Some(table.len()?), table.stats()?),
+            ));
+        }
+
+        for handle in rx.list_multimap_tables()?.collect::<Vec<_>>() {
+            let name = handle.name().to_string();
+            let table = rx.open_untyped_multimap_table(handle)?;
+            out.push((
+                name,
+                TableFootprint::new(Some(table.len()?), table.stats()?),
+            ));
+        }
+
+        out.sort_by(|(a, _): &(String, _), (b, _)| a.cmp(b));
+
+        Ok(out)
+    }
+
     pub fn prune_history(
         &self,
         max_slots: u64,
@@ -764,6 +827,19 @@ impl ArchiveStore {
         Ok(done)
     }
 
+    /// Drop everything the archive holds after `after`.
+    ///
+    /// The cut is by slot, so at a slot holding more than one block every one
+    /// of them survives, including any that follow `after` in the chain. That
+    /// is only expressible where two blocks share a slot — a Byron
+    /// epoch-boundary block and the first main block of the epoch it opens —
+    /// and a rollback cannot reach one: `Domain::rollback` walks the WAL back
+    /// to `after`, and the WAL holds `max_rollback` slots behind the tip,
+    /// while epoch-boundary blocks stop at the end of Byron. The behaviour
+    /// also predates the archive keeping both blocks, which is why it is
+    /// recorded here rather than changed: resolving `after` to one block of a
+    /// slot means matching its hash, which is `find_intersect`'s job, not this
+    /// one's.
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), RedbArchiveError> {
         let mut wx = self.db().begin_write()?;
         wx.set_quick_repair(true);
@@ -787,6 +863,63 @@ pub struct ArchiveStoreWriter {
     tables: HashMap<Namespace, Table>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
+    pending_logs: Mutex<Vec<(Namespace, LogKey, EntityValue)>>,
+}
+
+/// Break the ascending order of a batch of log rows before it is inserted.
+///
+/// Derived-log batches arrive in key order — their writers stream entities out
+/// of the state store, which is sorted — and every key in one batch carries a
+/// fresh temporal prefix greater than everything already stored. That makes the
+/// batch a pure right-edge append, and redb splits a full leaf at half its
+/// bytes with no rightmost-split case (`tree_store/btree_base.rs`,
+/// `build_split`), so every page left behind converges to half full. The same
+/// keys inserted in an arbitrary order converge to the ~69% (`ln 2`)
+/// random-insertion asymptote instead.
+///
+/// Measured on a full preprod replay of the account-epoch log: 47.0% → 61.6%
+/// leaf fill, 23.6% fewer leaf pages for byte-identical data.
+///
+/// This is a property of redb's B-tree, not of any particular log, so it lives
+/// with the backend rather than with the callers that happen to produce sorted
+/// batches. Only arrival order changes — the rows, their keys, and the table
+/// they land in are identical either way, so a stele cut from the result is
+/// byte-identical (ADR-004).
+fn break_insertion_order(
+    tables: &HashMap<Namespace, Table>,
+    batch: Vec<(Namespace, LogKey, EntityValue)>,
+) -> Vec<(Namespace, LogKey, EntityValue)> {
+    // A key written twice in one batch means different things per namespace
+    // kind, and the difference decides whether reordering is safe. A value
+    // table *replaces*, so only the last write is supposed to survive — and a
+    // shuffle, left to itself, would be free to persist the superseded one.
+    // A multimap table *adds an element*, so every write is its own row and
+    // the order they arrive in does not matter. Collapse the first kind to its
+    // last write; leave the second whole.
+    let mut superseded = HashSet::new();
+
+    let mut batch: Vec<_> = batch
+        .into_iter()
+        .rev()
+        .filter(|(ns, key, _)| {
+            matches!(tables.get(ns), Some(Table::MultiValue(_)))
+                || superseded.insert((*ns, key.clone()))
+        })
+        .collect();
+
+    batch.reverse();
+
+    // The batch seeds its own shuffle from the first key's temporal prefix —
+    // the slot every row of one boundary shares — so replaying a boundary lays
+    // its pages out the same way twice.
+    if let Some((_, key, _)) = batch.first() {
+        let seed = TemporalKey::from(key.clone());
+        let seed = u64::from_be_bytes(seed.as_ref().try_into().unwrap());
+
+        batch.shuffle(&mut SmallRng::seed_from_u64(seed));
+    }
+
+    batch
 }
 
 impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
@@ -806,10 +939,25 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
     fn commit(self) -> Result<(), ArchiveError> {
         // 1. Batch-append all pending blocks to flat files (fsync inside).
         // 2. Insert all index entries into redb.
-        // 3. Commit redb transaction.
+        // 3. Insert the log rows, in an order that does not halve the leaves.
+        // 4. Commit redb transaction.
         let pending = self.pending_blocks.into_inner().unwrap();
         if !pending.is_empty() {
             tables::BlocksTable::apply_batch(&self.wx, &self.flatfiles, &pending)?;
+        }
+
+        let logs = self.pending_logs.into_inner().unwrap();
+        let logs = break_insertion_order(&self.tables, logs);
+
+        for (ns, key, value) in logs {
+            let table = self
+                .tables
+                .get(&ns)
+                .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+
+            table
+                .write(&self.wx, key, &value)
+                .map_err(RedbArchiveError::from)?;
         }
 
         self.wx.commit().map_err(RedbArchiveError::from)?;
@@ -822,14 +970,17 @@ impl dolos_core::ArchiveWriter for ArchiveStoreWriter {
         key: &dolos_core::LogKey,
         value: &dolos_core::EntityValue,
     ) -> Result<(), ArchiveError> {
-        let table = self
-            .tables
-            .get(&ns)
-            .ok_or(ArchiveError::NamespaceNotFound(ns))?;
+        // Held back until `commit`, where the whole batch is reordered — see
+        // `break_insertion_order`. The namespace is still resolved here so an
+        // unknown one fails at the call that names it rather than at commit.
+        if !self.tables.contains_key(&ns) {
+            return Err(ArchiveError::NamespaceNotFound(ns));
+        }
 
-        table
-            .write(&self.wx, key, value)
-            .map_err(RedbArchiveError::from)?;
+        self.pending_logs
+            .lock()
+            .unwrap()
+            .push((ns, key.clone(), value.clone()));
 
         Ok(())
     }
@@ -883,6 +1034,11 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
         Ok(Self::get_block_by_slot(self, slot)?)
     }
+
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        Ok(Self::get_blocks_by_slot(self, slot)?)
+    }
+
     fn get_range<'a>(
         &self,
         from: Option<BlockSlot>,
@@ -956,10 +1112,64 @@ impl dolos_core::ArchiveStore for ArchiveStore {
     }
 }
 
+type IndexEntry = (BlockSlot, flatfiles::BlockLocation);
+
 /// Iterator over a range of blocks, reading lazily from flat files.
+///
+/// A slot can hold more than one block, so an index entry expands to a run of
+/// locations and whatever is left of the entry each end is working through is
+/// buffered here. When one end's range runs dry it drains the other end's
+/// buffer, which is what keeps a forward and a backward walk from yielding a
+/// block twice or dropping one where they meet.
 pub struct ArchiveRangeIter {
     range: redb::Range<'static, BlockSlot, &'static [u8]>,
+    front: VecDeque<IndexEntry>,
+    back: VecDeque<IndexEntry>,
     flatfiles: Arc<flatfiles::FlatFileStore>,
+}
+
+impl ArchiveRangeIter {
+    fn next_entry(&mut self) -> Option<IndexEntry> {
+        loop {
+            if let Some(entry) = self.front.pop_front() {
+                return Some(entry);
+            }
+
+            let Some(next) = self.range.next() else {
+                return self.back.pop_front();
+            };
+
+            let (slot, value) = next.ok()?;
+            let slot = slot.value();
+
+            self.front.extend(
+                flatfiles::decode_locations(value.value())
+                    .rev()
+                    .map(|loc| (slot, loc)),
+            );
+        }
+    }
+
+    fn next_entry_back(&mut self) -> Option<IndexEntry> {
+        loop {
+            if let Some(entry) = self.back.pop_back() {
+                return Some(entry);
+            }
+
+            let Some(next) = self.range.next_back() else {
+                return self.front.pop_back();
+            };
+
+            let (slot, value) = next.ok()?;
+            let slot = slot.value();
+
+            self.back.extend(
+                flatfiles::decode_locations(value.value())
+                    .rev()
+                    .map(|loc| (slot, loc)),
+            );
+        }
+    }
 }
 
 impl Iterator for ArchiveRangeIter {
@@ -967,10 +1177,9 @@ impl Iterator for ArchiveRangeIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (slot, loc_bytes) = self.range.next()?.ok()?;
-            let loc = flatfiles::BlockLocation::from_bytes(loc_bytes.value());
+            let (slot, loc) = self.next_entry()?;
             match self.flatfiles.read(&loc) {
-                Ok(data) => return Some((slot.value(), data)),
+                Ok(data) => return Some((slot, data)),
                 Err(_) => continue, // skip unreadable blocks
             }
         }
@@ -980,10 +1189,9 @@ impl Iterator for ArchiveRangeIter {
 impl DoubleEndedIterator for ArchiveRangeIter {
     fn next_back(&mut self) -> Option<Self::Item> {
         loop {
-            let (slot, loc_bytes) = self.range.next_back()?.ok()?;
-            let loc = flatfiles::BlockLocation::from_bytes(loc_bytes.value());
+            let (slot, loc) = self.next_entry_back()?;
             match self.flatfiles.read(&loc) {
-                Ok(data) => return Some((slot.value(), data)),
+                Ok(data) => return Some((slot, data)),
                 Err(_) => continue,
             }
         }
@@ -993,7 +1201,7 @@ impl DoubleEndedIterator for ArchiveRangeIter {
 impl dolos_core::archive::Skippable for ArchiveRangeIter {
     fn skip_forward(&mut self, n: usize) {
         for _ in 0..n {
-            if self.range.next().is_none() {
+            if self.next_entry().is_none() {
                 break;
             }
         }
@@ -1001,7 +1209,7 @@ impl dolos_core::archive::Skippable for ArchiveRangeIter {
 
     fn skip_backward(&mut self, n: usize) {
         for _ in 0..n {
-            if self.range.next_back().is_none() {
+            if self.next_entry_back().is_none() {
                 break;
             }
         }

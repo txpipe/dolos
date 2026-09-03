@@ -1,6 +1,6 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::BTreeSet, sync::Arc};
 
-use dolos_core::{BlockSlot, EntityKey, Genesis, NsKey};
+use dolos_core::{cbor, BlockSlot, Genesis, NsKey};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::{
@@ -16,7 +16,7 @@ use super::{
     eras::EraTransition,
     pools::PoolHash,
     pparams::PParamsSet,
-    FixedNamespace as _,
+    SingletonEntity,
 };
 use crate::pots::{EpochIncentives, Pots};
 
@@ -104,8 +104,19 @@ pub struct RollingStats {
     #[n(7)]
     pub withdrawals: Lovelace,
 
+    /// Pools registered during the epoch.
+    ///
+    /// **Ordered**, and that is load-bearing rather than incidental: this
+    /// value's minicbor encoding is copied verbatim into a stele's
+    /// `state-epochs` and `log-epochs` layers, so an iteration order that
+    /// varies per instance — as a hash container's does — would make two
+    /// honest publishers of the same ledger disagree about the bytes of
+    /// identical state (ADR-004, "Determinism depends on deterministic entity
+    /// encoding"). Any container reachable from an entity value has to order
+    /// by content; `crates/snapshot/tests/field_registry.rs` is what holds
+    /// this one to it.
     #[n(8)]
-    pub registered_pools: HashSet<PoolHash>,
+    pub registered_pools: BTreeSet<PoolHash>,
 
     #[n(13)]
     pub blocks_minted: u32,
@@ -140,6 +151,31 @@ pub struct RollingStats {
     #[n(21)]
     #[cbor(default)]
     pub treasury_mirs: Lovelace,
+
+    /// Number of transactions across all blocks minted this epoch.
+    #[n(22)]
+    #[cbor(default)]
+    pub tx_count: u64,
+
+    /// Gross sum of all lovelace in transaction outputs this epoch (matches
+    /// db-sync's `epoch.out_sum`). The type is [`cbor::U128`] because the sum
+    /// for one epoch can be more than u64 allows, although the outputs of one
+    /// transaction always fit in u64.
+    #[n(23)]
+    #[cbor(default)]
+    pub output: cbor::U128,
+
+    /// Slot of the first block minted this epoch (0 if the epoch has no block).
+    /// The reader converts this slot to a wall-clock time with `ChainSummary`.
+    #[n(24)]
+    #[cbor(default)]
+    pub first_block_slot: u64,
+
+    /// Slot of the last block minted this epoch (0 if the epoch has no block).
+    /// The reader converts this slot to a wall-clock time with `ChainSummary`.
+    #[n(25)]
+    #[cbor(default)]
+    pub last_block_slot: u64,
 }
 
 impl TransitionDefault for RollingStats {
@@ -194,6 +230,19 @@ pub struct EndStats {
     #[n(14)]
     #[cbor(default)]
     pub invalid_reserve_mirs: Lovelace,
+
+    /// Treasury withdrawals enacted by governance at the boundary and
+    /// delivered to registered accounts (moved treasury → rewards).
+    #[n(15)]
+    #[cbor(default)]
+    pub treasury_withdrawals: Lovelace,
+
+    /// Enacted treasury withdrawals whose target account cannot receive
+    /// them (unregistered at the boundary) — discarded, the value stays
+    /// in treasury.
+    #[n(16)]
+    #[cbor(default)]
+    pub invalid_treasury_withdrawals: Lovelace,
 
     #[n(6)]
     pub proposal_invalid_refunds: Lovelace,
@@ -255,7 +304,8 @@ pub struct EpochState {
     #[n(13)]
     pub end: Option<EndStats>,
 
-    /// Epoch incentives computed during RUPD, used for pot calculations at epoch boundary.
+    /// Epoch incentives computed during RUPD, used for pot calculations at
+    /// epoch boundary.
     #[n(14)]
     #[cbor(default)]
     pub incentives: Option<EpochIncentives>,
@@ -316,6 +366,10 @@ impl Default for EpochState {
 
 entity_boilerplate!(EpochState, "epochs");
 
+impl SingletonEntity for EpochState {
+    const KEY: &'static [u8] = CURRENT_EPOCH_KEY;
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -342,12 +396,20 @@ pub(crate) mod testing {
             consumed_utxos in root::any_lovelace(),
             gathered_fees in root::any_lovelace(),
             blocks_minted in 0u32..1000u32,
+            tx_count in 0u64..100_000u64,
+            output in 0u128..u128::from(u64::MAX),
+            first_block_slot in root::any_slot(),
+            last_block_slot in root::any_slot(),
         ) -> RollingStats {
             RollingStats {
                 produced_utxos,
                 consumed_utxos,
                 gathered_fees,
                 blocks_minted,
+                tx_count,
+                output: cbor::U128(output),
+                first_block_slot,
+                last_block_slot,
                 ..Default::default()
             }
         }
@@ -373,6 +435,8 @@ pub(crate) mod testing {
                 reserve_mirs: 0,
                 invalid_treasury_mirs: 0,
                 invalid_reserve_mirs: 0,
+                treasury_withdrawals: 0,
+                invalid_treasury_withdrawals: 0,
                 proposal_invalid_refunds: 0,
                 proposal_refunds: 0,
                 __drep_deposits: 0,
@@ -402,11 +466,14 @@ pub(crate) mod testing {
                 (0u32..32u32, 1u32..=32u32).prop_map(|(committed, total)| ShardProgress { committed, total })
             ),
         ) -> EpochState {
+            // ESTART rotates rolling/pparams in lockstep with the epoch
+            // number, so a healthy entity has all three aligned. The `strict`
+            // feature asserts this; rebase the independently drawn values.
             EpochState {
                 number,
                 initial_pots,
-                rolling,
-                pparams,
+                rolling: crate::model::epoch_value::testing::rebase(rolling, number),
+                pparams: crate::model::epoch_value::testing::rebase(pparams, number),
                 largest_stable_slot,
                 previous_nonce_tail,
                 nonces,
@@ -430,7 +497,7 @@ pub struct EpochStatsUpdate {
     pub(crate) new_accounts: u64,
     pub(crate) removed_accounts: u64,
     pub(crate) withdrawals: u64,
-    pub(crate) registered_pools: HashSet<PoolHash>,
+    pub(crate) registered_pools: BTreeSet<PoolHash>,
     pub(crate) drep_deposits: Lovelace,
     pub(crate) proposal_deposits: Lovelace,
     pub(crate) drep_refunds: Lovelace,
@@ -438,18 +505,27 @@ pub struct EpochStatsUpdate {
     pub(crate) reserve_mirs: Lovelace,
     pub(crate) treasury_mirs: Lovelace,
     pub(crate) non_overlay_blocks_minted: u32,
+    pub(crate) tx_count: u64,
+    pub(crate) output: cbor::U128,
+    pub(crate) block_slot: u64,
 
     // undo: did apply create rolling.live from default? Plus the pre-union pool set, which
     // can't be recovered by set subtraction (a pool in both prev and self would be removed).
     pub(crate) was_new: bool,
-    pub(crate) prev_registered_pools: HashSet<PoolHash>,
+    pub(crate) prev_registered_pools: BTreeSet<PoolHash>,
+
+    // Undo data for the first and last block slots. A min or max operation is
+    // not reversible by arithmetic. So `apply` keeps the earlier values here,
+    // and `undo` restores them.
+    pub(crate) prev_first_block_slot: u64,
+    pub(crate) prev_last_block_slot: u64,
 }
 
 impl dolos_core::EntityDelta for EpochStatsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -480,6 +556,22 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.reserve_mirs += self.reserve_mirs;
         stats.treasury_mirs += self.treasury_mirs;
         stats.non_overlay_blocks_minted += self.non_overlay_blocks_minted;
+        stats.tx_count += self.tx_count;
+        stats.output += self.output;
+
+        // Keep the earlier slots so `undo` can restore them. The first and last
+        // slots are a min and a max, which arithmetic cannot reverse.
+        self.prev_first_block_slot = stats.first_block_slot;
+        self.prev_last_block_slot = stats.last_block_slot;
+
+        // `first_block_slot` gets a value only once, at the earliest block of
+        // the epoch. `last_block_slot` moves forward to the most recent block.
+        // Blocks roll in slot order, so these values are the correct min and
+        // max.
+        if stats.first_block_slot == 0 {
+            stats.first_block_slot = self.block_slot;
+        }
+        stats.last_block_slot = self.block_slot;
 
         stats.registered_pools = stats
             .registered_pools
@@ -518,6 +610,11 @@ impl dolos_core::EntityDelta for EpochStatsUpdate {
         stats.reserve_mirs -= self.reserve_mirs;
         stats.treasury_mirs -= self.treasury_mirs;
         stats.non_overlay_blocks_minted -= self.non_overlay_blocks_minted;
+        stats.tx_count -= self.tx_count;
+        stats.output -= self.output;
+
+        stats.first_block_slot = self.prev_first_block_slot;
+        stats.last_block_slot = self.prev_last_block_slot;
 
         stats.registered_pools = self.prev_registered_pools.clone();
     }
@@ -547,7 +644,7 @@ impl dolos_core::EntityDelta for NoncesUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -593,7 +690,7 @@ impl dolos_core::EntityDelta for PParamsUpdate {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<EpochState>) {
@@ -652,7 +749,7 @@ impl dolos_core::EntityDelta for EpochWrapUp {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -724,7 +821,7 @@ impl dolos_core::EntityDelta for EpochWrapUpV2 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -787,7 +884,7 @@ impl dolos_core::EntityDelta for EpochWrapUpV3 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -860,7 +957,7 @@ impl dolos_core::EntityDelta for EWrapProgress {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -999,7 +1096,7 @@ impl dolos_core::EntityDelta for EStartProgress {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1107,7 +1204,7 @@ impl dolos_core::EntityDelta for RupdProgress {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1199,7 +1296,7 @@ impl dolos_core::EntityDelta for NonceTransition {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1282,7 +1379,7 @@ impl dolos_core::EntityDelta for EpochTransition {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1292,8 +1389,8 @@ impl dolos_core::EntityDelta for EpochTransition {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
-        // save undo info (snapshot whole EpochValues so rotation + any era migration are
-        // both covered)
+        // save undo info (snapshot whole EpochValues so rotation + any era migration
+        // are both covered)
         self.prev_number = entity.number;
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());
@@ -1390,7 +1487,7 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, CURRENT_EPOCH_KEY))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1400,8 +1497,8 @@ impl dolos_core::EntityDelta for EpochTransitionV2 {
             .new_pots
             .is_consistent(entity.initial_pots.max_supply()));
 
-        // save undo info (snapshot whole EpochValues so rotation + any era migration are
-        // both covered)
+        // save undo info (snapshot whole EpochValues so rotation + any era migration
+        // are both covered)
         self.prev_number = entity.number;
         self.prev_initial_pots = Some(entity.initial_pots.clone());
         self.prev_rolling = Some(entity.rolling.clone());
@@ -1476,7 +1573,7 @@ impl dolos_core::EntityDelta for SetEpochIncentives {
     type Entity = EpochState;
 
     fn key(&self) -> NsKey {
-        NsKey::from((EpochState::NS, EntityKey::from(CURRENT_EPOCH_KEY)))
+        EpochState::ns_key()
     }
 
     fn apply(&mut self, entity: &mut Option<Self::Entity>) {
@@ -1518,11 +1615,13 @@ mod prop_tests {
             end in prop::option::of(any_end_stats()),
             incentives in prop::option::of(any_epoch_incentives()),
         ) -> EpochState {
+            // Same lockstep rebase as `any_epoch_state`: `strict` asserts the
+            // epoch values sit at the entity's current epoch.
             EpochState {
                 number,
                 initial_pots,
-                rolling,
-                pparams,
+                rolling: crate::model::epoch_value::testing::rebase(rolling, number),
+                pparams: crate::model::epoch_value::testing::rebase(pparams, number),
                 largest_stable_slot,
                 previous_nonce_tail,
                 nonces,
@@ -1543,10 +1642,14 @@ mod prop_tests {
             new_accounts in 0u64..100u64,
             removed_accounts in 0u64..100u64,
             withdrawals in root::any_lovelace(),
+            tx_count in 0u64..1000u64,
+            output in 0u128..u128::from(u64::MAX),
+            block_slot in root::any_slot(),
         ) -> EpochStatsUpdate {
             EpochStatsUpdate {
                 epoch, block_fees, utxo_delta,
                 new_accounts, removed_accounts, withdrawals,
+                tx_count, output: cbor::U128(output), block_slot,
                 ..EpochStatsUpdate::default()
             }
         }
@@ -1728,8 +1831,12 @@ mod prop_tests {
         #[test]
         fn epoch_stats_update_roundtrip(
             entity in any_epoch_state_no_rolling_next(),
-            delta in any_epoch_stats_update(),
+            mut delta in any_epoch_stats_update(),
         ) {
+            // `apply` mutates `rolling` through `live_mut`, which asserts
+            // alignment under `strict`, so the delta carries the entity's
+            // epoch.
+            delta.epoch = entity.rolling.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1790,6 +1897,9 @@ mod prop_tests {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.
             delta.new_pots = entity.initial_pots.clone();
+            // `transition` asserts `new_epoch` is exactly one past the
+            // entity's epoch under `strict`.
+            delta.new_epoch = entity.rolling.epoch().expect("generated at epoch position") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1801,6 +1911,7 @@ mod prop_tests {
             // align new_pots with the entity's initial_pots so apply's max_supply
             // consistency debug_assert holds.
             delta.new_pots = entity.initial_pots.clone();
+            delta.new_epoch = entity.rolling.epoch().expect("generated at epoch position") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
 

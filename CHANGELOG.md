@@ -2,6 +2,329 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.7.0-alpha.1] - 2026-08-24
+
+### 🚀 Features
+
+- *(minibf)* Implement `/pools/retired` endpoint (#1218)
+- *(cli)* Add doctor command to regenerate the state store (#1222)
+- *(cli)* Improve data checks of pots at epoch boundaries (#1235)
+- *(minibf)* Bump Blockfrost OpenAPI to v0.1.91 (#1223)
+- *(minibf)* Add `/txs/{hash}/required_signers` endpoint (#1232)
+- *(minibf)* Implement `/pools/{pool_id}/updates` endpoint (#1237)
+- *(minibf)* Add `/epochs/{number}/blocks/{pool_id}` endpoint (#1233)
+- *(minibf)* Add `/scripts/{script_hash}/utxos` endpoint (#1207)
+- *(stelae)* Make an unknown layer kind skippable at restore, strict at publish (#1242)
+- *(snapshot)* Retain state dumps at configured epochs (#1246)
+- *(cardano)* [**breaking**] Merge the four per-account epoch logs into one entity (#1249)
+- Introduce fjall archive backend as the default (#1257)
+- *(snapshot)* Add the `snapshot backfill` publisher driver (#1259)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Move the pots when a treasury withdrawal enacts (#1227)
+- *(deps)* Update `h2` for `RUSTSEC-2026-0258` (#1229)
+- *(cardano)* Align the boundary DRep distribution with the ledger's post-enactment snapshot (#1228)
+- *(snapshot)* Align the stele's sequence and tag with the epoch it names (#1240)
+- *(archive)* Support EBBs persistence via multi-block per slot (#1239)
+- *(grpc)* Don't panic on an unservable FollowTip/WatchTx intersect (#1226)
+- *(cli)* Advance the state rebuild by block, not by slot (#1244)
+- *(cardano)* Delete the unredeemed AVVM utxos the Allegra boundary reclaims (#1250)
+- *(stelae)* Retry a read the OS interrupted instead of failing the layer (#1254)
+
+### 🚜 Refactor
+
+- *(snapshot)* Split the logs layer into per-namespace kinds (#1241)
+- *(snapshot)* Split the state layer into per-namespace kinds (#1243)
+
+### 🔧 Continuous Integration
+
+- Improve workflow performance by removing steps from the critical path (#1251)
+
+### ⚡ Performance
+
+- *(redb3)* Avoid empty space in leaf pages by randomizing insert order (#1253)
+- *(snapshot)* Band the index traversal across a run of epochs (#1255)
+- *(stelae)* Move a publish's layer round trips concurrently (#1260)
+
+### 🧪 Testing
+
+- *(snapshot)* Pin every namespace's field table against the compatibility contract (#1245)
+
+### ⚙️ Miscellaneous Tasks
+
+- Increase surface of dolos-devs code ownership (#1231)
+
+## [1.7.0-alpha.0] - 2026-08-16
+
+### 🚀 Features
+
+- *(stelae)* Setup a walking skeleton for the Stelae protocol (#1147)
+- *(storage)* Add the export/restore seam Stelae index layers need (#1150)
+- *(storage)* Introduce true memory built-in store for state and indexes (#1158)
+- *(storage)* Make the archive dimension registry enforce itself (#1161)
+- *(stelae)* Read layers as a stream, bounded by one record (#1148)
+- *(snapshot)* Define our custom stelae profile (#1166)
+- *(stelae)* Write layers as a stream, bounded by one record (#1167)
+- *(minibf)* Implement `/accounts/{stake_address}/transactions` endpoint (#1127)
+- *(snapshot)* Export a stele from a live node (#1168)
+- *(snapshot)* Support restoring a node from a stele (#1169)
+- *(stelae)* Push and pull a stele to an OCI registry (#1170)
+- *(minibf)* Implement the `/pools` endpoint (#1137)
+- *(minibf)* Implement `/accounts/{stake_address}/addresses/assets` endpoint (#1126)
+- *(snapshot)* Publish a stele into a registry, and only what is new (#1173)
+- *(snapshot)* Restore from a registry, and survive being interrupted (#1176)
+- *(stelae)* Authenticate a registry with basic credentials (#1184)
+- *(stelae)* Name the official registry's published read-only pair (#1186)
+- *(stelae)* Give a publisher digest, verify and inspect capabilities (#1188)
+- *(stelae)* Introduce scratch dir for publish operations (#1191)
+- *(stelae)* Run preflight rules before publish / restore (#1192)
+- *(cardano)* Introduce log per-account epoch stake distribution (#1151)
+- *(minibf)* Implement `/epochs/{number}/stakes` endpoint (#1152)
+- *(minibf)* Implement `/epochs/{number}/stakes/{pool_id}` endpoint (#1154)
+- *(minibf)* Implement `/assets/policy/{policy_id}` endpoint (#1189)
+- *(cardano)* Introduce committee, constitution and governance singleton state (#1130)
+- *(core)* Introduce cbor::U128 newtype (#1208)
+- *(minibf)* Implement `/epochs/{number}`, `/next` and `/previous` (#1171)
+- *(stelae)* Support resume of interrupted publish (#1200)
+- *(stelae)* Introduce restore / publish progress reports (#1210)
+- *(cardano)* Enact the four missing governance action variants (#1211)
+- *(cli)* Introduce `data check` command to review semantic consistency (#1213)
+- *(cardano)* Compute DRep and SPO stake distributions in the EWRAP pass (#1212)
+- *(cardano)* Governance "ratify" engine in shadow mode (#1214)
+- *(cardano)* Compute proposal outcomes instead of using hacks (#1215)
+
+### 🐛 Bug Fixes
+
+- *(minibf)* Render relay IPv6 addresses in network byte order (#1136)
+- *(minibf)* Return affected addresses from `/blocks/{hash_or_number}/addresses` (#1124)
+- *(stelae)* A registry client should not need a C toolchain (#1180)
+- *(stelae)* Hold a publisher to the record ceiling its reader enforces (#1182)
+- *(stelae)* Specify the manifest third parties read, and prove it in CI (#1183)
+- *(stelae)* A blob that already exists is a dedup, not a rename (#1187)
+- *(minibf)* Return a JSON error body for a malformed stake address (#1177)
+- *(stelae)* Improve error messages on staging dir preflight checks (#1202)
+- *(cardano)* Clear a vote delegation only when the ledger cleared it (#1216)
+
+### 🚜 Refactor
+
+- *(storage)* Let append_prehashed take an iterator (#1159)
+- *(storage)* Factor the archive record prefix walk (#1160)
+- *(storage)* Source the stored tag key from one definition (#1162)
+- *(storage)* Refuse unsupported store methods instead of panicking (#1164)
+- *(minibf)* Share input resolution across scan endpoints (#1134)
+- *(minibf)* Share input resolution for the account transactions scan (#1174)
+- *(minibf)* Share input resolution for the block addresses endpoint (#1190)
+- *(stelae)* Improve DRY on layer opening prologue (#1201)
+
+### 📚 Documentation
+
+- Restore lost changelog
+- *(adr)* Rename the snapshot mechanism Stelae (#1146)
+- Fix the Tx3 Rust SDK signer import path (#1181)
+
+### 🔧 Continuous Integration
+
+- Pin git-cliff workdir so changelog survives submodule
+- Ban cmake in deny.toml instead of documenting the refusal (#1196)
+- Don't publish prereleases to homebrew and npm
+
+### ⚡ Performance
+
+- *(storage)* Hold exact record keys inline (#1163)
+
+### 🎨 Styling
+
+- *(snapshot)* Normalize the preflight test comments (#1209)
+
+### 🧪 Testing
+
+- Improve CI coverage with comprehensive all-features workspace testing (#1157)
+- *(storage)* One seeder for the index roundtrip and cost fixtures (#1165)
+- *(stelae)* Point the oci harness at a deployed registry (#1185)
+- *(stelae)* Avoid preflight disk space margins race (#1203)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(storage)* Formalize supported vs deprecated backends (#1155)
+- Add dolos-devs as code owner for `crates/minibf` (#1194)
+
+### Release
+
+- V1.7.0-alpha.0
+
+## [1.6.0] - 2026-07-27
+
+### 🚀 Features
+
+- *(minibf)* Implement `/pools/retiring` endpoint (#1122)
+- *(cardano)* Capture governance votes and full proposal state (#1129)
+- *(minibf)* Add block txs CBOR endpoints (#1123)
+- *(minibf)* Implement `/addresses/{address}/total` endpoint (#1133)
+- *(minibf)* Implement `/pools/{pool_id}/relays` endpoint (#1132)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Stop dropping StakeVoteDeleg drep leg and drep anchors (#1128)
+- *(bootstrap)* Install rustls crypto provider for mithril client (#1131)
+
+### ⚙️ Miscellaneous Tasks
+
+- *(minibf)* Bump openapi crate to 1.90 (#1125)
+
+### Release
+
+- V1.6.0
+
+## [1.5.0] - 2026-07-16
+
+### 🚀 Features
+
+- *(bootstrap)* Migrate mithril client to v2 Cardano Database format (#1063)
+
+### 🐛 Bug Fixes
+
+- *(examples)* Update blaze-client deps to clear security advisories (#1054)
+- *(deps)* Bump vulnerable dependencies to clear security advisories (#1057)
+- *(cardano)* Adjust fn visibility to satisfy private interface lint (#1060)
+- *(deps)* Upgrade opentelemetry family to 0.32 (#1058)
+- *(minibf)* Return 404 for valid but non-existent asset in `/assets/{asset}/addresses` (#1055)
+- *(cardano)* Update gov proposal mappings and update skill (#1065)
+
+### 📚 Documentation
+
+- Add ADR for deterministic OCI snapshots (#1056)
+- *(examples)* Introduce UTxO RPC WatchTx examples (#1061)
+- Incorporate ADR 004 review feedback (#1062)
+
+### 🔧 Continuous Integration
+
+- Add cargo-deny advisories gate (#1059)
+
+### Release
+
+- V1.5.0
+
+## [1.4.0] - 2026-07-08
+
+### 🐛 Bug Fixes
+
+- *(wal)* Correct slot-range endianness so pruning and lookups work (#1045)
+- *(cli)* Make wal-integrity tool robust to synthetic entries and discontinuities (#1046)
+- *(core)* Unify store catch-up policy after crash (#1048)
+- *(cardano)* Add missing enacted governance proposals to hacks.rs (#1052)
+- *(cardano)* Inject Plutus POSIXTime in milliseconds for mempool validation (#1028)
+
+### 🚜 Refactor
+
+- *(sync)* Add apply-side block-sequence continuity guard (#1049)
+
+### 📚 Documentation
+
+- Document issue label structure in CONTRIBUTING (#1030)
+- Add architecture section describing internals (#1044)
+
+### 🔧 Continuous Integration
+
+- Harden Rust CI (#1051)
+
+### 🧪 Testing
+
+- Harden housekeeping test coverage (#1047)
+
+### ⚙️ Miscellaneous Tasks
+
+- Link high-stakes TODOs to tracking issues (#1043)
+
+### Release
+
+- V1.4.0
+
+## [1.3.2] - 2026-06-23
+
+### ⚙️ Miscellaneous Tasks
+
+- *(trp)* Bump tx3-resolver/tx3-cardano to 0.23.0 (#1027)
+
+### Release
+
+- V1.3.2
+
+## [1.3.1] - 2026-06-20
+
+### 🐛 Bug Fixes
+
+- *(cli)* Download snapshots via ranged ring buffer (#1025)
+- *(cli)* Keep snapshot progress bar live during ranged download (#1026)
+
+### Release
+
+- V1.3.1
+
+## [1.3.0] - 2026-06-19
+
+### 🚀 Features
+
+- *(utxorpc)* Expose configurable HTTP/2 transport tuning (#1011)
+- *(utxorpc)* Honor field_mask in Sync service to skip unused block representations (#1012)
+
+### 🐛 Bug Fixes
+
+- *(cardano)* Surface lagging pool snapshots in RUPD instead of obscure panic (#1016)
+- *(cardano)* Fail loud on lagging pool snapshots and unfinished epoch boundaries (#1017)
+- *(minibf)* Source address-utxo tx_hash from TxoRef, not archive block_data (#1009)
+
+### 📚 Documentation
+
+- Re-generate wiped-out changelog
+
+### ⚙️ Miscellaneous Tasks
+
+- *(cardano)* Add more gov proposal mappings (#1013)
+- Switch snapshot source to R2 (#1014)
+- *(cardano)* Update gov proposal mappings (#1023)
+- *(trp)* Bump tx3-cardano and tx3-resolver to 0.22.0 (#1022)
+- Bump pallas to 1.1.1 (#1024)
+
+### Release
+
+- V1.3.0
+
+## [1.2.0] - 2026-06-01
+
+### 🚀 Features
+
+- *(utxorpc)* Support certificate pattern matching in the `watch` service (#994)
+- *(utxorpc)* Honor height & hash params in dump history calls (#993)
+- *(trp)* Populate reference script expression in TRP UTxO mapping (#1007)
+
+### 🐛 Bug Fixes
+
+- *(utxorpc)* Honor search of utxo by policy id and asset name (#992)
+- *(u5c)* Populate block_ref in AnyUtxoData via block_by_tx_hash (#1000)
+- *(u5c)* Convert ChainPoint/BlockRef timestamp from seconds to ms (#1003)
+- *(testing)* Use Waker::noop() to satisfy clippy::manual_noop_waker
+- Use Waker::noop() to satisfy clippy::manual_noop_waker (#1004)
+- *(cli)* Shutdown databases before export (#1005)
+
+### 🚜 Refactor
+
+- Extend BlockRefMeta and use on the other drivers (#1006)
+
+### 📚 Documentation
+
+- Add performance subsection (#1001)
+
+### ⚙️ Miscellaneous Tasks
+
+- Update preview enactments (#996)
+- *(minibf)* Upgrade blockfrost crate to 0.1.88 (#1002)
+- *(trp)* Bump tx3-cardano and tx3-resolver to 0.21.0 (#1008)
+
+### Release
+
+- V1.2.0
+
 ## [1.1.1] - 2026-05-05
 
 ### 🚀 Features
@@ -13,6 +336,10 @@ All notable changes to this project will be documented in this file.
 
 - *(minibf)* Add v11 new cost model mapping names (#988)
 - *(cardano)* Short-circuit ewrap replay between boundary phases (#991)
+
+### Release
+
+- V1.1.1
 
 ## [1.1.0] - 2026-04-30
 

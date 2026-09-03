@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityDelta as _,
+    ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityMap,
     IndexStore as _, IndexWriter as _, MempoolStore, RawBlock, StateStore, StateWriter as _,
     TipEvent, WalStore, WorkUnit,
 };
@@ -53,7 +53,8 @@ impl<D: Domain> SyncExt for D {
     fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError> {
         let mut chain = self.write_chain();
 
-        // Drain first in case there's previous work that needs to be applied (eg: initialization)
+        // Drain first in case there's previous work that needs to be applied (eg:
+        // initialization)
         drain_pending_work::<D>(&mut *chain, self)?;
 
         let last = chain.receive_block(block)?;
@@ -70,7 +71,12 @@ impl<D: Domain> SyncExt for D {
         let writer = self.state().start_writer()?;
         let index_writer = self.indexes().start_writer()?;
 
-        for (point, mut log) in undo_blocks.rev() {
+        // Entities accumulate across all undone entries so consecutive blocks
+        // touching the same entity unwind from the in-memory value instead of
+        // re-reading the not-yet-committed store.
+        let mut entities: EntityMap<Self::Entity> = EntityMap::default();
+
+        for (point, log) in undo_blocks.rev() {
             if point == *to {
                 // Final cursor update - build an empty delta with just the cursor
                 let empty_delta = crate::IndexDelta {
@@ -82,26 +88,7 @@ impl<D: Domain> SyncExt for D {
                 break;
             }
 
-            let entities = log
-                .delta
-                .iter()
-                .map(|delta| delta.key())
-                .collect::<Vec<_>>();
-
-            let mut entities =
-                crate::state::load_entity_chunk::<Self>(entities.as_slice(), self.state())?;
-
-            for (key, entity) in entities.iter_mut() {
-                // Undo deltas in reverse application order. Each delta's `prev_*`
-                // captures the state immediately before its own apply, so multiple
-                // deltas keyed to the same entity must be reversed last-first to
-                // correctly walk back through the apply chain.
-                for delta in log.delta.iter_mut().rev() {
-                    if delta.key() == *key {
-                        delta.undo(entity);
-                    }
-                }
-            }
+            crate::state::undo_delta_chunk::<Self>(&mut entities, self.state(), &log.delta)?;
 
             let block = Arc::new(log.block);
 
@@ -130,6 +117,9 @@ impl<D: Domain> SyncExt for D {
             info!(%point, "block undone");
         }
 
+        // Persist the undone entities (`Some` upserts, `None` deletes).
+        crate::state::save_entities::<Self>(&writer, &entities)?;
+
         writer.commit()?;
         index_writer.commit()?;
 
@@ -157,13 +147,11 @@ pub(crate) fn drain_pending_work<D: Domain>(
 ///
 /// Sync lifecycle includes all phases:
 /// 1. `initialize()` - Shard-agnostic setup
-/// 2. For each shard `0..total_shards()`:
-///    a. `load()` - Load required data from storage
-///    b. `compute()` - Execute computation over loaded data
-///    c. `commit_wal()` - Persist to write-ahead log
-///    d. `commit_state()` - Apply changes to state store
-///    e. `commit_archive()` - Apply changes to archive store
-///    f. `commit_indexes()` - Apply changes to index stores
+/// 2. For each shard `0..total_shards()`: a. `load()` - Load required data from
+///    storage b. `compute()` - Execute computation over loaded data c.
+///    `commit_wal()` - Persist to write-ahead log d. `commit_state()` - Apply
+///    changes to state store e. `commit_archive()` - Apply changes to archive
+///    store f. `commit_indexes()` - Apply changes to index stores
 /// 3. `finalize()` - Shard-agnostic teardown
 /// 4. `notify_tip()` - Notify tip subscribers
 ///

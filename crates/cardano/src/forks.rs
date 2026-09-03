@@ -244,7 +244,7 @@ pub fn migrate_pparams_version(
         // Van Rossem: intra-era hard-fork to protocol version 11
         (10, 11) => intra_era_hardfork(current, to),
         (from, to) => {
-            unimplemented!("don't know how to bump from version {from} to {to}",)
+            unimplemented!("don't know how to bump from version {from} to {to} (#1033)",)
         }
     }
 }

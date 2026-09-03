@@ -11,13 +11,14 @@
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
-    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
+    Entity, EntityDelta as _, EntityKey, IndexStore, IndexWriter, LogKey, NsKey, StateStore,
+    StateWriter, TemporalKey,
 };
 use tracing::{debug, instrument, trace, warn};
 
 use crate::{
     forks, AccountState, CardanoEntity, DRepState, EpochState, EraSummary, FixedNamespace,
-    PoolState, ProposalState,
+    GovState, PoolState, ProposalState,
 };
 
 /// Era transition data collected from state.
@@ -142,8 +143,9 @@ impl super::WorkContext {
             self.stream_and_apply_namespace::<D, AccountState>(state, &writer, Some(range))?;
         }
 
-        // EpochState gets the EStartProgress delta (single entity).
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+        // EpochState gets the EStartProgress delta.
+        self.deltas
+            .apply_singleton::<EpochState, _>(state, &writer)?;
 
         // Archive logs — share the start-of-epoch temporal key across shards.
         let start_of_epoch = self.chain_summary.epoch_start(self.starting_epoch_no());
@@ -175,14 +177,36 @@ impl super::WorkContext {
     /// runs. The cursor is set only here, so a crash mid-shard restarts
     /// from the boundary block and the pre-finalize state stays at the
     /// previous-epoch cursor.
+    ///
+    /// It is also where the Shelley→Allegra AVVM reclamation deletes its
+    /// UTxOs — see [`crate::estart::avvm`] for why that belongs in the same
+    /// transaction as the pot delta.
     #[instrument(skip_all)]
     pub fn commit_finalize<D: Domain>(
         &mut self,
         state: &D::State,
         archive: &D::Archive,
+        indexes: &D::Indexes,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
+
+        // Finalize advances the epoch and rotates every pool in one commit, so
+        // it must run exactly once and only after all shards committed. Require
+        // `committed == total` and that the epoch has not advanced, turning a
+        // would-be double-rotation into a loud error. (Guards finalize only,
+        // not per-shard replay — see the "true shard resume" TODO.)
+        let ended = self.ended_state();
+        let progress = ended.estart_progress.as_ref();
+        let all_shards_committed = progress.is_some_and(|p| p.committed == p.total);
+        if !all_shards_committed {
+            return Err(dolos_core::BrokenInvariant::EpochBoundaryIncomplete {
+                epoch: ended.number,
+                committed: progress.map(|p| p.committed),
+                total: progress.map(|p| p.total),
+            }
+            .into());
+        }
 
         // Collect era transition data first (only 1-2 entities, not a memory concern)
         let era_transition = self.collect_era_transition(state)?;
@@ -205,8 +229,26 @@ impl super::WorkContext {
         debug!("streaming proposal entities");
         self.stream_and_apply_namespace::<D, ProposalState>(state, &writer, None)?;
 
-        debug!("streaming epoch entities");
-        self.stream_and_apply_namespace::<D, EpochState>(state, &writer, None)?;
+        debug!("applying singleton deltas");
+        self.deltas
+            .apply_singleton::<EpochState, _>(state, &writer)?;
+
+        // Gov isn't streamed by namespace; its boundary deltas (e.g. the
+        // Conway-boundary `GovGenesisInit`) go through the singleton path.
+        self.deltas.apply_singleton::<GovState, _>(state, &writer)?;
+
+        let avvm_deletion =
+            (!self.avvm_reclamation.is_empty()).then(|| self.avvm_reclamation.deletion_delta());
+
+        if let Some(delta) = avvm_deletion.as_ref() {
+            debug!(
+                count = self.avvm_reclamation.utxos.len(),
+                total = self.avvm_reclamation.total,
+                "deleting unredeemed AVVM utxos"
+            );
+
+            writer.apply_utxoset(delta)?;
+        }
 
         // Write era transition if needed (only 2 entities)
         if let Some(transition) = era_transition {
@@ -216,7 +258,8 @@ impl super::WorkContext {
                 .write_entity_typed::<EraSummary>(&transition.new_key, &transition.new_summary)?;
         }
 
-        // Write archive logs (accumulated during compute_global_deltas, much smaller than entities)
+        // Write archive logs (accumulated during compute_global_deltas, much smaller
+        // than entities)
         debug!(log_count = self.logs.len(), "writing archive logs");
         for (entity_key, log) in self.logs.drain(..) {
             let log_key = LogKey::from((temporal_key.clone(), entity_key));
@@ -235,8 +278,119 @@ impl super::WorkContext {
         writer.commit()?;
         archive_writer.commit()?;
 
+        // The by-address (and every other UTxO filter) index has to lose the
+        // reclaimed refs too, or the serving APIs keep answering with outputs
+        // the state store no longer holds. Indexes follow the state commit;
+        // `AvvmReclamation::apply_deletion` records why that order.
+        if let Some(delta) = avvm_deletion.as_ref() {
+            // Carry the index's own cursor through: this changes what the
+            // index holds, not how far it has been advanced, and
+            // `IndexWriter::apply` writes whatever cursor the delta names.
+            // `None` is the never-indexed store, which bootstrap reads as
+            // "replay the whole WAL": `Origin` keeps saying that, where this
+            // boundary's slot would claim every block before it as indexed.
+            let cursor = indexes.cursor()?.unwrap_or(ChainPoint::Origin);
+
+            let delta = crate::indexes::index_delta_from_utxo_delta(cursor, delta);
+
+            let index_writer = indexes.start_writer()?;
+            index_writer.apply(&delta)?;
+            index_writer.commit()?;
+        }
+
         debug!("estart finalize commit complete");
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::{Domain as _, StateStore as _};
+    use dolos_testing::toy_domain::ToyDomain;
+
+    use crate::{
+        gov_from_conway_genesis, ChainSummary, EraProtocol, GovGenesisInit, SingletonEntity as _,
+    };
+
+    use super::*;
+
+    fn empty_context(domain: &ToyDomain) -> super::super::WorkContext {
+        super::super::WorkContext {
+            ended_state: Default::default(),
+            active_protocol: EraProtocol::from(9),
+            chain_summary: ChainSummary::default(),
+            genesis: domain.genesis(),
+            avvm_reclamation: Default::default(),
+            deltas: Default::default(),
+            logs: Default::default(),
+        }
+    }
+
+    fn read_gov(domain: &ToyDomain) -> Option<GovState> {
+        domain
+            .state()
+            .read_entity_typed::<GovState>(GovState::NS, &GovState::singleton_key())
+            .unwrap()
+    }
+
+    /// `GovGenesisInit` applied through the singleton path activates the
+    /// existing (inactive) row with the genesis enact-state.
+    #[test]
+    fn gov_genesis_init_activates_existing_singleton() {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        // the devnet bootstrap activates the row; reset it to the
+        // inactive state a chain crossing Chang would carry
+        let writer = state.start_writer().unwrap();
+        writer
+            .write_entity_typed(&GovState::singleton_key(), &GovState::default())
+            .unwrap();
+        writer.commit().unwrap();
+        assert_eq!(read_gov(&domain), Some(GovState::default()));
+
+        let (constitution, committee) = gov_from_conway_genesis(&domain.genesis().conway).unwrap();
+
+        let mut ctx = empty_context(&domain);
+        ctx.add_delta(GovGenesisInit::new(
+            constitution.clone(),
+            committee.clone(),
+            507,
+        ));
+
+        let writer = state.start_writer().unwrap();
+        ctx.deltas
+            .apply_singleton::<GovState, _>(state, &writer)
+            .unwrap();
+        writer.commit().unwrap();
+
+        let gov = read_gov(&domain).expect("singleton exists");
+        assert_eq!(gov.constitution, Some(constitution));
+        assert_eq!(gov.committee, Some(committee));
+        assert_eq!(gov.active_since, Some(507));
+
+        // the queue entry was drained — no double apply possible
+        assert!(ctx.deltas.entities.is_empty());
+    }
+
+    /// With no queued gov deltas the pass is a no-op that leaves the
+    /// existing entity untouched.
+    #[test]
+    fn gov_apply_without_deltas_is_noop() {
+        let domain = ToyDomain::new(None, None);
+        let state = domain.state();
+
+        let before = read_gov(&domain).expect("devnet bootstrap seeds the entity");
+
+        let mut ctx = empty_context(&domain);
+
+        let writer = state.start_writer().unwrap();
+        ctx.deltas
+            .apply_singleton::<GovState, _>(state, &writer)
+            .unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(read_gov(&domain), Some(before));
     }
 }

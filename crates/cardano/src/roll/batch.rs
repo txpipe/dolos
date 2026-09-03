@@ -8,13 +8,17 @@ use std::{collections::HashMap, ops::RangeInclusive};
 use itertools::Itertools as _;
 use rayon::prelude::*;
 
+use crate::consensus::ConsensusError;
 use crate::indexes::CardanoIndexDeltaBuilder;
-use crate::{CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput};
+use crate::{
+    CardanoDelta, CardanoEntity, CardanoLogic, OwnedMultiEraBlock, OwnedMultiEraOutput,
+    SingletonEntity,
+};
 use dolos_core::{
     ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError, ChainPoint, Domain,
     DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _, LogValue,
-    NsKey, RawBlock, RawUtxoMap, StateError, StateStore as _, StateWriter as _, TxoRef,
-    UtxoSetDelta, WalStore as _,
+    NsKey, RawBlock, RawUtxoMap, StateError, StateStore, StateWriter as _, TxoRef, UtxoSetDelta,
+    WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -29,6 +33,42 @@ impl WorkDeltas {
         let key = delta.key();
         let group = self.entities.entry(key).or_default();
         group.push(delta);
+    }
+
+    /// Apply queued deltas for a singleton entity and write the result.
+    ///
+    /// Namespace streams only visit rows that already exist, so a delta
+    /// that must *create* its entity (e.g. `GovGenesisInit` at the Conway
+    /// boundary) would be dropped silently. This path reads the fixed key
+    /// directly and applies against `None` when the row is absent.
+    ///
+    /// Returns the post-apply entity so callers can refresh cached
+    /// copies; `None` when no deltas were queued.
+    pub fn apply_singleton<E, S>(
+        &mut self,
+        state: &S,
+        writer: &S::Writer,
+    ) -> Result<Option<E>, ChainError>
+    where
+        E: SingletonEntity + Into<CardanoEntity>,
+        CardanoEntity: Into<Option<E>>,
+        S: StateStore,
+    {
+        let Some(to_apply) = self.entities.remove(&E::ns_key()) else {
+            return Ok(None);
+        };
+
+        let mut entity: Option<CardanoEntity> = state
+            .read_entity_typed::<E>(E::NS, &E::singleton_key())?
+            .map(Into::into);
+
+        for mut delta in to_apply {
+            delta.apply(&mut entity);
+        }
+
+        writer.save_entity_typed(E::NS, &E::singleton_key(), entity.as_ref())?;
+
+        Ok(entity.and_then(Into::into))
     }
 }
 
@@ -134,6 +174,30 @@ impl WorkBatch {
         self.blocks.last().unwrap().point()
     }
 
+    /// Verify that the batch forms a contiguous chain extending from the
+    /// persisted state cursor — the apply-side integrity guard. Folds
+    /// [`consensus::check_extension`](crate::consensus) over the blocks
+    /// starting from `cursor` (or `Origin` when unset) and advancing the
+    /// tip after each block, so intra-batch links are validated too.
+    ///
+    /// Must be called after [`sort_by_slot`](Self::sort_by_slot).
+    pub fn check_continuity(&self, cursor: Option<&ChainPoint>) -> Result<(), ConsensusError> {
+        debug_assert!(
+            self.is_sorted,
+            "check_continuity must run after sort_by_slot"
+        );
+
+        let mut tip = cursor.cloned().unwrap_or(ChainPoint::Origin);
+
+        for block in &self.blocks {
+            let view = block.block.view();
+            crate::consensus::check_extension(&tip, view.slot(), view.header().previous_hash())?;
+            tip = ChainPoint::Specific(view.slot(), view.hash());
+        }
+
+        Ok(())
+    }
+
     #[allow(dead_code)]
     fn range(&self) -> RangeInclusive<BlockSlot> {
         debug_assert!(!self.blocks.is_empty());
@@ -148,7 +212,7 @@ impl WorkBatch {
     where
         D: Domain<Chain = CardanoLogic>,
     {
-        // TODO: paralelize in chunks
+        // TODO: paralelize in chunks (#1040)
 
         let all_refs: Vec<_> = self
             .blocks
@@ -285,7 +349,7 @@ impl WorkBatch {
         }
 
         // TODO: we treat the UTxO set differently due to tech-debt. We should migrate
-        // this into the entity system.
+        // this into the entity system. (#1042)
         for block in self.blocks.iter() {
             if let Some(utxo_delta) = &block.utxo_delta {
                 writer.apply_utxoset(utxo_delta)?;

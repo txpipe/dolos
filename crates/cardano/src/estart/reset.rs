@@ -32,6 +32,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         // Rolling stats contain total from MIR certificates, which includes unregistered accounts
         reserve_mirs: end.reserve_mirs,
         treasury_mirs: end.treasury_mirs,
+        treasury_withdrawals: end.treasury_withdrawals,
         proposal_refunds: end.proposal_refunds,
         proposal_invalid_refunds: end.proposal_invalid_refunds,
         effective_rewards: end.effective_rewards,
@@ -46,7 +47,7 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
             .mark()
             .map(|p| p.protocol_major_or_default())
             .unwrap_or_else(|| epoch.pparams.unwrap_live().protocol_major_or_default()),
-        avvm_reclamation: ctx.avvm_reclamation,
+        avvm_reclamation: ctx.avvm_reclamation.total,
     };
 
     tracing::debug!(
@@ -69,6 +70,8 @@ pub fn define_new_pots(ctx: &super::WorkContext) -> Pots {
         effective_treasury_mirs = end.treasury_mirs,
         invalid_reserve_mirs = end.invalid_reserve_mirs,
         invalid_treasury_mirs = end.invalid_treasury_mirs,
+        treasury_withdrawals = end.treasury_withdrawals,
+        invalid_treasury_withdrawals = end.invalid_treasury_withdrawals,
         pool_invalid_refund_count = end.pool_invalid_refund_count,
         proposal_invalid_refunds = end.proposal_invalid_refunds,
         treasury_donations = rolling.treasury_donations,

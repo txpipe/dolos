@@ -1,12 +1,14 @@
 use dolos_core::config::{ChainConfig, GenesisConfig, LoggingConfig, RootConfig, TelemetryConfig};
 use dolos_core::BootstrapExt;
+use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
 use std::{fs, path::PathBuf, time::Duration};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
@@ -62,6 +64,19 @@ pub fn load_config(
 }
 
 pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
+    setup_domain_with_stop_epoch(config, None)
+}
+
+/// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
+///
+/// For callers that replay to a chosen epoch boundary over the live stores —
+/// `snapshot backfill` — the way `doctor rebuild-state` forces it on the
+/// domain it hand-builds. A `Some` here overrides whatever the configuration
+/// says; `None` leaves it alone.
+pub fn setup_domain_with_stop_epoch(
+    config: &RootConfig,
+    stop_epoch: Option<u64>,
+) -> miette::Result<DomainAdapter> {
     let stores = open_data_stores(config).map_err(|e| match e {
         Error::WalError(WalError::IncompatibleVersion { found, expected }) => miette::miette!(
             help = format!(
@@ -76,7 +91,11 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
     let chain = config.chain.clone();
 
-    let ChainConfig::Cardano(chain_config) = chain;
+    let ChainConfig::Cardano(mut chain_config) = chain;
+
+    if stop_epoch.is_some() {
+        chain_config.stop_epoch = stop_epoch;
+    }
 
     let chain = dolos_cardano::CardanoLogic::initialize::<DomainAdapter>(
         chain_config,
@@ -102,13 +121,19 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
     domain.bootstrap().map_err(|e| match e {
         dolos_core::DomainError::InconsistentState { ref wal, ref state } => {
             let msg = match (wal, state) {
-                (Some(w), Some(s)) => format!("state (slot {}) is ahead of WAL (slot {})", s.slot(), w.slot()),
+                (Some(w), Some(s)) => format!(
+                    "state (slot {}) is ahead of WAL (slot {})",
+                    s.slot(),
+                    w.slot()
+                ),
                 (None, Some(s)) => format!("WAL is empty but state exists at slot {}", s.slot()),
                 (Some(w), None) => format!("WAL at slot {} but state has no cursor", w.slot()),
                 (None, None) => "WAL and state are both missing".into(),
             };
             let help: &str = match (wal, state) {
-                (_, Some(_)) => "run `dolos doctor reset-wal` to rebuild the WAL from the current state",
+                (_, Some(_)) => {
+                    "run `dolos doctor reset-wal` to rebuild the WAL from the current state"
+                }
                 _ => "storage may be corrupted; consider re-bootstrapping with `dolos bootstrap`",
             };
             miette::miette!(help = help, "{msg}")
@@ -241,7 +266,7 @@ pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
 
 #[inline]
 #[cfg(unix)]
-async fn wait_for_exit_signal() {
+pub(crate) async fn wait_for_exit_signal() {
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
 
@@ -257,7 +282,7 @@ async fn wait_for_exit_signal() {
 
 #[inline]
 #[cfg(windows)]
-async fn wait_for_exit_signal() {
+pub(crate) async fn wait_for_exit_signal() {
     tokio::signal::ctrl_c().await.unwrap()
 }
 
@@ -297,6 +322,40 @@ pub async fn run_pipeline(pipeline: gasket::daemon::Daemon, exit: CancellationTo
     pipeline.teardown();
 }
 
+/// Drains the serving drivers, cancelling the rest once any one of them fails.
+///
+/// Returns the first failure instead of only logging it: the exit status is
+/// what a supervisor reads. Draining continues past that failure because
+/// cancellation is what winds the healthy drivers down and nothing else
+/// awaits them.
+pub async fn monitor_drivers(
+    mut drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>>,
+    exit: CancellationToken,
+) -> Result<(), ServeError> {
+    let mut first_failure = None;
+
+    while let Some(result) = drivers.next().await {
+        let failure = match result {
+            Ok(Ok(())) => continue,
+            Ok(Err(e)) => {
+                error!(error = %e, "driver failed");
+                e
+            }
+            Err(e) => {
+                error!(error = %e, "driver task failed");
+                ServeError::Internal(Box::new(e))
+            }
+        };
+
+        warn!("cancelling remaining drivers");
+        exit.cancel();
+
+        first_failure.get_or_insert(failure);
+    }
+
+    first_failure.map_or(Ok(()), Err)
+}
+
 pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
     let root = &config.storage.path;
 
@@ -313,4 +372,157 @@ pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
         info!("Path is not a directory, ignoring.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use dolos_core::config::StelaeConfig;
+    use dolos_snapshot::{node::registry_auth, registry::Auth};
+    use futures_util::stream::FuturesUnordered;
+    use std::io;
+    use tokio::task::JoinHandle;
+
+    use super::*;
+
+    /// The environment reaches `[stelae.registry]` by the same route as every
+    /// other setting, and *this* is the assertion that says so.
+    ///
+    /// It stays here, beside [`load_config`], while the credential policy it
+    /// feeds is [`dolos_snapshot::node::registry_auth`]'s: what is being pinned
+    /// is this binary's configuration sources, not what the profile crate makes
+    /// of them. It is the whole of Dolos's registry-credential environment
+    /// story — a publisher exports `DOLOS_STELAE_REGISTRY_USER` and
+    /// `DOLOS_STELAE_REGISTRY_PASSWORD` and nothing in this binary reads them —
+    /// so it is worth pinning rather than trusting. The source is built exactly
+    /// as [`load_config`] builds it; only the file layers are left off, because
+    /// those would make the test depend on the working directory.
+    ///
+    /// What would break it is a rename of either field or a change to the
+    /// prefix or separator, and all three are silent failures at run time: the
+    /// override would simply stop applying, and a publisher would authenticate
+    /// as the read-only user.
+    #[test]
+    fn the_dolos_environment_prefix_reaches_the_registry_section() {
+        #[derive(serde::Deserialize)]
+        struct Root {
+            stelae: StelaeConfig,
+        }
+
+        // Process-wide, so this test owns these three names for its duration.
+        // Nothing else in this binary reads them.
+        static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let names = [
+            "DOLOS_STELAE_REGISTRY_USER",
+            "DOLOS_STELAE_REGISTRY_PASSWORD",
+            "DOLOS_STELAE_REGISTRY_TOKEN",
+        ];
+
+        let previous: Vec<Option<String>> = names.iter().map(|n| std::env::var(n).ok()).collect();
+
+        std::env::set_var("DOLOS_STELAE_REGISTRY_USER", "publisher");
+        std::env::set_var("DOLOS_STELAE_REGISTRY_PASSWORD", "full-access");
+        std::env::remove_var("DOLOS_STELAE_REGISTRY_TOKEN");
+
+        let built: Root = ::config::Config::builder()
+            .add_source(::config::Environment::with_prefix("DOLOS").separator("_"))
+            .build()
+            .expect("the environment source builds")
+            .try_deserialize()
+            .expect("DOLOS_STELAE_REGISTRY_* deserializes into [stelae.registry]");
+
+        for (name, value) in names.iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        assert_eq!(
+            registry_auth(&built.stelae).unwrap(),
+            Auth::Basic {
+                user: "publisher".to_owned(),
+                password: "full-access".to_owned(),
+            },
+            "the DOLOS_ prefix no longer reaches [stelae.registry]",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_observes_a_failure_a_healthy_driver_would_hide() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        // `FuturesUnordered` links at the head, so the ordered drain this
+        // replaced reached the last push first.
+        drivers.push(tokio::spawn(async {
+            Err(ServeError::BindError(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "socket already exists",
+            )))
+        }));
+
+        let exit_for_healthy_driver = exit.clone();
+        drivers.push(tokio::spawn(async move {
+            exit_for_healthy_driver.cancelled().await;
+            Ok(())
+        }));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_drivers(drivers, exit.clone()),
+        )
+        .await
+        .expect("driver monitor should observe the bind failure promptly");
+
+        assert!(exit.is_cancelled());
+
+        assert!(
+            matches!(result, Err(ServeError::BindError(_))),
+            "the bind failure has to reach the caller, not just the log",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_propagates_a_panicking_driver() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        drivers.push(tokio::spawn(async { panic!("driver panicked") }));
+
+        let result = monitor_drivers(drivers, exit.clone()).await;
+
+        assert!(exit.is_cancelled());
+
+        assert!(
+            result.is_err(),
+            "a panicking driver must not report success",
+        );
+    }
+
+    #[tokio::test]
+    async fn monitor_drivers_reports_a_clean_shutdown_as_success() {
+        let exit = CancellationToken::new();
+        let drivers: FuturesUnordered<JoinHandle<Result<(), ServeError>>> = FuturesUnordered::new();
+
+        for _ in 0..3 {
+            let exit_for_driver = exit.clone();
+            drivers.push(tokio::spawn(async move {
+                exit_for_driver.cancelled().await;
+                Ok(())
+            }));
+        }
+
+        exit.cancel();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            monitor_drivers(drivers, exit.clone()),
+        )
+        .await
+        .expect("cancelled drivers should finish promptly");
+
+        assert!(result.is_ok(), "a signalled shutdown is not a failure");
+    }
 }

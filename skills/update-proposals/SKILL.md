@@ -31,6 +31,7 @@ SELECT
     encode(tx.hash, 'hex') || '#' || gap.index::text AS proposal_id,
     gap.type::text AS proposal_type,
     b.epoch_no AS submitted_epoch,
+    gap.ratified_epoch,
     gap.enacted_epoch,
     gap.dropped_epoch,
     gap.expired_epoch
@@ -43,6 +44,7 @@ ORDER BY b.epoch_no, gap.index;
 **Key columns:**
 - `proposal_id`: The `txhash#index` format used in hacks.rs match arms
 - `type`: `TreasuryWithdrawals`, `NewConstitution`, `NewCommittee`, `ParameterChange`, `HardForkInitiation`, `InfoAction`
+- `ratified_epoch`: Non-null if the proposal was ratified (enactment follows at the next epoch). Use this when `enacted_epoch` is still NULL — the proposal is ratified but enactment hasn't happened yet at the current DBSync tip.
 - `enacted_epoch`: Non-null if the proposal was enacted on-chain
 - `dropped_epoch`: Non-null if the proposal was dropped (superseded by another)
 - `expired_epoch`: Non-null if the proposal expired without ratification
@@ -54,25 +56,26 @@ SELECT
     encode(tx.hash, 'hex') || '#' || gap.index::text AS proposal_id,
     gap.type::text AS proposal_type,
     b.epoch_no AS submitted_epoch,
+    gap.ratified_epoch,
     gap.enacted_epoch,
-    (gap.enacted_epoch - 1)::text AS expected_ratified
+    COALESCE(gap.ratified_epoch, gap.enacted_epoch - 1)::text AS expected_ratified
 FROM gov_action_proposal gap
 JOIN tx ON tx.id = gap.tx_id
 JOIN block b ON b.id = tx.block_id
-WHERE gap.enacted_epoch IS NOT NULL
-ORDER BY gap.enacted_epoch, gap.index;
+WHERE gap.enacted_epoch IS NOT NULL OR gap.ratified_epoch IS NOT NULL
+ORDER BY COALESCE(gap.enacted_epoch, gap.ratified_epoch), gap.index;
 ```
 
-The formula is: **`Ratified(enacted_epoch - 1)`**. Ratification happens one epoch before enactment in Conway governance.
+The formula is: **`Ratified(enacted_epoch - 1)`**, or equivalently `Ratified(ratified_epoch)`. Ratification happens one epoch before enactment in Conway governance. Include proposals where `ratified_epoch` is non-null but `enacted_epoch` is still NULL — these are ratified but awaiting enactment at the current tip, and still need `Ratified` entries in hacks.rs.
 
 ## Step 4: Cross-reference against hacks.rs
 
 Read `crates/cardano/src/hacks.rs` and find the network's `outcome()` function (e.g., `pub mod mainnet`). Compare every enacted proposal from Step 3 against existing match arms.
 
 **Check for:**
-1. **Missing entries**: Enacted proposals not in hacks.rs. These return `Unknown`, never get enacted, and eventually expire -- causing wrong deposit refund timing and missed treasury withdrawals.
-2. **Wrong Ratified epoch**: Existing entries where the `Ratified(N)` doesn't match `enacted_epoch - 1`.
-3. **Still-pending proposals**: Proposals with no `enacted_epoch`, `dropped_epoch`, or `expired_epoch` yet. These correctly return `Unknown` and will need entries added later when resolved.
+1. **Missing entries**: Enacted or ratified proposals not in hacks.rs. These return `Unknown`, never get enacted, and eventually expire -- causing wrong deposit refund timing and missed treasury withdrawals.
+2. **Wrong Ratified epoch**: Existing entries where the `Ratified(N)` doesn't match `ratified_epoch` (or `enacted_epoch - 1` if `ratified_epoch` is NULL).
+3. **Still-pending proposals**: Proposals with no `ratified_epoch`, `enacted_epoch`, `dropped_epoch`, or `expired_epoch` yet. These correctly return `Unknown` and will need entries added later when resolved.
 
 ## Step 5: Determine if dropped/expired proposals need entries
 
@@ -135,6 +138,7 @@ cargo test --test epoch_pots --release -- --nocapture
 | `tx_id` | bigint | FK to `tx` -- the transaction containing the proposal |
 | `index` | int | Index of the proposal within the transaction |
 | `type` | text | Proposal type enum |
+| `ratified_epoch` | int | Epoch when ratified (null if not ratified). May be set before `enacted_epoch` if enactment hasn't happened yet at the current DBSync tip. |
 | `enacted_epoch` | int | Epoch when enacted (null if not enacted) |
 | `dropped_epoch` | int | Epoch when dropped/superseded (null if not dropped) |
 | `expired_epoch` | int | Epoch when expired (null if not expired) |

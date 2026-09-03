@@ -38,12 +38,23 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     // Compaction requires direct redb access
     match &mut stores.archive {
+        ArchiveStoreBackend::LogsOnly(_) => {
+            bail!("chain compaction needs exclusive access to the archive database")
+        }
         ArchiveStoreBackend::Redb(s) => {
             let db = s.db_mut();
 
             while db.compact().into_diagnostic()? {
                 info!("chain compaction round");
             }
+
+            info!("chain segment trimmed");
+        }
+        ArchiveStoreBackend::Fjall(s) => {
+            // Background compaction would reclaim the space eventually; a
+            // major compaction makes the prune's effect immediate, matching
+            // what the command promises for redb.
+            s.compact().into_diagnostic()?;
 
             info!("chain segment trimmed");
         }

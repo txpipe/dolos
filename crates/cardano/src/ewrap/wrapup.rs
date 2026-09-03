@@ -62,7 +62,8 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
     let incentives = ctx.rewards.incentives();
 
     // Use effective MIR amounts (only applied to registered accounts)
-    // instead of total from rolling stats (which includes MIRs to unregistered accounts)
+    // instead of total from rolling stats (which includes MIRs to unregistered
+    // accounts)
     let treasury_mirs = ctx.effective_treasury_mirs;
     let reserve_mirs = ctx.effective_reserve_mirs;
     let invalid_treasury_mirs = ctx.invalid_treasury_mirs;
@@ -109,6 +110,8 @@ fn define_end_stats(ctx: &super::BoundaryWork) -> EndStats {
         reserve_mirs,
         invalid_treasury_mirs,
         invalid_reserve_mirs,
+        treasury_withdrawals: ctx.effective_treasury_withdrawals,
+        invalid_treasury_withdrawals: ctx.invalid_treasury_withdrawals,
         proposal_refunds: proposal_valid_refunds,
         proposal_invalid_refunds,
         // TODO: deprecate

@@ -134,9 +134,10 @@ where
         }
     }
 
-    /// Test-only raw constructor used by proptest strategies to populate every slot
-    /// independently. Must stay behind `cfg(test)` so production code keeps going through
-    /// the regular `new`/`with_live`/`schedule`/`transition` API.
+    /// Test-only raw constructor used by proptest strategies to populate every
+    /// slot independently. Must stay behind `cfg(test)` so production code
+    /// keeps going through the regular
+    /// `new`/`with_live`/`schedule`/`transition` API.
     #[cfg(test)]
     pub(crate) fn from_parts(
         epoch: Epoch,
@@ -173,6 +174,17 @@ where
             EpochPosition::Genesis => None,
             EpochPosition::Epoch(epoch) => Some(epoch),
         }
+    }
+
+    /// Whether the live position sits exactly at `epoch`.
+    ///
+    /// Snapshot accessors (`mark`/`set`/`go`) are positional relative to the
+    /// live epoch, so they only map to the intended epochs when the value has
+    /// been transitioned in lockstep with the ledger. A healthy entity is
+    /// always at the current epoch (ESTART transitions every entity each
+    /// boundary); a `false` here means the value is lagging.
+    pub fn is_at_epoch(&self, epoch: Epoch) -> bool {
+        self.epoch() == Some(epoch)
     }
 
     /// Returns a reference to the live value that matches the ongoing epoch.
@@ -317,11 +329,35 @@ pub(crate) mod testing {
     use crate::model::testing as root;
     use proptest::prelude::*;
 
-    /// Generate an `EpochValue<T>` where `live` is always populated (most deltas require
-    /// it) and the other slots are independently randomized.
+    /// Rebase a generated `EpochValue` onto a specific epoch position,
+    /// keeping every slot as-is.
     ///
-    /// Takes a `BoxedStrategy` because many proptest combinator types are not `Clone`,
-    /// which is required by the tuple-combinator composition used here.
+    /// The `strict` feature asserts that deltas target the entity's current
+    /// epoch and that entities rotate their epoch values in lockstep (ESTART
+    /// transitions every entity each boundary). Strategies that draw several
+    /// `EpochValue`s — or an entity and a delta — independently violate that
+    /// invariant almost surely; rebasing them onto one drawn epoch restores
+    /// it without giving up randomized slot contents.
+    pub fn rebase<T>(value: EpochValue<T>, epoch: Epoch) -> EpochValue<T>
+    where
+        T: Clone + std::fmt::Debug,
+    {
+        EpochValue::from_parts(
+            epoch,
+            value.live().cloned(),
+            value.next().cloned(),
+            value.mark().cloned(),
+            value.set().cloned(),
+            value.go().cloned(),
+        )
+    }
+
+    /// Generate an `EpochValue<T>` where `live` is always populated (most
+    /// deltas require it) and the other slots are independently randomized.
+    ///
+    /// Takes a `BoxedStrategy` because many proptest combinator types are not
+    /// `Clone`, which is required by the tuple-combinator composition used
+    /// here.
     pub fn any_epoch_value<T>(inner: BoxedStrategy<T>) -> impl Strategy<Value = EpochValue<T>>
     where
         T: Clone + std::fmt::Debug + 'static,
@@ -359,8 +395,9 @@ pub(crate) mod testing {
             })
     }
 
-    /// Variant of `any_epoch_value` that forces `next` to `None`. Required by deltas
-    /// whose `apply` calls `live_mut`, which asserts there is no scheduled next.
+    /// Variant of `any_epoch_value` that forces `next` to `None`. Required by
+    /// deltas whose `apply` calls `live_mut`, which asserts there is no
+    /// scheduled next.
     pub fn any_epoch_value_no_next<T>(
         inner: BoxedStrategy<T>,
     ) -> impl Strategy<Value = EpochValue<T>>
@@ -377,5 +414,32 @@ pub(crate) mod testing {
             .prop_map(|(epoch, live, mark, set, go)| {
                 EpochValue::from_parts(epoch, Some(live), None, mark, set, go)
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_at_epoch_matches_live_position() {
+        let value = EpochValue::<u32>::new(1223);
+        assert!(value.is_at_epoch(1223));
+        assert!(!value.is_at_epoch(1222));
+        assert!(!value.is_at_epoch(1224));
+    }
+
+    #[test]
+    fn is_at_epoch_false_at_genesis_position() {
+        let value = EpochValue::<u32> {
+            epoch: EpochPosition::Genesis,
+            next: None,
+            live: None,
+            mark: None,
+            set: None,
+            go: None,
+        };
+        assert_eq!(value.epoch(), None);
+        assert!(!value.is_at_epoch(0));
     }
 }

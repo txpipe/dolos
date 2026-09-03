@@ -345,6 +345,12 @@ impl PParamsSet {
         self.values.iter().find(|value| value.kind() == kind)
     }
 
+    /// The values present in the set — for consumers that classify an
+    /// update's touched parameters (e.g. ratification threshold groups).
+    pub fn iter(&self) -> impl Iterator<Item = &PParamValue> {
+        self.values.iter()
+    }
+
     pub fn get_mut(&mut self, kind: PParamKind) -> Option<&mut PParamValue> {
         self.values.iter_mut().find(|value| value.kind() == kind)
     }
@@ -480,8 +486,9 @@ pub(crate) mod testing {
     use super::*;
     use proptest::prelude::*;
 
-    /// Kept intentionally simple — empty. Reversibility of `PParamsUpdate` doesn't
-    /// depend on the merge surface being exhaustive, only that merge is applied twice.
+    /// Kept intentionally simple — empty. Reversibility of `PParamsUpdate`
+    /// doesn't depend on the merge surface being exhaustive, only that
+    /// merge is applied twice.
     pub fn any_pparams_set() -> impl Strategy<Value = PParamsSet> {
         Just(PParamsSet::default())
     }

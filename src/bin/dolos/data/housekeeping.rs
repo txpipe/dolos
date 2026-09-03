@@ -18,22 +18,11 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let domain = setup_domain(config)?;
 
-    let mut done = false;
-    let mut rounds = 0;
-
-    while !done {
-        tracing::info!(round = rounds, max =? args.max_rounds, "starting housekeeping round");
-        done = match domain.housekeeping() {
-            Ok(done) => done,
-            Err(err) => {
-                tracing::error!(err =? err, "running housekeeping");
-                bail!("got error while running housekeeping");
-            }
-        };
-        rounds += 1;
-
-        if let Some(max) = args.max_rounds {
-            done = rounds >= max;
+    match domain.drain_housekeeping(args.max_rounds) {
+        Ok(rounds) => tracing::info!(rounds, "housekeeping complete"),
+        Err(err) => {
+            tracing::error!(err =? err, "running housekeeping");
+            bail!("got error while running housekeeping");
         }
     }
 

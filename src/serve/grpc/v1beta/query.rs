@@ -9,8 +9,18 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::prelude::*;
+use crate::serve::grpc::block_refs::BlockRefData;
 use crate::serve::grpc::masking::apply_mask;
 use dolos_cardano::indexes::AsyncCardanoQueryExt;
+
+fn to_chain_point(data: &BlockRefData) -> u5c::query::ChainPoint {
+    u5c::query::ChainPoint {
+        slot: data.slot,
+        hash: data.hash.to_vec().into(),
+        height: data.height,
+        timestamp: data.timestamp,
+    }
+}
 
 pub fn point_to_u5c<T: LedgerContext>(_ledger: &T, point: &ChainPoint) -> u5c::query::ChainPoint {
     u5c::query::ChainPoint {
@@ -726,6 +736,7 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
     body: &EraCbor,
     mapper: &interop::Mapper<S>,
     domain: &S,
+    block_ref: Option<u5c::query::ChainPoint>,
 ) -> Result<u5c::query::AnyUtxoData, Box<dyn std::error::Error>> {
     use pallas::ledger::primitives::conway::DatumOption;
 
@@ -784,7 +795,7 @@ async fn into_u5c_utxo<S: Domain + LedgerContext>(
         }),
         native_bytes: body.1.clone().into(),
         parsed_state: Some(u5c::query::any_utxo_data::ParsedState::Cardano(parsed)),
-        block_ref: None,
+        block_ref,
     })
 }
 
@@ -859,10 +870,14 @@ where
         let utxos = StateStore::get_utxos(self.domain.state(), keys)
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        let block_refs =
+            crate::serve::grpc::block_refs::fetch_block_refs(&self.domain, utxos.keys()).await?;
+
         let mut items = Vec::new();
         for (k, v) in utxos.iter() {
+            let block_ref = block_refs.get(&k.0).map(to_chain_point);
             items.push(
-                into_u5c_utxo(k, v, &self.mapper, &self.domain)
+                into_u5c_utxo(k, v, &self.mapper, &self.domain, block_ref)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?,
             );
@@ -909,10 +924,14 @@ where
         let utxos = StateStore::get_utxos(self.domain.state(), set.into_iter().collect_vec())
             .map_err(|e| Status::internal(e.to_string()))?;
 
+        let block_refs =
+            crate::serve::grpc::block_refs::fetch_block_refs(&self.domain, utxos.keys()).await?;
+
         let mut items = Vec::new();
         for (k, v) in utxos.iter() {
+            let block_ref = block_refs.get(&k.0).map(to_chain_point);
             items.push(
-                into_u5c_utxo(k, v, &self.mapper, &self.domain)
+                into_u5c_utxo(k, v, &self.mapper, &self.domain, block_ref)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?,
             );
@@ -976,7 +995,11 @@ where
                     slot: block.slot(),
                     hash: block.hash().to_vec().into(),
                     height: block.header().number(),
-                    timestamp: self.domain.get_slot_timestamp(block.slot()).unwrap_or(0),
+                    timestamp: self
+                        .domain
+                        .get_slot_timestamp(block.slot())
+                        .map(|s| s * 1000)
+                        .unwrap_or(0),
                 }),
                 chain: Some(u5c::query::any_chain_tx::Chain::Cardano(
                     self.mapper.map_tx(&tx),

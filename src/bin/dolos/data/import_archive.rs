@@ -87,9 +87,11 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         end_slot, "starting archive import"
     );
 
-    let mut iter =
-        pallas::interop::hardano::storage::immutable::read_blocks_from_point(source_path, cursor.clone())
-            .map_err(|e| miette::miette!("failed to open immutable DB: {}", e))?;
+    let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
+        source_path,
+        cursor.clone(),
+    )
+    .map_err(|e| miette::miette!("failed to open immutable DB: {}", e))?;
 
     // When resuming, skip the first block since the cursor points at the last
     // processed block, not the next one.

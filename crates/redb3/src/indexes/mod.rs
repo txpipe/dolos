@@ -11,9 +11,9 @@ use std::{
 };
 
 use dolos_core::{
-    config::RedbIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint, IndexDelta, IndexError,
-    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef,
-    UtxoSet,
+    config::RedbIndexConfig, key_hash, ArchiveIndexDelta, BlockSlot, ChainPoint, EmptyExactIter,
+    EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, Tag, TagDimension, TxoRef, UtxoSet, KEY_HASH_SIZE,
 };
 use redb::{
     Database, Durability, MultimapTableDefinition, ReadTransaction, ReadableDatabase,
@@ -55,6 +55,7 @@ pub mod utxo_dimensions {
     pub const STAKE: &str = "stake";
     pub const POLICY: &str = "policy";
     pub const ASSET: &str = "asset";
+    pub const SCRIPT_REF: &str = "script_ref";
 }
 
 /// Archive index dimension constants (must match dolos-cardano dimensions).
@@ -69,7 +70,10 @@ pub mod archive_dimensions {
     pub const ACCOUNT_CERTS: &str = "account_certs";
     pub const POOL_CERTS: &str = "pool_certs";
     pub const ACCOUNT_WITHDRAWALS: &str = "account_withdrawals";
-    pub const METADATA: &str = "metadata";
+    /// Sourced from core: this is the one dimension whose logical key is kept
+    /// verbatim instead of hashed, and that fact belongs to the stored-key
+    /// rule rather than to this backend.
+    pub const METADATA: &str = dolos_core::VERBATIM_KEY_DIMENSION;
     pub const SCRIPT: &str = "script";
 }
 
@@ -91,12 +95,16 @@ impl FilterIndexes {
     pub const BY_ASSET: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
         MultimapTableDefinition::new("byasset");
 
+    pub const BY_SCRIPT_REF: MultimapTableDefinition<'static, &'static [u8], UtxosKey> =
+        MultimapTableDefinition::new("byscriptref");
+
     pub fn initialize(wx: &WriteTransaction) -> Result<(), Error> {
         wx.open_multimap_table(Self::BY_ADDRESS)?;
         wx.open_multimap_table(Self::BY_PAYMENT)?;
         wx.open_multimap_table(Self::BY_STAKE)?;
         wx.open_multimap_table(Self::BY_POLICY)?;
         wx.open_multimap_table(Self::BY_ASSET)?;
+        wx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         Ok(())
     }
@@ -111,6 +119,7 @@ impl FilterIndexes {
             utxo_dimensions::STAKE => Some(Self::BY_STAKE),
             utxo_dimensions::POLICY => Some(Self::BY_POLICY),
             utxo_dimensions::ASSET => Some(Self::BY_ASSET),
+            utxo_dimensions::SCRIPT_REF => Some(Self::BY_SCRIPT_REF),
             _ => None,
         }
     }
@@ -203,6 +212,7 @@ impl FilterIndexes {
         let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
         let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
         let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
+        let mut script_ref_table = wx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         // Insert produced UTxOs
         for (txo_ref, tags) in &delta.utxo.produced {
@@ -224,6 +234,9 @@ impl FilterIndexes {
                     }
                     utxo_dimensions::ASSET => {
                         asset_table.insert(tag.key.as_slice(), v)?;
+                    }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.insert(tag.key.as_slice(), v)?;
                     }
                     _ => {} // Ignore unknown dimensions
                 }
@@ -251,6 +264,9 @@ impl FilterIndexes {
                     utxo_dimensions::ASSET => {
                         asset_table.remove(tag.key.as_slice(), v)?;
                     }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.remove(tag.key.as_slice(), v)?;
+                    }
                     _ => {} // Ignore unknown dimensions
                 }
             }
@@ -268,6 +284,7 @@ impl FilterIndexes {
         let mut stake_table = wx.open_multimap_table(Self::BY_STAKE)?;
         let mut policy_table = wx.open_multimap_table(Self::BY_POLICY)?;
         let mut asset_table = wx.open_multimap_table(Self::BY_ASSET)?;
+        let mut script_ref_table = wx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         // Remove produced UTxOs (undo insertion)
         for (txo_ref, tags) in &delta.utxo.produced {
@@ -289,6 +306,9 @@ impl FilterIndexes {
                     }
                     utxo_dimensions::ASSET => {
                         asset_table.remove(tag.key.as_slice(), v)?;
+                    }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.remove(tag.key.as_slice(), v)?;
                     }
                     _ => {}
                 }
@@ -315,6 +335,9 @@ impl FilterIndexes {
                     }
                     utxo_dimensions::ASSET => {
                         asset_table.insert(tag.key.as_slice(), v)?;
+                    }
+                    utxo_dimensions::SCRIPT_REF => {
+                        script_ref_table.insert(tag.key.as_slice(), v)?;
                     }
                     _ => {}
                 }
@@ -351,6 +374,7 @@ impl FilterIndexes {
         Self::copy_table(rx, wx, Self::BY_STAKE)?;
         Self::copy_table(rx, wx, Self::BY_POLICY)?;
         Self::copy_table(rx, wx, Self::BY_ASSET)?;
+        Self::copy_table(rx, wx, Self::BY_SCRIPT_REF)?;
 
         Ok(())
     }
@@ -361,6 +385,7 @@ impl FilterIndexes {
         let stake = rx.open_multimap_table(Self::BY_STAKE)?;
         let policy = rx.open_multimap_table(Self::BY_POLICY)?;
         let asset = rx.open_multimap_table(Self::BY_ASSET)?;
+        let script_ref = rx.open_multimap_table(Self::BY_SCRIPT_REF)?;
 
         Ok(HashMap::from_iter([
             ("address", address.stats()?),
@@ -368,6 +393,7 @@ impl FilterIndexes {
             ("stake", stake.stats()?),
             ("policy", policy.stats()?),
             ("asset", asset.stats()?),
+            ("script_ref", script_ref.stats()?),
         ]))
     }
 }
@@ -440,23 +466,36 @@ fn undo_archive_delta(wx: &WriteTransaction, block: &ArchiveIndexDelta) -> Resul
     Ok(())
 }
 
+/// The stored form of a tag key, as the `u64` this backend's bucketed keys
+/// take.
+///
+/// The derivation is [`dolos_core::key_hash`]'s, not this module's — including
+/// the `metadata` exception, whose logical key is already a `u64` label and is
+/// kept verbatim rather than hashed. A backend that decided those bytes for
+/// itself could disagree with another and neither would fail: records would
+/// cross, restore cleanly, and then miss every logical-key query about
+/// themselves.
+///
+/// `None` from `key_hash` is a key with no valid stored form — today only a
+/// `metadata` label that is not eight bytes wide. This backend refuses it,
+/// which is the behaviour these call sites already had.
+fn stored_tag_key(tag: &Tag) -> Result<u64, Error> {
+    let hash = key_hash(tag.dimension, &tag.key).ok_or_else(|| {
+        Error::ArchiveError(format!(
+            "{} key must be {KEY_HASH_SIZE} bytes",
+            tag.dimension
+        ))
+    })?;
+
+    Ok(u64::from_be_bytes(hash))
+}
+
 /// Insert a single archive tag.
 fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Result<(), Error> {
     use archive::indexes::*;
-    use xxhash_rust::xxh3::xxh3_64;
 
     let key_builder = archive::indexes::key_builder();
-    let bucketed_key =
-        if tag.dimension == archive_dimensions::METADATA {
-            let metadata =
-                u64::from_be_bytes(tag.key.as_slice().try_into().map_err(|_| {
-                    Error::ArchiveError("metadata key must be 8 bytes".to_string())
-                })?);
-            key_builder.bucketed_key(metadata, slot)
-        } else {
-            let key = xxh3_64(&tag.key);
-            key_builder.bucketed_key(key, slot)
-        };
+    let bucketed_key = key_builder.bucketed_key(stored_tag_key(tag)?, slot);
 
     match tag.dimension {
         archive_dimensions::ADDRESS => {
@@ -516,20 +555,9 @@ fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
 /// Remove a single archive tag.
 fn remove_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Result<(), Error> {
     use archive::indexes::*;
-    use xxhash_rust::xxh3::xxh3_64;
 
     let key_builder = archive::indexes::key_builder();
-    let bucketed_key =
-        if tag.dimension == archive_dimensions::METADATA {
-            let metadata =
-                u64::from_be_bytes(tag.key.as_slice().try_into().map_err(|_| {
-                    Error::ArchiveError("metadata key must be 8 bytes".to_string())
-                })?);
-            key_builder.bucketed_key(metadata, slot)
-        } else {
-            let key = xxh3_64(&tag.key);
-            key_builder.bucketed_key(key, slot)
-        };
+    let bucketed_key = key_builder.bucketed_key(stored_tag_key(tag)?, slot);
 
     match tag.dimension {
         archive_dimensions::ADDRESS => {
@@ -746,6 +774,19 @@ impl CoreIndexWriter for IndexStoreWriter {
         Ok(())
     }
 
+    /// Not implemented on this backend.
+    ///
+    /// Pre-hashed append exists for the snapshot restore path, which runs
+    /// against the live index backend (fjall). This store is not part of that
+    /// path, so it carries the trait method without an implementation rather
+    /// than a second copy of the encoding to keep in step.
+    fn append_prehashed(
+        &self,
+        _records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
+        Err(IndexError::Unsupported("append_prehashed"))
+    }
+
     fn commit(self) -> Result<(), IndexError> {
         self.wx.commit().map_err(map_db_error)?;
         Ok(())
@@ -777,6 +818,8 @@ impl DoubleEndedIterator for SlotIter {
 impl CoreIndexStore for IndexStore {
     type Writer = IndexStoreWriter;
     type SlotIter = SlotIter;
+    type TagIter = EmptyTagIter;
+    type ExactIter = EmptyExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         let mut wx = self.db.begin_write().map_err(map_db_error)?;
@@ -873,9 +916,13 @@ impl CoreIndexStore for IndexStore {
                 archive::indexes::Indexes::iter_by_account_withdrawals(&rx, key, start, end)?
             }
             archive_dimensions::METADATA => {
-                // Metadata is keyed by u64, need to parse the bytes
-                let metadata = u64::from_be_bytes(key.try_into().map_err(|_| {
-                    IndexError::CodecError("metadata key must be 8 bytes".to_string())
+                // The label is stored verbatim rather than hashed, and
+                // `key_hash` is where that exception lives.
+                let metadata = u64::from_be_bytes(key_hash(dimension, key).ok_or_else(|| {
+                    IndexError::CodecError(format!(
+                        "{dimension} key must be {KEY_HASH_SIZE} bytes, got {}",
+                        key.len()
+                    ))
                 })?);
                 archive::indexes::Indexes::iter_by_metadata(&rx, &metadata, start, end)?
             }
@@ -888,5 +935,27 @@ impl CoreIndexStore for IndexStore {
         };
 
         Ok(SlotIter { _rx: rx, range })
+    }
+
+    /// Not implemented on this backend.
+    ///
+    /// Bulk record traversal exists for the snapshot export path, which runs
+    /// against the live index backend (fjall). Implementing it here would mean
+    /// a per-dimension table walk with no consumer.
+    fn iter_archive_tags(
+        &self,
+        _dimensions: &[TagDimension],
+        _slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        Err(IndexError::Unsupported("iter_archive_tags"))
+    }
+
+    /// Not implemented on this backend. See
+    /// [`IndexStore::iter_archive_tags`](CoreIndexStore::iter_archive_tags).
+    fn iter_exact_records(
+        &self,
+        _slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::ExactIter, IndexError> {
+        Err(IndexError::Unsupported("iter_exact_records"))
     }
 }

@@ -174,19 +174,23 @@ pub(crate) mod testing {
             credential in root::any_stake_credential(),
             registered_at in prop::option::of(root::any_slot()),
             deregistered_at in prop::option::of(root::any_slot()),
+            epoch in root::any_epoch(),
             stake in any_epoch_value(any_stake().boxed()),
             pool in any_epoch_value(any_pool_delegation().boxed()),
             drep in any_epoch_value(any_drep_delegation().boxed()),
             vote_delegated_at in prop::option::of((root::any_slot(), root::any_tx_order())),
             retired_pool in prop::option::of(root::any_pool_hash()),
         ) -> AccountState {
+            // ESTART rotates stake/pool/drep in lockstep, so a healthy account
+            // has all three at the same epoch. The `strict` feature asserts
+            // this; rebase the independently drawn values onto one epoch.
             AccountState {
                 credential,
                 registered_at,
                 deregistered_at,
-                stake,
-                pool,
-                drep,
+                stake: crate::model::epoch_value::testing::rebase(stake, epoch),
+                pool: crate::model::epoch_value::testing::rebase(pool, epoch),
+                drep: crate::model::epoch_value::testing::rebase(drep, epoch),
                 vote_delegated_at,
                 retired_pool,
             }
@@ -225,12 +229,13 @@ impl AccountState {
     }
 
     /// Check if the account was registered at a specific slot.
-    /// Used for RUPD-time filtering where we need registration status at the RUPD slot,
-    /// not the current chain tip.
+    /// Used for RUPD-time filtering where we need registration status at the
+    /// RUPD slot, not the current chain tip.
     ///
     /// Note: When an account deregisters, `registered_at` is cleared to `None`.
-    /// So we handle the case where `deregistered_at` is set but `registered_at` is not:
-    /// if the deregistration slot is after the target slot, the account was registered.
+    /// So we handle the case where `deregistered_at` is set but `registered_at`
+    /// is not: if the deregistration slot is after the target slot, the
+    /// account was registered.
     pub fn is_registered_at(&self, slot: u64) -> bool {
         match (self.registered_at, self.deregistered_at) {
             // Never registered and never deregistered
@@ -1019,14 +1024,17 @@ impl dolos_core::EntityDelta for AccountTransition {
 
 #[cfg(test)]
 mod prop_tests {
-    use super::*;
     use super::testing::any_account_state;
-    use crate::model::testing::{self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip};
+    use super::*;
+    use crate::model::testing::{
+        self as root, assert_delta_roundtrip, assert_delta_serde_roundtrip,
+    };
     use proptest::prelude::*;
 
-    /// Build an `AccountState` whose `pool.live` is guaranteed to be `PoolDelegation::Pool(..)`.
-    /// Required by `PoolDelegatorRetire`, which panics via `unreachable!()` if `prev_pool` isn't
-    /// a real pool delegation.
+    /// Build an `AccountState` whose `pool.live` is guaranteed to be
+    /// `PoolDelegation::Pool(..)`. Required by `PoolDelegatorRetire`, which
+    /// panics via `unreachable!()` if `prev_pool` isn't a real pool
+    /// delegation.
     fn any_account_with_active_pool() -> impl Strategy<Value = AccountState> {
         (any_account_state(), root::any_pool_hash()).prop_map(|(mut acct, pool)| {
             let live = acct.pool.live().cloned();
@@ -1204,24 +1212,29 @@ mod prop_tests {
         #[test]
         fn stake_delegation_roundtrip(
             entity in any_account_state(),
-            delta in any_stake_delegation(),
+            mut delta in any_stake_delegation(),
         ) {
+            // `apply` asserts alignment under `strict`, so the delta carries
+            // the entity's epoch.
+            delta.epoch = entity.pool.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn vote_delegation_roundtrip(
             entity in any_account_state(),
-            delta in any_vote_delegation(),
+            mut delta in any_vote_delegation(),
         ) {
+            delta.epoch = entity.drep.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn stake_deregistration_roundtrip(
             entity in any_account_state(),
-            delta in any_stake_deregistration(),
+            mut delta in any_stake_deregistration(),
         ) {
+            delta.epoch = entity.pool.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1236,16 +1249,18 @@ mod prop_tests {
         #[test]
         fn pool_delegator_retire_roundtrip(
             entity in any_account_with_active_pool(),
-            delta in any_pool_delegator_retire(),
+            mut delta in any_pool_delegator_retire(),
         ) {
+            delta.epoch = entity.pool.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn drep_delegator_drop_roundtrip(
             entity in any_account_state(),
-            delta in any_drep_delegator_drop(),
+            mut delta in any_drep_delegator_drop(),
         ) {
+            delta.epoch = entity.drep.epoch().expect("generated at epoch position");
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1284,8 +1299,11 @@ mod prop_tests {
         #[test]
         fn account_transition_roundtrip(
             entity in any_account_state(),
-            delta in any_account_transition(),
+            mut delta in any_account_transition(),
         ) {
+            // `transition` asserts `next_epoch` is exactly one past the
+            // entity's epoch under `strict`.
+            delta.next_epoch = entity.stake.epoch().expect("generated at epoch position") + 1;
             assert_delta_roundtrip(Some(entity), delta);
         }
 
@@ -1326,24 +1344,27 @@ mod prop_tests {
         #[test]
         fn stake_delegation_serde_roundtrip(
             entity in any_account_state(),
-            delta in any_stake_delegation(),
+            mut delta in any_stake_delegation(),
         ) {
+            delta.epoch = entity.pool.epoch().expect("generated at epoch position");
             assert_delta_serde_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn stake_deregistration_serde_roundtrip(
             entity in any_account_state(),
-            delta in any_stake_deregistration(),
+            mut delta in any_stake_deregistration(),
         ) {
+            delta.epoch = entity.pool.epoch().expect("generated at epoch position");
             assert_delta_serde_roundtrip(Some(entity), delta);
         }
 
         #[test]
         fn vote_delegation_serde_roundtrip(
             entity in any_account_state(),
-            delta in any_vote_delegation(),
+            mut delta in any_vote_delegation(),
         ) {
+            delta.epoch = entity.drep.epoch().expect("generated at epoch position");
             assert_delta_serde_roundtrip(Some(entity), delta);
         }
 

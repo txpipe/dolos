@@ -22,8 +22,9 @@ use pallas::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     ops::Deref,
+    sync::Arc,
     time::Duration,
 };
 
@@ -33,6 +34,8 @@ use blockfrost_openapi::models::{
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
+    block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
     tx_content_delegations_inner::TxContentDelegationsInner,
@@ -46,6 +49,7 @@ use blockfrost_openapi::models::{
     tx_content_pool_certs_inner_relays_inner::TxContentPoolCertsInnerRelaysInner,
     tx_content_pool_retires_inner::TxContentPoolRetiresInner,
     tx_content_redeemers_inner::{Purpose, TxContentRedeemersInner},
+    tx_content_required_signers_inner::TxContentRequiredSignersInner,
     tx_content_stake_addr_inner::TxContentStakeAddrInner,
     tx_content_utxo::TxContentUtxo,
     tx_content_utxo_inputs_inner::TxContentUtxoInputsInner,
@@ -56,7 +60,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     pallas_extras, AccountState, ChainSummary, DRepState, PParamsSet, PoolHash, PoolState,
 };
-use dolos_core::{BlockSlot, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
+use dolos_core::{async_query::BlockRefMeta, Domain, EraCbor, TxHash, TxOrder, TxoIdx, TxoRef};
 
 use crate::Facade;
 
@@ -83,6 +87,7 @@ const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
+const GOV_ACTION_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("gov_action");
 
 #[inline]
 pub fn bech32(hrp: bech32::Hrp, key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
@@ -118,6 +123,22 @@ pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
 
 pub fn bech32_calidus(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
     bech32(CALIDUS_HRP, key)
+}
+
+/// CIP-129 governance action id: the proposing tx hash followed by the index
+/// of the action inside that tx.
+///
+/// Blockfrost writes the index as the shortest big-endian byte string that
+/// holds it, so index 0 still costs a byte and an index past 255 costs two.
+/// No tx comes close to 256 proposals, but matching the rule is free.
+pub fn bech32_gov_action(tx: &Hash<32>, idx: u32) -> Result<String, StatusCode> {
+    let bytes = idx.to_be_bytes();
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len() - 1);
+
+    bech32(GOV_ACTION_HRP, [tx.as_slice(), &bytes[first..]].concat())
 }
 
 pub fn asset_fingerprint(subject: &[u8]) -> Result<String, StatusCode> {
@@ -210,44 +231,60 @@ where
     }
 }
 
-pub fn aggregate_assets<'a>(
-    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
-) -> Vec<TxContentOutputAmountInner> {
-    let mut lovelace = 0;
-    let mut by_asset: HashMap<String, u64> = HashMap::new();
+#[derive(Default)]
+pub struct AssetTotals {
+    lovelace: u128,
+    by_asset: HashMap<String, u128>,
+}
 
-    for txout in txouts {
+impl AssetTotals {
+    pub fn add_output(&mut self, txout: &MultiEraOutput) {
         let value = txout.value();
 
         // Add lovelace amount
-        lovelace += value.coin();
+        self.lovelace += value.coin() as u128;
 
         // Add other assets
         for ma in value.assets() {
             for asset in ma.assets() {
                 let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
-                let amount = asset.output_coin().unwrap_or_default();
-                *by_asset.entry(unit).or_insert(0) += amount;
+                let amount = asset.output_coin().unwrap_or_default() as u128;
+                *self.by_asset.entry(unit).or_insert(0) += amount;
             }
         }
     }
 
-    let lovelace = TxContentOutputAmountInner {
-        unit: "lovelace".to_string(),
-        quantity: lovelace.to_string(),
-    };
+    pub fn into_amounts(self) -> Vec<TxContentOutputAmountInner> {
+        let lovelace = TxContentOutputAmountInner {
+            unit: "lovelace".to_string(),
+            quantity: self.lovelace.to_string(),
+        };
 
-    let mut assets: Vec<_> = by_asset
-        .into_iter()
-        .map(|(unit, quantity)| TxContentOutputAmountInner {
-            unit,
-            quantity: quantity.to_string(),
-        })
-        .collect();
+        let mut assets: Vec<_> = self
+            .by_asset
+            .into_iter()
+            .map(|(unit, quantity)| TxContentOutputAmountInner {
+                unit,
+                quantity: quantity.to_string(),
+            })
+            .collect();
 
-    assets.sort_by_key(|a| a.unit.clone());
+        assets.sort_by_key(|a| a.unit.clone());
 
-    std::iter::once(lovelace).chain(assets).collect()
+        std::iter::once(lovelace).chain(assets).collect()
+    }
+}
+
+pub fn aggregate_assets<'a>(
+    txouts: impl Iterator<Item = &'a MultiEraOutput<'a>>,
+) -> Vec<TxContentOutputAmountInner> {
+    let mut totals = AssetTotals::default();
+
+    for txout in txouts {
+        totals.add_output(txout);
+    }
+
+    totals.into_amounts()
 }
 
 pub fn list_assets<'a>(
@@ -283,6 +320,54 @@ pub fn list_assets<'a>(
     assets.sort_by_key(|a| a.unit.clone());
 
     std::iter::once(lovelace).chain(assets).collect()
+}
+
+pub struct AssetAggregate {
+    pub quantity: u128,
+    pub oldest: Option<(u64, usize, TxoIdx)>,
+    pub newest: Option<(u64, usize, TxoIdx)>,
+}
+
+/// Aggregates asset quantities per unit over a set of utxos, tracking the
+/// chain position of the oldest and newest utxo holding each asset —
+/// Blockfrost orders account assets by these. The BTreeMap keeps units
+/// sorted, providing the tie-break order for assets sharing a position.
+pub fn aggregate_account_assets(
+    utxos: &HashMap<TxoRef, Arc<EraCbor>>,
+    block_deps: &HashMap<TxHash, BlockRefMeta>,
+) -> Result<BTreeMap<String, AssetAggregate>, StatusCode> {
+    let mut by_unit: BTreeMap<String, AssetAggregate> = BTreeMap::new();
+
+    for (txo_ref, cbor) in utxos.iter() {
+        let output = MultiEraOutput::try_from(cbor.as_ref())
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let position = block_deps
+            .get(&txo_ref.0)
+            .map(|meta| (meta.slot, meta.tx_index, txo_ref.1));
+
+        for ma in output.value().assets() {
+            for asset in ma.assets() {
+                let unit = format!("{}{}", ma.policy(), hex::encode(asset.name()));
+                let quantity = asset.output_coin().unwrap_or_default() as u128;
+
+                let agg = by_unit.entry(unit).or_insert(AssetAggregate {
+                    quantity: 0,
+                    oldest: None,
+                    newest: None,
+                });
+
+                agg.quantity += quantity;
+
+                if let Some(position) = position {
+                    agg.oldest = Some(agg.oldest.map_or(position, |x| x.min(position)));
+                    agg.newest = Some(agg.newest.map_or(position, |x| x.max(position)));
+                }
+            }
+        }
+    }
+
+    Ok(by_unit)
 }
 
 pub enum AddressKind {
@@ -365,40 +450,7 @@ impl<'a> IntoModel<String> for ScriptRef<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<String, StatusCode> {
-        let out = match self {
-            ScriptRef::NativeScript(x) => x.original_hash(),
-            ScriptRef::PlutusV1Script(x) => x.compute_hash(),
-            ScriptRef::PlutusV2Script(x) => x.compute_hash(),
-            ScriptRef::PlutusV3Script(x) => x.compute_hash(),
-        }
-        .to_string();
-
-        Ok(out)
-    }
-}
-
-#[derive(Clone)]
-pub struct UtxoBlockData {
-    pub block_slot: BlockSlot,
-    pub block_hash: Hash<32>,
-    pub tx_hash: Hash<32>,
-    pub tx_order: TxOrder,
-}
-
-impl TryFrom<(MultiEraBlock<'_>, TxOrder)> for UtxoBlockData {
-    type Error = StatusCode;
-    fn try_from(value: (MultiEraBlock<'_>, TxOrder)) -> Result<Self, Self::Error> {
-        Ok(Self {
-            block_slot: value.0.slot(),
-            block_hash: value.0.hash(),
-            tx_hash: value
-                .0
-                .txs()
-                .get(value.1)
-                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-                .hash(),
-            tx_order: value.1,
-        })
+        Ok(pallas_extras::script_ref_hash(&self).to_string())
     }
 }
 
@@ -406,7 +458,7 @@ pub struct UtxoOutputModelBuilder<'a> {
     txo_ref: TxoRef,
     output: MultiEraOutput<'a>,
     is_collateral: bool,
-    block_data: Option<UtxoBlockData>,
+    block_data: Option<BlockRefMeta>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -440,7 +492,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
         }
     }
 
-    pub fn with_block_data(self, block_data: UtxoBlockData) -> Self {
+    pub fn with_block_data(self, block_data: BlockRefMeta) -> Self {
         Self {
             block_data: Some(block_data),
             ..self
@@ -500,21 +552,20 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     fn sort_key(&self) -> Option<Self::SortKey> {
         self.block_data
             .as_ref()
-            .map(|data| (data.block_slot, data.tx_order, self.txo_ref.1))
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
     }
 
     fn into_model(self) -> Result<AddressUtxoContentInner, StatusCode> {
         let out = AddressUtxoContentInner {
             address: self.output.address().into_model()?,
-            tx_hash: self
-                .block_data
-                .as_ref()
-                .map(|data| data.tx_hash.to_string())
-                .unwrap_or_default(),
+            // source the tx_hash from the UTxO's own TxoRef (always present),
+            // not the archive block_data lookup which is None for blocks older
+            // than `max_history` and would yield an empty hash.
+            tx_hash: self.txo_ref.0.to_string(),
             block: self
                 .block_data
                 .as_ref()
-                .map(|b| b.block_hash.to_string())
+                .map(|b| b.hash.to_string())
                 .unwrap_or_default(),
             output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
@@ -543,6 +594,56 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
         Ok(out)
     }
 }
+
+impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = (u64, usize, u32);
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block_data
+            .as_ref()
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
+    }
+
+    fn into_model(self) -> Result<ScriptUtxosInner, StatusCode> {
+        let out = ScriptUtxosInner {
+            address: self.output.address().into_model()?,
+            // source the tx_hash from the UTxO's own TxoRef (always present),
+            // not the archive block_data lookup which is None for blocks older
+            // than `max_history` and would yield an empty hash.
+            tx_hash: self.txo_ref.0.to_string(),
+            block: self
+                .block_data
+                .as_ref()
+                .map(|b| b.hash.to_string())
+                .unwrap_or_default(),
+            output_index: try_into_or_500!(self.txo_ref.1),
+            amount: self.output.value().into_model()?,
+            data_hash: self.output.datum().map(|x| match x {
+                DatumOption::Hash(x) => x.to_string(),
+                DatumOption::Data(x) => x.original_hash().to_string(),
+            }),
+            inline_datum: self
+                .output
+                .datum()
+                .and_then(|x| match x {
+                    DatumOption::Hash(_) => None,
+                    DatumOption::Data(x) => Some(minicbor::to_vec(&x.0).unwrap()),
+                })
+                .map(hex::encode),
+            // the model requires the hash; callers only build this model for
+            // outputs that carry a reference script.
+            reference_script_hash: self
+                .output
+                .script_ref()
+                .map(|h| h.into_model())
+                .transpose()?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+        };
+
+        Ok(out)
+    }
+}
+
 pub struct UtxoInputModelBuilder<'a> {
     input: MultiEraInput<'a>,
     as_output: Option<MultiEraOutput<'a>>,
@@ -645,14 +746,7 @@ impl<'a> TxModelBuilder<'a> {
     ) -> Result<Self, StatusCode> {
         let epoch = self.tx_epoch()?;
         let chain = self.chain_or_500()?;
-        let tip = facade.get_tip_slot()?;
-        let (curr, _) = chain.slot_epoch(tip);
-
-        let pparams = if epoch == curr {
-            facade.get_current_effective_pparams()?
-        } else {
-            facade.get_historical_effective_pparams(epoch, chain)?
-        };
+        let pparams = facade.get_effective_pparams_for_epoch(epoch, chain)?;
 
         Ok(self.with_pparams(pparams))
     }
@@ -1420,6 +1514,25 @@ impl IntoModel<Vec<TxContentWithdrawalsInner>> for TxModelBuilder<'_> {
     }
 }
 
+impl IntoModel<Vec<TxContentRequiredSignersInner>> for TxModelBuilder<'_> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<TxContentRequiredSignersInner>, StatusCode> {
+        let tx = self.tx()?;
+        let signers = tx.required_signers();
+
+        let items = signers
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|hash| TxContentRequiredSignersInner {
+                witness_hash: hash.to_string(),
+            })
+            .collect();
+
+        Ok(items)
+    }
+}
+
 fn build_delegation_inner(
     index: usize,
     cred: &StakeCredential,
@@ -1616,8 +1729,14 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
                     }
                 }),
                 ipv6: ipv6.map(|ipv6| {
-                    if let Ok(slice) = <[u8; 16]>::try_from(ipv6.as_slice()) {
-                        std::net::Ipv6Addr::from(slice).to_string()
+                    if let Ok(mut bytes) = <[u8; 16]>::try_from(ipv6.as_slice()) {
+                        // cardano-ledger serializes relay IPv6 addresses as
+                        // four 32-bit words in little-endian order; swap each
+                        // word back to network order (same as dbsync).
+                        for word in bytes.chunks_exact_mut(4) {
+                            word.reverse();
+                        }
+                        std::net::Ipv6Addr::from(bytes).to_string()
                     } else {
                         Default::default()
                     }
@@ -1636,8 +1755,8 @@ impl IntoModel<TxContentPoolCertsInnerRelaysInner> for alonzo::Relay {
             alonzo::Relay::MultiHostName(dns) => TxContentPoolCertsInnerRelaysInner {
                 ipv4: None,
                 ipv6: None,
-                dns: Some(dns.to_string()),
-                dns_srv: None,
+                dns: None,
+                dns_srv: Some(dns.to_string()),
                 port: Default::default(),
             },
         };
@@ -2002,6 +2121,7 @@ pub struct BlockModelBuilder<'a> {
     previous: Option<MultiEraBlock<'a>>,
     next: Option<MultiEraBlock<'a>>,
     tip: Option<MultiEraBlock<'a>>,
+    touched_addresses: Option<Vec<(String, BTreeSet<String>)>>,
 }
 
 impl<'a> BlockModelBuilder<'a> {
@@ -2014,7 +2134,30 @@ impl<'a> BlockModelBuilder<'a> {
             next: None,
             tip: None,
             chain: None,
+            touched_addresses: None,
         })
+    }
+
+    pub fn txs(&self) -> Vec<MultiEraTx<'_>> {
+        self.block.txs()
+    }
+
+    /// Collect the addresses each tx touches by asking `collect` for every tx
+    /// of the block, in block order. The builder drives the walk itself, so
+    /// the sets cannot fall out of sync with the txs they describe.
+    pub fn collect_touched_addresses_with<F>(mut self, mut collect: F) -> Result<Self, StatusCode>
+    where
+        F: FnMut(&MultiEraTx<'_>) -> Result<BTreeSet<String>, StatusCode>,
+    {
+        self.touched_addresses = Some(
+            self.block
+                .txs()
+                .iter()
+                .map(|tx| collect(tx).map(|addresses| (tx.hash().to_string(), addresses)))
+                .try_collect()?,
+        );
+
+        Ok(self)
     }
 
     pub fn with_chain(self, chain: &'a ChainSummary) -> Self {
@@ -2303,26 +2446,54 @@ impl<'a> IntoModel<Vec<String>> for BlockModelBuilder<'a> {
     }
 }
 
+impl<'a> IntoModel<Vec<BlockContentTxsCborInner>> for BlockModelBuilder<'a> {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Vec<BlockContentTxsCborInner>, StatusCode> {
+        let block = &self.block;
+
+        let txs = block
+            .txs()
+            .iter()
+            .map(|tx| BlockContentTxsCborInner {
+                tx_hash: tx.hash().to_string(),
+                cbor: hex::encode(tx.encode()),
+            })
+            .collect();
+
+        Ok(txs)
+    }
+}
+
 impl<'a> IntoModel<Vec<BlockContentAddressesInner>> for BlockModelBuilder<'a> {
     type SortKey = ();
 
     fn into_model(self) -> Result<Vec<BlockContentAddressesInner>, StatusCode> {
-        let block = &self.block;
-        let addresses = block
-            .txs()
-            .iter()
-            .flat_map(|tx| {
-                tx.produces()
-                    .iter()
-                    .map(|(_, output)| BlockContentAddressesInner {
-                        address: output.address().unwrap().to_string(),
-                        transactions: vec![BlockContentAddressesInnerTransactionsInner {
-                            tx_hash: tx.hash().to_string(),
-                        }],
-                    })
-                    .collect::<Vec<_>>()
+        let touched_addresses = self.touched_addresses.ok_or_else(|| {
+            tracing::error!("touched addresses not collected for block");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+        // BTreeMap keeps entries sorted alphabetically by address, matching
+        // Blockfrost. Tx hashes are appended in block order and deduped per
+        // address because each tx's touched addresses arrive as a set.
+        let mut by_address: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        for (tx_hash, touched_by_tx) in touched_addresses {
+            for address in touched_by_tx {
+                by_address.entry(address).or_default().push(tx_hash.clone());
+            }
+        }
+
+        let addresses = by_address
+            .into_iter()
+            .map(|(address, tx_hashes)| BlockContentAddressesInner {
+                address,
+                transactions: tx_hashes
+                    .into_iter()
+                    .map(|tx_hash| BlockContentAddressesInnerTransactionsInner { tx_hash })
+                    .collect(),
             })
-            .sorted_by(|x, y| x.address.cmp(&y.address))
             .collect();
 
         Ok(addresses)

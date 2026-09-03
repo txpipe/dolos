@@ -1090,7 +1090,8 @@ mod tests {
             store.check_status(&hash).stage,
             MempoolTxStage::Acknowledged
         ));
-        // find_inflight now returns any inflight sub-stage (Propagated, Acknowledged, Confirmed)
+        // find_inflight now returns any inflight sub-stage (Propagated, Acknowledged,
+        // Confirmed)
         assert!(store.find_inflight(&hash).is_some());
     }
 

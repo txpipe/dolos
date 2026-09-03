@@ -4,65 +4,186 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Line tables keep backtraces symbolicated at a fraction of the link time and
+  # cache size. `dev` is the one that matters: `cargo test` builds dependencies
+  # with it. Set here, not in `[profile.dev]`, so local debugging is unaffected.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
-  check:
-    name: Check Build
+  fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    # rustfmt.toml enables `wrap_comments`, an unstable option that only the
+    # nightly rustfmt applies — stable silently ignores it. Run nightly here so
+    # the check actually enforces comment wrapping.
+    #
+    # Pinned, because unstable options give no output-stability guarantee: the
+    # nightly published 2026-08-30 rewraps comments across 85 files. Held at the
+    # last nightly that formats `main` clean; taking that rewrap is #1280.
+    # Local devs: `cargo +nightly-2026-08-27 fmt`.
+    env:
+      RUSTFMT_NIGHTLY: nightly-2026-08-27
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUSTFMT_NIGHTLY }}
+          components: rustfmt
+      - run: cargo +$RUSTFMT_NIGHTLY fmt --all -- --check
+
+  clippy:
+    name: cargo clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - uses: actions-rs/toolchain@v1
+  deny:
+    name: cargo deny (advisories, bans)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-          toolchain: stable
-          override: true
-
-      - name: check
-        uses: actions-rs/cargo@v1
+          persist-credentials: false
+      # Fails the build on any RustSec advisory affecting the locked
+      # dependency tree. Config lives in deny.toml. The action installs
+      # cargo-deny and caches the advisory database.
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
-          args: --workspace --all-targets
-
-      - name: lint
-        uses: actions-rs/cargo@v1
-        with:
-          command: clippy
-          args: --all-targets --all-features -- -D warnings
+          command: check advisories bans
 
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    needs: check
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-14]
 
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
-          override: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # `all-features` and `e2e` restore this read-only; without a shared
+          # key each would save its own multi-GB entry against a full quota.
+          shared-key: test-${{ matrix.os }}
 
       - name: Run unit tests
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --workspace --all-targets
+        run: cargo test --workspace --all-targets
 
       - name: Run e2e smoke tests
-        if: runner.os != 'Windows'
-        uses: actions-rs/cargo@v1
-        with:
-          command: test
-          args: --test smoke -- --ignored
+        run: cargo test --test smoke -- --ignored
 
-      - name: Run e2e tests
-        if: runner.os != 'Windows'
-        uses: actions-rs/cargo@v1
+  # Windows is the slowest job and skips e2e, so on a PR it adds latency without
+  # coverage anyone acts on. A Windows-only break lands on main and is caught by
+  # the merge run instead of blocking the PR.
+  #
+  # The cost of that trade is that a fix *for* a Windows break cannot be proven
+  # before it merges, which is how the `getrusage` break stayed red across five
+  # merges. The two extra arms are the way out: label a PR `ci:windows` to opt
+  # it into this job, or dispatch the workflow against a branch. Neither changes
+  # what an unlabelled PR runs.
+  test-windows:
+    name: Test (windows-latest)
+    if: >-
+      github.ref == 'refs/heads/main'
+      || github.event_name == 'workflow_dispatch'
+      || contains(github.event.pull_request.labels.*.name, 'ci:windows')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-          command: test
-          args: --test sync --test snapshot -- --ignored
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run unit tests
+        run: cargo test --workspace --all-targets
+
+  # AGENTS.md prescribes verifying with `--all-features`, which enables
+  # feature-gated code (notably the `strict` epoch-coherence assertions in
+  # dolos-cardano) that the default-features run never exercises. Keep it green
+  # here so the prescribed verification and CI cannot drift apart. The three
+  # service crates are excluded because their test fixtures import synthetic
+  # chains that jump from genesis straight to epoch 2, tripping the strict
+  # assertions inside the fixture itself; they keep full coverage in the
+  # default-features run. Remove the exclusions once the fixtures build
+  # epoch-coherent domains (see AGENTS.md, "Code Verification Requirements").
+  # Feature-gated code is platform-independent, so one OS keeps the cost bounded.
+  all-features:
+    name: Test (all features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
+
+  # `dolos-snapshot` carries one default-off half — the backfill daemon
+  # (`backfill`) — and every job above builds it the one way the `dolos`
+  # binary does, with it on (the default `mithril` feature forwards to it).
+  # Feature unification means no workspace job ever constructs the
+  # backfill-off build, so a `cfg` mistake there passes everything and breaks
+  # only a consumer. This checks that one configuration, at `cargo check`
+  # depth: the guard is that it compiles, not that it passes a suite the jobs
+  # above already run.
+  snapshot-features:
+    name: Check (dolos-snapshot default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo check -p dolos-snapshot --all-targets
+
+  # These sleep on a real relay rather than compute, so they are slow and only
+  # as reliable as the relay. Run them on merges to main; smoke stays on the
+  # matrix everywhere and covers ports, socket and shutdown on every PR.
+  e2e:
+    name: E2E (sync, snapshot)
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-ubuntu-latest
+          save-if: false
+      - run: cargo test --test sync --test snapshot -- --ignored

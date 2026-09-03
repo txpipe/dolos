@@ -121,11 +121,13 @@ pub struct PotDelta {
     #[n(9)]
     pub effective_rewards: Lovelace,
 
-    /// Unspendable rewards that go to treasury (accounts deregistered late after RUPD).
+    /// Unspendable rewards that go to treasury (accounts deregistered late
+    /// after RUPD).
     #[n(10)]
     pub unspendable_to_treasury: Lovelace,
 
-    /// Unspendable rewards that return to reserves (accounts deregistered soon after RUPD).
+    /// Unspendable rewards that return to reserves (accounts deregistered soon
+    /// after RUPD).
     #[n(22)]
     #[cbor(default)]
     pub unspendable_to_reserves: Lovelace,
@@ -181,6 +183,12 @@ pub struct PotDelta {
     #[n(24)]
     #[cbor(default)]
     pub treasury_mirs: Lovelace,
+
+    /// Treasury withdrawals enacted by governance at this boundary,
+    /// restricted to the amounts delivered to registered accounts.
+    #[n(25)]
+    #[cbor(default)]
+    pub treasury_withdrawals: Lovelace,
 }
 
 impl PotDelta {
@@ -211,12 +219,14 @@ impl PotDelta {
             deposit_per_pool: None,
             avvm_reclamation: 0,
             treasury_mirs: 0,
+            treasury_withdrawals: 0,
         }
     }
 
     /// Total rewards consumed from the available incentives pool.
-    /// Includes effective (applied) and unspendable rewards that go to treasury.
-    /// Unspendable rewards that return to reserves are NOT consumed (they stay in reserves).
+    /// Includes effective (applied) and unspendable rewards that go to
+    /// treasury. Unspendable rewards that return to reserves are NOT
+    /// consumed (they stay in reserves).
     pub fn consumed_incentives(&self) -> Lovelace {
         self.effective_rewards + self.unspendable_to_treasury
     }
@@ -389,6 +399,7 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.treasury = add!(pots.treasury, delta.proposal_invalid_refunds);
     pots.treasury = add!(pots.treasury, delta.treasury_donations);
     pots.treasury = sub!(pots.treasury, delta.treasury_mirs);
+    pots.treasury = sub!(pots.treasury, delta.treasury_withdrawals);
 
     // fees pot
     pots.fees = sub!(pots.fees, incentives.used_fees);
@@ -404,6 +415,7 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.rewards = add!(pots.rewards, delta.proposal_refunds);
     pots.rewards = add!(pots.rewards, delta.reserve_mirs);
     pots.rewards = add!(pots.rewards, delta.treasury_mirs);
+    pots.rewards = add!(pots.rewards, delta.treasury_withdrawals);
 
     // we don't need to return account deposit refunds to the rewards pot because
     // these refunds are returned directly as utxos in the deregistration
@@ -427,7 +439,8 @@ pub fn apply_shelley_delta(mut pots: Pots, incentives: &EpochIncentives, delta: 
     pots.account_count = add!(pots.account_count, delta.new_accounts);
     pots.account_count = sub!(pots.account_count, delta.removed_accounts);
 
-    // for governance, since each cert contains the specific deposit amount, we deal directly with lovelace values.
+    // for governance, since each cert contains the specific deposit amount, we deal
+    // directly with lovelace values.
 
     pots.drep_deposits = add!(pots.drep_deposits, delta.drep_deposits);
     pots.drep_deposits = sub!(pots.drep_deposits, delta.drep_refunds);
@@ -634,6 +647,48 @@ mod tests {
         assert_eq!(pots.rewards, 0);
     }
 
+    /// An enacted treasury withdrawal moves value from the treasury pot to
+    /// the rewards pot — the same pair the treasury MIR moves — and total
+    /// supply is conserved.
+    #[test]
+    fn treasury_withdrawal_moves_treasury_to_rewards() {
+        let pots = Pots {
+            reserves: 8_000_000_000_000_000,
+            treasury: 1_000_000_000_000_000,
+            fees: 0,
+            utxos: 35_999_000_000_000_000,
+            rewards: 1_000_000_000_000,
+            pool_count: 0,
+            account_count: 0,
+            deposit_per_pool: 0,
+            deposit_per_account: 0,
+            nominal_deposits: 0,
+            drep_deposits: 0,
+            proposal_deposits: 0,
+        };
+
+        assert!(pots.is_consistent(MAX_SUPPLY));
+
+        let withdrawal = 649_764_674_000_000;
+
+        let delta = PotDelta {
+            treasury_withdrawals: withdrawal,
+            ..PotDelta::neutral(10, 10)
+        };
+
+        let incentives = EpochIncentives::default();
+
+        let after = apply_delta(pots.clone(), &incentives, &delta);
+
+        assert!(after.is_consistent(MAX_SUPPLY));
+
+        assert_eq!(after.treasury, pots.treasury - withdrawal);
+        assert_eq!(after.rewards, pots.rewards + withdrawal);
+        assert_eq!(after.reserves, pots.reserves);
+        assert_eq!(after.utxos, pots.utxos);
+        assert_eq!(after.fees, pots.fees);
+    }
+
     // TODO: add property based testing that ensures that the pots are
-    // consistent
+    // consistent (#1039)
 }

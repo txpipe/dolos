@@ -1,12 +1,13 @@
 //! Storage backend wrappers for runtime backend selection.
 //!
-//! This module provides enum wrappers around the concrete storage implementations
-//! (redb3, fjall, and noop) that implement the core storage traits. This enables runtime
-//! selection of storage backends via configuration.
+//! This module provides enum wrappers around the concrete storage
+//! implementations (redb3, fjall, and noop) that implement the core storage
+//! traits. This enables runtime selection of storage backends via
+//! configuration.
 //!
 //! The `open` functions are simple matchers that delegate directly to concrete
-//! implementations, passing through the backend-specific config struct. All path
-//! resolution and directory creation is handled by the caller.
+//! implementations, passing through the backend-specific config struct. All
+//! path resolution and directory creation is handled by the caller.
 
 use std::{ops::Range, path::Path, path::PathBuf};
 
@@ -15,19 +16,21 @@ use dolos_core::{
         ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, LogKey,
     },
     builtin::{
-        EmptyBlockIter, EmptyLogIter, EmptySlotIter, NoOpArchiveStore, NoOpArchiveWriter,
-        NoOpIndexStore, NoOpIndexWriter,
+        EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryIndexStore, MemoryIndexWriter,
+        MemoryStateStore, MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter, NoOpIndexStore,
+        NoOpIndexWriter,
     },
     config::{
         ArchiveStoreConfig, FjallIndexConfig, FjallStateConfig, IndexStoreConfig,
         MempoolStoreConfig, RedbArchiveConfig, RedbIndexConfig, RedbStateConfig, RedbWalConfig,
         RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, IndexDelta, IndexError,
-    IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, LogEntry, LogValue, MempoolError,
-    MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock, StateError, StateSchema,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxHash, TxStatus,
-    TxoRef, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
+    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, ExactRecord, IndexDelta,
+    IndexError, IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter,
+    LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock,
+    StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
+    TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoMap, UtxoSet, UtxoSetDelta,
+    WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -50,6 +53,91 @@ pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
     Ok(config.storage.path.clone())
 }
 
+/// Empty the storage directory.
+///
+/// A `remove_dir_all` of the whole path and not a per-store wipe, which matters
+/// for one thing that is not a store: a stele restore's progress file lives
+/// inside `storage.path`, and a progress file that outlived the stores it
+/// describes would tell the next `--continue` to skip layers whose data is
+/// gone. Anything that clears storage has to clear that too, and taking the
+/// directory is how this does it without having to remember.
+pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
+    std::fs::remove_dir_all(storage_path)
+        .map_err(|e| Error::StorageError(format!("removing existing storage: {e}")))?;
+
+    std::fs::create_dir_all(storage_path)
+        .map_err(|e| Error::StorageError(format!("recreating storage directory: {e}")))?;
+
+    Ok(())
+}
+
+/// What to do about data already in storage.
+///
+/// Deciding is separated from doing because only one of the outcomes is
+/// destructive, and it must not happen until the run is fully known. An
+/// interactive bootstrap asks which method to use — and, for a stele, where the
+/// stele is — *after* the flags are parsed, so a `--force` that cleared first
+/// would take a working node away on a typo, a cancel, or a machine with no
+/// terminal, and hand back nothing in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// Data is there and `--skip-if-data` says to leave it alone.
+    Skip,
+    /// Go ahead, but clear storage first.
+    Clear,
+    /// Go ahead as things are.
+    Proceed,
+}
+
+/// The three flags that say what to do about data already in storage.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ExistingDataPolicy {
+    /// `--force`: clear storage and re-bootstrap.
+    pub force: bool,
+    /// `--skip-if-data`: leave it alone and exit zero.
+    pub skip_if_data: bool,
+    /// `--continue`: go ahead, trusting the run to resume.
+    pub r#continue: bool,
+}
+
+/// Whether storage already holds a node: a state cursor is the whole test.
+pub fn has_existing_data(config: &RootConfig) -> Result<bool, Error> {
+    let state = open_state_store(config)?;
+
+    Ok(state.read_cursor()?.is_some())
+}
+
+/// Read what is in storage and decide, without touching any of it.
+///
+/// The refusals happen here — a skip, and the refusal for existing data with no
+/// flag saying what to do about it — so neither is a question asked of an
+/// operator whose answer is then thrown away.
+pub fn inspect_existing_data(
+    config: &RootConfig,
+    policy: ExistingDataPolicy,
+) -> Result<Existing, Error> {
+    if policy.r#continue {
+        return Ok(Existing::Proceed);
+    }
+
+    if !has_existing_data(config)? {
+        return Ok(Existing::Proceed);
+    }
+
+    if policy.skip_if_data {
+        return Ok(Existing::Skip);
+    }
+
+    if policy.force {
+        return Ok(Existing::Clear);
+    }
+
+    Err(Error::message(
+        "existing data detected in storage. Use --force to clear and re-bootstrap, \
+         --skip-if-data to skip, or --continue to resume",
+    ))
+}
+
 fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
     if config.storage.version != StorageVersion::V3 {
         return Err(Error::StorageError(format!(
@@ -58,6 +146,41 @@ fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
         )));
     }
     Ok(())
+}
+
+/// Refuse a deprecated state backend at the point where the backend is
+/// chosen, so a stale configuration fails immediately with an actionable
+/// error instead of surfacing later at runtime.
+///
+/// `in_memory` is not refused: it is a builtin store that serves the whole
+/// contract, ephemeral by design rather than by incapacity.
+#[allow(deprecated)]
+fn check_state_backend(config: &StateStoreConfig) -> Result<(), Error> {
+    let selected = match config {
+        StateStoreConfig::Fjall(_) | StateStoreConfig::InMemory => return Ok(()),
+        StateStoreConfig::Redb(_) => "redb",
+    };
+
+    Err(Error::StorageError(format!(
+        "state backend `{selected}` is deprecated; the supported state backend is `fjall`"
+    )))
+}
+
+/// Refuse a deprecated index backend, same rationale as
+/// [`check_state_backend`]. `in_memory` is a builtin store that serves the
+/// whole contract, and `no_op` is an explicit opt-out of the index layer.
+#[allow(deprecated)]
+fn check_index_backend(config: &IndexStoreConfig) -> Result<(), Error> {
+    let selected = match config {
+        IndexStoreConfig::Fjall(_) | IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => {
+            return Ok(())
+        }
+        IndexStoreConfig::Redb(_) => "redb",
+    };
+
+    Err(Error::StorageError(format!(
+        "index backend `{selected}` is deprecated; the supported index backend is `fjall`"
+    )))
 }
 
 /// Ensure directory exists for a store path.
@@ -88,12 +211,14 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
+    check_index_backend(&config.storage.index)?;
     let path = config.storage.index_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    check_state_backend(&config.storage.state)?;
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -332,6 +457,7 @@ where
 pub enum StateStoreBackend {
     Redb(dolos_redb3::state::StateStore),
     Fjall(dolos_fjall::StateStore),
+    Memory(MemoryStateStore),
 }
 
 impl StateStoreBackend {
@@ -355,16 +481,18 @@ impl StateStoreBackend {
     }
 
     /// Create an in-memory state store.
-    pub fn in_memory(schema: StateSchema) -> Result<Self, StateError> {
-        Ok(Self::Redb(dolos_redb3::state::StateStore::in_memory(
-            schema,
-        )?))
+    ///
+    /// Takes no schema: the builtin store discovers namespaces as they are
+    /// written, so there is no table set to declare up front.
+    pub fn in_memory() -> Result<Self, StateError> {
+        Ok(Self::Memory(MemoryStateStore::new()))
     }
 
     /// Open a state store based on the config variant.
     ///
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
+    #[allow(deprecated)]
     pub fn open(
         path: impl AsRef<Path>,
         schema: StateSchema,
@@ -373,7 +501,7 @@ impl StateStoreBackend {
         match config {
             StateStoreConfig::Redb(cfg) => Self::open_redb(path, schema, cfg),
             StateStoreConfig::Fjall(cfg) => Self::open_fjall(path, cfg),
-            StateStoreConfig::InMemory => Self::in_memory(schema),
+            StateStoreConfig::InMemory => Self::in_memory(),
         }
     }
 
@@ -385,6 +513,7 @@ impl StateStoreBackend {
             Self::Fjall(s) => s
                 .shutdown()
                 .map_err(|e| StateError::InternalStoreError(e.to_string())),
+            Self::Memory(s) => s.shutdown(),
         }
     }
 }
@@ -392,6 +521,7 @@ impl StateStoreBackend {
 pub enum StateWriterBackend {
     Redb(Box<<dolos_redb3::state::StateStore as CoreStateStore>::Writer>),
     Fjall(<dolos_fjall::StateStore as CoreStateStore>::Writer),
+    Memory(MemoryStateWriter),
 }
 
 impl CoreStateWriter for StateWriterBackend {
@@ -399,6 +529,7 @@ impl CoreStateWriter for StateWriterBackend {
         match self {
             Self::Redb(w) => w.set_cursor(cursor),
             Self::Fjall(w) => w.set_cursor(cursor),
+            Self::Memory(w) => w.set_cursor(cursor),
         }
     }
 
@@ -411,6 +542,7 @@ impl CoreStateWriter for StateWriterBackend {
         match self {
             Self::Redb(w) => w.write_entity(ns, key, value),
             Self::Fjall(w) => w.write_entity(ns, key, value),
+            Self::Memory(w) => w.write_entity(ns, key, value),
         }
     }
 
@@ -418,6 +550,7 @@ impl CoreStateWriter for StateWriterBackend {
         match self {
             Self::Redb(w) => w.delete_entity(ns, key),
             Self::Fjall(w) => w.delete_entity(ns, key),
+            Self::Memory(w) => w.delete_entity(ns, key),
         }
     }
 
@@ -425,6 +558,7 @@ impl CoreStateWriter for StateWriterBackend {
         match self {
             Self::Redb(w) => w.apply_utxoset(delta),
             Self::Fjall(w) => w.apply_utxoset(delta),
+            Self::Memory(w) => w.apply_utxoset(delta),
         }
     }
 
@@ -432,6 +566,7 @@ impl CoreStateWriter for StateWriterBackend {
         match self {
             Self::Redb(w) => (*w).commit(),
             Self::Fjall(w) => w.commit(),
+            Self::Memory(w) => w.commit(),
         }
     }
 }
@@ -439,6 +574,7 @@ impl CoreStateWriter for StateWriterBackend {
 pub enum StateEntityIterBackend {
     Redb(<dolos_redb3::state::StateStore as CoreStateStore>::EntityIter),
     Fjall(<dolos_fjall::StateStore as CoreStateStore>::EntityIter),
+    Memory(<MemoryStateStore as CoreStateStore>::EntityIter),
 }
 
 impl Iterator for StateEntityIterBackend {
@@ -447,6 +583,7 @@ impl Iterator for StateEntityIterBackend {
         match self {
             Self::Redb(iter) => iter.next(),
             Self::Fjall(iter) => iter.next(),
+            Self::Memory(iter) => iter.next(),
         }
     }
 }
@@ -454,6 +591,7 @@ impl Iterator for StateEntityIterBackend {
 pub enum StateEntityValueIterBackend {
     Redb(Box<<dolos_redb3::state::StateStore as CoreStateStore>::EntityValueIter>),
     Fjall(<dolos_fjall::StateStore as CoreStateStore>::EntityValueIter),
+    Memory(<MemoryStateStore as CoreStateStore>::EntityValueIter),
 }
 
 impl Iterator for StateEntityValueIterBackend {
@@ -462,6 +600,24 @@ impl Iterator for StateEntityValueIterBackend {
         match self {
             Self::Redb(iter) => iter.next(),
             Self::Fjall(iter) => iter.next(),
+            Self::Memory(iter) => iter.next(),
+        }
+    }
+}
+
+pub enum StateUtxoIterBackend {
+    Redb(<dolos_redb3::state::StateStore as CoreStateStore>::UtxoIter),
+    Fjall(<dolos_fjall::StateStore as CoreStateStore>::UtxoIter),
+    Memory(<MemoryStateStore as CoreStateStore>::UtxoIter),
+}
+
+impl Iterator for StateUtxoIterBackend {
+    type Item = Result<UtxoEntry, StateError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::Memory(iter) => iter.next(),
         }
     }
 }
@@ -469,12 +625,14 @@ impl Iterator for StateEntityValueIterBackend {
 impl CoreStateStore for StateStoreBackend {
     type EntityIter = StateEntityIterBackend;
     type EntityValueIter = StateEntityValueIterBackend;
+    type UtxoIter = StateUtxoIterBackend;
     type Writer = StateWriterBackend;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         match self {
             Self::Redb(s) => s.read_cursor(),
             Self::Fjall(s) => s.read_cursor(),
+            Self::Memory(s) => s.read_cursor(),
         }
     }
 
@@ -486,6 +644,7 @@ impl CoreStateStore for StateStoreBackend {
         match self {
             Self::Redb(s) => s.read_entities(ns, keys),
             Self::Fjall(s) => s.read_entities(ns, keys),
+            Self::Memory(s) => s.read_entities(ns, keys),
         }
     }
 
@@ -495,6 +654,7 @@ impl CoreStateStore for StateStoreBackend {
                 .start_writer()
                 .map(|writer| StateWriterBackend::Redb(Box::new(writer))),
             Self::Fjall(s) => s.start_writer().map(StateWriterBackend::Fjall),
+            Self::Memory(s) => s.start_writer().map(StateWriterBackend::Memory),
         }
     }
 
@@ -508,6 +668,9 @@ impl CoreStateStore for StateStoreBackend {
             Self::Fjall(s) => s
                 .iter_entities(ns, range)
                 .map(StateEntityIterBackend::Fjall),
+            Self::Memory(s) => s
+                .iter_entities(ns, range)
+                .map(StateEntityIterBackend::Memory),
         }
     }
 
@@ -523,6 +686,9 @@ impl CoreStateStore for StateStoreBackend {
             Self::Fjall(s) => s
                 .iter_entity_values(ns, key)
                 .map(StateEntityValueIterBackend::Fjall),
+            Self::Memory(s) => s
+                .iter_entity_values(ns, key)
+                .map(StateEntityValueIterBackend::Memory),
         }
     }
 
@@ -530,6 +696,15 @@ impl CoreStateStore for StateStoreBackend {
         match self {
             Self::Redb(s) => s.get_utxos(refs),
             Self::Fjall(s) => s.get_utxos(refs),
+            Self::Memory(s) => s.get_utxos(refs),
+        }
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        match self {
+            Self::Redb(s) => s.iter_utxos().map(StateUtxoIterBackend::Redb),
+            Self::Fjall(s) => s.iter_utxos().map(StateUtxoIterBackend::Fjall),
+            Self::Memory(s) => s.iter_utxos().map(StateUtxoIterBackend::Memory),
         }
     }
 }
@@ -542,6 +717,20 @@ impl CoreStateStore for StateStoreBackend {
 #[derive(Clone)]
 pub enum ArchiveStoreBackend {
     Redb(dolos_redb3::archive::ArchiveStore),
+    /// Write-gated view over an already-open archive: reads and derived-log
+    /// writes pass through, block appends and undos are discarded.
+    ///
+    /// This exists for replays over an archive that already holds the chain
+    /// (`dolos doctor rebuild-state --rewrite-logs`): block appends are not
+    /// idempotent — replaying them would double every shared segment file,
+    /// whichever backend owns the index — while boundary log keys are
+    /// slot-derived and identical under replay, so re-written log rows
+    /// overwrite the originals in place.
+    ///
+    /// [`Self::logs_only`] is the sole constructor, and it never nests one
+    /// gate inside another.
+    LogsOnly(Box<ArchiveStoreBackend>),
+    Fjall(dolos_fjall::archive::ArchiveStore),
     NoOp(NoOpArchiveStore),
 }
 
@@ -557,9 +746,41 @@ impl ArchiveStoreBackend {
         )?))
     }
 
+    /// Open an archive store with the Fjall backend.
+    pub fn open_fjall(
+        path: impl AsRef<Path>,
+        schema: StateSchema,
+        config: &dolos_core::config::FjallArchiveConfig,
+    ) -> Result<Self, ArchiveError> {
+        Ok(Self::Fjall(
+            dolos_fjall::archive::ArchiveStore::open(schema, path, config)
+                .map_err(ArchiveError::from)?,
+        ))
+    }
+
     /// Create a no-op archive store that discards all writes.
     pub fn noop() -> Self {
         Self::NoOp(NoOpArchiveStore)
+    }
+
+    /// Wrap this backend's already-open store in a [`Self::LogsOnly`] write
+    /// gate.
+    ///
+    /// Clones the handle out of the open store rather than opening the path
+    /// again, because redb refuses to open the same file twice. Returns
+    /// `None` when there is no persistent store to wrap.
+    ///
+    /// The result therefore *aliases* the store it came from: both share the
+    /// same underlying handle. Anything reaching for exclusive database
+    /// access — `db_mut`, and so redb compaction — must refuse a `LogsOnly`
+    /// value rather than unwrap it, because `Arc::get_mut` cannot succeed
+    /// while the original handle is alive.
+    pub fn logs_only(&self) -> Option<Self> {
+        match self {
+            Self::LogsOnly(_) => Some(self.clone()),
+            Self::Redb(_) | Self::Fjall(_) => Some(Self::LogsOnly(Box::new(self.clone()))),
+            Self::NoOp(_) => None,
+        }
     }
 
     /// Create an in-memory archive store.
@@ -581,6 +802,7 @@ impl ArchiveStoreBackend {
     ) -> Result<Self, ArchiveError> {
         match config {
             ArchiveStoreConfig::Redb(cfg) => Self::open_redb(path, schema, cfg),
+            ArchiveStoreConfig::Fjall(cfg) => Self::open_fjall(path, schema, cfg),
             ArchiveStoreConfig::InMemory => Self::in_memory(schema),
             ArchiveStoreConfig::NoOp => Ok(Self::noop()),
         }
@@ -591,6 +813,8 @@ impl ArchiveStoreBackend {
             Self::Redb(s) => s
                 .shutdown()
                 .map_err(|e| ArchiveError::InternalError(e.to_string())),
+            Self::LogsOnly(inner) => inner.shutdown(),
+            Self::Fjall(s) => s.shutdown().map_err(ArchiveError::from),
             Self::NoOp(s) => s.shutdown(),
         }
     }
@@ -598,6 +822,9 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::Writer>),
+    /// Delegates `write_log` and `commit`; discards `apply` and `undo`.
+    LogsOnly(Box<ArchiveWriterBackend>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
 }
 
@@ -605,6 +832,8 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(w) => w.apply(point, block),
+            Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.apply(point, block),
             Self::NoOp(w) => w.apply(point, block),
         }
     }
@@ -617,6 +846,8 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     ) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(w) => w.write_log(ns, key, value),
+            Self::LogsOnly(w) => w.write_log(ns, key, value),
+            Self::Fjall(w) => w.write_log(ns, key, value),
             Self::NoOp(w) => w.write_log(ns, key, value),
         }
     }
@@ -624,6 +855,8 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(w) => w.undo(point),
+            Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.undo(point),
             Self::NoOp(w) => w.undo(point),
         }
     }
@@ -631,6 +864,8 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn commit(self) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(w) => (*w).commit(),
+            Self::LogsOnly(w) => (*w).commit(),
+            Self::Fjall(w) => (*w).commit(),
             Self::NoOp(w) => w.commit(),
         }
     }
@@ -638,6 +873,7 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
 
 pub enum ArchiveBlockIterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::BlockIter<'static>>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::BlockIter<'static>>),
     NoOp(EmptyBlockIter),
 }
 
@@ -646,6 +882,7 @@ impl Iterator for ArchiveBlockIterBackend {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -655,6 +892,7 @@ impl DoubleEndedIterator for ArchiveBlockIterBackend {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next_back(),
+            Self::Fjall(iter) => iter.next_back(),
             Self::NoOp(iter) => iter.next_back(),
         }
     }
@@ -664,6 +902,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
     fn skip_forward(&mut self, n: usize) {
         match self {
             Self::Redb(iter) => iter.skip_forward(n),
+            Self::Fjall(iter) => iter.skip_forward(n),
             Self::NoOp(iter) => iter.skip_forward(n),
         }
     }
@@ -671,6 +910,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
     fn skip_backward(&mut self, n: usize) {
         match self {
             Self::Redb(iter) => iter.skip_backward(n),
+            Self::Fjall(iter) => iter.skip_backward(n),
             Self::NoOp(iter) => iter.skip_backward(n),
         }
     }
@@ -678,6 +918,7 @@ impl dolos_core::archive::Skippable for ArchiveBlockIterBackend {
 
 pub enum ArchiveLogIterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::LogIter>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::LogIter>),
     NoOp(EmptyLogIter),
 }
 
@@ -686,6 +927,7 @@ impl Iterator for ArchiveLogIterBackend {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -693,6 +935,7 @@ impl Iterator for ArchiveLogIterBackend {
 
 pub enum ArchiveEntityValueIterBackend {
     Redb(Box<<dolos_redb3::archive::ArchiveStore as CoreArchiveStore>::EntityValueIter>),
+    Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::EntityValueIter>),
     NoOp(dolos_core::builtin::EmptyEntityValueIter),
 }
 
@@ -701,6 +944,7 @@ impl Iterator for ArchiveEntityValueIterBackend {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -716,6 +960,10 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Redb(s) => CoreArchiveStore::start_writer(s)
                 .map(|writer| ArchiveWriterBackend::Redb(Box::new(writer))),
+            Self::LogsOnly(inner) => CoreArchiveStore::start_writer(inner.as_ref())
+                .map(|writer| ArchiveWriterBackend::LogsOnly(Box::new(writer))),
+            Self::Fjall(s) => CoreArchiveStore::start_writer(s)
+                .map(|writer| ArchiveWriterBackend::Fjall(Box::new(writer))),
             Self::NoOp(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::NoOp),
         }
     }
@@ -727,6 +975,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     ) -> Result<Vec<Option<EntityValue>>, ArchiveError> {
         match self {
             Self::Redb(s) => CoreArchiveStore::read_logs(s, ns, keys),
+            Self::LogsOnly(inner) => CoreArchiveStore::read_logs(inner.as_ref(), ns, keys),
+            Self::Fjall(s) => CoreArchiveStore::read_logs(s, ns, keys),
             Self::NoOp(s) => CoreArchiveStore::read_logs(s, ns, keys),
         }
     }
@@ -739,6 +989,9 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Redb(s) => CoreArchiveStore::iter_logs(s, ns, range)
                 .map(|iter| ArchiveLogIterBackend::Redb(Box::new(iter))),
+            Self::LogsOnly(inner) => CoreArchiveStore::iter_logs(inner.as_ref(), ns, range),
+            Self::Fjall(s) => CoreArchiveStore::iter_logs(s, ns, range)
+                .map(|iter| ArchiveLogIterBackend::Fjall(Box::new(iter))),
             Self::NoOp(s) => {
                 CoreArchiveStore::iter_logs(s, ns, range).map(ArchiveLogIterBackend::NoOp)
             }
@@ -748,7 +1001,18 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
         match self {
             Self::Redb(s) => CoreArchiveStore::get_block_by_slot(s, slot),
+            Self::LogsOnly(inner) => CoreArchiveStore::get_block_by_slot(inner.as_ref(), slot),
+            Self::Fjall(s) => CoreArchiveStore::get_block_by_slot(s, slot),
             Self::NoOp(s) => CoreArchiveStore::get_block_by_slot(s, slot),
+        }
+    }
+
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        match self {
+            Self::Redb(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
+            Self::LogsOnly(inner) => CoreArchiveStore::get_blocks_by_slot(inner.as_ref(), slot),
+            Self::Fjall(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
+            Self::NoOp(s) => CoreArchiveStore::get_blocks_by_slot(s, slot),
         }
     }
 
@@ -760,6 +1024,9 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         match self {
             Self::Redb(s) => CoreArchiveStore::get_range(s, from, to)
                 .map(|iter| ArchiveBlockIterBackend::Redb(Box::new(iter))),
+            Self::LogsOnly(inner) => CoreArchiveStore::get_range(inner.as_ref(), from, to),
+            Self::Fjall(s) => CoreArchiveStore::get_range(s, from, to)
+                .map(|iter| ArchiveBlockIterBackend::Fjall(Box::new(iter))),
             Self::NoOp(s) => {
                 CoreArchiveStore::get_range(s, from, to).map(ArchiveBlockIterBackend::NoOp)
             }
@@ -769,6 +1036,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         match self {
             Self::Redb(s) => CoreArchiveStore::find_intersect(s, intersect),
+            Self::LogsOnly(inner) => CoreArchiveStore::find_intersect(inner.as_ref(), intersect),
+            Self::Fjall(s) => CoreArchiveStore::find_intersect(s, intersect),
             Self::NoOp(s) => CoreArchiveStore::find_intersect(s, intersect),
         }
     }
@@ -776,6 +1045,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
         match self {
             Self::Redb(s) => CoreArchiveStore::get_tip(s),
+            Self::LogsOnly(inner) => CoreArchiveStore::get_tip(inner.as_ref()),
+            Self::Fjall(s) => CoreArchiveStore::get_tip(s),
             Self::NoOp(s) => CoreArchiveStore::get_tip(s),
         }
     }
@@ -783,6 +1054,10 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         match self {
             Self::Redb(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
+            Self::LogsOnly(inner) => {
+                CoreArchiveStore::prune_history(inner.as_ref(), max_slots, max_prune)
+            }
+            Self::Fjall(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
             Self::NoOp(s) => CoreArchiveStore::prune_history(s, max_slots, max_prune),
         }
     }
@@ -790,6 +1065,8 @@ impl CoreArchiveStore for ArchiveStoreBackend {
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
         match self {
             Self::Redb(s) => CoreArchiveStore::truncate_front(s, after),
+            Self::LogsOnly(inner) => CoreArchiveStore::truncate_front(inner.as_ref(), after),
+            Self::Fjall(s) => CoreArchiveStore::truncate_front(s, after),
             Self::NoOp(s) => CoreArchiveStore::truncate_front(s, after),
         }
     }
@@ -804,6 +1081,7 @@ impl CoreArchiveStore for ArchiveStoreBackend {
 pub enum IndexStoreBackend {
     Redb(dolos_redb3::indexes::IndexStore),
     Fjall(dolos_fjall::IndexStore),
+    Memory(MemoryIndexStore),
     NoOp(NoOpIndexStore),
 }
 
@@ -830,7 +1108,7 @@ impl IndexStoreBackend {
 
     /// Create an in-memory index store.
     pub fn in_memory() -> Result<Self, IndexError> {
-        Ok(Self::Redb(dolos_redb3::indexes::IndexStore::in_memory()?))
+        Ok(Self::Memory(MemoryIndexStore::new()))
     }
 
     /// Open an index store based on the config variant.
@@ -838,6 +1116,7 @@ impl IndexStoreBackend {
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
     /// For `NoOp`, the path is ignored.
+    #[allow(deprecated)]
     pub fn open(path: impl AsRef<Path>, config: &IndexStoreConfig) -> Result<Self, IndexError> {
         match config {
             IndexStoreConfig::Redb(cfg) => Self::open_redb(path, cfg),
@@ -851,6 +1130,7 @@ impl IndexStoreBackend {
         match self {
             Self::Redb(s) => s.shutdown().map_err(|e| IndexError::DbError(e.to_string())),
             Self::Fjall(s) => s.shutdown().map_err(|e| IndexError::DbError(e.to_string())),
+            Self::Memory(s) => s.shutdown(),
             Self::NoOp(s) => s.shutdown(),
         }
     }
@@ -859,6 +1139,7 @@ impl IndexStoreBackend {
 pub enum IndexWriterBackend {
     Redb(Box<<dolos_redb3::indexes::IndexStore as CoreIndexStore>::Writer>),
     Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::Writer),
+    Memory(MemoryIndexWriter),
     NoOp(NoOpIndexWriter),
 }
 
@@ -867,6 +1148,7 @@ impl CoreIndexWriter for IndexWriterBackend {
         match self {
             Self::Redb(w) => w.apply(delta),
             Self::Fjall(w) => w.apply(delta),
+            Self::Memory(w) => w.apply(delta),
             Self::NoOp(w) => w.apply(delta),
         }
     }
@@ -875,7 +1157,20 @@ impl CoreIndexWriter for IndexWriterBackend {
         match self {
             Self::Redb(w) => w.undo(delta),
             Self::Fjall(w) => w.undo(delta),
+            Self::Memory(w) => w.undo(delta),
             Self::NoOp(w) => w.undo(delta),
+        }
+    }
+
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
+        match self {
+            Self::Redb(w) => w.append_prehashed(records),
+            Self::Fjall(w) => w.append_prehashed(records),
+            Self::Memory(w) => w.append_prehashed(records),
+            Self::NoOp(w) => w.append_prehashed(records),
         }
     }
 
@@ -883,6 +1178,7 @@ impl CoreIndexWriter for IndexWriterBackend {
         match self {
             Self::Redb(w) => (*w).commit(),
             Self::Fjall(w) => w.commit(),
+            Self::Memory(w) => w.commit(),
             Self::NoOp(w) => w.commit(),
         }
     }
@@ -891,6 +1187,7 @@ impl CoreIndexWriter for IndexWriterBackend {
 pub enum IndexSlotIterBackend {
     Redb(Box<<dolos_redb3::indexes::IndexStore as CoreIndexStore>::SlotIter>),
     Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::SlotIter),
+    Memory(<MemoryIndexStore as CoreIndexStore>::SlotIter),
     NoOp(EmptySlotIter),
 }
 
@@ -900,6 +1197,7 @@ impl Iterator for IndexSlotIterBackend {
         match self {
             Self::Redb(iter) => iter.next(),
             Self::Fjall(iter) => iter.next(),
+            Self::Memory(iter) => iter.next(),
             Self::NoOp(iter) => iter.next(),
         }
     }
@@ -910,7 +1208,46 @@ impl DoubleEndedIterator for IndexSlotIterBackend {
         match self {
             Self::Redb(iter) => iter.next_back(),
             Self::Fjall(iter) => iter.next_back(),
+            Self::Memory(iter) => iter.next_back(),
             Self::NoOp(iter) => iter.next_back(),
+        }
+    }
+}
+
+pub enum IndexTagIterBackend {
+    Redb(<dolos_redb3::indexes::IndexStore as CoreIndexStore>::TagIter),
+    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::TagIter),
+    Memory(<MemoryIndexStore as CoreIndexStore>::TagIter),
+    NoOp(<NoOpIndexStore as CoreIndexStore>::TagIter),
+}
+
+impl Iterator for IndexTagIterBackend {
+    type Item = Result<TagRecord, IndexError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::Memory(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
+pub enum IndexExactIterBackend {
+    Redb(<dolos_redb3::indexes::IndexStore as CoreIndexStore>::ExactIter),
+    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::ExactIter),
+    Memory(<MemoryIndexStore as CoreIndexStore>::ExactIter),
+    NoOp(<NoOpIndexStore as CoreIndexStore>::ExactIter),
+}
+
+impl Iterator for IndexExactIterBackend {
+    type Item = Result<ExactRecord, IndexError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Redb(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::Memory(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
         }
     }
 }
@@ -918,6 +1255,8 @@ impl DoubleEndedIterator for IndexSlotIterBackend {
 impl CoreIndexStore for IndexStoreBackend {
     type Writer = IndexWriterBackend;
     type SlotIter = IndexSlotIterBackend;
+    type TagIter = IndexTagIterBackend;
+    type ExactIter = IndexExactIterBackend;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         match self {
@@ -925,6 +1264,7 @@ impl CoreIndexStore for IndexStoreBackend {
                 .start_writer()
                 .map(|writer| IndexWriterBackend::Redb(Box::new(writer))),
             Self::Fjall(s) => s.start_writer().map(IndexWriterBackend::Fjall),
+            Self::Memory(s) => s.start_writer().map(IndexWriterBackend::Memory),
             Self::NoOp(s) => s.start_writer().map(IndexWriterBackend::NoOp),
         }
     }
@@ -933,6 +1273,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s.initialize_schema(),
             Self::Fjall(s) => s.initialize_schema(),
+            Self::Memory(s) => s.initialize_schema(),
             Self::NoOp(s) => s.initialize_schema(),
         }
     }
@@ -941,6 +1282,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match (self, target) {
             (Self::Redb(s), Self::Redb(t)) => s.copy(t),
             (Self::Fjall(s), Self::Fjall(t)) => s.copy(t),
+            (Self::Memory(s), Self::Memory(t)) => s.copy(t),
             (Self::NoOp(s), Self::NoOp(t)) => s.copy(t),
             _ => Err(IndexError::DbError(
                 "cannot copy between different backend types".into(),
@@ -952,6 +1294,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s.cursor(),
             Self::Fjall(s) => s.cursor(),
+            Self::Memory(s) => s.cursor(),
             Self::NoOp(s) => s.cursor(),
         }
     }
@@ -960,6 +1303,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s.utxos_by_tag(dimension, key),
             Self::Fjall(s) => s.utxos_by_tag(dimension, key),
+            Self::Memory(s) => s.utxos_by_tag(dimension, key),
             Self::NoOp(s) => s.utxos_by_tag(dimension, key),
         }
     }
@@ -968,6 +1312,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s.slot_by_block_hash(hash),
             Self::Fjall(s) => s.slot_by_block_hash(hash),
+            Self::Memory(s) => s.slot_by_block_hash(hash),
             Self::NoOp(s) => s.slot_by_block_hash(hash),
         }
     }
@@ -976,6 +1321,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s.slot_by_block_number(number),
             Self::Fjall(s) => s.slot_by_block_number(number),
+            Self::Memory(s) => s.slot_by_block_number(number),
             Self::NoOp(s) => s.slot_by_block_number(number),
         }
     }
@@ -984,6 +1330,7 @@ impl CoreIndexStore for IndexStoreBackend {
         match self {
             Self::Redb(s) => s.slot_by_tx_hash(hash),
             Self::Fjall(s) => s.slot_by_tx_hash(hash),
+            Self::Memory(s) => s.slot_by_tx_hash(hash),
             Self::NoOp(s) => s.slot_by_tx_hash(hash),
         }
     }
@@ -1002,9 +1349,46 @@ impl CoreIndexStore for IndexStoreBackend {
             Self::Fjall(s) => s
                 .slots_by_tag(dimension, key, start, end)
                 .map(IndexSlotIterBackend::Fjall),
+            Self::Memory(s) => s
+                .slots_by_tag(dimension, key, start, end)
+                .map(IndexSlotIterBackend::Memory),
             Self::NoOp(s) => s
                 .slots_by_tag(dimension, key, start, end)
                 .map(IndexSlotIterBackend::NoOp),
+        }
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, IndexError> {
+        match self {
+            Self::Redb(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::Redb),
+            Self::Fjall(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::Fjall),
+            Self::Memory(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::Memory),
+            Self::NoOp(s) => s
+                .iter_archive_tags(dimensions, slots)
+                .map(IndexTagIterBackend::NoOp),
+        }
+    }
+
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
+        match self {
+            Self::Redb(s) => s.iter_exact_records(slots).map(IndexExactIterBackend::Redb),
+            Self::Fjall(s) => s
+                .iter_exact_records(slots)
+                .map(IndexExactIterBackend::Fjall),
+            Self::Memory(s) => s
+                .iter_exact_records(slots)
+                .map(IndexExactIterBackend::Memory),
+            Self::NoOp(s) => s.iter_exact_records(slots).map(IndexExactIterBackend::NoOp),
         }
     }
 }
@@ -1136,5 +1520,161 @@ impl MempoolStore for MempoolBackend {
             Self::Ephemeral(s) => MempoolStreamBackend::Ephemeral(s.subscribe()),
             Self::Redb(s) => MempoolStreamBackend::Redb(s.subscribe()),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use super::*;
+
+    fn refusal(result: Result<(), Error>) -> String {
+        match result {
+            Err(Error::StorageError(message)) => message,
+            other => panic!("expected a storage refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepted_backends_pass_validation() {
+        check_state_backend(&StateStoreConfig::Fjall(FjallStateConfig::default())).unwrap();
+        check_index_backend(&IndexStoreConfig::Fjall(FjallIndexConfig::default())).unwrap();
+
+        // in_memory stays accepted: a builtin store that serves the whole
+        // contract, ephemeral by design rather than by incapacity.
+        check_state_backend(&StateStoreConfig::InMemory).unwrap();
+        check_index_backend(&IndexStoreConfig::InMemory).unwrap();
+
+        // no_op stays accepted too: it is an explicit opt-out of the index
+        // layer.
+        check_index_backend(&IndexStoreConfig::NoOp).unwrap();
+    }
+
+    /// `in_memory` has to reach the builtin stores, not a memory-mode disk
+    /// backend: that was the old wiring, and it was the reason the variant
+    /// could not serve the snapshot export seam.
+    #[test]
+    fn in_memory_selects_the_builtin_stores() {
+        let path = std::path::Path::new("/nonexistent");
+
+        let state =
+            StateStoreBackend::open(path, StateSchema::default(), &StateStoreConfig::InMemory)
+                .expect("in_memory state store should open without touching the path");
+
+        assert!(matches!(state, StateStoreBackend::Memory(_)));
+
+        let indexes = IndexStoreBackend::open(path, &IndexStoreConfig::InMemory)
+            .expect("in_memory index store should open without touching the path");
+
+        assert!(matches!(indexes, IndexStoreBackend::Memory(_)));
+
+        // And the seam the old wiring could not serve now answers.
+        state.iter_utxos().expect("iter_utxos must be supported");
+        indexes
+            .iter_archive_tags(&[], 0..1)
+            .expect("iter_archive_tags must be supported");
+        indexes
+            .start_writer()
+            .expect("start_writer failed")
+            .append_prehashed([])
+            .expect("append_prehashed must be supported");
+    }
+
+    #[test]
+    fn deprecated_state_backends_are_refused() {
+        let message = refusal(check_state_backend(&StateStoreConfig::Redb(
+            RedbStateConfig::default(),
+        )));
+
+        assert!(message.contains("redb"), "refusal must name the backend");
+        assert!(
+            message.contains("deprecated"),
+            "refusal must say the backend is deprecated"
+        );
+        assert!(
+            message.contains("fjall"),
+            "refusal must name the supported backend"
+        );
+    }
+
+    #[test]
+    fn deprecated_index_backends_are_refused() {
+        let message = refusal(check_index_backend(&IndexStoreConfig::Redb(
+            RedbIndexConfig::default(),
+        )));
+
+        assert!(message.contains("redb"), "refusal must name the backend");
+        assert!(
+            message.contains("deprecated"),
+            "refusal must say the backend is deprecated"
+        );
+        assert!(
+            message.contains("fjall"),
+            "refusal must name the supported backend"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use dolos_snapshot::restore::progress_path_in;
+
+    /// A `--force` wipe takes the progress file with the data it describes.
+    ///
+    /// The hazard this rules out is specific and quiet. `--continue` reads the
+    /// progress file and skips every layer it names; `--force` clears the
+    /// stores. A progress file that survived a wipe would therefore tell the
+    /// next run that layers it has no data for are already done, and the node
+    /// that came out would be missing a slice of chain with nothing reporting
+    /// it.
+    ///
+    /// Asserted against [`super::clear_storage`]'s actual behaviour rather than
+    /// against the fact that it happens to call `remove_dir_all`: what has to
+    /// stay true is the outcome, however the wipe is later spelled.
+    #[test]
+    fn clearing_storage_removes_a_restore_in_progress() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = temp.path().join("data");
+
+        std::fs::create_dir_all(&storage).unwrap();
+
+        let progress = progress_path_in(&storage);
+        std::fs::write(&progress, b"{}").unwrap();
+
+        // A stand-in for the stores the progress file describes, so the
+        // assertion is about a directory that had a node in it.
+        std::fs::write(storage.join("state"), b"a store").unwrap();
+
+        assert!(progress.exists());
+
+        super::clear_storage(&storage).unwrap();
+
+        assert!(
+            !progress.exists(),
+            "a progress file outlived the stores it describes"
+        );
+
+        assert!(
+            storage.is_dir(),
+            "the storage directory itself has to come back, empty"
+        );
+
+        assert_eq!(
+            std::fs::read_dir(&storage).unwrap().count(),
+            0,
+            "and come back empty"
+        );
+    }
+
+    /// The progress file is *inside* the storage path.
+    ///
+    /// The other half of the test above, and the half that would fail first if
+    /// the file were ever moved: a wipe of `storage.path` only takes it while
+    /// it lives there.
+    #[test]
+    fn the_progress_file_lives_inside_the_storage_path() {
+        let storage = std::path::Path::new("/var/lib/dolos/data");
+
+        assert!(progress_path_in(storage).starts_with(storage));
     }
 }

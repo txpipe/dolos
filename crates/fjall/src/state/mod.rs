@@ -1,7 +1,7 @@
 //! Fjall-based state store implementation for Dolos.
 //!
-//! This module provides an implementation of the `StateStore` trait using fjall,
-//! an LSM-tree based embedded database.
+//! This module provides an implementation of the `StateStore` trait using
+//! fjall, an LSM-tree based embedded database.
 //!
 //! ## Three Keyspace Design
 //!
@@ -9,13 +9,11 @@
 //!
 //! 1. **`state-cursor`**: Chain position tracking (single key-value)
 //!
-//! 2. **`state-utxos`**: UTxO set storage
-//!    Key: `[tx_hash:32][index:4]` (36 bytes)
-//!    Value: `[era:2][cbor:...]`
+//! 2. **`state-utxos`**: UTxO set storage Key: `[tx_hash:32][index:4]` (36
+//!    bytes) Value: `[era:2][cbor:...]`
 //!
-//! 3. **`state-entities`**: All entity types with namespace hash prefix
-//!    Key: `[ns_hash:8][entity_key:32]` (40 bytes)
-//!    Value: entity CBOR bytes
+//! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
+//!    `[ns_hash:8][entity_key:32]` (40 bytes) Value: entity CBOR bytes
 //!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors
@@ -155,6 +153,17 @@ impl StateStore {
         &self.entities
     }
 
+    /// Per-keyspace disk footprint: `(name, bytes, path)`.
+    pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
+        [
+            (keyspace_names::CURSOR, &self.cursor),
+            (keyspace_names::UTXOS, &self.utxos),
+            (keyspace_names::ENTITIES, &self.entities),
+        ]
+        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .to_vec()
+    }
+
     /// Gracefully shutdown the state store.
     ///
     /// This method ensures all pending work is completed before the database
@@ -267,6 +276,7 @@ impl CoreStateWriter for StateWriter {
 impl CoreStateStore for StateStore {
     type EntityIter = entities::EntityIterator;
     type EntityValueIter = entities::EmptyEntityValueIterator;
+    type UtxoIter = utxos::UtxosIterator;
     type Writer = StateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
@@ -314,20 +324,29 @@ impl CoreStateStore for StateStore {
             .map_err(StateError::from)
     }
 
+    /// Multi-value namespaces have no encoding in this store: its entity
+    /// keyspace is one value per key, with no multimap to walk (#1036).
+    ///
+    /// Refusing is the convention the trait's newer methods already use, and
+    /// what the builtin memory store answers. A panic here would take down a
+    /// caller that has an error path anyway.
     fn iter_entity_values(
         &self,
         _ns: Namespace,
         _key: impl AsRef<[u8]>,
     ) -> Result<Self::EntityValueIter, StateError> {
-        // Multimap not supported - panic if called
-        unimplemented!(
-            "iter_entity_values is not supported in fjall state store (no multimap support)"
-        )
+        Err(StateError::Unsupported("iter_entity_values"))
     }
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError> {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         utxos::get_utxos(&snapshot, &self.utxos, &refs).map_err(StateError::from)
+    }
+
+    fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        Ok(utxos::UtxosIterator::new(&snapshot, &self.utxos))
     }
 }

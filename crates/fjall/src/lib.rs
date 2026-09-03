@@ -1,17 +1,22 @@
 //! Fjall-based storage implementations for Dolos.
 //!
-//! This crate provides implementations of the `IndexStore` and `StateStore` traits
-//! using fjall, an LSM-tree based embedded database. Fjall is optimized for write-heavy
-//! workloads with many keys, which is ideal for blockchain data.
+//! This crate provides implementations of the `IndexStore` and `StateStore`
+//! traits using fjall, an LSM-tree based embedded database. Fjall is optimized
+//! for write-heavy workloads with many keys, which is ideal for blockchain
+//! data.
 //!
 //! ## Modules
 //!
 //! - [`index`]: Index store implementation for cross-cutting indexes
-//! - [`state`]: State store implementation for ledger state (UTxOs, entities, datums)
+//! - [`state`]: State store implementation for ledger state (UTxOs, entities,
+//!   datums)
+//! - [`archive`]: Archive store implementation (block bodies stay in the shared
+//!   flat segment files from `dolos-flatfiles`)
 //! - [`keys`]: Shared key encoding utilities
 
-use dolos_core::{IndexError, StateError};
+use dolos_core::{ArchiveError, IndexError, StateError};
 
+pub mod archive;
 pub mod index;
 pub mod keys;
 pub mod state;
@@ -37,6 +42,9 @@ pub enum Error {
 
     #[error("keyspace not found: {0}")]
     KeyspaceNotFound(String),
+
+    #[error("io error: {0}")]
+    Io(String),
 }
 
 impl From<Error> for IndexError {
@@ -48,5 +56,11 @@ impl From<Error> for IndexError {
 impl From<Error> for StateError {
     fn from(error: Error) -> Self {
         StateError::InternalStoreError(error.to_string())
+    }
+}
+
+impl From<Error> for ArchiveError {
+    fn from(error: Error) -> Self {
+        ArchiveError::InternalError(error.to_string())
     }
 }

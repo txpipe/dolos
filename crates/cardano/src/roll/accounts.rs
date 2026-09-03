@@ -147,9 +147,10 @@ impl BlockVisitor for AccountVisitor {
             let MoveInstantaneousReward { source, target, .. } = cert;
 
             if let InstantaneousRewardTarget::StakeCredentials(creds) = target {
-                // Pre-Alonzo (protocol < 5): MIRs overwrite previous values (Map.union semantics)
-                // Alonzo+ (protocol >= 5): MIRs accumulate (Map.unionWith (<>) semantics)
-                // TODO: move this logic out of the visitor and into a module more ledger-related.
+                // Pre-Alonzo (protocol < 5): MIRs overwrite previous values (Map.union
+                // semantics) Alonzo+ (protocol >= 5): MIRs accumulate
+                // (Map.unionWith (<>) semantics) TODO: move this logic out of
+                // the visitor and into a module more ledger-related.
                 let overwrite = self.protocol_version.unwrap_or(0) < 5;
 
                 for (cred, amount) in creds {

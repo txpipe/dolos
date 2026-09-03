@@ -20,6 +20,7 @@ use rand::Rng;
 
 use dolos_core::*;
 
+pub mod archive;
 pub mod blocks;
 pub mod faults;
 pub mod synthetic;
@@ -79,7 +80,8 @@ pub const ADDRESS_TYPE_VECTORS: [&str; 5] = [
     BYRON_ADDR,
 ];
 
-/// Key seeds for person addresses (offset to avoid collision with synthetic.rs which uses [3u8; 64])
+/// Key seeds for person addresses (offset to avoid collision with synthetic.rs
+/// which uses [3u8; 64])
 const PERSON_SEEDS: [[u8; 64]; 5] = [[11u8; 64], [12u8; 64], [13u8; 64], [14u8; 64], [15u8; 64]];
 
 fn make_person_address(seed: [u8; 64]) -> String {

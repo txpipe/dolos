@@ -4,9 +4,11 @@ use crate::{
     mapping::{rational_to_f64, IntoModel},
     routes::epochs::cost_models::get_named_cost_model,
 };
-use blockfrost_openapi::models::epoch_param_content::EpochParamContent;
-use dolos_cardano::PParamsSet;
-use dolos_core::Genesis;
+use blockfrost_openapi::models::{
+    epoch_content::EpochContent, epoch_param_content::EpochParamContent,
+};
+use dolos_cardano::{model::EpochState, PParamsSet};
+use dolos_core::{cbor, Genesis};
 use pallas::ledger::primitives::{conway::CostModels, Epoch};
 
 fn cost_models_to_key_value(cost_models: &CostModels) -> Vec<(&'static str, &[i64])> {
@@ -191,6 +193,55 @@ impl<'a> IntoModel<EpochParamContent> for ParametersModelBuilder<'a> {
             decentralisation_param: rational_to_f64::<3>(
                 &params.decentralization_constant_or_default(),
             ),
+        };
+
+        Ok(out)
+    }
+}
+
+pub struct EpochContentModelBuilder {
+    pub state: EpochState,
+    pub start_time: u64,
+    pub end_time: u64,
+    pub first_block_time: u64,
+    pub last_block_time: u64,
+    pub tx_count: u64,
+    pub output: cbor::U128,
+    pub active_stake: Option<u64>,
+}
+
+impl IntoModel<EpochContent> for EpochContentModelBuilder {
+    type SortKey = Epoch;
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        Some(self.state.number)
+    }
+
+    fn into_model(self) -> Result<EpochContent, axum::http::StatusCode> {
+        let Self {
+            state,
+            start_time,
+            end_time,
+            first_block_time,
+            last_block_time,
+            tx_count,
+            output,
+            active_stake,
+        } = self;
+
+        let rolling = state.rolling.live().cloned().unwrap_or_default();
+
+        let out = EpochContent {
+            epoch: state.number as i32,
+            start_time: start_time as i32,
+            end_time: end_time as i32,
+            first_block_time: first_block_time as i32,
+            last_block_time: last_block_time as i32,
+            block_count: rolling.blocks_minted as i32,
+            tx_count: tx_count as i32,
+            output: output.to_string(),
+            fees: rolling.gathered_fees.to_string(),
+            active_stake: active_stake.map(|x| x.to_string()),
         };
 
         Ok(out)

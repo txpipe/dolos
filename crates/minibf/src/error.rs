@@ -12,10 +12,16 @@ pub enum Error {
     Pagination(PaginationError),
     Code(StatusCode),
     InvalidAddress,
+    InvalidStakeAddress,
     InvalidAsset,
+    InvalidPolicy,
     InvalidPoolId,
     InvalidBlockNumber,
     InvalidBlockHash,
+    InvalidEpochNumber,
+    InvalidXpub,
+    InvalidDerivationRole,
+    InvalidDerivationIndex,
 }
 
 #[derive(Serialize)]
@@ -63,12 +69,30 @@ impl IntoResponse for Error {
                 )),
             )
                 .into_response(),
+            Error::InvalidStakeAddress => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid or malformed stake address format.",
+                )),
+            )
+                .into_response(),
             Error::InvalidAsset => (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorBody::new(
                     400,
                     "Bad Request",
                     "Invalid or malformed asset format.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidPolicy => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Invalid or malformed policy format.",
                 )),
             )
                 .into_response(),
@@ -96,6 +120,42 @@ impl IntoResponse for Error {
                     400,
                     "Bad Request",
                     "Missing or malformed block hash.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidEpochNumber => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "Missing, out of range or malformed epoch_number.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidXpub => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "The xpub is not valid. Use 128 hexadecimal characters.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidDerivationRole => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "The role is missing or is not valid. Use an integer from 0 through 2147483647.",
+                )),
+            )
+                .into_response(),
+            Error::InvalidDerivationIndex => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::new(
+                    400,
+                    "Bad Request",
+                    "The index is missing or is not valid. Use an integer from 0 through 2147483647.",
                 )),
             )
                 .into_response(),

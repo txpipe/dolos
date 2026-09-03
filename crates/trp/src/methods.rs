@@ -339,7 +339,8 @@ mod tests {
     use super::*;
 
     async fn setup_test_context() -> Arc<Context<ToyDomain>> {
-        // Use devnet genesis (protocol 9 = Conway, has Plutus cost models needed by tx3 compiler)
+        // Use devnet genesis (protocol 9 = Conway, has Plutus cost models needed by tx3
+        // compiler)
         let genesis = std::sync::Arc::new(dolos_cardano::include::devnet::load());
 
         // Compute minimum slot for the genesis era summary

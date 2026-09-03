@@ -10,8 +10,8 @@ use crate::{
     pots::{self, EpochIncentives, Eta, Pots},
     ratio,
     rupd::{credential_to_key, RupdWork, StakeSnapshot},
-    AccountState, EpochState, EraProtocol, FixedNamespace as _, PParamsSet, PoolHash, PoolParams,
-    PoolState,
+    AccountState, EpochState, EpochValue, EraProtocol, FixedNamespace as _, PParamsSet, PoolHash,
+    PoolParams, PoolSnapshot, PoolState,
 };
 
 /// Calculate eta using pool blocks (not total blocks including federated).
@@ -93,6 +93,28 @@ fn define_epoch_incentives(
     Ok(incentives)
 }
 
+/// Map a lagging pool snapshot to a descriptive error.
+///
+/// A pool whose snapshot isn't aligned to `current_epoch` (see
+/// [`EpochValue::is_at_epoch`]) would be read through the wrong positional
+/// slots and either feed stale data into rewards or be silently dropped, so we
+/// fail loud and name the offending pool instead.
+fn ensure_pool_aligned(
+    operator: &PoolHash,
+    snapshot: &EpochValue<PoolSnapshot>,
+    current_epoch: u64,
+) -> Result<(), ChainError> {
+    if snapshot.is_at_epoch(current_epoch) {
+        return Ok(());
+    }
+
+    Err(ChainError::PoolSnapshotLagging {
+        pool: hex::encode(operator),
+        pool_epoch: snapshot.epoch(),
+        current_epoch,
+    })
+}
+
 impl StakeSnapshot {
     fn track_stake(
         &mut self,
@@ -108,6 +130,15 @@ impl StakeSnapshot {
             .entry(pool_id)
             .and_modify(|x| *x += stake)
             .or_insert(stake);
+
+        // Same reasoning for the delegator count, which `finalize` reports in
+        // the per-pool `StakeLog`: counting it here (the globals pass sees
+        // every account) keeps it correct after a mid-RUPD restart, which a
+        // per-shard tally would not be.
+        self.pool_delegator_counts
+            .entry(pool_id)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
 
         self.active_stake_sum += stake;
 
@@ -137,10 +168,13 @@ impl StakeSnapshot {
     ///
     /// # Arguments
     /// * `state` - Current state store
+    /// * `current_epoch` - Epoch the RUPD is computing for; every pool's
+    ///   snapshot must be aligned to it (see `ensure_pool_aligned`).
     /// * `stake_epoch` - Epoch for stake/delegation snapshot (E-3)
     /// * `protocol` - Era protocol for stake calculation
     pub fn load_globals<D: Domain>(
         state: &D::State,
+        current_epoch: u64,
         stake_epoch: u64,
         protocol: EraProtocol,
     ) -> Result<Self, ChainError> {
@@ -150,6 +184,10 @@ impl StakeSnapshot {
 
         for record in pools {
             let (_, pool) = record?;
+
+            // Check ALL pools, not just admitted ones, so a pool lagging out of
+            // the admission window is caught rather than silently dropped.
+            ensure_pool_aligned(&pool.operator, &pool.snapshot, current_epoch)?;
 
             // Sum blocks from ALL pools that have mark() data for the performance epoch.
             // This is needed for epoch_blocks() denominator in apparent performance.
@@ -251,10 +289,8 @@ impl StakeSnapshot {
         ranges: &[Range<EntityKey>],
     ) -> Result<(), ChainError> {
         for range in ranges {
-            let accounts = state.iter_entities_typed::<AccountState>(
-                AccountState::NS,
-                Some(range.clone()),
-            )?;
+            let accounts =
+                state.iter_entities_typed::<AccountState>(AccountState::NS, Some(range.clone()))?;
 
             for record in accounts {
                 let (_, account) = record?;
@@ -366,7 +402,8 @@ impl RupdWork {
 
         let pots = epoch.initial_pots.clone();
 
-        // Use non-overlay block count for eta calculation (matches ledger BlocksMade total).
+        // Use non-overlay block count for eta calculation (matches ledger BlocksMade
+        // total).
         let blocks_made_total = epoch
             .rolling
             .mark()
@@ -410,7 +447,8 @@ impl RupdWork {
             let era = work.chain.era_for_epoch(snapshot_epoch + 1);
             let protocol = EraProtocol::from(era.protocol);
 
-            work.snapshot = StakeSnapshot::load_globals::<D>(state, snapshot_epoch, protocol)?;
+            work.snapshot =
+                StakeSnapshot::load_globals::<D>(state, current_epoch, snapshot_epoch, protocol)?;
 
             debug!(
                 %current_epoch,
@@ -501,13 +539,15 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn pool_params(&self, pool: PoolHash) -> &PoolParams {
+        // Alignment is validated in `load_globals`, so an admitted pool always
+        // has a go (E-3) snapshot.
         self.snapshot
             .pools
             .get(&pool)
-            .unwrap()
+            .expect("pool missing from rewards snapshot")
             .go()
             .map(|x| &x.params)
-            .unwrap()
+            .expect("aligned pool must have a go snapshot")
     }
 
     fn pool_delegators(&self, pool: PoolHash) -> impl Iterator<Item = StakeCredential> {
@@ -524,14 +564,14 @@ impl crate::rewards::RewardsContext for RupdWork {
     }
 
     fn pool_blocks(&self, pool: PoolHash) -> u64 {
-        *self
-            .snapshot
+        // As in `pool_params`: an aligned pool always has a mark (E-1) snapshot.
+        self.snapshot
             .pools
             .get(&pool)
-            .unwrap()
+            .expect("pool missing from rewards snapshot")
             .mark()
-            .map(|x| &x.blocks_minted)
-            .unwrap() as u64
+            .map(|x| x.blocks_minted as u64)
+            .expect("aligned pool must have a mark snapshot")
     }
 
     fn pre_allegra(&self) -> bool {

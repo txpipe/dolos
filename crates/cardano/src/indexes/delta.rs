@@ -1,7 +1,7 @@
 //! Cardano-specific index delta builder.
 //!
-//! This module provides `CardanoIndexDeltaBuilder` for constructing `IndexDelta`
-//! structures from Cardano block data.
+//! This module provides `CardanoIndexDeltaBuilder` for constructing
+//! `IndexDelta` structures from Cardano block data.
 
 use dolos_core::{
     ArchiveIndexDelta, BlockSlot, ChainPoint, EraCbor, IndexDelta, Tag, TxoRef, UtxoIndexDelta,
@@ -59,8 +59,8 @@ impl CardanoIndexDeltaBuilder {
 
     /// Add a produced UTxO to the delta.
     ///
-    /// Extracts tags from the output (address, assets) and adds them to the UTxO
-    /// filter delta for insertion.
+    /// Extracts tags from the output (address, assets) and adds them to the
+    /// UTxO filter delta for insertion.
     pub fn add_produced_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
         let tags = Self::extract_utxo_tags(output);
         self.delta.utxo.produced.push((txo_ref, tags));
@@ -68,8 +68,8 @@ impl CardanoIndexDeltaBuilder {
 
     /// Add a consumed UTxO to the delta.
     ///
-    /// Extracts tags from the output (address, assets) and adds them to the UTxO
-    /// filter delta for removal.
+    /// Extracts tags from the output (address, assets) and adds them to the
+    /// UTxO filter delta for removal.
     pub fn add_consumed_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
         let tags = Self::extract_utxo_tags(output);
         self.delta.utxo.consumed.push((txo_ref, tags));
@@ -107,6 +107,14 @@ impl CardanoIndexDeltaBuilder {
                 subject.extend(asset.name());
                 tags.push(Tag::new(utxo::ASSET, subject));
             }
+        }
+
+        // Reference script tag
+        if let Some(script_ref) = output.script_ref() {
+            tags.push(Tag::new(
+                utxo::SCRIPT_REF,
+                pallas_extras::script_ref_hash(&script_ref).to_vec(),
+            ));
         }
 
         tags
@@ -269,7 +277,8 @@ impl CardanoIndexDeltaBuilder {
     ///
     /// Calls `start_block`, then iterates all transactions adding
     /// tx hashes, metadata, inputs (with resolved UTxO lookups),
-    /// outputs (with script refs), witness scripts/datums, certs, and redeemers.
+    /// outputs (with script refs), witness scripts/datums, certs, and
+    /// redeemers.
     pub fn index_block(
         &mut self,
         block: &pallas::ledger::traverse::MultiEraBlock<'_>,
@@ -430,6 +439,7 @@ mod tests {
     use pallas::ledger::addresses::{
         Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
     };
+    use std::collections::BTreeSet;
 
     fn test_shelley_address() -> Address {
         Address::Shelley(ShelleyAddress::new(
@@ -457,5 +467,148 @@ mod tests {
         assert_eq!(delta.archive[0].tx_hashes.len(), 1);
         // Shelley address produces 3 tags: full, payment, stake
         assert_eq!(delta.archive[0].tags.len(), 3);
+    }
+
+    /// An output that carries a reference script gets a `script_ref` tag whose
+    /// key is the script's on-chain hash.
+    #[test]
+    fn reference_script_output_gets_script_ref_tag() {
+        use pallas::codec::minicbor;
+        use pallas::codec::utils::{CborWrap, KeepRaw};
+        use pallas::crypto::hash::Hasher;
+        use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, ScriptRef, Value};
+        use pallas::ledger::traverse::{Era, MultiEraOutput};
+
+        let script = pallas::ledger::primitives::alonzo::NativeScript::InvalidHereafter(500_000);
+
+        let output = PostAlonzoTransactionOutput {
+            address: test_shelley_address().to_vec().into(),
+            value: Value::Coin(1_000_000),
+            datum_option: None,
+            script_ref: Some(CborWrap(ScriptRef::NativeScript(KeepRaw::from(
+                script.clone(),
+            )))),
+        };
+
+        let cbor = minicbor::to_vec(&output).unwrap();
+        let output = MultiEraOutput::decode(Era::Conway, &cbor).unwrap();
+
+        let tags = CardanoIndexDeltaBuilder::extract_utxo_tags(&output);
+
+        // Native scripts hash their CBOR behind a leading 0x00 language tag.
+        let script_cbor = minicbor::to_vec(&script).unwrap();
+        let expected = Hasher::<224>::hash_tagged(&script_cbor, 0);
+
+        let tag = tags
+            .iter()
+            .find(|tag| tag.dimension == utxo::SCRIPT_REF)
+            .expect("output with a reference script must produce a script_ref tag");
+
+        assert_eq!(tag.key, expected.to_vec());
+    }
+
+    /// Drive every tag-producing method on the builder once.
+    ///
+    /// This is the producer side of the registry: what a block turns into.
+    /// Kept as one function so the completeness check below and any future
+    /// caller see the same set.
+    fn tag_every_dimension(builder: &mut CardanoIndexDeltaBuilder) {
+        use pallas::ledger::primitives::{
+            alonzo::TransactionInput,
+            conway::{Certificate, Value},
+            StakeCredential,
+        };
+        use pallas::ledger::traverse::{MultiEraCert, MultiEraInput, MultiEraValue};
+        use std::borrow::Cow;
+        use std::collections::BTreeMap;
+
+        builder.start_block(100, vec![0; 32], Some(50));
+        builder.add_tx_hash(vec![1; 32]);
+
+        // ADDRESS, PAYMENT, STAKE
+        builder.add_address(&test_shelley_address());
+
+        // POLICY, ASSET
+        let mut names = BTreeMap::new();
+        names.insert(
+            vec![0xaa; 4].into(),
+            1u64.try_into().expect("1 is a positive coin"),
+        );
+        let mut multiasset = BTreeMap::new();
+        multiasset.insert(Hash::new([0x11; 28]), names);
+        let value = Value::Multiasset(0, multiasset);
+        builder.add_assets(&MultiEraValue::Conway(Cow::Owned(value)));
+
+        // DATUM
+        builder.add_datum_hash(vec![0x22; 32]);
+
+        // SPENT_TXO
+        let input = TransactionInput {
+            transaction_id: Hash::new([0x33; 32]),
+            index: 0,
+        };
+        builder.add_spent_input(&MultiEraInput::from_alonzo_compatible(&input));
+
+        // SCRIPT
+        builder.add_script_hash(vec![0x44; 28]);
+
+        // ACCOUNT_CERTS
+        let registration =
+            Certificate::StakeRegistration(StakeCredential::AddrKeyhash(Hash::new([0x55; 28])));
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(registration))));
+
+        // POOL_CERTS
+        let retirement = Certificate::PoolRetirement(Hash::new([0x66; 28]), 42);
+        builder.add_cert(&MultiEraCert::Conway(Box::new(Cow::Owned(retirement))));
+
+        // ACCOUNT_WITHDRAWALS
+        builder.add_withdrawal(&[0x77; 29]);
+
+        // METADATA
+        builder.add_metadata_label(674);
+    }
+
+    /// The dimension registry has to hold every dimension this builder emits.
+    ///
+    /// `archive::ALL` drives every bulk traversal of archive tags — index
+    /// stores keep a hash of the dimension name, not the name, so the set is
+    /// not discoverable from disk. A dimension produced here and missing there
+    /// does not fail: it silently stops being exported, and a snapshot built
+    /// from the traversal is quietly incomplete.
+    ///
+    /// The reverse direction is checked too. Without it the test could stop
+    /// covering a dimension — by a builder method losing its call above — and
+    /// still pass, which is the same blind spot one step removed.
+    #[test]
+    fn every_produced_dimension_is_registered() {
+        let mut builder =
+            CardanoIndexDeltaBuilder::new(ChainPoint::Specific(100, Hash::new([0; 32])));
+        tag_every_dimension(&mut builder);
+
+        let delta = builder.build();
+
+        let produced: BTreeSet<&str> = delta
+            .archive
+            .iter()
+            .flat_map(|block| block.tags.iter())
+            .map(|tag| tag.dimension)
+            .collect();
+
+        let registered: BTreeSet<&str> = archive::ALL.iter().copied().collect();
+
+        assert!(
+            produced.is_subset(&registered),
+            "these dimensions are produced but not in archive::ALL, so they \
+             would silently stop being exported: {:?}",
+            &produced - &registered,
+        );
+
+        assert_eq!(
+            produced,
+            registered,
+            "every registered dimension must be exercised here, otherwise this \
+             test stops covering the ones it misses: {:?} are unexercised",
+            &registered - &produced,
+        );
     }
 }

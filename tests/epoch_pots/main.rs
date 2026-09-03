@@ -513,8 +513,7 @@ fn run_epoch_pots_test(
                         // and capture the ending epoch.
                         accumulated_applied.clear();
                         if let Some(boundary) = shard.boundary() {
-                            accumulated_ending_epoch =
-                                Some(boundary.ending_state().number);
+                            accumulated_ending_epoch = Some(boundary.ending_state().number);
                         }
                     }
                     if let Some(boundary) = shard.boundary() {

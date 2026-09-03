@@ -6,9 +6,9 @@ use tracing::info;
 pub use pallas;
 
 use dolos_core::{
-    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EntityKey,
-    EraCbor, Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore,
-    TipEvent, WorkUnit,
+    config::CardanoConfig, BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor,
+    Genesis, MempoolAwareUtxoStore, MempoolTx, MempoolUpdate, RawBlock, StateStore, TipEvent,
+    WorkUnit,
 };
 
 use crate::{
@@ -41,6 +41,7 @@ pub mod utxoset;
 pub mod estart;
 pub mod ewrap;
 pub mod genesis;
+mod migrate;
 pub mod roll;
 pub mod rupd;
 mod work;
@@ -112,9 +113,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::total_shards(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::total_shards(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::total_shards(w),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::total_shards(w)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::total_shards(w),
             Self::ForcedStop => 1,
         }
     }
@@ -136,9 +135,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::initialize(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::initialize(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::initialize(w, domain),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::initialize(w, domain)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::initialize(w, domain),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -150,29 +147,21 @@ where
             }
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
-            Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain, shard_index)
+            Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::load(w, domain, shard_index),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::load(w, domain, shard_index)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::load(
-                w,
-                domain,
-                shard_index,
-            ),
             Self::ForcedStop => Ok(()),
         }
     }
 
     fn compute(&mut self, shard_index: u32) -> Result<(), DomainError> {
         match self {
-            Self::Genesis(w) => {
-                <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w, shard_index)
-            }
+            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::compute(w, shard_index),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::compute(w, shard_index)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::compute(w, shard_index),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -191,11 +180,9 @@ where
             Self::Ewrap(w) => {
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
             }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(
-                w,
-                domain,
-                shard_index,
-            ),
+            Self::Estart(w) => {
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_wal(w, domain, shard_index)
+            }
             Self::ForcedStop => Ok(()),
         }
     }
@@ -215,11 +202,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
             }
             Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(
-                    w,
-                    domain,
-                    shard_index,
-                )
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_state(w, domain, shard_index)
             }
             Self::ForcedStop => Err(DomainError::StopEpochReached),
         }
@@ -240,11 +223,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
             }
             Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(
-                    w,
-                    domain,
-                    shard_index,
-                )
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
             }
             Self::ForcedStop => Ok(()),
         }
@@ -265,11 +244,7 @@ where
                 <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
             }
             Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(
-                    w,
-                    domain,
-                    shard_index,
-                )
+                <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
             }
             Self::ForcedStop => Ok(()),
         }
@@ -281,9 +256,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::finalize(w, domain),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::finalize(w, domain)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::finalize(w, domain),
             Self::ForcedStop => Ok(()),
         }
     }
@@ -294,9 +267,7 @@ where
             Self::Roll(w) => <roll::RollWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Rupd(w) => <rupd::RupdWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::Ewrap(w) => <ewrap::EwrapWorkUnit as WorkUnit<D>>::tip_events(w),
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w)
-            }
+            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::tip_events(w),
             Self::ForcedStop => Vec::new(),
         }
     }
@@ -319,8 +290,9 @@ pub struct CardanoLogic {
     config: CardanoConfig,
     work: Option<WorkBuffer>,
     pub(crate) cache: Cache,
-    /// Flag indicating the cache needs refresh after a work unit that modifies eras.
-    /// Set after Genesis or EStart work units are popped, cleared at next pop_work call.
+    /// Flag indicating the cache needs refresh after a work unit that modifies
+    /// eras. Set after Genesis or EStart work units are popped, cleared at
+    /// next pop_work call.
     needs_cache_refresh: bool,
 }
 
@@ -350,6 +322,11 @@ impl dolos_core::ChainLogic for CardanoLogic {
     ) -> Result<Self, ChainError> {
         info!("initializing");
 
+        // One-time self-heal migrations. Must run before anything reads
+        // governance state and before WAL catch-up replays deltas that
+        // expect the singleton to exist.
+        migrate::ensure_gov_singleton::<D>(state)?;
+
         let cursor = state.read_cursor()?;
 
         let work = match cursor {
@@ -357,105 +334,51 @@ impl dolos_core::ChainLogic for CardanoLogic {
             None => WorkBuffer::Empty,
         };
 
-        // Crash-recovery check: if the previous process crashed mid-boundary,
-        // `EpochState.ewrap_progress` will be `Some(p)` with `p.committed`
-        // equal to the next Ewrap that should have run, and `p.total` the
-        // boundary's shard count captured at the first commit. Detect and
-        // warn — full resume requires re-fetching the boundary block from
-        // upstream, which is tracked separately. The persisted `total` is
-        // used for the in-flight boundary even if `crate::shard::ACCOUNT_SHARDS`
-        // changed across versions, to avoid breaking the in-progress pipeline.
+        // Crash-recovery diagnostics for a boundary interrupted by a prior
+        // crash. The two progress fields are NOT mutually exclusive: under
+        // `EpochWrapUpV3`, `ewrap_progress` is left at `Some(total, total)`
+        // once the close phase finishes and is only cleared by
+        // `EpochTransition` at ESTART finalize — so mid-open both fields are
+        // set and both checks can fire. These only warn; resume itself is not
+        // yet fully idempotent.
+        // TODO: implement true shard resume (#1018).
         if let Ok(epoch) = load_epoch::<D>(state) {
-            if let Some(progress) = epoch.ewrap_progress.as_ref() {
-                let configured = crate::shard::ACCOUNT_SHARDS;
-                if progress.total != configured {
+            let configured = crate::shard::ACCOUNT_SHARDS;
+            let warn_resume = |phase: &'static str, p: &ShardProgress| {
+                if p.total != configured {
                     tracing::warn!(
+                        phase,
                         epoch = epoch.number,
-                        stored_total = progress.total,
+                        stored_total = p.total,
                         configured_total = configured,
-                        "in-flight boundary uses {} shards but ACCOUNT_SHARDS = {}; \
-                         the in-flight boundary will continue with {} (the persisted total) \
-                         and the new value takes effect on the next boundary",
-                        progress.total,
-                        configured,
-                        progress.total,
+                        "CARDANO-003: in-flight boundary shard count differs from configured; \
+                         continuing with the persisted total"
                     );
                 }
-                if progress.committed < progress.total {
+                if p.committed < p.total {
                     tracing::warn!(
+                        phase,
                         epoch = epoch.number,
-                        next_shard = progress.committed,
-                        total_shards = progress.total,
-                        "crash detected mid-boundary: ewrap_progress is set. \
-                         On the next block that triggers the boundary, dolos will \
-                         resume the Ewrap pipeline; correctness depends on shard \
-                         idempotency (state deletes are no-ops if already applied; \
-                         EWrapProgress guards on shard_index). Operators should \
-                         monitor the subsequent boundary for inconsistency. \
-                         TODO: implement true shard resume."
+                        next_shard = p.committed,
+                        total_shards = p.total,
+                        "CARDANO-004: crash detected mid-boundary; resuming on the next boundary trigger"
                     );
                 } else {
                     tracing::warn!(
+                        phase,
                         epoch = epoch.number,
-                        committed = progress.committed,
-                        total_shards = progress.total,
-                        "found EpochState.ewrap_progress.committed == total \
-                         at startup — EWRAP for this boundary closed in a \
-                         prior run but ESTART finalize did not commit before \
-                         crash. The next boundary trigger will short-circuit \
-                         the EwrapWorkUnit (no replay) and resume the ESTART \
-                         pipeline from estart_progress.committed."
+                        committed = p.committed,
+                        total_shards = p.total,
+                        "CARDANO-005: boundary half-closed at startup; resuming the remaining phase"
                     );
                 }
-            }
+            };
 
-            // Same crash-recovery check for the EStart-shard half of the
-            // boundary. Only one of the two progress fields can be set at
-            // any time — Ewrap clears `ewrap_progress` before any
-            // EStart-shard runs, and `EpochTransition` clears
-            // `estart_progress` when the new epoch opens.
-            if let Some(progress) = epoch.estart_progress.as_ref() {
-                let configured = crate::shard::ACCOUNT_SHARDS;
-                if progress.total != configured {
-                    tracing::warn!(
-                        epoch = epoch.number,
-                        stored_total = progress.total,
-                        configured_total = configured,
-                        "in-flight estart-shard boundary uses {} shards but \
-                         ACCOUNT_SHARDS = {}; the in-flight boundary will \
-                         continue with {} (the persisted total) and the new \
-                         value takes effect on the next boundary",
-                        progress.total,
-                        configured,
-                        progress.total,
-                    );
-                }
-                if progress.committed < progress.total {
-                    tracing::warn!(
-                        epoch = epoch.number,
-                        next_shard = progress.committed,
-                        total_shards = progress.total,
-                        "crash detected mid-boundary: estart_progress is set. \
-                         On the next block that triggers the boundary, dolos will \
-                         resume the EStart-shard pipeline; correctness depends on \
-                         shard idempotency (EStartProgress guards on \
-                         shard_index, but AccountTransition is not natively \
-                         idempotent). Operators should monitor the subsequent \
-                         boundary for inconsistency. TODO: implement true shard \
-                         resume."
-                    );
-                } else {
-                    tracing::warn!(
-                        epoch = epoch.number,
-                        committed = progress.committed,
-                        total_shards = progress.total,
-                        "found EpochState.estart_progress.committed == total \
-                         at startup — Estart finalize was not committed before \
-                         crash. The next boundary attempt will re-run \
-                         EStart-shards and finalize; idempotency should keep the \
-                         result correct."
-                    );
-                }
+            if let Some(p) = epoch.ewrap_progress.as_ref() {
+                warn_resume("ewrap", p);
+            }
+            if let Some(p) = epoch.estart_progress.as_ref() {
+                warn_resume("estart", p);
             }
         }
 
@@ -658,11 +581,22 @@ pub fn load_effective_pparams<D: Domain>(state: &D::State) -> Result<PParamsSet,
 }
 
 pub fn load_epoch<D: Domain>(state: &D::State) -> Result<EpochState, ChainError> {
-    let epoch = state
-        .read_entity_typed::<EpochState>(EpochState::NS, &EntityKey::from(CURRENT_EPOCH_KEY))?
-        .ok_or(ChainError::NoActiveEpoch)?;
+    read_singleton::<D, EpochState>(state)?.ok_or(ChainError::NoActiveEpoch)
+}
 
-    Ok(epoch)
+/// Load the governance singleton, whose existence is an invariant
+/// (seeded at bootstrap or by the CARDANO-006 startup migration).
+pub fn load_gov<D: Domain>(state: &D::State) -> Result<GovState, ChainError> {
+    read_singleton::<D, GovState>(state)?.ok_or(ChainError::MissingGovState)
+}
+
+/// Read a singleton entity directly at its fixed key. `None` means the
+/// row was never created — for the known singletons that's a broken or
+/// pre-migration store, which the `load_*` wrappers turn into errors.
+pub fn read_singleton<D: Domain, E: SingletonEntity>(
+    state: &D::State,
+) -> Result<Option<E>, ChainError> {
+    Ok(state.read_entity_typed::<E>(E::NS, &E::singleton_key())?)
 }
 
 #[cfg(test)]

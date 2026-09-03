@@ -1,0 +1,67 @@
+---
+title: Troubleshooting
+sidebar:
+  order: 5
+---
+
+Dolos tags certain operational failures with a stable error code (e.g. `CARDANO-001`). When you see one in the logs, look it up here for what it means and how to act.
+
+Codes are grouped by subsystem: `CARDANO-*` covers ledger / epoch-boundary state. Severity is `error` (the node stops) unless noted as a warning.
+
+Crash-recovery warnings (`CARDANO-003/004/005`) carry a `phase` field of `ewrap` (epoch close) or `estart` (epoch open) indicating which half of the boundary they refer to.
+
+## CARDANO-001 — pool snapshot lagging
+
+```
+CARDANO-001: pool <hash> snapshot at epoch <e>, expected <current>
+```
+
+**Meaning.** A pool's stake/performance snapshot is at an older epoch than the rest of the ledger. Each pool's snapshot window is rotated forward on every epoch boundary; this one was left behind, so the data needed for reward calculation (its `go`/`mark` slots) is missing or misaligned.
+
+**When you see it.** Either at block processing (a block mints into the lagging pool) or at the reward update (RUPD) for the epoch.
+
+**Likely cause.** Inconsistent state persisted by an abnormal shutdown during an epoch boundary — the boundary resume path is not yet fully idempotent. It does not occur during healthy, uninterrupted operation.
+
+**What to do.** The node cannot compute correct rewards from this state, so it stops rather than emit wrong data. Re-bootstrap the node from a trusted snapshot. Capture the full log line (the pool hash and both epochs) when reporting the issue.
+
+## CARDANO-002 — epoch boundary incomplete
+
+```
+CARDANO-002: epoch boundary <e> incomplete (estart shards <committed>/<total>)
+```
+
+**Meaning.** The epoch-opening (ESTART) finalize step was asked to run before all of its sharded work had committed, or after the epoch had already advanced. Finalize must run exactly once per boundary; this guard refuses to run it on an inconsistent boundary rather than double-apply the transition.
+
+**Likely cause.** An abnormal shutdown mid-boundary followed by a resume that did not replay every shard. As with `CARDANO-001`, this points at the not-yet-idempotent boundary resume path.
+
+**What to do.** Restart the node; the boundary is re-driven from its last consistent point. If the error persists across restarts, the on-disk state is inconsistent — re-bootstrap from a trusted snapshot and report the log line (epoch and shard counts).
+
+## CARDANO-003 — boundary shard count changed (warning)
+
+```
+CARDANO-003: in-flight boundary shard count differs from configured; continuing with the persisted total
+```
+
+**Meaning.** A boundary was in flight when the node was last stopped, and the build's shard count has since changed. The in-flight boundary finishes with the count it started with; the new value applies from the next boundary.
+
+**What to do.** Nothing — informational. It only appears once, on the restart that resumes an in-flight boundary.
+
+## CARDANO-004 — crash detected mid-boundary, resuming (warning)
+
+```
+CARDANO-004: crash detected mid-boundary; resuming on the next boundary trigger
+```
+
+**Meaning.** The node stopped while a boundary's sharded work was partway done. On the next block that triggers the boundary, dolos resumes from the last committed shard.
+
+**What to do.** Let it run, then **watch the following boundary**. Resume is not yet fully idempotent (see #1018), so verify the next epoch's data looks consistent. Persisted inconsistency surfaces later as `CARDANO-001` or `CARDANO-002`.
+
+## CARDANO-005 — boundary half-closed at startup, resuming (warning)
+
+```
+CARDANO-005: boundary half-closed at startup; resuming the remaining phase
+```
+
+**Meaning.** One half of a boundary committed before the stop and the other did not (e.g. epoch close finished but epoch open did not). The completed half is not replayed; dolos resumes the remaining phase.
+
+**What to do.** Nothing required; same caveat as `CARDANO-004` — watch the boundary for consistency.

@@ -274,11 +274,19 @@ impl FjallStateConfig {
 }
 
 /// State store configuration.
+///
+/// The supported persistent state backend is `fjall`. The `redb` variant is
+/// deprecated in its favor: it is kept only so existing configuration files
+/// still deserialize, and is refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
+#[allow(deprecated)]
 pub enum StateStoreConfig {
+    #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
     Redb(RedbStateConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
+    /// Builtin in-memory backend: serves the whole state contract, ephemeral
+    /// by design and sized for devnets, tooling and tests rather than for a
+    /// node following a public network.
     #[serde(rename = "in_memory")]
     InMemory,
     Fjall(FjallStateConfig),
@@ -290,6 +298,7 @@ impl Default for StateStoreConfig {
     }
 }
 
+#[allow(deprecated)]
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
@@ -307,11 +316,13 @@ impl StateStoreConfig {
         }
     }
 
+    /// Whether this selection round-trips through `Default`: true only for
+    /// the default variant carrying no explicit options, so an explicit
+    /// non-default backend choice survives re-serialization.
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory => false,
+            Self::Redb(_) | Self::InMemory => false,
         }
     }
 }
@@ -343,21 +354,73 @@ impl RedbArchiveConfig {
     }
 }
 
+/// Configuration for the Fjall archive backend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct FjallArchiveConfig {
+    /// Optional path override for the archive directory.
+    /// If relative, resolved from storage root.
+    /// If not specified, defaults to `<storage.path>/archive`.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Optional path override for block segment files.
+    /// If not specified, segment files are stored in the archive directory.
+    #[serde(default)]
+    pub blocks_path: Option<PathBuf>,
+    /// Size (in MB) of memory allocated for caching.
+    #[serde(default)]
+    pub cache: Option<usize>,
+    /// Maximum journal size in MB.
+    #[serde(default)]
+    pub max_journal_size: Option<usize>,
+    /// Flush journal after each commit.
+    #[serde(default)]
+    pub flush_on_commit: Option<bool>,
+    /// L0 compaction threshold (default: 4, lower = more aggressive).
+    #[serde(default)]
+    pub l0_threshold: Option<u8>,
+    /// Number of background compaction worker threads.
+    #[serde(default)]
+    pub worker_threads: Option<usize>,
+    /// Memtable size in MB before flush (default: 64).
+    #[serde(default)]
+    pub memtable_size_mb: Option<usize>,
+}
+
+impl FjallArchiveConfig {
+    pub fn is_default(&self) -> bool {
+        self.path.is_none()
+            && self.blocks_path.is_none()
+            && self.cache.is_none()
+            && self.max_journal_size.is_none()
+            && self.flush_on_commit.is_none()
+            && self.l0_threshold.is_none()
+            && self.worker_threads.is_none()
+            && self.memtable_size_mb.is_none()
+    }
+}
+
 /// Archive store configuration.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
+    /// Redb backend, supported via explicit configuration. Reads and writes
+    /// the archive index as a single redb file; block segment files are
+    /// shared with the fjall backend.
     Redb(RedbArchiveConfig),
+    /// Fjall backend, the default. Block segment files are shared with the
+    /// redb backend; only the index differs.
+    Fjall(FjallArchiveConfig),
     /// In-memory backend (ephemeral, data lost on restart).
     #[serde(rename = "in_memory")]
     InMemory,
     /// No-op backend that discards all writes and returns empty results.
+    #[serde(rename = "no_op", alias = "noop")]
     NoOp,
 }
 
 impl Default for ArchiveStoreConfig {
     fn default() -> Self {
-        Self::Redb(RedbArchiveConfig::default())
+        Self::Fjall(FjallArchiveConfig::default())
     }
 }
 
@@ -365,14 +428,19 @@ impl ArchiveStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
             Self::Redb(cfg) => cfg.path.as_ref(),
+            Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
     }
 
+    /// Whether this selection round-trips through `Default`: true only for
+    /// the default variant carrying no explicit options. Any other variant
+    /// must survive re-serialization even with an empty options set — a bare
+    /// `backend = "redb"` is an explicit choice, not the default.
     pub fn is_default(&self) -> bool {
         match self {
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory | Self::NoOp => false,
+            Self::Fjall(cfg) => cfg.is_default(),
+            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -439,15 +507,25 @@ impl FjallIndexConfig {
 }
 
 /// Index store configuration.
+///
+/// The supported persistent index backend is `fjall`. The `redb` variant is
+/// deprecated in its favor: it is kept only so existing configuration files
+/// still deserialize, and is refused when the node opens its stores.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
+#[allow(deprecated)]
 pub enum IndexStoreConfig {
+    #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
     Redb(RedbIndexConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
+    /// Builtin in-memory backend: serves the whole index contract, ephemeral
+    /// by design and sized for devnets, tooling and tests rather than for a
+    /// node following a public network.
     #[serde(rename = "in_memory")]
     InMemory,
     Fjall(FjallIndexConfig),
-    /// No-op backend that discards all writes and returns empty results.
+    /// No-op backend that discards all writes and returns empty results: an
+    /// explicit opt-out of the index layer.
+    #[serde(rename = "no_op", alias = "noop")]
     NoOp,
 }
 
@@ -457,6 +535,7 @@ impl Default for IndexStoreConfig {
     }
 }
 
+#[allow(deprecated)]
 impl IndexStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
@@ -466,11 +545,13 @@ impl IndexStoreConfig {
         }
     }
 
+    /// Whether this selection round-trips through `Default`: true only for
+    /// the default variant carrying no explicit options, so an explicit
+    /// non-default backend choice survives re-serialization.
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(cfg) => cfg.is_default(),
-            Self::InMemory | Self::NoOp => false,
+            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -526,7 +607,8 @@ impl MempoolStoreConfig {
 pub struct StorageConfig {
     pub version: StorageVersion,
 
-    /// Root directory for storage files.
+    /// Root directory for storage files. Also holds `scratch/`, where a stele
+    /// transfer over an OCI registry stages layers in flight.
     pub path: std::path::PathBuf,
 
     /// WAL store configuration.
@@ -551,7 +633,8 @@ pub struct StorageConfig {
 }
 
 impl StorageConfig {
-    /// Resolve path with a default subdir for backends that don't specify a custom path.
+    /// Resolve path with a default subdir for backends that don't specify a
+    /// custom path.
     fn resolve_store_path_with_default(
         &self,
         config_path: Option<&PathBuf>,
@@ -577,6 +660,7 @@ impl StorageConfig {
 
     /// Get the resolved path for the state store.
     /// Returns `None` for in-memory backends.
+    #[allow(deprecated)]
     pub fn state_path(&self) -> Option<PathBuf> {
         match &self.state {
             StateStoreConfig::InMemory => None,
@@ -597,11 +681,15 @@ impl StorageConfig {
             ArchiveStoreConfig::Redb(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
             }
+            ArchiveStoreConfig::Fjall(cfg) => {
+                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
+            }
         }
     }
 
     /// Get the resolved path for the index store.
     /// Returns `None` for in-memory or no-op backends.
+    #[allow(deprecated)]
     pub fn index_path(&self) -> Option<PathBuf> {
         match &self.index {
             IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
@@ -672,9 +760,117 @@ pub struct MithrilConfig {
     pub ancillary_key: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// `[snapshot]` — this node's dealings with published snapshots, in both
+/// directions.
+///
+/// ADR-004 keeps "snapshot" as Dolos's word for the artifact the protocol
+/// calls a stele, and this is the section that word names: what a node
+/// bootstraps from, and — for the small number of nodes that publish — what
+/// their steles carry. `[stelae.registry]` stays separate because it is a
+/// credential and nothing else.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotConfig {
-    pub download_url: String,
+    /// Template the legacy tarball bootstrap downloads from, kept working
+    /// while the stele path replaces it.
+    ///
+    /// Optional so that a publisher can set nothing but
+    /// [`state_epochs`](SnapshotConfig::state_epochs) here. `bootstrap
+    /// snapshot` already falls back to its own default template when the
+    /// section is absent, so an absent field and an absent section mean the
+    /// same thing to the one reader there is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+
+    /// Epochs whose state this publisher retains a dump of, alongside the
+    /// moving tip.
+    ///
+    /// A publisher setting, and normative per network: the list is echoed
+    /// into the inscription's `parameters` as signed input, so two publishers
+    /// of one network that disagree about it publish different documents and
+    /// stop co-signing. Era boundaries are one sensible criterion and
+    /// cherry-picked epochs another; what belongs in it is operational, which
+    /// is why it is configured here rather than derived from the chain
+    /// summary (decision 0026).
+    ///
+    /// Strictly ascending and never naming epoch 0 —
+    /// `dolos_snapshot::RetainedEpochs` is what refuses the rest, since the
+    /// rule is the profile's and this crate carries the shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_epochs: Vec<u64>,
+}
+
+/// `[stelae]` — how this node reaches a stele registry.
+///
+/// One section carrying one credential, and that is the whole of the consumer
+/// surface: a node restoring from a stele repository needs to authenticate, and
+/// nothing more about a registry belongs in a node's configuration.
+///
+/// **Which registry is the official one, and what it is read as, is not decided
+/// here.** That is a hardcoded default of the same kind as a network's relay
+/// address or its Mithril aggregator, and it lives where those live: beside
+/// `KnownNetwork` in the binary, which is both what seeds a generated
+/// `dolos.toml` and what answers for a section naming a user and no password.
+/// This crate carries the shape and none of the values.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct StelaeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry: Option<StelaeRegistryConfig>,
+}
+
+impl StelaeConfig {
+    pub fn is_default(&self) -> bool {
+        self.registry.is_none()
+    }
+}
+
+/// `[stelae.registry]` — the credentials a stele registry is reached with.
+///
+/// **Every field is settable from the environment as `DOLOS_STELAE_REGISTRY_*`,
+/// and that is not a feature this section implements.** `RootConfig` is loaded
+/// through a `config::Environment` layer with the `DOLOS` prefix, so a
+/// publisher exports `DOLOS_STELAE_REGISTRY_USER` and
+/// `DOLOS_STELAE_REGISTRY_PASSWORD` the same way any other setting is
+/// overridden, and the precedence is the one the whole configuration already
+/// has. Nothing in Dolos reads a registry credential out of the environment by
+/// hand.
+///
+/// That is what keeps a publisher's real secret out of the file while a
+/// consumer's published user stays in it.
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct StelaeRegistryConfig {
+    /// The identity to authenticate as, sent with [a
+    /// password](StelaeRegistryConfig::password) as HTTP Basic.
+    ///
+    /// Seeded by `dolos init`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+
+    /// Omitted by `dolos init`, and by anything reading the official registry —
+    /// the binary supplies that one rather than copying it into every generated
+    /// file. Set it for a registry that is not the official one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+
+    /// A bearer token, for a registry that issues them rather than accepting a
+    /// pair. Mutually exclusive with `user`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
+/// Names the user and never a secret.
+///
+/// `RootConfig` is printed in diagnostics; a derived `Debug` here would put a
+/// publisher's credentials in whatever a bug report happens to include.
+impl std::fmt::Debug for StelaeRegistryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |value: &Option<String>| value.as_ref().map(|_| "<redacted>");
+
+        f.debug_struct("StelaeRegistryConfig")
+            .field("user", &self.user)
+            .field("password", &redacted(&self.password))
+            .field("token", &redacted(&self.token))
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -688,6 +884,27 @@ pub struct GrpcConfig {
     pub tls_client_ca_root: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     permissive_cors: Option<bool>,
+
+    // --- HTTP/2 transport tuning ---
+    /// Enable hyper's adaptive (BDP-based) flow-control windowing. Defaults to
+    /// `true`. When enabled, the explicit `http2_initial_*_window_size` values
+    /// are ignored by hyper (adaptive sizing takes precedence).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_adaptive_window: Option<bool>,
+    /// Initial HTTP/2 stream-level flow-control window, in bytes. Ignored when
+    /// `http2_adaptive_window` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_initial_stream_window_size: Option<u32>,
+    /// Initial HTTP/2 connection-level flow-control window, in bytes. Ignored
+    /// when `http2_adaptive_window` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_initial_connection_window_size: Option<u32>,
+    /// Maximum HTTP/2 frame size, in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_max_frame_size: Option<u32>,
+    /// Maximum number of concurrent HTTP/2 streams per connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http2_max_concurrent_streams: Option<u32>,
 }
 
 impl GrpcConfig {
@@ -696,6 +913,11 @@ impl GrpcConfig {
             listen_address,
             tls_client_ca_root,
             permissive_cors: None,
+            http2_adaptive_window: None,
+            http2_initial_stream_window_size: None,
+            http2_initial_connection_window_size: None,
+            http2_max_frame_size: None,
+            http2_max_concurrent_streams: None,
         }
     }
 
@@ -706,6 +928,11 @@ impl GrpcConfig {
 
     pub fn permissive_cors(&self) -> bool {
         self.permissive_cors.unwrap_or(true)
+    }
+
+    /// Whether adaptive HTTP/2 windowing should be used. Defaults to `true`.
+    pub fn http2_adaptive_window(&self) -> bool {
+        self.http2_adaptive_window.unwrap_or(true)
     }
 }
 
@@ -1096,6 +1323,9 @@ pub struct RootConfig {
 
     pub snapshot: Option<SnapshotConfig>,
 
+    #[serde(default, skip_serializing_if = "StelaeConfig::is_default")]
+    pub stelae: StelaeConfig,
+
     pub chain: ChainConfig,
 
     #[serde(default, skip_serializing_if = "LoggingConfig::is_default")]
@@ -1103,4 +1333,66 @@ pub struct RootConfig {
 
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
     pub telemetry: TelemetryConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An explicit `backend = "redb"` with no options must not be treated as
+    /// the default: dropping it on re-serialization would silently flip the
+    /// archive to fjall on the next load.
+    #[test]
+    fn explicit_non_default_backend_survives_reserialization() {
+        let storage = StorageConfig {
+            archive: ArchiveStoreConfig::Redb(RedbArchiveConfig::default()),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_value(&storage).unwrap();
+        let restored: StorageConfig = serde_json::from_value(json).unwrap();
+
+        assert!(matches!(restored.archive, ArchiveStoreConfig::Redb(_)));
+    }
+
+    #[test]
+    fn default_backend_selections_are_not_serialized() {
+        let json = serde_json::to_value(StorageConfig::default()).unwrap();
+
+        assert!(json.get("archive").is_none());
+        assert!(json.get("state").is_none());
+        assert!(json.get("index").is_none());
+    }
+
+    #[test]
+    fn the_default_archive_backend_is_fjall() {
+        assert!(matches!(
+            ArchiveStoreConfig::default(),
+            ArchiveStoreConfig::Fjall(cfg) if cfg.is_default()
+        ));
+    }
+
+    /// The docs spell the opt-out backend `no_op`; the historical serde
+    /// lowercase of `NoOp` was `noop`. Both must parse, and serialization
+    /// must emit the documented spelling.
+    #[test]
+    fn no_op_backend_accepts_both_spellings_and_serializes_documented_one() {
+        use serde_json::json;
+
+        for spelling in ["no_op", "noop"] {
+            let archive: ArchiveStoreConfig =
+                serde_json::from_value(json!({ "backend": spelling })).unwrap();
+            assert!(matches!(archive, ArchiveStoreConfig::NoOp));
+
+            let index: IndexStoreConfig =
+                serde_json::from_value(json!({ "backend": spelling })).unwrap();
+            assert!(matches!(index, IndexStoreConfig::NoOp));
+        }
+
+        let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
+        assert_eq!(json["backend"], "no_op");
+
+        let json = serde_json::to_value(IndexStoreConfig::NoOp).unwrap();
+        assert_eq!(json["backend"], "no_op");
+    }
 }

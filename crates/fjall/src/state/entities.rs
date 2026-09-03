@@ -18,8 +18,9 @@ use crate::Error;
 
 /// Read multiple entities by keys from the unified entities keyspace.
 ///
-/// Uses the `Readable` trait to support both direct keyspace access and snapshot-based
-/// reads. Snapshot-based reads avoid potential deadlocks with concurrent writes.
+/// Uses the `Readable` trait to support both direct keyspace access and
+/// snapshot-based reads. Snapshot-based reads avoid potential deadlocks with
+/// concurrent writes.
 pub fn read_entities<R: Readable>(
     readable: &R,
     keyspace: &Keyspace,
@@ -64,7 +65,8 @@ pub fn delete_entity(
 ///
 /// Wraps a `fjall::Iter` which is an owned iterator holding a `SnapshotNonce`
 /// and a `Box<dyn DoubleEndedIterator + Send + 'static>`. Items are decoded
-/// one at a time in `next()`, keeping memory usage O(1) regardless of entity count.
+/// one at a time in `next()`, keeping memory usage O(1) regardless of entity
+/// count.
 pub struct EntityIterator {
     inner: fjall::Iter,
 }
