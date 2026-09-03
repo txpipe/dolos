@@ -673,11 +673,13 @@ where
         app
     };
 
-    // NormalizePath must receive the request before the router matches a route. Then NormalizePath can
-    // remove a trailing slash from the path. A layer added with `Router::layer` runs after the route
-    // match. Thus, a request with a trailing slash does not match a route. The code sets the normalized
-    // router as the fallback service of an empty router. As a result, every request goes to this
-    // fallback service, and the public return type remains `Router`.
+    // NormalizePath must receive the request before the router matches a route.
+    // Then NormalizePath can remove a trailing slash from the path. A layer
+    // added with `Router::layer` runs after the route match. Thus, a request
+    // with a trailing slash does not match a route. The code sets the normalized
+    // router as the fallback service of an empty router. As a result, every request
+    // goes to this fallback service, and the public return type remains
+    // `Router`.
     let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
     Ok(Router::new().fallback_service(normalized))
 }
@@ -734,7 +736,8 @@ mod base_path_tests {
 
     #[tokio::test]
     async fn trailing_slash_in_base_path_config_is_trimmed() {
-        // The router removes a trailing slash from `base_path` before it nests the routes.
+        // The router removes a trailing slash from `base_path` before it nests the
+        // routes.
         let app = TestApp::try_new_with_base_path(Some("/api/v0/".into()))
             .expect("router should build with trailing-slash base_path");
 
@@ -747,7 +750,8 @@ mod base_path_tests {
         let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
             .expect("the router did not accept a valid base_path");
 
-        // The router removes a trailing slash from the request path before route matching.
+        // The router removes a trailing slash from the request path before route
+        // matching.
         let (status, _) = app.get_bytes("/api/v0/network/").await;
         assert_eq!(
             status,

@@ -29,9 +29,9 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         format!("/{}", args.path.trim())
     };
 
-    // When `base_path` has a value, the router serves each route with that prefix. This code adds the
-    // same prefix to the CLI path. If the path already has the prefix, this code does not add the
-    // prefix again.
+    // When `base_path` has a value, the router serves each route with that prefix.
+    // This code adds the same prefix to the CLI path. If the path already has
+    // the prefix, this code does not add the prefix again.
     let path = match minibf.base_path.as_deref() {
         Some(base_path) => {
             let base_path = base_path.trim_end_matches('/');
