@@ -337,6 +337,9 @@ impl WalError {
 
 #[derive(Debug, Error)]
 pub enum ServeError {
+    #[error("invalid configuration: {0}")]
+    ConfigError(String),
+
     #[error("failed to bind listener: {0}")]
     BindError(#[source] std::io::Error),
 

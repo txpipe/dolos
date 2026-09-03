@@ -16,6 +16,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, Range},
 };
+use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
@@ -341,7 +342,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Result<Router, ServeError>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -357,7 +358,7 @@ where
     })
 }
 
-pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
+pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Result<Router, ServeError>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -367,6 +368,7 @@ where
     Option<DRepState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
+    let base_path = facade.config.base_path.clone();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -658,7 +660,28 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+
+    let router = if let Some(base_path) = &base_path {
+        let base_path = base_path.trim_end_matches('/');
+        if base_path.is_empty() || !base_path.starts_with('/') || base_path.contains('*') {
+            return Err(ServeError::ConfigError(format!(
+                "base_path \"{base_path}\" is not valid. Use a base_path that starts with '/' and has no '*' wildcard."
+            )));
+        }
+        Router::new().nest(base_path, app)
+    } else {
+        app
+    };
+
+    // NormalizePath must receive the request before the router matches a route.
+    // Then NormalizePath can remove a trailing slash from the path. A layer
+    // added with `Router::layer` runs after the route match. Thus, a request
+    // with a trailing slash does not match a route. The code sets the normalized
+    // router as the fallback service of an empty router. As a result, every request
+    // goes to this fallback service, and the public return type remains
+    // `Router`.
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
+    Ok(Router::new().fallback_service(normalized))
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -673,7 +696,7 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        let app = build_router(cfg.clone(), domain);
+        let app = build_router(cfg.clone(), domain)?;
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
             .await
@@ -685,5 +708,76 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod base_path_tests {
+    use axum::http::StatusCode;
+    use dolos_core::ServeError;
+
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn routes_resolve_under_configured_base_path() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
+            .expect("router should build with valid base_path");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK, "prefixed route should resolve");
+
+        let (status, _) = app.get_bytes("/network").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "root route should 404 when base_path is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_base_path_config_is_trimmed() {
+        // The router removes a trailing slash from `base_path` before it nests the
+        // routes.
+        let app = TestApp::try_new_with_base_path(Some("/api/v0/".into()))
+            .expect("router should build with trailing-slash base_path");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_request_is_normalized() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
+            .expect("the router did not accept a valid base_path");
+
+        // The router removes a trailing slash from the request path before route
+        // matching.
+        let (status, _) = app.get_bytes("/api/v0/network/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the router did not remove the trailing slash from the request path"
+        );
+
+        // The base path resolves to the root route of the nested router.
+        let (status, _) = app.get_bytes("/api/v0/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the base path with a trailing slash did not resolve to the root route"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_base_path_returns_config_error() {
+        for invalid in ["", "/", "no-leading-slash", "/with*wildcard"] {
+            let err = TestApp::try_new_with_base_path(Some(invalid.into()))
+                .err()
+                .unwrap_or_else(|| panic!("expected ConfigError for base_path = {invalid:?}"));
+            assert!(
+                matches!(err, ServeError::ConfigError(_)),
+                "expected ServeError::ConfigError for {invalid:?}, got {err:?}"
+            );
+        }
     }
 }
