@@ -458,8 +458,7 @@ where
 /// and action index.
 ///
 /// The payload contains the 32-byte transaction hash.
-/// It then contains the shortest big-endian byte string for the action index.
-/// An empty remaining payload gives an action index of zero.
+/// It then contains a big-endian byte string for the action index.
 fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
     let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -467,8 +466,8 @@ fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // The payload can contain an index of no more than four bytes.
-    if payload.len() < 32 || payload.len() > 36 {
+    // The payload must contain the hash and one to four index bytes.
+    if payload.len() < 33 || payload.len() > 36 {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -764,6 +763,19 @@ mod tests {
             parse_gov_action_id(&bech32_gov_action(&tx, 256).unwrap()).unwrap(),
             (tx, 256)
         );
+
+        let tx_only = bech32::encode::<Bech32>(Hrp::parse_unchecked("gov_action"), tx.as_slice())
+            .expect("Cannot encode the transaction-only governance action ID.");
+        assert_eq!(parse_gov_action_id(&tx_only), Err(StatusCode::BAD_REQUEST));
+
+        let padded_payload = [tx.as_slice(), &[0, 1]].concat();
+        let padded = bech32::encode::<Bech32>(
+            Hrp::parse_unchecked("gov_action"),
+            padded_payload.as_slice(),
+        )
+        .expect("Cannot encode the padded governance action ID.");
+        assert_eq!(parse_gov_action_id(&padded).unwrap(), (tx, 1));
+
         assert_eq!(
             parse_gov_action_id("not-a-gov-action"),
             Err(StatusCode::BAD_REQUEST)
