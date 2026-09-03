@@ -16,6 +16,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, Range},
 };
+use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
@@ -660,24 +661,25 @@ where
             CorsLayer::new()
         });
 
-    if let Some(base_path) = &base_path {
+    let router = if let Some(base_path) = &base_path {
         let base_path = base_path.trim_end_matches('/');
-        if base_path.is_empty()
-            || base_path == "/"
-            || !base_path.starts_with('/')
-            || base_path.contains('*')
-        {
+        if base_path.is_empty() || !base_path.starts_with('/') || base_path.contains('*') {
             return Err(ServeError::ConfigError(format!(
-                "base_path must start with '/', must not be just '/', and must not contain wildcards; got: \"{}\"",
-                base_path
+                "base_path \"{base_path}\" is not valid. Use a base_path that starts with '/' and has no '*' wildcard."
             )));
         }
-        Ok(Router::new()
-            .nest(base_path, app)
-            .layer(NormalizePathLayer::trim_trailing_slash()))
+        Router::new().nest(base_path, app)
     } else {
-        Ok(app.layer(NormalizePathLayer::trim_trailing_slash()))
-    }
+        app
+    };
+
+    // NormalizePath must receive the request before the router matches a route. Then NormalizePath can
+    // remove a trailing slash from the path. A layer added with `Router::layer` runs after the route
+    // match. Thus, a request with a trailing slash does not match a route. The code sets the normalized
+    // router as the fallback service of an empty router. As a result, every request goes to this
+    // fallback service, and the public return type remains `Router`.
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
+    Ok(Router::new().fallback_service(normalized))
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -731,12 +733,35 @@ mod base_path_tests {
     }
 
     #[tokio::test]
-    async fn trailing_slash_in_base_path_is_normalized() {
+    async fn trailing_slash_in_base_path_config_is_trimmed() {
+        // The router removes a trailing slash from `base_path` before it nests the routes.
         let app = TestApp::try_new_with_base_path(Some("/api/v0/".into()))
             .expect("router should build with trailing-slash base_path");
 
         let (status, _) = app.get_bytes("/api/v0/network").await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_request_is_normalized() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
+            .expect("the router did not accept a valid base_path");
+
+        // The router removes a trailing slash from the request path before route matching.
+        let (status, _) = app.get_bytes("/api/v0/network/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the router did not remove the trailing slash from the request path"
+        );
+
+        // The base path resolves to the root route of the nested router.
+        let (status, _) = app.get_bytes("/api/v0/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the base path with a trailing slash did not resolve to the root route"
+        );
     }
 
     #[tokio::test]
