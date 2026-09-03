@@ -544,9 +544,7 @@ where
     Ok(Json(ProposalMetadata {
         id,
         tx_hash: hex::encode(tx),
-        cert_index: cert_index
-            .try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        cert_index: cert_index.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
         url: anchor.url.clone(),
         hash,
         json_metadata: Some(metadata.json),
@@ -583,9 +581,7 @@ where
     Ok(Json(ProposalMetadataV2 {
         id,
         tx_hash: hex::encode(tx),
-        cert_index: idx
-            .try_into()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        cert_index: idx.try_into().map_err(|_| StatusCode::BAD_REQUEST)?,
         url: anchor.url.clone(),
         hash,
         json_metadata,
