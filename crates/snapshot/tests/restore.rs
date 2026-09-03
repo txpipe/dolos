@@ -122,7 +122,7 @@ fn restore_into<B: ToyStores>(
     let plan = restore::plan(&stele, magic, None)?;
     // A directory stele stages nothing — its blobs are read where they are —
     // so the only volume this restore has a need on is the destination.
-    plan.preflight(root, None)?;
+    plan.preflight(root, &stelae::Resume::none(), None)?;
 
     let index = stele.blob_index()?;
 
