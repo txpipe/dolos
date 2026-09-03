@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use dolos_core::{
     builtin::{MemoryIndexStore, MemoryStateStore},
-    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexError,
-    IndexStore, LogEntry, LogKey, LogValue, Namespace, StateError, StateStore, TagDimension,
-    TipEvent, WalError, WalStore,
+    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexDelta,
+    IndexError, IndexRecord, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace,
+    StateError, StateStore, TagDimension, TipEvent, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -16,6 +16,13 @@ pub enum TestFault {
     StateStoreError,
     ArchiveStoreError,
     IndexStoreError,
+    /// Only [`IndexWriter::apply`] fails; every other index call succeeds.
+    ///
+    /// The narrow one, for a caller that has to reach a specific write and
+    /// would never get there if opening the store failed too — a stele restore
+    /// above all, whose only `apply` is the live-UTxO rebuild that runs after
+    /// every layer has landed.
+    IndexApplyError,
     WalStoreError,
     GenesisError,
 }
@@ -285,7 +292,7 @@ impl FaultyIndexStore {
 }
 
 impl IndexStore for FaultyIndexStore {
-    type Writer = <MemoryIndexStore as IndexStore>::Writer;
+    type Writer = FaultyIndexWriter;
     type SlotIter = <MemoryIndexStore as IndexStore>::SlotIter;
     type TagIter = <MemoryIndexStore as IndexStore>::TagIter;
     type ExactIter = <MemoryIndexStore as IndexStore>::ExactIter;
@@ -294,7 +301,10 @@ impl IndexStore for FaultyIndexStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer()
+        Ok(FaultyIndexWriter {
+            inner: self.inner.start_writer()?,
+            fault: self.fault,
+        })
     }
 
     fn initialize_schema(&self) -> Result<(), IndexError> {
@@ -382,6 +392,35 @@ impl IndexStore for FaultyIndexStore {
             return Err(self.fault_err());
         }
         self.inner.iter_exact_records(slots)
+    }
+}
+
+pub struct FaultyIndexWriter {
+    inner: <MemoryIndexStore as IndexStore>::Writer,
+    fault: TestFault,
+}
+
+impl IndexWriter for FaultyIndexWriter {
+    fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
+        if matches!(self.fault, TestFault::IndexApplyError) {
+            return Err(IndexError::DbError("fault injection: index apply".into()));
+        }
+        self.inner.apply(delta)
+    }
+
+    fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
+        self.inner.undo(delta)
+    }
+
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), IndexError> {
+        self.inner.append_prehashed(records)
+    }
+
+    fn commit(self) -> Result<(), IndexError> {
+        self.inner.commit()
     }
 }
 

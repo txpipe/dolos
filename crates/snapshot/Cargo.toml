@@ -30,8 +30,8 @@ backfill = [
 # parties; this profile publishes into registries as a matter of course, so
 # it turns the transport on unconditionally rather than forwarding a feature
 # nothing in dolos ever left off.
-stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.1.0", features = ["oci"] }
-stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.1.0", features = ["oci"] }
+stelae = { git = "https://github.com/txpipe/stelae", tag = "v0.2.0", features = ["oci"] }
+stelae-driver = { git = "https://github.com/txpipe/stelae", tag = "v0.2.0", features = ["oci"] }
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
 
