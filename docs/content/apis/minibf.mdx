@@ -97,6 +97,8 @@ Check the [Configuration Schema](../configuration/schema) for detailed info on h
 
 Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos:
 
+Two of them report lifetime totals — `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` — by folding every transaction the address or account ever took part in, read from the archive on each request. They are only as complete as the history the node keeps: with `sync.max_history` set, the sums and `tx_count` cover the retained window instead of the whole chain, so a node serving them should run with full history.
+
 | Endpoint                                   | Description                                              |
 |--------------------------------------------|----------------------------------------------------------|
 | `/`                                        | Service info (version, revision)                         |
@@ -106,6 +108,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/accounts/{stake_address}`                | Get account information for a stake address              |
 | `/accounts/{stake_address}/addresses`      | Get addresses for a stake address                        |
 | `/accounts/{stake_address}/addresses/assets` | Get assets held across a stake address's addresses     |
+| `/accounts/{stake_address}/addresses/total` | Get lifetime received/sent totals across a stake address's addresses |
 | `/accounts/{stake_address}/delegations`    | Get delegations for a stake address                      |
 | `/accounts/{stake_address}/history`        | Get the per-epoch stake history for a stake address      |
 | `/accounts/{stake_address}/registrations`  | Get registrations for a stake address                    |
