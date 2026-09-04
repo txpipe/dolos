@@ -29,7 +29,7 @@ use serde_json::{json, Value};
 
 use crate::{
     error::Error,
-    mapping::{bech32, bech32_gov_action, stake_cred_to_address, IntoModel},
+    mapping::{bech32, bech32_gov_action, parse_gov_action_id, stake_cred_to_address, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -466,30 +466,6 @@ fn parse_tx_hash(tx_hash: &str) -> Result<Hash<32>, StatusCode> {
     let bytes: [u8; 32] = bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     Ok(bytes.into())
-}
-
-/// Parse a CIP-0129 governance action id: bech32 payload with the 32-byte tx
-/// hash followed by a 1-byte action index. The 32-byte form is not part of
-/// the CIP: it is an ecosystem shorthand for index 0 (cexplorer emits it,
-/// Blockfrost accepts it).
-fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
-    let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    if hrp.as_str() != "gov_action" {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    let idx = match payload.len() {
-        32 => 0,
-        33 => payload[32] as u32,
-        _ => return Err(StatusCode::BAD_REQUEST),
-    };
-
-    let tx: [u8; 32] = payload[..32]
-        .try_into()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    Ok((tx.into(), idx))
 }
 
 // The helpers below reconstruct the `governance_description` JSON that
