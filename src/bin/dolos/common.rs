@@ -384,27 +384,6 @@ mod tests {
 
     use super::*;
 
-    /// The migration message for a removed backend has to survive the
-    /// configuration loader, not just serde: an operator upgrading reads what
-    /// the loader prints, and a message the `config` crate replaced with its
-    /// own unknown-variant text would tell them nothing.
-    #[test]
-    fn a_removed_backend_reports_the_migration_message_through_the_loader() {
-        let error = ::config::Config::builder()
-            .add_source(::config::File::from_str(
-                "path = \"data\"\n[state]\nbackend = \"redb\"\npath = \"state\"\n",
-                ::config::FileFormat::Toml,
-            ))
-            .build()
-            .expect("the source builds")
-            .try_deserialize::<dolos_core::config::StorageConfig>()
-            .unwrap_err()
-            .to_string();
-
-        assert!(error.contains("redb"), "must name the removed backend");
-        assert!(error.contains("fjall"), "must name the supported backend");
-    }
-
     /// The environment reaches `[stelae.registry]` by the same route as every
     /// other setting, and *this* is the assertion that says so.
     ///
