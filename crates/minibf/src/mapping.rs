@@ -141,6 +141,30 @@ pub fn bech32_gov_action(tx: &Hash<32>, idx: u32) -> Result<String, StatusCode> 
     bech32(GOV_ACTION_HRP, [tx.as_slice(), &bytes[first..]].concat())
 }
 
+/// Parse a CIP-0129 governance action id: bech32 payload with the 32-byte tx
+/// hash followed by a 1-byte action index. The 32-byte form is not part of
+/// the CIP: it is an ecosystem shorthand for index 0 (cexplorer emits it,
+/// Blockfrost accepts it).
+pub fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
+    let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if hrp.as_str() != "gov_action" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let idx = match payload.len() {
+        32 => 0,
+        33 => payload[32] as u32,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let tx: [u8; 32] = payload[..32]
+        .try_into()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    Ok((tx.into(), idx))
+}
+
 pub fn asset_fingerprint(subject: &[u8]) -> Result<String, StatusCode> {
     let mut hasher = pallas::crypto::hash::Hasher::<160>::new();
     hasher.input(subject);
