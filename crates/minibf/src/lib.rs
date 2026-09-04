@@ -522,6 +522,10 @@ where
             get(routes::scripts::by_hash_utxos::<D>),
         )
         .route(
+            "/scripts/{script_hash}/redeemers",
+            get(routes::scripts::by_hash_redeemers::<D>),
+        )
+        .route(
             "/scripts/datum/{datum_hash}",
             get(routes::scripts::by_datum_hash::<D>),
         )

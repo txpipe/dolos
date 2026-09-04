@@ -75,6 +75,7 @@ pub mod archive_dimensions {
     /// rule rather than to this backend.
     pub const METADATA: &str = dolos_core::VERBATIM_KEY_DIMENSION;
     pub const SCRIPT: &str = "script";
+    pub const SCRIPT_REDEEMERS: &str = "script_redeemers";
 }
 
 pub struct FilterIndexes;
@@ -546,6 +547,10 @@ fn insert_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
             let mut table = wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
             table.insert(bucketed_key, slot)?;
         }
+        archive_dimensions::SCRIPT_REDEEMERS => {
+            let mut table = wx.open_multimap_table(ScriptRedeemersApproxIndexTable::DEF)?;
+            table.insert(bucketed_key, slot)?;
+        }
         _ => {} // Ignore unknown dimensions
     }
 
@@ -606,6 +611,10 @@ fn remove_archive_tag(wx: &WriteTransaction, tag: &Tag, slot: BlockSlot) -> Resu
         }
         archive_dimensions::SCRIPT => {
             let mut table = wx.open_multimap_table(ScriptHashApproxIndexTable::DEF)?;
+            table.remove(bucketed_key, slot)?;
+        }
+        archive_dimensions::SCRIPT_REDEEMERS => {
+            let mut table = wx.open_multimap_table(ScriptRedeemersApproxIndexTable::DEF)?;
             table.remove(bucketed_key, slot)?;
         }
         _ => {} // Ignore unknown dimensions
@@ -928,6 +937,9 @@ impl CoreIndexStore for IndexStore {
             }
             archive_dimensions::SCRIPT => {
                 archive::indexes::Indexes::iter_by_script(&rx, key, start, end)?
+            }
+            archive_dimensions::SCRIPT_REDEEMERS => {
+                archive::indexes::Indexes::iter_by_script_redeemers(&rx, key, start, end)?
             }
             _ => {
                 return Err(IndexError::DimensionNotFound(dimension.to_string()));
