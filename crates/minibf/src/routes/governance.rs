@@ -818,22 +818,30 @@ impl ProposalModelBuilder {
         }
     }
 
-    /// Dolos stores the epoch before the enactment boundary as
-    /// `ratified_epoch`. db-sync stamps both `ratified_epoch` and
-    /// `enacted_epoch` with the boundary epoch, so both fields map to the
-    /// same value.
+    /// Dolos stamps `ratified_epoch` with the epoch the ratifying boundary
+    /// closes. db-sync reports that same epoch as `ratified_epoch` and the
+    /// enactment lands one boundary later, so `enacted_epoch` is one more.
     fn enactment_epoch(&self) -> Option<Epoch> {
         let boundary = self.state.ratified_epoch? + 1;
 
         (self.current_epoch >= boundary).then_some(boundary)
     }
 
+    /// An unratified proposal counts as expired from its `expires_at` epoch
+    /// on, before any boundary stamp. The expiry drop later stamps
+    /// `canceled_epoch`, one epoch past `expires_at`. A `canceled_epoch` at
+    /// or before `expires_at` is a sibling pruned by a competing enactment
+    /// instead: db-sync reports that as dropped, never as expired.
     fn expired_epoch(&self) -> Option<Epoch> {
-        if self.state.ratified_epoch.is_some() || self.state.canceled_epoch.is_some() {
+        if self.state.ratified_epoch.is_some() {
             return None;
         }
 
         let expires = self.state.expires_at()?;
+
+        if self.state.canceled_epoch.is_some_and(|x| x <= expires) {
+            return None;
+        }
 
         (self.current_epoch >= expires).then_some(expires)
     }
@@ -877,7 +885,7 @@ impl IntoModel<Proposal> for ProposalModelBuilder {
             governance_description,
             deposit: self.state.deposit.unwrap_or_default().to_string(),
             return_address,
-            ratified_epoch: enactment.map(|x| x as i32),
+            ratified_epoch: self.state.ratified_epoch.map(|x| x as i32),
             enacted_epoch: enactment.map(|x| x as i32),
             dropped_epoch: self.dropped_epoch().map(|x| x as i32),
             expired_epoch: self.expired_epoch().map(|x| x as i32),
@@ -1322,6 +1330,76 @@ mod tests {
 
     fn proposal_tx() -> Hash<32> {
         [7u8; 32].into()
+    }
+
+    /// A proposal that expires after epoch 646 (`expires_at` = 647), with
+    /// the boundary outcome stamps given by the caller.
+    fn lifecycle_state(ratified: Option<Epoch>, canceled: Option<Epoch>) -> ProposalState {
+        ProposalState {
+            slot: 1,
+            tx: proposal_tx(),
+            idx: 0,
+            action: ProposalAction::Info,
+            max_epoch: Some(646),
+            ratified_epoch: ratified,
+            canceled_epoch: canceled,
+            deposit: Some(100_000_000),
+            reward_account: Some(StakeCredential::AddrKeyhash([7u8; 28].into())),
+            proposed_in: Some(640),
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        }
+    }
+
+    fn lifecycle_model(state: ProposalState, current_epoch: Epoch) -> Proposal {
+        ProposalModelBuilder {
+            state,
+            gov_action: None,
+            network: Network::Testnet,
+            current_epoch,
+        }
+        .into_model()
+        .expect("failed to build proposal model")
+    }
+
+    /// The expected values mirror the Blockfrost mainnet responses for
+    /// b2a591ac… (enacted), dfd81f8d… (expired), and 729daaf2… (pending
+    /// through its expiration epoch).
+    #[test]
+    fn proposal_lifecycle_epochs_match_db_sync() {
+        // ratified at the boundary closing 525: enacted one epoch later
+        let enacted = lifecycle_model(lifecycle_state(Some(525), None), 653);
+        assert_eq!(enacted.ratified_epoch, Some(525));
+        assert_eq!(enacted.enacted_epoch, Some(526));
+        assert_eq!(enacted.expired_epoch, None);
+        assert_eq!(enacted.dropped_epoch, None);
+
+        // expired at 647: the drop stamps canceled one epoch past expiry
+        let expired = lifecycle_model(lifecycle_state(None, Some(648)), 653);
+        assert_eq!(expired.ratified_epoch, None);
+        assert_eq!(expired.enacted_epoch, None);
+        assert_eq!(expired.expired_epoch, Some(647));
+        assert_eq!(expired.dropped_epoch, Some(648));
+
+        // canceled before expiry: a pruned sibling drops but never expires
+        let pruned = lifecycle_model(lifecycle_state(None, Some(645)), 653);
+        assert_eq!(pruned.expired_epoch, None);
+        assert_eq!(pruned.dropped_epoch, Some(645));
+
+        // in its expiration epoch without a boundary stamp: already expired,
+        // the drop follows one epoch later (mirrors mainnet ab474223…)
+        let expiring = lifecycle_model(lifecycle_state(None, None), 647);
+        assert_eq!(expiring.expired_epoch, Some(647));
+        assert_eq!(expiring.dropped_epoch, None);
+
+        // still votable before its expiration epoch: no outcome yet
+        let pending = lifecycle_model(lifecycle_state(None, None), 646);
+        assert_eq!(pending.expired_epoch, None);
+        assert_eq!(pending.dropped_epoch, None);
     }
 
     fn seed_proposal(domain: &ToyDomain) {
