@@ -184,7 +184,7 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer().map_err(ArchiveError::from)
+        self.inner.start_writer()
     }
 
     fn read_logs(
@@ -213,18 +213,14 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_block_by_slot(slot)
-            .map_err(ArchiveError::from)
+        self.inner.get_block_by_slot(slot)
     }
 
     fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_blocks_by_slot(slot)
-            .map_err(ArchiveError::from)
+        self.inner.get_blocks_by_slot(slot)
     }
 
     fn get_range<'a>(
@@ -235,32 +231,28 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_range(from, to).map_err(ArchiveError::from)
+        self.inner.get_range(from, to)
     }
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .find_intersect(intersect)
-            .map_err(ArchiveError::from)
+        self.inner.find_intersect(intersect)
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_tip().map_err(ArchiveError::from)
+        self.inner.get_tip()
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .prune_history(max_slots, max_prune)
-            .map_err(ArchiveError::from)
+        self.inner.prune_history(max_slots, max_prune)
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {

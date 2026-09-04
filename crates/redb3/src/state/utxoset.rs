@@ -132,8 +132,9 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        ChainPoint, IndexDelta, IndexStore as _, IndexWriter as _, StateSchema, StateStore as _,
-        StateWriter as _, Tag, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+        builtin::MemoryIndexStore, ChainPoint, IndexDelta, IndexStore as _, IndexWriter as _,
+        StateSchema, StateStore as _, StateWriter as _, Tag, TxoRef, UtxoIndexDelta, UtxoMap,
+        UtxoSet, UtxoSetDelta,
     };
     use dolos_testing::*;
     use pallas::ledger::{
@@ -153,13 +154,13 @@ mod tests {
         pub const ASSET: &str = "asset";
     }
 
-    fn build_indexes(_store: &StateStore) -> crate::indexes::IndexStore {
-        crate::indexes::IndexStore::in_memory().unwrap()
+    fn build_indexes(_store: &StateStore) -> MemoryIndexStore {
+        MemoryIndexStore::new()
     }
 
     fn get_test_address_utxos(
         store: &StateStore,
-        indexes: &crate::indexes::IndexStore,
+        indexes: &MemoryIndexStore,
         address: TestAddress,
     ) -> UtxoMap {
         let bobs = indexes
@@ -486,10 +487,11 @@ mod tests {
                 .count();
 
             let count = indexes
-                .count_utxo_by_address(address.to_bytes().as_slice())
-                .unwrap();
+                .utxos_by_tag(dimensions::ADDRESS, address.to_bytes().as_slice())
+                .unwrap()
+                .len();
 
-            assert_eq!(expected as u64, count);
+            assert_eq!(expected, count);
         }
     }
 
@@ -518,12 +520,11 @@ mod tests {
                 })
                 .collect();
 
-            let iterator = indexes
-                .iter_utxo_by_address(address.to_bytes().as_slice())
+            let found = indexes
+                .utxos_by_tag(dimensions::ADDRESS, address.to_bytes().as_slice())
                 .unwrap();
 
-            for key in iterator {
-                let key = key.unwrap();
+            for key in found {
                 assert!(expected.remove(&key));
             }
 

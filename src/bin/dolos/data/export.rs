@@ -130,20 +130,6 @@ fn append_dir_filtered(
     Ok(())
 }
 
-fn prepare_archive(
-    archive: &mut dolos_redb3::archive::ArchiveStore,
-    pb: &crate::feedback::ProgressBar,
-) -> miette::Result<()> {
-    let db = archive.db_mut();
-    pb.set_message("compacting archive");
-    db.compact().into_diagnostic()?;
-
-    pb.set_message("checking archive integrity");
-    db.check_integrity().into_diagnostic()?;
-
-    Ok(())
-}
-
 pub fn run(
     config: &RootConfig,
     args: &Args,
@@ -162,15 +148,14 @@ pub fn run(
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
             bail!("archive sanitization needs exclusive access to the archive database")
         }
-        // Sanitization requires direct backend access: redb compacts and
-        // integrity-checks the database file, fjall major-compacts both
-        // keyspaces (an LSM has no offline integrity check to run).
-        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
+        // Sanitization requires direct backend access: fjall major-compacts
+        // both keyspaces (an LSM has no offline integrity check to run). The
+        // memory archive has no files to sanitize or to export.
         ArchiveStoreBackend::Fjall(s) if !args.skip_sanitization => {
             pb.set_message("compacting archive");
             s.compact().into_diagnostic()?;
         }
-        ArchiveStoreBackend::Redb(_)
+        ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {

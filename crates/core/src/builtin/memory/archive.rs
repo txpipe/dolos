@@ -7,9 +7,9 @@
 //! bodies themselves under the slot:
 //!
 //! - blocks live in one map keyed on the slot, holding every body written to
-//!   that slot in arrival order, which is chain order — a Byron
-//!   epoch-boundary block and the first main block of the epoch it opens
-//!   share a slot, and the main block arrives second;
+//!   that slot in arrival order, which is chain order — a Byron epoch-boundary
+//!   block and the first main block of the epoch it opens share a slot, and the
+//!   main block arrives second;
 //! - logs live in one map keyed `(namespace, log_key)`, which makes a
 //!   namespaced range scan a plain [`BTreeMap::range`] — the same shape fjall
 //!   gets from its `[ns_hash:8][log_key:40]` prefix.

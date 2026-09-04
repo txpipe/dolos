@@ -294,20 +294,6 @@ impl Backend for Memory {
     }
 }
 
-struct Redb;
-
-impl Backend for Redb {
-    type Store = dolos_redb3::indexes::IndexStore;
-    type Guard = ();
-
-    fn open() -> (Self::Store, Self::Guard) {
-        (
-            dolos_redb3::indexes::IndexStore::in_memory().expect("failed to open redb index store"),
-            (),
-        )
-    }
-}
-
 /// Declare the whole suite for one backend. Adding a backend is one line.
 macro_rules! conformance_suite {
     ($module:ident, $backend:ty) => {
@@ -359,11 +345,6 @@ macro_rules! conformance_suite {
 
 conformance_suite!(fjall, Fjall);
 conformance_suite!(memory, Memory);
-
-#[test]
-fn redb_slots_by_tag_are_ordered_in_both_directions() {
-    slots_by_tag_are_ordered_in_both_directions::<Redb>();
-}
 
 fn epoch_slots(epoch: u64) -> Range<BlockSlot> {
     (epoch * EPOCH_LEN)..((epoch + 1) * EPOCH_LEN)
@@ -1289,9 +1270,8 @@ fn publish_at_band<S: CoreIndexStore>(
 
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let archive = dolos_core::builtin::MemoryArchiveStore::new(
-        dolos_cardano::model::build_schema(),
-    );
+    let archive =
+        dolos_core::builtin::MemoryArchiveStore::new(dolos_cardano::model::build_schema());
 
     let state = dolos_core::builtin::MemoryStateStore::new();
 

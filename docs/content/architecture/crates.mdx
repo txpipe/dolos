@@ -12,7 +12,7 @@ Dolos is a Cargo workspace. The code is split so that generic data-node abstract
 | ----- | ---- | ------- |
 | `dolos-core` | `crates/core/` | Chain-agnostic traits and types: `Domain`, `ChainLogic`, `WorkUnit`, and the `StateStore` / `ArchiveStore` / `WalStore` / `IndexStore` / `MempoolStore` storage traits. Knows nothing about Cardano. |
 | `dolos-cardano` | `crates/cardano/` | The Cardano implementation of the core traits: block processing, ledger state, era rules, epoch transitions, and reward calculations. |
-| `dolos-redb3` | `crates/redb3/` | Storage backend built on [redb](https://github.com/cberner/redb) (embedded, ACID, B+tree). Implements WAL, state, archive, indexes, and mempool. |
+| `dolos-redb3` | `crates/redb3/` | Storage backend built on [redb](https://github.com/cberner/redb) (embedded, ACID, B+tree). Implements the WAL and the mempool. |
 | `dolos-fjall` | `crates/fjall/` | Storage backend built on [fjall](https://github.com/fjall-rs/fjall) (LSM-tree), an alternative for write-heavy state and index stores. |
 | `dolos-minibf` | `crates/minibf/` | Blockfrost-compatible HTTP API server. |
 | `dolos-minikupo` | `crates/minikupo/` | Kupo-compatible HTTP API for datum/script resolution and pattern matching. |
