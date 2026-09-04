@@ -4,7 +4,9 @@ use futures_util::{stream::FuturesUnordered, StreamExt};
 use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::{fs, path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -17,6 +19,8 @@ use dolos::prelude::*;
 use dolos::storage;
 
 pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
+
+static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// Ensure the storage root directory exists.
 pub fn ensure_storage_path(config: &RootConfig) -> Result<PathBuf, Error> {
@@ -218,6 +222,7 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
             .build();
 
         opentelemetry::global::set_tracer_provider(tracer.clone());
+        let _ = TRACER_PROVIDER.set(tracer.clone());
 
         let layer = tracing_opentelemetry::layer().with_tracer(tracer.tracer("dolos"));
         Some(layer)
@@ -250,6 +255,20 @@ pub fn setup_tracing(config: &LoggingConfig, telemetry: &TelemetryConfig) -> mie
     tracing_log::LogTracer::init().ok();
 
     Ok(())
+}
+
+/// Flush and stop the batch span exporter before the process exits.
+///
+/// The global provider owns a clone, so merely dropping the local provider from
+/// `setup_tracing` does not stop its worker or export its final batch. Keeping a
+/// handle here lets the CLI perform an explicit shutdown after every command,
+/// including commands that do not run the long-lived daemon pipeline.
+pub fn shutdown_tracing() {
+    if let Some(provider) = TRACER_PROVIDER.get() {
+        if let Err(error) = provider.shutdown() {
+            eprintln!("failed to shut down OpenTelemetry tracer provider: {error}");
+        }
+    }
 }
 
 pub fn open_genesis_files(config: &GenesisConfig) -> miette::Result<Genesis> {
