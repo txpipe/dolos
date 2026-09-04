@@ -273,17 +273,22 @@ impl FjallStateConfig {
     }
 }
 
+/// The message a configuration selecting the removed `redb` state backend
+/// fails with.
+pub const REMOVED_REDB_STATE_BACKEND: &str =
+    "the `redb` state backend was removed; the supported state backend is `fjall`, \
+     and an existing redb state directory has to be re-bootstrapped (a stelae restore \
+     is the shortest path)";
+
 /// State store configuration.
 ///
-/// The supported persistent state backend is `fjall`. The `redb` variant is
-/// deprecated in its favor: it is kept only so existing configuration files
-/// still deserialize, and is refused when the node opens its stores.
+/// The supported persistent state backend is `fjall`. The `redb` backend was
+/// removed: a configuration still naming it fails to load with
+/// [`REMOVED_REDB_STATE_BACKEND`] rather than serde's unknown-variant error.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
-#[allow(deprecated)]
+#[serde(try_from = "StateStoreConfigRepr")]
 pub enum StateStoreConfig {
-    #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
-    Redb(RedbStateConfig),
     /// Builtin in-memory backend: serves the whole state contract, ephemeral
     /// by design and sized for devnets, tooling and tests rather than for a
     /// node following a public network.
@@ -292,17 +297,38 @@ pub enum StateStoreConfig {
     Fjall(FjallStateConfig),
 }
 
+/// Deserialization shape for [`StateStoreConfig`]: it still accepts the
+/// removed `redb` backend so the load fails with a migration message.
+#[derive(Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+enum StateStoreConfigRepr {
+    Redb {},
+    #[serde(rename = "in_memory")]
+    InMemory,
+    Fjall(FjallStateConfig),
+}
+
+impl TryFrom<StateStoreConfigRepr> for StateStoreConfig {
+    type Error = &'static str;
+
+    fn try_from(value: StateStoreConfigRepr) -> Result<Self, Self::Error> {
+        match value {
+            StateStoreConfigRepr::Redb {} => Err(REMOVED_REDB_STATE_BACKEND),
+            StateStoreConfigRepr::InMemory => Ok(Self::InMemory),
+            StateStoreConfigRepr::Fjall(cfg) => Ok(Self::Fjall(cfg)),
+        }
+    }
+}
+
 impl Default for StateStoreConfig {
     fn default() -> Self {
         Self::Fjall(FjallStateConfig::default())
     }
 }
 
-#[allow(deprecated)]
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory => None,
         }
@@ -310,7 +336,6 @@ impl StateStoreConfig {
 
     pub fn max_history(&self) -> Option<u64> {
         match self {
-            Self::Redb(cfg) => cfg.max_history,
             Self::Fjall(cfg) => cfg.max_history,
             Self::InMemory => None,
         }
@@ -322,7 +347,7 @@ impl StateStoreConfig {
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory => false,
+            Self::InMemory => false,
         }
     }
 }
@@ -506,17 +531,22 @@ impl FjallIndexConfig {
     }
 }
 
+/// The message a configuration selecting the removed `redb` index backend
+/// fails with.
+pub const REMOVED_REDB_INDEX_BACKEND: &str =
+    "the `redb` index backend was removed; the supported index backend is `fjall`, \
+     and an existing redb index directory has to be rebuilt (a stelae restore \
+     is the shortest path)";
+
 /// Index store configuration.
 ///
-/// The supported persistent index backend is `fjall`. The `redb` variant is
-/// deprecated in its favor: it is kept only so existing configuration files
-/// still deserialize, and is refused when the node opens its stores.
+/// The supported persistent index backend is `fjall`. The `redb` backend was
+/// removed: a configuration still naming it fails to load with
+/// [`REMOVED_REDB_INDEX_BACKEND`] rather than serde's unknown-variant error.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
-#[allow(deprecated)]
+#[serde(try_from = "IndexStoreConfigRepr")]
 pub enum IndexStoreConfig {
-    #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
-    Redb(RedbIndexConfig),
     /// Builtin in-memory backend: serves the whole index contract, ephemeral
     /// by design and sized for devnets, tooling and tests rather than for a
     /// node following a public network.
@@ -529,17 +559,41 @@ pub enum IndexStoreConfig {
     NoOp,
 }
 
+/// Deserialization shape for [`IndexStoreConfig`]: it still accepts the
+/// removed `redb` backend so the load fails with a migration message.
+#[derive(Deserialize)]
+#[serde(tag = "backend", rename_all = "lowercase")]
+enum IndexStoreConfigRepr {
+    Redb {},
+    #[serde(rename = "in_memory")]
+    InMemory,
+    Fjall(FjallIndexConfig),
+    #[serde(rename = "no_op", alias = "noop")]
+    NoOp,
+}
+
+impl TryFrom<IndexStoreConfigRepr> for IndexStoreConfig {
+    type Error = &'static str;
+
+    fn try_from(value: IndexStoreConfigRepr) -> Result<Self, Self::Error> {
+        match value {
+            IndexStoreConfigRepr::Redb {} => Err(REMOVED_REDB_INDEX_BACKEND),
+            IndexStoreConfigRepr::InMemory => Ok(Self::InMemory),
+            IndexStoreConfigRepr::Fjall(cfg) => Ok(Self::Fjall(cfg)),
+            IndexStoreConfigRepr::NoOp => Ok(Self::NoOp),
+        }
+    }
+}
+
 impl Default for IndexStoreConfig {
     fn default() -> Self {
         Self::Fjall(FjallIndexConfig::default())
     }
 }
 
-#[allow(deprecated)]
 impl IndexStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
@@ -551,7 +605,7 @@ impl IndexStoreConfig {
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
+            Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -660,13 +714,9 @@ impl StorageConfig {
 
     /// Get the resolved path for the state store.
     /// Returns `None` for in-memory backends.
-    #[allow(deprecated)]
     pub fn state_path(&self) -> Option<PathBuf> {
         match &self.state {
             StateStoreConfig::InMemory => None,
-            StateStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
-            }
             StateStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
             }
@@ -689,13 +739,9 @@ impl StorageConfig {
 
     /// Get the resolved path for the index store.
     /// Returns `None` for in-memory or no-op backends.
-    #[allow(deprecated)]
     pub fn index_path(&self) -> Option<PathBuf> {
         match &self.index {
             IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
-            IndexStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
-            }
             IndexStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
             }
@@ -1388,5 +1434,31 @@ mod tests {
 
         let json = serde_json::to_value(IndexStoreConfig::NoOp).unwrap();
         assert_eq!(json["backend"], "no_op");
+    }
+
+    /// A configuration still naming the removed `redb` state or index backend
+    /// must fail with the migration message, not with serde's unknown-variant
+    /// error, so an operator upgrading reads what to do instead.
+    #[test]
+    fn the_removed_redb_backends_fail_with_a_migration_message() {
+        use serde_json::json;
+
+        let error = serde_json::from_value::<StateStoreConfig>(
+            json!({ "backend": "redb", "path": "state", "cache": 500 }),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("redb"), "must name the removed backend");
+        assert!(error.contains("fjall"), "must name the supported backend");
+
+        let error = serde_json::from_value::<IndexStoreConfig>(
+            json!({ "backend": "redb", "path": "index" }),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("redb"), "must name the removed backend");
+        assert!(error.contains("fjall"), "must name the supported backend");
     }
 }
