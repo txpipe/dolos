@@ -148,9 +148,14 @@ pub fn run(
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
             bail!("archive sanitization needs exclusive access to the archive database")
         }
+        // The memory archive holds its blocks in process, so there is no
+        // `<root>/archive` for `--include-archive` to pick up. The other
+        // stores may still be on disk, so only the archive half is refused.
+        ArchiveStoreBackend::Memory(_) if args.include_archive => {
+            bail!("the in-memory archive keeps nothing on disk to export")
+        }
         // Sanitization requires direct backend access: fjall major-compacts
-        // both keyspaces (an LSM has no offline integrity check to run). The
-        // memory archive has no files to sanitize or to export.
+        // both keyspaces (an LSM has no offline integrity check to run).
         ArchiveStoreBackend::Fjall(s) if !args.skip_sanitization => {
             pb.set_message("compacting archive");
             s.compact().into_diagnostic()?;
