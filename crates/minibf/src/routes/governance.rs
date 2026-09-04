@@ -34,8 +34,6 @@ use crate::{
     Facade,
 };
 
-const GOV_ACTION_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("gov_action");
-
 fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusCode> {
     match drep_id {
         "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
@@ -494,14 +492,6 @@ fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
     Ok((tx.into(), idx))
 }
 
-fn gov_action_id_bech32(tx: Hash<32>, idx: u32) -> Result<String, StatusCode> {
-    let idx: u8 = idx
-        .try_into()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    bech32(GOV_ACTION_HRP, [tx.as_slice(), &[idx]].concat())
-}
-
 // The helpers below reconstruct the `governance_description` JSON that
 // Blockfrost copies from db-sync. db-sync stores the cardano-ledger Aeson
 // encoding of the submitted `GovAction`, so field names follow the ledger
@@ -904,7 +894,7 @@ impl IntoModel<Proposal> for ProposalModelBuilder {
         let governance_description = self.gov_action.as_ref().map(description_json).transpose()?;
 
         let out = Proposal {
-            id: gov_action_id_bech32(self.state.tx, self.state.idx)?,
+            id: bech32_gov_action(&self.state.tx, self.state.idx)?,
             tx_hash: hex::encode(self.state.tx),
             cert_index: self.state.idx as i32,
             governance_type: self.governance_type(),
@@ -1408,7 +1398,7 @@ mod tests {
         assert_eq!(model.cert_index, 0);
         assert_eq!(
             model.id,
-            gov_action_id_bech32(proposal_tx(), 0).expect("failed to encode gov action id")
+            bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id")
         );
         assert_eq!(
             model.governance_type,
@@ -1462,7 +1452,7 @@ mod tests {
     #[tokio::test]
     async fn governance_proposal_by_gov_action_id_happy_path() {
         let app = proposal_lookup_app();
-        let id = gov_action_id_bech32(proposal_tx(), 0).expect("failed to encode gov action id");
+        let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
         let path = format!("/governance/proposals/{id}");
         let (status, body) = app.get_bytes(&path).await;
         assert_eq!(status, StatusCode::OK);
@@ -1503,7 +1493,7 @@ mod tests {
             assert_eq!(parsed_tx, Hash::from(tx));
             assert_eq!(parsed_idx, idx);
 
-            let encoded = gov_action_id_bech32(tx.into(), idx).expect("failed to encode vector");
+            let encoded = bech32_gov_action(&tx.into(), idx).expect("failed to encode vector");
             assert_eq!(encoded, id);
         }
     }
@@ -1612,7 +1602,7 @@ mod tests {
     #[tokio::test]
     async fn governance_proposal_by_gov_action_id_internal_error() {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
-        let id = gov_action_id_bech32(proposal_tx(), 0).expect("failed to encode gov action id");
+        let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
         let path = format!("/governance/proposals/{id}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
