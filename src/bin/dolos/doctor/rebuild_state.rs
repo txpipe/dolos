@@ -124,7 +124,6 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     // Segment files can live outside the archive directory; the backend takes
     // `blocks_path` verbatim, so this check does too.
     let blocks_path = match &config.storage.archive {
-        dolos_core::config::ArchiveStoreConfig::Redb(cfg) => cfg.blocks_path.as_ref(),
         dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.as_ref(),
         _ => None,
     };

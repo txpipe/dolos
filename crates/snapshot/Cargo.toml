@@ -65,8 +65,6 @@ rustls = { version = "0.23", default-features = false, features = [
     "std",
 ] }
 
-# The export tests drive real store sets: `dolos-testing` for the harness
-# domain and its two backend bindings, `dolos-redb3` for the archive, which is
-# the one store with no builtin backend.
+# The export tests drive real store sets through `dolos-testing`'s harness
+# domain and its backend bindings.
 dolos-testing = { path = "../testing" }
-dolos-redb3 = { path = "../redb3" }

@@ -2,20 +2,21 @@
 //!
 //! Every test is written against the `ArchiveStore`/`ArchiveWriter` traits
 //! and instantiated per backend by the `conformance_suite!` macro at the
-//! bottom, so redb — the shipping backend — pins the semantics the fjall
-//! prototype must match: block reads and walks (including the Byron
-//! boundary slot family), undo's segment truncation, prune and truncate
-//! boundaries, and the log namespaces' write/read/range behavior.
+//! bottom, so the builtin memory archive — small enough to read as a
+//! specification — pins the semantics the shipping fjall backend must match:
+//! block reads and walks (including the Byron boundary slot family), undo's
+//! segment truncation, prune and truncate boundaries, and the log
+//! namespaces' write/read/range behavior.
 //!
-//! The block tests are ports of the redb crate's inline archive tests
-//! (`crates/redb3/src/archive/tests.rs`); the log tests are new here, since
-//! the redb suite exercised logs only through backend-specific internals.
+//! The suite was written against the retired redb archive, whose block tests
+//! it ports; the memory archive took over as the oracle when redb retired
+//! (decision 0039).
 
 use std::sync::Arc;
 
 use dolos_core::{
-    ArchiveStore as CoreArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, EntityKey, LogKey,
-    NamespaceType, RawBlock, StateSchema, TemporalKey,
+    builtin::MemoryArchiveStore, ArchiveStore as CoreArchiveStore, ArchiveWriter as _, BlockSlot,
+    ChainPoint, EntityKey, LogKey, NamespaceType, RawBlock, StateSchema, TemporalKey,
 };
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
@@ -45,18 +46,14 @@ trait Backend {
     fn open() -> (Self::Store, Self::Guard);
 }
 
-struct Redb;
+struct Memory;
 
-impl Backend for Redb {
-    type Store = dolos_redb3::archive::ArchiveStore;
+impl Backend for Memory {
+    type Store = MemoryArchiveStore;
     type Guard = ();
 
     fn open() -> (Self::Store, Self::Guard) {
-        (
-            dolos_redb3::archive::ArchiveStore::in_memory(schema())
-                .expect("failed to open redb archive store"),
-            (),
-        )
+        (MemoryArchiveStore::new(schema()), ())
     }
 }
 
@@ -998,10 +995,9 @@ fn truncate_front_drops_logs_at_the_cut_slot<B: Backend>() {
     store.truncate_front(&point(200)).unwrap();
 
     // The block at the cut slot survives; log rows at the cut slot go with
-    // everything after it. This asymmetry is what the redb backend does —
-    // its block removal is strictly-after while its log removal compares
-    // full keys against the bare temporal prefix — and both backends must
-    // agree on it.
+    // everything after it. The asymmetry comes from the block removal being
+    // strictly-after while the log removal compares full keys against the
+    // bare temporal prefix, and both backends must agree on it.
     assert_eq!(stored_slots(&store), vec![100, 200]);
 
     let walked: Vec<LogKey> = store
@@ -1043,7 +1039,7 @@ fn logs_and_blocks_share_one_writer_commit<B: Backend>() {
 /// benchmark protocol runs on a real replay.
 #[test]
 fn backends_agree_on_identical_writes() {
-    let (redb, _g1) = Redb::open();
+    let (memory, _g1) = Memory::open();
     let (fjall, _g2) = Fjall::open();
 
     let seed_rows: Vec<(LogKey, Vec<u8>)> = (0u64..50)
@@ -1055,11 +1051,11 @@ fn backends_agree_on_identical_writes() {
         })
         .collect();
 
-    for store in [&redb as &dyn WriteSurface, &fjall as &dyn WriteSurface] {
+    for store in [&memory as &dyn WriteSurface, &fjall as &dyn WriteSurface] {
         store.write(&seed_rows);
     }
 
-    let from_redb: Vec<(LogKey, Vec<u8>)> = redb
+    let from_memory: Vec<(LogKey, Vec<u8>)> = memory
         .iter_logs(NS_A, LogKey::full_range())
         .unwrap()
         .collect::<Result<_, _>>()
@@ -1070,8 +1066,11 @@ fn backends_agree_on_identical_writes() {
         .collect::<Result<_, _>>()
         .unwrap();
 
-    assert_eq!(from_redb, seed_rows, "the walk must return the seeded rows");
-    assert_eq!(from_redb, from_fjall);
+    assert_eq!(
+        from_memory, seed_rows,
+        "the walk must return the seeded rows"
+    );
+    assert_eq!(from_memory, from_fjall);
 }
 
 /// Object-safe helper so the agreement test writes through both backends
@@ -1153,5 +1152,5 @@ macro_rules! full_suite {
     };
 }
 
-full_suite!(redb, Redb);
+full_suite!(memory, Memory);
 full_suite!(fjall, Fjall);

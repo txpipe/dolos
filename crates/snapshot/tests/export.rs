@@ -43,7 +43,7 @@ use dolos_cardano::{
     pallas::ledger::traverse::MultiEraBlock, EraBoundary,
 };
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
+    builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord,
     IndexRecord, IndexStore, IndexWriter as _, LogKey, Namespace, StateStore, StateWriter as _,
     TagRecord, TemporalKey,
@@ -105,14 +105,8 @@ fn skeleton_point() -> ChainPoint {
 }
 
 /// An archive, state and index store holding nothing but a cursor.
-fn empty_stores() -> (
-    dolos_redb3::archive::ArchiveStore,
-    MemoryStateStore,
-    MemoryIndexStore,
-) {
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
-            .unwrap();
+fn empty_stores() -> (MemoryArchiveStore, MemoryStateStore, MemoryIndexStore) {
+    let archive = MemoryArchiveStore::new(dolos_cardano::model::build_schema());
 
     let state = MemoryStateStore::new();
     let writer = state.start_writer().unwrap();
@@ -605,11 +599,10 @@ fn expected_state<B: ToyStores>(
 
 /// Done criterion 3, and the claim ADR-004 rests on.
 ///
-/// The two domains differ in exactly one thing: the state and index stores are
-/// the builtin in-memory pair in one and the on-disk fjall pair in the other.
-/// The archive is redb in both, because there is no second archive backend to
-/// compare against. Same genesis, same blocks, same seeding — so the same
-/// inscription, byte for byte, or the format does not mean what it claims.
+/// The two domains share no store implementation: the builtin in-memory state,
+/// index and archive in one, the on-disk fjall trio in the other. Same genesis,
+/// same blocks, same seeding — so the same inscription, byte for byte, or the
+/// format does not mean what it claims.
 #[test]
 fn both_backends_publish_the_same_inscription() {
     // At the live cursor, which is what a publisher actually stands at, and
