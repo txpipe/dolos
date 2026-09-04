@@ -43,7 +43,7 @@ use dolos_cardano::{
     pallas::ledger::traverse::MultiEraBlock, EraBoundary,
 };
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
+    builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord,
     IndexRecord, IndexStore, IndexWriter as _, LogKey, Namespace, StateStore, StateWriter as _,
     TagRecord, TemporalKey,
@@ -105,14 +105,8 @@ fn skeleton_point() -> ChainPoint {
 }
 
 /// An archive, state and index store holding nothing but a cursor.
-fn empty_stores() -> (
-    dolos_redb3::archive::ArchiveStore,
-    MemoryStateStore,
-    MemoryIndexStore,
-) {
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
-            .unwrap();
+fn empty_stores() -> (MemoryArchiveStore, MemoryStateStore, MemoryIndexStore) {
+    let archive = MemoryArchiveStore::new(dolos_cardano::model::build_schema());
 
     let state = MemoryStateStore::new();
     let writer = state.start_writer().unwrap();

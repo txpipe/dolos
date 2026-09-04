@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
+    builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexDelta,
     IndexError, IndexRecord, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace,
     StateError, StateStore, TagDimension, TipEvent, WalError, WalStore,
@@ -156,12 +156,12 @@ impl StateStore for FaultyStateStore {
 
 #[derive(Clone)]
 pub struct FaultyArchiveStore {
-    inner: dolos_redb3::archive::ArchiveStore,
+    inner: MemoryArchiveStore,
     fault: TestFault,
 }
 
 impl FaultyArchiveStore {
-    pub fn new(inner: dolos_redb3::archive::ArchiveStore, fault: TestFault) -> Self {
+    pub fn new(inner: MemoryArchiveStore, fault: TestFault) -> Self {
         Self { inner, fault }
     }
 
@@ -175,10 +175,10 @@ impl FaultyArchiveStore {
 }
 
 impl ArchiveStore for FaultyArchiveStore {
-    type BlockIter<'a> = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::BlockIter<'a>;
-    type Writer = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::Writer;
-    type LogIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::LogIter;
-    type EntityValueIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::EntityValueIter;
+    type BlockIter<'a> = <MemoryArchiveStore as ArchiveStore>::BlockIter<'a>;
+    type Writer = <MemoryArchiveStore as ArchiveStore>::Writer;
+    type LogIter = <MemoryArchiveStore as ArchiveStore>::LogIter;
+    type EntityValueIter = <MemoryArchiveStore as ArchiveStore>::EntityValueIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {

@@ -1289,9 +1289,9 @@ fn publish_at_band<S: CoreIndexStore>(
 
     let temp = tempfile::tempdir().expect("tempdir");
 
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
-            .expect("archive store");
+    let archive = dolos_core::builtin::MemoryArchiveStore::new(
+        dolos_cardano::model::build_schema(),
+    );
 
     let state = dolos_core::builtin::MemoryStateStore::new();
 

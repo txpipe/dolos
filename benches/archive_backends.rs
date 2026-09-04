@@ -1,11 +1,10 @@
-//! Regression guards for the archive backends' three read-shape families.
+//! Regression guards for the archive backend's three read-shape families.
 //!
-//! Both backends are populated with the identical synthetic content from
-//! `dolos_testing::archive` and measured against the same keys, so a run
-//! compares redb and fjall on equal footing: block location resolution and
-//! full block reads (`get_block_by_slot`), the per-account reward point
-//! reads (`read_logs` per epoch), and the per-epoch temporal-prefix scan
-//! (`iter_logs`).
+//! The store is populated with the synthetic content from
+//! `dolos_testing::archive` and measured against a fixed key sample: block
+//! location resolution and full block reads (`get_block_by_slot`), the
+//! per-account reward point reads (`read_logs` per epoch), and the per-epoch
+//! temporal-prefix scan (`iter_logs`).
 //!
 //! These are *relative* regression guards on small tempdir populations.
 //! Absolute numbers say nothing about production behavior — the
@@ -41,28 +40,13 @@ fn schema() -> StateSchema {
 }
 
 /// One archive backend under measurement, mirroring the conformance suite's
-/// seam (`tests/archive_conformance.rs`). Both backends open on a tempdir —
-/// redb's in-memory variant would swap its index to a different storage
-/// backend and skew the comparison.
+/// seam (`tests/archive_conformance.rs`). The seam is kept generic even with
+/// one persistent backend left, so the shapes stay comparable across a
+/// future one.
 trait Backend {
     type Store: CoreArchiveStore;
 
     fn open(dir: &std::path::Path) -> Self::Store;
-}
-
-struct Redb;
-
-impl Backend for Redb {
-    type Store = dolos_redb3::archive::ArchiveStore;
-
-    fn open(dir: &std::path::Path) -> Self::Store {
-        dolos_redb3::archive::ArchiveStore::open(
-            schema(),
-            dir,
-            &dolos_core::config::RedbArchiveConfig::default(),
-        )
-        .expect("failed to open redb archive store")
-    }
 }
 
 struct Fjall;
@@ -96,7 +80,7 @@ fn sampled_slots() -> Vec<u64> {
     SHAPE.block_slots().step_by(BLOCK_SAMPLE_STRIDE).collect()
 }
 
-#[divan::bench(types = [Redb, Fjall], sample_count = 50)]
+#[divan::bench(types = [Fjall], sample_count = 50)]
 fn block_location_resolution<B: Backend>(bencher: divan::Bencher) {
     let (store, _dir) = populated::<B>();
     let slots = sampled_slots();
@@ -120,7 +104,7 @@ fn block_location_resolution<B: Backend>(bencher: divan::Bencher) {
     });
 }
 
-#[divan::bench(types = [Redb, Fjall], sample_count = 50)]
+#[divan::bench(types = [Fjall], sample_count = 50)]
 fn block_full_read<B: Backend>(bencher: divan::Bencher) {
     let (store, _dir) = populated::<B>();
     let slots = sampled_slots();
@@ -136,7 +120,7 @@ fn block_full_read<B: Backend>(bencher: divan::Bencher) {
     });
 }
 
-#[divan::bench(types = [Redb, Fjall], sample_count = 50)]
+#[divan::bench(types = [Fjall], sample_count = 50)]
 fn rewards_point_reads<B: Backend>(bencher: divan::Bencher) {
     let (store, _dir) = populated::<B>();
     let account_stride = SHAPE.log_rows_per_epoch / ACCOUNT_SAMPLES;
@@ -152,7 +136,7 @@ fn rewards_point_reads<B: Backend>(bencher: divan::Bencher) {
     });
 }
 
-#[divan::bench(types = [Redb, Fjall], sample_count = 50)]
+#[divan::bench(types = [Fjall], sample_count = 50)]
 fn epoch_scan<B: Backend>(bencher: divan::Bencher) {
     let (store, _dir) = populated::<B>();
     let scanned_epoch = SHAPE.epochs / 2;

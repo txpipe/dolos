@@ -12,9 +12,11 @@
 //! materializes rather than streams. That suits devnets, tooling and tests, and
 //! nothing else — see each module's docs.
 
+mod archive;
 mod index;
 mod state;
 
+pub use archive::{MemoryArchiveStore, MemoryArchiveWriter, MemoryBlockIter, MemoryLogIter};
 pub use index::{
     MemoryExactIter, MemoryIndexStore, MemoryIndexWriter, MemorySlotIter, MemoryTagIter,
 };

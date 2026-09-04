@@ -1,7 +1,7 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
 use dolos_cardano::indexes::index_delta_from_utxo_delta;
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
+    builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     config::{CardanoConfig, StorageConfig, SyncConfig},
     sync::execute_work_unit,
     BootstrapExt, LogKey, TemporalKey, *,
@@ -170,22 +170,19 @@ pub trait ToyStores: Clone + Send + Sync + 'static {
 pub struct MemoryStores {
     state: MemoryStateStore,
     indexes: MemoryIndexStore,
-    archive: dolos_redb3::archive::ArchiveStore,
+    archive: MemoryArchiveStore,
 }
 
 impl ToyStores for MemoryStores {
     type State = MemoryStateStore;
     type Indexes = MemoryIndexStore;
-    type Archive = dolos_redb3::archive::ArchiveStore;
+    type Archive = MemoryArchiveStore;
 
     fn open() -> Self {
         Self {
             state: MemoryStateStore::new(),
             indexes: MemoryIndexStore::new(),
-            archive: dolos_redb3::archive::ArchiveStore::in_memory(
-                dolos_cardano::model::build_schema(),
-            )
-            .expect("opening the in-memory redb archive store"),
+            archive: MemoryArchiveStore::new(dolos_cardano::model::build_schema()),
         }
     }
 
