@@ -148,7 +148,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
+- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb state directory has to be re-bootstrapped (a stelae restore is the shortest path).
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
 - `cache`: size (MB) of the state cache.
 - `max_history`: maximum number of slots to keep before pruning.
@@ -187,7 +187,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads   | integer | 8       |
 | memtable_size_mb | integer | 128     |
 
-- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole index in process memory: ephemeral — everything is lost on restart — and RAM-resident, so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the index layer entirely. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
+- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole index in process memory: ephemeral — everything is lost on restart — and RAM-resident, so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the index layer entirely. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb index directory has to be rebuilt (a stelae restore is the shortest path).
 - `path`: optional override for the index path (defaults to `<storage.path>/index`).
 - `cache`: size (MB) of the index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.

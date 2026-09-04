@@ -275,15 +275,11 @@ impl FjallStateConfig {
 
 /// State store configuration.
 ///
-/// The supported persistent state backend is `fjall`. The `redb` variant is
-/// deprecated in its favor: it is kept only so existing configuration files
-/// still deserialize, and is refused when the node opens its stores.
+/// The supported persistent state backend is `fjall`; the `redb` backend was
+/// removed.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
-#[allow(deprecated)]
 pub enum StateStoreConfig {
-    #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
-    Redb(RedbStateConfig),
     /// Builtin in-memory backend: serves the whole state contract, ephemeral
     /// by design and sized for devnets, tooling and tests rather than for a
     /// node following a public network.
@@ -298,11 +294,9 @@ impl Default for StateStoreConfig {
     }
 }
 
-#[allow(deprecated)]
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory => None,
         }
@@ -310,7 +304,6 @@ impl StateStoreConfig {
 
     pub fn max_history(&self) -> Option<u64> {
         match self {
-            Self::Redb(cfg) => cfg.max_history,
             Self::Fjall(cfg) => cfg.max_history,
             Self::InMemory => None,
         }
@@ -322,7 +315,7 @@ impl StateStoreConfig {
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory => false,
+            Self::InMemory => false,
         }
     }
 }
@@ -508,15 +501,11 @@ impl FjallIndexConfig {
 
 /// Index store configuration.
 ///
-/// The supported persistent index backend is `fjall`. The `redb` variant is
-/// deprecated in its favor: it is kept only so existing configuration files
-/// still deserialize, and is refused when the node opens its stores.
+/// The supported persistent index backend is `fjall`; the `redb` backend was
+/// removed.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
-#[allow(deprecated)]
 pub enum IndexStoreConfig {
-    #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
-    Redb(RedbIndexConfig),
     /// Builtin in-memory backend: serves the whole index contract, ephemeral
     /// by design and sized for devnets, tooling and tests rather than for a
     /// node following a public network.
@@ -535,11 +524,9 @@ impl Default for IndexStoreConfig {
     }
 }
 
-#[allow(deprecated)]
 impl IndexStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
@@ -551,7 +538,7 @@ impl IndexStoreConfig {
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
+            Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -660,13 +647,9 @@ impl StorageConfig {
 
     /// Get the resolved path for the state store.
     /// Returns `None` for in-memory backends.
-    #[allow(deprecated)]
     pub fn state_path(&self) -> Option<PathBuf> {
         match &self.state {
             StateStoreConfig::InMemory => None,
-            StateStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
-            }
             StateStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
             }
@@ -689,13 +672,9 @@ impl StorageConfig {
 
     /// Get the resolved path for the index store.
     /// Returns `None` for in-memory or no-op backends.
-    #[allow(deprecated)]
     pub fn index_path(&self) -> Option<PathBuf> {
         match &self.index {
             IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
-            IndexStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
-            }
             IndexStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
             }

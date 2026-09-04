@@ -148,41 +148,6 @@ fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
     Ok(())
 }
 
-/// Refuse a deprecated state backend at the point where the backend is
-/// chosen, so a stale configuration fails immediately with an actionable
-/// error instead of surfacing later at runtime.
-///
-/// `in_memory` is not refused: it is a builtin store that serves the whole
-/// contract, ephemeral by design rather than by incapacity.
-#[allow(deprecated)]
-fn check_state_backend(config: &StateStoreConfig) -> Result<(), Error> {
-    let selected = match config {
-        StateStoreConfig::Fjall(_) | StateStoreConfig::InMemory => return Ok(()),
-        StateStoreConfig::Redb(_) => "redb",
-    };
-
-    Err(Error::StorageError(format!(
-        "state backend `{selected}` is deprecated; the supported state backend is `fjall`"
-    )))
-}
-
-/// Refuse a deprecated index backend, same rationale as
-/// [`check_state_backend`]. `in_memory` is a builtin store that serves the
-/// whole contract, and `no_op` is an explicit opt-out of the index layer.
-#[allow(deprecated)]
-fn check_index_backend(config: &IndexStoreConfig) -> Result<(), Error> {
-    let selected = match config {
-        IndexStoreConfig::Fjall(_) | IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => {
-            return Ok(())
-        }
-        IndexStoreConfig::Redb(_) => "redb",
-    };
-
-    Err(Error::StorageError(format!(
-        "index backend `{selected}` is deprecated; the supported index backend is `fjall`"
-    )))
-}
-
 /// Ensure directory exists for a store path.
 fn ensure_store_path(path: &Path) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
@@ -211,14 +176,12 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 }
 
 pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
-    check_index_backend(&config.storage.index)?;
     let path = config.storage.index_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
-    check_state_backend(&config.storage.state)?;
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -492,14 +455,12 @@ impl StateStoreBackend {
     ///
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
-    #[allow(deprecated)]
     pub fn open(
         path: impl AsRef<Path>,
-        schema: StateSchema,
+        _schema: StateSchema,
         config: &StateStoreConfig,
     ) -> Result<Self, StateError> {
         match config {
-            StateStoreConfig::Redb(cfg) => Self::open_redb(path, schema, cfg),
             StateStoreConfig::Fjall(cfg) => Self::open_fjall(path, cfg),
             StateStoreConfig::InMemory => Self::in_memory(),
         }
@@ -1116,10 +1077,8 @@ impl IndexStoreBackend {
     /// For persistent backends, the caller must provide the resolved path.
     /// For `InMemory`, the path is ignored and an in-memory store is created.
     /// For `NoOp`, the path is ignored.
-    #[allow(deprecated)]
     pub fn open(path: impl AsRef<Path>, config: &IndexStoreConfig) -> Result<Self, IndexError> {
         match config {
-            IndexStoreConfig::Redb(cfg) => Self::open_redb(path, cfg),
             IndexStoreConfig::Fjall(cfg) => Self::open_fjall(path, cfg),
             IndexStoreConfig::InMemory => Self::in_memory(),
             IndexStoreConfig::NoOp => Ok(Self::noop()),
@@ -1524,31 +1483,8 @@ impl MempoolStore for MempoolBackend {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
-
-    fn refusal(result: Result<(), Error>) -> String {
-        match result {
-            Err(Error::StorageError(message)) => message,
-            other => panic!("expected a storage refusal, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn accepted_backends_pass_validation() {
-        check_state_backend(&StateStoreConfig::Fjall(FjallStateConfig::default())).unwrap();
-        check_index_backend(&IndexStoreConfig::Fjall(FjallIndexConfig::default())).unwrap();
-
-        // in_memory stays accepted: a builtin store that serves the whole
-        // contract, ephemeral by design rather than by incapacity.
-        check_state_backend(&StateStoreConfig::InMemory).unwrap();
-        check_index_backend(&IndexStoreConfig::InMemory).unwrap();
-
-        // no_op stays accepted too: it is an explicit opt-out of the index
-        // layer.
-        check_index_backend(&IndexStoreConfig::NoOp).unwrap();
-    }
 
     /// `in_memory` has to reach the builtin stores, not a memory-mode disk
     /// backend: that was the old wiring, and it was the reason the variant
@@ -1578,40 +1514,6 @@ mod tests {
             .expect("start_writer failed")
             .append_prehashed([])
             .expect("append_prehashed must be supported");
-    }
-
-    #[test]
-    fn deprecated_state_backends_are_refused() {
-        let message = refusal(check_state_backend(&StateStoreConfig::Redb(
-            RedbStateConfig::default(),
-        )));
-
-        assert!(message.contains("redb"), "refusal must name the backend");
-        assert!(
-            message.contains("deprecated"),
-            "refusal must say the backend is deprecated"
-        );
-        assert!(
-            message.contains("fjall"),
-            "refusal must name the supported backend"
-        );
-    }
-
-    #[test]
-    fn deprecated_index_backends_are_refused() {
-        let message = refusal(check_index_backend(&IndexStoreConfig::Redb(
-            RedbIndexConfig::default(),
-        )));
-
-        assert!(message.contains("redb"), "refusal must name the backend");
-        assert!(
-            message.contains("deprecated"),
-            "refusal must say the backend is deprecated"
-        );
-        assert!(
-            message.contains("fjall"),
-            "refusal must name the supported backend"
-        );
     }
 }
 
