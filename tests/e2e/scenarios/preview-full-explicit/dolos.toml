@@ -22,10 +22,15 @@ worker_threads = 8
 memtable_size_mb = 64
 
 [storage.archive]
-backend = "redb"
+backend = "fjall"
 path = "archive"
 blocks_path = "blocks"
 cache = 500
+max_journal_size = 1024
+flush_on_commit = false
+l0_threshold = 4
+worker_threads = 4
+memtable_size_mb = 64
 
 [storage.index]
 backend = "fjall"

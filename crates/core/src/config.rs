@@ -324,29 +324,6 @@ impl StateStoreConfig {
 // Archive Store Configuration
 // ============================================================================
 
-/// Configuration for the Redb archive backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbArchiveConfig {
-    /// Optional path override for the archive directory.
-    /// If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/archive`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Optional path override for block segment files.
-    /// If not specified, segment files are stored in the archive directory.
-    #[serde(default)]
-    pub blocks_path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-}
-
-impl RedbArchiveConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.blocks_path.is_none() && self.cache.is_none()
-    }
-}
-
 /// Configuration for the Fjall archive backend.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct FjallArchiveConfig {
@@ -393,17 +370,17 @@ impl FjallArchiveConfig {
 }
 
 /// Archive store configuration.
+///
+/// The supported persistent archive backend is `fjall`; the `redb` backend
+/// was removed.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
-    /// Redb backend, supported via explicit configuration. Reads and writes
-    /// the archive index as a single redb file; block segment files are
-    /// shared with the fjall backend.
-    Redb(RedbArchiveConfig),
-    /// Fjall backend, the default. Block segment files are shared with the
-    /// redb backend; only the index differs.
+    /// Fjall backend, the default.
     Fjall(FjallArchiveConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
+    /// Builtin in-memory backend: serves the whole archive contract,
+    /// ephemeral by design and sized for devnets, tooling and tests rather
+    /// than for a node following a public network.
     #[serde(rename = "in_memory")]
     InMemory,
     /// No-op backend that discards all writes and returns empty results.
@@ -420,7 +397,6 @@ impl Default for ArchiveStoreConfig {
 impl ArchiveStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
@@ -429,11 +405,11 @@ impl ArchiveStoreConfig {
     /// Whether this selection round-trips through `Default`: true only for
     /// the default variant carrying no explicit options. Any other variant
     /// must survive re-serialization even with an empty options set — a bare
-    /// `backend = "redb"` is an explicit choice, not the default.
+    /// `backend = "in_memory"` is an explicit choice, not the default.
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
+            Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -441,24 +417,6 @@ impl ArchiveStoreConfig {
 // ============================================================================
 // Index Store Configuration
 // ============================================================================
-
-/// Configuration for the Redb index backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbIndexConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/index`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-}
-
-impl RedbIndexConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.cache.is_none()
-    }
-}
 
 /// Configuration for the Fjall index backend.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -661,9 +619,6 @@ impl StorageConfig {
     pub fn archive_path(&self) -> Option<PathBuf> {
         match &self.archive {
             ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
-            ArchiveStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
-            }
             ArchiveStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
             }
@@ -1312,20 +1267,20 @@ pub struct RootConfig {
 mod tests {
     use super::*;
 
-    /// An explicit `backend = "redb"` with no options must not be treated as
-    /// the default: dropping it on re-serialization would silently flip the
-    /// archive to fjall on the next load.
+    /// An explicit non-default backend carrying no options must not be
+    /// treated as the default: dropping it on re-serialization would silently
+    /// flip the archive to fjall on the next load.
     #[test]
     fn explicit_non_default_backend_survives_reserialization() {
         let storage = StorageConfig {
-            archive: ArchiveStoreConfig::Redb(RedbArchiveConfig::default()),
+            archive: ArchiveStoreConfig::InMemory,
             ..Default::default()
         };
 
         let json = serde_json::to_value(&storage).unwrap();
         let restored: StorageConfig = serde_json::from_value(json).unwrap();
 
-        assert!(matches!(restored.archive, ArchiveStoreConfig::Redb(_)));
+        assert!(matches!(restored.archive, ArchiveStoreConfig::InMemory));
     }
 
     #[test]

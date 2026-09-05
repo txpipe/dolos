@@ -8,8 +8,8 @@ use std::str::FromStr as _;
 use std::sync::Arc;
 
 use dolos_core::{
-    sync::SyncExt as _, BootstrapExt, ChainLogic, ChainPoint, Domain, IndexStore, StateStore,
-    StateWriter, TxoRef, WalStore, WorkUnit,
+    sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain,
+    IndexStore, StateStore, StateWriter, TxoRef, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},

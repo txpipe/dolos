@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
+    builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexDelta,
     IndexError, IndexRecord, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace,
     StateError, StateStore, TagDimension, TipEvent, WalError, WalStore,
@@ -156,12 +156,12 @@ impl StateStore for FaultyStateStore {
 
 #[derive(Clone)]
 pub struct FaultyArchiveStore {
-    inner: dolos_redb3::archive::ArchiveStore,
+    inner: MemoryArchiveStore,
     fault: TestFault,
 }
 
 impl FaultyArchiveStore {
-    pub fn new(inner: dolos_redb3::archive::ArchiveStore, fault: TestFault) -> Self {
+    pub fn new(inner: MemoryArchiveStore, fault: TestFault) -> Self {
         Self { inner, fault }
     }
 
@@ -175,16 +175,16 @@ impl FaultyArchiveStore {
 }
 
 impl ArchiveStore for FaultyArchiveStore {
-    type BlockIter<'a> = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::BlockIter<'a>;
-    type Writer = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::Writer;
-    type LogIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::LogIter;
-    type EntityValueIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::EntityValueIter;
+    type BlockIter<'a> = <MemoryArchiveStore as ArchiveStore>::BlockIter<'a>;
+    type Writer = <MemoryArchiveStore as ArchiveStore>::Writer;
+    type LogIter = <MemoryArchiveStore as ArchiveStore>::LogIter;
+    type EntityValueIter = <MemoryArchiveStore as ArchiveStore>::EntityValueIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer().map_err(ArchiveError::from)
+        self.inner.start_writer()
     }
 
     fn read_logs(
@@ -213,18 +213,14 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_block_by_slot(slot)
-            .map_err(ArchiveError::from)
+        self.inner.get_block_by_slot(slot)
     }
 
     fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_blocks_by_slot(slot)
-            .map_err(ArchiveError::from)
+        self.inner.get_blocks_by_slot(slot)
     }
 
     fn get_range<'a>(
@@ -235,32 +231,28 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_range(from, to).map_err(ArchiveError::from)
+        self.inner.get_range(from, to)
     }
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .find_intersect(intersect)
-            .map_err(ArchiveError::from)
+        self.inner.find_intersect(intersect)
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_tip().map_err(ArchiveError::from)
+        self.inner.get_tip()
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .prune_history(max_slots, max_prune)
-            .map_err(ArchiveError::from)
+        self.inner.prune_history(max_slots, max_prune)
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
