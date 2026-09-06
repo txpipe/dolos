@@ -112,7 +112,7 @@ impl EpochWindow {
     }
 }
 
-/// How many `indexes` layers one traversal of the index store fills.
+/// How many `indexes` layers one traversal of the archive store fills.
 ///
 /// ## Why a publish needs a band at all
 ///
@@ -278,11 +278,11 @@ pub struct Plan {
     /// derived from `summary` — which epochs are worth a dump is operational
     /// (decision 0026).
     pub retained: RetainedEpochs,
-    /// How many `indexes` layers one traversal of the index store fills.
+    /// How many `indexes` layers one traversal of the archive store fills.
     ///
     /// Execution rather than geometry: it changes neither which layers this
     /// publish writes nor a byte of what is in them, only how many passes over
-    /// the index store it takes to fill them. It rides on the plan because
+    /// the archive store it takes to fill them. It rides on the plan because
     /// every driver that walks these stores — [`export`], [`reproduce`],
     /// [`verify_reproduction`] — pays the same cost and should take the same
     /// band without each call site spelling it. See [`IndexBand`].
@@ -1576,9 +1576,9 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// ## This is a scan, not a seek, which is why it is banded
 ///
 /// Neither traversal can seek to a slot, so a pass here costs a walk of the
-/// whole index store however few epochs it fills, and one epoch per pass makes
-/// a first publish O(N²). [`IndexBand`] states why the store cannot seek, what
-/// turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
+/// whole archive store however few epochs it fills, and one epoch per pass
+/// makes a first publish O(N²). [`IndexBand`] states why the store cannot seek,
+/// what turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
 ///
 /// ## Positions are handed out before anything is written
 ///
@@ -1712,7 +1712,7 @@ struct Building<K> {
 /// Send one index record to the layer whose epoch its slot falls in.
 ///
 /// A binary search rather than a walk of the band: this runs once per record,
-/// and a mainnet index store holds hundreds of millions of them.
+/// and a mainnet archive store holds hundreds of millions of them.
 ///
 /// A record that lands in no layer is **dropped on purpose** — see
 /// [`write_indexes`] for the two ways the band's span can cover a slot no layer

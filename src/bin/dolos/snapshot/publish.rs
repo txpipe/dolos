@@ -57,7 +57,7 @@ pub struct Args {
     #[arg(long, value_name = "DIR", conflicts_with = "output_dir")]
     scratch_dir: Option<PathBuf>,
 
-    /// epochs whose index layers one traversal of the index store fills; a
+    /// epochs whose index layers one traversal of the archive store fills; a
     /// larger band trades resident memory for fewer traversals, and changes
     /// nothing about the stele it produces. Defaults to the measured value
     /// that keeps the index pass inside 1 GiB
