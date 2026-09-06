@@ -5,9 +5,8 @@ use tokio::sync::Semaphore;
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::{
-    archive::ArchiveStore, indexes::IndexStore, ArchiveError, BlockBody, BlockHash, BlockHeight,
-    BlockSlot, ChainError, ChainPoint, Domain, DomainError, EraCbor, IndexError, TagDimension,
-    TxHash, TxOrder,
+    archive::ArchiveStore, ArchiveError, BlockBody, BlockHash, BlockHeight, BlockSlot, ChainError,
+    ChainPoint, Domain, DomainError, EraCbor, TagDimension, TxHash, TxOrder,
 };
 
 /// Lightweight block metadata for a transaction, extracted via a single decode.
@@ -110,7 +109,7 @@ where
 
     pub async fn block_by_hash(&self, hash: Vec<u8>) -> Result<Option<BlockBody>, DomainError> {
         self.run_blocking(move |domain| {
-            let slot = domain.indexes().slot_by_block_hash(&hash)?;
+            let slot = domain.archive().slot_by_block_hash(&hash)?;
             match slot {
                 Some(slot) => {
                     let candidates = domain.archive().get_blocks_by_slot(&slot)?;
@@ -124,7 +123,7 @@ where
 
     pub async fn block_by_number(&self, number: u64) -> Result<Option<BlockBody>, DomainError> {
         self.run_blocking(move |domain| {
-            let slot = domain.indexes().slot_by_block_number(number)?;
+            let slot = domain.archive().slot_by_block_number(number)?;
             match slot {
                 Some(slot) => Ok(domain.archive().get_block_by_slot(&slot)?),
                 None => Ok(None),
@@ -134,7 +133,7 @@ where
     }
 
     pub async fn slot_by_number(&self, number: u64) -> Result<Option<BlockSlot>, DomainError> {
-        self.run_blocking(move |domain| Ok(domain.indexes().slot_by_block_number(number)?))
+        self.run_blocking(move |domain| Ok(domain.archive().slot_by_block_number(number)?))
             .await
     }
 
@@ -145,7 +144,7 @@ where
         let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {
-                let slot = domain.indexes().slot_by_tx_hash(&tx_hash_lookup)?;
+                let slot = domain.archive().slot_by_tx_hash(&tx_hash_lookup)?;
                 let Some(slot) = slot else {
                     return Ok(None);
                 };
@@ -181,7 +180,7 @@ where
         tx_hash: Vec<u8>,
     ) -> Result<Option<BlockRefMeta>, DomainError> {
         self.run_blocking(move |domain| {
-            let Some(slot) = domain.indexes().slot_by_tx_hash(&tx_hash)? else {
+            let Some(slot) = domain.archive().slot_by_tx_hash(&tx_hash)? else {
                 return Ok(None);
             };
             let Some(raw) = domain.archive().get_block_by_slot(&slot)? else {
@@ -212,7 +211,7 @@ where
         let tx_hash_lookup = tx_hash.clone();
         let Some(raw) = self
             .run_blocking(move |domain| {
-                let slot = domain.indexes().slot_by_tx_hash(&tx_hash_lookup)?;
+                let slot = domain.archive().slot_by_tx_hash(&tx_hash_lookup)?;
                 let Some(slot) = slot else {
                     return Ok(None);
                 };
@@ -242,9 +241,9 @@ where
     ) -> Result<Vec<BlockSlot>, DomainError> {
         self.run_blocking(move |domain| {
             let slots = domain
-                .indexes()
+                .archive()
                 .slots_by_tag(dimension, &key, start_slot, end_slot)?
-                .collect::<Result<Vec<_>, IndexError>>()?;
+                .collect::<Result<Vec<_>, ArchiveError>>()?;
             Ok(slots)
         })
         .await

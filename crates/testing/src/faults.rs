@@ -3,9 +3,8 @@ use std::sync::Arc;
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexDelta,
-    IndexError, IndexRecord, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace,
-    StateError, StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError,
-    WalStore,
+    IndexError, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace, StateError,
+    StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -240,6 +239,9 @@ impl ArchiveStore for FaultyArchiveStore {
     type Writer = <MemoryArchiveStore as ArchiveStore>::Writer;
     type LogIter = <MemoryArchiveStore as ArchiveStore>::LogIter;
     type EntityValueIter = <MemoryArchiveStore as ArchiveStore>::EntityValueIter;
+    type SlotIter = <MemoryArchiveStore as ArchiveStore>::SlotIter;
+    type TagIter = <MemoryArchiveStore as ArchiveStore>::TagIter;
+    type ExactIter = <MemoryArchiveStore as ArchiveStore>::ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
@@ -322,6 +324,61 @@ impl ArchiveStore for FaultyArchiveStore {
         }
         self.inner.truncate_front(after)
     }
+
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.slot_by_block_hash(hash)
+    }
+
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.slot_by_block_number(number)
+    }
+
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.slot_by_tx_hash(hash)
+    }
+
+    fn slots_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.slots_by_tag(dimension, key, start, end)
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::TagIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_archive_tags(dimensions, slots)
+    }
+
+    fn iter_exact_records(
+        &self,
+        slots: std::ops::Range<BlockSlot>,
+    ) -> Result<Self::ExactIter, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.iter_exact_records(slots)
+    }
 }
 
 #[derive(Clone)]
@@ -346,9 +403,6 @@ impl FaultyIndexStore {
 
 impl IndexStore for FaultyIndexStore {
     type Writer = FaultyIndexWriter;
-    type SlotIter = <MemoryIndexStore as IndexStore>::SlotIter;
-    type TagIter = <MemoryIndexStore as IndexStore>::TagIter;
-    type ExactIter = <MemoryIndexStore as IndexStore>::ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         if self.should_fault() {
@@ -379,61 +433,6 @@ impl IndexStore for FaultyIndexStore {
         }
         self.inner.cursor()
     }
-
-    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.slot_by_block_hash(hash)
-    }
-
-    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.slot_by_block_number(number)
-    }
-
-    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.slot_by_tx_hash(hash)
-    }
-
-    fn slots_by_tag(
-        &self,
-        dimension: TagDimension,
-        key: &[u8],
-        start: BlockSlot,
-        end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.slots_by_tag(dimension, key, start, end)
-    }
-
-    fn iter_archive_tags(
-        &self,
-        dimensions: &[TagDimension],
-        slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.iter_archive_tags(dimensions, slots)
-    }
-
-    fn iter_exact_records(
-        &self,
-        slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::ExactIter, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.iter_exact_records(slots)
-    }
 }
 
 pub struct FaultyIndexWriter {
@@ -443,17 +442,6 @@ pub struct FaultyIndexWriter {
 impl IndexWriter for FaultyIndexWriter {
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         self.inner.apply(delta)
-    }
-
-    fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
-        self.inner.undo(delta)
-    }
-
-    fn append_prehashed(
-        &self,
-        records: impl IntoIterator<Item = IndexRecord>,
-    ) -> Result<(), IndexError> {
-        self.inner.append_prehashed(records)
     }
 
     fn commit(self) -> Result<(), IndexError> {

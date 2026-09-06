@@ -3,12 +3,12 @@
 //! All multi-byte integers are encoded as big-endian to ensure correct
 //! lexicographic ordering in the LSM tree.
 //!
-//! ## Index Store Keys
+//! ## Index Keys
 //!
 //! All index keys use dimension hashing for chain-agnostic storage:
-//! - **UTxO tag**: `[dim_hash:8][lookup_key:var][txo_ref:36]`
-//! - **Block tag**: `[dim_hash:8][xxh3(tag_key):8][slot:8]`
-//! - **Exact lookup**: `[dim_hash:8][key_data:var]`
+//! - **UTxO tag** (state store): `[dim_hash:8][lookup_key:var][txo_ref:36]`
+//! - **Block tag** (archive store): `[dim_hash:8][xxh3(tag_key):8][slot:8]`
+//! - **Exact lookup** (archive store): `[dim_hash:8][key_data:var]`
 //!
 //! ## State Store Keys
 //!
@@ -39,7 +39,7 @@ pub const DIM_HASH_SIZE: usize = 8;
 // Dimension Hashing (Chain-Agnostic Index Keys)
 // ============================================================================
 
-/// Internal dimension prefix constants for index store.
+/// Internal dimension prefix constants for the index keyspaces.
 ///
 /// These prefixes are combined with dimension strings to create unique
 /// hashes that distinguish between different index types (UTxO tags,

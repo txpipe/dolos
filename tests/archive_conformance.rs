@@ -5,8 +5,11 @@
 //! bottom, so the builtin memory archive — small enough to read as a
 //! specification — pins the semantics the shipping fjall backend must match:
 //! block reads and walks (including the Byron boundary slot family), undo's
-//! segment truncation, prune and truncate boundaries, and the log
-//! namespaces' write/read/range behavior.
+//! segment truncation, prune and truncate boundaries, the log namespaces'
+//! write/read/range behavior, and the index entries a block projects (the
+//! exact lookups and the archive tags, written in the block's own commit).
+//! The index half's export/restore contract has its own suite,
+//! `archive_index_roundtrip`.
 //!
 //! The suite was written against the retired redb archive, whose block tests
 //! it ports; the memory archive took over as the oracle when redb retired
@@ -14,9 +17,11 @@
 
 use std::sync::Arc;
 
+use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    builtin::MemoryArchiveStore, ArchiveStore as CoreArchiveStore, ArchiveWriter as _, BlockSlot,
-    ChainPoint, EntityKey, LogKey, NamespaceType, RawBlock, StateSchema, TemporalKey,
+    builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
+    ArchiveWriter as _, BlockSlot, ChainPoint, EntityKey, LogKey, NamespaceType, RawBlock,
+    StateSchema, Tag, TemporalKey,
 };
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
@@ -1030,6 +1035,129 @@ fn logs_and_blocks_share_one_writer_commit<B: Backend>() {
     );
 }
 
+// Index entries: the archive's projection of its blocks
+
+/// The index entries one block projects: its hash, its number, one
+/// transaction and one address tag, all derived from `seed` so two deltas
+/// never share an entry.
+fn index_delta(slot: u64, seed: u8) -> ArchiveIndexDelta {
+    ArchiveIndexDelta {
+        slot,
+        block_hash: vec![seed; 32],
+        block_number: Some(slot),
+        tx_hashes: vec![vec![0x80 | seed; 32]],
+        tags: vec![Tag::new(archive_dimensions::ADDRESS, vec![seed; 28])],
+    }
+}
+
+fn tagged_slots<S: CoreArchiveStore>(store: &S, key: &[u8], start: u64, end: u64) -> Vec<u64> {
+    store
+        .slots_by_tag(archive_dimensions::ADDRESS, key, start, end)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+/// A block and the entries that resolve to it land in one commit, and every
+/// exact lookup then answers with the block's slot.
+fn apply_index_then_slot_by_tx_hash_resolves<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let delta = index_delta(100, 0x01);
+
+    let writer = store.start_writer().unwrap();
+    writer
+        .apply(&point(100), &Arc::new(fake_block(100)))
+        .unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+
+    // Nothing is visible before the commit: the entries ride the block's
+    // batch rather than landing ahead of it.
+    assert_eq!(store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(), None);
+
+    writer.commit().unwrap();
+
+    assert_eq!(
+        store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        store.slot_by_block_hash(&delta.block_hash).unwrap(),
+        Some(100)
+    );
+    assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
+    assert_eq!(tagged_slots(&store, &delta.tags[0].key, 0, u64::MAX), [100]);
+
+    assert_eq!(
+        store.get_block_by_slot(&100).unwrap(),
+        Some(fake_block(100)),
+        "the block the entries point at is there too"
+    );
+}
+
+/// A rollback takes back exactly the undone block's entries, and nothing of
+/// the block before it.
+fn undo_index_removes_exactly_what_apply_index_added<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let kept = index_delta(100, 0x01);
+    let undone = index_delta(200, 0x02);
+
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(&[kept.clone(), undone.clone()]).unwrap();
+    writer.commit().unwrap();
+
+    let writer = store.start_writer().unwrap();
+    writer.undo_index(std::slice::from_ref(&undone)).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(store.slot_by_tx_hash(&undone.tx_hashes[0]).unwrap(), None);
+    assert_eq!(store.slot_by_block_hash(&undone.block_hash).unwrap(), None);
+    assert_eq!(store.slot_by_block_number(200).unwrap(), None);
+    assert!(tagged_slots(&store, &undone.tags[0].key, 0, u64::MAX).is_empty());
+
+    assert_eq!(
+        store.slot_by_tx_hash(&kept.tx_hashes[0]).unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        store.slot_by_block_hash(&kept.block_hash).unwrap(),
+        Some(100)
+    );
+    assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
+    assert_eq!(tagged_slots(&store, &kept.tags[0].key, 0, u64::MAX), [100]);
+}
+
+/// `slots_by_tag` takes both bounds inclusive — unlike the record traversals,
+/// whose range is half-open — so the slot at `end` is an answer.
+fn slots_by_tag_bounds_are_inclusive<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let key = vec![0xAA; 28];
+
+    let deltas: Vec<_> = [10u64, 20, 30]
+        .into_iter()
+        .map(|slot| ArchiveIndexDelta {
+            slot,
+            block_hash: vec![slot as u8; 32],
+            block_number: Some(slot),
+            tx_hashes: Vec::new(),
+            tags: vec![Tag::new(archive_dimensions::ADDRESS, key.clone())],
+        })
+        .collect();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(&deltas).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(tagged_slots(&store, &key, 10, 30), [10, 20, 30]);
+    assert_eq!(tagged_slots(&store, &key, 10, 20), [10, 20]);
+    assert_eq!(tagged_slots(&store, &key, 20, 30), [20, 30]);
+    assert_eq!(tagged_slots(&store, &key, 20, 20), [20]);
+    assert_eq!(tagged_slots(&store, &key, 11, 29), [20]);
+    assert!(tagged_slots(&store, &key, 21, 29).is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Cross-backend agreement: both backends walk identical data identically
 // ---------------------------------------------------------------------------
@@ -1147,6 +1275,9 @@ macro_rules! full_suite {
                 prune_keeps_logs_at_the_cutoff_slot,
                 truncate_front_drops_logs_at_the_cut_slot,
                 logs_and_blocks_share_one_writer_commit,
+                apply_index_then_slot_by_tx_hash_resolves,
+                undo_index_removes_exactly_what_apply_index_added,
+                slots_by_tag_bounds_are_inclusive,
             ]
         );
     };

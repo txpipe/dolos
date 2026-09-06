@@ -6,7 +6,7 @@ use axum::{
 };
 use dolos_cardano::{indexes::CardanoStateIndexExt, network_from_genesis, pallas_extras};
 use dolos_core::{
-    async_query::BlockRefMeta, Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet,
+    async_query::BlockRefMeta, ArchiveStore as _, Domain, EraCbor, StateStore as _, TxoRef, UtxoSet,
 };
 use pallas::codec::minicbor;
 use pallas::ledger::{
@@ -682,7 +682,7 @@ fn parse_slot_or_point<D: Domain>(value: &str, facade: &Facade<D>) -> Result<u64
             return Err(MatchError::BadRequest(slot_range_hint()));
         }
         let found_slot = facade
-            .indexes()
+            .archive()
             .slot_by_block_hash(&bytes)
             .map_err(|_| MatchError::Internal)?
             .ok_or_else(|| MatchError::BadRequest(slot_range_hint()))?;
@@ -1050,7 +1050,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let path = format!("/matches/{}", app.vectors().address);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }

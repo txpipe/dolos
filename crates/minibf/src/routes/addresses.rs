@@ -883,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_total_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/total");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/transactions");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

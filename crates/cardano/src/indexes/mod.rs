@@ -1,7 +1,7 @@
 //! Cardano-specific index support.
 //!
-//! This module provides Cardano-specific extensions to the generic index store
-//! defined in `dolos-core`. It includes:
+//! This module provides Cardano-specific extensions to the generic index
+//! types defined in `dolos-core`. It includes:
 //!
 //! - Dimension constants for UTxO filter and archive indexes
 //! - Extension traits for convenient Cardano-specific index queries
@@ -14,5 +14,5 @@ mod query;
 
 pub use delta::{utxo_index_delta_from_utxo_delta, CardanoIndexDeltaBuilder};
 pub use dimensions::{archive as archive_dimensions, utxo as utxo_dimensions};
-pub use ext::{CardanoIndexExt, CardanoStateIndexExt};
+pub use ext::{CardanoArchiveIndexExt, CardanoStateIndexExt};
 pub use query::{AsyncCardanoQueryExt, ScriptData, ScriptLanguage, SlotOrder};

@@ -83,7 +83,9 @@ pub struct UndoBlockData {
     /// The tags the block's outputs and inputs carried, for
     /// `StateWriter::undo_utxo_tags` to take back out beside `utxo_delta`.
     pub utxo_index_delta: UtxoIndexDelta,
-    pub index_delta: IndexDelta,
+    /// The archive tags and exact entries the block wrote, for
+    /// `ArchiveWriter::undo_index` to take back out beside the block.
+    pub archive_index_deltas: Vec<ArchiveIndexDelta>,
     pub tx_hashes: Vec<TxHash>,
 }
 
@@ -97,7 +99,9 @@ pub struct CatchUpBlockData {
     /// The tag changes `utxo_delta` implies, applied beside it through the
     /// state writer.
     pub utxo_index_delta: UtxoIndexDelta,
-    pub index_delta: IndexDelta,
+    /// The archive tags and exact entries the block projects, applied beside
+    /// it through the archive writer.
+    pub archive_index_deltas: Vec<ArchiveIndexDelta>,
     pub tx_hashes: Vec<TxHash>,
 }
 

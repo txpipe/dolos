@@ -139,7 +139,6 @@ impl Node {
             plan,
             self.domain.archive(),
             self.domain.state(),
-            self.domain.indexes(),
             None,
             &Observer::silent(),
         )
@@ -242,7 +241,6 @@ fn a_registry_restore_is_a_directory_restore() {
             &node.first,
             node.domain.archive(),
             node.domain.state(),
-            node.domain.indexes(),
             None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
@@ -688,7 +686,12 @@ impl SteleReader for Interrupted<'_> {
 fn assert_stores_match<B: ToyStores>(left: &Blank<B>, right: &Blank<B>) {
     assert_state_matches(left.state(), right.state());
     assert_archive_matches(&left.archive, &right.archive);
-    assert_indexes_match(left.indexes(), right.indexes());
+    assert_indexes_match(&left.archive, &right.archive);
+    assert_eq!(
+        left.indexes().cursor().unwrap(),
+        right.indexes().cursor().unwrap(),
+        "index cursor"
+    );
     assert_utxo_tags_match(left.state(), right.state());
 }
 
@@ -749,10 +752,8 @@ fn assert_archive_matches<A: ArchiveStore>(left: &A, right: &A) {
     assert!(any, "the fixture wrote no logs, so this proves nothing");
 }
 
-/// The archive half of the index store: the records the layers carry.
-fn assert_indexes_match<I: IndexStore>(left: &I, right: &I) {
-    assert_eq!(left.cursor().unwrap(), right.cursor().unwrap(), "cursor");
-
+/// The index half of the archive: the records the `indexes` layers carry.
+fn assert_indexes_match<A: ArchiveStore>(left: &A, right: &A) {
     let tags = tags_of(right);
     assert!(!tags.is_empty(), "the fixture produced no archive tags");
     assert_eq!(tags_of(left), tags, "archive tags");
@@ -821,7 +822,7 @@ fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>
         .collect()
 }
 
-fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
+fn tags_of<A: ArchiveStore>(store: &A) -> Vec<TagRecord> {
     let mut found: Vec<TagRecord> = store
         .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
         .unwrap()
@@ -832,7 +833,7 @@ fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
     found
 }
 
-fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
+fn exact_of<A: ArchiveStore>(store: &A) -> Vec<ExactRecord> {
     let mut found: Vec<ExactRecord> = store
         .iter_exact_records(0..u64::MAX)
         .unwrap()

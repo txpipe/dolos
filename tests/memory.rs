@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    config::{FjallIndexConfig, FjallStateConfig},
-    ArchiveIndexDelta, ChainPoint, EntityKey, EraCbor, IndexDelta, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, NamespaceType, StateSchema, StateStore as CoreStateStore,
+    config::{FjallArchiveConfig, FjallStateConfig},
+    ArchiveIndexDelta, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter,
+    EntityKey, EraCbor, NamespaceType, StateSchema, StateStore as CoreStateStore,
     StateWriter as CoreStateWriter, Tag, TagRecord, TxoRef, UtxoSetDelta,
 };
 
@@ -342,7 +342,7 @@ const TAGS_PER_BLOCK: u64 = 20;
 const TAG_RECORD_COUNT: u64 = TAG_BLOCK_COUNT * TAGS_PER_BLOCK;
 const TAG_BLOCKS_PER_BATCH: u64 = 500;
 
-fn seed_archive_tags<S: CoreIndexStore>(store: &S) {
+fn seed_archive_tags<S: CoreArchiveStore>(store: &S) {
     let mut block = 0u64;
 
     while block < TAG_BLOCK_COUNT {
@@ -381,18 +381,15 @@ fn seed_archive_tags<S: CoreIndexStore>(store: &S) {
             });
         }
 
-        let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-        let delta = IndexDelta { cursor, archive };
-
         let writer = store.start_writer().expect("start_writer failed");
-        writer.apply(&delta).expect("apply failed");
+        writer.apply_index(&archive).expect("apply_index failed");
         writer.commit().expect("commit failed");
 
         block = batch_end;
     }
 }
 
-fn assert_lazy_archive_tag_iter<S: CoreIndexStore>(store: &S) {
+fn assert_lazy_archive_tag_iter<S: CoreArchiveStore>(store: &S) {
     seed_archive_tags(store);
 
     let threshold = LAZY_BUDGET;
@@ -455,7 +452,7 @@ fn assert_lazy_archive_tag_iter<S: CoreIndexStore>(store: &S) {
 #[serial]
 fn test_fjall_lazy_archive_tag_iter() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
-    let config = FjallIndexConfig {
+    let config = FjallArchiveConfig {
         // Small on purpose: cached blocks are live heap, and the measurement is
         // the iterator's footprint, not the engine's cache budget.
         cache: Some(1),
@@ -463,8 +460,9 @@ fn test_fjall_lazy_archive_tag_iter() {
         worker_threads: Some(1),
         ..Default::default()
     };
-    let store = dolos_fjall::IndexStore::open(tmpdir.path(), &config)
-        .expect("failed to open fjall index store");
+    let store =
+        dolos_fjall::archive::ArchiveStore::open(StateSchema::default(), tmpdir.path(), &config)
+            .expect("failed to open fjall archive store");
 
     assert_lazy_archive_tag_iter(&store);
 }

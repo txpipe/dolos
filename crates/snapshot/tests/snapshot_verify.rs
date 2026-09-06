@@ -262,7 +262,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
     )
     .unwrap();
@@ -274,7 +273,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.first,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
     )
     .unwrap_err();
@@ -350,7 +348,6 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
         &following,
     )

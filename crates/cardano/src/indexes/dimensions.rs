@@ -34,7 +34,7 @@ pub mod utxo {
 ///
 /// Index stores keep a *hash* of the dimension name rather than the name, so
 /// the set of dimensions is not discoverable from disk: any bulk traversal of
-/// archive tags (`IndexStore::iter_archive_tags`) has to be driven by `ALL`,
+/// archive tags (`ArchiveStore::iter_archive_tags`) has to be driven by `ALL`,
 /// and a dimension missing from it silently stops being exported.
 ///
 /// Writing the two out separately made that a comment's job. Here a constant

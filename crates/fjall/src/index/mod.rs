@@ -1,58 +1,32 @@
 //! Fjall-based index store implementation for Dolos (chain-agnostic).
 //!
-//! This module provides an implementation of the `IndexStore` trait using
-//! fjall, an LSM-tree based embedded database. This is optimized for
-//! write-heavy workloads with many keys, which is ideal for blockchain index
-//! data.
+//! What is left of the index store is its cursor: one keyspace, one key.
 //!
-//! ## Three Keyspace Design
+//! The indexes it used to hold moved to the stores they project. The
+//! live-UTxO tags (mutable, high-churn) live in the state store's `state-tags`
+//! keyspace beside the UTxO set (see `crate::state::tags`); the archive tags
+//! and the exact lookups live in the archive store's `archive-tags` and
+//! `index-exact` keyspaces beside the block locations (see
+//! `crate::archive::{tags, exact}`), written in the same batch as the blocks.
 //!
-//! Indexes are organized into three keyspaces based on access patterns:
+//! ## Keyspace
 //!
-//! 1. **`index-cursor`**: Chain position tracking (separate for different
-//!    access pattern)
-//!
-//! 2. **`index-exact`**: Exact-match lookups (point queries) Key format:
-//!    `[dim_hash:8][key_data:var]` -> `[slot:8]`
-//!
-//! 3. **`archive-tags`**: Block tag queries (append-only, never deleted) Key
-//!    format: `[dim_hash:8][xxh3(tag_key):8][slot:8]` -> empty
-//!
-//! The `dim_hash` is computed as `xxh3(prefix + ":" + dimension)` where prefix
-//! is "exact" or "block". This makes the storage layer fully chain-agnostic.
-//!
-//! The live-UTxO tags (mutable, high-churn) live in the state store's
-//! `state-tags` keyspace, beside the UTxO set they project (see
-//! `crate::state::tags`).
-//!
-//! All multi-byte integers are big-endian encoded for correct lexicographic
-//! ordering.
+//! - **`index-cursor`**: chain position tracking. Key `[0x00]`, value a
+//!   bincode-serialized `ChainPoint`.
 
-use std::borrow::Cow;
-use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallIndexConfig, key_hash, BlockSlot, ChainPoint, ExactKind, IndexDelta, IndexError,
-    IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension,
-    KEY_HASH_SIZE,
+    config::FjallIndexConfig, ChainPoint, IndexDelta, IndexError, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
     Readable,
 };
 
-pub mod archive_tags;
-pub mod exact;
-pub mod scan;
-
-use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::Error;
-
-// Re-export the iterator types
-pub use archive_tags::{SlotIterator as SlotIter, TagRecordIterator as TagIter};
-pub use exact::ExactRecordIterator as ExactIter;
 
 /// Default cache size in MB
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
@@ -67,33 +41,18 @@ const DEFAULT_MEMTABLE_SIZE_MB: usize = 128;
 
 /// Keyspace names for index store
 mod keyspace_names {
-    /// Cursor keyspace (separate for different access pattern)
+    /// Cursor keyspace
     pub const CURSOR: &str = "index-cursor";
-    /// Exact-match keyspace (block hash, tx hash, block number -> slot)
-    pub const EXACT: &str = "index-exact";
-    /// Archive tags keyspace (append-only, never deleted)
-    pub const BLOCK_TAGS: &str = "archive-tags";
 }
 
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
-/// Fjall-based index store implementation with three keyspaces.
-///
-/// Uses 3 keyspaces split by workload class:
-/// - `cursor`: Chain position tracking
-/// - `exact`: Exact-match lookups (block/tx hash, block number)
-/// - `block_tags`: Block tags (append-only, can use relaxed compaction)
+/// Fjall-based index store: the cursor keyspace.
 #[derive(Clone)]
 pub struct IndexStore {
     db: Database,
-    /// Cursor keyspace (separate due to different access pattern)
     cursor: Keyspace,
-    /// Exact-match keyspace for point lookups
-    exact: Keyspace,
-    /// Block tags keyspace (append-only, never deleted)
-    block_tags: Keyspace,
-    /// Configuration
     flush_on_commit: bool,
 }
 
@@ -153,14 +112,10 @@ impl IndexStore {
         };
 
         let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
-        let exact = db.keyspace(keyspace_names::EXACT, build_opts)?;
-        let block_tags = db.keyspace(keyspace_names::BLOCK_TAGS, build_opts)?;
 
         Ok(Self {
             db,
             cursor,
-            exact,
-            block_tags,
             flush_on_commit,
         })
     }
@@ -170,25 +125,13 @@ impl IndexStore {
         &self.db
     }
 
-    /// Get a reference to the exact-match keyspace
-    pub fn exact_keyspace(&self) -> &Keyspace {
-        &self.exact
-    }
-
-    /// Get a reference to the block tags keyspace
-    pub fn block_tags_keyspace(&self) -> &Keyspace {
-        &self.block_tags
-    }
-
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
-        [
-            (keyspace_names::CURSOR, &self.cursor),
-            (keyspace_names::EXACT, &self.exact),
-            (keyspace_names::BLOCK_TAGS, &self.block_tags),
-        ]
-        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
-        .to_vec()
+        vec![(
+            keyspace_names::CURSOR,
+            self.cursor.disk_space(),
+            self.cursor.path().to_path_buf(),
+        )]
     }
 
     /// Gracefully shutdown the index store.
@@ -247,78 +190,9 @@ impl CoreIndexWriter for IndexStoreWriter {
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        // Apply exact index changes to index-exact keyspace
-        exact::apply(&mut batch, &self.store.exact, delta).map_err(IndexError::from)?;
-
-        // Apply archive tag changes to archive-tags keyspace
-        archive_tags::apply(&mut batch, &self.store.block_tags, delta).map_err(IndexError::from)?;
-
-        // Set cursor
         let cursor_bytes =
             bincode::serialize(&delta.cursor).map_err(|e| Error::Codec(e.to_string()))?;
         batch.insert(&self.store.cursor, CURSOR_KEY, cursor_bytes);
-
-        Ok(())
-    }
-
-    fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
-        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-
-        // Undo exact index changes
-        exact::undo(&mut batch, &self.store.exact, delta).map_err(IndexError::from)?;
-
-        // Undo archive tag changes
-        archive_tags::undo(&mut batch, &self.store.block_tags, delta).map_err(IndexError::from)?;
-
-        Ok(())
-    }
-
-    fn append_prehashed(
-        &self,
-        records: impl IntoIterator<Item = IndexRecord>,
-    ) -> Result<(), IndexError> {
-        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-
-        // Records arrive sorted, hence grouped by dimension/kind: hash each
-        // group's dimension once instead of once per record. The cached
-        // dimension is owned because a record no longer outlives its own
-        // iteration step — the clone is one per group, not one per record.
-        let mut tag_dim: Option<(Cow<'static, str>, [u8; DIM_HASH_SIZE])> = None;
-        let mut exact_dim: Option<(ExactKind, [u8; DIM_HASH_SIZE])> = None;
-
-        for record in records {
-            match record {
-                IndexRecord::Tag(tag) => {
-                    let dim_hash = match &tag_dim {
-                        Some((cached, hash)) if cached == &tag.dimension => *hash,
-                        _ => {
-                            let hash = hash_dimension(dim_prefix::BLOCK, tag.dimension());
-                            tag_dim = Some((tag.dimension.clone(), hash));
-                            hash
-                        }
-                    };
-
-                    archive_tags::insert_prehashed(
-                        &mut batch,
-                        &self.store.block_tags,
-                        &tag,
-                        dim_hash,
-                    );
-                }
-                IndexRecord::Exact(exact) => {
-                    let dim_hash = match exact_dim {
-                        Some((cached, hash)) if cached == exact.kind => hash,
-                        _ => {
-                            let hash = hash_dimension(dim_prefix::EXACT, exact.kind.as_str());
-                            exact_dim = Some((exact.kind, hash));
-                            hash
-                        }
-                    };
-
-                    exact::insert_prehashed(&mut batch, &self.store.exact, &exact, dim_hash);
-                }
-            }
-        }
 
         Ok(())
     }
@@ -346,9 +220,6 @@ impl CoreIndexWriter for IndexStoreWriter {
 
 impl CoreIndexStore for IndexStore {
     type Writer = IndexStoreWriter;
-    type SlotIter = SlotIter;
-    type TagIter = TagIter;
-    type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         let batch = self.db.batch();
@@ -386,69 +257,5 @@ impl CoreIndexStore for IndexStore {
             }
             None => Ok(None),
         }
-    }
-
-    fn slot_by_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
-        let snapshot = self.db.snapshot();
-        exact::get_by_block_hash(&snapshot, &self.exact, block_hash).map_err(IndexError::from)
-    }
-
-    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
-        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
-        let snapshot = self.db.snapshot();
-        exact::get_by_block_number(&snapshot, &self.exact, number).map_err(IndexError::from)
-    }
-
-    fn slot_by_tx_hash(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
-        let snapshot = self.db.snapshot();
-        exact::get_by_tx_hash(&snapshot, &self.exact, tx_hash).map_err(IndexError::from)
-    }
-
-    fn slots_by_tag(
-        &self,
-        dimension: TagDimension,
-        key: &[u8],
-        start: BlockSlot,
-        end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        // The stored key form is the write path's, not this method's: the same
-        // `key_hash` an insert used, so a query cannot look under bytes an
-        // insert would not have written. `None` is a key with no valid stored
-        // form — today only a `metadata` label that is not eight bytes wide —
-        // which is a malformed query rather than an empty result.
-        let Some(hash) = key_hash(dimension, key) else {
-            return Err(IndexError::CodecError(format!(
-                "{dimension} key must be {KEY_HASH_SIZE} bytes, got {}",
-                key.len(),
-            )));
-        };
-
-        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
-        let snapshot = self.db.snapshot();
-
-        // Pass dimension string directly - chain-agnostic
-        SlotIter::new(&snapshot, &self.block_tags, dimension, hash, start, end)
-            .map_err(IndexError::from)
-    }
-
-    fn iter_archive_tags(
-        &self,
-        dimensions: &[TagDimension],
-        slots: Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError> {
-        // One snapshot for the whole traversal: every dimension prefix is read
-        // from the same MVCC view, so the record set is consistent even under
-        // concurrent writes.
-        let snapshot = self.db.snapshot();
-
-        Ok(TagIter::new(snapshot, &self.block_tags, dimensions, slots))
-    }
-
-    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
-        let snapshot = self.db.snapshot();
-
-        Ok(ExactIter::new(snapshot, &self.exact, slots))
     }
 }

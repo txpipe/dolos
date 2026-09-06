@@ -66,7 +66,7 @@ pub struct Args {
     #[arg(long, action)]
     reproduce: bool,
 
-    /// epochs whose index layers one traversal of the index store fills; a
+    /// epochs whose index layers one traversal of the archive store fills; a
     /// larger band trades resident memory for fewer traversals, and changes
     /// nothing about the stele it produces. Defaults to the measured value
     /// that keeps the index pass inside 1 GiB
@@ -156,7 +156,6 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         &plan,
         &stores.archive,
         &stores.state,
-        &stores.indexes,
         None,
     )
     .into_diagnostic()

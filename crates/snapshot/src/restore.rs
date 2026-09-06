@@ -19,7 +19,7 @@
 //!    the protocol, so nothing but this crate can read an epoch out of one.
 //! 3. [`dolos_core::IndexStore::initialize_schema`].
 //! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
-//!    `indexes`.
+//!    `indexes` — all three into the archive store.
 //! 5. The state tip — every shard of every `state-{ns}` kind.
 //! 6. Rebuild the live-UTxO tags from the restored UTxO set, into the state
 //!    store beside it. They are never shipped — ADR-004's Amendment 2 — so this
@@ -999,7 +999,7 @@ where
             let at = cursor.open(INDEXES, &descriptor.scope);
 
             let (count, outcome) =
-                checkpoint.fetch(descriptor, || restore_indexes(&reader, descriptor, indexes))?;
+                checkpoint.fetch(descriptor, || restore_indexes(&reader, descriptor, archive))?;
 
             cursor.close(at, INDEXES, outcome);
             summary.count(outcome);
@@ -1031,13 +1031,12 @@ where
 
     rebuild_utxo_tags(state, budget)?;
 
-    // Align the index cursor, which `IndexWriter::append_prehashed`
-    // deliberately never touches: bootstrap still reads it, and without it the
-    // index store reads as never indexed.
+    // Align the index cursor, which nothing above wrote: the index records
+    // went into the archive, and bootstrap still reads this cursor — without
+    // it the index store reads as never indexed.
     let writer = indexes.start_writer()?;
     writer.apply(&IndexDelta {
         cursor: plan.position.point.clone(),
-        ..Default::default()
     })?;
     writer.commit()?;
 
@@ -1323,17 +1322,20 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 /// is this caller's, which is what the trait says, and the sort order the
 /// backends want holds across the whole layer because that is what the codec's
 /// `OrderCheck` made the exporter prove.
-fn restore_indexes<R: SteleReader, I: IndexStore>(
+///
+/// The records go into the archive, beside the blocks they project — the same
+/// store `restore_blocks` wrote the epoch's `blocks` layer into.
+fn restore_indexes<R: SteleReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
-    indexes: &I,
+    archive: &A,
 ) -> Result<u64, Error> {
     reader.drain(
         descriptor,
         indexes::decode,
         |_| std::mem::size_of::<IndexRecord>(),
         |chunk| {
-            let writer = indexes.start_writer()?;
+            let writer = archive.start_writer()?;
 
             writer.append_prehashed(chunk)?;
             writer.commit()?;

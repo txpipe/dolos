@@ -58,7 +58,7 @@ Content records per kind (Dolos profile):
 | Kind | Record | Order | Restore write path |
 |---|---|---|---|
 | `blocks` (per epoch) | `[slot, hash: bytes(32), body: bytes]`, body = raw wire CBOR verbatim | ascending slot, stream order for same-slot (Byron EBB) | `ArchiveWriter::apply` |
-| `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE — except dimension `metadata`, see below; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `IndexWriter::append_prehashed` |
+| `indexes` (per epoch) | tags: `[0, dimension: tstr, key_hash: bytes(8), slot]` with `key_hash = xxh3_64(key)` BE — except dimension `metadata`, see below; exact: `[1, kind: tstr, key: bytes, slot]` for block-hash/block-number/tx | sorted, deduped | new `ArchiveWriter::append_prehashed` |
 | `log-{ns}` (per epoch, per log namespace, omitted when empty) | `[log_key: bytes(40), value: bytes]`, value = stored EntityValue verbatim | `log_key` | `ArchiveWriter::write_log` into the namespace the kind names |
 | `state-{ns}` (tip or retained dump, per state namespace, `scope.shard` = 0..`parameters.shards[ns]`-1) | `[key: bytes, value: bytes]` | `key`; shard = first nibble of `key[0]` for a 16-way namespace, 0 for a single blob | dispatch on the kind: `state-utxos` → chunked `StateWriter::apply_utxoset`, else `write_entity` into the namespace the kind names |
 | `digests` (tip, optional) | `[immutable_number, chunk: bytes(32), primary: bytes(32), secondary: bytes(32)]`, each sha256 over the raw file bytes | ascending `immutable_number` | none — verification metadata, not written to stores |

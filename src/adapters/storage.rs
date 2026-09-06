@@ -25,12 +25,12 @@ use dolos_core::{
         MempoolStoreConfig, RedbStateConfig, RedbWalConfig, RootConfig, StateStoreConfig,
         StorageVersion, WalStoreConfig,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue, ExactRecord, IndexDelta,
-    IndexError, IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter,
-    LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock,
-    StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
-    TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
-    UtxoSetDelta, WalError, WalStore,
+    ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
+    ExactRecord, IndexDelta, IndexError, IndexRecord, IndexStore as CoreIndexStore,
+    IndexWriter as CoreIndexWriter, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
+    MempoolTx, Namespace, RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
+    StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry,
+    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -790,7 +790,8 @@ impl ArchiveStoreBackend {
 
 pub enum ArchiveWriterBackend {
     Memory(Box<<MemoryArchiveStore as CoreArchiveStore>::Writer>),
-    /// Delegates `write_log` and `commit`; discards `apply` and `undo`.
+    /// Delegates `write_log` and `commit`; discards `apply`, `undo` and the
+    /// index writes, which project the blocks the gate refuses.
     LogsOnly(Box<ArchiveWriterBackend>),
     Fjall(Box<<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::Writer>),
     NoOp(NoOpArchiveWriter),
@@ -826,6 +827,36 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
             Self::LogsOnly(_) => Ok(()),
             Self::Fjall(w) => w.undo(point),
             Self::NoOp(w) => w.undo(point),
+        }
+    }
+
+    fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.apply_index(deltas),
+            Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.apply_index(deltas),
+            Self::NoOp(w) => w.apply_index(deltas),
+        }
+    }
+
+    fn undo_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.undo_index(deltas),
+            Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.undo_index(deltas),
+            Self::NoOp(w) => w.undo_index(deltas),
+        }
+    }
+
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(w) => w.append_prehashed(records),
+            Self::LogsOnly(_) => Ok(()),
+            Self::Fjall(w) => w.append_prehashed(records),
+            Self::NoOp(w) => w.append_prehashed(records),
         }
     }
 
@@ -918,11 +949,75 @@ impl Iterator for ArchiveEntityValueIterBackend {
     }
 }
 
+pub enum ArchiveSlotIterBackend {
+    Memory(<MemoryArchiveStore as CoreArchiveStore>::SlotIter),
+    Fjall(<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::SlotIter),
+    NoOp(EmptySlotIter),
+}
+
+impl Iterator for ArchiveSlotIterBackend {
+    type Item = Result<BlockSlot, ArchiveError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for ArchiveSlotIterBackend {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(iter) => iter.next_back(),
+            Self::Fjall(iter) => iter.next_back(),
+            Self::NoOp(iter) => iter.next_back(),
+        }
+    }
+}
+
+pub enum ArchiveTagIterBackend {
+    Memory(<MemoryArchiveStore as CoreArchiveStore>::TagIter),
+    Fjall(<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::TagIter),
+    NoOp(<NoOpArchiveStore as CoreArchiveStore>::TagIter),
+}
+
+impl Iterator for ArchiveTagIterBackend {
+    type Item = Result<TagRecord, ArchiveError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
+pub enum ArchiveExactIterBackend {
+    Memory(<MemoryArchiveStore as CoreArchiveStore>::ExactIter),
+    Fjall(<dolos_fjall::archive::ArchiveStore as CoreArchiveStore>::ExactIter),
+    NoOp(<NoOpArchiveStore as CoreArchiveStore>::ExactIter),
+}
+
+impl Iterator for ArchiveExactIterBackend {
+    type Item = Result<ExactRecord, ArchiveError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Memory(iter) => iter.next(),
+            Self::Fjall(iter) => iter.next(),
+            Self::NoOp(iter) => iter.next(),
+        }
+    }
+}
+
 impl CoreArchiveStore for ArchiveStoreBackend {
     type BlockIter<'a> = ArchiveBlockIterBackend;
     type Writer = ArchiveWriterBackend;
     type LogIter = ArchiveLogIterBackend;
     type EntityValueIter = ArchiveEntityValueIterBackend;
+    type SlotIter = ArchiveSlotIterBackend;
+    type TagIter = ArchiveTagIterBackend;
+    type ExactIter = ArchiveExactIterBackend;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         match self {
@@ -1038,6 +1133,86 @@ impl CoreArchiveStore for ArchiveStoreBackend {
             Self::NoOp(s) => CoreArchiveStore::truncate_front(s, after),
         }
     }
+
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
+            Self::LogsOnly(inner) => CoreArchiveStore::slot_by_block_hash(inner.as_ref(), hash),
+            Self::Fjall(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
+            Self::NoOp(s) => CoreArchiveStore::slot_by_block_hash(s, hash),
+        }
+    }
+
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::slot_by_block_number(s, number),
+            Self::LogsOnly(inner) => CoreArchiveStore::slot_by_block_number(inner.as_ref(), number),
+            Self::Fjall(s) => CoreArchiveStore::slot_by_block_number(s, number),
+            Self::NoOp(s) => CoreArchiveStore::slot_by_block_number(s, number),
+        }
+    }
+
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::slot_by_tx_hash(s, hash),
+            Self::LogsOnly(inner) => CoreArchiveStore::slot_by_tx_hash(inner.as_ref(), hash),
+            Self::Fjall(s) => CoreArchiveStore::slot_by_tx_hash(s, hash),
+            Self::NoOp(s) => CoreArchiveStore::slot_by_tx_hash(s, hash),
+        }
+    }
+
+    fn slots_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::slots_by_tag(s, dimension, key, start, end)
+                .map(ArchiveSlotIterBackend::Memory),
+            Self::LogsOnly(inner) => {
+                CoreArchiveStore::slots_by_tag(inner.as_ref(), dimension, key, start, end)
+            }
+            Self::Fjall(s) => CoreArchiveStore::slots_by_tag(s, dimension, key, start, end)
+                .map(ArchiveSlotIterBackend::Fjall),
+            Self::NoOp(s) => CoreArchiveStore::slots_by_tag(s, dimension, key, start, end)
+                .map(ArchiveSlotIterBackend::NoOp),
+        }
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::iter_archive_tags(s, dimensions, slots)
+                .map(ArchiveTagIterBackend::Memory),
+            Self::LogsOnly(inner) => {
+                CoreArchiveStore::iter_archive_tags(inner.as_ref(), dimensions, slots)
+            }
+            Self::Fjall(s) => CoreArchiveStore::iter_archive_tags(s, dimensions, slots)
+                .map(ArchiveTagIterBackend::Fjall),
+            Self::NoOp(s) => CoreArchiveStore::iter_archive_tags(s, dimensions, slots)
+                .map(ArchiveTagIterBackend::NoOp),
+        }
+    }
+
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError> {
+        match self {
+            Self::Memory(s) => {
+                CoreArchiveStore::iter_exact_records(s, slots).map(ArchiveExactIterBackend::Memory)
+            }
+            Self::LogsOnly(inner) => CoreArchiveStore::iter_exact_records(inner.as_ref(), slots),
+            Self::Fjall(s) => {
+                CoreArchiveStore::iter_exact_records(s, slots).map(ArchiveExactIterBackend::Fjall)
+            }
+            Self::NoOp(s) => {
+                CoreArchiveStore::iter_exact_records(s, slots).map(ArchiveExactIterBackend::NoOp)
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -1108,25 +1283,6 @@ impl CoreIndexWriter for IndexWriterBackend {
         }
     }
 
-    fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
-        match self {
-            Self::Fjall(w) => w.undo(delta),
-            Self::Memory(w) => w.undo(delta),
-            Self::NoOp(w) => w.undo(delta),
-        }
-    }
-
-    fn append_prehashed(
-        &self,
-        records: impl IntoIterator<Item = IndexRecord>,
-    ) -> Result<(), IndexError> {
-        match self {
-            Self::Fjall(w) => w.append_prehashed(records),
-            Self::Memory(w) => w.append_prehashed(records),
-            Self::NoOp(w) => w.append_prehashed(records),
-        }
-    }
-
     fn commit(self) -> Result<(), IndexError> {
         match self {
             Self::Fjall(w) => w.commit(),
@@ -1136,72 +1292,8 @@ impl CoreIndexWriter for IndexWriterBackend {
     }
 }
 
-pub enum IndexSlotIterBackend {
-    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::SlotIter),
-    Memory(<MemoryIndexStore as CoreIndexStore>::SlotIter),
-    NoOp(EmptySlotIter),
-}
-
-impl Iterator for IndexSlotIterBackend {
-    type Item = Result<BlockSlot, IndexError>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Fjall(iter) => iter.next(),
-            Self::Memory(iter) => iter.next(),
-            Self::NoOp(iter) => iter.next(),
-        }
-    }
-}
-
-impl DoubleEndedIterator for IndexSlotIterBackend {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Fjall(iter) => iter.next_back(),
-            Self::Memory(iter) => iter.next_back(),
-            Self::NoOp(iter) => iter.next_back(),
-        }
-    }
-}
-
-pub enum IndexTagIterBackend {
-    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::TagIter),
-    Memory(<MemoryIndexStore as CoreIndexStore>::TagIter),
-    NoOp(<NoOpIndexStore as CoreIndexStore>::TagIter),
-}
-
-impl Iterator for IndexTagIterBackend {
-    type Item = Result<TagRecord, IndexError>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Fjall(iter) => iter.next(),
-            Self::Memory(iter) => iter.next(),
-            Self::NoOp(iter) => iter.next(),
-        }
-    }
-}
-
-pub enum IndexExactIterBackend {
-    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::ExactIter),
-    Memory(<MemoryIndexStore as CoreIndexStore>::ExactIter),
-    NoOp(<NoOpIndexStore as CoreIndexStore>::ExactIter),
-}
-
-impl Iterator for IndexExactIterBackend {
-    type Item = Result<ExactRecord, IndexError>;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Fjall(iter) => iter.next(),
-            Self::Memory(iter) => iter.next(),
-            Self::NoOp(iter) => iter.next(),
-        }
-    }
-}
-
 impl CoreIndexStore for IndexStoreBackend {
     type Writer = IndexWriterBackend;
-    type SlotIter = IndexSlotIterBackend;
-    type TagIter = IndexTagIterBackend;
-    type ExactIter = IndexExactIterBackend;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         match self {
@@ -1235,80 +1327,6 @@ impl CoreIndexStore for IndexStoreBackend {
             Self::Fjall(s) => s.cursor(),
             Self::Memory(s) => s.cursor(),
             Self::NoOp(s) => s.cursor(),
-        }
-    }
-
-    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        match self {
-            Self::Fjall(s) => s.slot_by_block_hash(hash),
-            Self::Memory(s) => s.slot_by_block_hash(hash),
-            Self::NoOp(s) => s.slot_by_block_hash(hash),
-        }
-    }
-
-    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
-        match self {
-            Self::Fjall(s) => s.slot_by_block_number(number),
-            Self::Memory(s) => s.slot_by_block_number(number),
-            Self::NoOp(s) => s.slot_by_block_number(number),
-        }
-    }
-
-    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        match self {
-            Self::Fjall(s) => s.slot_by_tx_hash(hash),
-            Self::Memory(s) => s.slot_by_tx_hash(hash),
-            Self::NoOp(s) => s.slot_by_tx_hash(hash),
-        }
-    }
-
-    fn slots_by_tag(
-        &self,
-        dimension: TagDimension,
-        key: &[u8],
-        start: BlockSlot,
-        end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        match self {
-            Self::Fjall(s) => s
-                .slots_by_tag(dimension, key, start, end)
-                .map(IndexSlotIterBackend::Fjall),
-            Self::Memory(s) => s
-                .slots_by_tag(dimension, key, start, end)
-                .map(IndexSlotIterBackend::Memory),
-            Self::NoOp(s) => s
-                .slots_by_tag(dimension, key, start, end)
-                .map(IndexSlotIterBackend::NoOp),
-        }
-    }
-
-    fn iter_archive_tags(
-        &self,
-        dimensions: &[TagDimension],
-        slots: Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError> {
-        match self {
-            Self::Fjall(s) => s
-                .iter_archive_tags(dimensions, slots)
-                .map(IndexTagIterBackend::Fjall),
-            Self::Memory(s) => s
-                .iter_archive_tags(dimensions, slots)
-                .map(IndexTagIterBackend::Memory),
-            Self::NoOp(s) => s
-                .iter_archive_tags(dimensions, slots)
-                .map(IndexTagIterBackend::NoOp),
-        }
-    }
-
-    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
-        match self {
-            Self::Fjall(s) => s
-                .iter_exact_records(slots)
-                .map(IndexExactIterBackend::Fjall),
-            Self::Memory(s) => s
-                .iter_exact_records(slots)
-                .map(IndexExactIterBackend::Memory),
-            Self::NoOp(s) => s.iter_exact_records(slots).map(IndexExactIterBackend::NoOp),
         }
     }
 }
@@ -1465,12 +1483,18 @@ mod tests {
 
         assert!(matches!(indexes, IndexStoreBackend::Memory(_)));
 
+        let archive =
+            ArchiveStoreBackend::open(path, StateSchema::default(), &ArchiveStoreConfig::InMemory)
+                .expect("in_memory archive store should open without touching the path");
+
+        assert!(matches!(archive, ArchiveStoreBackend::Memory(_)));
+
         // And the seam the old wiring could not serve now answers.
         state.iter_utxos().expect("iter_utxos must be supported");
-        indexes
+        archive
             .iter_archive_tags(&[], 0..1)
             .expect("iter_archive_tags must be supported");
-        indexes
+        archive
             .start_writer()
             .expect("start_writer failed")
             .append_prehashed([])
