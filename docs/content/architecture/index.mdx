@@ -38,7 +38,7 @@ Each layer is covered in its own page:
 
 The most important structural idea in Dolos is the split between a **generic core** and a **chain-specific implementation**.
 
-The `dolos-core` crate defines the abstractions that any UTxO blockchain data node needs, as a set of traits: `Domain` (the umbrella that bundles all the stores together), `ChainLogic` (how blocks turn into state changes), `WorkUnit` (a unit of pipelined ledger work), and the storage traits `StateStore`, `ArchiveStore`, `WalStore`, `IndexStore`, and `MempoolStore`. None of this code knows anything about Cardano specifically.
+The `dolos-core` crate defines the abstractions that any UTxO blockchain data node needs, as a set of traits: `Domain` (the umbrella that bundles all the stores together), `ChainLogic` (how blocks turn into state changes), `WorkUnit` (a unit of pipelined ledger work), and the storage traits `StateStore`, `ArchiveStore`, `WalStore`, and `MempoolStore`. None of this code knows anything about Cardano specifically.
 
 The `dolos-cardano` crate implements those traits for Cardano — block parsing, ledger rules, epoch transitions, and reward calculations. Everything else in the system is either a **storage backend** (an implementation of the store traits, e.g. `dolos-redb3` or `dolos-fjall`) or a **serving adapter** (an implementation of an API surface that reads from a `Domain`). This is what keeps the sync pipeline, the storage engine, and the API servers decoupled from each other and from the ledger rules.
 

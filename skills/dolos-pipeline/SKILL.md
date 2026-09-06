@@ -27,7 +27,7 @@ Default no-op implementations exist for `commit_wal` and `tip_events`.
 ### Sync Mode (`crates/core/src/sync.rs`)
 
 Full lifecycle for live block processing:
-- Runs all 6 phases + tip event emission
+- Runs all 5 phases + tip event emission
 - Includes WAL commits for crash recovery and rollback support
 - Entry point: `SyncExt::roll_forward()` → drains pending work via `drain_pending_work()` → `execute_work_unit()` per unit
 

@@ -492,7 +492,7 @@ pub struct Driver<'a, D: Domain> {
     /// Where the replay's progress goes.
     pub replay: &'a dyn Replay,
 
-    /// Open the four stores a publish reads, without assembling a domain.
+    /// Open the three stores a publish reads, without assembling a domain.
     pub open_stores: &'a dyn Fn() -> Result<Stores<D>, Error>,
 
     /// Build a domain whose `stop_epoch` is the given epoch.
