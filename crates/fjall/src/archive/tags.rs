@@ -82,6 +82,23 @@ fn decode_block_tag_slot(key: &[u8]) -> u64 {
     decode_slot(&key[start..])
 }
 
+/// The slot a stored tag entry belongs to, read from its key.
+///
+/// The prune sweep's view of an entry: the slot is the key's last component,
+/// so nothing but the key is needed. A key too short to carry one is a
+/// malformed entry, refused rather than skipped for the same reason the
+/// record scan fuses on it.
+pub fn slot_of_entry(key: &[u8]) -> Result<BlockSlot, Error> {
+    if key.len() < BLOCK_TAG_KEY_SIZE {
+        return Err(Error::Codec(format!(
+            "malformed archive tag key: {} bytes, expected {BLOCK_TAG_KEY_SIZE}",
+            key.len(),
+        )));
+    }
+
+    Ok(decode_block_tag_slot(key))
+}
+
 /// Decode the stored tag key hash from a block tag key (bytes 8..16)
 fn decode_block_tag_key_hash(key: &[u8]) -> KeyHash {
     debug_assert!(key.len() >= BLOCK_TAG_KEY_SIZE);

@@ -625,6 +625,14 @@ impl ArchiveStore for MemoryArchiveStore {
         tables.blocks.retain(|slot, _| *slot >= prune_before);
         tables.logs.retain(|(_, key), _| *key >= cutoff);
 
+        // The index entries of a pruned block go with it. The disk backend
+        // amortizes this across rounds; here a walk of the maps is the cost
+        // of a retain, so every round does it.
+        tables
+            .archive_tags
+            .retain(|(_, _, slot)| *slot >= prune_before);
+        tables.exact.retain(|_, slot| *slot >= prune_before);
+
         Ok(done)
     }
 

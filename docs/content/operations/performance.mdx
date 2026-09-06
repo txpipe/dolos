@@ -72,7 +72,7 @@ Dolos includes a write-ahead log and bounded rollback history to support restart
 The most relevant configuration knobs are in the [`[sync]`](../configuration/schema#sync-section) section:
 
 - `max_rollback` controls how much rollback history Dolos keeps available for rollback handling.
-- `max_history` controls how much recent archive history remains before pruning.
+- `max_history` controls how much recent archive history remains before pruning. The window bounds the archive's block bodies, its logs, and its two index keyspaces (`archive-tags` and `index-exact`) alike: housekeeping removes the index entries of pruned blocks in a sweep of both keyspaces, run once the prune cutoff has advanced by a sixteenth of the window since the last sweep rather than every round. A sliding-history node restored from a full-history stele pays one whole-keyspace scan on its first sweep, then only window-sized ones.
 
 Bootstrap commands also provide flags such as `--continue` and `--skip-if-data` to help operators resume or safely avoid repeating work when data already exists. See the [bootstrap overview](../bootstrap).
 

@@ -49,7 +49,7 @@ The three storage modes exposed in configuration are really combinations of back
 
 `archive.backend = "no_op"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
 
-Pruning is driven by `prune_history()` on the WAL and archive stores. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
+Pruning is driven by `prune_history()` on the WAL and archive stores. In the archive it covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
 
 ## Data model primitives
 
