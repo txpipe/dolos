@@ -42,7 +42,7 @@
 mod node;
 mod watcher;
 
-use dolos_cardano::indexes::{archive_dimensions, index_delta_from_utxo_delta};
+use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
     ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, IndexStore, LogKey,
     StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
@@ -54,7 +54,7 @@ use dolos_snapshot::{
     NAMESPACES, STATE_KINDS, UTXOS,
 };
 use dolos_testing::{
-    faults::{FaultyIndexStore, TestFault},
+    faults::{FaultyStateStore, TestFault},
     toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
 };
 use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
@@ -411,11 +411,12 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
 
 /// Done criterion 1: the state cursor is the last write of the restore.
 ///
-/// The failure is injected into `IndexWriter::apply`, which the restore calls
-/// in exactly one place — the live-UTxO rebuild of step 6, after every layer
-/// including the state tip has committed. So this is the interruption the
-/// profile's old step order could not survive: the ledger is whole, the
-/// `utxo::*` dimensions are not, and what says so is that there is no cursor.
+/// The failure is injected into `StateWriter::apply_utxo_tags`, which the
+/// restore calls in exactly one place — the live-UTxO rebuild of step 6, after
+/// every layer including the state tip has committed. So this is the
+/// interruption the profile's old step order could not survive: the ledger is
+/// whole, the `utxo::*` dimensions are not, and what says so is that there is
+/// no cursor.
 #[test]
 fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
     let domain: ToyDomain = harness();
@@ -424,7 +425,7 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
     export_to(temp.path(), &domain);
 
     let blank = Blank::<MemoryStores>::open();
-    let indexes = FaultyIndexStore::new(blank.indexes().clone(), TestFault::IndexApplyError);
+    let state = FaultyStateStore::new(blank.state().clone(), TestFault::StateTagsApplyError);
 
     let stele = SteleDir::open(temp.path()).unwrap();
     let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
@@ -434,7 +435,7 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
         &stele,
         &index,
         &plan,
-        restore::Target::new(&blank.archive, blank.state(), &indexes),
+        restore::Target::new(&blank.archive, &state, blank.indexes()),
         default_budget(),
         &mut Checkpoint::none(),
         &Observer::silent(),
@@ -442,7 +443,7 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
     .unwrap_err();
 
     assert!(
-        matches!(&err, Error::Index(dolos_core::IndexError::DbError(reason)) if reason.contains("fault injection")),
+        matches!(&err, Error::State(dolos_core::StateError::InternalStoreError(reason)) if reason.contains("fault injection")),
         "{err:?}"
     );
 
@@ -596,7 +597,8 @@ fn a_restored_node_matches_a_replayed_one_on_fjall() {
 fn assert_stores_match<B: ToyStores>(restored: &Blank<B>, original: &ToyDomain<B>) {
     assert_state_matches(restored.state(), original.state());
     assert_archive_matches(&restored.archive, original.archive());
-    assert_indexes_match(restored.indexes(), original.indexes(), original.state());
+    assert_indexes_match(restored.indexes(), original.indexes());
+    assert_utxo_tags_match(restored.state(), original.state());
 }
 
 fn assert_state_matches<S: StateStore>(restored: &S, original: &S) {
@@ -659,13 +661,8 @@ fn assert_archive_matches<A: ArchiveStore>(restored: &A, original: &A) {
     assert!(any, "the fixture wrote no logs, so this proves nothing");
 }
 
-/// Both halves of the index store: the archive records the layers carry, and
-/// the live-UTxO dimensions they deliberately do not.
-///
-/// The second half is the point. `utxo::*` tags are never shipped — ADR-004's
-/// Amendment 2 — so they exist in a restored node only because the restore
-/// rebuilt them, and only a query proves it did.
-fn assert_indexes_match<I: IndexStore, S: StateStore>(restored: &I, original: &I, state: &S) {
+/// The archive half of the index store: the records the layers carry.
+fn assert_indexes_match<I: IndexStore>(restored: &I, original: &I) {
     assert_eq!(
         restored.cursor().unwrap(),
         original.cursor().unwrap(),
@@ -679,21 +676,28 @@ fn assert_indexes_match<I: IndexStore, S: StateStore>(restored: &I, original: &I
     let exact = exact_of(original);
     assert!(!exact.is_empty(), "the fixture produced no exact records");
     assert_eq!(exact_of(restored), exact, "exact records");
+}
 
+/// The live-UTxO tags, which the layers deliberately do not carry.
+///
+/// This is the point. `utxo::*` tags are never shipped — ADR-004's Amendment
+/// 2 — so they exist in a restored node only because the restore rebuilt
+/// them, and only a query proves it did.
+fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     // Every dimension the ledger tagged the restored UTxO set under, asked of
     // both stores.
     let delta = UtxoSetDelta {
-        produced_utxo: utxos_of(state)
+        produced_utxo: utxos_of(original)
             .into_iter()
             .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
             .collect(),
         ..Default::default()
     };
 
-    let rebuilt = index_delta_from_utxo_delta(ChainPoint::Origin, &delta);
+    let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.utxo.produced {
+    for (txo, tags) in &rebuilt.produced {
         for tag in tags {
             let left: UtxoSet = restored.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let right: UtxoSet = original.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -1278,7 +1282,8 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_state_matches(blank.state(), reference.state());
     assert_archive_matches(&blank.archive, &reference.archive);
-    assert_indexes_match(blank.indexes(), reference.indexes(), blank.state());
+    assert_indexes_match(blank.indexes(), reference.indexes());
+    assert_utxo_tags_match(blank.state(), reference.state());
 }
 
 /// The slot epoch 1 begins at, for a test that needs to stand on the boundary.

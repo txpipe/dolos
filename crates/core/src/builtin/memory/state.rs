@@ -10,6 +10,10 @@
 //!   gets from its `[ns_hash:8][entity_key:32]` prefix;
 //! - UTxOs live in a map keyed on [`TxoRef`], whose `(tx_hash, index)` ordering
 //!   is exactly what fjall's `[tx_hash:32][index:4]` big-endian key encodes;
+//! - the live-UTxO tags live in a map keyed `(dimension, logical key)`, each
+//!   holding the refs tagged under it — the query takes the logical key, the
+//!   set is mutable, and nothing ever leaves the store, so there is nothing to
+//!   gain from hashing it;
 //! - the cursor is one slot.
 //!
 //! ## Ephemeral by design
@@ -21,14 +25,16 @@
 //! tooling and tests, where it is the fastest store available and the only
 //! memory-resident one that serves the snapshot export seam.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::state::{
     EntityKey, EntityValue, Namespace, StateError, StateStore, StateWriter, UtxoEntry,
 };
-use crate::{ChainPoint, EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
+use crate::{
+    ChainPoint, EraCbor, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+};
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default)]
@@ -39,6 +45,7 @@ struct Tables {
     /// hottest read on this store — hands them out without copying a CBOR body
     /// per lookup.
     utxos: BTreeMap<TxoRef, Arc<EraCbor>>,
+    utxo_tags: BTreeMap<(TagDimension, Vec<u8>), HashSet<TxoRef>>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -53,6 +60,8 @@ enum Op {
     DeleteEntity(Namespace, EntityKey),
     PutUtxo(TxoRef, Arc<EraCbor>),
     DeleteUtxo(TxoRef),
+    InsertUtxoTag(TagDimension, Vec<u8>, TxoRef),
+    RemoveUtxoTag(TagDimension, Vec<u8>, TxoRef),
 }
 
 fn poisoned() -> StateError {
@@ -96,6 +105,22 @@ pub struct MemoryStateWriter {
 impl MemoryStateWriter {
     fn push(&self, op: Op) -> Result<(), StateError> {
         self.ops.lock().map_err(|_| poisoned())?.push(op);
+        Ok(())
+    }
+
+    fn push_tags(
+        &self,
+        tagged: &[(TxoRef, Vec<crate::Tag>)],
+        op: fn(TagDimension, Vec<u8>, TxoRef) -> Op,
+    ) -> Result<(), StateError> {
+        let mut ops = self.ops.lock().map_err(|_| poisoned())?;
+
+        for (txo, tags) in tagged {
+            for tag in tags {
+                ops.push(op(tag.dimension, tag.key.clone(), txo.clone()));
+            }
+        }
+
         Ok(())
     }
 }
@@ -143,6 +168,16 @@ impl StateWriter for MemoryStateWriter {
         Ok(())
     }
 
+    fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        self.push_tags(&delta.produced, Op::InsertUtxoTag)?;
+        self.push_tags(&delta.consumed, Op::RemoveUtxoTag)
+    }
+
+    fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        self.push_tags(&delta.produced, Op::RemoveUtxoTag)?;
+        self.push_tags(&delta.consumed, Op::InsertUtxoTag)
+    }
+
     fn commit(self) -> Result<(), StateError> {
         let ops = self.ops.into_inner().map_err(|_| poisoned())?;
 
@@ -162,6 +197,23 @@ impl StateWriter for MemoryStateWriter {
                 }
                 Op::DeleteUtxo(txo) => {
                     tables.utxos.remove(&txo);
+                }
+                Op::InsertUtxoTag(dimension, key, txo) => {
+                    tables
+                        .utxo_tags
+                        .entry((dimension, key))
+                        .or_default()
+                        .insert(txo);
+                }
+                Op::RemoveUtxoTag(dimension, key, txo) => {
+                    if let std::collections::btree_map::Entry::Occupied(mut entry) =
+                        tables.utxo_tags.entry((dimension, key))
+                    {
+                        entry.get_mut().remove(&txo);
+                        if entry.get().is_empty() {
+                            entry.remove();
+                        }
+                    }
                 }
             }
         }
@@ -271,6 +323,18 @@ impl StateStore for MemoryStateStore {
             .into_iter()
             .filter_map(|txo| tables.utxos.get(&txo).map(|value| (txo, value.clone())))
             .collect();
+
+        Ok(found)
+    }
+
+    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let found = tables
+            .utxo_tags
+            .get(&(dimension, key.to_vec()))
+            .cloned()
+            .unwrap_or_default();
 
         Ok(found)
     }

@@ -4,12 +4,14 @@
 //! lifecycle with partial commits (WAL + state only), then verifies that
 //! `bootstrap()` recovers archive and index stores from WAL replay.
 
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr as _;
 use std::sync::Arc;
 
+use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain,
-    IndexStore, StateStore, StateWriter, TxoRef, WalStore, WorkUnit,
+    IndexStore, StateStore, StateWriter, TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -35,6 +37,103 @@ enum CrashAfter {
     /// Run commit_wal + commit_state + commit_archive — models a crash
     /// between the archive commit and the index commit.
     Archive,
+}
+
+/// The live-UTxO tags are a projection of the UTxO set: every live ref answers
+/// under every tag its output carries, and no tag answers with a ref that is
+/// not live. Both directions, so a stale tag (a ref the set no longer holds)
+/// fails as surely as a missing one.
+fn assert_tags_match_utxo_set(domain: &ToyDomain) {
+    let live: Vec<_> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .map(|(txo, value)| (txo, Arc::new(value)))
+        .collect();
+    let live_refs: HashSet<TxoRef> = live.iter().map(|(txo, _)| txo.clone()).collect();
+
+    let expected = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
+        produced_utxo: live.into_iter().collect(),
+        ..Default::default()
+    });
+
+    let mut asked = 0usize;
+
+    for (txo, tags) in &expected.produced {
+        for tag in tags {
+            let found = domain
+                .state()
+                .utxos_by_tag(tag.dimension, &tag.key)
+                .unwrap();
+
+            assert!(
+                found.contains(txo),
+                "live ref {txo:?} is missing under {} tag",
+                tag.dimension
+            );
+
+            let stale: Vec<_> = found.difference(&live_refs).collect();
+            assert!(
+                stale.is_empty(),
+                "{} tag answers with {stale:?}, which the UTxO set no longer holds",
+                tag.dimension
+            );
+
+            asked += 1;
+        }
+    }
+
+    assert!(
+        asked > 0,
+        "the UTxO set carries no tags, so this proves nothing"
+    );
+}
+
+/// Every `(dimension, key)` the live UTxO set carries right now.
+fn live_tag_keys(domain: &ToyDomain) -> BTreeSet<(TagDimension, Vec<u8>)> {
+    let live: Vec<_> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .map(|(txo, value)| (txo, Arc::new(value)))
+        .collect();
+
+    let delta = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
+        produced_utxo: live.into_iter().collect(),
+        ..Default::default()
+    });
+
+    delta
+        .produced
+        .into_iter()
+        .flat_map(|(_, tags)| tags)
+        .map(|tag| (tag.dimension, tag.key))
+        .collect()
+}
+
+/// Keys the set carried at an earlier point answer with live refs only. This
+/// is what `assert_tags_match_utxo_set` cannot see: a key that only undone
+/// outputs carried is no longer among the live tags, so it is never asked
+/// there, and a rollback that left it behind would pass.
+fn assert_no_stale_tags(domain: &ToyDomain, keys: &BTreeSet<(TagDimension, Vec<u8>)>) {
+    let live_refs: HashSet<TxoRef> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap().0)
+        .collect();
+
+    for (dimension, key) in keys {
+        let found = domain.state().utxos_by_tag(dimension, key).unwrap();
+
+        let stale: Vec<_> = found.difference(&live_refs).collect();
+        assert!(
+            stale.is_empty(),
+            "{dimension} tag answers with {stale:?}, which the UTxO set no longer holds"
+        );
+    }
 }
 
 /// Helper: feed blocks into a domain with partial work-unit execution.
@@ -148,6 +247,9 @@ fn test_catchup_recovers_archive_and_indexes() {
         "tx hash {} should be found in index after catch-up",
         tx_hash_hex
     );
+
+    // The live-UTxO tags rode the state commit, so they were never behind.
+    assert_tags_match_utxo_set(&domain);
 }
 
 /// A crash between `commit_wal` and `commit_state` leaves the WAL ahead of
@@ -216,6 +318,10 @@ fn test_catchup_recovers_state_from_wal() {
         1,
         "utxo produced by replayed block should be queryable from state"
     );
+
+    // ... tags included: `catch_up_state` re-derives them from the same WAL
+    // entries and commits them with the set.
+    assert_tags_match_utxo_set(&domain);
 }
 
 /// Crash-recovery matrix: state, archive and indexes each at a different
@@ -372,6 +478,8 @@ fn test_rollback_after_full_sync_lifecycle() {
         domain.roll_forward(block.clone()).unwrap();
     }
 
+    let tags_at_tip = live_tag_keys(&domain);
+
     let tip_before_rollback = domain.state().read_cursor().unwrap();
     assert_ne!(
         tip_before_rollback.as_ref(),
@@ -405,6 +513,18 @@ fn test_rollback_after_full_sync_lifecycle() {
         accounts_at_target,
         "account entities should be restored to their state at the rollback target",
     );
+
+    // The live-UTxO tags followed the set back: the inputs the undone blocks
+    // spent answer again, and their outputs answer under no tag, keys that
+    // only they carried included.
+    assert_tags_match_utxo_set(&domain);
+
+    let gone = tags_at_tip.difference(&live_tag_keys(&domain)).count();
+    assert!(
+        gone > 0,
+        "no tag key was unique to the undone blocks, so the stale-key probe proves nothing"
+    );
+    assert_no_stale_tags(&domain, &tags_at_tip);
 }
 
 /// Collect all raw (key, value) pairs in a state namespace.

@@ -16,7 +16,7 @@ use crate::roll::{WorkBatch, WorkBlock};
 /// and runs its global teardown (Ewrap / Estart) inside its `finalize()`.
 pub(crate) enum InternalWorkUnit {
     Genesis,
-    Blocks(WorkBatch),
+    Blocks(Box<WorkBatch>),
     Ewrap(BlockSlot),
     Estart(BlockSlot),
     Rupd(BlockSlot),
@@ -167,12 +167,12 @@ impl WorkBuffer {
             WorkBuffer::OpenBatch(batch) => {
                 let last_point = batch.last_point();
                 (
-                    Some(InternalWorkUnit::Blocks(batch)),
+                    Some(InternalWorkUnit::Blocks(Box::new(batch))),
                     Self::Restart(last_point),
                 )
             }
             WorkBuffer::PreRupdBoundary(batch, block) => (
-                Some(InternalWorkUnit::Blocks(batch)),
+                Some(InternalWorkUnit::Blocks(Box::new(batch))),
                 Self::RupdBoundary(block),
             ),
             WorkBuffer::RupdBoundary(block) => (
@@ -180,7 +180,7 @@ impl WorkBuffer {
                 Self::OpenBatch(WorkBatch::for_single_block(WorkBlock::new(block))),
             ),
             WorkBuffer::PreEwrapBoundary(batch, block, epoch) => (
-                Some(InternalWorkUnit::Blocks(batch)),
+                Some(InternalWorkUnit::Blocks(Box::new(batch))),
                 Self::EwrapBoundary(block, epoch),
             ),
             WorkBuffer::EwrapBoundary(block, epoch) => {
@@ -208,8 +208,8 @@ impl WorkBuffer {
                 )
             }
             WorkBuffer::PreForcedStop(block) => (
-                Some(InternalWorkUnit::Blocks(WorkBatch::for_single_block(
-                    WorkBlock::new(block),
+                Some(InternalWorkUnit::Blocks(Box::new(
+                    WorkBatch::for_single_block(WorkBlock::new(block)),
                 ))),
                 Self::ForcedStop,
             ),

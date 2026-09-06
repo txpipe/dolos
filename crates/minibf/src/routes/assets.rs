@@ -17,7 +17,7 @@ use blockfrost_openapi::models::{
 use dolos_cardano::{
     cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
     cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
-    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::AssetState,
     ChainSummary,
 };
@@ -549,7 +549,7 @@ where
     let (asset, _) = resolve_asset_state(&domain, &subject)?;
 
     let utxoset = domain
-        .indexes()
+        .state()
         .utxos_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .into_iter()

@@ -382,11 +382,7 @@ fn seed_archive_tags<S: CoreIndexStore>(store: &S) {
         }
 
         let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-        let delta = IndexDelta {
-            cursor,
-            utxo: Default::default(),
-            archive,
-        };
+        let delta = IndexDelta { cursor, archive };
 
         let writer = store.start_writer().expect("start_writer failed");
         writer.apply(&delta).expect("apply failed");

@@ -287,7 +287,6 @@ impl<M: MempoolStore> Stream for UpdateFilter<M> {
 
 pub struct MempoolAwareUtxoStore<'a, D: Domain> {
     inner: &'a D::State,
-    indexes: &'a D::Indexes,
     mempool: &'a D::Mempool,
 }
 
@@ -375,12 +374,8 @@ fn select_mempool_utxos<D: Domain>(refs: &mut HashSet<TxoRef>, mempool: &D::Memp
 }
 
 impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
-    pub fn new(inner: &'a D::State, indexes: &'a D::Indexes, mempool: &'a D::Mempool) -> Self {
-        Self {
-            inner,
-            indexes,
-            mempool,
-        }
+    pub fn new(inner: &'a D::State, mempool: &'a D::Mempool) -> Self {
+        Self { inner, mempool }
     }
 
     pub fn state(&self) -> &D::State {
@@ -391,12 +386,8 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         self.mempool
     }
 
-    pub fn indexes(&self) -> &D::Indexes {
-        self.indexes
-    }
-
     /// Get UTxOs by a tag dimension and key, merging results from both the
-    /// index and the mempool.
+    /// state store's tags and the mempool.
     ///
     /// The `predicate` is used to filter mempool UTxOs that match the query
     /// criteria.
@@ -405,13 +396,13 @@ impl<'a, D: Domain> MempoolAwareUtxoStore<'a, D> {
         dimension: TagDimension,
         key: &[u8],
         predicate: F,
-    ) -> Result<UtxoSet, IndexError>
+    ) -> Result<UtxoSet, StateError>
     where
         F: Fn(&MultiEraOutput<'_>) -> bool,
     {
         let from_mempool = scan_mempool_utxos::<D, _>(predicate, self.mempool);
 
-        let mut utxos = self.indexes.utxos_by_tag(dimension, key)?;
+        let mut utxos = self.inner.utxos_by_tag(dimension, key)?;
 
         utxos.extend(from_mempool);
 

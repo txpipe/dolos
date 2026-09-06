@@ -29,8 +29,8 @@ use dolos_core::{
     IndexError, IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter,
     LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore, MempoolTx, Namespace, RawBlock,
     StateError, StateSchema, StateStore as CoreStateStore, StateWriter as CoreStateWriter,
-    TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoMap, UtxoSet, UtxoSetDelta,
-    WalError, WalStore,
+    TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry, UtxoIndexDelta, UtxoMap, UtxoSet,
+    UtxoSetDelta, WalError, WalStore,
 };
 use serde::{de::DeserializeOwned, Serialize};
 
@@ -523,6 +523,22 @@ impl CoreStateWriter for StateWriterBackend {
         }
     }
 
+    fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        match self {
+            Self::Redb(w) => w.apply_utxo_tags(delta),
+            Self::Fjall(w) => w.apply_utxo_tags(delta),
+            Self::Memory(w) => w.apply_utxo_tags(delta),
+        }
+    }
+
+    fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        match self {
+            Self::Redb(w) => w.undo_utxo_tags(delta),
+            Self::Fjall(w) => w.undo_utxo_tags(delta),
+            Self::Memory(w) => w.undo_utxo_tags(delta),
+        }
+    }
+
     fn commit(self) -> Result<(), StateError> {
         match self {
             Self::Redb(w) => (*w).commit(),
@@ -658,6 +674,14 @@ impl CoreStateStore for StateStoreBackend {
             Self::Redb(s) => s.get_utxos(refs),
             Self::Fjall(s) => s.get_utxos(refs),
             Self::Memory(s) => s.get_utxos(refs),
+        }
+    }
+
+    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError> {
+        match self {
+            Self::Redb(s) => s.utxos_by_tag(dimension, key),
+            Self::Fjall(s) => s.utxos_by_tag(dimension, key),
+            Self::Memory(s) => s.utxos_by_tag(dimension, key),
         }
     }
 
@@ -1211,14 +1235,6 @@ impl CoreIndexStore for IndexStoreBackend {
             Self::Fjall(s) => s.cursor(),
             Self::Memory(s) => s.cursor(),
             Self::NoOp(s) => s.cursor(),
-        }
-    }
-
-    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError> {
-        match self {
-            Self::Fjall(s) => s.utxos_by_tag(dimension, key),
-            Self::Memory(s) => s.utxos_by_tag(dimension, key),
-            Self::NoOp(s) => s.utxos_by_tag(dimension, key),
         }
     }
 

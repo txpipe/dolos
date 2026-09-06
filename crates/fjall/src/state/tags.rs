@@ -1,8 +1,9 @@
-//! State tag index operations for the `state-tags` keyspace (chain-agnostic).
+//! Live-UTxO tag operations for the `state-tags` keyspace (chain-agnostic).
 //!
 //! This module handles key encoding, batch writes (apply/undo), and read
-//! queries for the `state-tags` keyspace. These indexes map lookup keys
-//! (addresses, policies, assets) to sets of TxoRefs.
+//! queries for the `state-tags` keyspace of the state store. These tags map
+//! lookup keys (addresses, policies, assets) to sets of TxoRefs, and are
+//! written in the same batch as the UTxO set they project.
 //!
 //! Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` with empty value.
 //! Queries use prefix scanning to find all TxoRefs for a given lookup key.
@@ -12,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use dolos_core::{IndexDelta, TxoRef, UtxoSet};
+use dolos_core::{TxoRef, UtxoIndexDelta, UtxoSet};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
 
 use crate::keys::{
@@ -79,21 +80,21 @@ fn remove_entry(
     batch.remove(keyspace, key);
 }
 
-/// Apply UTxO tag changes from an IndexDelta to the state-tags keyspace
+/// Apply UTxO tag changes from a UtxoIndexDelta to the state-tags keyspace
 pub fn apply(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
-    delta: &IndexDelta,
+    delta: &UtxoIndexDelta,
 ) -> Result<(), Error> {
     // Insert produced UTxOs
-    for (txo_ref, tags) in &delta.utxo.produced {
+    for (txo_ref, tags) in &delta.produced {
         for tag in tags {
             insert_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
         }
     }
 
     // Remove consumed UTxOs
-    for (txo_ref, tags) in &delta.utxo.consumed {
+    for (txo_ref, tags) in &delta.consumed {
         for tag in tags {
             remove_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
         }
@@ -102,21 +103,21 @@ pub fn apply(
     Ok(())
 }
 
-/// Undo UTxO tag changes from an IndexDelta (for rollback)
+/// Undo UTxO tag changes from a UtxoIndexDelta (for rollback)
 pub fn undo(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
-    delta: &IndexDelta,
+    delta: &UtxoIndexDelta,
 ) -> Result<(), Error> {
     // Remove produced UTxOs (undo insertion)
-    for (txo_ref, tags) in &delta.utxo.produced {
+    for (txo_ref, tags) in &delta.produced {
         for tag in tags {
             remove_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
         }
     }
 
     // Restore consumed UTxOs (undo removal)
-    for (txo_ref, tags) in &delta.utxo.consumed {
+    for (txo_ref, tags) in &delta.consumed {
         for tag in tags {
             insert_entry(batch, keyspace, tag.dimension, &tag.key, txo_ref);
         }

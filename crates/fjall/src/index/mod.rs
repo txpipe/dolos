@@ -5,9 +5,9 @@
 //! write-heavy workloads with many keys, which is ideal for blockchain index
 //! data.
 //!
-//! ## Four Keyspace Design
+//! ## Three Keyspace Design
 //!
-//! Indexes are organized into four keyspaces based on access patterns:
+//! Indexes are organized into three keyspaces based on access patterns:
 //!
 //! 1. **`index-cursor`**: Chain position tracking (separate for different
 //!    access pattern)
@@ -15,19 +15,15 @@
 //! 2. **`index-exact`**: Exact-match lookups (point queries) Key format:
 //!    `[dim_hash:8][key_data:var]` -> `[slot:8]`
 //!
-//! 3. **`state-tags`**: UTxO tag queries (mutable: insert on produce, delete on
-//!    consume) Key format: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
-//!
-//! 4. **`archive-tags`**: Block tag queries (append-only, never deleted) Key
+//! 3. **`archive-tags`**: Block tag queries (append-only, never deleted) Key
 //!    format: `[dim_hash:8][xxh3(tag_key):8][slot:8]` -> empty
 //!
 //! The `dim_hash` is computed as `xxh3(prefix + ":" + dimension)` where prefix
-//! is "exact", "utxo", or "block". This makes the storage layer fully
-//! chain-agnostic.
+//! is "exact" or "block". This makes the storage layer fully chain-agnostic.
 //!
-//! Splitting UTxO tags (mutable, high-churn) from block tags (append-only) into
-//! separate keyspaces reduces write amplification and allows independent
-//! compaction.
+//! The live-UTxO tags (mutable, high-churn) live in the state store's
+//! `state-tags` keyspace, beside the UTxO set they project (see
+//! `crate::state::tags`).
 //!
 //! All multi-byte integers are big-endian encoded for correct lexicographic
 //! ordering.
@@ -40,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use dolos_core::{
     config::FjallIndexConfig, key_hash, BlockSlot, ChainPoint, ExactKind, IndexDelta, IndexError,
     IndexRecord, IndexStore as CoreIndexStore, IndexWriter as CoreIndexWriter, TagDimension,
-    UtxoSet, KEY_HASH_SIZE,
+    KEY_HASH_SIZE,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -50,7 +46,6 @@ use fjall::{
 pub mod archive_tags;
 pub mod exact;
 pub mod scan;
-pub mod state_tags;
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::Error;
@@ -76,8 +71,6 @@ mod keyspace_names {
     pub const CURSOR: &str = "index-cursor";
     /// Exact-match keyspace (block hash, tx hash, block number -> slot)
     pub const EXACT: &str = "index-exact";
-    /// State tags keyspace (mutable: insert on produce, delete on consume)
-    pub const UTXO_TAGS: &str = "state-tags";
     /// Archive tags keyspace (append-only, never deleted)
     pub const BLOCK_TAGS: &str = "archive-tags";
 }
@@ -85,13 +78,11 @@ mod keyspace_names {
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
-/// Fjall-based index store implementation with four keyspaces.
+/// Fjall-based index store implementation with three keyspaces.
 ///
-/// Uses 4 keyspaces split by workload class:
+/// Uses 3 keyspaces split by workload class:
 /// - `cursor`: Chain position tracking
 /// - `exact`: Exact-match lookups (block/tx hash, block number)
-/// - `utxo_tags`: UTxO tags (mutable: insert+delete, needs tombstone
-///   compaction)
 /// - `block_tags`: Block tags (append-only, can use relaxed compaction)
 #[derive(Clone)]
 pub struct IndexStore {
@@ -100,8 +91,6 @@ pub struct IndexStore {
     cursor: Keyspace,
     /// Exact-match keyspace for point lookups
     exact: Keyspace,
-    /// UTxO tags keyspace (mutable: insert on produce, delete on consume)
-    utxo_tags: Keyspace,
     /// Block tags keyspace (append-only, never deleted)
     block_tags: Keyspace,
     /// Configuration
@@ -163,17 +152,14 @@ impl IndexStore {
             opts
         };
 
-        // 4 keyspaces: cursor, exact, utxo_tags, block_tags
         let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
         let exact = db.keyspace(keyspace_names::EXACT, build_opts)?;
-        let utxo_tags = db.keyspace(keyspace_names::UTXO_TAGS, build_opts)?;
         let block_tags = db.keyspace(keyspace_names::BLOCK_TAGS, build_opts)?;
 
         Ok(Self {
             db,
             cursor,
             exact,
-            utxo_tags,
             block_tags,
             flush_on_commit,
         })
@@ -189,11 +175,6 @@ impl IndexStore {
         &self.exact
     }
 
-    /// Get a reference to the UTxO tags keyspace
-    pub fn utxo_tags_keyspace(&self) -> &Keyspace {
-        &self.utxo_tags
-    }
-
     /// Get a reference to the block tags keyspace
     pub fn block_tags_keyspace(&self) -> &Keyspace {
         &self.block_tags
@@ -204,7 +185,6 @@ impl IndexStore {
         [
             (keyspace_names::CURSOR, &self.cursor),
             (keyspace_names::EXACT, &self.exact),
-            (keyspace_names::UTXO_TAGS, &self.utxo_tags),
             (keyspace_names::BLOCK_TAGS, &self.block_tags),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
@@ -267,9 +247,6 @@ impl CoreIndexWriter for IndexStoreWriter {
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
 
-        // Apply state tag changes to state-tags keyspace
-        state_tags::apply(&mut batch, &self.store.utxo_tags, delta).map_err(IndexError::from)?;
-
         // Apply exact index changes to index-exact keyspace
         exact::apply(&mut batch, &self.store.exact, delta).map_err(IndexError::from)?;
 
@@ -286,9 +263,6 @@ impl CoreIndexWriter for IndexStoreWriter {
 
     fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
-
-        // Undo state tag changes
-        state_tags::undo(&mut batch, &self.store.utxo_tags, delta).map_err(IndexError::from)?;
 
         // Undo exact index changes
         exact::undo(&mut batch, &self.store.exact, delta).map_err(IndexError::from)?;
@@ -412,13 +386,6 @@ impl CoreIndexStore for IndexStore {
             }
             None => Ok(None),
         }
-    }
-
-    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError> {
-        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
-        let snapshot = self.db.snapshot();
-        // Pass dimension string directly - chain-agnostic
-        state_tags::get_by_key(&snapshot, &self.utxo_tags, dimension, key).map_err(IndexError::from)
     }
 
     fn slot_by_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {

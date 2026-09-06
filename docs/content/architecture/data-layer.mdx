@@ -13,17 +13,17 @@ Under the configured `storage.path`, a running node maintains four on-disk store
 ```
 <storage.path>/
 ├── wal/       Write-Ahead Log — recent blocks as reversible deltas (rollback buffer)
-├── state/     Ledger state — current UTxO set, pools, accounts, epoch state, protocol params
+├── state/     Ledger state — current UTxO set (with its by-address/asset/… tags), pools, accounts, epoch state, protocol params
 ├── archive/   Historical blocks — full block bodies + temporal entity logs
-└── index/     Secondary indexes — reverse lookups (address → UTxO, asset → UTxO, …)
+└── index/     Secondary indexes — historical reverse lookups (address → slots, tx hash → slot, …)
 ```
 
 | Store | Holds | Why it's separate |
 | ----- | ----- | ----------------- |
 | **WAL** | The most recent blocks, stored as `EntityDelta`s that can be applied or undone. | Rollbacks (chain reorganizations) are resolved by replaying these deltas in reverse. It is a bounded buffer, not long-term history. |
-| **State** | The *current* ledger: UTxO set, stake pool registry, account/stake state, DReps, protocol parameters, and per-epoch ledger state. | This is the hot, always-current view the ledger rules read and write on every block. |
+| **State** | The *current* ledger: UTxO set and its reverse-lookup tags (by address, payment credential, stake credential, policy, asset, reference script), stake pool registry, account/stake state, DReps, protocol parameters, and per-epoch ledger state. | This is the hot, always-current view the ledger rules read and write on every block. The tags are a projection of the UTxO set, so they live beside it and commit with it. |
 | **Archive** | Immutable history: full block bodies plus time-indexed logs of entity changes. | History is append-only and read differently from current state, so it uses its own layout (see below). |
-| **Index** | Reverse lookups over UTxOs by address, payment credential, stake credential, policy, and asset. | The APIs need "find all UTxOs for X" queries that the primary state store isn't keyed for. |
+| **Index** | Historical reverse lookups: slots by address, payment credential, stake credential, policy, asset, datum, and more; slot by block hash, block number, and tx hash. | The APIs need "find the blocks involving X" queries that the archive isn't keyed for. |
 | **Mempool** | Submitted-but-unconfirmed transactions and their lifecycle state. | Pending transactions are transient and overlaid on top of committed state during validation. |
 
 ## Storage traits and pluggable backends
@@ -57,6 +57,6 @@ A few concepts recur across the stores:
 - **`EntityDelta` (apply / undo).** Every state change is expressed as a delta that carries enough of the previous value to reverse itself. Applying deltas rolls the ledger forward; undoing them (from the WAL) rolls it back. This is the mechanism that makes rollbacks exact — see the [Sync Pipeline](./sync-pipeline).
 - **`EpochValue` snapshot window.** Cardano staking reads state as it was several epochs ago. State entities that participate in staking are stored as a rotating window of snapshots (live / mark / set / go / next). The details are covered in the [Ledger Model](./ledger-model).
 - **Archive dual storage.** Block bodies are written to append-only flatfile segments (one segment per Cardano epoch), while a compact index maps each slot to its `(segment, offset, length)` location. Historical entity changes are stored as `(slot, entity-key) → value` logs, enabling range queries over time.
-- **Index dimensions.** The index store maintains multimaps keyed by address, payment credential, stake credential, policy id, and asset id, each pointing at the matching UTxOs (for current state) or slots (for historical lookups).
+- **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the index store.
 
 Source: `crates/core/src/{state,archive,wal,indexes,mempool}.rs`, `crates/redb3/src/*`, `crates/fjall/src/*`, and storage configuration in `crates/core/src/config.rs`.

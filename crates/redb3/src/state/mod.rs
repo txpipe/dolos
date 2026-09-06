@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 
 use dolos_core::{
     config::RedbStateConfig, ChainPoint, EmptyUtxoIter, EntityKey, EntityValue, Namespace,
-    StateError, StateSchema, TxoRef, UtxoMap,
+    StateError, StateSchema, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet,
 };
 
 use redb::{
@@ -229,6 +229,19 @@ impl dolos_core::StateWriter for StateWriter {
         Ok(())
     }
 
+    /// Not implemented on this backend.
+    ///
+    /// The live-UTxO tags exist for the serving APIs, which run against the
+    /// live state backend (fjall).
+    fn apply_utxo_tags(&self, _delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        Err(StateError::Unsupported("apply_utxo_tags"))
+    }
+
+    /// Not implemented on this backend; see `apply_utxo_tags`.
+    fn undo_utxo_tags(&self, _delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        Err(StateError::Unsupported("undo_utxo_tags"))
+    }
+
     fn commit(self) -> Result<(), StateError> {
         self.wx.commit().map_err(Error::from)?;
 
@@ -328,10 +341,15 @@ impl dolos_core::StateStore for StateStore {
         Ok(out)
     }
 
+    /// Not implemented on this backend; see `StateWriter::apply_utxo_tags`.
+    fn utxos_by_tag(&self, _dimension: TagDimension, _key: &[u8]) -> Result<UtxoSet, StateError> {
+        Err(StateError::Unsupported("utxos_by_tag"))
+    }
+
     /// Not implemented on this backend.
     ///
     /// Full UTxO-set iteration exists for the snapshot export and live-UTxO
-    /// index rebuild paths, which run against the live state backend (fjall).
+    /// tag rebuild paths, which run against the live state backend (fjall).
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         Err(StateError::Unsupported("iter_utxos"))
     }

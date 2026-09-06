@@ -1,5 +1,5 @@
 use crate::{make_custom_utxo_delta, TestAddress, UtxoGenerator};
-use dolos_cardano::indexes::index_delta_from_utxo_delta;
+use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     config::{CardanoConfig, StorageConfig, SyncConfig},
@@ -378,21 +378,11 @@ impl<B: ToyStores> ToyDomain<B> {
 
         if let Some(delta) = initial_delta {
             let writer = domain.stores.state().start_writer().unwrap();
-            let index_writer = domain.stores.indexes().start_writer().unwrap();
             writer.apply_utxoset(&delta).unwrap();
-
-            // Build index delta from UTxO delta using Cardano-specific helper
-            let cursor = domain
-                .stores
-                .state()
-                .read_cursor()
-                .unwrap()
-                .unwrap_or(ChainPoint::Origin);
-            let index_delta = index_delta_from_utxo_delta(cursor, &delta);
-            index_writer.apply(&index_delta).unwrap();
-
+            writer
+                .apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))
+                .unwrap();
             writer.commit().unwrap();
-            index_writer.commit().unwrap();
         }
 
         domain

@@ -34,8 +34,7 @@ pub trait SubmitExt: Domain {
     fn validate_tx(&self, chain: &Self::Chain, cbor: &[u8]) -> Result<MempoolTx, DomainError> {
         let tip = self.state().read_cursor()?;
 
-        let utxos =
-            MempoolAwareUtxoStore::<'_, Self>::new(self.state(), self.indexes(), self.mempool());
+        let utxos = MempoolAwareUtxoStore::<'_, Self>::new(self.state(), self.mempool());
 
         let tx = chain.validate_tx(cbor, &utxos, tip, &self.genesis())?;
 
