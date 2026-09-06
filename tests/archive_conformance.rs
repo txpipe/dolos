@@ -7,7 +7,8 @@
 //! block reads and walks (including the Byron boundary slot family), undo's
 //! segment truncation, prune and truncate boundaries, the log namespaces'
 //! write/read/range behavior, and the index entries a block projects (the
-//! exact lookups and the archive tags, written in the block's own commit).
+//! exact lookups and the archive tags, written in the block's own commit
+//! and pruned with it).
 //! The index half's export/restore contract has its own suite,
 //! `archive_index_roundtrip`.
 //!
@@ -1158,6 +1159,190 @@ fn slots_by_tag_bounds_are_inclusive<B: Backend>() {
     assert!(tagged_slots(&store, &key, 21, 29).is_empty());
 }
 
+// Index entries: prune
+
+/// The one tag key every block of a prune test carries, so `slots_by_tag`
+/// on it lists whatever blocks the store still holds.
+const SHARED_TAG_KEY: [u8; 28] = [0xAA; 28];
+
+/// The index entries of a block at `slot`, derived from the slot alone so a
+/// test can probe any block it wrote without keeping the deltas around: the
+/// block number is the slot, the hashes carry the slot in their leading
+/// bytes.
+fn slot_delta(slot: u64) -> ArchiveIndexDelta {
+    let mut block_hash = vec![0u8; 32];
+    block_hash[..8].copy_from_slice(&slot.to_be_bytes());
+
+    let mut tx_hash = vec![0xFFu8; 32];
+    tx_hash[8..16].copy_from_slice(&slot.to_be_bytes());
+
+    ArchiveIndexDelta {
+        slot,
+        block_hash,
+        block_number: Some(slot),
+        tx_hashes: vec![tx_hash],
+        tags: vec![Tag::new(
+            archive_dimensions::ADDRESS,
+            SHARED_TAG_KEY.to_vec(),
+        )],
+    }
+}
+
+/// Write a block and its [`slot_delta`] entries at every slot, one commit.
+fn write_indexed_blocks<S: CoreArchiveStore>(store: &S, slots: &[u64]) {
+    let writer = store.start_writer().unwrap();
+    for &slot in slots {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+        writer.apply_index(&[slot_delta(slot)]).unwrap();
+    }
+    writer.commit().unwrap();
+}
+
+/// Whether every exact lookup of the block at `slot` still resolves.
+///
+/// The three answer together or not at all: a block's entries are pruned
+/// as one, so a split answer is a defect this helper would hide.
+fn exact_entries_present<S: CoreArchiveStore>(store: &S, slot: u64) -> bool {
+    let delta = slot_delta(slot);
+    let answers = [
+        store.slot_by_block_hash(&delta.block_hash).unwrap(),
+        store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(),
+        store.slot_by_block_number(slot).unwrap(),
+    ];
+
+    match answers {
+        [Some(a), Some(b), Some(c)] if a == slot && b == slot && c == slot => true,
+        [None, None, None] => false,
+        other => panic!("the exact entries of slot {slot} disagree: {other:?}"),
+    }
+}
+
+/// Pruning the blocks below the cutoff prunes their index entries with
+/// them: no exact lookup resolves a pruned block and no tag names it, while
+/// every block still held keeps every entry.
+fn prune_history_drops_tags_and_exact_below_the_cutoff<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let slots: Vec<u64> = (0..=1_000).step_by(100).collect();
+    write_indexed_blocks(&store, &slots);
+
+    // Start 0, tip 1000, window 500: prune before slot 500.
+    let done = store.prune_history(500, None).unwrap();
+    assert!(done);
+
+    for &slot in &slots {
+        let retained = slot >= 500;
+        assert_eq!(
+            store.get_block_by_slot(&slot).unwrap().is_some(),
+            retained,
+            "block at {slot}"
+        );
+        assert_eq!(
+            exact_entries_present(&store, slot),
+            retained,
+            "exact entries of {slot}"
+        );
+    }
+
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX),
+        [500, 600, 700, 800, 900, 1_000]
+    );
+}
+
+/// The cutoff is exclusive for index entries exactly as it is for blocks and
+/// logs: the entries of the block at the cutoff slot survive, the entries of
+/// the block one slot before it go.
+fn prune_keeps_index_entries_at_the_cutoff_slot<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    write_indexed_blocks(&store, &[0, 499, 500, 501, 1_000]);
+
+    // Start 0, tip 1000, window 500: prune before slot 500.
+    let done = store.prune_history(500, None).unwrap();
+    assert!(done);
+
+    assert!(!exact_entries_present(&store, 0));
+    assert!(!exact_entries_present(&store, 499));
+    assert!(exact_entries_present(&store, 500));
+    assert!(exact_entries_present(&store, 501));
+    assert!(exact_entries_present(&store, 1_000));
+
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX),
+        [500, 501, 1_000]
+    );
+}
+
+/// A tag query whose range straddles the cutoff answers only the retained
+/// side of it, and a range entirely below the cutoff answers nothing —
+/// the same shape `get_range` has over the pruned blocks.
+fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let slots: Vec<u64> = (0..=1_000).step_by(100).collect();
+    write_indexed_blocks(&store, &slots);
+
+    // Start 0, tip 1000, window 300: prune before slot 700.
+    let done = store.prune_history(300, None).unwrap();
+    assert!(done);
+
+    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 100, 800), [700, 800]);
+    assert!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 699).is_empty());
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX),
+        [700, 800, 900, 1_000]
+    );
+}
+
+/// The fjall backend sweeps its index keyspaces only when the cutoff has
+/// advanced by a sixteenth of the window since the last sweep, so between
+/// sweeps a pruned block's entries linger; the memory backend has no such
+/// cadence, which is why this is not a conformance case.
+///
+/// Window 1600 makes the threshold 100 slots; each round prunes 40. The
+/// first prune after open always sweeps, the next two fall inside the
+/// threshold and leave the entries of the blocks they pruned in place, and
+/// the fourth crosses it and removes them.
+#[test]
+fn fjall_index_sweep_is_amortized_across_prune_rounds() {
+    let (store, _guard) = Fjall::open();
+
+    let slots: Vec<u64> = (0..=3_000).step_by(10).collect();
+    write_indexed_blocks(&store, &slots);
+
+    let max_slots = 1_600;
+    let max_prune = Some(40);
+
+    // Round 1: cutoff 40, first sweep after open.
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!exact_entries_present(&store, 30));
+    assert!(exact_entries_present(&store, 40));
+
+    // Rounds 2 and 3: cutoffs 80 and 120, inside the threshold. The blocks
+    // are gone, their entries are not yet.
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert_eq!(store.get_block_by_slot(&40).unwrap(), None);
+    assert_eq!(store.get_block_by_slot(&110).unwrap(), None);
+    assert!(exact_entries_present(&store, 40));
+    assert!(exact_entries_present(&store, 110));
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, 120),
+        [40, 50, 60, 70, 80, 90, 100, 110, 120]
+    );
+
+    // Round 4: cutoff 160, past the threshold: everything below it goes.
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!exact_entries_present(&store, 40));
+    assert!(!exact_entries_present(&store, 110));
+    assert!(!exact_entries_present(&store, 150));
+    assert!(exact_entries_present(&store, 160));
+    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 170), [160, 170]);
+}
+
 // ---------------------------------------------------------------------------
 // Cross-backend agreement: both backends walk identical data identically
 // ---------------------------------------------------------------------------
@@ -1278,6 +1463,9 @@ macro_rules! full_suite {
                 apply_index_then_slot_by_tx_hash_resolves,
                 undo_index_removes_exactly_what_apply_index_added,
                 slots_by_tag_bounds_are_inclusive,
+                prune_history_drops_tags_and_exact_below_the_cutoff,
+                prune_keeps_index_entries_at_the_cutoff_slot,
+                slots_by_tag_after_prune_answers_only_retained_slots,
             ]
         );
     };

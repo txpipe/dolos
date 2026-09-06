@@ -30,9 +30,20 @@
 //! The two index keyspaces are projections of the blocks and are written in
 //! the same batch as the block locations, so the history and its lookups
 //! commit together. They keep the compaction settings the standalone index
-//! store gave them, and neither `prune_history` nor `truncate_front` touches
-//! them: a rollback removes its entries through
-//! [`CoreArchiveWriter::undo_index`], and pruning them is not done yet.
+//! store gave them. A rollback removes its entries through
+//! [`CoreArchiveWriter::undo_index`]; `truncate_front` does not touch them.
+//!
+//! ## Pruning the index keyspaces
+//!
+//! The slot is the *last* key component of a tag entry and the *value* of an
+//! exact entry, so neither keyspace can be range-deleted by slot the way the
+//! blocks and logs are. `prune_history` instead sweeps them: a full walk of
+//! both keyspaces removing every entry below the cutoff. Under sliding
+//! history the retained entry set is one window wide once the sweep has run,
+//! so a walk costs the window, not the chain — and the sweep is amortized
+//! across housekeeping rounds, running only when the cutoff has advanced by
+//! a sixteenth of the window since the last one. A node restored from a
+//! full-history stele pays one whole-keyspace scan on its first sweep.
 //!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
@@ -42,6 +53,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Bound, Range};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
@@ -83,6 +95,15 @@ const DEFAULT_CACHE_SIZE_MB: usize = 500;
 const INDEX_L0_THRESHOLD: u8 = 8;
 const INDEX_MEMTABLE_SIZE_MB: usize = 128;
 
+/// The index keyspaces are swept once the prune cutoff has advanced by this
+/// fraction of the retained window since the last sweep.
+const INDEX_SWEEP_WINDOW_DIVISOR: u64 = 16;
+
+/// Most removals one sweep batch carries before it is committed and a new
+/// one started, so the first sweep after a full-history restore — tens of
+/// millions of entries — never builds one memory-resident batch.
+const INDEX_SWEEP_BATCH_KEYS: usize = 100_000;
+
 /// Keyspace names for the archive store
 mod keyspace_names {
     /// Blocks location table (slot → packed BlockLocations)
@@ -118,6 +139,9 @@ pub struct ArchiveStore {
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     flush_on_commit: bool,
+    /// The prune cutoff the index keyspaces were last swept up to; zero
+    /// until the first sweep after open, which is why that one always runs.
+    last_index_sweep: Arc<AtomicU64>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -232,6 +256,7 @@ impl ArchiveStore {
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
             flush_on_commit,
+            last_index_sweep: Arc::new(AtomicU64::new(0)),
             _tempdir: tempdir,
         })
     }
@@ -320,6 +345,94 @@ impl ArchiveStore {
             Some(bytes) => Ok(decode_locations(&bytes).collect()),
             None => Ok(vec![]),
         }
+    }
+
+    /// Remove every index entry below `prune_before` if the cutoff has moved
+    /// far enough since the last sweep to be worth a walk of both keyspaces.
+    ///
+    /// The threshold is a sixteenth of the retained window (at least one
+    /// slot), so a sliding node walks its window-sized index about sixteen
+    /// times per window of chain instead of once per housekeeping round. The
+    /// first prune after open always sweeps.
+    fn sweep_indexes(
+        &self,
+        snapshot: &Snapshot,
+        prune_before: BlockSlot,
+        max_slots: u64,
+    ) -> Result<(), ArchiveError> {
+        let last = self.last_index_sweep.load(Ordering::Acquire);
+        let threshold = (max_slots / INDEX_SWEEP_WINDOW_DIVISOR).max(1);
+
+        if last != 0 && prune_before.saturating_sub(last) < threshold {
+            tracing::debug!(
+                cutoff_slot = prune_before,
+                last_sweep = last,
+                threshold,
+                "index sweep deferred"
+            );
+            return Ok(());
+        }
+
+        let tags = self.sweep_below(snapshot, &self.tags, prune_before, |key, _| {
+            tags::slot_of_entry(key)
+        })?;
+        let exact = self.sweep_below(snapshot, &self.exact, prune_before, |_, value| {
+            exact::slot_of_entry(value)
+        })?;
+
+        self.last_index_sweep.store(prune_before, Ordering::Release);
+
+        tracing::info!(
+            cutoff_slot = prune_before,
+            tags,
+            exact,
+            "swept archive index entries below cutoff"
+        );
+
+        Ok(())
+    }
+
+    /// Walk `keyspace` under `snapshot` and remove every entry whose slot,
+    /// as `slot_of` reads it from the entry, is below `prune_before`.
+    ///
+    /// Removals are committed in batches of at most
+    /// [`INDEX_SWEEP_BATCH_KEYS`], in sequence. Returns the number removed.
+    fn sweep_below(
+        &self,
+        snapshot: &Snapshot,
+        keyspace: &Keyspace,
+        prune_before: BlockSlot,
+        slot_of: impl Fn(&[u8], &[u8]) -> Result<BlockSlot, Error>,
+    ) -> Result<u64, ArchiveError> {
+        let mut removed = 0u64;
+        let mut batch = self.db.batch();
+
+        for guard in snapshot.iter(keyspace) {
+            let (key, value) = guard.into_inner().map_err(fjall_err)?;
+
+            if slot_of(&key, &value)? >= prune_before {
+                continue;
+            }
+
+            batch.remove(keyspace, key);
+            removed += 1;
+
+            if batch.len() >= INDEX_SWEEP_BATCH_KEYS {
+                let full = std::mem::replace(&mut batch, self.db.batch());
+                full.durability(Some(PersistMode::Buffer))
+                    .commit()
+                    .map_err(fjall_err)?;
+            }
+        }
+
+        if !batch.is_empty() {
+            batch
+                .durability(Some(PersistMode::Buffer))
+                .commit()
+                .map_err(fjall_err)?;
+        }
+
+        Ok(removed)
     }
 }
 
@@ -968,6 +1081,10 @@ impl CoreArchiveStore for ArchiveStore {
 
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
+
+        // The index keyspaces cannot be range-deleted by slot; they are swept
+        // under the same snapshot, after the rows that point at the blocks.
+        self.sweep_indexes(&snapshot, prune_before, max_slots)?;
 
         Ok(done)
     }

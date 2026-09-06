@@ -122,6 +122,23 @@ fn decode_slot_value(value: &[u8]) -> u64 {
     decode_slot(value)
 }
 
+/// The slot a stored exact entry resolves to, read from its value.
+///
+/// The prune sweep's view of an entry: the slot is the value, so the key is
+/// not consulted. A value too short to carry one is a malformed entry,
+/// refused rather than skipped for the same reason the record scan fuses on
+/// it.
+pub fn slot_of_entry(value: &[u8]) -> Result<BlockSlot, Error> {
+    if value.len() < SLOT_SIZE {
+        return Err(Error::Codec(format!(
+            "malformed exact index value: {} bytes, expected {SLOT_SIZE}",
+            value.len(),
+        )));
+    }
+
+    Ok(decode_slot_value(value))
+}
+
 // ============================================================================
 // Block Processing
 // ============================================================================
