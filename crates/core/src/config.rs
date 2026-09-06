@@ -460,20 +460,8 @@ impl MempoolStoreConfig {
 // Storage Configuration
 // ============================================================================
 
-/// What a configuration still carrying `[storage.index]` is refused with.
-///
-/// The table is not merely obsolete: a node that ignored it would keep
-/// running against a directory nothing writes any more, so the load fails and
-/// says what to do about it.
-const REMOVED_INDEX_STORE: &str = "the standalone index store was removed in \
-    v1.7: live-UTxO tags live in the state store and archive tags in the \
-    archive store; delete the `[storage.index]` table and re-bootstrap (a \
-    stelae restore is the shortest path); see \
-    https://docs.txpipe.io/dolos/migration/dolos-v1-7";
-
 /// Storage configuration with nested per-store settings.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(try_from = "StorageConfigRepr")]
 pub struct StorageConfig {
     pub version: StorageVersion,
 
@@ -555,51 +543,6 @@ impl StorageConfig {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "mempool"))
             }
         }
-    }
-}
-
-/// The shape [`StorageConfig`] deserializes through, keeping the removed
-/// `[storage.index]` table so its presence is refused rather than ignored.
-#[derive(Deserialize)]
-struct StorageConfigRepr {
-    version: StorageVersion,
-
-    path: std::path::PathBuf,
-
-    #[serde(default)]
-    wal: WalStoreConfig,
-
-    #[serde(default)]
-    state: StateStoreConfig,
-
-    #[serde(default)]
-    archive: ArchiveStoreConfig,
-
-    #[serde(default)]
-    mempool: MempoolStoreConfig,
-
-    /// Removed in v1.7. Captured only so a stale table fails the load with
-    /// [`REMOVED_INDEX_STORE`].
-    #[serde(default)]
-    index: Option<serde::de::IgnoredAny>,
-}
-
-impl TryFrom<StorageConfigRepr> for StorageConfig {
-    type Error = &'static str;
-
-    fn try_from(value: StorageConfigRepr) -> Result<Self, Self::Error> {
-        if value.index.is_some() {
-            return Err(REMOVED_INDEX_STORE);
-        }
-
-        Ok(Self {
-            version: value.version,
-            path: value.path,
-            wal: value.wal,
-            state: value.state,
-            archive: value.archive,
-            mempool: value.mempool,
-        })
     }
 }
 
@@ -1268,37 +1211,5 @@ mod tests {
 
         let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
         assert_eq!(json["backend"], "no_op");
-    }
-
-    /// A config still carrying the removed table must fail the load with the
-    /// migration message, not be quietly ignored.
-    #[test]
-    fn a_leftover_index_table_is_refused_with_the_migration_message() {
-        let toml = r#"
-            version = "v3"
-            path = "data"
-
-            [index]
-            backend = "fjall"
-        "#;
-
-        let err = toml::from_str::<StorageConfig>(toml).unwrap_err();
-
-        assert!(
-            err.to_string().contains(REMOVED_INDEX_STORE),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn a_config_without_the_index_table_parses() {
-        let toml = r#"
-            version = "v3"
-            path = "data"
-        "#;
-
-        let storage: StorageConfig = toml::from_str(toml).unwrap();
-
-        assert_eq!(storage.path, std::path::PathBuf::from("data"));
     }
 }

@@ -176,14 +176,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 
 ### `storage.index` section — removed in v1.7
 
-The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. A configuration that still carries the table fails to load with:
-
-```
-the standalone index store was removed in v1.7: live-UTxO tags live in the
-state store and archive tags in the archive store; delete the
-`[storage.index]` table and re-bootstrap (a stelae restore is the shortest
-path); see https://docs.txpipe.io/dolos/migration/dolos-v1-7
-```
+The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. Drop the table from the configuration; v1.7 bumps the storage version, so an existing data directory has to be re-bootstrapped (a stelae restore is the shortest path) and its configuration revisited anyway.
 
 Any tuning the table carried (`cache`, `worker_threads`, `max_journal_size`, and the rest) should be re-applied to `storage.state` and `storage.archive`, which now carry the keyspaces. `index.backend = "no_op"` had no replacement and needs none: `archive.backend = "no_op"` is the ledger-only switch and drops the historical lookups with the archive, while the live-UTxO tags stay with the UTxO set they project.
 
