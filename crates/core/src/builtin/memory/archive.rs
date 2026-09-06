@@ -12,7 +12,21 @@
 //!   main block arrives second;
 //! - logs live in one map keyed `(namespace, log_key)`, which makes a
 //!   namespaced range scan a plain [`BTreeMap::range`] — the same shape fjall
-//!   gets from its `[ns_hash:8][log_key:40]` prefix.
+//!   gets from its `[ns_hash:8][log_key:40]` prefix;
+//! - the archive tags live in one set keyed on the traversal contract's own
+//!   sort key `(dimension, key_hash, slot)`, and the exact lookups in one map
+//!   keyed `(kind, key)`. The disk backend encodes `[dim_hash][key][slot]`
+//!   triples into a flat keyspace and can only reach the contract's order by
+//!   walking a caller-supplied dimension list in name order; keyed on the
+//!   triple, that order is the map's own and holds by construction.
+//!
+//! ## Stored key form
+//!
+//! Tags are stored under [`key_hash`], not under their logical key, exactly as
+//! the disk backend stores them. Keeping the logical key would be a
+//! divergence, not an improvement: [`ArchiveWriter::append_prehashed`]
+//! delivers records that carry only the stored form, so a store that indexed
+//! anything else could not answer a logical-key query about a restored record.
 //!
 //! ## Ephemeral by design
 //!
@@ -23,16 +37,47 @@
 //! variant, the test harness's store, and the oracle the disk backend's
 //! conformance suite is checked against.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Bound, Range};
 use std::sync::{Arc, Mutex, RwLock};
 
 use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::archive::{ArchiveError, ArchiveStore, ArchiveWriter, LogKey, Skippable};
+use crate::indexes::{
+    key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash, TagDimension,
+    TagRecord, MAX_EXACT_KEY_LEN,
+};
 use crate::{
     BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, StateSchema, TemporalKey,
 };
+
+/// A stored archive tag: the traversal contract's sort key, used as the key.
+type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
+
+/// An exact key, zero-padded to the widest kind — the same inline shape
+/// [`ExactRecord`] carries, so a record goes in and comes back out without a
+/// heap allocation on either side.
+type ExactKey = [u8; MAX_EXACT_KEY_LEN];
+
+/// A key's stored form, or `None` unless it is exactly the width its kind
+/// requires.
+///
+/// Refusing rather than padding or truncating to fit: a key adjusted to fit
+/// aliases with the key it was adjusted into, so a 33-byte block hash and the
+/// 32-byte hash that is its prefix would answer each other's lookups.
+/// `ArchiveIndexDelta` holds its hashes as `Vec<u8>`, so nothing upstream
+/// enforces the width.
+fn exact_key(kind: ExactKind, key: &[u8]) -> Option<ExactKey> {
+    if key.len() != kind.key_len() {
+        return None;
+    }
+
+    let mut buf = [0u8; MAX_EXACT_KEY_LEN];
+    buf[..key.len()].copy_from_slice(key);
+    Some(buf)
+}
 
 /// The store's whole contents, guarded as one unit so a commit is atomic.
 #[derive(Default)]
@@ -42,6 +87,10 @@ struct Tables {
     /// always real chain positions.
     blocks: BTreeMap<BlockSlot, Vec<BlockBody>>,
     logs: BTreeMap<(Namespace, LogKey), EntityValue>,
+    archive_tags: BTreeSet<ArchiveTag>,
+    /// Keyed on the record's own inline key rather than a `Vec`, so
+    /// `iter_exact_records` copies rather than allocates per record.
+    exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -53,6 +102,10 @@ enum Op {
     Apply(ChainPoint, RawBlock),
     WriteLog(Namespace, LogKey, EntityValue),
     Undo(ChainPoint),
+    InsertArchiveTag(ArchiveTag),
+    RemoveArchiveTag(ArchiveTag),
+    InsertExact(ExactKind, ExactKey, BlockSlot),
+    RemoveExact(ExactKind, ExactKey),
 }
 
 fn poisoned() -> ArchiveError {
@@ -122,11 +175,123 @@ impl MemoryArchiveWriter {
         self.ops.lock().map_err(|_| poisoned())?.push(op);
         Ok(())
     }
+
+    fn archive_tags_of(block: &ArchiveIndexDelta) -> impl Iterator<Item = ArchiveTag> + '_ {
+        block.tags.iter().filter_map(|tag| {
+            key_hash(tag.dimension, &tag.key)
+                .map(|hash| (Cow::Borrowed(tag.dimension), hash, block.slot))
+        })
+    }
+
+    /// The exact entries a block delta writes.
+    ///
+    /// Every key is width-checked here, because the delta path is *not*
+    /// type-enforced: `ArchiveIndexDelta` holds its block and transaction
+    /// hashes as `Vec<u8>`. A wrong-width hash is a malformed block, and
+    /// refusing the batch beats dropping the entry — a block whose hash did not
+    /// land is a block no hash lookup can reach, and an index that quietly
+    /// omits it looks complete.
+    fn exact_keys_of(
+        block: &ArchiveIndexDelta,
+    ) -> impl Iterator<Item = Result<(ExactKind, ExactKey), ArchiveError>> + '_ {
+        let hash = (!block.block_hash.is_empty())
+            .then_some((ExactKind::BlockHash, block.block_hash.as_slice()));
+
+        let number = block.block_number.map(|n| (ExactKind::BlockNumber, n));
+
+        let txs = block
+            .tx_hashes
+            .iter()
+            .map(|hash| (ExactKind::TxHash, hash.as_slice()));
+
+        let hashes = hash.into_iter().chain(txs).map(|(kind, key)| {
+            exact_key(kind, key).map(|key| (kind, key)).ok_or_else(|| {
+                ArchiveError::InternalError(format!(
+                    "exact entry of kind {kind} has a {}-byte key, expected {}",
+                    key.len(),
+                    kind.key_len(),
+                ))
+            })
+        });
+
+        // A block number is type-enforced eight bytes, so it cannot be
+        // malformed the way a hash can.
+        let number = number.map(|(kind, n)| {
+            Ok((
+                kind,
+                exact_key(kind, &n.to_be_bytes()).expect("a u64 is the block-number key width"),
+            ))
+        });
+
+        hashes.chain(number)
+    }
 }
 
 impl ArchiveWriter for MemoryArchiveWriter {
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError> {
         self.push(Op::Apply(point.clone(), block.clone()))
+    }
+
+    fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        let mut ops = self.ops.lock().map_err(|_| poisoned())?;
+
+        for block in deltas {
+            for entry in Self::exact_keys_of(block) {
+                let (kind, key) = entry?;
+                ops.push(Op::InsertExact(kind, key, block.slot));
+            }
+
+            for tag in Self::archive_tags_of(block) {
+                ops.push(Op::InsertArchiveTag(tag));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The exact inverse of [`Self::apply_index`], blocks walked
+    /// back-to-front.
+    fn undo_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        let mut ops = self.ops.lock().map_err(|_| poisoned())?;
+
+        for block in deltas.iter().rev() {
+            for entry in Self::exact_keys_of(block) {
+                let (kind, key) = entry?;
+                ops.push(Op::RemoveExact(kind, key));
+            }
+
+            for tag in Self::archive_tags_of(block) {
+                ops.push(Op::RemoveArchiveTag(tag));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), ArchiveError> {
+        let mut ops = self.ops.lock().map_err(|_| poisoned())?;
+
+        for record in records {
+            match record {
+                IndexRecord::Tag(tag) => ops.push(Op::InsertArchiveTag((
+                    tag.dimension,
+                    tag.key_hash,
+                    tag.slot,
+                ))),
+                // The width is already checked: `ExactRecord` cannot be
+                // constructed with a key that does not match its kind.
+                IndexRecord::Exact(exact) => ops.push(Op::InsertExact(
+                    exact.kind,
+                    exact_key(exact.kind, exact.key()).expect("a record's key is its kind's width"),
+                    exact.slot,
+                )),
+            }
+        }
+
+        Ok(())
     }
 
     fn write_log(
@@ -182,11 +347,69 @@ impl ArchiveWriter for MemoryArchiveWriter {
                         }
                     }
                 }
+                Op::InsertArchiveTag(tag) => {
+                    tables.archive_tags.insert(tag);
+                }
+                Op::RemoveArchiveTag(tag) => {
+                    tables.archive_tags.remove(&tag);
+                }
+                Op::InsertExact(kind, key, slot) => {
+                    tables.exact.insert((kind, key), slot);
+                }
+                Op::RemoveExact(kind, key) => {
+                    tables.exact.remove(&(kind, key));
+                }
             }
         }
 
         Ok(())
     }
+}
+
+/// Slot iterator over a materialized range.
+pub struct MemorySlotIter(std::vec::IntoIter<BlockSlot>);
+
+impl Iterator for MemorySlotIter {
+    type Item = Result<BlockSlot, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(Ok)
+    }
+}
+
+impl DoubleEndedIterator for MemorySlotIter {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.0.next_back().map(Ok)
+    }
+}
+
+/// Archive tag iterator over a materialized range.
+pub struct MemoryTagIter(std::vec::IntoIter<TagRecord>);
+
+impl Iterator for MemoryTagIter {
+    type Item = Result<TagRecord, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(Ok)
+    }
+}
+
+/// Exact-match record iterator over a materialized range.
+pub struct MemoryExactIter(std::vec::IntoIter<ExactRecord>);
+
+impl Iterator for MemoryExactIter {
+    type Item = Result<ExactRecord, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(Ok)
+    }
+}
+
+/// Every tag stored under `dimension`, whatever its key hash or slot.
+fn dimension_span(dimension: TagDimension) -> std::ops::RangeInclusive<ArchiveTag> {
+    let low = (Cow::Borrowed(dimension), [u8::MIN; 8], BlockSlot::MIN);
+    let high = (Cow::Borrowed(dimension), [u8::MAX; 8], BlockSlot::MAX);
+    low..=high
 }
 
 /// Block iterator over a materialized range.
@@ -246,6 +469,9 @@ impl ArchiveStore for MemoryArchiveStore {
     type Writer = MemoryArchiveWriter;
     type LogIter = MemoryLogIter;
     type EntityValueIter = std::iter::Empty<Result<EntityValue, ArchiveError>>;
+    type SlotIter = MemorySlotIter;
+    type TagIter = MemoryTagIter;
+    type ExactIter = MemoryExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(MemoryArchiveWriter {
@@ -418,5 +644,113 @@ impl ArchiveStore for MemoryArchiveStore {
         tables.logs.retain(|(_, key), _| *key < cutoff);
 
         Ok(())
+    }
+
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        // A key that could not have been stored cannot be found, so a
+        // wrong-width query is a miss rather than an error.
+        let Some(key) = exact_key(ExactKind::BlockHash, hash) else {
+            return Ok(None);
+        };
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+        Ok(tables.exact.get(&(ExactKind::BlockHash, key)).copied())
+    }
+
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
+        // A block number is type-enforced eight bytes, so this cannot fail.
+        let key = exact_key(ExactKind::BlockNumber, &number.to_be_bytes())
+            .expect("a u64 is the block-number key width");
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+        Ok(tables.exact.get(&(ExactKind::BlockNumber, key)).copied())
+    }
+
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        // A key that could not have been stored cannot be found, so a
+        // wrong-width query is a miss rather than an error.
+        let Some(key) = exact_key(ExactKind::TxHash, hash) else {
+            return Ok(None);
+        };
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+        Ok(tables.exact.get(&(ExactKind::TxHash, key)).copied())
+    }
+
+    fn slots_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        let Some(hash) = key_hash(dimension, key) else {
+            return Err(ArchiveError::InternalError(format!(
+                "{dimension} key must be 8 bytes, got {}",
+                key.len(),
+            )));
+        };
+
+        if start > end {
+            return Ok(MemorySlotIter(Vec::new().into_iter()));
+        }
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let low = (Cow::Borrowed(dimension), hash, start);
+        let high = (Cow::Borrowed(dimension), hash, end);
+
+        let slots: Vec<BlockSlot> = tables
+            .archive_tags
+            .range(low..=high)
+            .map(|(_, _, slot)| *slot)
+            .collect();
+
+        Ok(MemorySlotIter(slots.into_iter()))
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, ArchiveError> {
+        // Sorted and deduplicated here rather than trusted from the caller, so
+        // the ordering contract holds whatever order the list arrived in.
+        let mut dimensions = dimensions.to_vec();
+        dimensions.sort_unstable();
+        dimensions.dedup();
+
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let records: Vec<TagRecord> = dimensions
+            .into_iter()
+            .flat_map(|dimension| {
+                tables
+                    .archive_tags
+                    .range(dimension_span(dimension))
+                    .filter(|(_, _, slot)| slots.contains(slot))
+                    .map(move |(_, hash, slot)| TagRecord::new(dimension, *hash, *slot))
+            })
+            .collect();
+
+        Ok(MemoryTagIter(records.into_iter()))
+    }
+
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        // `ExactKind`'s ordering is its name ordering, so the map's own order
+        // is the `(kind, key)` contract.
+        let records: Vec<ExactRecord> = tables
+            .exact
+            .iter()
+            .filter(|(_, slot)| slots.contains(slot))
+            .map(|((kind, key), slot)| {
+                ExactRecord::new(*kind, &key[..kind.key_len()], *slot)
+                    .map_err(|e| ArchiveError::InternalError(e.to_string()))
+            })
+            .collect::<Result<_, _>>()?;
+
+        Ok(MemoryExactIter(records.into_iter()))
     }
 }

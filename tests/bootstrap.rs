@@ -238,13 +238,14 @@ fn test_catchup_recovers_archive_and_indexes() {
     );
 
     // Verify index content: look up a synthetic tx hash to confirm
-    // compute_catchup produced the correct index delta.
+    // compute_catchup produced the correct index delta, and that it landed in
+    // the archive beside the block.
     let tx_hash_hex = &vectors.blocks[0].tx_hashes[0];
     let tx_hash_bytes = hex::decode(tx_hash_hex).unwrap();
-    let slot = domain.indexes().slot_by_tx_hash(&tx_hash_bytes).unwrap();
+    let slot = domain.archive().slot_by_tx_hash(&tx_hash_bytes).unwrap();
     assert!(
         slot.is_some(),
-        "tx hash {} should be found in index after catch-up",
+        "tx hash {} should be found in the archive after catch-up",
         tx_hash_hex
     );
 
@@ -413,13 +414,13 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
         "index cursor should be at the WAL tip after catch-up"
     );
 
-    // Verify index content came through the replay.
+    // The index entries rode the archive commit, so they were never behind.
     let tx_hash_hex = &vectors.blocks[0].tx_hashes[0];
     let tx_hash_bytes = hex::decode(tx_hash_hex).unwrap();
-    let slot = domain.indexes().slot_by_tx_hash(&tx_hash_bytes).unwrap();
+    let slot = domain.archive().slot_by_tx_hash(&tx_hash_bytes).unwrap();
     assert!(
         slot.is_some(),
-        "tx hash {} should be found in index after catch-up",
+        "tx hash {} should be found in the archive",
         tx_hash_hex
     );
 }
@@ -445,10 +446,14 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
 /// byte-identical to its snapshot at the rollback target. Before the fix,
 /// rollback undid entities in memory but never saved them, leaving entity
 /// state reflecting the undone blocks.
+///
+/// And it verifies that the archive's index entries go with the blocks: a
+/// rolled-back block's transaction hash no longer resolves, while the
+/// target's still does.
 #[test]
 fn test_rollback_after_full_sync_lifecycle() {
     let cfg = SyntheticBlockConfig::default();
-    let (blocks, _vectors, cardano_config) = build_synthetic_blocks(cfg);
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
     assert!(
         blocks.len() >= 2,
         "synthetic config must produce at least 2 blocks for the rollback target to differ from the tip",
@@ -479,6 +484,17 @@ fn test_rollback_after_full_sync_lifecycle() {
     }
 
     let tags_at_tip = live_tag_keys(&domain);
+
+    let kept_tx = hex::decode(&vectors.blocks[0].tx_hashes[0]).unwrap();
+    let undone_tx = hex::decode(&vectors.blocks[1].tx_hashes[0]).unwrap();
+    assert!(
+        domain
+            .archive()
+            .slot_by_tx_hash(&undone_tx)
+            .unwrap()
+            .is_some(),
+        "the block about to be undone should resolve before the rollback"
+    );
 
     let tip_before_rollback = domain.state().read_cursor().unwrap();
     assert_ne!(
@@ -525,6 +541,22 @@ fn test_rollback_after_full_sync_lifecycle() {
         "no tag key was unique to the undone blocks, so the stale-key probe proves nothing"
     );
     assert_no_stale_tags(&domain, &tags_at_tip);
+
+    // The archive's index entries followed the blocks back: the undone
+    // block's transaction is gone, the target's is still there.
+    assert_eq!(
+        domain.archive().slot_by_tx_hash(&undone_tx).unwrap(),
+        None,
+        "a rolled-back block's tx hash should no longer resolve"
+    );
+    assert!(
+        domain
+            .archive()
+            .slot_by_tx_hash(&kept_tx)
+            .unwrap()
+            .is_some(),
+        "the rollback target's tx hash should still resolve"
+    );
 }
 
 /// Collect all raw (key, value) pairs in a state namespace.

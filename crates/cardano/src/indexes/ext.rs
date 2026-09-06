@@ -1,10 +1,10 @@
 //! Cardano-specific store extension traits.
 //!
 //! This module provides `CardanoStateIndexExt`, which adds the live-UTxO
-//! lookups to any `StateStore`, and `CardanoIndexExt`, which adds the archive
-//! lookups to any `IndexStore`.
+//! lookups to any `StateStore`, and `CardanoArchiveIndexExt`, which adds the
+//! history lookups to any `ArchiveStore`.
 
-use dolos_core::{BlockSlot, IndexError, IndexStore, StateError, StateStore, UtxoSet};
+use dolos_core::{ArchiveError, ArchiveStore, BlockSlot, StateError, StateStore, UtxoSet};
 
 use super::dimensions::{archive, utxo};
 
@@ -60,18 +60,18 @@ impl<T: StateStore> CardanoStateIndexExt for T {}
 /// Extension trait providing Cardano-specific archive index queries.
 ///
 /// This trait is automatically implemented for all types implementing
-/// `IndexStore`. It provides convenient methods that map Cardano concepts to
-/// generic tag lookups.
+/// `ArchiveStore`. It provides convenient methods that map Cardano concepts
+/// to generic tag lookups.
 ///
 /// # Example
 ///
 /// ```ignore
-/// use dolos_cardano::indexes::CardanoIndexExt;
+/// use dolos_cardano::indexes::CardanoArchiveIndexExt;
 ///
-/// // domain.indexes() returns an IndexStore implementation
-/// let slots = domain.indexes().slots_by_address(&address_bytes, start, end)?;
+/// // domain.archive() returns an ArchiveStore implementation
+/// let slots = domain.archive().slots_by_address(&address_bytes, start, end)?;
 /// ```
-pub trait CardanoIndexExt: IndexStore {
+pub trait CardanoArchiveIndexExt: ArchiveStore {
     // ============ Archive Slot Queries ============
 
     /// Iterate over slots of blocks containing transactions involving an
@@ -81,7 +81,7 @@ pub trait CardanoIndexExt: IndexStore {
         address: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::ADDRESS, address, start, end)
     }
 
@@ -92,7 +92,7 @@ pub trait CardanoIndexExt: IndexStore {
         payment: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::PAYMENT, payment, start, end)
     }
 
@@ -103,7 +103,7 @@ pub trait CardanoIndexExt: IndexStore {
         stake: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::STAKE, stake, start, end)
     }
 
@@ -113,7 +113,7 @@ pub trait CardanoIndexExt: IndexStore {
         asset: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::ASSET, asset, start, end)
     }
 
@@ -124,7 +124,7 @@ pub trait CardanoIndexExt: IndexStore {
         policy: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::POLICY, policy, start, end)
     }
 
@@ -134,7 +134,7 @@ pub trait CardanoIndexExt: IndexStore {
         datum: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::DATUM, datum, start, end)
     }
 
@@ -144,7 +144,7 @@ pub trait CardanoIndexExt: IndexStore {
         txo: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::SPENT_TXO, txo, start, end)
     }
 
@@ -154,7 +154,7 @@ pub trait CardanoIndexExt: IndexStore {
         account: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::ACCOUNT_CERTS, account, start, end)
     }
 
@@ -164,7 +164,7 @@ pub trait CardanoIndexExt: IndexStore {
         pool: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::POOL_CERTS, pool, start, end)
     }
 
@@ -174,7 +174,7 @@ pub trait CardanoIndexExt: IndexStore {
         account: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::ACCOUNT_WITHDRAWALS, account, start, end)
     }
 
@@ -185,7 +185,7 @@ pub trait CardanoIndexExt: IndexStore {
         label: u64,
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.slots_by_tag(archive::METADATA, &label.to_be_bytes(), start, end)
     }
 
@@ -194,9 +194,9 @@ pub trait CardanoIndexExt: IndexStore {
     /// Iterate every archive tag record in `slots`, across every Cardano
     /// archive dimension.
     ///
-    /// [`IndexStore::iter_archive_tags`] takes the dimension list because the
-    /// storage layer is chain-agnostic and cannot know it — stores keep a hash
-    /// of the dimension name, not the name. That makes `archive::ALL` the
+    /// [`ArchiveStore::iter_archive_tags`] takes the dimension list because
+    /// the storage layer is chain-agnostic and cannot know it — stores keep a
+    /// hash of the dimension name, not the name. That makes `archive::ALL` the
     /// caller's to supply, and every export call site a place the list can
     /// drift out of.
     ///
@@ -205,10 +205,10 @@ pub trait CardanoIndexExt: IndexStore {
     fn iter_all_archive_tags(
         &self,
         slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError> {
+    ) -> Result<Self::TagIter, ArchiveError> {
         self.iter_archive_tags(&archive::ALL, slots)
     }
 }
 
-// Blanket implementation for all IndexStore implementations
-impl<T: IndexStore> CardanoIndexExt for T {}
+// Blanket implementation for all ArchiveStore implementations
+impl<T: ArchiveStore> CardanoArchiveIndexExt for T {}

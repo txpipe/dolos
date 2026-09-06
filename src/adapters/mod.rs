@@ -7,7 +7,6 @@ use dolos_cardano::CardanoLogic;
 use dolos_core::{
     archive::ArchiveStore as _,
     config::{StorageConfig, SyncConfig},
-    indexes::IndexStore as _,
     *,
 };
 use pallas::ledger::traverse::MultiEraBlock;
@@ -173,7 +172,7 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
         }
 
         for (tx_hash_bytes, txo_refs) in by_tx {
-            let Ok(Some(slot)) = self.indexes().slot_by_tx_hash(&tx_hash_bytes) else {
+            let Ok(Some(slot)) = self.archive().slot_by_tx_hash(&tx_hash_bytes) else {
                 continue;
             };
             let Ok(Some(block_bytes)) = self.archive().get_block_by_slot(&slot) else {

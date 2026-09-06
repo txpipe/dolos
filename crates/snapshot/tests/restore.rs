@@ -537,7 +537,6 @@ fn roundtrip<B: ToyStores>() {
             &plan,
             &blank.archive,
             blank.state(),
-            blank.indexes(),
             None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
@@ -597,7 +596,12 @@ fn a_restored_node_matches_a_replayed_one_on_fjall() {
 fn assert_stores_match<B: ToyStores>(restored: &Blank<B>, original: &ToyDomain<B>) {
     assert_state_matches(restored.state(), original.state());
     assert_archive_matches(&restored.archive, original.archive());
-    assert_indexes_match(restored.indexes(), original.indexes());
+    assert_indexes_match(&restored.archive, original.archive());
+    assert_eq!(
+        restored.indexes().cursor().unwrap(),
+        original.indexes().cursor().unwrap(),
+        "index cursor"
+    );
     assert_utxo_tags_match(restored.state(), original.state());
 }
 
@@ -661,14 +665,8 @@ fn assert_archive_matches<A: ArchiveStore>(restored: &A, original: &A) {
     assert!(any, "the fixture wrote no logs, so this proves nothing");
 }
 
-/// The archive half of the index store: the records the layers carry.
-fn assert_indexes_match<I: IndexStore>(restored: &I, original: &I) {
-    assert_eq!(
-        restored.cursor().unwrap(),
-        original.cursor().unwrap(),
-        "cursor"
-    );
-
+/// The index half of the archive: the records the `indexes` layers carry.
+fn assert_indexes_match<A: ArchiveStore>(restored: &A, original: &A) {
     let tags = tags_of(original);
     assert!(!tags.is_empty(), "the fixture produced no archive tags");
     assert_eq!(tags_of(restored), tags, "archive tags");
@@ -743,7 +741,7 @@ fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>
         .collect()
 }
 
-fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
+fn tags_of<A: ArchiveStore>(store: &A) -> Vec<TagRecord> {
     let mut found: Vec<TagRecord> = store
         .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
         .unwrap()
@@ -754,7 +752,7 @@ fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
     found
 }
 
-fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
+fn exact_of<A: ArchiveStore>(store: &A) -> Vec<ExactRecord> {
     let mut found: Vec<ExactRecord> = store
         .iter_exact_records(0..u64::MAX)
         .unwrap()
@@ -1282,7 +1280,12 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_state_matches(blank.state(), reference.state());
     assert_archive_matches(&blank.archive, &reference.archive);
-    assert_indexes_match(blank.indexes(), reference.indexes());
+    assert_indexes_match(&blank.archive, &reference.archive);
+    assert_eq!(
+        blank.indexes().cursor().unwrap(),
+        reference.indexes().cursor().unwrap(),
+        "index cursor"
+    );
     assert_utxo_tags_match(blank.state(), reference.state());
 }
 
@@ -1326,7 +1329,6 @@ fn export_standing_at<B: ToyStores>(
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &dolos_snapshot::export::First,
         &Observer::silent(),

@@ -16,8 +16,9 @@ mod archive;
 mod index;
 mod state;
 
-pub use archive::{MemoryArchiveStore, MemoryArchiveWriter, MemoryBlockIter, MemoryLogIter};
-pub use index::{
-    MemoryExactIter, MemoryIndexStore, MemoryIndexWriter, MemorySlotIter, MemoryTagIter,
+pub use archive::{
+    MemoryArchiveStore, MemoryArchiveWriter, MemoryBlockIter, MemoryExactIter, MemoryLogIter,
+    MemorySlotIter, MemoryTagIter,
 };
+pub use index::{MemoryIndexStore, MemoryIndexWriter};
 pub use state::{MemoryEntityIter, MemoryStateStore, MemoryStateWriter, MemoryUtxoIter};

@@ -4,11 +4,14 @@
 //! It ensures storage consistency and drains any pending initialization work
 //! using the full sync lifecycle (WAL + tip notifications).
 
+use std::sync::Arc;
+
 use tracing::{error, info, warn};
 
 use crate::{
     sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityMap, IndexStore, IndexWriter as _, StateStore, StateWriter as _, WalStore,
+    DomainError, EntityMap, IndexDelta, IndexStore, IndexWriter as _, StateStore, StateWriter as _,
+    WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -194,8 +197,8 @@ fn verify_caught_up(
 /// The WAL commits first in the work-unit lifecycle, so after a crash it is
 /// the most advanced store. Every other store reconciles forward to the WAL
 /// tip: state first (covering a crash between `commit_wal` and
-/// `commit_state`), then archive and indexes (covering a crash between the
-/// state commit and the archive/index commits).
+/// `commit_state`), then the archive with its index entries, then the index
+/// cursor (covering a crash between the state commit and the later commits).
 fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let target = match domain.wal().find_tip()? {
         // nothing to catch up
@@ -295,7 +298,13 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
     )
 }
 
-/// Catch up archive store by replaying WAL blocks.
+/// Catch up the archive store by replaying WAL entries.
+///
+/// A crash between `commit_state` and `commit_archive` leaves the WAL (and
+/// the state) holding blocks the archive never saw. Each entry carries the
+/// block and its resolved inputs, so the archive's index entries — the tags
+/// and the exact lookups the block projects — are re-derived here and land in
+/// the same commit as the block, as they do on the sync path.
 fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
     let archive_tip = domain.archive().get_tip()?.map(|(slot, _)| slot);
     let target_slot = target.slot();
@@ -311,23 +320,26 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
         None => None,
     };
 
-    let blocks = domain.wal().iter_blocks(start, Some(target.clone()))?;
+    let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
 
     let writer = domain.archive().start_writer()?;
     let mut count = 0u64;
 
-    for (point, block) in blocks {
+    for (point, log) in logs {
         // Skip the start point itself (already in archive) and anything at or before it
         if Some(point.slot()) <= archive_tip {
             continue;
         }
 
         // Skip synthetic entries (from reset_to) — they carry no block
-        if block.is_empty() {
+        if log.block.is_empty() {
             continue;
         }
 
-        writer.apply(&point, &block)?;
+        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
+
+        writer.apply(&point, &Arc::new(log.block))?;
+        writer.apply_index(&catchup.archive_index_deltas)?;
         count += 1;
     }
 
@@ -344,7 +356,12 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
     verify_caught_up("archive", archive_tip, target, CatchUpSeverity::Lenient)
 }
 
-/// Catch up index store by replaying WAL log entries.
+/// Catch up the index store's cursor by replaying WAL entries.
+///
+/// The index entries themselves ride the state and archive commits, so what
+/// a crash between `commit_archive` and `commit_indexes` leaves behind is a
+/// cursor: it is walked forward over the same entries the other stores
+/// replayed.
 fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
     let index_cursor = domain.indexes().cursor()?;
 
@@ -376,9 +393,7 @@ fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
             continue;
         }
 
-        let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point)?;
-
-        writer.apply(&catchup.index_delta)?;
+        writer.apply(&IndexDelta { cursor: point })?;
         count += 1;
     }
 

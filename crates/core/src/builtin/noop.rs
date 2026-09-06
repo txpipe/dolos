@@ -7,12 +7,9 @@
 use std::ops::Range;
 
 use crate::{
-    archive::{ArchiveError, ArchiveStore, ArchiveWriter, LogKey},
-    indexes::{
-        EmptyExactIter, EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore, IndexWriter,
-        TagDimension,
-    },
-    BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock,
+    archive::{ArchiveError, ArchiveStore, ArchiveWriter, EmptyExactIter, EmptyTagIter, LogKey},
+    indexes::{ArchiveIndexDelta, IndexDelta, IndexError, IndexRecord, IndexStore, IndexWriter},
+    BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, TagDimension,
 };
 
 // ============================================================================
@@ -26,21 +23,6 @@ pub struct NoOpIndexWriter;
 impl IndexWriter for NoOpIndexWriter {
     fn apply(&self, _delta: &IndexDelta) -> Result<(), IndexError> {
         Ok(())
-    }
-
-    fn undo(&self, _delta: &IndexDelta) -> Result<(), IndexError> {
-        Ok(())
-    }
-
-    /// A restore against a store that discards every record must fail, not
-    /// report success: `Ok` here would let a snapshot restore complete
-    /// "cleanly" having written nothing. See
-    /// [`NoOpIndexStore::iter_archive_tags`] for the read-side twin.
-    fn append_prehashed(
-        &self,
-        _records: impl IntoIterator<Item = IndexRecord>,
-    ) -> Result<(), IndexError> {
-        Err(IndexError::Unsupported("append_prehashed"))
     }
 
     fn commit(self) -> Result<(), IndexError> {
@@ -62,28 +44,8 @@ impl NoOpIndexStore {
     }
 }
 
-/// Empty iterator for slot queries.
-pub struct EmptySlotIter;
-
-impl Iterator for EmptySlotIter {
-    type Item = Result<BlockSlot, IndexError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
-impl DoubleEndedIterator for EmptySlotIter {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
 impl IndexStore for NoOpIndexStore {
     type Writer = NoOpIndexWriter;
-    type SlotIter = EmptySlotIter;
-    type TagIter = EmptyTagIter;
-    type ExactIter = EmptyExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, IndexError> {
         Ok(NoOpIndexWriter)
@@ -99,46 +61,6 @@ impl IndexStore for NoOpIndexStore {
 
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
         Ok(None)
-    }
-
-    fn slot_by_block_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        Ok(None)
-    }
-
-    fn slot_by_block_number(&self, _number: u64) -> Result<Option<BlockSlot>, IndexError> {
-        Ok(None)
-    }
-
-    fn slot_by_tx_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
-        Ok(None)
-    }
-
-    fn slots_by_tag(
-        &self,
-        _dimension: TagDimension,
-        _key: &[u8],
-        _start: BlockSlot,
-        _end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
-        Ok(EmptySlotIter)
-    }
-
-    /// Errors rather than yielding an empty iteration: this seam's callers
-    /// publish the iterated records as a signed snapshot layer, and a
-    /// well-formed *empty* layer from an index-less node is indistinguishable
-    /// from a genuinely tag-free epoch. Matches redb3 and the loud-failure
-    /// precedent of `data stats` / `data export` on noop backends.
-    fn iter_archive_tags(
-        &self,
-        _dimensions: &[TagDimension],
-        _slots: Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError> {
-        Err(IndexError::Unsupported("iter_archive_tags"))
-    }
-
-    /// See [`NoOpIndexStore::iter_archive_tags`].
-    fn iter_exact_records(&self, _slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError> {
-        Err(IndexError::Unsupported("iter_exact_records"))
     }
 }
 
@@ -168,6 +90,25 @@ impl ArchiveWriter for NoOpArchiveWriter {
         Ok(())
     }
 
+    fn apply_index(&self, _deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+
+    fn undo_index(&self, _deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        Ok(())
+    }
+
+    /// A restore against a store that discards every record must fail, not
+    /// report success: `Ok` here would let a snapshot restore complete
+    /// "cleanly" having written nothing. See
+    /// [`NoOpArchiveStore::iter_archive_tags`] for the read-side twin.
+    fn append_prehashed(
+        &self,
+        _records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), ArchiveError> {
+        Err(ArchiveError::Unsupported("append_prehashed"))
+    }
+
     fn commit(self) -> Result<(), ArchiveError> {
         Ok(())
     }
@@ -184,6 +125,23 @@ impl NoOpArchiveStore {
 
     pub fn shutdown(&self) -> Result<(), ArchiveError> {
         Ok(())
+    }
+}
+
+/// Empty iterator for slot queries.
+pub struct EmptySlotIter;
+
+impl Iterator for EmptySlotIter {
+    type Item = Result<BlockSlot, ArchiveError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        None
+    }
+}
+
+impl DoubleEndedIterator for EmptySlotIter {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        None
     }
 }
 
@@ -236,6 +194,9 @@ impl ArchiveStore for NoOpArchiveStore {
     type Writer = NoOpArchiveWriter;
     type LogIter = EmptyLogIter;
     type EntityValueIter = EmptyEntityValueIter;
+    type SlotIter = EmptySlotIter;
+    type TagIter = EmptyTagIter;
+    type ExactIter = EmptyExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(NoOpArchiveWriter)
@@ -291,5 +252,48 @@ impl ArchiveStore for NoOpArchiveStore {
 
     fn truncate_front(&self, _after: &ChainPoint) -> Result<(), ArchiveError> {
         Ok(())
+    }
+
+    fn slot_by_block_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(None)
+    }
+
+    fn slot_by_block_number(&self, _number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(None)
+    }
+
+    fn slot_by_tx_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        Ok(None)
+    }
+
+    fn slots_by_tag(
+        &self,
+        _dimension: TagDimension,
+        _key: &[u8],
+        _start: BlockSlot,
+        _end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        Ok(EmptySlotIter)
+    }
+
+    /// Errors rather than yielding an empty iteration: this seam's callers
+    /// publish the iterated records as a signed snapshot layer, and a
+    /// well-formed *empty* layer from an index-less node is indistinguishable
+    /// from a genuinely tag-free epoch. Matches the loud-failure precedent of
+    /// `data stats` / `data export` on noop backends.
+    fn iter_archive_tags(
+        &self,
+        _dimensions: &[TagDimension],
+        _slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, ArchiveError> {
+        Err(ArchiveError::Unsupported("iter_archive_tags"))
+    }
+
+    /// See [`NoOpArchiveStore::iter_archive_tags`].
+    fn iter_exact_records(
+        &self,
+        _slots: Range<BlockSlot>,
+    ) -> Result<Self::ExactIter, ArchiveError> {
+        Err(ArchiveError::Unsupported("iter_exact_records"))
     }
 }

@@ -156,7 +156,6 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         &plan,
         &stores.archive,
         &stores.state,
-        &stores.indexes,
         None,
     )
     .into_diagnostic()

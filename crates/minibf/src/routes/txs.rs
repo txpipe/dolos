@@ -381,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -420,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_cbor_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -459,7 +459,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_utxos_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -498,7 +498,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_metadata_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/metadata");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -537,7 +537,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_metadata_cbor_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/metadata/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -576,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_redeemers_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/redeemers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -615,7 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_delegations_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/delegations");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -654,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_mirs_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/mirs");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -693,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_pool_retires_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_retires");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -732,7 +732,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_pool_updates_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/pool_updates");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -771,7 +771,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_stakes_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/stakes");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -814,7 +814,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_required_signers_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/required_signers");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -853,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn txs_by_hash_withdrawals_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let tx_hash = app.vectors().tx_hash.as_str();
         let path = format!("/txs/{tx_hash}/withdrawals");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

@@ -27,12 +27,10 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 - **Database**: `<storage.path>/wal`
 
 ### IndexStore
-- **Purpose**: Cross-cutting indexes for fast historical lookups
-- **Contents**: Archive indexes — historical queries (by block hash, tx hash, slots with address/asset/etc.)
-- **Not here**: the live-UTxO tags (by address, payment, stake, policy, asset, script ref) are a projection of the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
-- **Traits**: `IndexStore` (reads) + `IndexWriter` (batched writes)
+- **Purpose**: the index cursor, and nothing else any more
+- **Not here**: the live-UTxO tags (by address, payment, stake, policy, asset, script ref) are a projection of the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set); the archive tags and the exact lookups (by block hash, block number, tx hash) are a projection of the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
+- **Traits**: `IndexStore` (cursor read) + `IndexWriter` (cursor write)
 - **Database**: `<storage.path>/index` (isolated from other stores)
-- **Design Note**: Returns primitive values (slots, UTxO refs) not block data. Use `QueryHelpers` to join with archive for full data.
 
 ### Database File Organization
 
@@ -111,10 +109,12 @@ The project follows a modular workspace architecture with clear separation of co
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
-  - `index`: `IndexStore` implementation with three-keyspace design:
-    - **`index-cursor`**: Chain position tracking
+  - `archive`: `ArchiveStore` implementation with four-keyspace design:
+    - **`archive-blocks`**: Slot -> packed block locations in the flat segment files
+    - **`archive-logs`**: All log namespaces with `[ns_hash:8][log_key:40]` keys
+    - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
-    - **`archive-tags`**: Tag-based prefix scans for block tags
+  - `index`: `IndexStore` implementation, reduced to the **`index-cursor`** keyspace
   - `keys`: Shared key encoding utilities
 - **Key Advantages**:
   - Reduced segment files compared to per-entity keyspaces

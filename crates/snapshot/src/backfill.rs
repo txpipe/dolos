@@ -230,13 +230,7 @@ pub trait Publish<D: Domain> {
 
     /// Publish the plan. Retried in place by the daemon, so it must be safe to
     /// simply run again.
-    fn publish(
-        &self,
-        plan: &Plan,
-        archive: &D::Archive,
-        state: &D::State,
-        indexes: &D::Indexes,
-    ) -> Result<(), Error>;
+    fn publish(&self, plan: &Plan, archive: &D::Archive, state: &D::State) -> Result<(), Error>;
 }
 
 /// How a run ended, for a caller that has something to say about it.
@@ -652,10 +646,7 @@ impl<D: Domain> Driver<'_, D> {
         retry::transient(
             "publishing the pending sequence",
             &|| self.aborted(),
-            || {
-                self.publish
-                    .publish(&plan, &stores.archive, &stores.state, &stores.indexes)
-            },
+            || self.publish.publish(&plan, &stores.archive, &stores.state),
         )?;
 
         if self.until_epoch.is_some_and(|until| plan.sequence >= until) {

@@ -219,7 +219,6 @@ mod registry_node {
                 plan,
                 self.domain.archive(),
                 self.domain.state(),
-                self.domain.indexes(),
                 None,
                 observer,
             )
@@ -239,7 +238,6 @@ mod registry_node {
                 plan,
                 self.domain.archive(),
                 self.domain.state(),
-                self.domain.indexes(),
                 None,
                 &Observer::silent(),
             )
@@ -331,7 +329,6 @@ pub fn export_plan<B: ToyStores>(
         plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &First,
         &Observer::silent(),

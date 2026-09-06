@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
-use dolos_core::{ArchiveStore, IndexStore, StateStore};
+use dolos_core::{ArchiveStore, StateStore};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::{
@@ -134,7 +134,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 &plan,
                 &stores.archive,
                 &stores.state,
-                &stores.indexes,
                 feedback,
             )
         }
@@ -166,7 +165,6 @@ fn to_directory(
         plan,
         &stores.archive,
         &stores.state,
-        &stores.indexes,
         None,
         &progress.observer(),
     )
@@ -196,13 +194,12 @@ fn to_directory(
 /// than trust: how much of this stele was inherited rather than built, and how
 /// much of it moved. Both are numbers the code counted, not an inference from a
 /// duration.
-pub(super) fn to_repository<A: ArchiveStore, S: StateStore, I: IndexStore>(
+pub(super) fn to_repository<A: ArchiveStore, S: StateStore>(
     config: &RootConfig,
     publish: &RepositoryPublish,
     plan: &export::Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     let repo = publish.repo;
@@ -257,7 +254,7 @@ pub(super) fn to_repository<A: ArchiveStore, S: StateStore, I: IndexStore>(
     let progress = SteleProgress::publishing(feedback);
 
     let published = publisher
-        .publish(plan, archive, state, indexes, &progress.observer())
+        .publish(plan, archive, state, &progress.observer())
         .into_diagnostic()
         .context("publishing the stele")?;
 

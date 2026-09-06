@@ -21,7 +21,7 @@ use dolos_cardano::{
     model::AssetState,
     ChainSummary,
 };
-use dolos_core::{BlockSlot, Domain, EraCbor, IndexStore as _, StateStore as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EraCbor, StateStore as _};
 use futures_util::StreamExt;
 use itertools::Itertools;
 use pallas::{
@@ -564,7 +564,7 @@ where
     for (txoref, eracbor) in utxos {
         let sort = (
             domain
-                .indexes()
+                .archive()
                 .slot_by_tx_hash(txoref.0.as_slice())
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
@@ -1107,7 +1107,7 @@ mod tests {
 
     #[tokio::test]
     async fn assets_by_subject_transactions_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}/transactions");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1236,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn assets_by_subject_txs_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let asset = app.vectors().asset_unit.as_str();
         let path = format!("/assets/{asset}/txs");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

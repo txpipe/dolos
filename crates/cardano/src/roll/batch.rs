@@ -124,7 +124,8 @@ pub struct WorkBatch {
     entities: EntityMap<CardanoEntity>,
 
     // index halves, built once by `build_index_deltas` and committed by
-    // `commit_state` (tags) and `commit_indexes` (archive)
+    // `commit_state` (live-UTxO tags) and `commit_archive` (archive tags and
+    // exact lookups)
     utxo_index_delta: Option<UtxoIndexDelta>,
     archive_index_deltas: Option<Vec<ArchiveIndexDelta>>,
 
@@ -375,6 +376,8 @@ impl WorkBatch {
         Ok(())
     }
 
+    /// Write the batch's blocks and, in the same commit, the index entries
+    /// they project: the archive tags and the exact lookups.
     pub fn commit_archive<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = CardanoLogic>,
@@ -388,6 +391,13 @@ impl WorkBatch {
             writer.apply(&point, &raw)?;
         }
 
+        self.build_index_deltas();
+        let archive_index_deltas = self
+            .archive_index_deltas
+            .take()
+            .expect("build_index_deltas fills the archive half");
+        writer.apply_index(&archive_index_deltas)?;
+
         writer.commit()?;
 
         Ok(())
@@ -397,14 +407,14 @@ impl WorkBatch {
     ///
     /// The live-UTxO tags follow each block's `utxo_delta`; the archive
     /// entries come from the already decoded block. Idempotent: the halves are
-    /// cached on the batch for `commit_state` and `commit_indexes`, whichever
+    /// cached on the batch for `commit_state` and `commit_archive`, whichever
     /// runs first.
     fn build_index_deltas(&mut self) {
         if self.utxo_index_delta.is_some() {
             return;
         }
 
-        let mut builder = CardanoIndexDeltaBuilder::new(self.last_point());
+        let mut builder = CardanoIndexDeltaBuilder::new();
 
         for work_block in self.blocks.iter() {
             if let Some(utxo_delta) = &work_block.utxo_delta {
@@ -418,21 +428,16 @@ impl WorkBatch {
         let (utxo, archive) = builder.into_parts();
 
         self.utxo_index_delta = Some(utxo);
-        self.archive_index_deltas = Some(archive.archive);
+        self.archive_index_deltas = Some(archive);
     }
 
+    /// Place the index store's cursor at the batch's last point.
     pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = CardanoLogic>,
     {
-        self.build_index_deltas();
-
         let delta = IndexDelta {
             cursor: self.last_point(),
-            archive: self
-                .archive_index_deltas
-                .take()
-                .expect("build_index_deltas fills the archive half"),
         };
 
         let writer = domain.indexes().start_writer()?;

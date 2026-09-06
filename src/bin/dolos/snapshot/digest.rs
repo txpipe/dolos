@@ -120,15 +120,9 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         None => eprintln!("history:  none; this reproduction starts a chain"),
     }
 
-    let document = export::digest_document(
-        &plan,
-        &stores.archive,
-        &stores.state,
-        &stores.indexes,
-        predecessor,
-    )
-    .into_diagnostic()
-    .context("reproducing the stele")?;
+    let document = export::digest_document(&plan, &stores.archive, &stores.state, predecessor)
+        .into_diagnostic()
+        .context("reproducing the stele")?;
 
     eprintln!("layers:   {}", document.layers);
     eprintln!(

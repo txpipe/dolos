@@ -3,11 +3,11 @@
 //! This module provides `CardanoIndexDeltaBuilder` for constructing the two
 //! index halves from Cardano block data: the live-UTxO tags
 //! (`UtxoIndexDelta`, written through the state store) and the archive
-//! entries (`IndexDelta`, written through the index store).
+//! entries (one `ArchiveIndexDelta` per block, written through the archive
+//! store).
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, ChainPoint, EraCbor, IndexDelta, Tag, TxoRef, UtxoIndexDelta,
-    UtxoMap, UtxoSetDelta,
+    ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
@@ -25,12 +25,14 @@ use crate::pallas_extras;
 ///
 /// This builder accumulates index tags as blocks are processed and produces
 /// the live-UTxO half (a `UtxoIndexDelta`, for `StateWriter::apply_utxo_tags`)
-/// and the archive half (an `IndexDelta`, for `IndexWriter::apply`).
+/// and the archive half (the `ArchiveIndexDelta`s, for
+/// `ArchiveWriter::apply_index`). Where the cursor lands is the committing
+/// writer's business, not the builder's.
 ///
 /// # Example
 ///
 /// ```ignore
-/// let mut builder = CardanoIndexDeltaBuilder::new(cursor_point);
+/// let mut builder = CardanoIndexDeltaBuilder::new();
 ///
 /// // Start processing a block
 /// builder.start_block(slot, block_hash, Some(block_number));
@@ -43,21 +45,15 @@ use crate::pallas_extras;
 /// // Take both halves
 /// let (utxo_tags, archive) = builder.into_parts();
 /// ```
+#[derive(Default)]
 pub struct CardanoIndexDeltaBuilder {
     utxo: UtxoIndexDelta,
-    delta: IndexDelta,
+    archive: Vec<ArchiveIndexDelta>,
 }
 
 impl CardanoIndexDeltaBuilder {
-    /// Create a new builder with the given cursor position.
-    pub fn new(cursor: ChainPoint) -> Self {
-        Self {
-            utxo: UtxoIndexDelta::default(),
-            delta: IndexDelta {
-                cursor,
-                ..Default::default()
-            },
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     // ============ UTxO Operations ============
@@ -131,7 +127,7 @@ impl CardanoIndexDeltaBuilder {
     ///
     /// Must be called before adding block-level tags.
     pub fn start_block(&mut self, slot: BlockSlot, block_hash: Vec<u8>, number: Option<u64>) {
-        self.delta.archive.push(ArchiveIndexDelta {
+        self.archive.push(ArchiveIndexDelta {
             slot,
             block_hash,
             block_number: number,
@@ -142,8 +138,7 @@ impl CardanoIndexDeltaBuilder {
 
     /// Get mutable reference to the current block delta.
     fn current_block(&mut self) -> &mut ArchiveIndexDelta {
-        self.delta
-            .archive
+        self.archive
             .last_mut()
             .expect("must call start_block before adding tags")
     }
@@ -378,17 +373,17 @@ impl CardanoIndexDeltaBuilder {
         }
     }
 
-    /// Build the archive half: the `IndexDelta` with its cursor.
+    /// Build the archive half: one delta per block started.
     ///
     /// Any live-UTxO tags added to the builder are dropped; a caller that
     /// wants both halves takes them with [`Self::into_parts`].
-    pub fn build(self) -> IndexDelta {
-        self.delta
+    pub fn build(self) -> Vec<ArchiveIndexDelta> {
+        self.archive
     }
 
-    /// Take both halves: the live-UTxO tags and the archive delta.
-    pub fn into_parts(self) -> (UtxoIndexDelta, IndexDelta) {
-        (self.utxo, self.delta)
+    /// Take both halves: the live-UTxO tags and the archive deltas.
+    pub fn into_parts(self) -> (UtxoIndexDelta, Vec<ArchiveIndexDelta>) {
+        (self.utxo, self.archive)
     }
 
     /// Get a reference to the UTxO delta (for inspection/testing).
@@ -398,7 +393,7 @@ impl CardanoIndexDeltaBuilder {
 
     /// Get a reference to the archive deltas (for inspection/testing).
     pub fn archive_deltas(&self) -> &[ArchiveIndexDelta] {
-        &self.delta.archive
+        &self.archive
     }
 
     // ============ Batch UTxO Operations (for genesis/import) ============
@@ -450,7 +445,7 @@ impl CardanoIndexDeltaBuilder {
 /// projection of the set. Used by genesis, WAL replay, the epoch-boundary
 /// AVVM deletion and the stele restore.
 pub fn utxo_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexDelta {
-    let mut builder = CardanoIndexDeltaBuilder::new(ChainPoint::Origin);
+    let mut builder = CardanoIndexDeltaBuilder::new();
     builder.add_utxo_tags_from_delta(utxo_delta);
     builder.into_parts().0
 }
@@ -458,7 +453,6 @@ pub fn utxo_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexD
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_core::ChainPoint;
     use pallas::crypto::hash::Hash;
     use pallas::ledger::addresses::{
         Network, ShelleyAddress, ShelleyDelegationPart, ShelleyPaymentPart,
@@ -475,22 +469,20 @@ mod tests {
 
     #[test]
     fn test_builder_basic() {
-        let cursor = ChainPoint::Specific(100, Hash::new([0; 32]));
-        let mut builder = CardanoIndexDeltaBuilder::new(cursor.clone());
+        let mut builder = CardanoIndexDeltaBuilder::new();
 
         builder.start_block(100, vec![0; 32], Some(50));
         builder.add_tx_hash(vec![1; 32]);
         builder.add_address(&test_shelley_address());
 
-        let delta = builder.build();
+        let archive = builder.build();
 
-        assert_eq!(delta.cursor, cursor);
-        assert_eq!(delta.archive.len(), 1);
-        assert_eq!(delta.archive[0].slot, 100);
-        assert_eq!(delta.archive[0].block_number, Some(50));
-        assert_eq!(delta.archive[0].tx_hashes.len(), 1);
+        assert_eq!(archive.len(), 1);
+        assert_eq!(archive[0].slot, 100);
+        assert_eq!(archive[0].block_number, Some(50));
+        assert_eq!(archive[0].tx_hashes.len(), 1);
         // Shelley address produces 3 tags: full, payment, stake
-        assert_eq!(delta.archive[0].tags.len(), 3);
+        assert_eq!(archive[0].tags.len(), 3);
     }
 
     /// An output that carries a reference script gets a `script_ref` tag whose
@@ -605,14 +597,12 @@ mod tests {
     /// still pass, which is the same blind spot one step removed.
     #[test]
     fn every_produced_dimension_is_registered() {
-        let mut builder =
-            CardanoIndexDeltaBuilder::new(ChainPoint::Specific(100, Hash::new([0; 32])));
+        let mut builder = CardanoIndexDeltaBuilder::new();
         tag_every_dimension(&mut builder);
 
-        let delta = builder.build();
+        let archive = builder.build();
 
-        let produced: BTreeSet<&str> = delta
-            .archive
+        let produced: BTreeSet<&str> = archive
             .iter()
             .flat_map(|block| block.tags.iter())
             .map(|tag| tag.dimension)

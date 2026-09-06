@@ -1,17 +1,18 @@
 //! Fjall-based storage implementations for Dolos.
 //!
-//! This crate provides implementations of the `IndexStore` and `StateStore`
-//! traits using fjall, an LSM-tree based embedded database. Fjall is optimized
-//! for write-heavy workloads with many keys, which is ideal for blockchain
-//! data.
+//! This crate provides implementations of the `StateStore`, `ArchiveStore`
+//! and `IndexStore` traits using fjall, an LSM-tree based embedded database.
+//! Fjall is optimized for write-heavy workloads with many keys, which is ideal
+//! for blockchain data.
 //!
 //! ## Modules
 //!
-//! - [`index`]: Index store implementation for cross-cutting indexes
 //! - [`state`]: State store implementation for ledger state (UTxOs, entities,
-//!   datums)
+//!   datums) and the live-UTxO tags that project the UTxO set
 //! - [`archive`]: Archive store implementation (block bodies stay in the shared
-//!   flat segment files from `dolos-flatfiles`)
+//!   flat segment files from `dolos-flatfiles`), hosting the archive tags and
+//!   the exact lookups that project the blocks
+//! - [`index`]: Index store implementation, reduced to its cursor
 //! - [`keys`]: Shared key encoding utilities
 
 use dolos_core::{ArchiveError, IndexError, StateError};
@@ -22,7 +23,7 @@ pub mod keys;
 pub mod state;
 
 // Re-export main types for convenience
-pub use index::{IndexStore, IndexStoreWriter, SlotIter};
+pub use index::{IndexStore, IndexStoreWriter};
 pub use state::{StateStore, StateWriter};
 
 /// Error type for fjall storage operations

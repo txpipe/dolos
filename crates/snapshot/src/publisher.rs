@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use dolos_core::{config::RootConfig, ArchiveStore, IndexStore, StateStore};
+use dolos_core::{config::RootConfig, ArchiveStore, StateStore};
 use stelae::progress::Observer;
 use stelae_driver::Standing;
 
@@ -200,28 +200,18 @@ impl Publisher {
     }
 
     /// Publish, chained to whatever is already in the repository.
-    pub fn publish<A, S, I>(
+    pub fn publish<A, S>(
         &self,
         plan: &Plan,
         archive: &A,
         state: &S,
-        indexes: &I,
         observer: &Observer,
     ) -> Result<Published, Error>
     where
         A: ArchiveStore,
         S: StateStore,
-        I: IndexStore,
     {
-        registry::publish(
-            self.publishing(),
-            plan,
-            archive,
-            state,
-            indexes,
-            None,
-            observer,
-        )
+        registry::publish(self.publishing(), plan, archive, state, None, observer)
     }
 
     fn publishing(&self) -> Publishing<'_> {

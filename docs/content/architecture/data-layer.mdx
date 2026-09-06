@@ -57,6 +57,12 @@ A few concepts recur across the stores:
 - **`EntityDelta` (apply / undo).** Every state change is expressed as a delta that carries enough of the previous value to reverse itself. Applying deltas rolls the ledger forward; undoing them (from the WAL) rolls it back. This is the mechanism that makes rollbacks exact — see the [Sync Pipeline](./sync-pipeline).
 - **`EpochValue` snapshot window.** Cardano staking reads state as it was several epochs ago. State entities that participate in staking are stored as a rotating window of snapshots (live / mark / set / go / next). The details are covered in the [Ledger Model](./ledger-model).
 - **Archive dual storage.** Block bodies are written to append-only flatfile segments (one segment per Cardano epoch), while a compact index maps each slot to its `(segment, offset, length)` location. Historical entity changes are stored as `(slot, entity-key) → value` logs, enabling range queries over time.
-- **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the index store.
+- **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the archive store's `archive-tags` keyspace, beside the `index-exact` keyspace that resolves a block hash, block number or transaction hash to its slot — both written in the same batch as the blocks they project. The index store keeps only its cursor.
+
+| Store | Keyspaces |
+|---|---|
+| state | `state-cursor`, `state-utxos`, `state-entities`, `state-tags` |
+| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact` |
+| index | `index-cursor` |
 
 Source: `crates/core/src/{state,archive,wal,indexes,mempool}.rs`, `crates/redb3/src/*`, `crates/fjall/src/*`, and storage configuration in `crates/core/src/config.rs`.

@@ -1665,7 +1665,7 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_by_stake_addresses_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/addresses");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1787,7 +1787,7 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_by_stake_delegations_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/delegations");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1926,7 +1926,7 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_by_stake_registrations_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/registrations");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -2358,7 +2358,7 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_by_stake_withdrawals_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/withdrawals");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -2478,7 +2478,7 @@ mod tests {
 
     #[tokio::test]
     async fn accounts_by_stake_transactions_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let stake_address = app.vectors().stake_address.as_str();
         let path = format!("/accounts/{stake_address}/transactions");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
