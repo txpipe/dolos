@@ -95,11 +95,9 @@ impl<D: Domain> SyncExt for D {
 
             let undo_data = D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
 
-            // Apply UTxO undo to state, tags included: the two are one batch
             writer.apply_utxoset(&undo_data.utxo_delta)?;
             writer.undo_utxo_tags(&undo_data.utxo_index_delta)?;
 
-            // Apply archive index delta for the undo
             index_writer.undo(&undo_data.index_delta)?;
 
             // TODO: we should differ notifications until we commit the writers

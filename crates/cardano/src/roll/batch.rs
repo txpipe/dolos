@@ -361,7 +361,6 @@ impl WorkBatch {
             }
         }
 
-        // The tags are a projection of the set above: same batch, same commit.
         self.build_index_deltas();
         let utxo_index_delta = self
             .utxo_index_delta

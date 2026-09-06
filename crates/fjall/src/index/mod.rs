@@ -152,7 +152,6 @@ impl IndexStore {
             opts
         };
 
-        // 3 keyspaces: cursor, exact, block_tags
         let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
         let exact = db.keyspace(keyspace_names::EXACT, build_opts)?;
         let block_tags = db.keyspace(keyspace_names::BLOCK_TAGS, build_opts)?;

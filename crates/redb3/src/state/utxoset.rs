@@ -261,7 +261,6 @@ mod tests {
             let index_writer = $indexes.start_writer().unwrap();
             for delta in $deltas.iter() {
                 writer.apply_utxoset(&delta).unwrap();
-                // Build the tag delta from the UTxO delta
                 let index_delta = build_index_delta_from_utxo_delta(&delta);
                 index_writer.apply_utxo_tags(&index_delta).unwrap();
             }
