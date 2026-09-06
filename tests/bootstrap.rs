@@ -2,7 +2,7 @@
 //!
 //! Exercises the full Cardano pipeline: feeds blocks through the sync
 //! lifecycle with partial commits (WAL + state only), then verifies that
-//! `bootstrap()` recovers archive and index stores from WAL replay.
+//! `bootstrap()` recovers the archive store from WAL replay.
 
 use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr as _;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
     sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain,
-    IndexStore, StateStore, StateWriter, TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
+    StateStore, StateWriter, TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -20,8 +20,8 @@ use dolos_testing::{
 
 /// Which commit phases to run when feeding blocks, simulating a crash at
 /// each inter-store boundary of the work-unit lifecycle
-/// (commit_wal → commit_state → commit_archive → commit_indexes).
-/// `commit_wal` always runs; commit_indexes and finalize never do.
+/// (commit_wal → commit_state → commit_archive).
+/// `commit_wal` always runs; finalize never does.
 ///
 /// Out of scope here: crashes *inside* a phase (mid-shard) and crashes
 /// during epoch-boundary work units (RUPD/EWRAP/ESTART), which don't write
@@ -34,8 +34,8 @@ enum CrashAfter {
     /// Run commit_wal + commit_state — models a crash between the state
     /// commit and the archive commit.
     State,
-    /// Run commit_wal + commit_state + commit_archive — models a crash
-    /// between the archive commit and the index commit.
+    /// Run every commit phase — models a crash after the last store commit
+    /// and before `finalize`.
     Archive,
 }
 
@@ -175,15 +175,14 @@ fn drain_partial(
             if matches!(crash_after, CrashAfter::Archive) {
                 WorkUnit::<ToyDomain>::commit_archive(&mut work, domain, shard).unwrap();
             }
-            // Intentionally skip commit_indexes — and intentionally skip
-            // finalize() to model a crash mid-lifecycle, which is what the
-            // recovery tests below exercise.
+            // Intentionally skip finalize() to model a crash mid-lifecycle,
+            // which is what the recovery tests below exercise.
         }
     }
 }
 
 #[test]
-fn test_catchup_recovers_archive_and_indexes() {
+fn test_catchup_recovers_the_archive() {
     let cfg = SyntheticBlockConfig::default();
     let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
 
@@ -193,9 +192,8 @@ fn test_catchup_recovers_archive_and_indexes() {
     // Record baseline cursors — all stores are in sync after initial bootstrap.
     let baseline_state = domain.state().read_cursor().unwrap();
     let baseline_archive = domain.archive().get_tip().unwrap().map(|(s, _)| s);
-    let baseline_index = domain.indexes().cursor().unwrap();
 
-    // Feed synthetic blocks with partial execution (skip archive + indexes).
+    // Feed synthetic blocks with partial execution (skip the archive commit).
     feed_blocks_partial(&domain, &blocks, CrashAfter::State);
 
     // State should have advanced.
@@ -206,16 +204,11 @@ fn test_catchup_recovers_archive_and_indexes() {
         "state should have advanced after feeding blocks"
     );
 
-    // Archive and indexes should still be at the baseline.
+    // The archive should still be at the baseline.
     let archive_tip = domain.archive().get_tip().unwrap().map(|(s, _)| s);
-    let index_cursor = domain.indexes().cursor().unwrap();
     assert_eq!(
         archive_tip, baseline_archive,
         "archive should not have advanced"
-    );
-    assert_eq!(
-        index_cursor, baseline_index,
-        "indexes should not have advanced"
     );
 
     // --- Run bootstrap (which calls catch_up_stores internally) ---
@@ -227,14 +220,6 @@ fn test_catchup_recovers_archive_and_indexes() {
         archive_tip_after,
         Some(state_cursor.slot()),
         "archive tip should match state cursor after catch-up"
-    );
-
-    // Index cursor should now match state cursor.
-    let index_cursor_after = domain.indexes().cursor().unwrap();
-    assert_eq!(
-        index_cursor_after.as_ref(),
-        Some(&state_cursor),
-        "index cursor should match state cursor after catch-up"
     );
 
     // Verify index content: look up a synthetic tx hash to confirm
@@ -255,7 +240,7 @@ fn test_catchup_recovers_archive_and_indexes() {
 
 /// A crash between `commit_wal` and `commit_state` leaves the WAL ahead of
 /// every other store. Bootstrap must replay the WAL entries into state (and
-/// then archive/indexes) instead of leaving state behind — otherwise the
+/// then the archive) instead of leaving state behind — otherwise the
 /// upstream intersection resumes from the WAL tip and the skipped blocks'
 /// effects are silently lost.
 #[test]
@@ -302,13 +287,6 @@ fn test_catchup_recovers_state_from_wal() {
         "archive tip should be at the WAL tip after catch-up"
     );
 
-    let index_cursor_after = domain.indexes().cursor().unwrap();
-    assert_eq!(
-        index_cursor_after.as_ref(),
-        Some(&wal_tip),
-        "index cursor should be at the WAL tip after catch-up"
-    );
-
     // The replayed blocks' UTxO effects must be visible in state. Use the
     // last tx of the last block — nothing after it can consume its output.
     let last_tx = vectors.blocks.last().unwrap().tx_hashes.last().unwrap();
@@ -325,9 +303,8 @@ fn test_catchup_recovers_state_from_wal() {
     assert_tags_match_utxo_set(&domain);
 }
 
-/// Crash-recovery matrix: state, archive and indexes each at a different
-/// point behind the WAL tip. Bootstrap must converge all of them to the
-/// WAL tip.
+/// Crash-recovery matrix: state and archive each at a different point behind
+/// the WAL tip. Bootstrap must converge both of them to the WAL tip.
 #[test]
 fn test_catchup_converges_all_stores_to_wal_tip() {
     let cfg = SyntheticBlockConfig::default();
@@ -340,7 +317,7 @@ fn test_catchup_converges_all_stores_to_wal_tip() {
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
     let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
 
-    // First batch: WAL + state commit (archive/index stay at baseline).
+    // First batch: WAL + state commit (the archive stays at baseline).
     feed_blocks_partial(&domain, &blocks[..1], CrashAfter::State);
 
     // Second batch: WAL only (state stays at the first batch).
@@ -366,27 +343,20 @@ fn test_catchup_converges_all_stores_to_wal_tip() {
         Some(wal_tip.slot()),
         "archive tip should be at the WAL tip after catch-up"
     );
-    assert_eq!(
-        domain.indexes().cursor().unwrap().as_ref(),
-        Some(&wal_tip),
-        "index cursor should be at the WAL tip after catch-up"
-    );
 }
 
-/// Crash between `commit_archive` and `commit_indexes`: WAL, state and
-/// archive are all at the tip, only indexes lag. Bootstrap must catch
-/// indexes up while leaving the already-current stores untouched.
+/// A crash after the last store commit and before `finalize`: every store is
+/// already at the WAL tip, so catch-up has nothing to replay and must leave
+/// them exactly where they are — index entries included.
 #[test]
-fn test_catchup_recovers_indexes_when_archive_ahead() {
+fn test_catchup_leaves_a_fully_committed_batch_alone() {
     let cfg = SyntheticBlockConfig::default();
     let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
 
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
     let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
 
-    let baseline_index = domain.indexes().cursor().unwrap();
-
-    // Feed blocks committing everything except indexes.
+    // Feed blocks running every commit phase.
     feed_blocks_partial(&domain, &blocks, CrashAfter::Archive);
 
     let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
@@ -400,18 +370,18 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
         Some(wal_tip.slot()),
         "archive should be at the WAL tip"
     );
-    assert_eq!(
-        domain.indexes().cursor().unwrap(),
-        baseline_index,
-        "indexes should not have advanced"
-    );
 
     domain.bootstrap().unwrap();
 
     assert_eq!(
-        domain.indexes().cursor().unwrap().as_ref(),
+        domain.state().read_cursor().unwrap().as_ref(),
         Some(&wal_tip),
-        "index cursor should be at the WAL tip after catch-up"
+        "state should still be at the WAL tip"
+    );
+    assert_eq!(
+        domain.archive().get_tip().unwrap().map(|(s, _)| s),
+        Some(wal_tip.slot()),
+        "archive should still be at the WAL tip"
     );
 
     // The index entries rode the archive commit, so they were never behind.
@@ -437,7 +407,7 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
 /// (typically `ControlledAmountInc`).
 ///
 /// This test feeds blocks through the *full* sync lifecycle (every phase,
-/// including `commit_archive` and `commit_indexes`) and then rolls back to a
+/// including `commit_archive`) and then rolls back to a
 /// prior point. With the lifecycle correctly ordered, the WAL rows carry their
 /// `prev_*` data, undo executes cleanly, and the cursor lands on the rollback
 /// target.

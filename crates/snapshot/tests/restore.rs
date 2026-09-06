@@ -44,8 +44,8 @@ mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, IndexStore, LogKey,
-    StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
+    TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -138,10 +138,8 @@ fn restore_into<B: ToyStores>(
 }
 
 /// Where a restore writes, for a blank store set.
-fn target<B: ToyStores>(
-    blank: &Blank<B>,
-) -> restore::Target<'_, impl ArchiveStore, B::State, B::Indexes> {
-    restore::Target::new(&blank.archive, blank.state(), blank.indexes())
+fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveStore, B::State> {
+    restore::Target::new(&blank.archive, blank.state())
 }
 
 // --------------------------------------------------------------------------
@@ -435,7 +433,7 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
         &stele,
         &index,
         &plan,
-        restore::Target::new(&blank.archive, &state, blank.indexes()),
+        restore::Target::new(&blank.archive, &state),
         default_budget(),
         &mut Checkpoint::none(),
         &Observer::silent(),
@@ -470,10 +468,6 @@ fn assert_untouched<B: ToyStores>(blank: &Blank<B>) {
             .next()
             .is_none(),
         "a block"
-    );
-    assert!(
-        blank.indexes().cursor().unwrap().is_none(),
-        "an index cursor"
     );
 
     for ns in NAMESPACES {
@@ -597,11 +591,6 @@ fn assert_stores_match<B: ToyStores>(restored: &Blank<B>, original: &ToyDomain<B
     assert_state_matches(restored.state(), original.state());
     assert_archive_matches(&restored.archive, original.archive());
     assert_indexes_match(&restored.archive, original.archive());
-    assert_eq!(
-        restored.indexes().cursor().unwrap(),
-        original.indexes().cursor().unwrap(),
-        "index cursor"
-    );
     assert_utxo_tags_match(restored.state(), original.state());
 }
 
@@ -1281,11 +1270,6 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
     assert_state_matches(blank.state(), reference.state());
     assert_archive_matches(&blank.archive, &reference.archive);
     assert_indexes_match(&blank.archive, &reference.archive);
-    assert_eq!(
-        blank.indexes().cursor().unwrap(),
-        reference.indexes().cursor().unwrap(),
-        "index cursor"
-    );
     assert_utxo_tags_match(blank.state(), reference.state());
 }
 

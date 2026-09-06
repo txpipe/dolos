@@ -181,7 +181,7 @@ impl Error {
     }
 }
 
-/// The four stores a publish reads, opened without a domain.
+/// The three stores a publish reads, opened without a domain.
 ///
 /// [`Driver::publish_pending`] runs *before* anything opens a domain and
 /// cannot use one: the WAL reseed it performs is the very thing that makes
@@ -191,7 +191,6 @@ pub struct Stores<D: Domain> {
     pub wal: D::Wal,
     pub state: D::State,
     pub archive: D::Archive,
-    pub indexes: D::Indexes,
 }
 
 /// Where the replay's own progress goes.

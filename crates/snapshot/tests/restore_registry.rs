@@ -47,8 +47,8 @@ mod watcher;
 
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, IndexStore,
-    LogKey, StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey,
+    StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     export::Plan,
@@ -202,10 +202,8 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
 }
 
 /// Where a restore writes, for a blank store set.
-fn target<B: ToyStores>(
-    blank: &Blank<B>,
-) -> restore::Target<'_, impl ArchiveStore, B::State, B::Indexes> {
-    restore::Target::new(&blank.archive, blank.state(), blank.indexes())
+fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveStore, B::State> {
+    restore::Target::new(&blank.archive, blank.state())
 }
 
 // ---------------------------------------------------------------------------
@@ -687,11 +685,6 @@ fn assert_stores_match<B: ToyStores>(left: &Blank<B>, right: &Blank<B>) {
     assert_state_matches(left.state(), right.state());
     assert_archive_matches(&left.archive, &right.archive);
     assert_indexes_match(&left.archive, &right.archive);
-    assert_eq!(
-        left.indexes().cursor().unwrap(),
-        right.indexes().cursor().unwrap(),
-        "index cursor"
-    );
     assert_utxo_tags_match(left.state(), right.state());
 }
 

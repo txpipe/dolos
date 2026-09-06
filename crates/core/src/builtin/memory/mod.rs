@@ -13,12 +13,10 @@
 //! nothing else — see each module's docs.
 
 mod archive;
-mod index;
 mod state;
 
 pub use archive::{
     MemoryArchiveStore, MemoryArchiveWriter, MemoryBlockIter, MemoryExactIter, MemoryLogIter,
     MemorySlotIter, MemoryTagIter,
 };
-pub use index::{MemoryIndexStore, MemoryIndexWriter};
 pub use state::{MemoryEntityIter, MemoryStateStore, MemoryStateWriter, MemoryUtxoIter};

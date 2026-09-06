@@ -112,7 +112,6 @@ pub fn setup_domain_with_stop_epoch(
         wal: stores.wal,
         state: stores.state,
         archive: stores.archive,
-        indexes: stores.indexes,
         mempool,
         tip_broadcast,
     };

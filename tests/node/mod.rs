@@ -140,7 +140,6 @@ impl Node {
             wal: stores.wal,
             state: stores.state,
             archive: stores.archive,
-            indexes: stores.indexes,
             mempool: stores.mempool,
             tip_broadcast,
         };

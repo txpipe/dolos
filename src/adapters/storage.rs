@@ -16,18 +16,15 @@ use dolos_core::{
         ArchiveError, ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, LogKey,
     },
     builtin::{
-        EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryIndexStore,
-        MemoryIndexWriter, MemoryStateStore, MemoryStateWriter, NoOpArchiveStore,
-        NoOpArchiveWriter, NoOpIndexStore, NoOpIndexWriter,
+        EmptyBlockIter, EmptyLogIter, EmptySlotIter, MemoryArchiveStore, MemoryStateStore,
+        MemoryStateWriter, NoOpArchiveStore, NoOpArchiveWriter,
     },
     config::{
-        ArchiveStoreConfig, FjallIndexConfig, FjallStateConfig, IndexStoreConfig,
-        MempoolStoreConfig, RedbStateConfig, RedbWalConfig, RootConfig, StateStoreConfig,
-        StorageVersion, WalStoreConfig,
+        ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
+        RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
-    ExactRecord, IndexDelta, IndexError, IndexRecord, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
+    ExactRecord, IndexRecord, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
     MempoolTx, Namespace, RawBlock, StateError, StateSchema, StateStore as CoreStateStore,
     StateWriter as CoreStateWriter, TagDimension, TagRecord, TxHash, TxStatus, TxoRef, UtxoEntry,
     UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta, WalError, WalStore,
@@ -43,7 +40,6 @@ where
     pub wal: WalStoreBackend<D>,
     pub state: StateStoreBackend,
     pub archive: ArchiveStoreBackend,
-    pub indexes: IndexStoreBackend,
     pub mempool: MempoolBackend,
 }
 
@@ -175,12 +171,6 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
     )?)
 }
 
-pub fn open_index_store(config: &RootConfig) -> Result<IndexStoreBackend, Error> {
-    let path = config.storage.index_path().unwrap_or_default();
-    ensure_store_path(&path)?;
-    Ok(IndexStoreBackend::open(&path, &config.storage.index)?)
-}
-
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
@@ -216,7 +206,6 @@ where
         wal: open_wal_store(config)?,
         state: open_state_store(config)?,
         archive: open_archive_store(config)?,
-        indexes: open_index_store(config)?,
         mempool: open_mempool_store(config)?,
     })
 }
@@ -1216,122 +1205,6 @@ impl CoreArchiveStore for ArchiveStoreBackend {
 }
 
 // ============================================================================
-// Index Store Backend
-// ============================================================================
-
-/// Enum wrapper for index store backends.
-#[derive(Clone)]
-pub enum IndexStoreBackend {
-    Fjall(dolos_fjall::IndexStore),
-    Memory(MemoryIndexStore),
-    NoOp(NoOpIndexStore),
-}
-
-impl IndexStoreBackend {
-    /// Open an index store with the Fjall backend.
-    pub fn open_fjall(
-        path: impl AsRef<Path>,
-        config: &FjallIndexConfig,
-    ) -> Result<Self, IndexError> {
-        Ok(Self::Fjall(dolos_fjall::IndexStore::open(path, config)?))
-    }
-
-    /// Create a no-op index store that discards all writes.
-    pub fn noop() -> Self {
-        Self::NoOp(NoOpIndexStore)
-    }
-
-    /// Create an in-memory index store.
-    pub fn in_memory() -> Result<Self, IndexError> {
-        Ok(Self::Memory(MemoryIndexStore::new()))
-    }
-
-    /// Open an index store based on the config variant.
-    ///
-    /// For persistent backends, the caller must provide the resolved path.
-    /// For `InMemory`, the path is ignored and an in-memory store is created.
-    /// For `NoOp`, the path is ignored.
-    pub fn open(path: impl AsRef<Path>, config: &IndexStoreConfig) -> Result<Self, IndexError> {
-        match config {
-            IndexStoreConfig::Fjall(cfg) => Self::open_fjall(path, cfg),
-            IndexStoreConfig::InMemory => Self::in_memory(),
-            IndexStoreConfig::NoOp => Ok(Self::noop()),
-        }
-    }
-
-    pub fn shutdown(&self) -> Result<(), IndexError> {
-        match self {
-            Self::Fjall(s) => s.shutdown().map_err(|e| IndexError::DbError(e.to_string())),
-            Self::Memory(s) => s.shutdown(),
-            Self::NoOp(s) => s.shutdown(),
-        }
-    }
-}
-
-pub enum IndexWriterBackend {
-    Fjall(<dolos_fjall::IndexStore as CoreIndexStore>::Writer),
-    Memory(MemoryIndexWriter),
-    NoOp(NoOpIndexWriter),
-}
-
-impl CoreIndexWriter for IndexWriterBackend {
-    fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
-        match self {
-            Self::Fjall(w) => w.apply(delta),
-            Self::Memory(w) => w.apply(delta),
-            Self::NoOp(w) => w.apply(delta),
-        }
-    }
-
-    fn commit(self) -> Result<(), IndexError> {
-        match self {
-            Self::Fjall(w) => w.commit(),
-            Self::Memory(w) => w.commit(),
-            Self::NoOp(w) => w.commit(),
-        }
-    }
-}
-
-impl CoreIndexStore for IndexStoreBackend {
-    type Writer = IndexWriterBackend;
-
-    fn start_writer(&self) -> Result<Self::Writer, IndexError> {
-        match self {
-            Self::Fjall(s) => s.start_writer().map(IndexWriterBackend::Fjall),
-            Self::Memory(s) => s.start_writer().map(IndexWriterBackend::Memory),
-            Self::NoOp(s) => s.start_writer().map(IndexWriterBackend::NoOp),
-        }
-    }
-
-    fn initialize_schema(&self) -> Result<(), IndexError> {
-        match self {
-            Self::Fjall(s) => s.initialize_schema(),
-            Self::Memory(s) => s.initialize_schema(),
-            Self::NoOp(s) => s.initialize_schema(),
-        }
-    }
-
-    fn copy(&self, target: &Self) -> Result<(), IndexError> {
-        match (self, target) {
-            (Self::Fjall(s), Self::Fjall(t)) => s.copy(t),
-            (Self::Memory(s), Self::Memory(t)) => s.copy(t),
-            (Self::NoOp(s), Self::NoOp(t)) => s.copy(t),
-            _ => Err(IndexError::DbError(
-                "cannot copy between different backend types".into(),
-            )),
-        }
-    }
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
-        match self {
-            Self::Fjall(s) => s.cursor(),
-            Self::Memory(s) => s.cursor(),
-            Self::NoOp(s) => s.cursor(),
-        }
-    }
-}
-
-// ============================================================================
 // Mempool Store Backend
 // ============================================================================
 
@@ -1477,11 +1350,6 @@ mod tests {
                 .expect("in_memory state store should open without touching the path");
 
         assert!(matches!(state, StateStoreBackend::Memory(_)));
-
-        let indexes = IndexStoreBackend::open(path, &IndexStoreConfig::InMemory)
-            .expect("in_memory index store should open without touching the path");
-
-        assert!(matches!(indexes, IndexStoreBackend::Memory(_)));
 
         let archive =
             ArchiveStoreBackend::open(path, StateSchema::default(), &ArchiveStoreConfig::InMemory)

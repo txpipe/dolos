@@ -14,8 +14,7 @@ use tracing::{debug, info, instrument, warn};
 
 use crate::{
     ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
-    EntityMap, IndexStore as _, IndexWriter as _, MempoolStore, RawBlock, StateStore,
-    StateWriter as _, TipEvent, WalStore, WorkUnit,
+    EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
 
 const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
@@ -72,7 +71,6 @@ impl<D: Domain> SyncExt for D {
 
         let writer = self.state().start_writer()?;
         let archive_writer = self.archive().start_writer()?;
-        let index_writer = self.indexes().start_writer()?;
 
         // Entities accumulate across all undone entries so consecutive blocks
         // touching the same entity unwind from the in-memory value instead of
@@ -82,9 +80,6 @@ impl<D: Domain> SyncExt for D {
         for (point, log) in undo_blocks.rev() {
             if point == *to {
                 // Final cursor update
-                index_writer.apply(&crate::IndexDelta {
-                    cursor: point.clone(),
-                })?;
                 writer.set_cursor(point.clone())?;
                 break;
             }
@@ -125,7 +120,6 @@ impl<D: Domain> SyncExt for D {
 
         writer.commit()?;
         archive_writer.commit()?;
-        index_writer.commit()?;
 
         self.archive().truncate_front(to)?;
 
@@ -155,7 +149,7 @@ pub(crate) fn drain_pending_work<D: Domain>(
 ///    storage b. `compute()` - Execute computation over loaded data c.
 ///    `commit_wal()` - Persist to write-ahead log d. `commit_state()` - Apply
 ///    changes to state store e. `commit_archive()` - Apply changes to archive
-///    store f. `commit_indexes()` - Apply changes to index stores
+///    store
 /// 3. `finalize()` - Shard-agnostic teardown
 /// 4. `notify_tip()` - Notify tip subscribers
 ///
@@ -217,8 +211,6 @@ pub(crate) fn run_lifecycle<D: Domain>(
         work.commit_state(domain, shard)?;
         debug!(phase = "commit_archive", "running phase");
         work.commit_archive(domain, shard)?;
-        debug!(phase = "commit_indexes", "running phase");
-        work.commit_indexes(domain, shard)?;
     }
 
     debug!(phase = "finalize", "running phase");

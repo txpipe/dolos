@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
-    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexDelta,
-    IndexError, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace, StateError,
-    StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError, WalStore,
+    builtin::{MemoryArchiveStore, MemoryStateStore},
+    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, LogEntry,
+    LogKey, LogValue, Namespace, StateError, StateStore, StateWriter, TagDimension, TipEvent,
+    UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -15,7 +15,6 @@ pub enum TestFault {
     None,
     StateStoreError,
     ArchiveStoreError,
-    IndexStoreError,
     /// Only [`StateWriter::apply_utxo_tags`] fails; every other state call
     /// succeeds.
     ///
@@ -34,7 +33,6 @@ pub struct FaultyToyDomain {
     genesis_override: Option<Arc<dolos_core::Genesis>>,
     state: FaultyStateStore,
     archive: FaultyArchiveStore,
-    indexes: FaultyIndexStore,
     wal: FaultyWalStore,
 }
 
@@ -42,7 +40,6 @@ impl FaultyToyDomain {
     pub fn new(inner: ToyDomain, fault: TestFault) -> Self {
         let state = FaultyStateStore::new(inner.state().clone(), fault);
         let archive = FaultyArchiveStore::new(inner.archive().clone(), fault);
-        let indexes = FaultyIndexStore::new(inner.indexes().clone(), fault);
         let wal = FaultyWalStore::new(inner.wal().clone(), fault);
         let genesis_override = match fault {
             TestFault::GenesisError => {
@@ -57,7 +54,6 @@ impl FaultyToyDomain {
             genesis_override,
             state,
             archive,
-            indexes,
             wal,
         }
     }
@@ -382,74 +378,6 @@ impl ArchiveStore for FaultyArchiveStore {
 }
 
 #[derive(Clone)]
-pub struct FaultyIndexStore {
-    inner: MemoryIndexStore,
-    fault: TestFault,
-}
-
-impl FaultyIndexStore {
-    pub fn new(inner: MemoryIndexStore, fault: TestFault) -> Self {
-        Self { inner, fault }
-    }
-
-    fn should_fault(&self) -> bool {
-        matches!(self.fault, TestFault::IndexStoreError)
-    }
-
-    fn fault_err(&self) -> IndexError {
-        IndexError::DbError("fault injection: index store".into())
-    }
-}
-
-impl IndexStore for FaultyIndexStore {
-    type Writer = FaultyIndexWriter;
-
-    fn start_writer(&self) -> Result<Self::Writer, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        Ok(FaultyIndexWriter {
-            inner: self.inner.start_writer()?,
-        })
-    }
-
-    fn initialize_schema(&self) -> Result<(), IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.initialize_schema()
-    }
-
-    fn copy(&self, target: &Self) -> Result<(), IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.copy(&target.inner)
-    }
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.cursor()
-    }
-}
-
-pub struct FaultyIndexWriter {
-    inner: <MemoryIndexStore as IndexStore>::Writer,
-}
-
-impl IndexWriter for FaultyIndexWriter {
-    fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
-        self.inner.apply(delta)
-    }
-
-    fn commit(self) -> Result<(), IndexError> {
-        self.inner.commit()
-    }
-}
-
-#[derive(Clone)]
 pub struct FaultyWalStore {
     inner: dolos_redb3::wal::RedbWalStore<dolos_cardano::CardanoDelta>,
     fault: TestFault,
@@ -564,7 +492,6 @@ impl Domain for FaultyToyDomain {
     type Chain = dolos_cardano::CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
-    type Indexes = FaultyIndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &dolos_core::config::StorageConfig {
@@ -600,10 +527,6 @@ impl Domain for FaultyToyDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
-    }
-
-    fn indexes(&self) -> &Self::Indexes {
-        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {

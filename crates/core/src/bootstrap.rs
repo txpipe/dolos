@@ -10,8 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     sync::drain_pending_work, ArchiveStore, ArchiveWriter as _, ChainLogic, ChainPoint, Domain,
-    DomainError, EntityMap, IndexDelta, IndexStore, IndexWriter as _, StateStore, StateWriter as _,
-    WalStore,
+    DomainError, EntityMap, StateStore, StateWriter as _, WalStore,
 };
 
 /// Extension trait for domain bootstrapping operations.
@@ -152,7 +151,7 @@ enum CatchUpSeverity {
     /// Consensus-critical (state): a residual gap is unrecoverable, so abort
     /// the boot with `InconsistentState`.
     Fatal,
-    /// Not consensus-critical (archive, indexes): a residual gap is logged
+    /// Not consensus-critical (the archive): a residual gap is logged
     /// but the node still boots, matching `check_archive_in_sync_with_state`.
     Lenient,
 }
@@ -192,26 +191,25 @@ fn verify_caught_up(
     }
 }
 
-/// Catch up state, archive and index stores by replaying WAL entries.
+/// Catch up the state and archive stores by replaying WAL entries.
 ///
 /// The WAL commits first in the work-unit lifecycle, so after a crash it is
 /// the most advanced store. Every other store reconciles forward to the WAL
 /// tip: state first (covering a crash between `commit_wal` and
-/// `commit_state`), then the archive with its index entries, then the index
-/// cursor (covering a crash between the state commit and the later commits).
+/// `commit_state`), then the archive with its index entries (covering a crash
+/// between the state commit and the archive commit).
 fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
     let target = match domain.wal().find_tip()? {
         // nothing to catch up
         None => return Ok(()),
-        // Origin means no blocks have been processed yet — state, archive and
-        // indexes are correctly empty, so there is nothing to replay.
+        // Origin means no blocks have been processed yet — state and archive
+        // are correctly empty, so there is nothing to replay.
         Some((ChainPoint::Origin, _)) => return Ok(()),
         Some((point, _)) => point,
     };
 
     catch_up_state(domain, &target)?;
     catch_up_archive(domain, &target)?;
-    catch_up_indexes(domain, &target)?;
 
     Ok(())
 }
@@ -354,60 +352,6 @@ fn catch_up_archive<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Do
         .map(|(slot, _)| ChainPoint::Slot(slot));
 
     verify_caught_up("archive", archive_tip, target, CatchUpSeverity::Lenient)
-}
-
-/// Catch up the index store's cursor by replaying WAL entries.
-///
-/// The index entries themselves ride the state and archive commits, so what
-/// a crash between `commit_archive` and `commit_indexes` leaves behind is a
-/// cursor: it is walked forward over the same entries the other stores
-/// replayed.
-fn catch_up_indexes<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
-    let index_cursor = domain.indexes().cursor()?;
-
-    if index_cursor.as_ref() == Some(target) {
-        return Ok(());
-    }
-
-    let index_slot = index_cursor.as_ref().map(|p| p.slot());
-
-    // Find the WAL start point from the index cursor
-    let start = match index_slot {
-        Some(slot) => domain.wal().locate_point(slot)?,
-        None => None,
-    };
-
-    let logs = domain.wal().iter_logs(start, Some(target.clone()))?;
-
-    let writer = domain.indexes().start_writer()?;
-    let mut count = 0u64;
-
-    for (point, log) in logs {
-        // Skip entries at or before the current index cursor
-        if Some(point.slot()) <= index_slot {
-            continue;
-        }
-
-        // Skip synthetic entries (from reset_to) — they carry no effects
-        if log.block.is_empty() {
-            continue;
-        }
-
-        writer.apply(&IndexDelta { cursor: point })?;
-        count += 1;
-    }
-
-    if count > 0 {
-        writer.commit()?;
-        info!(count, "indexes caught up from WAL");
-    }
-
-    verify_caught_up(
-        "indexes",
-        domain.indexes().cursor()?,
-        target,
-        CatchUpSeverity::Lenient,
-    )
 }
 
 #[cfg(test)]

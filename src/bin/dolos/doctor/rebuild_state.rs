@@ -4,7 +4,7 @@
 //! The archive holds the full raw chain, and state computation never reads
 //! the archive, so a synced instance can rebuild its state store offline by
 //! replaying its own archive through the import lifecycle: no network, no
-//! snapshot re-import, no re-writing of the archive or indexes. This is the
+//! snapshot re-import, no re-writing of the archive. This is the
 //! debugging loop for state-math fixes — a full replay re-writes every store
 //! to test a change that only touches state.
 //!
@@ -39,9 +39,7 @@ use pallas::ledger::traverse::MultiEraBlock;
 
 use dolos::adapters::DomainAdapter;
 use dolos::prelude::*;
-use dolos::storage::{
-    ArchiveStoreBackend, IndexStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
-};
+use dolos::storage::{ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend};
 
 use crate::feedback::Feedback;
 
@@ -113,9 +111,6 @@ fn check_wipe_scope(config: &RootConfig, state_path: &std::path::Path) -> miette
     }
     if let Some(path) = config.storage.archive_path() {
         others.push(("archive", path));
-    }
-    if let Some(path) = config.storage.index_path() {
-        others.push(("index", path));
     }
     if let Some(path) = config.storage.mempool_path() {
         others.push(("mempool", path));
@@ -227,10 +222,10 @@ fn preflight(archive: &ArchiveStoreBackend) -> miette::Result<ChainPoint> {
 
 /// Assemble the rebuild domain: the fresh state store, an empty in-memory WAL
 /// (the import lifecycle skips `commit_wal`, so it stays empty), the given
-/// archive backend (no-op, or the write-gated view under `--rewrite-logs`),
-/// no-op indexes and an ephemeral mempool. Genesis fires automatically on the
-/// first imported block; its one index delta is discarded by the no-op index,
-/// which is correct — the live indexes already carry it.
+/// archive backend (no-op, or the write-gated view under `--rewrite-logs`)
+/// and an ephemeral mempool. Genesis fires automatically on the first
+/// imported block; the archive entries it projects are discarded by the no-op
+/// archive, which is correct — the live archive already carries them.
 fn build_domain(
     config: &RootConfig,
     state: StateStoreBackend,
@@ -264,7 +259,6 @@ fn build_domain(
         wal,
         state,
         archive,
-        indexes: IndexStoreBackend::noop(),
         mempool: MempoolBackend::Ephemeral(dolos_core::builtin::EphemeralMempool::new()),
         tip_broadcast,
     })

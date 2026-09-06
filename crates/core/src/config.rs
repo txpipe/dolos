@@ -415,93 +415,6 @@ impl ArchiveStoreConfig {
 }
 
 // ============================================================================
-// Index Store Configuration
-// ============================================================================
-
-/// Configuration for the Fjall index backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FjallIndexConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/index`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB (default: 1024).
-    #[serde(default)]
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit (default: false).
-    #[serde(default)]
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 8, lower = more aggressive).
-    #[serde(default)]
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads (default: 8).
-    #[serde(default)]
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 128).
-    #[serde(default)]
-    pub memtable_size_mb: Option<usize>,
-}
-
-impl FjallIndexConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none()
-            && self.cache.is_none()
-            && self.max_journal_size.is_none()
-            && self.flush_on_commit.is_none()
-            && self.l0_threshold.is_none()
-            && self.worker_threads.is_none()
-            && self.memtable_size_mb.is_none()
-    }
-}
-
-/// Index store configuration.
-///
-/// The supported persistent index backend is `fjall`; the `redb` backend was
-/// removed.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "backend", rename_all = "lowercase")]
-pub enum IndexStoreConfig {
-    /// Builtin in-memory backend: serves the whole index contract, ephemeral
-    /// by design and sized for devnets, tooling and tests rather than for a
-    /// node following a public network.
-    #[serde(rename = "in_memory")]
-    InMemory,
-    Fjall(FjallIndexConfig),
-    /// No-op backend that discards all writes and returns empty results: an
-    /// explicit opt-out of the index layer.
-    #[serde(rename = "no_op", alias = "noop")]
-    NoOp,
-}
-
-impl Default for IndexStoreConfig {
-    fn default() -> Self {
-        Self::Fjall(FjallIndexConfig::default())
-    }
-}
-
-impl IndexStoreConfig {
-    pub fn path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Fjall(cfg) => cfg.path.as_ref(),
-            Self::InMemory | Self::NoOp => None,
-        }
-    }
-
-    /// Whether this selection round-trips through `Default`: true only for
-    /// the default variant carrying no explicit options, so an explicit
-    /// non-default backend choice survives re-serialization.
-    pub fn is_default(&self) -> bool {
-        match self {
-            Self::Fjall(cfg) => cfg.is_default(),
-            Self::InMemory | Self::NoOp => false,
-        }
-    }
-}
-
-// ============================================================================
 // Mempool Store Configuration
 // ============================================================================
 
@@ -547,8 +460,20 @@ impl MempoolStoreConfig {
 // Storage Configuration
 // ============================================================================
 
+/// What a configuration still carrying `[storage.index]` is refused with.
+///
+/// The table is not merely obsolete: a node that ignored it would keep
+/// running against a directory nothing writes any more, so the load fails and
+/// says what to do about it.
+const REMOVED_INDEX_STORE: &str = "the standalone index store was removed in \
+    v1.7: live-UTxO tags live in the state store and archive tags in the \
+    archive store; delete the `[storage.index]` table and re-bootstrap (a \
+    stelae restore is the shortest path); see \
+    https://docs.txpipe.io/dolos/migration/dolos-v1-7";
+
 /// Storage configuration with nested per-store settings.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(try_from = "StorageConfigRepr")]
 pub struct StorageConfig {
     pub version: StorageVersion,
 
@@ -567,10 +492,6 @@ pub struct StorageConfig {
     /// Archive store configuration.
     #[serde(default, skip_serializing_if = "ArchiveStoreConfig::is_default")]
     pub archive: ArchiveStoreConfig,
-
-    /// Index store configuration.
-    #[serde(default, skip_serializing_if = "IndexStoreConfig::is_default")]
-    pub index: IndexStoreConfig,
 
     /// Mempool store configuration.
     #[serde(default, skip_serializing_if = "MempoolStoreConfig::is_default")]
@@ -625,17 +546,6 @@ impl StorageConfig {
         }
     }
 
-    /// Get the resolved path for the index store.
-    /// Returns `None` for in-memory or no-op backends.
-    pub fn index_path(&self) -> Option<PathBuf> {
-        match &self.index {
-            IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
-            IndexStoreConfig::Fjall(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
-            }
-        }
-    }
-
     /// Get the resolved path for the mempool store.
     /// Returns `None` for in-memory backends.
     pub fn mempool_path(&self) -> Option<PathBuf> {
@@ -648,6 +558,51 @@ impl StorageConfig {
     }
 }
 
+/// The shape [`StorageConfig`] deserializes through, keeping the removed
+/// `[storage.index]` table so its presence is refused rather than ignored.
+#[derive(Deserialize)]
+struct StorageConfigRepr {
+    version: StorageVersion,
+
+    path: std::path::PathBuf,
+
+    #[serde(default)]
+    wal: WalStoreConfig,
+
+    #[serde(default)]
+    state: StateStoreConfig,
+
+    #[serde(default)]
+    archive: ArchiveStoreConfig,
+
+    #[serde(default)]
+    mempool: MempoolStoreConfig,
+
+    /// Removed in v1.7. Captured only so a stale table fails the load with
+    /// [`REMOVED_INDEX_STORE`].
+    #[serde(default)]
+    index: Option<serde::de::IgnoredAny>,
+}
+
+impl TryFrom<StorageConfigRepr> for StorageConfig {
+    type Error = &'static str;
+
+    fn try_from(value: StorageConfigRepr) -> Result<Self, Self::Error> {
+        if value.index.is_some() {
+            return Err(REMOVED_INDEX_STORE);
+        }
+
+        Ok(Self {
+            version: value.version,
+            path: value.path,
+            wal: value.wal,
+            state: value.state,
+            archive: value.archive,
+            mempool: value.mempool,
+        })
+    }
+}
+
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
@@ -656,7 +611,6 @@ impl Default for StorageConfig {
             wal: WalStoreConfig::default(),
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
-            index: IndexStoreConfig::default(),
             mempool: MempoolStoreConfig::default(),
         }
     }
@@ -1289,7 +1243,6 @@ mod tests {
 
         assert!(json.get("archive").is_none());
         assert!(json.get("state").is_none());
-        assert!(json.get("index").is_none());
     }
 
     #[test]
@@ -1311,16 +1264,41 @@ mod tests {
             let archive: ArchiveStoreConfig =
                 serde_json::from_value(json!({ "backend": spelling })).unwrap();
             assert!(matches!(archive, ArchiveStoreConfig::NoOp));
-
-            let index: IndexStoreConfig =
-                serde_json::from_value(json!({ "backend": spelling })).unwrap();
-            assert!(matches!(index, IndexStoreConfig::NoOp));
         }
 
         let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
         assert_eq!(json["backend"], "no_op");
+    }
 
-        let json = serde_json::to_value(IndexStoreConfig::NoOp).unwrap();
-        assert_eq!(json["backend"], "no_op");
+    /// A config still carrying the removed table must fail the load with the
+    /// migration message, not be quietly ignored.
+    #[test]
+    fn a_leftover_index_table_is_refused_with_the_migration_message() {
+        let toml = r#"
+            version = "v3"
+            path = "data"
+
+            [index]
+            backend = "fjall"
+        "#;
+
+        let err = toml::from_str::<StorageConfig>(toml).unwrap_err();
+
+        assert!(
+            err.to_string().contains(REMOVED_INDEX_STORE),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_config_without_the_index_table_parses() {
+        let toml = r#"
+            version = "v3"
+            path = "data"
+        "#;
+
+        let storage: StorageConfig = toml::from_str(toml).unwrap();
+
+        assert_eq!(storage.path, std::path::PathBuf::from("data"));
     }
 }

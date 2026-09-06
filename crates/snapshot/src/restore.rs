@@ -17,14 +17,13 @@
 //! 2. Select layers ([`plan`]) and preflight free space ([`Plan::preflight`]).
 //!    Selection is profile-side by necessity: a layer's `scope` is opaque to
 //!    the protocol, so nothing but this crate can read an epoch out of one.
-//! 3. [`dolos_core::IndexStore::initialize_schema`].
-//! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
+//! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes` — all three into the archive store.
-//! 5. The state tip — every shard of every `state-{ns}` kind.
-//! 6. Rebuild the live-UTxO tags from the restored UTxO set, into the state
+//! 4. The state tip — every shard of every `state-{ns}` kind.
+//! 5. Rebuild the live-UTxO tags from the restored UTxO set, into the state
 //!    store beside it. They are never shipped — ADR-004's Amendment 2 — so this
-//!    is where they come back; the index cursor is then aligned, and
-//!    `set_cursor` lands after both, as the last write of the restore.
+//!    is where they come back, and `set_cursor` lands after them, as the last
+//!    write of the restore.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
@@ -128,8 +127,8 @@ use std::{
 
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexDelta, IndexRecord,
-    IndexStore, IndexWriter, Namespace, StateStore, StateWriter, TxoRef, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, Namespace,
+    StateStore, StateWriter, TxoRef, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -873,25 +872,20 @@ pub fn progress_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(PROGRESS_FILE)
 }
 
-/// The three stores a restore writes into.
+/// The two stores a restore writes into.
 ///
 /// One value because they are one node. Threading them separately through four
 /// call layers is what took every signature here to the edge, and they have
 /// never once been supplied from different places.
 #[derive(Debug, Clone, Copy)]
-pub struct Target<'a, A, S, I> {
+pub struct Target<'a, A, S> {
     pub archive: &'a A,
     pub state: &'a S,
-    pub indexes: &'a I,
 }
 
-impl<'a, A, S, I> Target<'a, A, S, I> {
-    pub fn new(archive: &'a A, state: &'a S, indexes: &'a I) -> Self {
-        Self {
-            archive,
-            state,
-            indexes,
-        }
+impl<'a, A, S> Target<'a, A, S> {
+    pub fn new(archive: &'a A, state: &'a S) -> Self {
+        Self { archive, state }
     }
 }
 
@@ -928,11 +922,11 @@ pub struct Restoring<'a> {
 /// while the download that dominates a registry restore is only visible to the
 /// transport. [`Observer::silent`] is what a caller with nothing to render
 /// passes, and a silent run is byte-for-byte the run this was before the seam.
-pub fn restore<R, A, S, I>(
+pub fn restore<R, A, S>(
     stele: &R,
     index: &BlobIndex,
     plan: &Plan,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     budget: Budget,
     checkpoint: &mut Checkpoint,
     observer: &Observer,
@@ -941,13 +935,8 @@ where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
-    let Target {
-        archive,
-        state,
-        indexes,
-    } = target;
+    let Target { archive, state } = target;
 
     stele.observe(observer.clone());
 
@@ -961,8 +950,6 @@ where
 
     let cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
-
-    indexes.initialize_schema()?;
 
     for epoch in &plan.epochs {
         info!(
@@ -1031,15 +1018,6 @@ where
 
     rebuild_utxo_tags(state, budget)?;
 
-    // Align the index cursor, which nothing above wrote: the index records
-    // went into the archive, and bootstrap still reads this cursor — without
-    // it the index store reads as never indexed.
-    let writer = indexes.start_writer()?;
-    writer.apply(&IndexDelta {
-        cursor: plan.position.point.clone(),
-    })?;
-    writer.commit()?;
-
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
     // rather than a half-restored one.
@@ -1070,18 +1048,17 @@ where
 /// a registry hands over the directory it was opened with. Asking the
 /// transport is what keeps the volume the preflight sizes and the volume the
 /// transport writes to the same volume.
-pub(crate) fn restore_stele<R, A, S, I>(
+pub(crate) fn restore_stele<R, A, S>(
     stele: &R,
     node: Restoring<'_>,
     scratch_dir: Option<&Path>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let plan = plan(stele, node.network_magic, node.max_history)?;
 
@@ -1132,16 +1109,15 @@ where
 /// directory a degenerate registry — and `blob_index` reads it. One published
 /// before that file existed has none, and the map is rebuilt by decompressing
 /// every blob once *before* the restore decompresses the ones it wants.
-pub fn restore_dir<A, S, I>(
+pub fn restore_dir<A, S>(
     root: impl Into<std::path::PathBuf>,
     node: Restoring<'_>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = stelae::dir::SteleDir::open(root)?;
 

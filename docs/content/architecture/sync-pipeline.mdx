@@ -24,7 +24,7 @@ flowchart LR
     peer["upstream peer"]
     pull["pull"]
     apply["apply"]
-    stores["stores<br/><small>state · archive · index · WAL</small>"]
+    stores["stores<br/><small>state · archive · WAL</small>"]
     mempool["mempool"]
     submit["submit"]
 
@@ -46,12 +46,12 @@ On a local devnet, pull + apply are replaced by an `emulator` stage that produce
 When the apply stage receives a block, the Cardano chain logic turns it into one or more **work units** — the pipelined unit of ledger work defined by `dolos-core`'s `WorkUnit` trait. Each work unit runs through a fixed lifecycle:
 
 ```
-initialize → load (per shard) → commit_state → commit_archive → commit_indexes → finalize → tip_events
+initialize → load (per shard) → commit_state → commit_archive → finalize → tip_events
 ```
 
 - `initialize` loads the context the unit needs.
 - `load` does the actual computation, optionally split across shards for parallelism.
-- the `commit_*` steps write the resulting deltas into the state, archive, and index stores.
+- the `commit_*` steps write the resulting deltas into the state and archive stores, index entries included: the live-UTxO tags ride the state commit, the archive tags and exact lookups ride the archive commit.
 - `finalize` runs any global post-processing; the chain cursor is advanced here (only at an epoch start).
 - `tip_events` emits notifications so streaming API clients see the new tip.
 

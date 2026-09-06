@@ -135,7 +135,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dolos_core::{ArchiveStore, IndexStore, StateStore};
+use dolos_core::{ArchiveStore, StateStore};
 use stelae::{
     digest::LayerDigests,
     frame::Limits,
@@ -251,17 +251,16 @@ impl std::str::FromStr for Point {
 /// remaining-download figure in [`Outlook`] exact rather than an extrapolation.
 ///
 /// **Never call this from inside an async context.** See [`open`].
-pub fn restore_registry<A, S, I>(
+pub fn restore_registry<A, S>(
     registry: &Registry,
     point: Point,
     node: Restoring<'_>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(crate::restore::Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = point.pull(registry)?;
 

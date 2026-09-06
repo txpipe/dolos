@@ -101,7 +101,7 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 ## `storage` section
 
-The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, index, mempool) can be configured independently with its own backend and options.
+The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, mempool) can be configured independently with its own backend and options.
 
 | property | type   | example |
 | -------- | ------ | ------- |
@@ -174,23 +174,18 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 - `cache`: size (MB) of the archive index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
-### `storage.index` section
+### `storage.index` section — removed in v1.7
 
-| property         | type    | example |
-| ---------------- | ------- | ------- |
-| backend          | string  | "fjall" |
-| path             | string  | "index" |
-| cache            | integer | 500     |
-| max_journal_size | integer | 1024    |
-| flush_on_commit  | boolean | false   |
-| l0_threshold     | integer | 8       |
-| worker_threads   | integer | 8       |
-| memtable_size_mb | integer | 128     |
+The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. A configuration that still carries the table fails to load with:
 
-- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole index in process memory: ephemeral — everything is lost on restart — and RAM-resident, so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the index layer entirely. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb index directory has to be rebuilt (a stelae restore is the shortest path).
-- `path`: optional override for the index path (defaults to `<storage.path>/index`).
-- `cache`: size (MB) of the index cache.
-- `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
+```
+the standalone index store was removed in v1.7: live-UTxO tags live in the
+state store and archive tags in the archive store; delete the
+`[storage.index]` table and re-bootstrap (a stelae restore is the shortest
+path); see https://docs.txpipe.io/dolos/migration/dolos-v1-7
+```
+
+Any tuning the table carried (`cache`, `worker_threads`, `max_journal_size`, and the rest) should be re-applied to `storage.state` and `storage.archive`, which now carry the keyspaces. `index.backend = "no_op"` had no replacement and needs none: `archive.backend = "no_op"` is the ledger-only switch and drops the historical lookups with the archive, while the live-UTxO tags stay with the UTxO set they project.
 
 ### `storage.mempool` section
 
