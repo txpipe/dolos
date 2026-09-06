@@ -148,11 +148,11 @@ impl IndexBand {
     ///
     /// A zstd compression context at level 9 and the framing around it.
     /// Measured at **10.3 MiB** by `measure_layer_sink_residency` in the root
-    /// package's `tests/archive_index_roundtrip.rs` — thirty-two sinks opened against a
-    /// real stele and each given records to compress, since a context that has
-    /// never compressed anything has not yet allocated its window. Pinned above
-    /// the measurement rather than at it, so a zstd whose level-9 parameters
-    /// grow does not silently overrun the ceiling.
+    /// package's `tests/archive_index_roundtrip.rs` — thirty-two sinks opened
+    /// against a real stele and each given records to compress, since a
+    /// context that has never compressed anything has not yet allocated its
+    /// window. Pinned above the measurement rather than at it, so a zstd
+    /// whose level-9 parameters grow does not silently overrun the ceiling.
     ///
     /// A constant because [`DEFAULT`](IndexBand::DEFAULT) is arithmetic over it
     /// rather than a number someone liked.
