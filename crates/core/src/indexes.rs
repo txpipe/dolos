@@ -1,9 +1,12 @@
 //! Index store trait for cross-cutting indexes.
 //!
-//! The `IndexStore` provides lookups that return primitive index values (slots,
-//! UTxO refs) rather than full block data. To get block data, use
-//! `AsyncQueryFacade` from the `async_query` module which combines index
-//! lookups with archive fetches.
+//! The `IndexStore` provides lookups that return primitive index values (slots)
+//! rather than full block data. To get block data, use `AsyncQueryFacade` from
+//! the `async_query` module which combines index lookups with archive fetches.
+//!
+//! The live-UTxO tags are a projection of the UTxO set and live beside it in
+//! the state store (`StateStore::utxos_by_tag`, written through
+//! `StateWriter::apply_utxo_tags`); this store keeps the archive half.
 //!
 //! This module defines a chain-agnostic indexing system based on "tags" -
 //! associations between entities (blocks, transactions, UTxOs) and dimension
@@ -14,7 +17,7 @@ use std::{borrow::Cow, ops::Range};
 
 use thiserror::Error;
 
-use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
+use crate::{BlockSlot, ChainPoint, TxoRef};
 
 /// A dimension name identifying an index table.
 ///
@@ -46,7 +49,9 @@ impl Tag {
 /// Delta for UTxO filter indexes (current state).
 ///
 /// UTxO filter indexes track the current set of UTxOs matching various tags.
-/// They are updated as UTxOs are produced and consumed.
+/// They are updated as UTxOs are produced and consumed, through the state
+/// writer that applies the UTxO set they project
+/// (`StateWriter::apply_utxo_tags`).
 #[derive(Debug, Clone, Default)]
 pub struct UtxoIndexDelta {
     /// UTxOs to add to filter indexes: (txo_ref, tags)
@@ -69,16 +74,14 @@ pub struct ArchiveIndexDelta {
     pub tags: Vec<Tag>,
 }
 
-/// Unified index delta for a batch of operations.
+/// Archive index delta for a batch of operations.
 ///
-/// This structure contains all index changes for a batch of blocks,
-/// including both UTxO filter updates and archive index entries.
+/// This structure contains the archive index entries for a batch of blocks
+/// and the cursor to leave behind them.
 #[derive(Debug, Clone)]
 pub struct IndexDelta {
     /// Cursor position after applying this delta.
     pub cursor: ChainPoint,
-    /// UTxO filter index changes.
-    pub utxo: UtxoIndexDelta,
     /// Archive index changes (one per block in batch).
     pub archive: Vec<ArchiveIndexDelta>,
 }
@@ -87,7 +90,6 @@ impl Default for IndexDelta {
     fn default() -> Self {
         Self {
             cursor: ChainPoint::Origin,
-            utxo: UtxoIndexDelta::default(),
             archive: Vec::new(),
         }
     }
@@ -364,17 +366,14 @@ pub type EmptyExactIter = std::iter::Empty<Result<ExactRecord, IndexError>>;
 pub trait IndexWriter: Send + Sync + 'static {
     /// Apply index changes from a delta.
     ///
-    /// This applies all UTxO filter changes and archive index entries
-    /// contained in the delta. The cursor is set internally from
-    /// `delta.cursor`.
+    /// This applies the archive index entries contained in the delta. The
+    /// cursor is set internally from `delta.cursor`.
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError>;
 
     /// Undo index changes from a delta (rollback).
     ///
-    /// This reverses the changes made by `apply()`:
-    /// - UTxOs in `produced` are removed from filter indexes
-    /// - UTxOs in `consumed` are restored to filter indexes
-    /// - Archive index entries are removed
+    /// This reverses the changes made by `apply()`: the archive index entries
+    /// are removed. The cursor is left alone.
     fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError>;
 
     /// Append archive records that already carry their stored key form.
@@ -418,7 +417,7 @@ pub trait IndexWriter: Send + Sync + 'static {
 /// Index store trait for cross-cutting indexes.
 ///
 /// This trait provides pure index lookups that return primitive values like
-/// `BlockSlot` or `UtxoSet` rather than full block data. For high-level queries
+/// `BlockSlot` rather than full block data. For high-level queries
 /// that also fetch block data, use `AsyncQueryFacade`.
 ///
 /// The trait is chain-agnostic, using dimension strings to identify index
@@ -453,14 +452,6 @@ pub trait IndexStore: Clone + Send + Sync + 'static {
     /// have been applied yet. This is used for synchronization verification
     /// with other stores (state, archive).
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError>;
-
-    // ============ UTxO Filter Queries ============
-
-    /// Query UTxOs by tag dimension and key.
-    ///
-    /// Returns all UTxO references that have been tagged with the given
-    /// dimension and key and have not been consumed.
-    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError>;
 
     // ============ Archive Queries (Exact Lookups) ============
 

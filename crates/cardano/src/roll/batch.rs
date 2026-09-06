@@ -15,10 +15,10 @@ use crate::{
     SingletonEntity,
 };
 use dolos_core::{
-    ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError, ChainPoint, Domain,
-    DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _, IndexWriter as _, LogValue,
-    NsKey, RawBlock, RawUtxoMap, StateError, StateStore, StateWriter as _, TxoRef, UtxoSetDelta,
-    WalStore as _,
+    ArchiveIndexDelta, ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError,
+    ChainPoint, Domain, DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _,
+    IndexWriter as _, LogValue, NsKey, RawBlock, RawUtxoMap, StateError, StateStore,
+    StateWriter as _, TxoRef, UtxoIndexDelta, UtxoSetDelta, WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -122,6 +122,11 @@ pub struct WorkBatch {
     pub utxos_decoded: HashMap<TxoRef, OwnedMultiEraOutput>,
 
     entities: EntityMap<CardanoEntity>,
+
+    // index halves, built once by `build_index_deltas` and committed by
+    // `commit_state` (tags) and `commit_indexes` (archive)
+    utxo_index_delta: Option<UtxoIndexDelta>,
+    archive_index_deltas: Option<Vec<ArchiveIndexDelta>>,
 
     // internal checks
     is_sorted: bool,
@@ -356,6 +361,14 @@ impl WorkBatch {
             }
         }
 
+        // The tags are a projection of the set above: same batch, same commit.
+        self.build_index_deltas();
+        let utxo_index_delta = self
+            .utxo_index_delta
+            .as_ref()
+            .expect("build_index_deltas fills the utxo half");
+        writer.apply_utxo_tags(utxo_index_delta)?;
+
         writer.set_cursor(self.last_point())?;
 
         writer.commit()?;
@@ -381,66 +394,47 @@ impl WorkBatch {
         Ok(())
     }
 
-    /// Build the IndexDelta for this batch.
+    /// Build both index halves for this batch, once.
     ///
-    /// This traverses all blocks and extracts index tags using the
-    /// CardanoIndexDeltaBuilder.
-    pub fn build_index_delta(&self) -> IndexDelta {
-        use pallas::ledger::traverse::{MultiEraBlock, MultiEraOutput};
+    /// The live-UTxO tags follow each block's `utxo_delta`; the archive
+    /// entries come from the already decoded block. Idempotent: the halves are
+    /// cached on the batch for `commit_state` and `commit_indexes`, whichever
+    /// runs first.
+    fn build_index_deltas(&mut self) {
+        if self.utxo_index_delta.is_some() {
+            return;
+        }
 
         let mut builder = CardanoIndexDeltaBuilder::new(self.last_point());
 
         for work_block in self.blocks.iter() {
-            let raw = work_block.raw();
-
-            // Decode block for tag extraction
-            let Ok(block) = MultiEraBlock::decode(&raw) else {
-                continue;
-            };
-
-            // Process UTxO delta for filter indexes
             if let Some(utxo_delta) = &work_block.utxo_delta {
-                // Produced UTxOs
-                for (txo_ref, body) in &utxo_delta.produced_utxo {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
-                        builder.add_produced_utxo(txo_ref.clone(), &output);
-                    }
-                }
-
-                // Consumed UTxOs
-                for (txo_ref, body) in &utxo_delta.consumed_utxo {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
-                        builder.add_consumed_utxo(txo_ref.clone(), &output);
-                    }
-                }
-
-                // Recovered stxis (for rollback support)
-                for (txo_ref, body) in &utxo_delta.recovered_stxi {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
-                        builder.add_produced_utxo(txo_ref.clone(), &output);
-                    }
-                }
-
-                // Undone UTxOs (for rollback support)
-                for (txo_ref, body) in &utxo_delta.undone_utxo {
-                    if let Ok(output) = MultiEraOutput::try_from(body.as_ref()) {
-                        builder.add_consumed_utxo(txo_ref.clone(), &output);
-                    }
-                }
+                builder.add_utxo_tags_from_delta(utxo_delta);
             }
 
             // Archive indexes (shared logic)
-            builder.index_block(&block, &self.utxos_decoded);
+            builder.index_block(work_block.block.view(), &self.utxos_decoded);
         }
 
-        builder.build()
+        let (utxo, archive) = builder.into_parts();
+
+        self.utxo_index_delta = Some(utxo);
+        self.archive_index_deltas = Some(archive.archive);
     }
 
     pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
     where
         D: Domain<Chain = CardanoLogic>,
     {
-        let delta = self.build_index_delta();
+        self.build_index_deltas();
+
+        let delta = IndexDelta {
+            cursor: self.last_point(),
+            archive: self
+                .archive_index_deltas
+                .take()
+                .expect("build_index_deltas fills the archive half"),
+        };
 
         let writer = domain.indexes().start_writer()?;
         writer.apply(&delta)?;

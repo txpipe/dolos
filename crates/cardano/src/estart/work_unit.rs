@@ -194,12 +194,7 @@ where
 
         info!(epoch = context.starting_epoch_no(), "starting epoch");
 
-        context.commit_finalize::<D>(
-            domain.state(),
-            domain.archive(),
-            domain.indexes(),
-            self.slot,
-        )?;
+        context.commit_finalize::<D>(domain.state(), domain.archive(), self.slot)?;
 
         // Replace the per-shard context with the finalize-phase
         // WorkContext so post-finalize introspection (e.g. `ended_state`

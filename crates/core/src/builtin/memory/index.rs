@@ -26,7 +26,7 @@
 //! what that costs and why it is the right trade here.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -34,7 +34,7 @@ use crate::indexes::{
     key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexDelta, IndexError, IndexRecord,
     IndexStore, IndexWriter, KeyHash, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
 };
-use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
+use crate::{BlockSlot, ChainPoint};
 
 /// A stored archive tag: the traversal contract's sort key, used as the key.
 type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
@@ -66,10 +66,6 @@ fn exact_key(kind: ExactKind, key: &[u8]) -> Option<ExactKey> {
 #[derive(Default, Clone)]
 struct Tables {
     cursor: Option<ChainPoint>,
-    /// Live UTxOs per `(dimension, logical key)`. Unlike archive tags these
-    /// keep the logical key: the query takes one, the records never leave the
-    /// store, and the set is mutable rather than append-only.
-    utxo_tags: BTreeMap<(TagDimension, Vec<u8>), HashSet<TxoRef>>,
     archive_tags: BTreeSet<ArchiveTag>,
     /// Keyed on the record's own inline key rather than a `Vec`, so
     /// `iter_exact_records` copies rather than allocates per record.
@@ -80,8 +76,6 @@ struct Tables {
 /// state store's `Op` for why the writer keeps an ordered log.
 enum Op {
     SetCursor(ChainPoint),
-    InsertUtxoTag(TagDimension, Vec<u8>, TxoRef),
-    RemoveUtxoTag(TagDimension, Vec<u8>, TxoRef),
     InsertArchiveTag(ArchiveTag),
     RemoveArchiveTag(ArchiveTag),
     InsertExact(ExactKind, ExactKey, BlockSlot),
@@ -175,26 +169,6 @@ impl IndexWriter for MemoryIndexWriter {
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
 
-        for (txo, tags) in &delta.utxo.produced {
-            for tag in tags {
-                ops.push(Op::InsertUtxoTag(
-                    tag.dimension,
-                    tag.key.clone(),
-                    txo.clone(),
-                ));
-            }
-        }
-
-        for (txo, tags) in &delta.utxo.consumed {
-            for tag in tags {
-                ops.push(Op::RemoveUtxoTag(
-                    tag.dimension,
-                    tag.key.clone(),
-                    txo.clone(),
-                ));
-            }
-        }
-
         for block in &delta.archive {
             for entry in Self::exact_keys_of(block) {
                 let (kind, key) = entry?;
@@ -216,26 +190,6 @@ impl IndexWriter for MemoryIndexWriter {
     /// where the chain now sits is the caller's to declare.
     fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError> {
         let mut ops = self.ops.lock().map_err(|_| poisoned())?;
-
-        for (txo, tags) in &delta.utxo.produced {
-            for tag in tags {
-                ops.push(Op::RemoveUtxoTag(
-                    tag.dimension,
-                    tag.key.clone(),
-                    txo.clone(),
-                ));
-            }
-        }
-
-        for (txo, tags) in &delta.utxo.consumed {
-            for tag in tags {
-                ops.push(Op::InsertUtxoTag(
-                    tag.dimension,
-                    tag.key.clone(),
-                    txo.clone(),
-                ));
-            }
-        }
 
         for block in delta.archive.iter().rev() {
             for entry in Self::exact_keys_of(block) {
@@ -285,23 +239,6 @@ impl IndexWriter for MemoryIndexWriter {
         for op in ops {
             match op {
                 Op::SetCursor(cursor) => tables.cursor = Some(cursor),
-                Op::InsertUtxoTag(dimension, key, txo) => {
-                    tables
-                        .utxo_tags
-                        .entry((dimension, key))
-                        .or_default()
-                        .insert(txo);
-                }
-                Op::RemoveUtxoTag(dimension, key, txo) => {
-                    if let std::collections::btree_map::Entry::Occupied(mut entry) =
-                        tables.utxo_tags.entry((dimension, key))
-                    {
-                        entry.get_mut().remove(&txo);
-                        if entry.get().is_empty() {
-                            entry.remove();
-                        }
-                    }
-                }
                 Op::InsertArchiveTag(tag) => {
                     tables.archive_tags.insert(tag);
                 }
@@ -397,10 +334,6 @@ impl IndexStore for MemoryIndexStore {
             target.cursor = Some(cursor);
         }
 
-        for (key, txos) in source.utxo_tags {
-            target.utxo_tags.entry(key).or_default().extend(txos);
-        }
-
         target.archive_tags.extend(source.archive_tags);
         target.exact.extend(source.exact);
 
@@ -410,18 +343,6 @@ impl IndexStore for MemoryIndexStore {
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
         let tables = self.tables.read().map_err(|_| poisoned())?;
         Ok(tables.cursor.clone())
-    }
-
-    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError> {
-        let tables = self.tables.read().map_err(|_| poisoned())?;
-
-        let found = tables
-            .utxo_tags
-            .get(&(dimension, key.to_vec()))
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(found)
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {

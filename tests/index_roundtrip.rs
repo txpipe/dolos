@@ -208,11 +208,7 @@ fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(IndexDelta)) -> SeedCounts
             }
 
             let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-            sink(IndexDelta {
-                cursor,
-                utxo: Default::default(),
-                archive,
-            });
+            sink(IndexDelta { cursor, archive });
 
             block = batch_end;
         }
@@ -442,7 +438,6 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
         &store,
         &IndexDelta {
             cursor: ChainPoint::Slot(30),
-            utxo: Default::default(),
             archive,
         },
     );
@@ -1356,7 +1351,6 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
 
         let delta = IndexDelta {
             cursor: ChainPoint::Slot(100),
-            utxo: Default::default(),
             archive: vec![ArchiveIndexDelta {
                 slot: 100,
                 block_hash: vec![0xAB; width],
@@ -1397,7 +1391,6 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
 
         let delta = IndexDelta {
             cursor: ChainPoint::Slot(100),
-            utxo: Default::default(),
             archive: vec![ArchiveIndexDelta {
                 slot: 100,
                 block_hash: vec![0x01; 32],

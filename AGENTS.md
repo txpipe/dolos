@@ -27,10 +27,9 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 - **Database**: `<storage.path>/wal`
 
 ### IndexStore
-- **Purpose**: Cross-cutting indexes for fast lookups
-- **Contents**: Two types of indexes:
-  - **UTxO Filter Indexes**: Current state queries (by address, payment, stake, policy, asset)
-  - **Archive Indexes**: Historical queries (by block hash, tx hash, slots with address/asset/etc.)
+- **Purpose**: Cross-cutting indexes for fast historical lookups
+- **Contents**: Archive indexes — historical queries (by block hash, tx hash, slots with address/asset/etc.)
+- **Not here**: the live-UTxO tags (by address, payment, stake, policy, asset, script ref) are a projection of the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - **Traits**: `IndexStore` (reads) + `IndexWriter` (batched writes)
 - **Database**: `<storage.path>/index` (isolated from other stores)
 - **Design Note**: Returns primitive values (slots, UTxO refs) not block data. Use `QueryHelpers` to join with archive for full data.
@@ -107,14 +106,15 @@ The project follows a modular workspace architecture with clear separation of co
 - **Purpose**: Alternative storage backend implementation using the Fjall LSM-tree embedded database
 - **Design Philosophy**: Optimized for write-heavy workloads with many keys, ideal for blockchain data
 - **Components**:
-  - `state`: `StateStore` implementation with three-keyspace design:
+  - `state`: `StateStore` implementation with four-keyspace design:
     - **`state-cursor`**: Chain position tracking (single key-value)
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
+    - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
   - `index`: `IndexStore` implementation with three-keyspace design:
     - **`index-cursor`**: Chain position tracking
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
-    - **`index-tags`**: Tag-based prefix scans for UTxO and block tags
+    - **`archive-tags`**: Tag-based prefix scans for block tags
   - `keys`: Shared key encoding utilities
 - **Key Advantages**:
   - Reduced segment files compared to per-entity keyspaces

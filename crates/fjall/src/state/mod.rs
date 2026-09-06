@@ -3,9 +3,9 @@
 //! This module provides an implementation of the `StateStore` trait using
 //! fjall, an LSM-tree based embedded database.
 //!
-//! ## Three Keyspace Design
+//! ## Four Keyspace Design
 //!
-//! State is organized into three keyspaces based on access patterns:
+//! State is organized into four keyspaces based on access patterns:
 //!
 //! 1. **`state-cursor`**: Chain position tracking (single key-value)
 //!
@@ -15,9 +15,17 @@
 //! 3. **`state-entities`**: All entity types with namespace hash prefix Key:
 //!    `[ns_hash:8][entity_key:32]` (40 bytes) Value: entity CBOR bytes
 //!
+//! 4. **`state-tags`**: Live-UTxO tags (mutable: insert on produce, delete on
+//!    consume) Key: `[dim_hash:8][lookup_key:var][txo_ref:36]` -> empty
+//!
 //! This design reduces the number of LSM-tree segment files compared to using
 //! separate keyspaces per entity type, avoiding "too many open files" errors
 //! during heavy compaction.
+//!
+//! The tags keyspace is a projection of the UTxO set and is written in the
+//! same batch, so the two commit together; it keeps its own compaction
+//! settings because its churn (a delete per spent output) is unlike the
+//! entity and UTxO keyspaces'.
 
 use std::ops::Range;
 use std::path::Path;
@@ -25,7 +33,8 @@ use std::sync::{Arc, Mutex};
 
 use dolos_core::{
     config::FjallStateConfig, ChainPoint, EntityKey, EntityValue, Namespace, StateError,
-    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TxoRef, UtxoMap, UtxoSetDelta,
+    StateStore as CoreStateStore, StateWriter as CoreStateWriter, TagDimension, TxoRef,
+    UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -34,6 +43,7 @@ use fjall::{
 
 pub mod entities;
 pub mod entity_keys;
+pub mod tags;
 pub mod utxos;
 
 use crate::Error;
@@ -49,17 +59,25 @@ mod keyspace_names {
     pub const UTXOS: &str = "state-utxos";
     /// Unified entities keyspace (all entity types with namespace prefix)
     pub const ENTITIES: &str = "state-entities";
+    /// Live-UTxO tags keyspace (mutable: insert on produce, delete on consume)
+    pub const TAGS: &str = "state-tags";
 }
+
+/// Compaction settings of the tags keyspace: what the standalone index store
+/// applied to it before it moved here, kept so its behavior does not change.
+const TAGS_L0_THRESHOLD: u8 = 8;
+const TAGS_MEMTABLE_SIZE_MB: usize = 128;
 
 /// Key for the cursor entry
 const CURSOR_KEY: &[u8] = &[0u8];
 
 /// Fjall-based state store implementation with unified entities keyspace.
 ///
-/// Uses 3 keyspaces:
+/// Uses 4 keyspaces:
 /// - `cursor`: Chain position tracking
 /// - `utxos`: UTxO set storage
 /// - `entities`: All entity types with namespace hash prefixes
+/// - `tags`: Live-UTxO tags, a projection of `utxos`
 #[derive(Clone)]
 pub struct StateStore {
     db: Database,
@@ -69,6 +87,8 @@ pub struct StateStore {
     utxos: Keyspace,
     /// Unified entities keyspace (all entity types)
     entities: Keyspace,
+    /// Live-UTxO tags keyspace
+    tags: Keyspace,
     /// Configuration
     flush_on_commit: bool,
 }
@@ -128,17 +148,26 @@ impl StateStore {
             opts
         };
 
-        // 3 keyspaces: cursor, utxos, entities
         // db.keyspace expects a closure that returns KeyspaceCreateOptions
         let cursor = db.keyspace(keyspace_names::CURSOR, build_opts)?;
         let utxos = db.keyspace(keyspace_names::UTXOS, build_opts)?;
         let entities = db.keyspace(keyspace_names::ENTITIES, build_opts)?;
+
+        let tags_opts = || {
+            KeyspaceCreateOptions::default()
+                .compaction_strategy(Arc::new(
+                    Leveled::default().with_l0_threshold(TAGS_L0_THRESHOLD),
+                ))
+                .max_memtable_size((TAGS_MEMTABLE_SIZE_MB as u64) * 1024 * 1024)
+        };
+        let tags = db.keyspace(keyspace_names::TAGS, tags_opts)?;
 
         Ok(Self {
             db,
             cursor,
             utxos,
             entities,
+            tags,
             flush_on_commit,
         })
     }
@@ -159,6 +188,7 @@ impl StateStore {
             (keyspace_names::CURSOR, &self.cursor),
             (keyspace_names::UTXOS, &self.utxos),
             (keyspace_names::ENTITIES, &self.entities),
+            (keyspace_names::TAGS, &self.tags),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
         .to_vec()
@@ -248,6 +278,22 @@ impl CoreStateWriter for StateWriter {
 
         // Apply UTxO changes
         utxos::apply_delta(&mut batch, &self.store.utxos, delta)?;
+
+        Ok(())
+    }
+
+    fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
+
+        tags::apply(&mut batch, &self.store.tags, delta)?;
+
+        Ok(())
+    }
+
+    fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        let mut batch = self.batch.lock().map_err(|_| Error::LockPoisoned)?;
+
+        tags::undo(&mut batch, &self.store.tags, delta)?;
 
         Ok(())
     }
@@ -342,6 +388,12 @@ impl CoreStateStore for StateStore {
         // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
         let snapshot = self.db.snapshot();
         utxos::get_utxos(&snapshot, &self.utxos, &refs).map_err(StateError::from)
+    }
+
+    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError> {
+        // Use snapshot for MVCC reads to avoid deadlocks with concurrent writes
+        let snapshot = self.db.snapshot();
+        tags::get_by_key(&snapshot, &self.tags, dimension, key).map_err(StateError::from)
     }
 
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {

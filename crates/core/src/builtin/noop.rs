@@ -12,7 +12,7 @@ use crate::{
         EmptyExactIter, EmptyTagIter, IndexDelta, IndexError, IndexRecord, IndexStore, IndexWriter,
         TagDimension,
     },
-    BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, UtxoSet,
+    BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock,
 };
 
 // ============================================================================
@@ -99,10 +99,6 @@ impl IndexStore for NoOpIndexStore {
 
     fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
         Ok(None)
-    }
-
-    fn utxos_by_tag(&self, _dimension: TagDimension, _key: &[u8]) -> Result<UtxoSet, IndexError> {
-        Ok(UtxoSet::default())
     }
 
     fn slot_by_block_hash(&self, _hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {

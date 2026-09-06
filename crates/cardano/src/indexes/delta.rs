@@ -1,11 +1,13 @@
 //! Cardano-specific index delta builder.
 //!
-//! This module provides `CardanoIndexDeltaBuilder` for constructing
-//! `IndexDelta` structures from Cardano block data.
+//! This module provides `CardanoIndexDeltaBuilder` for constructing the two
+//! index halves from Cardano block data: the live-UTxO tags
+//! (`UtxoIndexDelta`, written through the state store) and the archive
+//! entries (`IndexDelta`, written through the index store).
 
 use dolos_core::{
     ArchiveIndexDelta, BlockSlot, ChainPoint, EraCbor, IndexDelta, Tag, TxoRef, UtxoIndexDelta,
-    UtxoSetDelta,
+    UtxoMap, UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
@@ -19,10 +21,11 @@ use pallas::{
 use super::dimensions::{archive, utxo};
 use crate::pallas_extras;
 
-/// Builder for constructing `IndexDelta` from Cardano block data.
+/// Builder for constructing index deltas from Cardano block data.
 ///
 /// This builder accumulates index tags as blocks are processed and produces
-/// a complete `IndexDelta` that can be applied to an `IndexStore`.
+/// the live-UTxO half (a `UtxoIndexDelta`, for `StateWriter::apply_utxo_tags`)
+/// and the archive half (an `IndexDelta`, for `IndexWriter::apply`).
 ///
 /// # Example
 ///
@@ -37,10 +40,11 @@ use crate::pallas_extras;
 /// builder.add_address(&address);
 /// builder.add_produced_utxo(txo_ref, &output);
 ///
-/// // Build the final delta
-/// let delta = builder.build();
+/// // Take both halves
+/// let (utxo_tags, archive) = builder.into_parts();
 /// ```
 pub struct CardanoIndexDeltaBuilder {
+    utxo: UtxoIndexDelta,
     delta: IndexDelta,
 }
 
@@ -48,6 +52,7 @@ impl CardanoIndexDeltaBuilder {
     /// Create a new builder with the given cursor position.
     pub fn new(cursor: ChainPoint) -> Self {
         Self {
+            utxo: UtxoIndexDelta::default(),
             delta: IndexDelta {
                 cursor,
                 ..Default::default()
@@ -63,7 +68,7 @@ impl CardanoIndexDeltaBuilder {
     /// UTxO filter delta for insertion.
     pub fn add_produced_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
         let tags = Self::extract_utxo_tags(output);
-        self.delta.utxo.produced.push((txo_ref, tags));
+        self.utxo.produced.push((txo_ref, tags));
     }
 
     /// Add a consumed UTxO to the delta.
@@ -72,7 +77,7 @@ impl CardanoIndexDeltaBuilder {
     /// UTxO filter delta for removal.
     pub fn add_consumed_utxo(&mut self, txo_ref: TxoRef, output: &MultiEraOutput) {
         let tags = Self::extract_utxo_tags(output);
-        self.delta.utxo.consumed.push((txo_ref, tags));
+        self.utxo.consumed.push((txo_ref, tags));
     }
 
     /// Extract UTxO filter tags from an output.
@@ -373,14 +378,22 @@ impl CardanoIndexDeltaBuilder {
         }
     }
 
-    /// Build the final `IndexDelta`.
+    /// Build the archive half: the `IndexDelta` with its cursor.
+    ///
+    /// Any live-UTxO tags added to the builder are dropped; a caller that
+    /// wants both halves takes them with [`Self::into_parts`].
     pub fn build(self) -> IndexDelta {
         self.delta
     }
 
+    /// Take both halves: the live-UTxO tags and the archive delta.
+    pub fn into_parts(self) -> (UtxoIndexDelta, IndexDelta) {
+        (self.utxo, self.delta)
+    }
+
     /// Get a reference to the UTxO delta (for inspection/testing).
     pub fn utxo_delta(&self) -> &UtxoIndexDelta {
-        &self.delta.utxo
+        &self.utxo
     }
 
     /// Get a reference to the archive deltas (for inspection/testing).
@@ -390,27 +403,36 @@ impl CardanoIndexDeltaBuilder {
 
     // ============ Batch UTxO Operations (for genesis/import) ============
 
-    /// Add produced UTxOs from a UtxoSetDelta.
+    /// Add produced UTxOs from a map of raw CBOR outputs.
     ///
-    /// This is used for genesis bootstrap and bulk imports where UTxOs are
-    /// provided as raw CBOR rather than parsed block outputs.
-    pub fn add_produced_utxos_from_delta(&mut self, utxo_delta: &UtxoSetDelta) {
-        for (txo_ref, era_cbor) in utxo_delta.produced_utxo.iter() {
+    /// This is used for genesis bootstrap, bulk imports and WAL replay, where
+    /// UTxOs are provided as raw CBOR rather than parsed block outputs. An
+    /// output that does not decode gets no tags, as on the block path.
+    pub fn add_produced_utxos(&mut self, utxos: &UtxoMap) {
+        for (txo_ref, era_cbor) in utxos {
             if let Some(tags) = Self::extract_tags_from_era_cbor(era_cbor) {
-                self.delta.utxo.produced.push((txo_ref.clone(), tags));
+                self.utxo.produced.push((txo_ref.clone(), tags));
             }
         }
     }
 
-    /// Add consumed UTxOs from a UtxoSetDelta.
-    ///
-    /// This is used for bulk operations where UTxOs are provided as raw CBOR.
-    pub fn add_consumed_utxos_from_delta(&mut self, utxo_delta: &UtxoSetDelta) {
-        for (txo_ref, era_cbor) in utxo_delta.consumed_utxo.iter() {
+    /// Add consumed UTxOs from a map of raw CBOR outputs.
+    pub fn add_consumed_utxos(&mut self, utxos: &UtxoMap) {
+        for (txo_ref, era_cbor) in utxos {
             if let Some(tags) = Self::extract_tags_from_era_cbor(era_cbor) {
-                self.delta.utxo.consumed.push((txo_ref.clone(), tags));
+                self.utxo.consumed.push((txo_ref.clone(), tags));
             }
         }
+    }
+
+    /// Add the tag changes a `UtxoSetDelta` implies, in the reading
+    /// `StateWriter::apply_utxoset` gives it: produced and recovered refs gain
+    /// their tags, consumed and undone refs lose them.
+    pub fn add_utxo_tags_from_delta(&mut self, utxo_delta: &UtxoSetDelta) {
+        self.add_produced_utxos(&utxo_delta.produced_utxo);
+        self.add_produced_utxos(&utxo_delta.recovered_stxi);
+        self.add_consumed_utxos(&utxo_delta.consumed_utxo);
+        self.add_consumed_utxos(&utxo_delta.undone_utxo);
     }
 
     /// Extract UTxO filter tags from raw EraCbor.
@@ -420,15 +442,17 @@ impl CardanoIndexDeltaBuilder {
     }
 }
 
-/// Build an `IndexDelta` from a `UtxoSetDelta` (for genesis/bulk import).
+/// The live-UTxO tag changes a `UtxoSetDelta` implies.
 ///
-/// This creates an `IndexDelta` containing only UTxO filter changes,
-/// with no archive index entries. Useful for genesis bootstrap.
-pub fn index_delta_from_utxo_delta(cursor: ChainPoint, utxo_delta: &UtxoSetDelta) -> IndexDelta {
-    let mut builder = CardanoIndexDeltaBuilder::new(cursor);
-    builder.add_produced_utxos_from_delta(utxo_delta);
-    builder.add_consumed_utxos_from_delta(utxo_delta);
-    builder.build()
+/// Pairs with `StateWriter::apply_utxoset`: every ref that delta puts into the
+/// set (produced, recovered) gains its tags, every ref it takes out (consumed,
+/// undone) loses them, so applying both through one writer keeps the tags a
+/// projection of the set. Used by genesis, WAL replay, the epoch-boundary
+/// AVVM deletion and the stele restore.
+pub fn utxo_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexDelta {
+    let mut builder = CardanoIndexDeltaBuilder::new(ChainPoint::Origin);
+    builder.add_utxo_tags_from_delta(utxo_delta);
+    builder.into_parts().0
 }
 
 #[cfg(test)]

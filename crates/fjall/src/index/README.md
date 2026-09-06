@@ -4,13 +4,13 @@ This module implements the `IndexStore` trait using [Fjall](https://github.com/f
 
 ## Design Philosophy
 
-The index store is organized into **4 keyspaces** based on workload class. Each keyspace maps to its own physical LSM-tree, which means it gets independent compaction, memtables, and I/O pipelines.
+The index store is organized into **3 keyspaces** based on workload class. Each keyspace maps to its own physical LSM-tree, which means it gets independent compaction, memtables, and I/O pipelines.
 
 ### Why separate keyspaces by workload?
 
-The index has two fundamentally different write patterns:
+Tag indexes come in two fundamentally different write patterns:
 
-- **State tags** (UTxO tags) are mutable. Entries are inserted when a UTxO is produced and deleted when it's consumed. This creates high churn with many tombstones that need compaction cleanup.
+- **State tags** (UTxO tags) are mutable. Entries are inserted when a UTxO is produced and deleted when it's consumed. This creates high churn with many tombstones that need compaction cleanup. They are a projection of the UTxO set, so they live in the state store's database (`state-tags`, see `../state/tags.rs`) and commit in the same batch as the set — in their own keyspace there, for the reasons below.
 - **Archive tags** (block tags) are append-only. Entries are written once during block indexing and never deleted. They grow monotonically with chain height.
 
 Mixing these in a single LSM-tree causes problems:
@@ -44,10 +44,11 @@ This allows the chain logic layer (dolos-cardano) to define any dimensions it ne
 |----------|------|---------|----------------|------------|
 | 1 | `index-cursor` | Chain position tracking | Single key read/write | Overwrite |
 | 2 | `index-exact` | Hash/number -> slot lookups | Point queries | Append-only |
-| 3 | `state-tags` | UTxO tag indexes (address, policy, etc.) | Prefix scans | Insert + delete |
-| 4 | `archive-tags` | Block tag indexes (historical lookups) | Prefix scans | Append-only |
+| 3 | `archive-tags` | Block tag indexes (historical lookups) | Prefix scans | Append-only |
 
-All four keyspaces participate in a single atomic write batch per block, so cross-keyspace consistency is guaranteed by Fjall's `OwnedWriteBatch`.
+All three keyspaces participate in a single atomic write batch per block, so cross-keyspace consistency is guaranteed by Fjall's `OwnedWriteBatch`.
+
+The live-UTxO tags (`state-tags`, keyed `[dim_hash:8][lookup_key:var][txo_ref:36]`) are a projection of the UTxO set and live in the state store's database, written in the same batch as the set — see `state/tags.rs`.
 
 ## Key Schemas
 
@@ -76,21 +77,6 @@ Where `dim_hash = xxh3("exact:" + dimension)`.
 | Block Hash | `exact:block_hash` | 32-byte hash |
 | Block Number | `exact:block_num` | 8-byte big-endian u64 |
 | Tx Hash | `exact:tx_hash` | 32-byte hash |
-
-### State Tags Keyspace (`state-tags`)
-
-Current UTxO set indexes for fast lookups by address, policy, etc:
-
-```
-Key:   [dim_hash:8][lookup_key:var][txo_ref:36]
-Value: (empty)
-```
-
-Where `dim_hash = xxh3("utxo:" + dimension)`.
-
-The `txo_ref` is 36 bytes: 32-byte tx hash + 4-byte big-endian output index.
-
-Entries are inserted when a UTxO is produced and removed when consumed.
 
 ### Archive Tags Keyspace (`archive-tags`)
 
@@ -122,7 +108,7 @@ pub fn hash_dimension(prefix: &str, dim: &str) -> [u8; 8] {
 ```
 
 Internal prefix constants:
-- `dim_prefix::UTXO = "utxo"` - for state tag dimensions
+- `dim_prefix::UTXO = "utxo"` - for the live-UTxO tag dimensions (state store)
 - `dim_prefix::BLOCK = "block"` - for archive tag dimensions
 - `dim_prefix::EXACT = "exact"` - for exact lookup dimensions
 
@@ -132,7 +118,6 @@ Internal prefix constants:
 index/
 ├── mod.rs              # IndexStore, keyspace management, trait impls
 ├── exact.rs            # index-exact keyspace (key encoding + operations + queries)
-├── state_tags.rs       # state-tags keyspace (key encoding + operations + queries)
 ├── archive_tags.rs     # archive-tags keyspace (key encoding + operations + SlotIterator)
 └── README.md
 ```

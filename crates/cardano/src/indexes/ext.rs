@@ -1,13 +1,63 @@
-//! Cardano-specific index store extension trait.
+//! Cardano-specific store extension traits.
 //!
-//! This module provides `CardanoIndexExt`, an extension trait that adds
-//! convenient Cardano-specific methods to any `IndexStore` implementation.
+//! This module provides `CardanoStateIndexExt`, which adds the live-UTxO
+//! lookups to any `StateStore`, and `CardanoIndexExt`, which adds the archive
+//! lookups to any `IndexStore`.
 
-use dolos_core::{BlockSlot, IndexError, IndexStore, UtxoSet};
+use dolos_core::{BlockSlot, IndexError, IndexStore, StateError, StateStore, UtxoSet};
 
 use super::dimensions::{archive, utxo};
 
-/// Extension trait providing Cardano-specific index queries.
+/// Extension trait providing Cardano-specific live-UTxO queries.
+///
+/// This trait is automatically implemented for all types implementing
+/// `StateStore`. It provides convenient methods that map Cardano concepts to
+/// generic tag lookups over the UTxO set.
+///
+/// # Example
+///
+/// ```ignore
+/// use dolos_cardano::indexes::CardanoStateIndexExt;
+///
+/// // domain.state() returns a StateStore implementation
+/// let utxos = domain.state().utxos_by_address(&address_bytes)?;
+/// let utxos = domain.state().utxos_by_payment(&payment_cred)?;
+/// ```
+pub trait CardanoStateIndexExt: StateStore {
+    /// Get UTxOs by full address.
+    fn utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, StateError> {
+        self.utxos_by_tag(utxo::ADDRESS, address)
+    }
+
+    /// Get UTxOs by payment credential.
+    fn utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, StateError> {
+        self.utxos_by_tag(utxo::PAYMENT, payment)
+    }
+
+    /// Get UTxOs by stake credential.
+    fn utxos_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, StateError> {
+        self.utxos_by_tag(utxo::STAKE, stake)
+    }
+
+    /// Get UTxOs by native asset policy ID.
+    fn utxos_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, StateError> {
+        self.utxos_by_tag(utxo::POLICY, policy)
+    }
+
+    /// Get UTxOs by native asset subject (policy + name).
+    fn utxos_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, StateError> {
+        self.utxos_by_tag(utxo::ASSET, asset)
+    }
+
+    /// Get UTxOs that carry a script as their reference script.
+    fn utxos_by_script_ref(&self, script_hash: &[u8]) -> Result<UtxoSet, StateError> {
+        self.utxos_by_tag(utxo::SCRIPT_REF, script_hash)
+    }
+}
+
+impl<T: StateStore> CardanoStateIndexExt for T {}
+
+/// Extension trait providing Cardano-specific archive index queries.
 ///
 /// This trait is automatically implemented for all types implementing
 /// `IndexStore`. It provides convenient methods that map Cardano concepts to
@@ -19,42 +69,9 @@ use super::dimensions::{archive, utxo};
 /// use dolos_cardano::indexes::CardanoIndexExt;
 ///
 /// // domain.indexes() returns an IndexStore implementation
-/// let utxos = domain.indexes().utxos_by_address(&address_bytes)?;
-/// let utxos = domain.indexes().utxos_by_payment(&payment_cred)?;
+/// let slots = domain.indexes().slots_by_address(&address_bytes, start, end)?;
 /// ```
 pub trait CardanoIndexExt: IndexStore {
-    // ============ UTxO Filter Queries ============
-
-    /// Get UTxOs by full address.
-    fn utxos_by_address(&self, address: &[u8]) -> Result<UtxoSet, IndexError> {
-        self.utxos_by_tag(utxo::ADDRESS, address)
-    }
-
-    /// Get UTxOs by payment credential.
-    fn utxos_by_payment(&self, payment: &[u8]) -> Result<UtxoSet, IndexError> {
-        self.utxos_by_tag(utxo::PAYMENT, payment)
-    }
-
-    /// Get UTxOs by stake credential.
-    fn utxos_by_stake(&self, stake: &[u8]) -> Result<UtxoSet, IndexError> {
-        self.utxos_by_tag(utxo::STAKE, stake)
-    }
-
-    /// Get UTxOs by native asset policy ID.
-    fn utxos_by_policy(&self, policy: &[u8]) -> Result<UtxoSet, IndexError> {
-        self.utxos_by_tag(utxo::POLICY, policy)
-    }
-
-    /// Get UTxOs by native asset subject (policy + name).
-    fn utxos_by_asset(&self, asset: &[u8]) -> Result<UtxoSet, IndexError> {
-        self.utxos_by_tag(utxo::ASSET, asset)
-    }
-
-    /// Get UTxOs that carry a script as their reference script.
-    fn utxos_by_script_ref(&self, script_hash: &[u8]) -> Result<UtxoSet, IndexError> {
-        self.utxos_by_tag(utxo::SCRIPT_REF, script_hash)
-    }
-
     // ============ Archive Slot Queries ============
 
     /// Iterate over slots of blocks containing transactions involving an

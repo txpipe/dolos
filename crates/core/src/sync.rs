@@ -44,7 +44,8 @@ pub trait SyncExt: Domain {
     /// Roll back the chain to a previous point.
     ///
     /// Iterates WAL entries after the target point in reverse order,
-    /// undoing each block's effects on state, UTxOs, and indexes.
+    /// undoing each block's effects on state, UTxOs (tags included), and
+    /// indexes.
     fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
 }
 
@@ -94,10 +95,11 @@ impl<D: Domain> SyncExt for D {
 
             let undo_data = D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
 
-            // Apply UTxO undo to state
+            // Apply UTxO undo to state, tags included: the two are one batch
             writer.apply_utxoset(&undo_data.utxo_delta)?;
+            writer.undo_utxo_tags(&undo_data.utxo_index_delta)?;
 
-            // Apply index delta for the undo
+            // Apply archive index delta for the undo
             index_writer.undo(&undo_data.index_delta)?;
 
             // TODO: we should differ notifications until we commit the writers

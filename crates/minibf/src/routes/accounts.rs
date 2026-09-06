@@ -22,7 +22,7 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
@@ -320,7 +320,7 @@ where
     let account_key = parse_account_key_param(&address, network)?;
 
     let refs = domain
-        .indexes()
+        .state()
         .utxos_by_stake(&account_key.address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -348,7 +348,7 @@ where
     }
 
     let refs = domain
-        .indexes()
+        .state()
         .utxos_by_stake(&account_key.address.to_vec())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1497,7 +1497,7 @@ mod tests {
                 .expect("invalid fixture stake address")
                 .to_vec();
             let mut ordered_refs: Vec<_> = domain
-                .indexes()
+                .state()
                 .utxos_by_stake(&stake_address)
                 .expect("failed to load fixture utxos")
                 .into_iter()

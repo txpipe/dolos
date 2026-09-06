@@ -219,9 +219,10 @@ fn catch_up_stores<D: Domain>(domain: &D) -> Result<(), DomainError> {
 /// blocks whose effects never reached the state store. Only roll work units
 /// write WAL entries, and each entry fully captures its state mutation
 /// (entity deltas + block + resolved inputs), so forward-replaying them here
-/// is lossless. Boundary work units never write the WAL, so they can't leave
-/// the WAL ahead of state; recovering a crash *during* a boundary is a
-/// separate concern (#1018).
+/// is lossless. The live-UTxO tags are re-derived from the same entries and
+/// land in the same commit as the UTxO set they project. Boundary work units
+/// never write the WAL, so they can't leave the WAL ahead of state; recovering
+/// a crash *during* a boundary is a separate concern (#1018).
 fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), DomainError> {
     let state_cursor = domain.state().read_cursor()?;
 
@@ -268,6 +269,7 @@ fn catch_up_state<D: Domain>(domain: &D, target: &ChainPoint) -> Result<(), Doma
         let catchup = D::Chain::compute_catchup(&log.block, &log.inputs, point.clone())?;
 
         writer.apply_utxoset(&catchup.utxo_delta)?;
+        writer.apply_utxo_tags(&catchup.utxo_index_delta)?;
 
         writer.set_cursor(point.clone())?;
 

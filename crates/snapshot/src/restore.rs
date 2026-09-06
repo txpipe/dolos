@@ -21,10 +21,10 @@
 //! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes`.
 //! 5. The state tip — every shard of every `state-{ns}` kind.
-//! 6. Rebuild the live-UTxO index dimensions from the restored UTxO set. They
-//!    are never shipped — ADR-004's Amendment 2 — so this is where they come
-//!    back, and `set_cursor` lands after them, as the last write of the
-//!    restore.
+//! 6. Rebuild the live-UTxO tags from the restored UTxO set, into the state
+//!    store beside it. They are never shipped — ADR-004's Amendment 2 — so this
+//!    is where they come back; the index cursor is then aligned, and
+//!    `set_cursor` lands after both, as the last write of the restore.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
@@ -40,9 +40,9 @@
 //!
 //! PROFILE.md §"Restore pipeline" moves the cursor rather than marking
 //! completeness a second time in the progress file, and the implementation is
-//! why it can: [`rebuild_utxo_indexes`] takes the chain point as an argument
-//! and never reads it back off the state store, so nothing between the tip and
-//! the rebuild consumes the cursor and the write moves on its own. It also
+//! why it can: [`rebuild_utxo_tags`] never reads the cursor off the state
+//! store, so nothing between the tip and the rebuild consumes the cursor and
+//! the write moves on its own. It also
 //! costs nothing on resume — the tip is never checkpointed and the rebuild is
 //! unconditional, so a resumed restore already redoes precisely the work that
 //! now follows the cursor.
@@ -126,10 +126,10 @@ use std::{
     sync::Arc,
 };
 
-use dolos_cardano::indexes::index_delta_from_utxo_delta;
+use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, IndexStore,
-    IndexWriter, Namespace, StateStore, StateWriter, TxoRef, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexDelta, IndexRecord,
+    IndexStore, IndexWriter, Namespace, StateStore, StateWriter, TxoRef, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -1027,9 +1027,19 @@ where
         }
     }
 
-    info!(utxos = summary.utxos, "rebuilding the live-utxo indexes");
+    info!(utxos = summary.utxos, "rebuilding the live-utxo tags");
 
-    rebuild_utxo_indexes(state, indexes, &plan.position.point, budget)?;
+    rebuild_utxo_tags(state, budget)?;
+
+    // Align the index cursor, which `IndexWriter::append_prehashed`
+    // deliberately never touches: bootstrap still reads it, and without it the
+    // index store reads as never indexed.
+    let writer = indexes.start_writer()?;
+    writer.apply(&IndexDelta {
+        cursor: plan.position.point.clone(),
+        ..Default::default()
+    })?;
+    writer.commit()?;
 
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
@@ -1391,23 +1401,14 @@ fn restore_state<R: SteleReader, S: StateStore>(
     Ok((entities, 0))
 }
 
-/// Rebuild the live-UTxO index dimensions from the restored UTxO set.
+/// Rebuild the live-UTxO tags from the restored UTxO set.
 ///
 /// `utxo::{address,payment,stake,policy,asset}` track the current UTxO set, so
 /// ADR-004's Amendment 2 leaves them out of the epoch layers and rebuilds them
 /// here: linear over a set that has just been written anyway, and cheaper than
-/// shipping them.
-///
-/// The last call also aligns the index cursor, which
-/// [`IndexWriter::append_prehashed`] deliberately never touches. It runs
-/// unconditionally — a stele with an empty UTxO set still has to leave a cursor
-/// behind, or `bootstrap` reads the index store as never indexed.
-fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
-    state: &S,
-    indexes: &I,
-    cursor: &ChainPoint,
-    budget: Budget,
-) -> Result<(), Error> {
+/// shipping them. The tags land in the state store beside the set, in chunks
+/// of `budget.commit_records`.
+fn rebuild_utxo_tags<S: StateStore>(state: &S, budget: Budget) -> Result<(), Error> {
     let mut chunk: Vec<(TxoRef, Arc<EraCbor>)> = Vec::new();
 
     let apply = |chunk: Vec<(TxoRef, Arc<EraCbor>)>| -> Result<(), Error> {
@@ -1416,9 +1417,9 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
             ..Default::default()
         };
 
-        let writer = indexes.start_writer()?;
+        let writer = state.start_writer()?;
 
-        writer.apply(&index_delta_from_utxo_delta(cursor.clone(), &delta))?;
+        writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))?;
         writer.commit()?;
 
         Ok(())
@@ -1434,7 +1435,10 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
         }
     }
 
-    // Unconditional: this is the call that leaves the cursor.
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
     apply(chunk)
 }
 

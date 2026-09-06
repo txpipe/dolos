@@ -4,7 +4,8 @@ use dolos_core::{
     builtin::{MemoryArchiveStore, MemoryIndexStore, MemoryStateStore},
     ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexDelta,
     IndexError, IndexRecord, IndexStore, IndexWriter, LogEntry, LogKey, LogValue, Namespace,
-    StateError, StateStore, TagDimension, TipEvent, WalError, WalStore,
+    StateError, StateStore, StateWriter, TagDimension, TipEvent, UtxoIndexDelta, WalError,
+    WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -16,13 +17,14 @@ pub enum TestFault {
     StateStoreError,
     ArchiveStoreError,
     IndexStoreError,
-    /// Only [`IndexWriter::apply`] fails; every other index call succeeds.
+    /// Only [`StateWriter::apply_utxo_tags`] fails; every other state call
+    /// succeeds.
     ///
     /// The narrow one, for a caller that has to reach a specific write and
     /// would never get there if opening the store failed too — a stele restore
-    /// above all, whose only `apply` is the live-UTxO rebuild that runs after
-    /// every layer has landed.
-    IndexApplyError,
+    /// above all, whose only tag write is the live-UTxO rebuild that runs
+    /// after every layer has landed.
+    StateTagsApplyError,
     WalStoreError,
     GenesisError,
 }
@@ -90,7 +92,7 @@ impl StateStore for FaultyStateStore {
     type EntityIter = <MemoryStateStore as StateStore>::EntityIter;
     type EntityValueIter = <MemoryStateStore as StateStore>::EntityValueIter;
     type UtxoIter = <MemoryStateStore as StateStore>::UtxoIter;
-    type Writer = <MemoryStateStore as StateStore>::Writer;
+    type Writer = FaultyStateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         if self.should_fault() {
@@ -114,7 +116,10 @@ impl StateStore for FaultyStateStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer()
+        Ok(FaultyStateWriter {
+            inner: self.inner.start_writer()?,
+            fault: self.fault,
+        })
     }
 
     fn iter_entities(
@@ -146,11 +151,67 @@ impl StateStore for FaultyStateStore {
         self.inner.get_utxos(refs)
     }
 
+    fn utxos_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+    ) -> Result<dolos_core::UtxoSet, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.utxos_by_tag(dimension, key)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner.iter_utxos()
+    }
+}
+
+pub struct FaultyStateWriter {
+    inner: <MemoryStateStore as StateStore>::Writer,
+    fault: TestFault,
+}
+
+impl StateWriter for FaultyStateWriter {
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
+        self.inner.set_cursor(cursor)
+    }
+
+    fn write_entity(
+        &self,
+        ns: Namespace,
+        key: &dolos_core::EntityKey,
+        value: &dolos_core::EntityValue,
+    ) -> Result<(), StateError> {
+        self.inner.write_entity(ns, key, value)
+    }
+
+    fn delete_entity(&self, ns: Namespace, key: &dolos_core::EntityKey) -> Result<(), StateError> {
+        self.inner.delete_entity(ns, key)
+    }
+
+    fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
+        self.inner.apply_utxoset(delta)
+    }
+
+    fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        if matches!(self.fault, TestFault::StateTagsApplyError) {
+            return Err(StateError::InternalStoreError(
+                "fault injection: state tags apply".into(),
+            ));
+        }
+        self.inner.apply_utxo_tags(delta)
+    }
+
+    fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        self.inner.undo_utxo_tags(delta)
+    }
+
+    fn commit(self) -> Result<(), StateError> {
+        self.inner.commit()
     }
 }
 
@@ -295,7 +356,6 @@ impl IndexStore for FaultyIndexStore {
         }
         Ok(FaultyIndexWriter {
             inner: self.inner.start_writer()?,
-            fault: self.fault,
         })
     }
 
@@ -318,17 +378,6 @@ impl IndexStore for FaultyIndexStore {
             return Err(self.fault_err());
         }
         self.inner.cursor()
-    }
-
-    fn utxos_by_tag(
-        &self,
-        dimension: TagDimension,
-        key: &[u8],
-    ) -> Result<dolos_core::UtxoSet, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.utxos_by_tag(dimension, key)
     }
 
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
@@ -389,14 +438,10 @@ impl IndexStore for FaultyIndexStore {
 
 pub struct FaultyIndexWriter {
     inner: <MemoryIndexStore as IndexStore>::Writer,
-    fault: TestFault,
 }
 
 impl IndexWriter for FaultyIndexWriter {
     fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError> {
-        if matches!(self.fault, TestFault::IndexApplyError) {
-            return Err(IndexError::DbError("fault injection: index apply".into()));
-        }
         self.inner.apply(delta)
     }
 

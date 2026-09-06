@@ -1540,14 +1540,6 @@ impl<S: IndexStore> IndexStore for Counted<S> {
         self.inner.cursor()
     }
 
-    fn utxos_by_tag(
-        &self,
-        dimension: dolos_core::TagDimension,
-        key: &[u8],
-    ) -> Result<dolos_core::UtxoSet, dolos_core::IndexError> {
-        self.inner.utxos_by_tag(dimension, key)
-    }
-
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
         self.inner.slot_by_block_hash(hash)
     }
@@ -1625,7 +1617,6 @@ fn index_across_the_skeleton() -> MemoryIndexStore {
     writer
         .apply(&dolos_core::IndexDelta {
             cursor: ChainPoint::Slot(SKELETON_SLOT),
-            utxo: Default::default(),
             archive,
         })
         .unwrap();

@@ -80,6 +80,9 @@ pub type TxHash = Hash<32>;
 /// and the resolved inputs stored in the WAL.
 pub struct UndoBlockData {
     pub utxo_delta: UtxoSetDelta,
+    /// The tags the block's outputs and inputs carried, for
+    /// `StateWriter::undo_utxo_tags` to take back out beside `utxo_delta`.
+    pub utxo_index_delta: UtxoIndexDelta,
     pub index_delta: IndexDelta,
     pub tx_hashes: Vec<TxHash>,
 }
@@ -91,6 +94,9 @@ pub struct UndoBlockData {
 /// replay blocks that are in the WAL but not yet applied to indexes.
 pub struct CatchUpBlockData {
     pub utxo_delta: UtxoSetDelta,
+    /// The tag changes `utxo_delta` implies, applied beside it through the
+    /// state writer.
+    pub utxo_index_delta: UtxoIndexDelta,
     pub index_delta: IndexDelta,
     pub tx_hashes: Vec<TxHash>,
 }

@@ -1,4 +1,4 @@
-use dolos_cardano::indexes::CardanoIndexExt;
+use dolos_cardano::indexes::CardanoStateIndexExt;
 use itertools::Itertools as _;
 use pallas::interop::utxorpc::v1alpha::spec::query::any_utxo_pattern::UtxoPattern;
 use pallas::interop::utxorpc::v1alpha::{self as interop, spec as u5c};
@@ -54,16 +54,16 @@ fn into_status(err: impl std::error::Error) -> Status {
 }
 
 trait IntoSet {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status>;
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status>;
 }
 
-fn intersect<S: CardanoIndexExt>(
-    indexes: &S,
+fn intersect<S: CardanoStateIndexExt>(
+    state: &S,
     a: impl IntoSet,
     b: impl IntoSet,
 ) -> Result<HashSet<TxoRef>, Status> {
-    let a = a.into_set(indexes)?;
-    let b = b.into_set(indexes)?;
+    let a = a.into_set(state)?;
+    let b = b.into_set(state)?;
 
     Ok(a.intersection(&b).cloned().collect())
 }
@@ -81,8 +81,8 @@ impl ByAddressQuery {
 }
 
 impl IntoSet for ByAddressQuery {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.utxos_by_address(&self.0).map_err(into_status)
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
+        state.utxos_by_address(&self.0).map_err(into_status)
     }
 }
 
@@ -99,8 +99,8 @@ impl ByPaymentQuery {
 }
 
 impl IntoSet for ByPaymentQuery {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.utxos_by_payment(&self.0).map_err(into_status)
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
+        state.utxos_by_payment(&self.0).map_err(into_status)
     }
 }
 
@@ -117,22 +117,22 @@ impl ByDelegationQuery {
 }
 
 impl IntoSet for ByDelegationQuery {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.utxos_by_stake(&self.0).map_err(into_status)
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
+        state.utxos_by_stake(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AddressPattern {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
         let exact = ByAddressQuery::maybe_from(self.exact_address);
         let payment = ByPaymentQuery::maybe_from(self.payment_part);
         let delegation = ByDelegationQuery::maybe_from(self.delegation_part);
 
         match (exact, payment, delegation) {
-            (Some(x), None, None) => x.into_set(indexes),
-            (None, Some(x), None) => x.into_set(indexes),
-            (None, None, Some(x)) => x.into_set(indexes),
-            (None, Some(a), Some(b)) => intersect(indexes, a, b),
+            (Some(x), None, None) => x.into_set(state),
+            (None, Some(x), None) => x.into_set(state),
+            (None, None, Some(x)) => x.into_set(state),
+            (None, Some(a), Some(b)) => intersect(state, a, b),
             (None, None, None) => Ok(HashSet::default()),
             _ => Err(Status::invalid_argument("conflicting address criteria")),
         }
@@ -152,8 +152,8 @@ impl ByPolicyQuery {
 }
 
 impl IntoSet for ByPolicyQuery {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.utxos_by_policy(&self.0).map_err(into_status)
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
+        state.utxos_by_policy(&self.0).map_err(into_status)
     }
 }
 
@@ -170,13 +170,13 @@ impl ByAssetQuery {
 }
 
 impl IntoSet for ByAssetQuery {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
-        indexes.utxos_by_asset(&self.0).map_err(into_status)
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
+        state.utxos_by_asset(&self.0).map_err(into_status)
     }
 }
 
 impl IntoSet for u5c::cardano::AssetPattern {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
         let by_policy = ByPolicyQuery::maybe_from(self.policy_id.clone());
         let by_asset = ByAssetQuery::maybe_from(self.asset_name.clone());
 
@@ -184,9 +184,9 @@ impl IntoSet for u5c::cardano::AssetPattern {
             (Some(_), Some(_)) => {
                 let mut subject = self.policy_id.to_vec();
                 subject.extend_from_slice(&self.asset_name);
-                ByAssetQuery(bytes::Bytes::from(subject)).into_set(indexes)
+                ByAssetQuery(bytes::Bytes::from(subject)).into_set(state)
             }
-            (Some(x), None) => x.into_set(indexes),
+            (Some(x), None) => x.into_set(state),
             (None, Some(_)) => Err(Status::invalid_argument(
                 "asset name query requires a policy_id",
             )),
@@ -196,20 +196,20 @@ impl IntoSet for u5c::cardano::AssetPattern {
 }
 
 impl IntoSet for u5c::cardano::TxOutputPattern {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
         match (self.address, self.asset) {
-            (None, Some(x)) => x.into_set(indexes),
-            (Some(x), None) => x.into_set(indexes),
-            (Some(a), Some(b)) => intersect(indexes, a, b),
+            (None, Some(x)) => x.into_set(state),
+            (Some(x), None) => x.into_set(state),
+            (Some(a), Some(b)) => intersect(state, a, b),
             (None, None) => Ok(HashSet::default()),
         }
     }
 }
 
 impl IntoSet for u5c::query::AnyUtxoPattern {
-    fn into_set<S: CardanoIndexExt>(self, indexes: &S) -> Result<HashSet<TxoRef>, Status> {
+    fn into_set<S: CardanoStateIndexExt>(self, state: &S) -> Result<HashSet<TxoRef>, Status> {
         match self.utxo_pattern {
-            Some(UtxoPattern::Cardano(x)) => x.into_set(indexes),
+            Some(UtxoPattern::Cardano(x)) => x.into_set(state),
             _ => Ok(HashSet::new()),
         }
     }
@@ -907,7 +907,7 @@ where
 
         let set = match message.predicate {
             Some(x) => match x.r#match {
-                Some(x) => x.into_set(self.domain.indexes())?,
+                Some(x) => x.into_set(self.domain.state())?,
                 _ => {
                     return Err(Status::invalid_argument(
                         "only 'match' predicate is supported by Dolos",
