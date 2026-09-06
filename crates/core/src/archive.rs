@@ -374,8 +374,6 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;
 
-    // ============ Index Queries (Exact Lookups) ============
-
     /// Get the slot for a block by its hash (exact lookup).
     fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
 
@@ -384,8 +382,6 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     /// Get the slot containing a transaction by its hash (exact lookup).
     fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
-
-    // ============ Index Queries (Tag-Based Range Queries) ============
 
     /// Query slots by tag dimension and key within a slot range.
     ///
@@ -405,8 +401,6 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         start: BlockSlot,
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError>;
-
-    // ============ Record Traversal (Bulk Export) ============
 
     /// Iterate every archive tag record whose slot falls in `slots`.
     ///

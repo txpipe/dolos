@@ -210,5 +210,4 @@ pub trait CardanoArchiveIndexExt: ArchiveStore {
     }
 }
 
-// Blanket implementation for all ArchiveStore implementations
 impl<T: ArchiveStore> CardanoArchiveIndexExt for T {}

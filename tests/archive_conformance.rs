@@ -1035,9 +1035,7 @@ fn logs_and_blocks_share_one_writer_commit<B: Backend>() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Index entries: the archive's projection of its blocks
-// ---------------------------------------------------------------------------
 
 /// The index entries one block projects: its hash, its number, one
 /// transaction and one address tag, all derived from `seed` so two deltas
