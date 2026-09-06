@@ -1159,9 +1159,7 @@ fn slots_by_tag_bounds_are_inclusive<B: Backend>() {
     assert!(tagged_slots(&store, &key, 21, 29).is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // Index entries: prune
-// ---------------------------------------------------------------------------
 
 /// The one tag key every block of a prune test carries, so `slots_by_tag`
 /// on it lists whatever blocks the store still holds.
