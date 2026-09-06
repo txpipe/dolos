@@ -23,10 +23,6 @@ pub struct Args {
     #[arg(long, action)]
     include_state: bool,
 
-    // Whether to include indexes
-    #[arg(long, action)]
-    include_indexes: bool,
-
     /// Skip the compact and integrity check of the archive database
     #[arg(long, action)]
     skip_sanitization: bool,
@@ -173,7 +169,6 @@ pub fn run(
     stores.wal.shutdown().into_diagnostic()?;
     stores.state.shutdown().into_diagnostic()?;
     stores.archive.shutdown().into_diagnostic()?;
-    stores.indexes.shutdown().into_diagnostic()?;
     drop(stores);
 
     if args.include_archive {
@@ -188,14 +183,6 @@ pub fn run(
         let path = root.join("state");
 
         append_path_filtered(&mut archive, &path, Path::new("state"))?;
-
-        pb.set_message("creating archive");
-    }
-
-    if args.include_indexes {
-        let path = root.join("index");
-
-        append_path_filtered(&mut archive, &path, Path::new("index"))?;
 
         pb.set_message("creating archive");
     }

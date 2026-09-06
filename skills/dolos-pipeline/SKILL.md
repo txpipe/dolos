@@ -8,7 +8,7 @@ user-invocable: false
 
 ## WorkUnit Trait Lifecycle
 
-Every piece of work in Dolos implements the `WorkUnit<D: Domain>` trait (`crates/core/src/work_unit.rs`) with 6 execution phases:
+Every piece of work in Dolos implements the `WorkUnit<D: Domain>` trait (`crates/core/src/work_unit.rs`) with 5 execution phases:
 
 | Phase | Purpose | I/O |
 |-------|---------|-----|
@@ -16,19 +16,18 @@ Every piece of work in Dolos implements the `WorkUnit<D: Domain>` trait (`crates
 | `compute()` | CPU-intensive work on loaded data | No storage access |
 | `commit_wal()` | Write to write-ahead log for crash recovery | Write to WAL |
 | `commit_state()` | Apply computed changes to state store | Write to state |
-| `commit_archive()` | Write historical data/logs to archive | Write to archive |
-| `commit_indexes()` | Update additional indexes | Write to indexes |
+| `commit_archive()` | Write historical data/logs, and the index entries they project, to archive | Write to archive |
 
 Additionally, `tip_events()` returns events for live subscribers.
 
-Default no-op implementations exist for `commit_wal`, `commit_indexes`, and `tip_events`.
+Default no-op implementations exist for `commit_wal` and `tip_events`.
 
 ## Executor Modes
 
 ### Sync Mode (`crates/core/src/sync.rs`)
 
 Full lifecycle for live block processing:
-- Runs all 6 phases + tip event emission
+- Runs all 5 phases + tip event emission
 - Includes WAL commits for crash recovery and rollback support
 - Entry point: `SyncExt::roll_forward()` → drains pending work via `drain_pending_work()` → `execute_work_unit()` per unit
 
@@ -130,9 +129,8 @@ Within a single epoch:
 | load | No-op (UTxO loading happens in `pop_work()`) |
 | compute | No-op (delta computation happens in `pop_work()` via DeltaBuilder) |
 | commit_wal | Sort batch by slot, append to WAL |
-| commit_state | Load entities, apply deltas, commit state + cursor |
-| commit_archive | Write blocks to archive |
-| commit_indexes | Build and apply index deltas |
+| commit_state | Load entities, apply deltas, commit state + live-UTxO tags + cursor |
+| commit_archive | Write blocks, with the archive tags and exact lookups they project |
 | tip_events | Emit Apply event per block (live mode only) |
 
 ### Rupd (`crates/cardano/src/rupd/`)

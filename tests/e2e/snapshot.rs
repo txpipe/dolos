@@ -45,7 +45,6 @@ fn sync_and_summarize(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary 
         .into_iter()
         .chain(original_summary.archive.tip_slot)
         .chain(original_summary.state.tip_slot)
-        .chain(original_summary.indexes.tip_slot)
         .max()
         .unwrap_or_default();
 
@@ -56,10 +55,9 @@ fn sync_and_summarize(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary 
     );
 
     println!(
-        "original summary: state={:?}, archive={:?}, indexes={:?}, wal={:?}",
+        "original summary: state={:?}, archive={:?}, wal={:?}",
         original_summary.state.tip_slot,
         original_summary.archive.tip_slot,
-        original_summary.indexes.tip_slot,
         original_summary.wal.tip_slot,
     );
 
@@ -68,11 +66,8 @@ fn sync_and_summarize(workspace: &ScenarioWorkspace) -> dolos::cli::DataSummary 
 
 fn assert_summaries_match(original: &dolos::cli::DataSummary, restored: &dolos::cli::DataSummary) {
     println!(
-        "restored summary: state={:?}, archive={:?}, indexes={:?}, wal={:?}",
-        restored.state.tip_slot,
-        restored.archive.tip_slot,
-        restored.indexes.tip_slot,
-        restored.wal.tip_slot,
+        "restored summary: state={:?}, archive={:?}, wal={:?}",
+        restored.state.tip_slot, restored.archive.tip_slot, restored.wal.tip_slot,
     );
 
     assert_eq!(
@@ -82,10 +77,6 @@ fn assert_summaries_match(original: &dolos::cli::DataSummary, restored: &dolos::
     assert_eq!(
         original.archive.tip_slot, restored.archive.tip_slot,
         "archive tip_slot mismatch"
-    );
-    assert_eq!(
-        original.indexes.tip_slot, restored.indexes.tip_slot,
-        "indexes tip_slot mismatch"
     );
     assert_eq!(
         original.wal.tip_slot, restored.wal.tip_slot,
@@ -136,7 +127,6 @@ fn snapshot_roundtrip(workspace: &ScenarioWorkspace) {
             snapshot_path.to_str().unwrap(),
             "--include-state",
             "--include-archive",
-            "--include-indexes",
         ])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

@@ -1,10 +1,9 @@
 //! `dolos data check` — store consistency an operator can run.
 //!
 //! A Dolos data directory holds mutually redundant, derived data: the archive
-//! holds the chain, the state holds what replaying it produces, the indexes
-//! hold where to find it. This command audits what is already on disk,
-//! read-only, and reports every disagreement it finds rather than stopping at
-//! the first.
+//! holds the chain and where to find it, the state holds what replaying it
+//! produces. This command audits what is already on disk, read-only, and
+//! reports every disagreement it finds rather than stopping at the first.
 //!
 //! It is the at-rest complement of the sync-time guards, not a replacement:
 //! `dolos doctor wal-integrity` still owns the WAL, and nothing here runs
@@ -31,7 +30,7 @@ mod totals;
 /// The five checks, cheapest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum CheckKind {
-    /// WAL, archive, state and index tips tell one story
+    /// WAL, archive and state tips tell one story
     Cursors,
     /// the archive's blocks form a chain
     ArchiveContinuity,
@@ -198,9 +197,7 @@ mod tests {
     use super::*;
     use dolos_cardano::model::{AccountState, EpochState, PoolState, SingletonEntity as _};
     use dolos_cardano::FixedNamespace as _;
-    use dolos_core::{
-        ArchiveStore as _, Domain as _, IndexStore as _, StateStore as _, WalStore as _,
-    };
+    use dolos_core::{ArchiveStore as _, Domain as _, StateStore as _, WalStore as _};
     use dolos_core::{ArchiveWriter as _, ChainPoint, EntityKey, StateWriter as _};
     use dolos_testing::blocks::make_conway_block_with_prev;
     use dolos_testing::toy_domain::ToyDomain;
@@ -237,7 +234,6 @@ mod tests {
                 .map(|(slot, _)| slot),
             archive_tip: domain.archive().get_tip().unwrap().map(|(slot, _)| slot),
             state: domain.state().read_cursor().unwrap(),
-            indexes: domain.indexes().cursor().unwrap(),
         };
 
         issues.extend(cursors::check_cursors(&tips));

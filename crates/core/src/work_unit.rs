@@ -38,7 +38,6 @@ pub struct MempoolUpdate {
 ///    c. **Commit WAL** - Persist to write-ahead log.
 ///    d. **Commit State** - Apply changes to the state store.
 ///    e. **Commit Archive** - Apply changes to the archive store.
-///    f. **Commit Indexes** - Apply changes to index stores.
 ///
 ///    Each commit phase owns its own transaction, so the order above is a
 ///    durability order, not an atomic one. Work units that persist a resume
@@ -179,19 +178,6 @@ pub trait WorkUnit<D: Domain>: Send {
     ///
     /// Returns an error if archive persistence fails.
     fn commit_archive(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError>;
-
-    /// Apply computed changes to index stores.
-    ///
-    /// This phase updates any additional indexes maintained by the node.
-    /// The default implementation does nothing, which is appropriate for
-    /// work units that don't require index updates.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if index persistence fails.
-    fn commit_indexes(&mut self, _domain: &D, _shard_index: u32) -> Result<(), DomainError> {
-        Ok(())
-    }
 
     /// Shard-agnostic teardown, run once after the last shard's commits.
     ///

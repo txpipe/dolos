@@ -1,11 +1,11 @@
-//! The chain-agnostic index types, and the index store that keeps a cursor.
+//! The chain-agnostic index types.
 //!
 //! This module defines a chain-agnostic indexing system based on "tags" -
 //! associations between entities (blocks, transactions, UTxOs) and dimension
 //! keys. Chain-specific code (e.g., Cardano) defines the dimensions and
 //! provides extension traits for convenient access.
 //!
-//! The indexes themselves are projections of the stores they live beside:
+//! The indexes are projections of the stores that hold them:
 //!
 //! - the live-UTxO tags project the UTxO set and live in the state store
 //!   (`StateStore::utxos_by_tag`, written through
@@ -14,15 +14,12 @@
 //!   in the archive store (`ArchiveStore::slots_by_tag`,
 //!   `ArchiveStore::slot_by_*`, written through `ArchiveWriter::apply_index`),
 //!   where the `indexes` stele layer is produced from and restored into.
-//!
-//! What is left of the `IndexStore` is its cursor, which the bootstrap
-//! catch-up and `dolos data check` still read; its removal is the next step.
 
 use std::borrow::Cow;
 
 use thiserror::Error;
 
-use crate::{BlockSlot, ChainPoint, TxoRef};
+use crate::{BlockSlot, TxoRef};
 
 /// A dimension name identifying an index table.
 ///
@@ -80,47 +77,11 @@ pub struct ArchiveIndexDelta {
     pub tags: Vec<Tag>,
 }
 
-/// What an index store commit carries: the cursor to leave behind.
-///
-/// The index entries themselves moved to the stores they project; this is the
-/// shape the cursor write kept, so the callers that place a cursor
-/// (`commit_indexes`, the WAL catch-up, a rollback, a stele restore) did not
-/// change.
-#[derive(Debug, Clone)]
-pub struct IndexDelta {
-    /// Cursor position after applying this delta.
-    pub cursor: ChainPoint,
-}
-
-impl Default for IndexDelta {
-    fn default() -> Self {
-        Self {
-            cursor: ChainPoint::Origin,
-        }
-    }
-}
-
+/// What can go wrong building an index record.
 #[derive(Debug, Error)]
 pub enum IndexError {
-    #[error("index db error: {0}")]
-    DbError(String),
-
     #[error("codec error: {0}")]
     CodecError(String),
-
-    #[error("schema error: {0}")]
-    SchemaError(String),
-
-    #[error("dimension not found: {0}")]
-    DimensionNotFound(String),
-
-    /// The operation is part of the trait but the concrete backend does not
-    /// implement it.
-    ///
-    /// A caller reaching for an unimplemented capability gets an error it can
-    /// handle instead of a panic.
-    #[error("{0} is not supported on this storage backend")]
-    Unsupported(&'static str),
 }
 
 /// Size of the hashed portion of an archive tag key.
@@ -347,46 +308,6 @@ impl From<ExactRecord> for IndexRecord {
     fn from(value: ExactRecord) -> Self {
         Self::Exact(value)
     }
-}
-
-/// Writer for batched index operations.
-///
-/// The one write left is the cursor. It is still a writer with a commit so the
-/// callers that place a cursor kept their shape, and so the memory and fjall
-/// stores keep one code path for it.
-pub trait IndexWriter: Send + Sync + 'static {
-    /// Set the cursor from `delta.cursor`.
-    fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError>;
-
-    /// Commit the batched operations.
-    fn commit(self) -> Result<(), IndexError>;
-}
-
-/// The index store: a cursor, and the writer that places it.
-///
-/// The lookups this trait used to answer live on the stores that hold what
-/// they project — see the module docs — and this is what the removal of the
-/// store still has to take out.
-#[trait_variant::make(Send)]
-pub trait IndexStore: Clone + Send + Sync + 'static {
-    /// Writer type for batched write operations.
-    type Writer: IndexWriter;
-
-    /// Start a new writer for batched operations.
-    fn start_writer(&self) -> Result<Self::Writer, IndexError>;
-
-    /// Initialize the index schema (create tables, etc.).
-    fn initialize_schema(&self) -> Result<(), IndexError>;
-
-    /// Copy all index data to another store.
-    fn copy(&self, target: &Self) -> Result<(), IndexError>;
-
-    /// Read the current cursor position.
-    ///
-    /// Returns the last chain point that was indexed, or None if no indexes
-    /// have been applied yet. This is used for synchronization verification
-    /// with other stores (state, archive).
-    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError>;
 }
 
 #[cfg(test)]

@@ -439,9 +439,6 @@ pub enum ChainError {
     StateError(#[from] StateError),
 
     #[error(transparent)]
-    IndexError(#[from] IndexError),
-
-    #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
 
     #[error("genesis field missing: {0}")]
@@ -613,9 +610,6 @@ pub enum DomainError {
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
 
-    #[error("index error: {0}")]
-    IndexError(#[from] IndexError),
-
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 
@@ -665,7 +659,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
-    type Indexes: IndexStore;
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
 
@@ -679,7 +672,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
-    fn indexes(&self) -> &Self::Indexes;
     fn mempool(&self) -> &Self::Mempool;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;

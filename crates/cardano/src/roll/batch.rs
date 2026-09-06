@@ -16,9 +16,8 @@ use crate::{
 };
 use dolos_core::{
     ArchiveIndexDelta, ArchiveStore, ArchiveWriter as _, Block as _, BlockSlot, ChainError,
-    ChainPoint, Domain, DomainError, EntityDelta, EntityMap, IndexDelta, IndexStore as _,
-    IndexWriter as _, LogValue, NsKey, RawBlock, RawUtxoMap, StateError, StateStore,
-    StateWriter as _, TxoRef, UtxoIndexDelta, UtxoSetDelta, WalStore as _,
+    ChainPoint, Domain, DomainError, EntityDelta, EntityMap, LogValue, NsKey, RawBlock, RawUtxoMap,
+    StateError, StateStore, StateWriter as _, TxoRef, UtxoIndexDelta, UtxoSetDelta, WalStore as _,
 };
 
 /// Container for entity deltas computed during block processing.
@@ -429,21 +428,5 @@ impl WorkBatch {
 
         self.utxo_index_delta = Some(utxo);
         self.archive_index_deltas = Some(archive);
-    }
-
-    /// Place the index store's cursor at the batch's last point.
-    pub fn commit_indexes<D>(&mut self, domain: &D) -> Result<(), DomainError>
-    where
-        D: Domain<Chain = CardanoLogic>,
-    {
-        let delta = IndexDelta {
-            cursor: self.last_point(),
-        };
-
-        let writer = domain.indexes().start_writer()?;
-        writer.apply(&delta)?;
-        writer.commit()?;
-
-        Ok(())
     }
 }

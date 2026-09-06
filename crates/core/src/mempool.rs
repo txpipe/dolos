@@ -119,9 +119,6 @@ pub enum MempoolError {
     #[error(transparent)]
     StateError(#[from] StateError),
 
-    #[error(transparent)]
-    IndexError(#[from] IndexError),
-
     #[error("plutus not supported")]
     PlutusNotSupported,
 

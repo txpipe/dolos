@@ -31,12 +31,12 @@ If your goal is to minimize operational cost, start with the smallest storage mo
 
 ## Query latency
 
-Query latency is workload-dependent. Dolos generally performs best on indexed and current-state lookups, where the request can be satisfied directly from the state and index stores. Historical queries can be more expensive because they may require joining index results with archived block data.
+Query latency is workload-dependent. Dolos generally performs best on indexed and current-state lookups, where the request can be satisfied directly from the state store. Historical queries can be more expensive because they may require joining the archive's lookups with archived block data.
 
 The biggest factors affecting latency are:
 
 - whether the query hits current state or historical archive data
-- cache sizing for state, archive, and index stores
+- cache sizing for the state and archive stores
 - storage backend performance under concurrent load
 - the number of enabled clients and the burstiness of their traffic
 

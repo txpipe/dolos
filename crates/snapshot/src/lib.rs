@@ -523,10 +523,10 @@ pub enum Error {
     #[error("stelae error: {0}")]
     Stelae(stelae::Error),
 
-    /// Raised where a record's validity is the index store's judgement rather
-    /// than this crate's — exact-key widths, above all. Surfacing the store's
+    /// Raised where a record's validity is the record type's judgement rather
+    /// than this crate's — exact-key widths, above all. Surfacing that
     /// refusal keeps one validation site instead of two that can disagree.
-    #[error("index store error: {0}")]
+    #[error("index record error: {0}")]
     Index(#[from] dolos_core::IndexError),
 
     #[error("archive store error: {0}")]

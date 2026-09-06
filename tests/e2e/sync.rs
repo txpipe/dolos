@@ -43,7 +43,6 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
         .into_iter()
         .chain(before.archive.tip_slot)
         .chain(before.state.tip_slot)
-        .chain(before.indexes.tip_slot)
         .max()
         .unwrap_or_default();
     let after_tip = after
@@ -52,7 +51,6 @@ fn daemon_syncs(workspace: &ScenarioWorkspace) {
         .into_iter()
         .chain(after.archive.tip_slot)
         .chain(after.state.tip_slot)
-        .chain(after.indexes.tip_slot)
         .max()
         .unwrap_or_default();
 

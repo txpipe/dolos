@@ -1,4 +1,4 @@
-use dolos::storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend};
+use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use dolos_redb3::TableFootprint;
 use miette::{bail, IntoDiagnostic as _};
@@ -43,13 +43,6 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
             json.insert("state".to_string(), fjall_section(state.disk_usage()));
         }
         StateStoreBackend::Memory(_) => (),
-    }
-
-    match &stores.indexes {
-        IndexStoreBackend::Fjall(indexes) => {
-            json.insert("indexes".to_string(), fjall_section(indexes.disk_usage()));
-        }
-        IndexStoreBackend::Memory(_) | IndexStoreBackend::NoOp(_) => (),
     }
 
     match &stores.archive {

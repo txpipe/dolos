@@ -2,67 +2,15 @@
 //!
 //! These implementations silently accept all writes and return empty results
 //! for all reads. Useful when you want to disable certain storage backends
-//! (e.g., indexes or archive) while still keeping the system functional.
+//! (e.g., the archive) while still keeping the system functional.
 
 use std::ops::Range;
 
 use crate::{
     archive::{ArchiveError, ArchiveStore, ArchiveWriter, EmptyExactIter, EmptyTagIter, LogKey},
-    indexes::{ArchiveIndexDelta, IndexDelta, IndexError, IndexRecord, IndexStore, IndexWriter},
+    indexes::{ArchiveIndexDelta, IndexRecord},
     BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, TagDimension,
 };
-
-// ============================================================================
-// NoOp Index Store
-// ============================================================================
-
-/// No-op index writer that accepts all operations but does nothing.
-#[derive(Debug, Default)]
-pub struct NoOpIndexWriter;
-
-impl IndexWriter for NoOpIndexWriter {
-    fn apply(&self, _delta: &IndexDelta) -> Result<(), IndexError> {
-        Ok(())
-    }
-
-    fn commit(self) -> Result<(), IndexError> {
-        Ok(())
-    }
-}
-
-/// No-op index store that returns empty results for all queries.
-#[derive(Debug, Clone, Default)]
-pub struct NoOpIndexStore;
-
-impl NoOpIndexStore {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn shutdown(&self) -> Result<(), IndexError> {
-        Ok(())
-    }
-}
-
-impl IndexStore for NoOpIndexStore {
-    type Writer = NoOpIndexWriter;
-
-    fn start_writer(&self) -> Result<Self::Writer, IndexError> {
-        Ok(NoOpIndexWriter)
-    }
-
-    fn initialize_schema(&self) -> Result<(), IndexError> {
-        Ok(())
-    }
-
-    fn copy(&self, _target: &Self) -> Result<(), IndexError> {
-        Ok(())
-    }
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
-        Ok(None)
-    }
-}
 
 // ============================================================================
 // NoOp Archive Store

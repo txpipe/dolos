@@ -259,7 +259,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 wal: stores.wal,
                 state: stores.state,
                 archive: stores.archive,
-                indexes: stores.indexes,
             })
         },
         build_domain: &|target| {
