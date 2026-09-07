@@ -1,5 +1,5 @@
 use clap::Parser;
-use dolos::storage::ArchiveStoreBackend;
+use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -126,6 +126,14 @@ fn append_dir_filtered(
     Ok(())
 }
 
+fn ensure_state_exportable(state: &StateStoreBackend, include_state: bool) -> miette::Result<()> {
+    if matches!(state, StateStoreBackend::Memory(_)) && include_state {
+        bail!("the in-memory state keeps nothing on disk to export");
+    }
+
+    Ok(())
+}
+
 pub fn run(
     config: &RootConfig,
     args: &Args,
@@ -139,6 +147,8 @@ pub fn run(
 
     let mut stores = crate::common::open_data_stores(config)?;
     let root = crate::common::ensure_storage_path(config)?;
+
+    ensure_state_exportable(&stores.state, args.include_state)?;
 
     match &mut stores.archive {
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
@@ -190,4 +200,19 @@ pub fn run(
     archive.finish().into_diagnostic()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn including_an_in_memory_state_is_refused() {
+        let state = StateStoreBackend::in_memory().unwrap();
+
+        ensure_state_exportable(&state, false).unwrap();
+
+        let error = ensure_state_exportable(&state, true).unwrap_err();
+        assert!(error.to_string().contains("nothing on disk to export"));
+    }
 }
