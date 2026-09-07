@@ -4,8 +4,11 @@
 //! segment) and addressed by packed [`BlockLocation`]s stored in whichever
 //! archive index backend is in use. The layout is backend-independent: the
 //! redb and fjall archive stores share these files byte for byte, which is
-//! why this crate depends on nothing but the standard library (plus
-//! `tempfile` for throwaway stores).
+//! why this crate knows nothing about Cardano and depends on little beyond
+//! the standard library: `tempfile` for throwaway stores, and `zstd` plus
+//! `sha2` for the [`compressed`] segment codec.
+
+pub mod compressed;
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::fs::{self, File, OpenOptions};

@@ -1543,7 +1543,9 @@ dependencies = [
 name = "dolos-flatfiles"
 version = "1.7.0-alpha.1"
 dependencies = [
+ "sha2 0.10.9",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]
