@@ -6,51 +6,48 @@ on:
 jobs:
   epoch-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         include:
-          # mainnet: seed 200, upstream 200-400
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 242, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 243, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 245, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 250, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 278, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 279, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 280, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 285, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 286, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 287, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 288, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 289, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 290, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 300, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 325, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 326, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 350, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 352, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 375, upstream_range: "200-400" }
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 400, upstream_range: "200-400" }
-          # mainnet: seed 200, upstream 200-500
-          - { network: mainnet, seed_epoch: 200, ground_truth_epoch: 500, upstream_range: "200-500" }
-          # preview: seed 500, upstream 500-700
-          - { network: preview, seed_epoch: 500, ground_truth_epoch: 550, upstream_range: "500-700" }
-          - { network: preview, seed_epoch: 500, ground_truth_epoch: 649, upstream_range: "500-700" }
-          - { network: preview, seed_epoch: 500, ground_truth_epoch: 700, upstream_range: "500-700" }
+          - { network: mainnet, epoch: 242 }
+          - { network: mainnet, epoch: 243 }
+          - { network: mainnet, epoch: 245 }
+          - { network: mainnet, epoch: 250 }
+          - { network: mainnet, epoch: 278 }
+          - { network: mainnet, epoch: 279 }
+          - { network: mainnet, epoch: 280 }
+          - { network: mainnet, epoch: 285 }
+          - { network: mainnet, epoch: 286 }
+          - { network: mainnet, epoch: 287 }
+          - { network: mainnet, epoch: 288 }
+          - { network: mainnet, epoch: 289 }
+          - { network: mainnet, epoch: 290 }
+          - { network: mainnet, epoch: 300 }
+          - { network: mainnet, epoch: 325 }
+          - { network: mainnet, epoch: 326 }
+          - { network: mainnet, epoch: 350 }
+          - { network: mainnet, epoch: 352 }
+          - { network: mainnet, epoch: 375 }
+          - { network: mainnet, epoch: 400 }
+          - { network: mainnet, epoch: 500 }
+          - { network: preview, epoch: 100 }
+          - { network: preview, epoch: 550 }
+          - { network: preview, epoch: 649 }
+          - { network: preview, epoch: 700 }
 
-    name: "${{ matrix.network }}-${{ matrix.ground_truth_epoch }}"
+    name: "${{ matrix.network }}-${{ matrix.epoch }}"
+
+    env:
+      DOLOS_FIXTURE_DIR: ${{ github.workspace }}/fixtures
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -66,32 +63,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-epoch-tests-
 
-      - name: Download seed
-        run: |
-          mkdir -p /tmp/fixtures/seeds
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/seeds/${{ matrix.network }}-${{ matrix.seed_epoch }}.tar" /tmp/seed.tar
-          tar xf /tmp/seed.tar -C /tmp/fixtures/seeds
-          rm /tmp/seed.tar
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+        with:
+          version: 1.2.0
 
-      - name: Download ground truth
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p /tmp/fixtures/ground-truth
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/ground-truth/${{ matrix.network }}-${{ matrix.ground_truth_epoch }}.tar" /tmp/ground-truth.tar
-          tar xf /tmp/ground-truth.tar -C /tmp/fixtures/ground-truth
-          rm /tmp/ground-truth.tar
+          export DOCKER_CONFIG="$(mktemp -d)"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          echo "$GITHUB_TOKEN" | oras login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Download upstream
+      - name: Pull test fixture
         run: |
-          mkdir -p /tmp/fixtures/upstream
-          aws s3 cp "s3://${{ vars.S3_BUCKET }}/upstream/${{ matrix.network }}-${{ matrix.upstream_range }}.tar" /tmp/upstream.tar
-          tar xf /tmp/upstream.tar -C /tmp/fixtures/upstream
-          rm /tmp/upstream.tar
+          mkdir -p "$DOLOS_FIXTURE_DIR"
+          cargo xtask fixture pull --network ${{ matrix.network }} --epoch ${{ matrix.epoch }}
 
       - name: Run epoch test
-        env:
-          DOLOS_FIXTURE_DIR: /tmp/fixtures
-        run: cargo test --test epoch_pots -- --nocapture
+        run: cargo test --test epoch_pots --release -- --nocapture
 
       - name: Cleanup
         if: always()
-        run: rm -rf /tmp/fixtures
+        run: rm -rf "$DOLOS_FIXTURE_DIR"
