@@ -1645,6 +1645,7 @@ version = "1.7.0-alpha.1"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
+ "dolos-flatfiles",
  "dolos-mithril",
  "dolos-testing",
  "hex",

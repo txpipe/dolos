@@ -204,9 +204,10 @@ Dictionary preparation is fallible: a matching content hash establishes
 identity, but malformed trained-dictionary contents still yield an
 `InvalidData` error naming the dictionary instead of panicking.
 
-Producing compressed files from a live store, choosing where dictionaries
-live, and routing `FlatFileStore::read` through this reader are lifecycle
-concerns implemented outside this module.
+Producing compressed files from a live store, where dictionaries live, and
+how `FlatFileStore` routes reads, appends and truncation across raw and
+compressed segments are the store's lifecycle, described in `LIFECYCLE.md`
+beside this file.
 
 The test fixtures under `fixtures/` are the reference bytes for this
 document; `fixtures/README.md` says how they were made.

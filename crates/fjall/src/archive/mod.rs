@@ -1,7 +1,8 @@
 //! Fjall-based archive store implementation for Dolos.
 //!
 //! The archive keeps block bodies in flat segment files ([`dolos_flatfiles`],
-//! shared byte for byte with the redb backend) and holds the rows that point
+//! raw or compressed per segment, addressed by the same packed locations
+//! either way) and holds the rows that point
 //! into the history — a blocks location table, the derived-log namespaces,
 //! and the two index projections of the blocks — in an LSM tree. Behavior is
 //! pinned by the shared conformance suite (`tests/archive_conformance.rs`),
@@ -68,7 +69,11 @@ use fjall::{
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
-use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
+use dolos_flatfiles::{
+    compressed::{WriteSummary, WriterOptions},
+    decode_locations, encode_locations, BlockLocation, FlatFileStore, SegmentInfo,
+    SLOTS_PER_SEGMENT,
+};
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::Error;
@@ -179,6 +184,9 @@ impl ArchiveStore {
             .clone()
             .unwrap_or_else(|| path.to_path_buf());
 
+        // Opening recovers any interrupted representation transition and
+        // validates every compressed segment's metadata and dictionary, so a
+        // segment this build cannot read fails the open, naming the segment.
         let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
 
         Self::from_database(
@@ -264,6 +272,57 @@ impl ArchiveStore {
     /// Get a reference to the underlying database
     pub fn database(&self) -> &Database {
         &self.db
+    }
+
+    /// The block segment files and their representations, ascending.
+    pub fn segments(&self) -> Result<Vec<SegmentInfo>, Error> {
+        self.flatfiles
+            .segments()
+            .map_err(|e| Error::Io(e.to_string()))
+    }
+
+    /// Every location the blocks table holds inside `segment_id`.
+    fn segment_locations(&self, segment_id: u32) -> Result<Vec<BlockLocation>, Error> {
+        let first = segment_id as u64 * SLOTS_PER_SEGMENT;
+        let end = first + SLOTS_PER_SEGMENT;
+        let snapshot = self.db.snapshot();
+        let range = snapshot.range(
+            &self.blocks,
+            first.to_be_bytes().to_vec()..end.to_be_bytes().to_vec(),
+        );
+
+        let mut locations = Vec::new();
+        for guard in range {
+            let (_, value) = guard.into_inner()?;
+            locations.extend(decode_locations(&value).filter(|loc| loc.segment_id == segment_id));
+        }
+
+        Ok(locations)
+    }
+
+    /// Compress the block segment `segment_id` in place, cutting frames at
+    /// the block boundaries the blocks table records for it.
+    ///
+    /// The index is not rewritten: every packed location keeps addressing
+    /// the same logical bytes. A later append to or truncation of the
+    /// segment converts it back to raw on its own. This is the primitive an
+    /// offline sealing tool calls; nothing here schedules it.
+    pub fn seal_segment(
+        &self,
+        segment_id: u32,
+        options: &WriterOptions,
+    ) -> Result<WriteSummary, Error> {
+        let locations = self.segment_locations(segment_id)?;
+        self.flatfiles
+            .seal(segment_id, &locations, options)
+            .map_err(|e| Error::Io(e.to_string()))
+    }
+
+    /// Restore the block segment `segment_id` to its raw representation.
+    pub fn thaw_segment(&self, segment_id: u32) -> Result<(), Error> {
+        self.flatfiles
+            .thaw(segment_id)
+            .map_err(|e| Error::Io(e.to_string()))
     }
 
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
