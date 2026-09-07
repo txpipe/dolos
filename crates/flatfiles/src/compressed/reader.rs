@@ -247,8 +247,9 @@ impl SegmentIndex {
 
     /// Decode frame `index` from `source`, checking it against the seek table.
     ///
-    /// The dictionary must be the one the metadata names, and absent when the
-    /// metadata names none.
+    /// The frame header's content size must match the seek table entry before
+    /// any output is allocated for it. The dictionary must be the one the
+    /// metadata names, and absent when the metadata names none.
     pub fn decode_frame<S: ReadAt + ?Sized>(
         &self,
         source: &S,
@@ -289,6 +290,19 @@ impl SegmentIndex {
 
         let mut compressed = vec![0u8; frame.compressed_size as usize];
         source.read_exact_at(&mut compressed, frame.physical_offset)?;
+        let declared = zstd::zstd_safe::get_frame_content_size(&compressed).map_err(|_| {
+            invalid(format!(
+                "frame {index} at {}: unreadable frame header",
+                frame.physical_offset
+            ))
+        })?;
+        if declared != Some(frame.decompressed_size as u64) {
+            return Err(invalid(format!(
+                "frame {index} header declares {} content bytes, seek table says {}",
+                declared.map_or("no".to_string(), |n| n.to_string()),
+                frame.decompressed_size
+            )));
+        }
         let decoded = decompressor
             .decompress(&compressed, frame.decompressed_size as usize)
             .map_err(|e| {

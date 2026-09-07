@@ -179,6 +179,11 @@ impl Metadata {
                 payload[20..52].try_into().unwrap(),
             ))
         } else {
+            if zstd_dictionary_id != 0 {
+                return Err(invalid(
+                    "zstd dictionary id set on a dictionary-free segment",
+                ));
+            }
             if payload[20..52].iter().any(|b| *b != 0) {
                 return Err(invalid(
                     "dictionary identity set on a dictionary-free segment",

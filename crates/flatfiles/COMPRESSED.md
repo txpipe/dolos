@@ -100,7 +100,7 @@ offset  size  field
 7       1     flags            bit 0: the data frames need a dictionary
 8       4     level            i32, the zstd compression level used
 12      4     frame target     u32, chunked mode's T; 0 in per-block mode
-16      4     zstd dict id     u32, the id zstd stamped into the frames; 0 if none
+16      4     zstd dict id     u32, the id zstd stamped into the frames; must be 0 when flag bit 0 is clear
 20      32    dictionary id    SHA-256 of the dictionary bytes; all zero when flag bit 0 is clear
 52      4     zstd version     u32, ZSTD_versionNumber() of the writer, for diagnosis
 56      8     reserved         all zero
@@ -132,9 +132,11 @@ is recorded only because zstd checks it on decode; it is not an identity
    decode without it, and refuse a dictionary with another identity.
 6. To read `length` bytes at `offset`: check `offset + length` against the
    logical length before allocating anything; find the frames overlapping the
-   span through the cumulative logical offsets; decode each with zstd (which
-   verifies the checksum) and check the decoded size against the entry; copy
-   the requested sub-spans. A span may cross any number of frames.
+   span through the cumulative logical offsets; for each, check the content
+   size in the frame header against the entry before allocating the output,
+   decode with zstd (which verifies the checksum) and check the decoded size
+   against the entry; copy the requested sub-spans. A span may cross any
+   number of frames.
 
 Every check above yields an `io::Error` with a message naming the frame or
 size involved; no input is allowed to panic the reader.

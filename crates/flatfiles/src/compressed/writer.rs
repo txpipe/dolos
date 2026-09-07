@@ -100,16 +100,11 @@ impl<W: Write> SegmentWriter<W> {
         };
         sink.write_all(&metadata.encode())?;
 
-        let pending = match options.mode {
-            FrameMode::PerBlock => Vec::new(),
-            FrameMode::Chunked { target } => Vec::with_capacity(target as usize),
-        };
-
         Ok(Self {
             sink,
             compressor,
             mode: options.mode,
-            pending,
+            pending: Vec::new(),
             entries: vec![SeekEntry {
                 compressed_size: METADATA_FRAME_SIZE as u32,
                 decompressed_size: 0,

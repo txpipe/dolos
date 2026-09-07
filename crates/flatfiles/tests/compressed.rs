@@ -419,6 +419,10 @@ fn malformed_metadata_is_an_error() {
     bad_mode[6] = 9;
     assert!(SegmentIndex::parse(&only_metadata(&metadata_frame(&bad_mode))).is_err());
 
+    let mut stray_zstd_id = payload.clone();
+    stray_zstd_id[16] = 1;
+    assert!(SegmentIndex::parse(&only_metadata(&metadata_frame(&stray_zstd_id))).is_err());
+
     let mut longer = payload.clone();
     longer.push(0);
     assert!(SegmentIndex::parse(&only_metadata(&metadata_frame(&longer))).is_err());
@@ -506,6 +510,15 @@ fn invalid_sizes_are_errors_not_panics() {
         .copy_from_slice(&(decompressed - 1).to_le_bytes());
     let index = SegmentIndex::parse(&shrunk_frame).unwrap();
     assert!(index.decode_frame(&shrunk_frame, 0, None).is_err());
+
+    let mut oversized = bytes.clone();
+    oversized[first_data_entry + 4..first_data_entry + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+    let index = SegmentIndex::parse(&oversized).unwrap();
+    let err = index.decode_frame(&oversized, 0, None).unwrap_err();
+    assert!(
+        err.to_string().contains("seek table says 4294967295"),
+        "the header check must reject the entry before allocating: {err}"
+    );
 
     let index = SegmentIndex::parse(&bytes).unwrap();
     let len = index.logical_len();
