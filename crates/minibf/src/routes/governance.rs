@@ -536,7 +536,7 @@ pub async fn proposal_metadata_by_gov_action<D: Domain>(
 where
     Option<ProposalState>: From<D::Entity>,
 {
-    let (tx, idx) = parse_gov_action_id(&gov_action_id)?;
+    let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
     let state = domain
         .read_cardano_entity::<ProposalState>(ProposalState::build_entity_key(tx, idx))?
@@ -840,6 +840,17 @@ mod tests {
             metadata.error.expect("The fetch error is absent.").code,
             blockfrost_openapi::models::dreps_inner_metadata_error::Code::ConnectionError
         );
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_metadata_by_gov_action_bad_request() {
+        let app = proposal_app();
+
+        // a malformed CIP-129 id is a 400, not a lookup that misses
+        for id in ["not-bech32", &missing_drep()] {
+            let path = format!("/governance/proposals/{id}/metadata");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
     }
 
     #[test]
