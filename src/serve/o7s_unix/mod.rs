@@ -8,6 +8,7 @@ use crate::prelude::*;
 
 mod chainsync;
 mod statequery;
+mod txmonitor;
 mod utils;
 
 #[derive(Clone)]
@@ -29,6 +30,7 @@ async fn handle_session<D: Domain, C: CancelToken>(
         plexer,
         chainsync,
         statequery,
+        txmonitor,
         ..
     } = connection;
 
@@ -44,13 +46,21 @@ async fn handle_session<D: Domain, C: CancelToken>(
         cancel.clone(),
     ));
 
-    let result = tokio::try_join!(chainsync_task, statequery_task);
+    let txmonitor_task = tokio::spawn(txmonitor::handle_session(
+        domain.clone(),
+        txmonitor,
+        cancel.clone(),
+    ));
+
+    let result = tokio::try_join!(chainsync_task, statequery_task, txmonitor_task);
     plexer.abort().await;
 
-    let (chainsync_res, statequery_res) = result.map_err(|e| ServeError::Internal(e.into()))?;
+    let (chainsync_res, statequery_res, txmonitor_res) =
+        result.map_err(|e| ServeError::Internal(e.into()))?;
 
     chainsync_res?;
     statequery_res?;
+    txmonitor_res?;
 
     Ok(())
 }

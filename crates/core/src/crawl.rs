@@ -36,11 +36,18 @@ impl<D: Domain> Batch<D> {
     }
 
     fn from_archive(last_point: ChainPoint, domain: &D) -> Result<Self, DomainError> {
+        // Origin is not a block, so there's nothing already seen to skip; for
+        // any concrete point, the block at the point itself was already
+        // delivered (or acknowledged via intersection) and must be skipped.
+        let seen = match &last_point {
+            ChainPoint::Origin => 0,
+            _ => 1,
+        };
+
         let page = domain
             .archive()
             .get_range(Some(last_point.slot()), None)?
-            // skip the last point, we already seen it
-            .skip(1)
+            .skip(seen)
             .take(LOAD_BATCH_SIZE)
             .map(|(slot, body)| (ChainPoint::Slot(slot), Arc::new(body)))
             .collect::<VecDeque<_>>();
