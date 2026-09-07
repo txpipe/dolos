@@ -7,9 +7,9 @@ pub mod memory;
 mod mempool;
 mod noop;
 
-pub use memory::{MemoryIndexStore, MemoryIndexWriter, MemoryStateStore, MemoryStateWriter};
+pub use memory::{MemoryArchiveStore, MemoryArchiveWriter, MemoryStateStore, MemoryStateWriter};
 pub use mempool::{EphemeralMempool, EphemeralMempoolStream};
 pub use noop::{
     EmptyBlockIter, EmptyEntityValueIter, EmptyLogIter, EmptySlotIter, NoOpArchiveStore,
-    NoOpArchiveWriter, NoOpIndexStore, NoOpIndexWriter,
+    NoOpArchiveWriter,
 };

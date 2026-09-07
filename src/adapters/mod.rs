@@ -7,14 +7,11 @@ use dolos_cardano::CardanoLogic;
 use dolos_core::{
     archive::ArchiveStore as _,
     config::{StorageConfig, SyncConfig},
-    indexes::IndexStore as _,
     *,
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
-pub use storage::{
-    ArchiveStoreBackend, IndexStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend,
-};
+pub use storage::{ArchiveStoreBackend, MempoolBackend, StateStoreBackend, WalStoreBackend};
 
 /// Type alias for the WAL store specialized for Cardano.
 pub type WalAdapter = WalStoreBackend<dolos_cardano::CardanoDelta>;
@@ -44,7 +41,6 @@ pub struct DomainAdapter {
     pub chain: Arc<std::sync::RwLock<CardanoLogic>>,
     pub state: StateStoreBackend,
     pub archive: ArchiveStoreBackend,
-    pub indexes: IndexStoreBackend,
     pub mempool: MempoolBackend,
     pub tip_broadcast: tokio::sync::broadcast::Sender<TipEvent>,
 }
@@ -62,7 +58,6 @@ impl DomainAdapter {
         self.wal.shutdown().map_err(DomainError::WalError)?;
         self.state.shutdown().map_err(DomainError::StateError)?;
         self.archive.shutdown().map_err(DomainError::ArchiveError)?;
-        self.indexes.shutdown().map_err(DomainError::IndexError)?;
 
         tracing::info!("domain adapter: graceful shutdown complete");
         Ok(())
@@ -77,7 +72,6 @@ impl Domain for DomainAdapter {
     type Wal = WalAdapter;
     type State = StateStoreBackend;
     type Archive = ArchiveStoreBackend;
-    type Indexes = IndexStoreBackend;
     type Mempool = MempoolBackend;
     type TipSubscription = TipSubscription;
 
@@ -103,10 +97,6 @@ impl Domain for DomainAdapter {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
-    }
-
-    fn indexes(&self) -> &Self::Indexes {
-        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {
@@ -173,7 +163,7 @@ impl pallas::interop::utxorpc::LedgerContext for DomainAdapter {
         }
 
         for (tx_hash_bytes, txo_refs) in by_tx {
-            let Ok(Some(slot)) = self.indexes().slot_by_tx_hash(&tx_hash_bytes) else {
+            let Ok(Some(slot)) = self.archive().slot_by_tx_hash(&tx_hash_bytes) else {
                 continue;
             };
             let Ok(Some(block_bytes)) = self.archive().get_block_by_slot(&slot) else {

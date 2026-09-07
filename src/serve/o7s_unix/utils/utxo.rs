@@ -1,5 +1,5 @@
 use crate::prelude::*;
-use dolos_core::{IndexStore, StateStore};
+use dolos_core::StateStore;
 use pallas::codec::utils::{AnyCbor, AnyUInt, KeyValuePairs};
 use pallas::ledger::addresses::Address;
 use pallas::ledger::primitives::conway::DatumOption;
@@ -21,7 +21,7 @@ pub fn build_utxo_by_address_response<D: Domain>(
         debug!(addr_len = addr_bytes.len(), addr_hex = %hex::encode(addr_bytes), "looking up utxos for address");
 
         let mut refs = domain
-            .indexes()
+            .state()
             .utxos_by_tag("address", addr_bytes)
             .map_err(|e| Error::server(format!("failed to get utxos by address: {}", e)))?;
 
@@ -32,7 +32,7 @@ pub fn build_utxo_by_address_response<D: Domain>(
                 let payment_bytes = shelley_addr.payment().to_vec();
                 debug!(payment_hex = %hex::encode(&payment_bytes), "trying payment credential lookup");
                 refs = domain
-                    .indexes()
+                    .state()
                     .utxos_by_tag("payment", &payment_bytes)
                     .map_err(|e| Error::server(format!("failed to get utxos by payment: {}", e)))?;
                 debug!(

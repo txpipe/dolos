@@ -23,10 +23,6 @@ pub struct Args {
     #[arg(long, action)]
     include_state: bool,
 
-    // Whether to include indexes
-    #[arg(long, action)]
-    include_indexes: bool,
-
     /// Skip the compact and integrity check of the archive database
     #[arg(long, action)]
     skip_sanitization: bool,
@@ -130,20 +126,6 @@ fn append_dir_filtered(
     Ok(())
 }
 
-fn prepare_archive(
-    archive: &mut dolos_redb3::archive::ArchiveStore,
-    pb: &crate::feedback::ProgressBar,
-) -> miette::Result<()> {
-    let db = archive.db_mut();
-    pb.set_message("compacting archive");
-    db.compact().into_diagnostic()?;
-
-    pb.set_message("checking archive integrity");
-    db.check_integrity().into_diagnostic()?;
-
-    Ok(())
-}
-
 pub fn run(
     config: &RootConfig,
     args: &Args,
@@ -162,15 +144,19 @@ pub fn run(
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
             bail!("archive sanitization needs exclusive access to the archive database")
         }
-        // Sanitization requires direct backend access: redb compacts and
-        // integrity-checks the database file, fjall major-compacts both
-        // keyspaces (an LSM has no offline integrity check to run).
-        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
+        // The memory archive holds its blocks in process, so there is no
+        // `<root>/archive` for `--include-archive` to pick up. The other
+        // stores may still be on disk, so only the archive half is refused.
+        ArchiveStoreBackend::Memory(_) if args.include_archive => {
+            bail!("the in-memory archive keeps nothing on disk to export")
+        }
+        // Sanitization requires direct backend access: fjall major-compacts
+        // both keyspaces (an LSM has no offline integrity check to run).
         ArchiveStoreBackend::Fjall(s) if !args.skip_sanitization => {
             pb.set_message("compacting archive");
             s.compact().into_diagnostic()?;
         }
-        ArchiveStoreBackend::Redb(_)
+        ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
@@ -183,7 +169,6 @@ pub fn run(
     stores.wal.shutdown().into_diagnostic()?;
     stores.state.shutdown().into_diagnostic()?;
     stores.archive.shutdown().into_diagnostic()?;
-    stores.indexes.shutdown().into_diagnostic()?;
     drop(stores);
 
     if args.include_archive {
@@ -198,14 +183,6 @@ pub fn run(
         let path = root.join("state");
 
         append_path_filtered(&mut archive, &path, Path::new("state"))?;
-
-        pb.set_message("creating archive");
-    }
-
-    if args.include_indexes {
-        let path = root.join("index");
-
-        append_path_filtered(&mut archive, &path, Path::new("index"))?;
 
         pb.set_message("creating archive");
     }

@@ -1,0 +1,45 @@
+name: PR checks
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+  # `main` merges through a queue, and a required check that never reports on
+  # the merge group stalls it. The title was validated on the PR before it was
+  # enqueued and is fixed from then on, so here the job only has to report.
+  merge_group:
+
+permissions:
+  pull-requests: read
+
+jobs:
+  title:
+    name: title is a conventional commit
+    runs-on: ubuntu-latest
+    steps:
+      # Squash merges take the PR title as the commit subject, and cliff.toml
+      # drops unconventional subjects from the changelog, so the title is the
+      # changelog entry. `pull_request_target` so fork PRs get the token; the
+      # job never checks out the branch, so that grant is safe.
+      - uses: amannn/action-semantic-pull-request@v6
+        if: github.event_name != 'merge_group'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # The types cliff.toml's commit_parsers group, plus `release`.
+          types: |
+            feat
+            fix
+            docs
+            ci
+            perf
+            refactor
+            style
+            test
+            chore
+            revert
+            release
+          requireScope: false
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject "{subject}" starts with a capital letter. Keep it lowercase;
+            the changelog generator capitalises it on render.

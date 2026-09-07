@@ -15,8 +15,8 @@
 //!
 //! The ordering rules are ADR-004's, and three of the five are exactly the
 //! iteration order the source stores already promise
-//! ([`dolos_core::IndexStore::iter_archive_tags`],
-//! [`dolos_core::IndexStore::iter_exact_records`]). The validator is not a
+//! ([`dolos_core::ArchiveStore::iter_archive_tags`],
+//! [`dolos_core::ArchiveStore::iter_exact_records`]). The validator is not a
 //! substitute for that promise; it is what catches a driver that merges,
 //! chunks or parallelizes those iterators and loses it.
 //!

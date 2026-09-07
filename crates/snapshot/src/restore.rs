@@ -17,36 +17,41 @@
 //! 2. Select layers ([`plan`]) and preflight free space ([`Plan::preflight`]).
 //!    Selection is profile-side by necessity: a layer's `scope` is opaque to
 //!    the protocol, so nothing but this crate can read an epoch out of one.
-//! 3. [`dolos_core::IndexStore::initialize_schema`].
-//! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
-//!    `indexes`.
-//! 5. The state tip — every shard of every `state-{ns}` kind — with
-//!    `set_cursor` **last**.
-//! 6. Rebuild the live-UTxO index dimensions from the restored UTxO set. They
-//!    are never shipped — ADR-004's Amendment 2 — so this is where they come
-//!    back.
+//! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
+//!    `indexes` — all three into the archive store.
+//! 4. The state tip — every shard of every `state-{ns}` kind.
+//! 5. Rebuild the live-UTxO tags from the restored UTxO set, into the state
+//!    store beside it. They are never shipped — ADR-004's Amendment 2 — so this
+//!    is where they come back, and `set_cursor` lands after them, as the last
+//!    write of the restore.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
 //!
-//! ## Why `set_cursor` is last, and what that does and does not buy
+//! ## Why `set_cursor` is the last write
 //!
-//! `has_existing_data()` reads the state cursor and nothing else, so writing it
-//! only after every shard has landed means an interrupted restore leaves a
-//! store set the next `bootstrap` treats as empty rather than as a node.
+//! `has_existing_data()` reads the state cursor and nothing else, so a node
+//! reads as restored exactly when that cursor is there. Writing it after step 6
+//! makes it the completion marker for the whole restore rather than for the
+//! state tip alone: a node whose ledger is complete and whose live-UTxO
+//! dimensions are not has no cursor, and the next `bootstrap` treats it as
+//! empty — which is what it is.
 //!
-//! It buys that and no more. Step 6 runs *after* the cursor is set, so an
-//! interruption between the two leaves a node whose ledger is complete and
-//! whose live-UTxO indexes are not — and `has_existing_data()` will say it is
-//! restored.
+//! PROFILE.md §"Restore pipeline" moves the cursor rather than marking
+//! completeness a second time in the progress file, and the implementation is
+//! why it can: [`rebuild_utxo_tags`] never reads the cursor off the state
+//! store, so nothing between the tip and the rebuild consumes the cursor and
+//! the write moves on its own. It also
+//! costs nothing on resume — the tip is never checkpointed and the rebuild is
+//! unconditional, so a resumed restore already redoes precisely the work that
+//! now follows the cursor.
 //!
-//! `--continue` **improves** that and does not close it. A resumed restore
-//! always redoes the state tip and always rebuilds the live-UTxO index, because
-//! the tip is never checkpointed — so the partial-`utxo::*` node is repairable
-//! by an operator who resumes, where before it could only be thrown away. What
-//! it does not answer is whether `set_cursor` should move *after* step 6. That
-//! is the profile spec's ordering, it is an open question with its owner, and
-//! nothing here reorders the pipeline to pre-empt it.
+//! What it leaves is worth stating rather than discovering: an interruption
+//! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
+//! `--continue` repairs it cheaply, because the epoch layers stay checkpointed;
+//! without it the stele is restored again from the top over keyed writes, which
+//! is a rewrite and not a duplication — the behaviour every interruption before
+//! the tip already had.
 //!
 //! ## Resume, and where the checkpoint goes
 //!
@@ -93,7 +98,8 @@
 //! so a redone `blocks` layer leaves the superseded bodies in the segment file
 //! with nothing pointing at them. Reads go through the table, so the node is
 //! correct; the dead space is bounded by one layer and is the price of not
-//! starting over.
+//! starting over. The preflight carries no addend for it; the reason is on
+//! [`Plan::remaining_uncompressed_size`].
 //!
 //! ## Memory
 //!
@@ -119,10 +125,10 @@ use std::{
     sync::Arc,
 };
 
-use dolos_cardano::indexes::index_delta_from_utxo_delta;
+use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, IndexStore,
-    IndexWriter, Namespace, StateStore, StateWriter, TxoRef, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, Namespace,
+    StateStore, StateWriter, TxoRef, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -350,15 +356,23 @@ impl Plan {
         index: &BlobIndex,
         resume: &Resume,
     ) -> Result<Remaining, Error> {
-        let epochs = self
-            .immutable_layers()
-            .filter(|descriptor| !resume.is_done(&descriptor.diff_id));
+        Ok(Remaining::of(stele, index, self.remaining_layers(resume))?)
+    }
 
-        Ok(Remaining::of(
-            stele,
-            index,
-            epochs.chain(self.tip_layers()),
-        )?)
+    /// The layers a run with `resume` behind it still has to read: the
+    /// immutable ones it has not recorded, and every tip layer.
+    ///
+    /// One definition for both halves of "what is left" — the compressed bytes
+    /// [`Plan::remaining`] reports and the uncompressed room
+    /// [`Plan::remaining_uncompressed_size`] demands. Two filters saying the
+    /// same thing is two places for the resume rule to drift.
+    pub fn remaining_layers<'a>(
+        &'a self,
+        resume: &'a Resume,
+    ) -> impl Iterator<Item = &'a LayerDescriptor> {
+        self.immutable_layers()
+            .filter(|descriptor| !resume.is_done(&descriptor.diff_id))
+            .chain(self.tip_layers())
     }
 
     /// Uncompressed bytes across the selected layers.
@@ -370,6 +384,30 @@ impl Plan {
         self.layers().map(|l| l.uncompressed_size).sum()
     }
 
+    /// Uncompressed bytes a run with `resume` behind it still has to write.
+    ///
+    /// [`Plan::uncompressed_size`] made resume-aware, and the number
+    /// [`Plan::preflight`] sizes the destination on: the layers a resumed run
+    /// will actually write, which is the immutable ones the resume has not
+    /// recorded plus every tip layer. Charging a resume for layers its own
+    /// earlier attempt already committed measures it against free space those
+    /// layers consumed and then bills for them a second time, which refuses
+    /// runs that would finish.
+    ///
+    /// **No addend.** A redone layer is rewritten and not appended — every
+    /// write path is keyed — with one exception, the redb archive, which
+    /// leaves the superseded block bodies of an interrupted `blocks` layer as
+    /// dead space in its segment file. That is past spend, not future spend:
+    /// [`preflight::check`] reads free space at check time, so those bytes are
+    /// already out of what it compares against, and the layer that left them
+    /// is not recorded as done, so its full uncompressed size is charged
+    /// again.
+    pub fn remaining_uncompressed_size(&self, resume: &Resume) -> u64 {
+        self.remaining_layers(resume)
+            .map(|l| l.uncompressed_size)
+            .sum()
+    }
+
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
     /// Two needs, one policy ([`crate::preflight`]): the stores this restore
@@ -379,17 +417,27 @@ impl Plan {
     /// the storage filesystem they are two claims on one pool of free bytes,
     /// and the default `<storage.path>/scratch` makes that the ordinary case.
     ///
+    /// Both needs are resume-aware, and for the same reason: what a run has to
+    /// fit is what *this* run will move, not what the plan describes. The
+    /// destination's is [`Plan::remaining_uncompressed_size`], the staging
+    /// volume's is the largest layer the caller's [`Remaining`] names.
+    ///
     /// The destination comparison is deliberately against the *uncompressed*
-    /// size of the selected layers rather than against a prediction of what the
+    /// size of those layers rather than against a prediction of what the
     /// stores will occupy. It is the only number the inscription carries, it is
     /// an underestimate for every backend (a store keeps indexes and slack of
     /// its own), and an underestimate is the safe direction for a check whose
     /// job is to catch the obviously-doomed run.
-    pub fn preflight(&self, path: &Path, staging: Option<Staging<'_>>) -> Result<(), Error> {
+    pub fn preflight(
+        &self,
+        path: &Path,
+        resume: &Resume,
+        staging: Option<Staging<'_>>,
+    ) -> Result<(), Error> {
         let mut needs = vec![preflight::Need::of(
             "restoring it",
             path,
-            self.uncompressed_size(),
+            self.remaining_uncompressed_size(resume),
         )];
 
         if let Some(staging) = staging {
@@ -824,25 +872,20 @@ pub fn progress_path_in(storage_path: &Path) -> PathBuf {
     storage_path.join(PROGRESS_FILE)
 }
 
-/// The three stores a restore writes into.
+/// The two stores a restore writes into.
 ///
 /// One value because they are one node. Threading them separately through four
 /// call layers is what took every signature here to the edge, and they have
 /// never once been supplied from different places.
 #[derive(Debug, Clone, Copy)]
-pub struct Target<'a, A, S, I> {
+pub struct Target<'a, A, S> {
     pub archive: &'a A,
     pub state: &'a S,
-    pub indexes: &'a I,
 }
 
-impl<'a, A, S, I> Target<'a, A, S, I> {
-    pub fn new(archive: &'a A, state: &'a S, indexes: &'a I) -> Self {
-        Self {
-            archive,
-            state,
-            indexes,
-        }
+impl<'a, A, S> Target<'a, A, S> {
+    pub fn new(archive: &'a A, state: &'a S) -> Self {
+        Self { archive, state }
     }
 }
 
@@ -879,11 +922,11 @@ pub struct Restoring<'a> {
 /// while the download that dominates a registry restore is only visible to the
 /// transport. [`Observer::silent`] is what a caller with nothing to render
 /// passes, and a silent run is byte-for-byte the run this was before the seam.
-pub fn restore<R, A, S, I>(
+pub fn restore<R, A, S>(
     stele: &R,
     index: &BlobIndex,
     plan: &Plan,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     budget: Budget,
     checkpoint: &mut Checkpoint,
     observer: &Observer,
@@ -892,13 +935,8 @@ where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
-    let Target {
-        archive,
-        state,
-        indexes,
-    } = target;
+    let Target { archive, state } = target;
 
     stele.observe(observer.clone());
 
@@ -912,8 +950,6 @@ where
 
     let cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
-
-    indexes.initialize_schema()?;
 
     for epoch in &plan.epochs {
         info!(
@@ -950,7 +986,7 @@ where
             let at = cursor.open(INDEXES, &descriptor.scope);
 
             let (count, outcome) =
-                checkpoint.fetch(descriptor, || restore_indexes(&reader, descriptor, indexes))?;
+                checkpoint.fetch(descriptor, || restore_indexes(&reader, descriptor, archive))?;
 
             cursor.close(at, INDEXES, outcome);
             summary.count(outcome);
@@ -978,19 +1014,20 @@ where
         }
     }
 
-    // Last, so that until this commit lands `has_existing_data()` reports an
-    // empty node rather than a half-restored one.
+    info!(utxos = summary.utxos, "rebuilding the live-utxo tags");
+
+    rebuild_utxo_tags(state, budget)?;
+
+    // The last write of the restore, the live-utxo dimensions above included:
+    // until this commit lands `has_existing_data()` reports an empty node
+    // rather than a half-restored one.
     let writer = state.start_writer()?;
     writer.set_cursor(plan.position.point.clone())?;
     writer.commit()?;
 
-    info!(utxos = summary.utxos, "rebuilding the live-utxo indexes");
-
-    rebuild_utxo_indexes(state, indexes, &plan.position.point, budget)?;
-
-    // Here and not one step earlier. The window between `set_cursor` and the
-    // rebuild above is the one an operator repairs by resuming, and a progress
-    // file deleted at the cursor would have taken that away.
+    // After the cursor, because the cursor is what says the restore finished.
+    // A progress file deleted before it would take away the resume that makes
+    // an interruption cheap.
     checkpoint.clear()?;
 
     Ok(summary)
@@ -1011,18 +1048,17 @@ where
 /// a registry hands over the directory it was opened with. Asking the
 /// transport is what keeps the volume the preflight sizes and the volume the
 /// transport writes to the same volume.
-pub(crate) fn restore_stele<R, A, S, I>(
+pub(crate) fn restore_stele<R, A, S>(
     stele: &R,
     node: Restoring<'_>,
     scratch_dir: Option<&Path>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let plan = plan(stele, node.network_magic, node.max_history)?;
 
@@ -1037,12 +1073,12 @@ where
         inherited: checkpoint.resume().len(),
     };
 
-    // Below the sizes rather than above them, and still ADR-004's step 2:
-    // what the staging volume has to hold is the largest layer this run will
-    // *actually* pull, which is a question about the resume and so cannot be
-    // asked before the checkpoint is open. Nothing between the plan and here
-    // writes — `Checkpoint::open` only reads the progress file and
-    // `blob_index` only reads blobs — so the preflight still refuses before
+    // Below the checkpoint rather than above it, and still ADR-004's step 2:
+    // both needs are questions about what this run will actually move — the
+    // largest layer it will pull, and the layers it still has to write — so
+    // neither can be asked before the resume is known. Nothing between the plan
+    // and here writes — `Checkpoint::open` only reads the progress file and
+    // `blob_index` only reads the stele — so the preflight still refuses before
     // the first byte is written, which is the whole of its promise.
     let staging = scratch_dir.map(|dir| Staging {
         dir,
@@ -1050,7 +1086,7 @@ where
         unsized_layers: outlook.remaining.unsized_layers,
     });
 
-    plan.preflight(node.storage_path, staging)?;
+    plan.preflight(node.storage_path, checkpoint.resume(), staging)?;
 
     let summary = restore(
         stele,
@@ -1067,20 +1103,21 @@ where
 
 /// Restore from a stele directory.
 ///
-/// `blob_index` is the expensive part and is unavoidable for a directory: an
-/// inscription names layers by identity and a directory has no manifest, so the
-/// map from a descriptor to the file holding it is rebuilt by decompressing
-/// every blob once. A registry supplies it off its manifest instead.
-pub fn restore_dir<A, S, I>(
+/// An inscription names layers by identity, so a reader needs a map from a
+/// descriptor to the file holding it. A stele sealed by this implementation
+/// carries one — `stelae::dir::BLOB_INDEX_FILE`, the sidecar that makes a
+/// directory a degenerate registry — and `blob_index` reads it. One published
+/// before that file existed has none, and the map is rebuilt by decompressing
+/// every blob once *before* the restore decompresses the ones it wants.
+pub fn restore_dir<A, S>(
     root: impl Into<std::path::PathBuf>,
     node: Restoring<'_>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = stelae::dir::SteleDir::open(root)?;
 
@@ -1261,17 +1298,20 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 /// is this caller's, which is what the trait says, and the sort order the
 /// backends want holds across the whole layer because that is what the codec's
 /// `OrderCheck` made the exporter prove.
-fn restore_indexes<R: SteleReader, I: IndexStore>(
+///
+/// The records go into the archive, beside the blocks they project — the same
+/// store `restore_blocks` wrote the epoch's `blocks` layer into.
+fn restore_indexes<R: SteleReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
-    indexes: &I,
+    archive: &A,
 ) -> Result<u64, Error> {
     reader.drain(
         descriptor,
         indexes::decode,
         |_| std::mem::size_of::<IndexRecord>(),
         |chunk| {
-            let writer = indexes.start_writer()?;
+            let writer = archive.start_writer()?;
 
             writer.append_prehashed(chunk)?;
             writer.commit()?;
@@ -1339,23 +1379,14 @@ fn restore_state<R: SteleReader, S: StateStore>(
     Ok((entities, 0))
 }
 
-/// Rebuild the live-UTxO index dimensions from the restored UTxO set.
+/// Rebuild the live-UTxO tags from the restored UTxO set.
 ///
 /// `utxo::{address,payment,stake,policy,asset}` track the current UTxO set, so
 /// ADR-004's Amendment 2 leaves them out of the epoch layers and rebuilds them
 /// here: linear over a set that has just been written anyway, and cheaper than
-/// shipping them.
-///
-/// The last call also aligns the index cursor, which
-/// [`IndexWriter::append_prehashed`] deliberately never touches. It runs
-/// unconditionally — a stele with an empty UTxO set still has to leave a cursor
-/// behind, or `bootstrap` reads the index store as never indexed.
-fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
-    state: &S,
-    indexes: &I,
-    cursor: &ChainPoint,
-    budget: Budget,
-) -> Result<(), Error> {
+/// shipping them. The tags land in the state store beside the set, in chunks
+/// of `budget.commit_records`.
+fn rebuild_utxo_tags<S: StateStore>(state: &S, budget: Budget) -> Result<(), Error> {
     let mut chunk: Vec<(TxoRef, Arc<EraCbor>)> = Vec::new();
 
     let apply = |chunk: Vec<(TxoRef, Arc<EraCbor>)>| -> Result<(), Error> {
@@ -1364,9 +1395,9 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
             ..Default::default()
         };
 
-        let writer = indexes.start_writer()?;
+        let writer = state.start_writer()?;
 
-        writer.apply(&index_delta_from_utxo_delta(cursor.clone(), &delta))?;
+        writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))?;
         writer.commit()?;
 
         Ok(())
@@ -1382,7 +1413,10 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
         }
     }
 
-    // Unconditional: this is the call that leaves the cursor.
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
     apply(chunk)
 }
 
@@ -1506,7 +1540,7 @@ mod source_tests {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use stelae::{inscription::LayerDescriptor, Digest};
+    use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
     use super::*;
     use crate::MAINNET_MAGIC;
@@ -2099,12 +2133,16 @@ mod tests {
             skipped_unknown: Vec::new(),
         };
 
-        plan.preflight(temp.path(), None).unwrap();
+        plan.preflight(temp.path(), &Resume::none(), None).unwrap();
 
         // A directory that does not exist yet is measured through its parent,
         // which is the shape a fresh node's storage path has.
-        plan.preflight(&temp.path().join("not").join("created").join("yet"), None)
-            .unwrap();
+        plan.preflight(
+            &temp.path().join("not").join("created").join("yet"),
+            &Resume::none(),
+            None,
+        )
+        .unwrap();
 
         let tip = crate::state_layer_count() as u64;
 
@@ -2112,8 +2150,94 @@ mod tests {
             descriptor.uncompressed_size = u64::MAX / tip;
         }
 
-        let err = plan.preflight(temp.path(), None).unwrap_err();
+        let err = plan
+            .preflight(temp.path(), &Resume::none(), None)
+            .unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+    }
+
+    /// The destination need is the resume's, not the plan's: a resumed
+    /// restore is charged for the layers it still has to write and not for the
+    /// ones an earlier attempt already put on the volume.
+    ///
+    /// Two-sided, because both directions are failures. Charging for committed
+    /// layers refuses a run that would finish; charging for none of them would
+    /// pass a run that dies at hour eight.
+    #[test]
+    fn the_preflight_charges_a_resume_only_for_what_is_left() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut layers = state_layers();
+        layers.push(epoch_descriptor(BLOCKS, 0, 0xa0));
+        layers.push(epoch_descriptor(BLOCKS, 1, 0xa1));
+        layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
+
+        let stele = inscription(layers);
+
+        let mut plan = Plan {
+            position: read_position(&stele.position).unwrap(),
+            sequence: stele.sequence,
+            epochs: select_epochs(&stele).unwrap(),
+            state: select_state(&stele).unwrap().tip,
+            state_dumps: BTreeMap::new(),
+            skipped_epochs: 0,
+            skipped_unknown: Vec::new(),
+        };
+
+        // Epochs 0 and 1 are each larger than any volume; epoch 2 and the tip
+        // keep their hundred bytes. So the whole plan cannot fit anywhere, and
+        // what is left once the first two are committed fits everywhere.
+        for epoch in plan.epochs.iter_mut().take(2) {
+            epoch.blocks.as_mut().unwrap().uncompressed_size = u64::MAX / 4;
+        }
+
+        let blocks_of = |epochs: std::ops::Range<usize>| {
+            let mut progress = RestoreProgress::new(Digest::from_bytes([0xdd; 32]));
+
+            for epoch in &plan.epochs[epochs] {
+                progress.record(epoch.blocks.as_ref().unwrap().diff_id);
+            }
+
+            Resume::from_progress(Some(&progress))
+        };
+
+        let tip = crate::state_layer_count() as u64;
+
+        // An empty resume asks for exactly what it asked for before there was
+        // a resume at all.
+        assert_eq!(
+            plan.remaining_uncompressed_size(&Resume::none()),
+            plan.uncompressed_size()
+        );
+
+        let err = plan
+            .preflight(temp.path(), &Resume::none(), None)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+
+        // Both impossible epochs committed: what is left is epoch 2 and the
+        // tip, and the run proceeds on a volume that could never have held the
+        // whole stele.
+        let resume = blocks_of(0..2);
+        assert_eq!(
+            plan.remaining_uncompressed_size(&resume),
+            (tip + 1) * 100,
+            "the tip is always redone and is always charged"
+        );
+        plan.preflight(temp.path(), &resume, None).unwrap();
+
+        // One of them committed: the other is still ahead of this run, and it
+        // is still refused. Subtracting too much is the dangerous direction.
+        let err = plan
+            .preflight(temp.path(), &blocks_of(0..1), None)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+
+        // Every epoch committed leaves the tip, which no resume ever skips.
+        assert_eq!(
+            plan.remaining_uncompressed_size(&blocks_of(0..3)),
+            tip * 100
+        );
     }
 
     /// The staging half: a scratch volume that cannot hold the largest layer
@@ -2141,6 +2265,7 @@ mod tests {
         let staging = |largest_layer, unsized_layers| {
             plan.preflight(
                 temp.path(),
+                &Resume::none(),
                 Some(Staging {
                     dir: &scratch,
                     largest_layer,

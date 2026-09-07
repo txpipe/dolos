@@ -6,7 +6,7 @@ Dolos is a lightweight Cardano node designed specifically for keeping an updated
 
 ## Storage Concepts
 
-Dolos uses four distinct storage backends, each serving a specific purpose:
+Dolos uses three distinct storage backends, each serving a specific purpose:
 
 ### StateStore
 - **Purpose**: Current ledger state (the "world view")
@@ -16,7 +16,7 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 
 ### ArchiveStore
 - **Purpose**: Historical block storage with temporal indexing
-- **Contents**: Raw blocks indexed by slot, entity logs keyed by `LogKey` (slot + entity key)
+- **Contents**: Raw blocks indexed by slot, entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
 - **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
@@ -26,14 +26,11 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 - **Traits**: `WalStore`
 - **Database**: `<storage.path>/wal`
 
-### IndexStore
-- **Purpose**: Cross-cutting indexes for fast lookups
-- **Contents**: Two types of indexes:
-  - **UTxO Filter Indexes**: Current state queries (by address, payment, stake, policy, asset)
-  - **Archive Indexes**: Historical queries (by block hash, tx hash, slots with address/asset/etc.)
-- **Traits**: `IndexStore` (reads) + `IndexWriter` (batched writes)
-- **Database**: `<storage.path>/index` (isolated from other stores)
-- **Design Note**: Returns primitive values (slots, UTxO refs) not block data. Use `QueryHelpers` to join with archive for full data.
+### Where the indexes live
+There is no standalone index store — it was removed in v1.7. Every index is a
+projection, and lives in the store that holds what it projects:
+- the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
+- the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
 
 ### Database File Organization
 
@@ -42,7 +39,6 @@ Dolos uses four distinct storage backends, each serving a specific purpose:
 ├── wal      # Write-Ahead Log database
 ├── state    # Ledger state database
 ├── archive  # Archive index plus flat block segment files
-├── index    # Consolidated index database
 └── scratch  # not a store: stele layers staged in flight by a registry transfer
 ```
 
@@ -71,7 +67,7 @@ The project follows a modular workspace architecture with clear separation of co
 - **Key Modules**:
   - `state`: `StateStore` and `StateWriter` traits, entity system
   - `archive`: `ArchiveStore` and `ArchiveWriter` traits, `SlotTags` for indexing metadata
-  - `indexes`: `IndexStore` and `IndexWriter` traits for cross-cutting indexes
+  - `indexes`: the chain-agnostic index record types (`Tag`, `UtxoIndexDelta`, `ArchiveIndexDelta`, `TagRecord`, `ExactRecord`, `IndexRecord`) the state and archive stores consume
   - `wal`: `WalStore` trait for write-ahead logging
   - `batch`: `WorkBatch`, `WorkBlock`, `WorkDeltas` for batch processing pipeline
   - `facade`: High-level operations (`execute_batch`, `roll_forward`, `import_blocks`)
@@ -98,29 +94,28 @@ The project follows a modular workspace architecture with clear separation of co
   - `state`: `StateStore` implementation with UTxO storage and entity tables
   - `archive`: `ArchiveStore` implementation with block and log storage
   - `wal`: `WalStore` implementation for crash recovery
-  - `indexes`: `IndexStore` implementation (isolated database) with:
-    - UTxO filter indexes (by address, payment, stake, policy, asset)
-    - Archive indexes (by block hash, tx hash, address, asset, datum, etc.)
 - **Role**: Persistence layer implementing the core storage traits
 
 #### `dolos-fjall` (Alternative Storage Backend)
 - **Purpose**: Alternative storage backend implementation using the Fjall LSM-tree embedded database
 - **Design Philosophy**: Optimized for write-heavy workloads with many keys, ideal for blockchain data
 - **Components**:
-  - `state`: `StateStore` implementation with three-keyspace design:
+  - `state`: `StateStore` implementation with four-keyspace design:
     - **`state-cursor`**: Chain position tracking (single key-value)
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
-  - `index`: `IndexStore` implementation with three-keyspace design:
-    - **`index-cursor`**: Chain position tracking
+    - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
+  - `archive`: `ArchiveStore` implementation with four-keyspace design:
+    - **`archive-blocks`**: Slot -> packed block locations in the flat segment files
+    - **`archive-logs`**: All log namespaces with `[ns_hash:8][log_key:40]` keys
+    - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
-    - **`index-tags`**: Tag-based prefix scans for UTxO and block tags
   - `keys`: Shared key encoding utilities
 - **Key Advantages**:
   - Reduced segment files compared to per-entity keyspaces
   - Chain-agnostic design using dimension hashing
   - LSM-tree optimization for high-write blockchain workloads
-- **Role**: Alternative persistence layer implementing `StateStore` and `IndexStore` traits
+- **Role**: Alternative persistence layer implementing `StateStore` and `ArchiveStore` traits
 
 ### Service Crates
 
@@ -176,7 +171,7 @@ dolos (main binary)
 
 ### Work Unit Pipeline
 
-Dolos processes blockchain data through a pipeline of **work units**. Each work unit functions as a mini-ETL job that extracts data from storage, transforms it using chain-specific logic, and loads results into the appropriate stores (state, archive, index).
+Dolos processes blockchain data through a pipeline of **work units**. Each work unit functions as a mini-ETL job that extracts data from storage, transforms it using chain-specific logic, and loads results into the appropriate stores (state, archive).
 
 #### WorkUnit Trait
 
@@ -186,8 +181,7 @@ The `WorkUnit<D: Domain>` trait (`dolos-core/src/work_unit.rs`) defines the cont
 2. `compute()` - Perform chain-specific transformations
 3. `commit_wal()` - Write to WAL for crash recovery
 4. `commit_state()` - Persist state changes to StateStore
-5. `commit_archive()` - Persist block data to ArchiveStore
-6. `commit_indexes()` - Update IndexStore
+5. `commit_archive()` - Persist block data, with the index entries it projects, to ArchiveStore
 
 The executor implementations live in `dolos-core/src/sync.rs` (full lifecycle) and `dolos-core/src/import.rs` (bulk import, skips WAL).
 
@@ -215,14 +209,12 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
-    type Indexes: IndexStore;
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
 
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
-    fn indexes(&self) -> &Self::Indexes;
     fn mempool(&self) -> &Self::Mempool;
     // ... configuration and chain access methods
 }
@@ -246,7 +238,6 @@ writer.commit()?;
 This pattern is used by:
 - `StateStore` → `StateWriter`
 - `ArchiveStore` → `ArchiveWriter`
-- `IndexStore` → `IndexWriter`
 
 ### Entity-Delta Pattern
 State mutations use a reversible delta pattern:
@@ -278,7 +269,7 @@ fn blocks_with_address(&self, address, start, end) -> SparseBlockIter;
 
 ### Trait-Based Extensibility
 - `ChainLogic` trait allows different blockchain implementations
-- `StateStore`, `ArchiveStore`, `IndexStore`, `WalStore` for storage components
+- `StateStore`, `ArchiveStore`, `WalStore` for storage components
 - `MempoolStore` for transaction mempool
 - Service feature flags enable modular functionality
 
@@ -286,7 +277,7 @@ fn blocks_with_address(&self, address, start, end) -> SparseBlockIter;
 
 - **Lightweight Architecture**: Intentionally avoids full consensus validation for minimal resource usage
 - **Trust Model**: Relies on trusted upstream peers rather than independent validation
-- **Separate Index Database**: Indexes live in their own database file (`index`) for independent scaling, tuning, and rebuilding without touching primary data
+- **Indexes Beside What They Project**: Each index is a projection, so it lives in the store holding its source and commits in the same batch — no separate database, no third cursor, no cross-store join to keep in sync
 - **Primitive-Value Indexes**: Index queries return slots/refs rather than full data; join with archive separately via `QueryHelpers`
 - **Batched Writes**: All storage writes go through transactional writers for atomicity and performance
 - **Entity-Delta System**: State changes are represented as reversible deltas for efficient rollbacks

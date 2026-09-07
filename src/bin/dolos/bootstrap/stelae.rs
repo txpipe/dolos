@@ -137,13 +137,8 @@ impl Node {
         '_,
         impl dolos_core::ArchiveStore,
         impl dolos_core::StateStore,
-        impl dolos_core::IndexStore,
     > {
-        dolos_snapshot::restore::Target::new(
-            &self.stores.archive,
-            &self.stores.state,
-            &self.stores.indexes,
-        )
+        dolos_snapshot::restore::Target::new(&self.stores.archive, &self.stores.state)
     }
 }
 

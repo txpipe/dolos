@@ -1,27 +1,27 @@
 //! Cursor coherence — the cheapest check, and the one that explains most of
 //! the others when it fails.
 //!
-//! `dolos data summary` already prints these four tips; this check asserts
-//! the relationships between them. The apply pipeline commits a block to the
+//! `dolos data summary` already prints these tips; this check asserts the
+//! relationships between them. The apply pipeline commits a block to the
 //! stores in a fixed order (`sync::run_lifecycle`): WAL, then state, then
-//! archive, then indexes. Every rule below follows from that order, so a
-//! violation names both the invariant and the commit that did not run.
+//! archive. Every rule below follows from that order, so a violation names
+//! both the invariant and the commit that did not run.
 
-use dolos_core::{ArchiveStore, BlockSlot, ChainPoint, IndexStore, StateStore, WalStore};
+use dolos_core::{ArchiveStore, BlockSlot, ChainPoint, StateStore, WalStore};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use super::{CheckKind, Issue};
 
 const CHECK: CheckKind = CheckKind::Cursors;
 
-/// The four stores' positions, read once so the check itself is a pure
+/// The three stores' positions, read once so the check itself is a pure
 /// function of them.
 ///
-/// The WAL and the two derived cursors are kept as [`ChainPoint`]s rather
-/// than slots because [`ChainPoint::Origin`] is not slot 0 — it is *before*
-/// any block. Genesis leaves every one of them at Origin with an empty
-/// archive, and a check that read Origin as a position would call the one
-/// state every node starts in corrupt.
+/// The WAL and the state cursor are kept as [`ChainPoint`]s rather than slots
+/// because [`ChainPoint::Origin`] is not slot 0 — it is *before* any block.
+/// Genesis leaves every one of them at Origin with an empty archive, and a
+/// check that read Origin as a position would call the one state every node
+/// starts in corrupt.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Tips {
     pub wal_start: Option<ChainPoint>,
@@ -29,7 +29,6 @@ pub struct Tips {
     pub archive_start: Option<BlockSlot>,
     pub archive_tip: Option<BlockSlot>,
     pub state: Option<ChainPoint>,
-    pub indexes: Option<ChainPoint>,
 }
 
 /// The slot of a cursor that has actually applied a block.
@@ -43,24 +42,20 @@ fn applied(cursor: &Option<ChainPoint>) -> Option<BlockSlot> {
     }
 }
 
-/// Assert that the four tips tell one story.
+/// Assert that the three tips tell one story.
 ///
 /// An empty archive is not itself an issue — a data directory that has never
-/// synced is consistent — but a state or index cursor over an empty archive
-/// is, because those cursors are only written after a block has been applied.
+/// synced is consistent — but a state cursor over an empty archive is,
+/// because that cursor is only written after a block has been applied.
 pub fn check_cursors(tips: &Tips) -> Vec<Issue> {
     let mut issues = Vec::new();
 
     let Some(archive_tip) = tips.archive_tip else {
-        for (name, cursor) in [("state", &tips.state), ("index", &tips.indexes)] {
-            if let Some(slot) = applied(cursor) {
-                issues.push(Issue::new(
-                    CHECK,
-                    format!(
-                        "{name} cursor sits at slot {slot} but the archive holds no blocks at all"
-                    ),
-                ));
-            }
+        if let Some(slot) = applied(&tips.state) {
+            issues.push(Issue::new(
+                CHECK,
+                format!("state cursor sits at slot {slot} but the archive holds no blocks at all"),
+            ));
         }
 
         if let Some(wal_tip) = applied(&tips.wal_tip) {
@@ -77,39 +72,33 @@ pub fn check_cursors(tips: &Tips) -> Vec<Issue> {
         return issues;
     };
 
-    // The archive is the store queries read, so both derived cursors have to
-    // sit inside the range it can actually serve.
+    // The archive is the store queries read, so the state cursor has to sit
+    // inside the range it can actually serve.
     let archive_start = tips.archive_start.unwrap_or(archive_tip);
 
-    for (name, cursor) in [("state", &tips.state), ("index", &tips.indexes)] {
-        let Some(slot) = applied(cursor) else {
-            issues.push(Issue::new(
-                CHECK,
-                format!(
-                    "the archive reaches slot {archive_tip} but there is no {name} cursor; the \
-                     {name} store was never advanced"
-                ),
-            ));
-            continue;
-        };
-
-        if slot > archive_tip {
-            issues.push(Issue::new(
-                CHECK,
-                format!(
-                    "{name} cursor at slot {slot} is ahead of the archive tip at slot \
-                     {archive_tip}; the archive commit did not run for at least one applied block"
-                ),
-            ));
-        } else if slot < archive_start {
-            issues.push(Issue::new(
-                CHECK,
-                format!(
-                    "{name} cursor at slot {slot} is before the archive's first block at slot \
-                     {archive_start}; the archive cannot serve the range the {name} store claims"
-                ),
-            ));
-        }
+    match applied(&tips.state) {
+        None => issues.push(Issue::new(
+            CHECK,
+            format!(
+                "the archive reaches slot {archive_tip} but there is no state cursor; the state \
+                 store was never advanced"
+            ),
+        )),
+        Some(slot) if slot > archive_tip => issues.push(Issue::new(
+            CHECK,
+            format!(
+                "state cursor at slot {slot} is ahead of the archive tip at slot {archive_tip}; \
+                 the archive commit did not run for at least one applied block"
+            ),
+        )),
+        Some(slot) if slot < archive_start => issues.push(Issue::new(
+            CHECK,
+            format!(
+                "state cursor at slot {slot} is before the archive's first block at slot \
+                 {archive_start}; the archive cannot serve the range the state store claims"
+            ),
+        )),
+        Some(_) => (),
     }
 
     // The WAL is written first and pruned from behind, so it must both reach
@@ -181,19 +170,12 @@ pub fn run(stores: &crate::common::Stores) -> miette::Result<Vec<Issue>> {
         .into_diagnostic()
         .context("reading state cursor")?;
 
-    let indexes = stores
-        .indexes
-        .cursor()
-        .into_diagnostic()
-        .context("reading index cursor")?;
-
     let tips = Tips {
         wal_start,
         wal_tip,
         archive_start,
         archive_tip,
         state,
-        indexes,
     };
 
     Ok(check_cursors(&tips))
@@ -214,7 +196,6 @@ mod tests {
             archive_start: Some(0),
             archive_tip: Some(1000),
             state: point(1000),
-            indexes: point(1000),
         }
     }
 
@@ -241,7 +222,6 @@ mod tests {
             archive_start: None,
             archive_tip: None,
             state: Some(ChainPoint::Origin),
-            indexes: Some(ChainPoint::Origin),
         };
 
         let issues = check_cursors(&tips);
@@ -266,21 +246,20 @@ mod tests {
         assert!(issues[0].detail.contains("archive tip at slot 1000"));
     }
 
-    /// Every issue is reported, not the first: both derived cursors are
-    /// stale here, and the WAL gap is a third, independent finding.
+    /// Every issue is reported, not the first: the state cursor is stale
+    /// here, and the WAL gap is a second, independent finding.
     #[test]
     fn every_issue_is_collected() {
         let tips = Tips {
             archive_start: Some(900),
             state: point(800),
-            indexes: point(800),
             wal_start: point(1200),
             ..healthy()
         };
 
         let issues = check_cursors(&tips);
 
-        assert_eq!(issues.len(), 3);
+        assert_eq!(issues.len(), 2);
         assert!(issues.iter().all(|x| x.check == CheckKind::Cursors));
     }
 
@@ -309,9 +288,8 @@ mod tests {
 
         let issues = check_cursors(&tips);
 
-        assert_eq!(issues.len(), 3);
+        assert_eq!(issues.len(), 2);
         assert!(issues.iter().any(|x| x.detail.contains("state cursor")));
-        assert!(issues.iter().any(|x| x.detail.contains("index cursor")));
         assert!(issues.iter().any(|x| x.detail.contains("the WAL reaches")));
     }
 }

@@ -1,20 +1,25 @@
-//! Index store trait for cross-cutting indexes.
-//!
-//! The `IndexStore` provides lookups that return primitive index values (slots,
-//! UTxO refs) rather than full block data. To get block data, use
-//! `AsyncQueryFacade` from the `async_query` module which combines index
-//! lookups with archive fetches.
+//! The chain-agnostic index types.
 //!
 //! This module defines a chain-agnostic indexing system based on "tags" -
 //! associations between entities (blocks, transactions, UTxOs) and dimension
 //! keys. Chain-specific code (e.g., Cardano) defines the dimensions and
 //! provides extension traits for convenient access.
+//!
+//! The indexes are projections of the stores that hold them:
+//!
+//! - the live-UTxO tags project the UTxO set and live in the state store
+//!   (`StateStore::utxos_by_tag`, written through
+//!   `StateWriter::apply_utxo_tags`);
+//! - the archive tags and the exact lookups project the block history and live
+//!   in the archive store (`ArchiveStore::slots_by_tag`,
+//!   `ArchiveStore::slot_by_*`, written through `ArchiveWriter::apply_index`),
+//!   where the `indexes` stele layer is produced from and restored into.
 
-use std::{borrow::Cow, ops::Range};
+use std::borrow::Cow;
 
 use thiserror::Error;
 
-use crate::{BlockSlot, ChainPoint, TxoRef, UtxoSet};
+use crate::{BlockSlot, TxoRef};
 
 /// A dimension name identifying an index table.
 ///
@@ -46,7 +51,9 @@ impl Tag {
 /// Delta for UTxO filter indexes (current state).
 ///
 /// UTxO filter indexes track the current set of UTxOs matching various tags.
-/// They are updated as UTxOs are produced and consumed.
+/// They are updated as UTxOs are produced and consumed, through the state
+/// writer that applies the UTxO set they project
+/// (`StateWriter::apply_utxo_tags`).
 #[derive(Debug, Clone, Default)]
 pub struct UtxoIndexDelta {
     /// UTxOs to add to filter indexes: (txo_ref, tags)
@@ -59,7 +66,8 @@ pub struct UtxoIndexDelta {
 ///
 /// Archive indexes track which slots contain data matching various tags.
 /// They enable historical queries like "find all blocks with transactions
-/// involving this address".
+/// involving this address". One per block; written through
+/// `ArchiveWriter::apply_index` in the same batch as the block it projects.
 #[derive(Debug, Clone, Default)]
 pub struct ArchiveIndexDelta {
     pub slot: BlockSlot,
@@ -69,52 +77,11 @@ pub struct ArchiveIndexDelta {
     pub tags: Vec<Tag>,
 }
 
-/// Unified index delta for a batch of operations.
-///
-/// This structure contains all index changes for a batch of blocks,
-/// including both UTxO filter updates and archive index entries.
-#[derive(Debug, Clone)]
-pub struct IndexDelta {
-    /// Cursor position after applying this delta.
-    pub cursor: ChainPoint,
-    /// UTxO filter index changes.
-    pub utxo: UtxoIndexDelta,
-    /// Archive index changes (one per block in batch).
-    pub archive: Vec<ArchiveIndexDelta>,
-}
-
-impl Default for IndexDelta {
-    fn default() -> Self {
-        Self {
-            cursor: ChainPoint::Origin,
-            utxo: UtxoIndexDelta::default(),
-            archive: Vec::new(),
-        }
-    }
-}
-
+/// What can go wrong building an index record.
 #[derive(Debug, Error)]
 pub enum IndexError {
-    #[error("index db error: {0}")]
-    DbError(String),
-
     #[error("codec error: {0}")]
     CodecError(String),
-
-    #[error("schema error: {0}")]
-    SchemaError(String),
-
-    #[error("dimension not found: {0}")]
-    DimensionNotFound(String),
-
-    /// The operation is part of the trait but the concrete backend does not
-    /// implement it.
-    ///
-    /// Used by backends outside the live set (see the record iteration and
-    /// pre-hashed append below) so that a caller reaching for an unimplemented
-    /// capability gets an error it can handle instead of a panic.
-    #[error("{0} is not supported on this storage backend")]
-    Unsupported(&'static str),
 }
 
 /// Size of the hashed portion of an archive tag key.
@@ -159,9 +126,9 @@ pub fn key_hash(dimension: &str, key: &[u8]) -> Option<KeyHash> {
 /// One archive tag entry, carrying the stored key hash instead of the logical
 /// key.
 ///
-/// The logical key is not recoverable from the index store — only its hash is
-/// kept on disk — so this is the most a reader can produce and the least a
-/// writer needs.
+/// The logical key is not recoverable from the store — only its hash is kept
+/// on disk — so this is the most a reader can produce and the least a writer
+/// needs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TagRecord {
     /// The logical dimension name. Borrowed when read from a store (the
@@ -189,7 +156,7 @@ impl TagRecord {
     }
 }
 
-/// The kinds of exact-match archive lookup an index store keeps.
+/// The kinds of exact-match archive lookup the archive store keeps.
 ///
 /// This is a closed set: the store hashes the kind name into the key, so it
 /// cannot be recovered from disk and traversal has to be driven by the known
@@ -324,7 +291,7 @@ impl std::fmt::Debug for ExactRecord {
 }
 
 /// Either archive record, as consumed by
-/// [`IndexWriter::append_prehashed`].
+/// `ArchiveWriter::append_prehashed`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum IndexRecord {
     Tag(TagRecord),
@@ -341,213 +308,6 @@ impl From<ExactRecord> for IndexRecord {
     fn from(value: ExactRecord) -> Self {
         Self::Exact(value)
     }
-}
-
-/// Iterator used by backends that do not implement
-/// [`IndexStore::iter_archive_tags`].
-///
-/// Never constructed — those backends return [`IndexError::Unsupported`], so
-/// the alias only exists to satisfy the associated type.
-pub type EmptyTagIter = std::iter::Empty<Result<TagRecord, IndexError>>;
-
-/// Iterator used by backends that do not implement
-/// [`IndexStore::iter_exact_records`].
-///
-/// Never constructed — those backends return [`IndexError::Unsupported`], so
-/// the alias only exists to satisfy the associated type.
-pub type EmptyExactIter = std::iter::Empty<Result<ExactRecord, IndexError>>;
-
-/// Writer for batched index operations.
-///
-/// This trait provides transactional write operations for indexes. Multiple
-/// operations can be batched together and committed atomically.
-pub trait IndexWriter: Send + Sync + 'static {
-    /// Apply index changes from a delta.
-    ///
-    /// This applies all UTxO filter changes and archive index entries
-    /// contained in the delta. The cursor is set internally from
-    /// `delta.cursor`.
-    fn apply(&self, delta: &IndexDelta) -> Result<(), IndexError>;
-
-    /// Undo index changes from a delta (rollback).
-    ///
-    /// This reverses the changes made by `apply()`:
-    /// - UTxOs in `produced` are removed from filter indexes
-    /// - UTxOs in `consumed` are restored to filter indexes
-    /// - Archive index entries are removed
-    fn undo(&self, delta: &IndexDelta) -> Result<(), IndexError>;
-
-    /// Append archive records that already carry their stored key form.
-    ///
-    /// This is the write mirror of [`IndexStore::iter_archive_tags`] and
-    /// [`IndexStore::iter_exact_records`]: records that came out of one store
-    /// go into another byte-for-byte, with no logical key in between (there is
-    /// none to recover — see [`KeyHash`]).
-    ///
-    /// Records must arrive sorted, since the backing stores are append
-    /// oriented. The cursor is *not* touched: a restore owns cursor placement,
-    /// and places it with an otherwise-empty delta once the records are in:
-    /// `writer.apply(&IndexDelta { cursor, ..Default::default() })`. A restore
-    /// that skips this leaves `cursor()` at `None` and bootstrap will treat the
-    /// store as never indexed.
-    ///
-    /// ## Chunking
-    ///
-    /// The argument is an iterator so a restore can pipe its wire decoder
-    /// straight in, rather than materializing a slice beside the write batch's
-    /// own encoded copy. It is consumed lazily and fully; a backend never
-    /// collects it.
-    ///
-    /// This call is *not* the batch boundary — the writer accumulates until
-    /// [`IndexWriter::commit`], so an unbounded iterator builds an unbounded
-    /// batch. Chunking is the caller's: feed one writer a run of records,
-    /// commit it, start the next. The sort order has to hold across the whole
-    /// restore, not merely within a chunk.
-    ///
-    /// Backends that do not implement this return
-    /// [`IndexError::Unsupported`].
-    fn append_prehashed(
-        &self,
-        records: impl IntoIterator<Item = IndexRecord>,
-    ) -> Result<(), IndexError>;
-
-    /// Commit the batched operations.
-    fn commit(self) -> Result<(), IndexError>;
-}
-
-/// Index store trait for cross-cutting indexes.
-///
-/// This trait provides pure index lookups that return primitive values like
-/// `BlockSlot` or `UtxoSet` rather than full block data. For high-level queries
-/// that also fetch block data, use `AsyncQueryFacade`.
-///
-/// The trait is chain-agnostic, using dimension strings to identify index
-/// types. Chain-specific code should provide extension traits with convenient
-/// methods.
-#[trait_variant::make(Send)]
-pub trait IndexStore: Clone + Send + Sync + 'static {
-    /// Writer type for batched write operations.
-    type Writer: IndexWriter;
-
-    /// Iterator type for sparse slot queries.
-    type SlotIter: Iterator<Item = Result<BlockSlot, IndexError>> + DoubleEndedIterator;
-
-    /// Iterator type for archive tag record traversal.
-    type TagIter: Iterator<Item = Result<TagRecord, IndexError>>;
-
-    /// Iterator type for exact-match record traversal.
-    type ExactIter: Iterator<Item = Result<ExactRecord, IndexError>>;
-
-    /// Start a new writer for batched operations.
-    fn start_writer(&self) -> Result<Self::Writer, IndexError>;
-
-    /// Initialize the index schema (create tables, etc.).
-    fn initialize_schema(&self) -> Result<(), IndexError>;
-
-    /// Copy all index data to another store.
-    fn copy(&self, target: &Self) -> Result<(), IndexError>;
-
-    /// Read the current cursor position.
-    ///
-    /// Returns the last chain point that was indexed, or None if no indexes
-    /// have been applied yet. This is used for synchronization verification
-    /// with other stores (state, archive).
-    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError>;
-
-    // ============ UTxO Filter Queries ============
-
-    /// Query UTxOs by tag dimension and key.
-    ///
-    /// Returns all UTxO references that have been tagged with the given
-    /// dimension and key and have not been consumed.
-    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, IndexError>;
-
-    // ============ Archive Queries (Exact Lookups) ============
-
-    /// Get the slot for a block by its hash (exact lookup).
-    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError>;
-
-    /// Get the slot for a block by its number/height (exact lookup).
-    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError>;
-
-    /// Get the slot containing a transaction by its hash (exact lookup).
-    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError>;
-
-    // ============ Archive Queries (Tag-Based Range Queries) ============
-
-    /// Query slots by tag dimension and key within a slot range.
-    ///
-    /// This method returns a lazy iterator over the slots that contain data
-    /// with the given dimension and key. Forward iteration gives the slots
-    /// in ascending order. Reverse iteration gives the slots in descending
-    /// order.
-    ///
-    /// Both `start` and `end` are **inclusive** — unlike the record traversal
-    /// methods below, which take a half-open [`Range`]. Reusing one `(start,
-    /// end)` pair across both conventions drops or double-counts the record at
-    /// `end`.
-    fn slots_by_tag(
-        &self,
-        dimension: TagDimension,
-        key: &[u8],
-        start: BlockSlot,
-        end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError>;
-
-    // ============ Record Traversal (Bulk Export) ============
-
-    /// Iterate every archive tag record whose slot falls in `slots`.
-    ///
-    /// `slots` is **half-open** (`start..end`), unlike
-    /// [`IndexStore::slots_by_tag`], whose bounds are both inclusive.
-    ///
-    /// `dimensions` is the closed list of dimensions to traverse. It has to be
-    /// supplied by the caller: stores keep a hash of the dimension name, not
-    /// the name, so the set of dimensions is not discoverable from disk.
-    /// Duplicates are ignored.
-    ///
-    /// **Order is part of the contract.** Records come out sorted by
-    /// `(dimension, key_hash, slot)` — `dimension` compared as a string,
-    /// independently of the order `dimensions` was given in. Consumers of this
-    /// iteration (snapshot layers) make that order their content, so an
-    /// unordered iterator is a wrong one.
-    ///
-    /// **Errors are terminal.** A malformed on-disk entry or a read failure is
-    /// yielded as `Err` and the iterator is fused from then on: it never
-    /// resumes past a fault, so a consumer that collects into
-    /// `Result<Vec<_>, _>` cannot receive a silently truncated record set.
-    ///
-    /// The iterator must be lazy in the size of the store. Each call opens its
-    /// own point-in-time view: records from separate calls (or from
-    /// [`IndexStore::iter_exact_records`]) are only mutually consistent if the
-    /// store is quiescent across the calls.
-    ///
-    /// Backends that do not implement this return
-    /// [`IndexError::Unsupported`].
-    fn iter_archive_tags(
-        &self,
-        dimensions: &[TagDimension],
-        slots: Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError>;
-
-    /// Iterate every exact-match record whose slot falls in `slots`.
-    ///
-    /// `slots` is **half-open** (`start..end`), unlike
-    /// [`IndexStore::slots_by_tag`], whose bounds are both inclusive.
-    ///
-    /// **Order is part of the contract**: records come out sorted by
-    /// `(kind, key)`, kinds in ascending [`ExactKind::as_str`] order.
-    ///
-    /// **Errors are terminal** — same policy as
-    /// [`IndexStore::iter_archive_tags`].
-    ///
-    /// Note that the slot is the stored *value* of an exact entry, not part of
-    /// its key, so a slot-bounded traversal is a scan of every exact entry in
-    /// the store rather than a seek. The iterator is still lazy in memory.
-    ///
-    /// Backends that do not implement this return
-    /// [`IndexError::Unsupported`].
-    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, IndexError>;
 }
 
 #[cfg(test)]

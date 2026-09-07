@@ -11,8 +11,7 @@
 
 use dolos_core::{
     ArchiveStore, ArchiveWriter, BlockSlot, BrokenInvariant, ChainError, ChainPoint, Domain,
-    Entity, EntityDelta as _, EntityKey, IndexStore, IndexWriter, LogKey, NsKey, StateStore,
-    StateWriter, TemporalKey,
+    Entity, EntityDelta as _, EntityKey, LogKey, NsKey, StateStore, StateWriter, TemporalKey,
 };
 use tracing::{debug, instrument, trace, warn};
 
@@ -186,7 +185,6 @@ impl super::WorkContext {
         &mut self,
         state: &D::State,
         archive: &D::Archive,
-        indexes: &D::Indexes,
         slot: BlockSlot,
     ) -> Result<(), ChainError> {
         debug!("committing estart finalize changes");
@@ -247,7 +245,11 @@ impl super::WorkContext {
                 "deleting unredeemed AVVM utxos"
             );
 
+            // The by-address (and every other UTxO filter) tag has to lose
+            // the reclaimed refs in the same commit, or the serving APIs keep
+            // answering with outputs the state store no longer holds.
             writer.apply_utxoset(delta)?;
+            writer.apply_utxo_tags(&crate::indexes::utxo_index_delta_from_utxo_delta(delta))?;
         }
 
         // Write era transition if needed (only 2 entities)
@@ -277,26 +279,6 @@ impl super::WorkContext {
         // Commit both writers atomically
         writer.commit()?;
         archive_writer.commit()?;
-
-        // The by-address (and every other UTxO filter) index has to lose the
-        // reclaimed refs too, or the serving APIs keep answering with outputs
-        // the state store no longer holds. Indexes follow the state commit;
-        // `AvvmReclamation::apply_deletion` records why that order.
-        if let Some(delta) = avvm_deletion.as_ref() {
-            // Carry the index's own cursor through: this changes what the
-            // index holds, not how far it has been advanced, and
-            // `IndexWriter::apply` writes whatever cursor the delta names.
-            // `None` is the never-indexed store, which bootstrap reads as
-            // "replay the whole WAL": `Origin` keeps saying that, where this
-            // boundary's slot would claim every block before it as indexed.
-            let cursor = indexes.cursor()?.unwrap_or(ChainPoint::Origin);
-
-            let delta = crate::indexes::index_delta_from_utxo_delta(cursor, delta);
-
-            let index_writer = indexes.start_writer()?;
-            index_writer.apply(&delta)?;
-            index_writer.commit()?;
-        }
 
         debug!("estart finalize commit complete");
 

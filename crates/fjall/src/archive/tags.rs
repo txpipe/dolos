@@ -1,9 +1,10 @@
-//! Archive tag index operations for the `archive-tags` keyspace
-//! (chain-agnostic).
+//! Archive tag index operations for the `archive-tags` keyspace of the
+//! archive store (chain-agnostic).
 //!
 //! This module handles key encoding, batch writes (apply/undo), read queries,
 //! and the `SlotIterator` for the `archive-tags` keyspace. Block tags are
-//! append-only entries that record which blocks contain specific data.
+//! append-only entries that record which blocks contain specific data; they
+//! are written in the same batch as the block locations they point at.
 //!
 //! ## Key Format
 //!
@@ -21,12 +22,11 @@ use std::borrow::Cow;
 use std::ops::Range;
 
 use dolos_core::{
-    key_hash, ArchiveIndexDelta, BlockSlot, IndexDelta, IndexError, KeyHash, Tag, TagDimension,
-    TagRecord,
+    key_hash, ArchiveError, ArchiveIndexDelta, BlockSlot, KeyHash, Tag, TagDimension, TagRecord,
 };
 use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
-use crate::index::scan::{DimensionScan, ScanTarget};
+use crate::archive::scan::{DimensionScan, ScanTarget};
 use crate::keys::{
     decode_slot, dim_prefix, hash_dimension, DIM_HASH_SIZE, HASH_KEY_SIZE, SLOT_SIZE,
 };
@@ -80,6 +80,23 @@ fn decode_block_tag_slot(key: &[u8]) -> u64 {
     debug_assert!(key.len() >= BLOCK_TAG_KEY_SIZE);
     let start = key.len() - SLOT_SIZE;
     decode_slot(&key[start..])
+}
+
+/// The slot a stored tag entry belongs to, read from its key.
+///
+/// The prune sweep's view of an entry: the slot is the key's last component,
+/// so nothing but the key is needed. A key too short to carry one is a
+/// malformed entry, refused rather than skipped for the same reason the
+/// record scan fuses on it.
+pub fn slot_of_entry(key: &[u8]) -> Result<BlockSlot, Error> {
+    if key.len() < BLOCK_TAG_KEY_SIZE {
+        return Err(Error::Codec(format!(
+            "malformed archive tag key: {} bytes, expected {BLOCK_TAG_KEY_SIZE}",
+            key.len(),
+        )));
+    }
+
+    Ok(decode_block_tag_slot(key))
 }
 
 /// Decode the stored tag key hash from a block tag key (bytes 8..16)
@@ -170,25 +187,25 @@ fn undo_block(
     Ok(())
 }
 
-/// Apply archive tag indexes from an IndexDelta
+/// Apply archive tag indexes for a batch of block deltas
 pub fn apply(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
-    delta: &IndexDelta,
+    deltas: &[ArchiveIndexDelta],
 ) -> Result<(), Error> {
-    for block in &delta.archive {
+    for block in deltas {
         apply_block(batch, keyspace, block)?;
     }
     Ok(())
 }
 
-/// Undo archive tag indexes from an IndexDelta (rollback)
+/// Undo archive tag indexes for a batch of block deltas (rollback)
 pub fn undo(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
-    delta: &IndexDelta,
+    deltas: &[ArchiveIndexDelta],
 ) -> Result<(), Error> {
-    for block in delta.archive.iter().rev() {
+    for block in deltas.iter().rev() {
         undo_block(batch, keyspace, block)?;
     }
     Ok(())
@@ -252,7 +269,7 @@ impl SlotIterator {
 }
 
 impl Iterator for SlotIterator {
-    type Item = Result<BlockSlot, IndexError>;
+    type Item = Result<BlockSlot, ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.front < self.back {
@@ -310,7 +327,7 @@ impl DoubleEndedIterator for SlotIterator {
 ///
 /// ## Errors
 ///
-/// Terminal, per the policy in [`crate::index::scan`] — the one place it is
+/// Terminal, per the policy in [`crate::archive::scan`] — the one place it is
 /// defined.
 pub struct TagRecordIterator(DimensionScan<TagScan, std::vec::IntoIter<TagDimension>>);
 
@@ -332,15 +349,16 @@ impl ScanTarget for TagScan {
         dimension: TagDimension,
         guard: fjall::Guard,
         slots: &Range<BlockSlot>,
-    ) -> Result<Option<TagRecord>, IndexError> {
+    ) -> Result<Option<TagRecord>, ArchiveError> {
         let key = guard.key().map_err(Error::Fjall)?;
 
         if key.len() < BLOCK_TAG_KEY_SIZE {
-            return Err(IndexError::CodecError(format!(
+            return Err(Error::Codec(format!(
                 "malformed archive tag key in dimension {dimension}: \
                  {} bytes, expected {BLOCK_TAG_KEY_SIZE}",
                 key.len(),
-            )));
+            ))
+            .into());
         }
 
         let slot = decode_block_tag_slot(&key);
@@ -383,7 +401,7 @@ impl TagRecordIterator {
 }
 
 impl Iterator for TagRecordIterator {
-    type Item = Result<TagRecord, IndexError>;
+    type Item = Result<TagRecord, ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()

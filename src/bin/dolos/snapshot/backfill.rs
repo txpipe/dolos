@@ -23,7 +23,7 @@ use miette::{bail, Context as _, IntoDiagnostic as _};
 use tokio_util::sync::CancellationToken;
 
 use crate::feedback::Feedback;
-use dolos::adapters::{ArchiveStoreBackend, DomainAdapter, IndexStoreBackend, StateStoreBackend};
+use dolos::adapters::{ArchiveStoreBackend, DomainAdapter, StateStoreBackend};
 
 /// Where the mithril window lands when the operator names nowhere: beside the
 /// stores, so the bytes stay on the data mount.
@@ -179,7 +179,6 @@ impl backfill::Publish<DomainAdapter> for RepositoryArm<'_> {
         plan: &Plan,
         archive: &ArchiveStoreBackend,
         state: &StateStoreBackend,
-        indexes: &IndexStoreBackend,
     ) -> Result<(), backfill::Error> {
         super::publish::to_repository(
             self.config,
@@ -187,7 +186,6 @@ impl backfill::Publish<DomainAdapter> for RepositoryArm<'_> {
             plan,
             archive,
             state,
-            indexes,
             self.feedback,
         )
         .map_err(backfill::Error::caller)
@@ -261,7 +259,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 wal: stores.wal,
                 state: stores.state,
                 archive: stores.archive,
-                indexes: stores.indexes,
             })
         },
         build_domain: &|target| {

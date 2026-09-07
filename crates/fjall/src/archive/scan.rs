@@ -27,7 +27,7 @@
 
 use std::ops::Range;
 
-use dolos_core::{BlockSlot, IndexError};
+use dolos_core::{ArchiveError, BlockSlot};
 use fjall::{Guard, Keyspace, Readable, Snapshot};
 
 use crate::keys::DIM_HASH_SIZE;
@@ -61,7 +61,7 @@ pub trait ScanTarget {
         label: Self::Label,
         guard: Guard,
         slots: &Range<BlockSlot>,
-    ) -> Result<Option<Self::Record>, IndexError>;
+    ) -> Result<Option<Self::Record>, ArchiveError>;
 }
 
 /// A lazy walk over the entries of a label list's prefixes, in list order.
@@ -112,7 +112,7 @@ impl<T: ScanTarget, L: Iterator<Item = T::Label>> DimensionScan<T, L> {
 }
 
 impl<T: ScanTarget, L: Iterator<Item = T::Label>> Iterator for DimensionScan<T, L> {
-    type Item = Result<T::Record, IndexError>;
+    type Item = Result<T::Record, ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {

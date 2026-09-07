@@ -1,8 +1,9 @@
-//! Exact-match index operations for the `index-exact` keyspace
-//! (chain-agnostic).
+//! Exact-match index operations for the `index-exact` keyspace of the
+//! archive store (chain-agnostic).
 //!
 //! This module handles key encoding, batch writes (apply/undo), and read
-//! queries for the `index-exact` keyspace:
+//! queries for the `index-exact` keyspace, written in the same batch as the
+//! block locations its entries resolve to:
 //! - Block hash -> slot
 //! - Transaction hash -> slot
 //! - Block number -> slot
@@ -20,11 +21,11 @@
 use std::ops::Range;
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, ExactKind, ExactRecord, IndexDelta, IndexError, MAX_EXACT_KEY_LEN,
+    ArchiveError, ArchiveIndexDelta, BlockSlot, ExactKind, ExactRecord, MAX_EXACT_KEY_LEN,
 };
 use fjall::{Keyspace, OwnedWriteBatch, Readable, Snapshot};
 
-use crate::index::scan::{DimensionScan, ScanTarget};
+use crate::archive::scan::{DimensionScan, ScanTarget};
 use crate::keys::{decode_slot, dim_prefix, encode_slot, hash_dimension, DIM_HASH_SIZE, SLOT_SIZE};
 use crate::Error;
 
@@ -121,6 +122,23 @@ fn decode_slot_value(value: &[u8]) -> u64 {
     decode_slot(value)
 }
 
+/// The slot a stored exact entry resolves to, read from its value.
+///
+/// The prune sweep's view of an entry: the slot is the value, so the key is
+/// not consulted. A value too short to carry one is a malformed entry,
+/// refused rather than skipped for the same reason the record scan fuses on
+/// it.
+pub fn slot_of_entry(value: &[u8]) -> Result<BlockSlot, Error> {
+    if value.len() < SLOT_SIZE {
+        return Err(Error::Codec(format!(
+            "malformed exact index value: {} bytes, expected {SLOT_SIZE}",
+            value.len(),
+        )));
+    }
+
+    Ok(decode_slot_value(value))
+}
+
 // ============================================================================
 // Block Processing
 // ============================================================================
@@ -178,25 +196,25 @@ fn undo_block(
     Ok(())
 }
 
-/// Apply exact indexes from an IndexDelta
+/// Apply exact indexes for a batch of block deltas
 pub fn apply(
     batch: &mut OwnedWriteBatch,
     exact_keyspace: &Keyspace,
-    delta: &IndexDelta,
+    deltas: &[ArchiveIndexDelta],
 ) -> Result<(), Error> {
-    for block in &delta.archive {
+    for block in deltas {
         apply_block(batch, exact_keyspace, block)?;
     }
     Ok(())
 }
 
-/// Undo exact indexes from an IndexDelta (rollback)
+/// Undo exact indexes for a batch of block deltas (rollback)
 pub fn undo(
     batch: &mut OwnedWriteBatch,
     exact_keyspace: &Keyspace,
-    delta: &IndexDelta,
+    deltas: &[ArchiveIndexDelta],
 ) -> Result<(), Error> {
-    for block in delta.archive.iter().rev() {
+    for block in deltas.iter().rev() {
         undo_block(batch, exact_keyspace, block)?;
     }
     Ok(())
@@ -320,7 +338,7 @@ pub fn get_by_tx_hash<R: Readable>(
 ///
 /// Same contract as `TagRecordIterator`: the held MVCC snapshot pins fjall's
 /// GC watermark for the iterator's lifetime, and errors are terminal per the
-/// policy in [`crate::index::scan`].
+/// policy in [`crate::archive::scan`].
 pub struct ExactRecordIterator(DimensionScan<ExactScan, std::array::IntoIter<ExactKind, 3>>);
 
 /// The exact-match half of the shared prefix walk.
@@ -340,16 +358,17 @@ impl ScanTarget for ExactScan {
         kind: ExactKind,
         guard: fjall::Guard,
         slots: &Range<BlockSlot>,
-    ) -> Result<Option<ExactRecord>, IndexError> {
+    ) -> Result<Option<ExactRecord>, ArchiveError> {
         let (key, value) = guard.into_inner().map_err(Error::Fjall)?;
 
         if key.len() <= DIM_HASH_SIZE || value.len() < SLOT_SIZE {
-            return Err(IndexError::CodecError(format!(
+            return Err(Error::Codec(format!(
                 "malformed exact index entry of kind {kind}: \
                  key {} bytes, value {} bytes",
                 key.len(),
                 value.len(),
-            )));
+            ))
+            .into());
         }
 
         let slot = decode_slot_value(&value);
@@ -361,7 +380,9 @@ impl ScanTarget for ExactScan {
         // A stored key of the wrong width for its kind is a malformed entry,
         // and `ExactRecord::new` is where that is decided. `Err` fuses the
         // scan, which is the policy for a malformed entry either way.
-        ExactRecord::new(kind, &key[DIM_HASH_SIZE..], slot).map(Some)
+        ExactRecord::new(kind, &key[DIM_HASH_SIZE..], slot)
+            .map(Some)
+            .map_err(|e| Error::Codec(e.to_string()).into())
     }
 }
 
@@ -380,7 +401,7 @@ impl ExactRecordIterator {
 }
 
 impl Iterator for ExactRecordIterator {
-    type Item = Result<ExactRecord, IndexError>;
+    type Item = Result<ExactRecord, ArchiveError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.0.next()

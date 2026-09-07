@@ -11,7 +11,7 @@ use pallas::{
 
 use dolos_core::{
     archive::ArchiveStore, AsyncQueryFacade, BlockBody, BlockSlot, ChainError, Domain, DomainError,
-    EntityKey, IndexStore, StateStore as _, TagDimension, TxHash, TxoRef,
+    EntityKey, StateStore as _, TagDimension, TxHash, TxoRef,
 };
 
 use crate::indexes::dimensions::archive;
@@ -677,7 +677,7 @@ where
         let slots: Vec<BlockSlot> = facade
             .run_blocking(move |domain| {
                 Ok(domain
-                    .indexes()
+                    .archive()
                     .slots_by_tag(dimension, &key_clone, chunk_start, end_slot)?
                     .take(SLOT_CHUNK_SIZE)
                     .collect::<Result<Vec<_>, _>>()?)
@@ -733,7 +733,7 @@ where
                     let key = key.clone();
                     move |domain| {
                         let iter = domain
-                            .indexes()
+                            .archive()
                             .slots_by_tag(dimension, &key, start_slot, end_slot)?;
 
                         let slots = match order {

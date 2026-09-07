@@ -275,15 +275,11 @@ impl FjallStateConfig {
 
 /// State store configuration.
 ///
-/// The supported persistent state backend is `fjall`. The `redb` variant is
-/// deprecated in its favor: it is kept only so existing configuration files
-/// still deserialize, and is refused when the node opens its stores.
+/// The supported persistent state backend is `fjall`; the `redb` backend was
+/// removed.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
-#[allow(deprecated)]
 pub enum StateStoreConfig {
-    #[deprecated(note = "deprecated in favor of the supported `fjall` state backend")]
-    Redb(RedbStateConfig),
     /// Builtin in-memory backend: serves the whole state contract, ephemeral
     /// by design and sized for devnets, tooling and tests rather than for a
     /// node following a public network.
@@ -298,11 +294,9 @@ impl Default for StateStoreConfig {
     }
 }
 
-#[allow(deprecated)]
 impl StateStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory => None,
         }
@@ -310,7 +304,6 @@ impl StateStoreConfig {
 
     pub fn max_history(&self) -> Option<u64> {
         match self {
-            Self::Redb(cfg) => cfg.max_history,
             Self::Fjall(cfg) => cfg.max_history,
             Self::InMemory => None,
         }
@@ -322,7 +315,7 @@ impl StateStoreConfig {
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory => false,
+            Self::InMemory => false,
         }
     }
 }
@@ -330,29 +323,6 @@ impl StateStoreConfig {
 // ============================================================================
 // Archive Store Configuration
 // ============================================================================
-
-/// Configuration for the Redb archive backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbArchiveConfig {
-    /// Optional path override for the archive directory.
-    /// If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/archive`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Optional path override for block segment files.
-    /// If not specified, segment files are stored in the archive directory.
-    #[serde(default)]
-    pub blocks_path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-}
-
-impl RedbArchiveConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.blocks_path.is_none() && self.cache.is_none()
-    }
-}
 
 /// Configuration for the Fjall archive backend.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -400,17 +370,17 @@ impl FjallArchiveConfig {
 }
 
 /// Archive store configuration.
+///
+/// The supported persistent archive backend is `fjall`; the `redb` backend
+/// was removed.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "backend", rename_all = "lowercase")]
 pub enum ArchiveStoreConfig {
-    /// Redb backend, supported via explicit configuration. Reads and writes
-    /// the archive index as a single redb file; block segment files are
-    /// shared with the fjall backend.
-    Redb(RedbArchiveConfig),
-    /// Fjall backend, the default. Block segment files are shared with the
-    /// redb backend; only the index differs.
+    /// Fjall backend, the default.
     Fjall(FjallArchiveConfig),
-    /// In-memory backend (ephemeral, data lost on restart).
+    /// Builtin in-memory backend: serves the whole archive contract,
+    /// ephemeral by design and sized for devnets, tooling and tests rather
+    /// than for a node following a public network.
     #[serde(rename = "in_memory")]
     InMemory,
     /// No-op backend that discards all writes and returns empty results.
@@ -427,7 +397,6 @@ impl Default for ArchiveStoreConfig {
 impl ArchiveStoreConfig {
     pub fn path(&self) -> Option<&PathBuf> {
         match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
             Self::Fjall(cfg) => cfg.path.as_ref(),
             Self::InMemory | Self::NoOp => None,
         }
@@ -436,122 +405,11 @@ impl ArchiveStoreConfig {
     /// Whether this selection round-trips through `Default`: true only for
     /// the default variant carrying no explicit options. Any other variant
     /// must survive re-serialization even with an empty options set — a bare
-    /// `backend = "redb"` is an explicit choice, not the default.
+    /// `backend = "in_memory"` is an explicit choice, not the default.
     pub fn is_default(&self) -> bool {
         match self {
             Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
-        }
-    }
-}
-
-// ============================================================================
-// Index Store Configuration
-// ============================================================================
-
-/// Configuration for the Redb index backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RedbIndexConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/index`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-}
-
-impl RedbIndexConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none() && self.cache.is_none()
-    }
-}
-
-/// Configuration for the Fjall index backend.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct FjallIndexConfig {
-    /// Optional path override. If relative, resolved from storage root.
-    /// If not specified, defaults to `<storage.path>/index`.
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-    /// Size (in MB) of memory allocated for caching.
-    #[serde(default)]
-    pub cache: Option<usize>,
-    /// Maximum journal size in MB (default: 1024).
-    #[serde(default)]
-    pub max_journal_size: Option<usize>,
-    /// Flush journal after each commit (default: false).
-    #[serde(default)]
-    pub flush_on_commit: Option<bool>,
-    /// L0 compaction threshold (default: 8, lower = more aggressive).
-    #[serde(default)]
-    pub l0_threshold: Option<u8>,
-    /// Number of background compaction worker threads (default: 8).
-    #[serde(default)]
-    pub worker_threads: Option<usize>,
-    /// Memtable size in MB before flush (default: 128).
-    #[serde(default)]
-    pub memtable_size_mb: Option<usize>,
-}
-
-impl FjallIndexConfig {
-    pub fn is_default(&self) -> bool {
-        self.path.is_none()
-            && self.cache.is_none()
-            && self.max_journal_size.is_none()
-            && self.flush_on_commit.is_none()
-            && self.l0_threshold.is_none()
-            && self.worker_threads.is_none()
-            && self.memtable_size_mb.is_none()
-    }
-}
-
-/// Index store configuration.
-///
-/// The supported persistent index backend is `fjall`. The `redb` variant is
-/// deprecated in its favor: it is kept only so existing configuration files
-/// still deserialize, and is refused when the node opens its stores.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(tag = "backend", rename_all = "lowercase")]
-#[allow(deprecated)]
-pub enum IndexStoreConfig {
-    #[deprecated(note = "deprecated in favor of the supported `fjall` index backend")]
-    Redb(RedbIndexConfig),
-    /// Builtin in-memory backend: serves the whole index contract, ephemeral
-    /// by design and sized for devnets, tooling and tests rather than for a
-    /// node following a public network.
-    #[serde(rename = "in_memory")]
-    InMemory,
-    Fjall(FjallIndexConfig),
-    /// No-op backend that discards all writes and returns empty results: an
-    /// explicit opt-out of the index layer.
-    #[serde(rename = "no_op", alias = "noop")]
-    NoOp,
-}
-
-impl Default for IndexStoreConfig {
-    fn default() -> Self {
-        Self::Fjall(FjallIndexConfig::default())
-    }
-}
-
-#[allow(deprecated)]
-impl IndexStoreConfig {
-    pub fn path(&self) -> Option<&PathBuf> {
-        match self {
-            Self::Redb(cfg) => cfg.path.as_ref(),
-            Self::Fjall(cfg) => cfg.path.as_ref(),
-            Self::InMemory | Self::NoOp => None,
-        }
-    }
-
-    /// Whether this selection round-trips through `Default`: true only for
-    /// the default variant carrying no explicit options, so an explicit
-    /// non-default backend choice survives re-serialization.
-    pub fn is_default(&self) -> bool {
-        match self {
-            Self::Fjall(cfg) => cfg.is_default(),
-            Self::Redb(_) | Self::InMemory | Self::NoOp => false,
+            Self::InMemory | Self::NoOp => false,
         }
     }
 }
@@ -623,10 +481,6 @@ pub struct StorageConfig {
     #[serde(default, skip_serializing_if = "ArchiveStoreConfig::is_default")]
     pub archive: ArchiveStoreConfig,
 
-    /// Index store configuration.
-    #[serde(default, skip_serializing_if = "IndexStoreConfig::is_default")]
-    pub index: IndexStoreConfig,
-
     /// Mempool store configuration.
     #[serde(default, skip_serializing_if = "MempoolStoreConfig::is_default")]
     pub mempool: MempoolStoreConfig,
@@ -660,13 +514,9 @@ impl StorageConfig {
 
     /// Get the resolved path for the state store.
     /// Returns `None` for in-memory backends.
-    #[allow(deprecated)]
     pub fn state_path(&self) -> Option<PathBuf> {
         match &self.state {
             StateStoreConfig::InMemory => None,
-            StateStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
-            }
             StateStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "state"))
             }
@@ -678,26 +528,8 @@ impl StorageConfig {
     pub fn archive_path(&self) -> Option<PathBuf> {
         match &self.archive {
             ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
-            ArchiveStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
-            }
             ArchiveStoreConfig::Fjall(cfg) => {
                 Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "archive"))
-            }
-        }
-    }
-
-    /// Get the resolved path for the index store.
-    /// Returns `None` for in-memory or no-op backends.
-    #[allow(deprecated)]
-    pub fn index_path(&self) -> Option<PathBuf> {
-        match &self.index {
-            IndexStoreConfig::InMemory | IndexStoreConfig::NoOp => None,
-            IndexStoreConfig::Redb(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
-            }
-            IndexStoreConfig::Fjall(cfg) => {
-                Some(self.resolve_store_path_with_default(cfg.path.as_ref(), "index"))
             }
         }
     }
@@ -722,7 +554,6 @@ impl Default for StorageConfig {
             wal: WalStoreConfig::default(),
             state: StateStoreConfig::default(),
             archive: ArchiveStoreConfig::default(),
-            index: IndexStoreConfig::default(),
             mempool: MempoolStoreConfig::default(),
         }
     }
@@ -1333,20 +1164,20 @@ pub struct RootConfig {
 mod tests {
     use super::*;
 
-    /// An explicit `backend = "redb"` with no options must not be treated as
-    /// the default: dropping it on re-serialization would silently flip the
-    /// archive to fjall on the next load.
+    /// An explicit non-default backend carrying no options must not be
+    /// treated as the default: dropping it on re-serialization would silently
+    /// flip the archive to fjall on the next load.
     #[test]
     fn explicit_non_default_backend_survives_reserialization() {
         let storage = StorageConfig {
-            archive: ArchiveStoreConfig::Redb(RedbArchiveConfig::default()),
+            archive: ArchiveStoreConfig::InMemory,
             ..Default::default()
         };
 
         let json = serde_json::to_value(&storage).unwrap();
         let restored: StorageConfig = serde_json::from_value(json).unwrap();
 
-        assert!(matches!(restored.archive, ArchiveStoreConfig::Redb(_)));
+        assert!(matches!(restored.archive, ArchiveStoreConfig::InMemory));
     }
 
     #[test]
@@ -1355,7 +1186,6 @@ mod tests {
 
         assert!(json.get("archive").is_none());
         assert!(json.get("state").is_none());
-        assert!(json.get("index").is_none());
     }
 
     #[test]
@@ -1377,16 +1207,9 @@ mod tests {
             let archive: ArchiveStoreConfig =
                 serde_json::from_value(json!({ "backend": spelling })).unwrap();
             assert!(matches!(archive, ArchiveStoreConfig::NoOp));
-
-            let index: IndexStoreConfig =
-                serde_json::from_value(json!({ "backend": spelling })).unwrap();
-            assert!(matches!(index, IndexStoreConfig::NoOp));
         }
 
         let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
-        assert_eq!(json["backend"], "no_op");
-
-        let json = serde_json::to_value(IndexStoreConfig::NoOp).unwrap();
         assert_eq!(json["backend"], "no_op");
     }
 }

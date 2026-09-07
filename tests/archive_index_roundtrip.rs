@@ -1,10 +1,10 @@
 //! Export/restore conformance for the pre-hashed archive index seam.
 //!
-//! `IndexStore::iter_archive_tags` / `iter_exact_records` and
-//! `IndexWriter::append_prehashed` are the two halves of one thing: a snapshot
-//! layer is exactly what iteration yields, and a restore is exactly what the
-//! writer takes back. Two properties make that work, and neither is visible
-//! from a single-store unit test:
+//! `ArchiveStore::iter_archive_tags` / `iter_exact_records` and
+//! `ArchiveWriter::append_prehashed` are the two halves of one thing: a
+//! snapshot layer is exactly what iteration yields, and a restore is exactly
+//! what the writer takes back. Two properties make that work, and neither is
+//! visible from a single-store unit test:
 //!
 //! 1. **The round trip is exact.** Records carry the stored key form, not a
 //!    logical key, because the logical key is not on disk. A store rebuilt from
@@ -15,20 +15,26 @@
 //!    sequences, so an iterator that yields the right records in the wrong
 //!    order is wrong, not slow.
 //!
-//! The suite is written once against the [`IndexStore`] trait and run against
-//! every live backend: fjall, the persistent one, and the builtin memory store.
-//! One suite defining the semantics is the point — a backend that passed its
-//! own private tests could still disagree with its peers, and records really do
-//! cross between backends (see [`records_cross_between_backends`]).
+//! The suite is written once against the [`ArchiveStore`] trait's index half
+//! and run against every live backend: fjall, the persistent one, and the
+//! builtin memory archive. One suite defining the semantics is the point — a
+//! backend that passed its own private tests could still disagree with its
+//! peers, and records really do cross between backends (see
+//! [`records_cross_between_backends`]).
+//!
+//! Only the index half of the archive is exercised here: the deltas name
+//! blocks the store never holds. The block side has its own suite
+//! (`archive_conformance`), which also pins that a block and its index
+//! entries share one commit.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-use dolos_cardano::indexes::{archive_dimensions, CardanoIndexExt};
+use dolos_cardano::indexes::{archive_dimensions, CardanoArchiveIndexExt};
 use dolos_core::{
-    builtin::MemoryIndexStore, config::FjallIndexConfig, ArchiveIndexDelta, BlockSlot, ChainPoint,
-    ExactKind, ExactRecord, IndexDelta, IndexRecord, IndexStore as CoreIndexStore,
-    IndexWriter as CoreIndexWriter, Tag, TagDimension, TagRecord,
+    builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
+    ArchiveWriter as CoreArchiveWriter, BlockSlot, ExactKind, ExactRecord, IndexRecord,
+    StateSchema, Tag, TagDimension, TagRecord,
 };
 
 const EPOCH_LEN: BlockSlot = 432_000;
@@ -166,7 +172,7 @@ fn seed_tag(spec: &SeedSpec, block: u64, t: u64) -> Tag {
 /// Deltas are streamed rather than returned so the cost measurement can seed
 /// millions of records without holding them; callers that want them all keep
 /// them in the sink (see [`Seeded::absorb`]).
-fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(IndexDelta)) -> SeedCounts {
+fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(Vec<ArchiveIndexDelta>)) -> SeedCounts {
     spec.check();
 
     let mut counts = SeedCounts {
@@ -207,12 +213,7 @@ fn seed_deltas(spec: &SeedSpec, sink: &mut impl FnMut(IndexDelta)) -> SeedCounts
                 });
             }
 
-            let cursor = ChainPoint::Slot(archive.last().unwrap().slot);
-            sink(IndexDelta {
-                cursor,
-                utxo: Default::default(),
-                archive,
-            });
+            sink(archive);
 
             block = batch_end;
         }
@@ -245,13 +246,12 @@ const CONFORMANCE: SeedSpec = SeedSpec {
     blocks_per_batch: 40,
 };
 
-/// One index backend under test.
+/// One archive backend under test.
 ///
 /// The guard carries whatever the backend needs kept alive for the store to
-/// stay usable — a temp directory for the on-disk one, nothing for the
-/// in-memory one.
+/// stay usable; both stores here hold their own, so it is nothing.
 trait Backend {
-    type Store: CoreIndexStore;
+    type Store: CoreArchiveStore;
     type Guard;
 
     /// A fresh, empty store.
@@ -261,50 +261,27 @@ trait Backend {
 struct Fjall;
 
 impl Backend for Fjall {
-    type Store = dolos_fjall::IndexStore;
-    type Guard = tempfile::TempDir;
+    type Store = dolos_fjall::archive::ArchiveStore;
+    type Guard = ();
 
     fn open() -> (Self::Store, Self::Guard) {
-        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        // The store carries its temp directory and removes it with the last
+        // clone.
+        let store = dolos_fjall::archive::ArchiveStore::for_tempdir(StateSchema::default())
+            .expect("failed to open fjall archive store");
 
-        // Only the fields this suite cares about; the rest are the backend's
-        // own defaults rather than a re-listing of them that can go stale.
-        let config = FjallIndexConfig {
-            cache: Some(16),
-            flush_on_commit: Some(false),
-            worker_threads: Some(1),
-            ..Default::default()
-        };
-
-        let store = dolos_fjall::IndexStore::open(dir.path(), &config)
-            .expect("failed to open fjall index store");
-
-        (store, dir)
+        (store, ())
     }
 }
 
 struct Memory;
 
 impl Backend for Memory {
-    type Store = MemoryIndexStore;
+    type Store = MemoryArchiveStore;
     type Guard = ();
 
     fn open() -> (Self::Store, Self::Guard) {
-        (MemoryIndexStore::new(), ())
-    }
-}
-
-struct Redb;
-
-impl Backend for Redb {
-    type Store = dolos_redb3::indexes::IndexStore;
-    type Guard = ();
-
-    fn open() -> (Self::Store, Self::Guard) {
-        (
-            dolos_redb3::indexes::IndexStore::in_memory().expect("failed to open redb index store"),
-            (),
-        )
+        (MemoryArchiveStore::new(StateSchema::default()), ())
     }
 }
 
@@ -360,11 +337,6 @@ macro_rules! conformance_suite {
 conformance_suite!(fjall, Fjall);
 conformance_suite!(memory, Memory);
 
-#[test]
-fn redb_slots_by_tag_are_ordered_in_both_directions() {
-    slots_by_tag_are_ordered_in_both_directions::<Redb>();
-}
-
 fn epoch_slots(epoch: u64) -> Range<BlockSlot> {
     (epoch * EPOCH_LEN)..((epoch + 1) * EPOCH_LEN)
 }
@@ -402,8 +374,8 @@ impl Seeded {
     /// The seeder streams deltas rather than describing what it wrote in a
     /// second structure, so this reads it back off them — one definition of
     /// what a delta contains instead of two that can disagree.
-    fn absorb(&mut self, delta: &IndexDelta) {
-        for block in &delta.archive {
+    fn absorb(&mut self, deltas: &[ArchiveIndexDelta]) {
+        for block in deltas {
             self.blocks.push((
                 block.block_hash.clone(),
                 block.block_number.unwrap(),
@@ -423,7 +395,7 @@ impl Seeded {
 
 /// The conformance seed's deltas, built independently of any store so two
 /// backends can be handed byte-identical input.
-fn conformance_deltas() -> (Vec<IndexDelta>, Seeded) {
+fn conformance_deltas() -> (Vec<Vec<ArchiveIndexDelta>>, Seeded) {
     let mut seeded = Seeded::default();
     let mut deltas = Vec::new();
 
@@ -435,10 +407,10 @@ fn conformance_deltas() -> (Vec<IndexDelta>, Seeded) {
     (deltas, seeded)
 }
 
-/// Apply one delta through the regular write path.
-fn apply<S: CoreIndexStore>(store: &S, delta: &IndexDelta) {
+/// Apply one batch of block deltas through the regular write path.
+fn apply<S: CoreArchiveStore>(store: &S, deltas: &[ArchiveIndexDelta]) {
     let writer = store.start_writer().expect("start_writer failed");
-    writer.apply(delta).expect("apply failed");
+    writer.apply_index(deltas).expect("apply_index failed");
     writer.commit().expect("commit failed");
 }
 
@@ -446,7 +418,7 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
     let (store, _guard) = B::open();
     let policy = vec![0xAA; 28];
     let slots = [30, 10, 20];
-    let archive = slots
+    let archive: Vec<_> = slots
         .into_iter()
         .map(|slot| ArchiveIndexDelta {
             slot,
@@ -457,14 +429,7 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
         })
         .collect();
 
-    apply(
-        &store,
-        &IndexDelta {
-            cursor: ChainPoint::Slot(30),
-            utxo: Default::default(),
-            archive,
-        },
-    );
+    apply(&store, &archive);
 
     let forward = store
         .slots_by_tag(archive_dimensions::POLICY, &policy, 0, 40)
@@ -485,7 +450,7 @@ fn slots_by_tag_are_ordered_in_both_directions<B: Backend>() {
 /// Populate a store through the regular delta path, the same one the sync
 /// pipeline uses. Nothing here knows about pre-hashed records: the export side
 /// has to cope with whatever normal indexing produced.
-fn seed<S: CoreIndexStore>(store: &S) -> Seeded {
+fn seed<S: CoreArchiveStore>(store: &S) -> Seeded {
     let mut seeded = Seeded::default();
 
     seed_deltas(&CONFORMANCE, &mut |delta| {
@@ -496,7 +461,7 @@ fn seed<S: CoreIndexStore>(store: &S) -> Seeded {
     seeded
 }
 
-fn collect_tags<S: CoreIndexStore>(
+fn collect_tags<S: CoreArchiveStore>(
     store: &S,
     dimensions: &[TagDimension],
     slots: Range<BlockSlot>,
@@ -511,7 +476,7 @@ fn collect_tags<S: CoreIndexStore>(
 /// Every dimension's tag records, the way an export call site asks for them:
 /// through the wrapper, so `archive_dimensions::ALL` is named in one place
 /// rather than at each call.
-fn collect_all_tags<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<TagRecord> {
+fn collect_all_tags<S: CoreArchiveStore>(store: &S, slots: Range<BlockSlot>) -> Vec<TagRecord> {
     store
         .iter_all_archive_tags(slots)
         .expect("iter_all_archive_tags failed")
@@ -519,7 +484,7 @@ fn collect_all_tags<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Ve
         .expect("tag iteration failed")
 }
 
-fn collect_exacts<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<ExactRecord> {
+fn collect_exacts<S: CoreArchiveStore>(store: &S, slots: Range<BlockSlot>) -> Vec<ExactRecord> {
     store
         .iter_exact_records(slots)
         .expect("iter_exact_records failed")
@@ -527,7 +492,7 @@ fn collect_exacts<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<
         .expect("exact iteration failed")
 }
 
-fn slots_for_tag<S: CoreIndexStore>(
+fn slots_for_tag<S: CoreArchiveStore>(
     store: &S,
     dimension: TagDimension,
     key: &[u8],
@@ -542,7 +507,7 @@ fn slots_for_tag<S: CoreIndexStore>(
 
 /// The epoch slice a publisher would export: every tag and exact record whose
 /// slot falls in the epoch, in traversal order.
-fn export_slice<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<IndexRecord> {
+fn export_slice<S: CoreArchiveStore>(store: &S, slots: Range<BlockSlot>) -> Vec<IndexRecord> {
     let mut records: Vec<IndexRecord> = Vec::new();
 
     records.extend(
@@ -562,7 +527,7 @@ fn export_slice<S: CoreIndexStore>(store: &S, slots: Range<BlockSlot>) -> Vec<In
 
 /// Restore in one batch, the way a driver would restore one chunk: the writer
 /// takes the records as an iterator and accumulates them until `commit`.
-fn restore<S: CoreIndexStore>(store: &S, records: impl IntoIterator<Item = IndexRecord>) {
+fn restore<S: CoreArchiveStore>(store: &S, records: impl IntoIterator<Item = IndexRecord>) {
     let writer = store.start_writer().expect("start_writer failed");
     writer
         .append_prehashed(records)
@@ -848,7 +813,7 @@ fn undo_removes_exactly_what_apply_added<B: Backend>() {
 
     for delta in second.iter().rev() {
         let writer = store.start_writer().expect("start_writer failed");
-        writer.undo(delta).expect("undo failed");
+        writer.undo_index(delta).expect("undo_index failed");
         writer.commit().expect("commit failed");
     }
 
@@ -1021,7 +986,8 @@ fn cost_spec(epochs: u64) -> SeedSpec {
 /// orchestration, not here.
 ///
 /// Run with:
-/// `cargo test --release --test index_roundtrip -- --ignored --nocapture`
+/// `cargo test --release --test archive_index_roundtrip -- --ignored
+/// --nocapture`
 #[test]
 #[ignore = "measurement, not an assertion"]
 fn measure_one_epoch_iteration_cost() {
@@ -1126,8 +1092,8 @@ fn mib(bytes: u64) -> f64 {
 /// window — a measurement taken before that would say a sink is nearly free.
 ///
 /// Run with:
-/// `cargo test --release --test index_roundtrip -- --ignored --nocapture
-/// measure_layer_sink_residency`
+/// `cargo test --release --test archive_index_roundtrip -- --ignored
+/// --nocapture measure_layer_sink_residency`
 #[cfg(unix)]
 #[test]
 #[ignore = "measurement, not an assertion"]
@@ -1206,9 +1172,9 @@ fn measure_layer_sink_residency() {
 /// assumed — a speed-up that moved the bytes would not be one.
 ///
 /// Run with:
-/// `cargo test --release --test index_roundtrip -- --ignored --nocapture
-/// measure_banded_publish_cost`, and `DOLOS_INDEX_COST_EPOCHS=32` for the
-/// deeper store [`measure_one_epoch_iteration_cost`] also reports.
+/// `cargo test --release --test archive_index_roundtrip -- --ignored
+/// --nocapture measure_banded_publish_cost`, and `DOLOS_INDEX_COST_EPOCHS=32`
+/// for the deeper store [`measure_one_epoch_iteration_cost`] also reports.
 #[cfg(unix)]
 #[test]
 #[ignore = "measurement, not an assertion"]
@@ -1273,25 +1239,21 @@ fn measure_banded_publish_cost() {
     );
 }
 
-/// Publish the seeded index store at `band`, into a directory that lives as
-/// long as the returned guard.
+/// Publish the seeded archive at `band`, into a directory that lives as long
+/// as the returned guard.
 #[cfg(unix)]
-fn publish_at_band<S: CoreIndexStore>(
+fn publish_at_band<S: CoreArchiveStore>(
     store: &S,
     epochs: u64,
     band: usize,
 ) -> (dolos_snapshot::inscription::Inscription, tempfile::TempDir) {
-    use dolos_core::{StateStore as _, StateWriter as _};
+    use dolos_core::{ChainPoint, StateStore as _, StateWriter as _};
     use dolos_snapshot::{
         export::{IndexBand, Plan},
         Network,
     };
 
     let temp = tempfile::tempdir().expect("tempdir");
-
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
-            .expect("archive store");
 
     let state = dolos_core::builtin::MemoryStateStore::new();
 
@@ -1320,9 +1282,8 @@ fn publish_at_band<S: CoreIndexStore>(
     let inscription = dolos_snapshot::export::publish(
         temp.path().join("stele"),
         &plan,
-        &archive,
-        &state,
         store,
+        &state,
         None,
         &dolos_snapshot::progress::Observer::silent(),
     )
@@ -1374,20 +1335,16 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
     for (label, width) in widths {
         let (store, _guard) = B::open();
 
-        let delta = IndexDelta {
-            cursor: ChainPoint::Slot(100),
-            utxo: Default::default(),
-            archive: vec![ArchiveIndexDelta {
-                slot: 100,
-                block_hash: vec![0xAB; width],
-                block_number: Some(1),
-                tx_hashes: vec![vec![0xCD; 32]],
-                tags: Vec::new(),
-            }],
-        };
+        let delta = vec![ArchiveIndexDelta {
+            slot: 100,
+            block_hash: vec![0xAB; width],
+            block_number: Some(1),
+            tx_hashes: vec![vec![0xCD; 32]],
+            tags: Vec::new(),
+        }];
 
         let writer = store.start_writer().expect("start_writer failed");
-        let applied = writer.apply(&delta);
+        let applied = writer.apply_index(&delta);
 
         if width == 0 {
             // An empty hash is "no block hash", not a malformed one — the
@@ -1415,21 +1372,17 @@ fn malformed_exact_keys_are_refused<B: Backend>() {
     for (label, width) in [("short", 31usize), ("over-wide", 33)] {
         let (store, _guard) = B::open();
 
-        let delta = IndexDelta {
-            cursor: ChainPoint::Slot(100),
-            utxo: Default::default(),
-            archive: vec![ArchiveIndexDelta {
-                slot: 100,
-                block_hash: vec![0x01; 32],
-                block_number: Some(1),
-                tx_hashes: vec![vec![0xEF; width]],
-                tags: Vec::new(),
-            }],
-        };
+        let delta = vec![ArchiveIndexDelta {
+            slot: 100,
+            block_hash: vec![0x01; 32],
+            block_number: Some(1),
+            tx_hashes: vec![vec![0xEF; width]],
+            tags: Vec::new(),
+        }];
 
         let writer = store.start_writer().expect("start_writer failed");
         assert!(
-            writer.apply(&delta).is_err(),
+            writer.apply_index(&delta).is_err(),
             "a {label} ({width}-byte) tx hash should be refused, not stored"
         );
         writer.commit().expect("commit failed");

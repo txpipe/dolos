@@ -3,8 +3,6 @@ use redb::{MultimapTableDefinition, ReadTransaction, TableDefinition, WriteTrans
 use std::{collections::HashMap, ops::Range};
 use tracing::trace;
 
-pub mod archive;
-pub mod indexes;
 pub mod mempool;
 pub mod state;
 pub mod wal;
@@ -37,9 +35,6 @@ pub enum Error {
     #[error("invalid operation")]
     InvalidOperation,
 
-    #[error("archive error: {0}")]
-    ArchiveError(String),
-
     #[error("invalid dimension: {0}")]
     InvalidDimension(String),
 
@@ -57,12 +52,6 @@ impl From<::redb::SetDurabilityError> for Error {
 impl From<::redb::TransactionError> for Error {
     fn from(error: ::redb::TransactionError) -> Self {
         Error::TransactionError(Box::new(error))
-    }
-}
-
-impl From<crate::archive::RedbArchiveError> for Error {
-    fn from(error: crate::archive::RedbArchiveError) -> Self {
-        Error::ArchiveError(error.to_string())
     }
 }
 

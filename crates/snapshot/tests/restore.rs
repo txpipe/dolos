@@ -7,7 +7,9 @@
 //!    one refusal whose timing is part of the requirement: half a mainnet
 //!    ledger under a preprod configuration is not a state a node recovers from.
 //! 2. **A failed restore leaves no cursor**, so `has_existing_data()` reports
-//!    an empty node rather than a half-restored one.
+//!    an empty node rather than a half-restored one — including a restore that
+//!    stopped in the live-UTxO rebuild, the one step that runs after the ledger
+//!    is whole.
 //! 3. **Roundtrip.** A node built by the harness, exported, and restored into
 //!    an empty store set is the node it came from: same cursor, same entities,
 //!    same UTxO set, same archive, same index records, same tag queries. And it
@@ -40,10 +42,10 @@
 mod node;
 mod watcher;
 
-use dolos_cardano::indexes::{archive_dimensions, index_delta_from_utxo_delta};
+use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, IndexStore, LogKey,
-    StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
+    TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -51,7 +53,10 @@ use dolos_snapshot::{
     state_layer_count, state_ns_for, DolosProfile, Error, RetainedEpochs, COMPRESSION_LEVEL, KINDS,
     NAMESPACES, STATE_KINDS, UTXOS,
 };
-use dolos_testing::toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores};
+use dolos_testing::{
+    faults::{FaultyStateStore, TestFault},
+    toy_domain::{FjallStores, MemoryStores, ToyDomain, ToyStores},
+};
 use node::{export_plan, export_to, harness, plan_at_boundary, Blank};
 use serde_json::json;
 use stelae::{
@@ -117,7 +122,7 @@ fn restore_into<B: ToyStores>(
     let plan = restore::plan(&stele, magic, None)?;
     // A directory stele stages nothing — its blobs are read where they are —
     // so the only volume this restore has a need on is the destination.
-    plan.preflight(root, None)?;
+    plan.preflight(root, &stelae::Resume::none(), None)?;
 
     let index = stele.blob_index()?;
 
@@ -133,10 +138,8 @@ fn restore_into<B: ToyStores>(
 }
 
 /// Where a restore writes, for a blank store set.
-fn target<B: ToyStores>(
-    blank: &Blank<B>,
-) -> restore::Target<'_, impl ArchiveStore, B::State, B::Indexes> {
-    restore::Target::new(&blank.archive, blank.state(), blank.indexes())
+fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveStore, B::State> {
+    restore::Target::new(&blank.archive, blank.state())
 }
 
 // --------------------------------------------------------------------------
@@ -352,7 +355,7 @@ fn a_required_unknown_layer_kind_is_refused_before_anything_is_written() {
 ///
 /// One state layer's blob is removed, so the restore fails partway through the
 /// tip — after epochs and other layers have landed. `set_cursor` is the last
-/// thing a restore does, so what it leaves behind is a store set with data in
+/// write a restore makes, so what it leaves behind is a store set with data in
 /// it and no cursor, which is what `bootstrap`'s `has_existing_data()` reads.
 #[test]
 fn a_restore_that_fails_partway_leaves_no_cursor() {
@@ -404,6 +407,57 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
     );
 }
 
+/// Done criterion 1: the state cursor is the last write of the restore.
+///
+/// The failure is injected into `StateWriter::apply_utxo_tags`, which the
+/// restore calls in exactly one place — the live-UTxO rebuild of step 6, after
+/// every layer including the state tip has committed. So this is the
+/// interruption the profile's old step order could not survive: the ledger is
+/// whole, the `utxo::*` dimensions are not, and what says so is that there is
+/// no cursor.
+#[test]
+fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
+    let domain: ToyDomain = harness();
+
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+
+    let blank = Blank::<MemoryStores>::open();
+    let state = FaultyStateStore::new(blank.state().clone(), TestFault::StateTagsApplyError);
+
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+    let index = stele.blob_index().unwrap();
+
+    let err = restore::restore(
+        &stele,
+        &index,
+        &plan,
+        restore::Target::new(&blank.archive, &state),
+        default_budget(),
+        &mut Checkpoint::none(),
+        &Observer::silent(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::State(dolos_core::StateError::InternalStoreError(reason)) if reason.contains("fault injection")),
+        "{err:?}"
+    );
+
+    assert!(
+        blank.state().read_cursor().unwrap().is_none(),
+        "a restore that never finished rebuilding the live-utxo indexes left a cursor behind"
+    );
+
+    // The tip did land, or the assertion above would hold of a restore that
+    // failed long before the rebuild and would prove nothing about its order.
+    assert!(
+        blank.state().iter_utxos().unwrap().next().is_some(),
+        "the state tip was never restored, so the missing cursor proves nothing"
+    );
+}
+
 fn assert_untouched<B: ToyStores>(blank: &Blank<B>) {
     assert!(blank.state().read_cursor().unwrap().is_none(), "a cursor");
     assert!(
@@ -414,10 +468,6 @@ fn assert_untouched<B: ToyStores>(blank: &Blank<B>) {
             .next()
             .is_none(),
         "a block"
-    );
-    assert!(
-        blank.indexes().cursor().unwrap().is_none(),
-        "an index cursor"
     );
 
     for ns in NAMESPACES {
@@ -481,7 +531,6 @@ fn roundtrip<B: ToyStores>() {
             &plan,
             &blank.archive,
             blank.state(),
-            blank.indexes(),
             None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
@@ -541,7 +590,8 @@ fn a_restored_node_matches_a_replayed_one_on_fjall() {
 fn assert_stores_match<B: ToyStores>(restored: &Blank<B>, original: &ToyDomain<B>) {
     assert_state_matches(restored.state(), original.state());
     assert_archive_matches(&restored.archive, original.archive());
-    assert_indexes_match(restored.indexes(), original.indexes(), original.state());
+    assert_indexes_match(&restored.archive, original.archive());
+    assert_utxo_tags_match(restored.state(), original.state());
 }
 
 fn assert_state_matches<S: StateStore>(restored: &S, original: &S) {
@@ -604,19 +654,8 @@ fn assert_archive_matches<A: ArchiveStore>(restored: &A, original: &A) {
     assert!(any, "the fixture wrote no logs, so this proves nothing");
 }
 
-/// Both halves of the index store: the archive records the layers carry, and
-/// the live-UTxO dimensions they deliberately do not.
-///
-/// The second half is the point. `utxo::*` tags are never shipped — ADR-004's
-/// Amendment 2 — so they exist in a restored node only because the restore
-/// rebuilt them, and only a query proves it did.
-fn assert_indexes_match<I: IndexStore, S: StateStore>(restored: &I, original: &I, state: &S) {
-    assert_eq!(
-        restored.cursor().unwrap(),
-        original.cursor().unwrap(),
-        "cursor"
-    );
-
+/// The index half of the archive: the records the `indexes` layers carry.
+fn assert_indexes_match<A: ArchiveStore>(restored: &A, original: &A) {
     let tags = tags_of(original);
     assert!(!tags.is_empty(), "the fixture produced no archive tags");
     assert_eq!(tags_of(restored), tags, "archive tags");
@@ -624,21 +663,28 @@ fn assert_indexes_match<I: IndexStore, S: StateStore>(restored: &I, original: &I
     let exact = exact_of(original);
     assert!(!exact.is_empty(), "the fixture produced no exact records");
     assert_eq!(exact_of(restored), exact, "exact records");
+}
 
+/// The live-UTxO tags, which the layers deliberately do not carry.
+///
+/// This is the point. `utxo::*` tags are never shipped — ADR-004's Amendment
+/// 2 — so they exist in a restored node only because the restore rebuilt
+/// them, and only a query proves it did.
+fn assert_utxo_tags_match<S: StateStore>(restored: &S, original: &S) {
     // Every dimension the ledger tagged the restored UTxO set under, asked of
     // both stores.
     let delta = UtxoSetDelta {
-        produced_utxo: utxos_of(state)
+        produced_utxo: utxos_of(original)
             .into_iter()
             .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
             .collect(),
         ..Default::default()
     };
 
-    let rebuilt = index_delta_from_utxo_delta(ChainPoint::Origin, &delta);
+    let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.utxo.produced {
+    for (txo, tags) in &rebuilt.produced {
         for tag in tags {
             let left: UtxoSet = restored.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let right: UtxoSet = original.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -684,7 +730,7 @@ fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>
         .collect()
 }
 
-fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
+fn tags_of<A: ArchiveStore>(store: &A) -> Vec<TagRecord> {
     let mut found: Vec<TagRecord> = store
         .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
         .unwrap()
@@ -695,7 +741,7 @@ fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
     found
 }
 
-fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
+fn exact_of<A: ArchiveStore>(store: &A) -> Vec<ExactRecord> {
     let mut found: Vec<ExactRecord> = store
         .iter_exact_records(0..u64::MAX)
         .unwrap()
@@ -1223,7 +1269,8 @@ fn a_newer_inscription_keeps_the_epoch_layers_and_redoes_the_tip() {
 
     assert_state_matches(blank.state(), reference.state());
     assert_archive_matches(&blank.archive, &reference.archive);
-    assert_indexes_match(blank.indexes(), reference.indexes(), blank.state());
+    assert_indexes_match(&blank.archive, &reference.archive);
+    assert_utxo_tags_match(blank.state(), reference.state());
 }
 
 /// The slot epoch 1 begins at, for a test that needs to stand on the boundary.
@@ -1266,7 +1313,6 @@ fn export_standing_at<B: ToyStores>(
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &dolos_snapshot::export::First,
         &Observer::silent(),

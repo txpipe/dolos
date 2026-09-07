@@ -202,7 +202,7 @@ where
             if !br.hash.is_empty() {
                 slot = self
                     .domain
-                    .indexes()
+                    .archive()
                     .slot_by_block_hash(&br.hash)
                     .map_err(|_| Status::internal("Failed to query chain service."))?;
             }
@@ -210,7 +210,7 @@ where
             if slot.is_none() && br.height != 0 {
                 slot = self
                     .domain
-                    .indexes()
+                    .archive()
                     .slot_by_block_number(br.height)
                     .map_err(|_| Status::internal("Failed to query chain service."))?;
             }

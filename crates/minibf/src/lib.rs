@@ -404,6 +404,10 @@ where
             get(routes::accounts::by_stake_utxos::<D>),
         )
         .route(
+            "/accounts/{stake_address}/history",
+            get(routes::accounts::by_stake_history::<D>),
+        )
+        .route(
             "/accounts/{stake_address}/rewards",
             get(routes::accounts::by_stake_rewards::<D>),
         )
@@ -570,6 +574,7 @@ where
             "/txs/{tx_hash}/stakes",
             get(routes::txs::by_hash_stakes::<D>),
         )
+        .route("/assets", get(routes::assets::all::<D>))
         .route(
             "/assets/policy/{policy_id}",
             get(routes::assets::by_policy::<D>),
@@ -632,6 +637,14 @@ where
         .route(
             "/governance/proposals/{gov_action_id}/metadata",
             get(routes::governance::proposal_metadata_by_gov_action::<D>),
+        )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/withdrawals",
+            get(routes::governance::proposal_withdrawals::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/withdrawals",
+            get(routes::governance::proposal_withdrawals_by_gov_action::<D>),
         )
         .with_state(facade)
         .layer(

@@ -229,27 +229,6 @@ where
         }
     }
 
-    fn commit_indexes(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        match self {
-            Self::Genesis(w) => {
-                <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
-            }
-            Self::Roll(w) => {
-                <roll::RollWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
-            }
-            Self::Rupd(w) => {
-                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
-            }
-            Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
-            }
-            Self::Estart(w) => {
-                <estart::EstartWorkUnit as WorkUnit<D>>::commit_indexes(w, domain, shard_index)
-            }
-            Self::ForcedStop => Ok(()),
-        }
-    }
-
     fn finalize(&mut self, domain: &D) -> Result<(), DomainError> {
         match self {
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::finalize(w, domain),
@@ -458,7 +437,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
             }
             InternalWorkUnit::Blocks(batch) => {
                 Some(CardanoWorkUnit::Roll(Box::new(roll::RollWorkUnit::new(
-                    batch,
+                    *batch,
                     domain.genesis(),
                     true, // live mode
                     self.cache.clone(),
@@ -486,7 +465,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn compute_undo(
         block: &dolos_core::Cbor,
         inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
-        point: ChainPoint,
+        _point: ChainPoint,
     ) -> Result<dolos_core::UndoBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
         let blockd = OwnedMultiEraBlock::decode(block_arc)?;
@@ -503,13 +482,25 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let utxo_delta = crate::utxoset::compute_undo_delta(blockv, &decoded_inputs)
             .map_err(ChainError::from)?;
 
-        let index_delta = crate::indexes::index_delta_from_utxo_delta(point, &utxo_delta);
+        // The tags the block put in and took out, as it did them: the undo
+        // delta names them inverted (undone = what the block produced,
+        // recovered = what it consumed), and `undo_utxo_tags` inverts again.
+        let mut builder = crate::indexes::CardanoIndexDeltaBuilder::new();
+        builder.add_produced_utxos(&utxo_delta.undone_utxo);
+        builder.add_consumed_utxos(&utxo_delta.recovered_stxi);
+
+        // The archive entries the block wrote, rebuilt the way the apply path
+        // built them, so `undo_index` removes exactly what `apply_index` added.
+        builder.index_block(blockv, &decoded_inputs);
+
+        let (utxo_index_delta, archive_index_deltas) = builder.into_parts();
 
         let tx_hashes = blockv.txs().iter().map(|tx| tx.hash()).collect();
 
         Ok(dolos_core::UndoBlockData {
             utxo_delta,
-            index_delta,
+            utxo_index_delta,
+            archive_index_deltas,
             tx_hashes,
         })
     }
@@ -517,7 +508,7 @@ impl dolos_core::ChainLogic for CardanoLogic {
     fn compute_catchup(
         block: &dolos_core::Cbor,
         inputs: &std::collections::HashMap<dolos_core::TxoRef, Arc<EraCbor>>,
-        point: ChainPoint,
+        _point: ChainPoint,
     ) -> Result<dolos_core::CatchUpBlockData, ChainError> {
         let block_arc = Arc::new(block.clone());
         let blockd = OwnedMultiEraBlock::decode(block_arc)?;
@@ -534,20 +525,22 @@ impl dolos_core::ChainLogic for CardanoLogic {
         let utxo_delta = crate::utxoset::compute_apply_delta(blockv, &decoded_inputs)
             .map_err(ChainError::from)?;
 
-        let mut builder = crate::indexes::CardanoIndexDeltaBuilder::new(point);
+        let mut builder = crate::indexes::CardanoIndexDeltaBuilder::new();
 
         // UTxO filter changes
-        builder.add_produced_utxos_from_delta(&utxo_delta);
-        builder.add_consumed_utxos_from_delta(&utxo_delta);
+        builder.add_utxo_tags_from_delta(&utxo_delta);
 
         // Archive indexes (shared logic)
         builder.index_block(blockv, &decoded_inputs);
+
+        let (utxo_index_delta, archive_index_deltas) = builder.into_parts();
 
         let tx_hashes = blockv.txs().iter().map(|tx| tx.hash()).collect();
 
         Ok(dolos_core::CatchUpBlockData {
             utxo_delta,
-            index_delta: builder.build(),
+            utxo_index_delta,
+            archive_index_deltas,
             tx_hashes,
         })
     }

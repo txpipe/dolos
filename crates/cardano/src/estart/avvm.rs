@@ -31,8 +31,7 @@
 //! thousand epochs behind any rollback window a node keeps.
 
 use dolos_core::{
-    ChainError, ChainPoint, Domain, EntityKey, Genesis, IndexStore, IndexWriter, StateStore,
-    StateWriter, TxoRef, UtxoMap, UtxoSetDelta,
+    ChainError, Domain, EntityKey, Genesis, StateStore, StateWriter, TxoRef, UtxoMap, UtxoSetDelta,
 };
 use pallas::ledger::traverse::MultiEraOutput;
 
@@ -157,8 +156,8 @@ impl AvvmReclamation {
         }
     }
 
-    /// Delete this census from the state store and from the UTxO filter
-    /// indexes, leaving every pot untouched.
+    /// Delete this census from the state store, UTxO filter tags included,
+    /// leaving every pot untouched.
     ///
     /// This is the repair path — `dolos doctor reclaim-avvm` against a store
     /// an earlier binary built, where the boundary already moved the value
@@ -166,18 +165,9 @@ impl AvvmReclamation {
     /// stages the same deletion inside its own commit, alongside the pot
     /// delta it must be atomic with.
     ///
-    /// Indexes follow the state commit, the order the block path uses. A
-    /// crash between the two leaves an index entry pointing at a ref the
-    /// state no longer holds, which readers already tolerate — they resolve
-    /// refs against the state and drop what is not there. Re-running the
-    /// repair after such a crash finds nothing unspent and does nothing, so
-    /// the stale tags outlive it; the other order would hide a live UTxO
-    /// instead, which is worse.
-    pub fn apply_deletion<D: Domain>(
-        &self,
-        state: &D::State,
-        indexes: &D::Indexes,
-    ) -> Result<(), ChainError> {
+    /// The rows and their tags go in one batch, so a crash leaves either both
+    /// or neither.
+    pub fn apply_deletion<D: Domain>(&self, state: &D::State) -> Result<(), ChainError> {
         if self.is_empty() {
             return Ok(());
         }
@@ -186,15 +176,8 @@ impl AvvmReclamation {
 
         let writer = state.start_writer()?;
         writer.apply_utxoset(&delta)?;
+        writer.apply_utxo_tags(&crate::indexes::utxo_index_delta_from_utxo_delta(&delta))?;
         writer.commit()?;
-
-        // The delta carries the index's own cursor: this changes what the
-        // index holds, never how far it has been advanced.
-        let cursor = indexes.cursor()?.unwrap_or(ChainPoint::Origin);
-
-        let index_writer = indexes.start_writer()?;
-        index_writer.apply(&crate::indexes::index_delta_from_utxo_delta(cursor, &delta))?;
-        index_writer.commit()?;
 
         Ok(())
     }
