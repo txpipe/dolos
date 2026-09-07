@@ -175,6 +175,35 @@ segment number *and generation* so a replaced file never serves stale bytes.
 `DictionarySource` is how a store hands the reader the dictionary a segment
 names; the codec never searches the file system for one.
 
+The frame, index and dictionary caches each have a separate byte budget and
+entry limit. Index weight includes the frame vector's allocated capacity;
+dictionary weight includes both the source bytes and zstd's prepared decoder
+allocation. Fixed cache bookkeeping and Arc headers are bounded by entry
+counts. An object larger than its budget is used for the current read but
+never retained. Zero bytes or entries disables that cache.
+
+`inflight_reads` bounds whole operations, starting before opening a file,
+parsing a seek table, preparing a dictionary or allocating output. Zero allows
+one operation; it never selects unlimited concurrency. Each admitted read can
+temporarily hold an index, a prepared dictionary, its output and one decoded
+frame outside the retained caches. These temporary objects are bounded in
+count, not by the retained byte budgets; frame and request sizes still follow
+the format limits above. Returned output and index objects belong to callers.
+
+`handles` limits all open segment files, including files held by readers
+after cache eviction, invalidation or clear. A file retains its permit until
+its final reader releases it; opening and decoding use no shared seek cursor.
+At the limit, a miss evicts retained handles and waits for active handles to
+close. Zero disables handle retention and permits one transient file, so
+`CacheLimits::DISABLED` remains bounded while retaining nothing.
+`CacheStats::handles` counts retained handles and `open_handles` counts all
+reserved/open handles. The other byte counters report retained allocations,
+and `inflight_reads` counts admitted operations.
+
+Dictionary preparation is fallible: a matching content hash establishes
+identity, but malformed trained-dictionary contents still yield an
+`InvalidData` error naming the dictionary instead of panicking.
+
 Producing compressed files from a live store, choosing where dictionaries
 live, and routing `FlatFileStore::read` through this reader are lifecycle
 concerns implemented outside this module.

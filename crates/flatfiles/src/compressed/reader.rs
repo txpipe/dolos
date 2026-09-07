@@ -6,7 +6,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use zstd::bulk::Decompressor;
+use zstd::zstd_safe::DCtx;
 
 use super::dictionary::{Dictionary, DictionaryId, DictionarySource, PreparedDictionary};
 use super::format::{
@@ -222,6 +222,16 @@ impl SegmentIndex {
         self.physical_len
     }
 
+    /// Retained bytes, including spare capacity in the frame vector.
+    /// Cache bookkeeping and Arc headers are bounded separately by entries.
+    pub fn memory_size(&self) -> usize {
+        std::mem::size_of::<Self>().saturating_add(
+            self.frames
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Frame>()),
+        )
+    }
+
     /// The frames covering `length` bytes at `offset`, or an error when the
     /// span leaves the logical stream.
     pub fn span(&self, offset: u64, length: u32) -> io::Result<Range<usize>> {
@@ -265,11 +275,9 @@ impl SegmentIndex {
                 ),
             )
         })?;
-        let mut decompressor = match (self.metadata.dictionary, dictionary) {
-            (None, None) => Decompressor::new()?,
-            (Some(id), Some(prepared)) if prepared.id() == id => {
-                Decompressor::with_prepared_dictionary(prepared.decoder())?
-            }
+        match (self.metadata.dictionary, dictionary) {
+            (None, None) => {}
+            (Some(id), Some(prepared)) if prepared.id() == id => {}
             (Some(id), Some(prepared)) => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -303,14 +311,25 @@ impl SegmentIndex {
                 frame.decompressed_size
             )));
         }
-        let decoded = decompressor
-            .decompress(&compressed, frame.decompressed_size as usize)
-            .map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame {index} at {}: {e}", frame.physical_offset),
-                )
-            })?;
+        let mut decompressor = DCtx::try_create()
+            .ok_or_else(|| io::Error::other("cannot allocate zstd decompression context"))?;
+        let mut decoded = Vec::with_capacity(frame.decompressed_size as usize);
+        let result = match dictionary {
+            Some(prepared) => {
+                decompressor.decompress_using_ddict(&mut decoded, &compressed, prepared.decoder())
+            }
+            None => decompressor.decompress(&mut decoded, &compressed),
+        };
+        result.map_err(|code| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "frame {index} at {}: {}",
+                    frame.physical_offset,
+                    zstd::zstd_safe::get_error_name(code)
+                ),
+            )
+        })?;
         if decoded.len() != frame.decompressed_size as usize {
             return Err(invalid(format!(
                 "frame {index} decoded to {} bytes, seek table says {}",
@@ -406,7 +425,7 @@ impl<S: ReadAt> SegmentReader<S> {
     pub fn new(source: S, dictionaries: &dyn DictionarySource) -> io::Result<Self> {
         let index = SegmentIndex::parse(&source)?;
         let dictionary = match index.metadata().dictionary {
-            Some(id) => Some(resolve_dictionary(id, dictionaries)?.prepare()),
+            Some(id) => Some(resolve_dictionary(id, dictionaries)?.prepare()?),
             None => None,
         };
         Ok(Self {

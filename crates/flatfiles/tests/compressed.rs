@@ -316,14 +316,14 @@ fn wrong_dictionary_is_refused_before_decoding() {
     assert!(err.to_string().contains(&right.id().to_string()));
 
     let index = SegmentIndex::parse(&bytes).unwrap();
-    let prepared = other.prepare();
+    let prepared = other.prepare().unwrap();
     let err = index.decode_frame(&bytes, 0, Some(&prepared)).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 
     let err = index.decode_frame(&bytes, 0, None).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::NotFound);
 
-    let prepared = right.prepare();
+    let prepared = right.prepare().unwrap();
     let (offset, length) = locations[0];
     assert_eq!(
         index
@@ -360,7 +360,7 @@ fn missing_dictionary_is_a_not_found_error() {
 fn dictionary_free_segment_refuses_a_dictionary() {
     let (bytes, _) = encode(&blocks(6, 5, 100, 200), per_block());
     let index = SegmentIndex::parse(&bytes).unwrap();
-    let prepared = raw_dictionary().prepare();
+    let prepared = raw_dictionary().prepare().unwrap();
     let err = index.decode_frame(&bytes, 0, Some(&prepared)).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 }
@@ -724,17 +724,21 @@ fn assert_within(cache: &ReadCache) {
     assert!(stats.frame_bytes <= limits.frame_bytes, "{stats:?}");
     assert!(stats.frame_entries <= limits.frame_entries, "{stats:?}");
     assert!(stats.index_entries <= limits.index_entries, "{stats:?}");
+    assert!(stats.index_bytes <= limits.index_bytes, "{stats:?}");
+    assert!(
+        stats.dictionary_bytes <= limits.dictionary_bytes,
+        "{stats:?}"
+    );
     assert!(
         stats.dictionary_entries <= limits.dictionary_entries,
         "{stats:?}"
     );
     assert!(stats.handles <= limits.handles, "{stats:?}");
-    if limits.inflight_decodes > 0 {
-        assert!(
-            stats.inflight_decodes <= limits.inflight_decodes,
-            "{stats:?}"
-        );
-    }
+    assert!(stats.open_handles <= limits.handles.max(1), "{stats:?}");
+    assert!(
+        stats.inflight_reads <= limits.inflight_reads.max(1),
+        "{stats:?}"
+    );
 }
 
 fn hammer(cache: &ReadCache, store: &Store, threads: usize, reads: usize) {
@@ -783,13 +787,14 @@ fn cache_serves_concurrent_reads_within_its_limits() {
         index_entries: 2,
         dictionary_entries: 1,
         handles: 2,
-        inflight_decodes: 3,
+        inflight_reads: 3,
+        ..CacheLimits::default()
     });
     hammer(&cache, &store, 8, 400);
     assert_within(&cache);
     let stats = cache.stats();
     assert!(stats.frame_entries > 0 && stats.index_entries > 0 && stats.handles > 0);
-    assert_eq!(stats.inflight_decodes, 0);
+    assert_eq!(stats.inflight_reads, 0);
     assert_eq!(stats.dictionary_entries, 1);
 }
 

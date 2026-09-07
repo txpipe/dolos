@@ -17,14 +17,20 @@ pub struct CacheLimits {
     pub frame_bytes: usize,
     /// Decoded frames kept across all segments.
     pub frame_entries: usize,
+    /// Parsed seek-table bytes kept across all segments.
+    pub index_bytes: usize,
     /// Parsed seek tables kept.
     pub index_entries: usize,
+    /// Dictionary bytes and prepared decoder allocations kept.
+    pub dictionary_bytes: usize,
     /// Prepared dictionaries kept.
     pub dictionary_entries: usize,
-    /// Open segment files kept.
+    /// Open segment files, including active reads. Zero disables retention
+    /// and allows one transient handle.
     pub handles: usize,
-    /// Frames decoding at once across all readers; zero leaves it unbounded.
-    pub inflight_decodes: usize,
+    /// Reads or index loads in flight, including opening, parsing and decoding.
+    /// Zero admits one operation at a time.
+    pub inflight_reads: usize,
 }
 
 impl CacheLimits {
@@ -32,10 +38,12 @@ impl CacheLimits {
     pub const DISABLED: Self = Self {
         frame_bytes: 0,
         frame_entries: 0,
+        index_bytes: 0,
         index_entries: 0,
+        dictionary_bytes: 0,
         dictionary_entries: 0,
         handles: 0,
-        inflight_decodes: 0,
+        inflight_reads: 1,
     };
 }
 
@@ -44,10 +52,12 @@ impl Default for CacheLimits {
         Self {
             frame_bytes: 64 << 20,
             frame_entries: 16_384,
+            index_bytes: 32 << 20,
             index_entries: 512,
+            dictionary_bytes: 8 << 20,
             dictionary_entries: 8,
             handles: 64,
-            inflight_decodes: 16,
+            inflight_reads: 16,
         }
     }
 }
@@ -65,10 +75,15 @@ pub struct SegmentRef {
 pub struct CacheStats {
     pub frame_bytes: usize,
     pub frame_entries: usize,
+    pub index_bytes: usize,
     pub index_entries: usize,
+    pub dictionary_bytes: usize,
     pub dictionary_entries: usize,
+    /// Handles retained in the cache.
     pub handles: usize,
-    pub inflight_decodes: usize,
+    /// All open handles, including active and evicted readers.
+    pub open_handles: usize,
+    pub inflight_reads: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,16 +96,22 @@ struct FrameKey {
 /// Bounded caches for reading compressed segments from many threads.
 ///
 /// Each cache is locked only to look up or insert; opening, parsing and
-/// decoding happen outside the locks, with decoding further bounded by an
-/// in-flight gate so a burst of readers cannot hold more than
-/// `inflight_decodes` frames in working memory on top of the cache.
+/// decoding happen outside the locks. An operation permit covers the whole
+/// read, including temporary index, dictionary and output allocations. A
+/// separate permit follows each open file until its final reader releases it.
 pub struct ReadCache {
     limits: CacheLimits,
-    handles: Mutex<Lru<SegmentRef, Arc<File>>>,
+    handles: Mutex<Lru<SegmentRef, Arc<ReadHandle>>>,
     indexes: Mutex<Lru<SegmentRef, Arc<SegmentIndex>>>,
     dictionaries: Mutex<Lru<DictionaryId, Arc<PreparedDictionary>>>,
     frames: Mutex<Lru<FrameKey, Arc<[u8]>>>,
-    gate: Gate,
+    gate: Arc<Gate>,
+    handle_gate: Arc<Gate>,
+}
+
+struct ReadHandle {
+    file: File,
+    _permit: Permit,
 }
 
 impl ReadCache {
@@ -98,10 +119,11 @@ impl ReadCache {
         Self {
             limits,
             handles: Mutex::new(Lru::new(limits.handles, usize::MAX)),
-            indexes: Mutex::new(Lru::new(limits.index_entries, usize::MAX)),
-            dictionaries: Mutex::new(Lru::new(limits.dictionary_entries, usize::MAX)),
+            indexes: Mutex::new(Lru::new(limits.index_entries, limits.index_bytes)),
+            dictionaries: Mutex::new(Lru::new(limits.dictionary_entries, limits.dictionary_bytes)),
             frames: Mutex::new(Lru::new(limits.frame_entries, limits.frame_bytes)),
-            gate: Gate::new(limits.inflight_decodes),
+            gate: Arc::new(Gate::new(limits.inflight_reads)),
+            handle_gate: Arc::new(Gate::new(limits.handles)),
         }
     }
 
@@ -118,21 +140,23 @@ impl ReadCache {
         length: u32,
         dictionaries: &dyn DictionarySource,
     ) -> io::Result<Vec<u8>> {
+        let _permit = self.gate.acquire();
         let handle = self.handle(segment, path)?;
-        let index = self.index_from(segment, &handle)?;
+        let index = self.index_from(segment, &handle.file)?;
         let dictionary = match index.metadata().dictionary {
             Some(id) => Some(self.dictionary(id, dictionaries)?),
             None => None,
         };
         index.assemble(offset, length, |frame| {
-            self.frame(segment, &index, &handle, dictionary.as_deref(), frame)
+            self.frame(segment, &index, &handle.file, dictionary.as_deref(), frame)
         })
     }
 
     /// The parsed index of the segment file at `path`.
     pub fn index(&self, segment: SegmentRef, path: &Path) -> io::Result<Arc<SegmentIndex>> {
+        let _permit = self.gate.acquire();
         let handle = self.handle(segment, path)?;
-        self.index_from(segment, &handle)
+        self.index_from(segment, &handle.file)
     }
 
     /// Forget everything cached for `segment_id`, whatever its generation.
@@ -161,26 +185,51 @@ impl ReadCache {
 
     pub fn stats(&self) -> CacheStats {
         let frames = self.frames.lock().unwrap();
+        let indexes = self.indexes.lock().unwrap();
+        let dictionaries = self.dictionaries.lock().unwrap();
         CacheStats {
             frame_bytes: frames.bytes(),
             frame_entries: frames.len(),
-            index_entries: self.indexes.lock().unwrap().len(),
-            dictionary_entries: self.dictionaries.lock().unwrap().len(),
+            index_bytes: indexes.bytes(),
+            index_entries: indexes.len(),
+            dictionary_bytes: dictionaries.bytes(),
+            dictionary_entries: dictionaries.len(),
             handles: self.handles.lock().unwrap().len(),
-            inflight_decodes: self.gate.inflight(),
+            open_handles: self.handle_gate.inflight(),
+            inflight_reads: self.gate.inflight(),
         }
     }
 
-    fn handle(&self, segment: SegmentRef, path: &Path) -> io::Result<Arc<File>> {
-        if let Some(handle) = self.handles.lock().unwrap().get(&segment) {
-            return Ok(handle);
+    fn handle(&self, segment: SegmentRef, path: &Path) -> io::Result<Arc<ReadHandle>> {
+        loop {
+            let revision = self.handle_gate.revision();
+            let mut handles = self.handles.lock().unwrap();
+            if let Some(handle) = handles.get(&segment) {
+                return Ok(handle);
+            }
+            let permit = loop {
+                if let Some(permit) = self.handle_gate.try_acquire() {
+                    break Some(permit);
+                }
+                if !handles.evict_oldest() {
+                    break None;
+                }
+            };
+            drop(handles);
+            if let Some(permit) = permit {
+                let handle = Arc::new(ReadHandle {
+                    file: File::open(path)?,
+                    _permit: permit,
+                });
+                self.handles
+                    .lock()
+                    .unwrap()
+                    .insert(segment, handle.clone(), 0);
+                self.handle_gate.changed();
+                return Ok(handle);
+            }
+            self.handle_gate.wait_changed(revision);
         }
-        let handle = Arc::new(File::open(path)?);
-        self.handles
-            .lock()
-            .unwrap()
-            .insert(segment, handle.clone(), 0);
-        Ok(handle)
     }
 
     fn index_from(&self, segment: SegmentRef, handle: &File) -> io::Result<Arc<SegmentIndex>> {
@@ -191,7 +240,7 @@ impl ReadCache {
         self.indexes
             .lock()
             .unwrap()
-            .insert(segment, index.clone(), 0);
+            .insert(segment, index.clone(), index.memory_size());
         Ok(index)
     }
 
@@ -203,11 +252,11 @@ impl ReadCache {
         if let Some(dictionary) = self.dictionaries.lock().unwrap().get(&id) {
             return Ok(dictionary);
         }
-        let dictionary = Arc::new(resolve_dictionary(id, source)?.prepare());
+        let dictionary = Arc::new(resolve_dictionary(id, source)?.prepare()?);
         self.dictionaries
             .lock()
             .unwrap()
-            .insert(id, dictionary.clone(), 0);
+            .insert(id, dictionary.clone(), dictionary.memory_size());
         Ok(dictionary)
     }
 
@@ -227,10 +276,7 @@ impl ReadCache {
         if let Some(data) = self.frames.lock().unwrap().get(&key) {
             return Ok(data);
         }
-        let data: Arc<[u8]> = {
-            let _permit = self.gate.acquire();
-            index.decode_frame(handle, frame, dictionary)?.into()
-        };
+        let data: Arc<[u8]> = index.decode_frame(handle, frame, dictionary)?.into();
         self.frames
             .lock()
             .unwrap()
@@ -292,13 +338,9 @@ impl<K: Hash + Eq + Clone, V: Clone> Lru<K, V> {
         }
         self.remove(&key);
         while !self.slots.is_empty()
-            && (self.slots.len() >= self.max_entries || self.bytes + weight > self.max_bytes)
+            && (self.slots.len() >= self.max_entries || weight > self.max_bytes - self.bytes)
         {
-            let oldest = *self.order.keys().next().unwrap();
-            let key = self.order.remove(&oldest).unwrap();
-            if let Some(slot) = self.slots.remove(&key) {
-                self.bytes -= slot.weight;
-            }
+            self.evict_oldest();
         }
         self.clock += 1;
         self.order.insert(self.clock, key.clone());
@@ -319,6 +361,16 @@ impl<K: Hash + Eq + Clone, V: Clone> Lru<K, V> {
             self.order.remove(&slot.tick);
             self.bytes -= slot.weight;
         }
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some((_, key)) = self.order.pop_first() else {
+            return false;
+        };
+        if let Some(slot) = self.slots.remove(&key) {
+            self.bytes -= slot.weight;
+        }
+        true
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
@@ -343,44 +395,75 @@ impl<K: Hash + Eq + Clone, V: Clone> Lru<K, V> {
     }
 }
 
-/// Counting gate over concurrent decodes; a limit of zero admits everyone.
+/// Counting gate whose permits can follow an operation or an open file.
 struct Gate {
     limit: usize,
-    inflight: Mutex<usize>,
+    state: Mutex<GateState>,
     freed: Condvar,
 }
 
-struct Permit<'a>(&'a Gate);
+#[derive(Default)]
+struct GateState {
+    inflight: usize,
+    revision: u64,
+}
+
+struct Permit(Arc<Gate>);
 
 impl Gate {
     fn new(limit: usize) -> Self {
         Self {
-            limit,
-            inflight: Mutex::new(0),
+            limit: limit.max(1),
+            state: Mutex::new(GateState::default()),
             freed: Condvar::new(),
         }
     }
 
-    fn acquire(&self) -> Option<Permit<'_>> {
-        if self.limit == 0 {
+    fn acquire(self: &Arc<Self>) -> Permit {
+        let mut state = self.state.lock().unwrap();
+        while state.inflight >= self.limit {
+            state = self.freed.wait(state).unwrap();
+        }
+        state.inflight += 1;
+        Permit(self.clone())
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<Permit> {
+        let mut state = self.state.lock().unwrap();
+        if state.inflight >= self.limit {
             return None;
         }
-        let mut inflight = self.inflight.lock().unwrap();
-        while *inflight >= self.limit {
-            inflight = self.freed.wait(inflight).unwrap();
+        state.inflight += 1;
+        Some(Permit(self.clone()))
+    }
+
+    fn revision(&self) -> u64 {
+        self.state.lock().unwrap().revision
+    }
+
+    fn changed(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.revision = state.revision.wrapping_add(1);
+        self.freed.notify_all();
+    }
+
+    fn wait_changed(&self, revision: u64) {
+        let mut state = self.state.lock().unwrap();
+        while state.revision == revision {
+            state = self.freed.wait(state).unwrap();
         }
-        *inflight += 1;
-        Some(Permit(self))
     }
 
     fn inflight(&self) -> usize {
-        *self.inflight.lock().unwrap()
+        self.state.lock().unwrap().inflight
     }
 }
 
-impl Drop for Permit<'_> {
+impl Drop for Permit {
     fn drop(&mut self) {
-        *self.0.inflight.lock().unwrap() -= 1;
-        self.0.freed.notify_one();
+        let mut state = self.0.state.lock().unwrap();
+        state.inflight -= 1;
+        state.revision = state.revision.wrapping_add(1);
+        self.0.freed.notify_all();
     }
 }

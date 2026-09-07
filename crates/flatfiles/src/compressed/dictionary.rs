@@ -7,7 +7,7 @@ use std::io;
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use zstd::dict::DecoderDictionary;
+use zstd::zstd_safe::DDict;
 
 /// Content identity of a dictionary: the SHA-256 of its bytes.
 ///
@@ -109,12 +109,22 @@ impl Dictionary {
         &self.bytes
     }
 
-    /// Digest the dictionary once for repeated decoding.
-    pub fn prepare(&self) -> PreparedDictionary {
-        PreparedDictionary {
+    /// Digest the dictionary once for repeated decoding, returning an error
+    /// if zstd cannot prepare its contents.
+    pub fn prepare(&self) -> io::Result<PreparedDictionary> {
+        let decoder = DDict::try_create(&self.bytes).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cannot prepare dictionary {}: invalid dictionary or allocation failure",
+                    self.id
+                ),
+            )
+        })?;
+        Ok(PreparedDictionary {
             dictionary: self.clone(),
-            decoder: DecoderDictionary::copy(&self.bytes),
-        }
+            decoder,
+        })
     }
 }
 
@@ -131,7 +141,7 @@ impl fmt::Debug for Dictionary {
 /// A dictionary digested into zstd's decoder form.
 pub struct PreparedDictionary {
     dictionary: Dictionary,
-    decoder: DecoderDictionary<'static>,
+    decoder: DDict<'static>,
 }
 
 impl PreparedDictionary {
@@ -143,8 +153,16 @@ impl PreparedDictionary {
         self.dictionary.id
     }
 
-    pub fn decoder(&self) -> &DecoderDictionary<'static> {
+    pub fn decoder(&self) -> &DDict<'static> {
         &self.decoder
+    }
+
+    /// Retained bytes, including the source and zstd's copied decoder data.
+    /// Cache bookkeeping and Arc headers are bounded separately by entries.
+    pub fn memory_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.dictionary.bytes.len())
+            .saturating_add(self.decoder.sizeof())
     }
 }
 
