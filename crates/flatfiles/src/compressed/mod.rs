@@ -32,8 +32,8 @@ mod writer;
 
 pub use cache::{CacheLimits, CacheStats, ReadCache, SegmentRef};
 pub use dictionary::{
-    Dictionary, DictionaryDir, DictionaryId, DictionarySet, DictionarySource, NoDictionaries,
-    PreparedDictionary,
+    bundled_dictionary, Dictionary, DictionaryDir, DictionaryId, DictionarySet, DictionarySource,
+    NoDictionaries, PreparedDictionary,
 };
 pub use format::{
     FrameMode, Metadata, SeekEntry, METADATA_FRAME_MAGIC, METADATA_FRAME_SIZE, METADATA_MAGIC,
