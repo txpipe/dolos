@@ -199,7 +199,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
             report.manifest.network_magic
         );
         println!(
-            "  select it with storage.archive.compression.dictionary = \"{}\"",
+            "  select it with storage.archive.block_compression.dictionary = \"{}\"",
             report.dictionary
         );
     }

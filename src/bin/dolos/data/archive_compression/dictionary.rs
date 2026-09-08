@@ -3,9 +3,10 @@
 //! the sample the dictionary was trained on, so a later seal can refuse a
 //! dictionary trained for another network and an operator can reproduce it.
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dolos_fjall::flatfiles::compressed::{
     Dictionary, DictionaryDir, DictionaryId, DictionarySource as _,
@@ -13,6 +14,8 @@ use dolos_fjall::flatfiles::compressed::{
 use dolos_fjall::flatfiles::DICTIONARIES_DIR;
 use miette::{bail, IntoDiagnostic, WrapErr};
 use serde::{Deserialize, Serialize};
+
+static NEXT_STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
 /// What a dictionary was trained on. Written once, beside the dictionary,
 /// under its identity.
@@ -81,27 +84,43 @@ pub fn write_manifest(
     if target.exists() {
         return Ok(target);
     }
-    // Staged under this process's id, so two trainers publishing the same
-    // dictionary never share a staging file; the rename is atomic, so a
-    // reader sees a complete manifest or none.
-    let staging = dictionaries
-        .path()
-        .join(format!("{id}.json.{}.tmp", std::process::id()));
     let text = serde_json::to_string_pretty(manifest).into_diagnostic()?;
     let write = || -> std::io::Result<()> {
-        let mut file = fs::File::create(&staging)?;
-        file.write_all(text.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&staging, &target)?;
+        let (staging, mut file) = loop {
+            let staging_id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+            let staging = dictionaries
+                .path()
+                .join(format!("{id}.json.{}.{staging_id}.tmp", std::process::id()));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)
+            {
+                Ok(file) => break (staging, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        };
+        let publish = (|| {
+            file.write_all(text.as_bytes())?;
+            file.write_all(b"\n")?;
+            file.sync_all()?;
+            drop(file);
+            match fs::hard_link(&staging, &target) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(e),
+            }
+        })();
+        let cleanup = fs::remove_file(&staging);
+        publish?;
+        cleanup?;
         if cfg!(unix) {
-            fs::File::open(dictionaries.path())?.sync_all()?;
+            File::open(dictionaries.path())?.sync_all()?;
         }
         Ok(())
     };
     if let Err(e) = write() {
-        let _ = fs::remove_file(&staging);
         return Err(e)
             .into_diagnostic()
             .wrap_err_with(|| format!("writing {}", target.display()));
@@ -196,4 +215,58 @@ pub fn installed(dictionaries: &DictionaryDir) -> miette::Result<Vec<Installed>>
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    const ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn manifest(seed: u64) -> Manifest {
+        Manifest {
+            network_magic: 42,
+            from_segment: 1,
+            to_segment: 2,
+            population: 3,
+            samples: 3,
+            sample_bytes: 4,
+            sample_budget_bytes: 5,
+            seed,
+            max_size: 6,
+            zstd_version: 7,
+        }
+    }
+
+    #[test]
+    fn concurrent_writers_publish_one_complete_manifest_without_staging_residue() {
+        let temp = tempfile::tempdir().unwrap();
+        let dictionaries = Arc::new(DictionaryDir::new(temp.path().to_path_buf()));
+        let id = DictionaryId::from_hex(ID).unwrap();
+        let writers = 16;
+        let barrier = Arc::new(Barrier::new(writers));
+        let mut threads = Vec::new();
+
+        for seed in 0..writers as u64 {
+            let dictionaries = dictionaries.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                write_manifest(&dictionaries, &id, &manifest(seed)).unwrap();
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let published = read_manifest(&dictionaries, &id).unwrap().unwrap();
+        assert!(published.seed < writers as u64);
+        assert!(fs::read_dir(temp.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")));
+    }
 }

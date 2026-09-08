@@ -125,7 +125,11 @@ mod keyspace_names {
 /// each field the operator set, the reader's own default for the rest.
 fn compressed_cache_limits(config: &FjallArchiveConfig) -> CacheLimits {
     let defaults = CacheLimits::default();
-    let Some(cache) = config.compression.as_ref().and_then(|c| c.cache.as_ref()) else {
+    let Some(cache) = config
+        .block_compression
+        .as_ref()
+        .and_then(|c| c.cache.as_ref())
+    else {
         return defaults;
     };
     let mb = |value: Option<usize>, default: usize| value.map_or(default, |mb| mb << 20);
@@ -210,7 +214,7 @@ impl ArchiveStore {
 
         // A compression table no command could act on fails here, before
         // anything is opened, rather than when a segment is about to move.
-        if let Some(compression) = &config.compression {
+        if let Some(compression) = &config.block_compression {
             compression.validate().map_err(Error::Config)?;
         }
 

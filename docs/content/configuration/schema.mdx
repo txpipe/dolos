@@ -173,9 +173,9 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 - `blocks_path`: optional override for block segment files.
 - `cache`: size (MB) of the archive index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
-- `compression`: the table below. Omit it to keep raw segments and default read bounds.
+- `block_compression`: the table below. Omit it to keep raw block segments and default read bounds.
 
-### `storage.archive.compression` section
+### `storage.archive.block_compression` section
 
 | property     | type    | example       |
 | ------------ | ------- | ------------- |

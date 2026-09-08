@@ -540,10 +540,10 @@ fn failures_before_publication_leave_the_raw_segment_as_it_was() {
     untouched(&ws);
 
     // A configuration no command could act on fails at open.
-    ws.configure("[storage.archive.compression]\nprofile = \"per-block\"");
+    ws.configure("[storage.archive.block_compression]\nprofile = \"per-block\"");
     let err = ws.fails(&["seal", "--from", "0", "--to", "0"]);
     assert!(
-        err.contains("needs storage.archive.compression.dictionary"),
+        err.contains("needs storage.archive.block_compression.dictionary"),
         "{err}"
     );
     ws.configure("");
@@ -651,7 +651,7 @@ fn dictionaries_survive_restart_and_a_file_level_backup() {
 
     // The configuration can name the dictionary instead of the command line.
     ws.configure(&format!(
-        "[storage.archive.compression]\nprofile = \"per-block\"\ndictionary = \"{first}\""
+        "[storage.archive.block_compression]\nprofile = \"per-block\"\ndictionary = \"{first}\""
     ));
     let out = ws.ok(&["seal", "--from", "2", "--to", "2"]);
     assert!(
@@ -726,7 +726,7 @@ fn the_reader_bounds_come_from_the_configuration() {
     let config = FjallArchiveConfig {
         cache: Some(16),
         worker_threads: Some(1),
-        compression: Some(Box::new(ArchiveCompressionConfig {
+        block_compression: Some(Box::new(ArchiveCompressionConfig {
             cache: Some(CompressionCacheConfig {
                 frame_mb: Some(3),
                 handles: Some(2),
@@ -748,7 +748,7 @@ fn the_reader_bounds_come_from_the_configuration() {
     drop(store);
 
     let invalid = FjallArchiveConfig {
-        compression: Some(Box::new(ArchiveCompressionConfig {
+        block_compression: Some(Box::new(ArchiveCompressionConfig {
             chunk_target: Some(0),
             ..Default::default()
         })),

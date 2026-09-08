@@ -39,12 +39,12 @@ device, so measure your own before counting on a number.
 ## Configuration
 
 ```toml
-[storage.archive.compression]
+[storage.archive.block_compression]
 profile = "per-block"          # or "chunked"
 dictionary = "<64 hex digits>" # required by per-block; naming one selects per-block
 chunk_target = 262144          # chunked only, bytes
 
-[storage.archive.compression.cache]
+[storage.archive.block_compression.cache]
 frame_mb = 64                  # decoded frames retained across all segments
 index_mb = 32                  # parsed seek tables retained
 dictionary_mb = 8              # dictionaries and their prepared decoders

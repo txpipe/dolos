@@ -38,17 +38,18 @@ pub struct Args {
     #[command(flatten)]
     range: SegmentRange,
 
-    /// profile to seal with; defaults to storage.archive.compression.profile
+    /// profile to seal with; defaults to
+    /// storage.archive.block_compression.profile
     #[arg(long, value_enum)]
     profile: Option<Profile>,
 
     /// identity of the installed dictionary the per-block profile compresses
-    /// with; defaults to storage.archive.compression.dictionary
+    /// with; defaults to storage.archive.block_compression.dictionary
     #[arg(long)]
     dictionary: Option<String>,
 
     /// frame target of the chunked profile, in bytes; defaults to
-    /// storage.archive.compression.chunk_target
+    /// storage.archive.block_compression.chunk_target
     #[arg(long)]
     chunk_target: Option<u32>,
 
@@ -100,7 +101,9 @@ fn describe(metadata: &Metadata) -> (String, Option<String>) {
 
 fn select(config: &RootConfig, args: &Args) -> miette::Result<Selection> {
     let compression = match &config.storage.archive {
-        dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => cfg.compression.clone().map(|c| *c),
+        dolos_core::config::ArchiveStoreConfig::Fjall(cfg) => {
+            cfg.block_compression.clone().map(|c| *c)
+        }
         _ => None,
     }
     .unwrap_or_default();
@@ -111,7 +114,7 @@ fn select(config: &RootConfig, args: &Args) -> miette::Result<Selection> {
             Some(profile) => profile,
             None => bail!(
                 "no sealing profile selected: pass --profile per-block|chunked or set \
-                 storage.archive.compression.profile"
+                 storage.archive.block_compression.profile"
             ),
         },
     };
@@ -129,7 +132,7 @@ fn select(config: &RootConfig, args: &Args) -> miette::Result<Selection> {
                 Some(id) => dictionary::parse_id(id)?,
                 None => bail!(
                     "the per-block profile needs a dictionary: pass --dictionary <identity> or \
-                     set storage.archive.compression.dictionary (train one with `dolos data \
+                     set storage.archive.block_compression.dictionary (train one with `dolos data \
                      archive-compression train-dictionary`)"
                 ),
             };

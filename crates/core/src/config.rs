@@ -360,7 +360,7 @@ pub struct FjallArchiveConfig {
     /// representation each segment has under the default bounds, and starts
     /// no background work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compression: Option<Box<ArchiveCompressionConfig>>,
+    pub block_compression: Option<Box<ArchiveCompressionConfig>>,
 }
 
 impl FjallArchiveConfig {
@@ -373,7 +373,7 @@ impl FjallArchiveConfig {
             && self.l0_threshold.is_none()
             && self.worker_threads.is_none()
             && self.memtable_size_mb.is_none()
-            && self.compression.is_none()
+            && self.block_compression.is_none()
     }
 }
 
@@ -409,7 +409,7 @@ impl std::fmt::Display for CompressionProfile {
     }
 }
 
-/// The `storage.archive.compression` table.
+/// The `storage.archive.block_compression` table.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ArchiveCompressionConfig {
     /// The profile `dolos data archive-compression seal` applies:
@@ -452,7 +452,8 @@ impl ArchiveCompressionConfig {
     pub fn validate(&self) -> Result<(), String> {
         if self.chunk_target == Some(0) {
             return Err(
-                "storage.archive.compression.chunk_target must be greater than zero".to_string(),
+                "storage.archive.block_compression.chunk_target must be greater than zero"
+                    .to_string(),
             );
         }
         if let Some(dictionary) = &self.dictionary {
@@ -460,16 +461,31 @@ impl ArchiveCompressionConfig {
                 dictionary.len() == 64 && dictionary.bytes().all(|b| b.is_ascii_hexdigit());
             if !is_hex {
                 return Err(format!(
-                    "storage.archive.compression.dictionary must be the 64 hex digits of an \
+                    "storage.archive.block_compression.dictionary must be the 64 hex digits of an \
                      installed dictionary's identity, not {dictionary:?}"
                 ));
             }
         }
         if self.profile == Some(CompressionProfile::PerBlock) && self.dictionary.is_none() {
-            return Err("storage.archive.compression.profile = \"per-block\" needs \
-                 storage.archive.compression.dictionary: train one with \
+            return Err(
+                "storage.archive.block_compression.profile = \"per-block\" needs \
+                 storage.archive.block_compression.dictionary: train one with \
                  `dolos data archive-compression train-dictionary`"
-                .to_string());
+                    .to_string(),
+            );
+        }
+        if let Some(cache) = &self.cache {
+            for (field, value) in [
+                ("frame_mb", cache.frame_mb),
+                ("index_mb", cache.index_mb),
+                ("dictionary_mb", cache.dictionary_mb),
+            ] {
+                if value.is_some_and(|mb| mb.checked_mul(1 << 20).is_none()) {
+                    return Err(format!(
+                        "storage.archive.block_compression.cache.{field} is too large"
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1357,7 +1373,7 @@ mod tests {
 
         let source = json!({
             "backend": "fjall",
-            "compression": {
+            "block_compression": {
                 "profile": "chunked",
                 "dictionary": DICTIONARY,
                 "chunk_target": 65536,
@@ -1368,7 +1384,7 @@ mod tests {
         let ArchiveStoreConfig::Fjall(cfg) = &archive else {
             panic!("expected the fjall backend");
         };
-        let compression = cfg.compression.as_ref().unwrap();
+        let compression = cfg.block_compression.as_ref().unwrap();
         assert_eq!(compression.profile(), Some(CompressionProfile::Chunked));
         assert_eq!(compression.dictionary.as_deref(), Some(DICTIONARY));
         assert_eq!(compression.chunk_target(), 65536);
@@ -1380,8 +1396,8 @@ mod tests {
         assert!(!cfg.is_default());
 
         assert_eq!(
-            serde_json::to_value(&archive).unwrap()["compression"],
-            source["compression"]
+            serde_json::to_value(&archive).unwrap()["block_compression"],
+            source["block_compression"]
         );
     }
 
@@ -1413,7 +1429,7 @@ mod tests {
         };
         let err = per_block_without_dictionary.validate().unwrap_err();
         assert!(
-            err.contains("needs storage.archive.compression.dictionary"),
+            err.contains("needs storage.archive.block_compression.dictionary"),
             "{err}"
         );
 
@@ -1433,5 +1449,15 @@ mod tests {
             let err = cfg.validate().unwrap_err();
             assert!(err.contains("64 hex digits"), "{bad}: {err}");
         }
+
+        let overflowing_cache = ArchiveCompressionConfig {
+            cache: Some(CompressionCacheConfig {
+                frame_mb: Some(usize::MAX),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = overflowing_cache.validate().unwrap_err();
+        assert!(err.contains("cache.frame_mb is too large"), "{err}");
     }
 }

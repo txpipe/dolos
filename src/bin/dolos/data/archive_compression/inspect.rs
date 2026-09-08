@@ -230,7 +230,7 @@ fn describe(
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     let dir = segments_dir(config)?;
     let compression = match &config.storage.archive {
-        ArchiveStoreConfig::Fjall(cfg) => cfg.compression.clone().map(|c| *c),
+        ArchiveStoreConfig::Fjall(cfg) => cfg.block_compression.clone().map(|c| *c),
         _ => None,
     }
     .unwrap_or_default();
