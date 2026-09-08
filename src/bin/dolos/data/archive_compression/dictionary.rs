@@ -81,7 +81,12 @@ pub fn write_manifest(
     if target.exists() {
         return Ok(target);
     }
-    let staging = dictionaries.path().join(format!("{id}.json.tmp"));
+    // Staged under this process's id, so two trainers publishing the same
+    // dictionary never share a staging file; the rename is atomic, so a
+    // reader sees a complete manifest or none.
+    let staging = dictionaries
+        .path()
+        .join(format!("{id}.json.{}.tmp", std::process::id()));
     let text = serde_json::to_string_pretty(manifest).into_diagnostic()?;
     let write = || -> std::io::Result<()> {
         let mut file = fs::File::create(&staging)?;
@@ -95,9 +100,12 @@ pub fn write_manifest(
         }
         Ok(())
     };
-    write()
-        .into_diagnostic()
-        .wrap_err_with(|| format!("writing {}", target.display()))?;
+    if let Err(e) = write() {
+        let _ = fs::remove_file(&staging);
+        return Err(e)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("writing {}", target.display()));
+    }
     Ok(target)
 }
 
