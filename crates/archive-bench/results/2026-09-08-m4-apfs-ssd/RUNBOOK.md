@@ -1,18 +1,19 @@
 # Runbook
 
 The commands that produced the records in this directory, in the order
-they ran. Paths are the measurement host's; the corpus is named by the
-segment files' SHA-256 in `cardano.dict.json` and by segment id in every
-record.
+they ran. Paths below are portable placeholders, not workstation locations.
+Point these variables at local copies before running. The corpus is named by
+the segment files' SHA-256 in `cardano.dict.json` and by segment id in every
+record. Path redaction changes neither the measured values nor corpus hashes.
 
 ```sh
 B="cargo run --release -p dolos-archive-bench --"
-MAINNET_HDD="/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks"   # raw segments 0..454
-MAINNET_SSD=~/dolos-instances/flatfile-lab/mainnet-raw                # raw segments 446..455, same files
-PREPROD_HDD="/Volumes/Santi HDD/dolos-work/flatfile-compression/preprod-raw"  # raw segments 0..306
-PREVIEW_IMM="/Volumes/Santi HDD/mithril-snapshots/preview-20260121/immutable"
-WORK=~/dolos-instances/archive-bench.noindex                          # internal SSD, APFS
-EVICT=~/dolos-instances/mainnet-v17/data                              # 75 GB of other files on the SSD
+MAINNET_HDD="corpora/mainnet-hdd"   # raw segments 0..454
+MAINNET_SSD=corpora/mainnet-ssd                # raw segments 446..455, same files
+PREPROD_HDD="corpora/preprod"  # raw segments 0..306
+PREVIEW_IMM="corpora/preview-immutable"
+WORK=work/archive-bench                          # internal SSD, APFS
+EVICT=corpora/cache-eviction                              # 75 GB of other files on the SSD
 
 # 1. dictionary candidates
 $B train --corpus "$MAINNET_HDD" --segments 8,25,40,60,120,250,330,380,420,440,445,446 \

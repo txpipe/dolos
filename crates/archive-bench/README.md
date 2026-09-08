@@ -122,6 +122,13 @@ and the 128 KiB budget.
 
 ## Results
 
+Before publishing results, replace workstation paths, usernames and temporary
+session directories in records, provenance and commands with consistent relative
+corpus/work labels. Preserve corpus hashes, revision metadata and measured values;
+regenerate reports from the sanitized records because run IDs include environment
+metadata. Local harness output is not automatically sanitized. The published-artifact
+test guards the committed results and dictionary provenance against common leaks.
+
 `results/` holds the measured runs, one directory per host and date, each
 with the raw `*.jsonl` records, the `report` output over them, the runbook
 that produced them and a `REPORT.md` with the corpus, host, verdicts and

@@ -1,6 +1,6 @@
 {
-  "command": "target/release/dolos-archive-bench train --corpus '/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks' --segments 440..447 --samples-per-segment 2250 --seed 0 --max-size 112640 --out /private/tmp/claude-501/-Users-santiago-Brain-txpipe/69ae2495-fa58-49e8-8d17-8881b4a30f94/scratchpad/recent.dict",
-  "corpus": "/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks",
+  "command": "target/release/dolos-archive-bench train --corpus 'corpora/mainnet-hdd' --segments 440..447 --samples-per-segment 2250 --seed 0 --max-size 112640 --out artifacts/recent.dict",
+  "corpus": "corpora/mainnet-hdd",
   "dictionary": {
     "bytes": 112640,
     "sha256": "bccf69b3e0caf113b2359a7423721c1f00474d0da2ab84370fdc3f64152a69ef",
