@@ -351,9 +351,9 @@ fn is_public_http_url(url: &reqwest::Url) -> bool {
 
 /// This function returns the shared HTTP client for governance-anchor fetches.
 ///
-/// This function creates the client one time and stores the result. All metadata
-/// requests use this client and its connection pool. If the builder returns an
-/// error, this function stores and returns the same error.
+/// This function creates the client one time and stores the result. All
+/// metadata requests use this client and its connection pool. If the builder
+/// returns an error, this function stores and returns the same error.
 fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Error> {
     static CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> = LazyLock::new(|| {
         reqwest::Client::builder()
@@ -478,17 +478,18 @@ async fn read_anchor_body(
 /// This function resolves a governance-anchor URL to an ordered list of HTTP(S)
 /// URLs.
 ///
-/// An `ipfs://<cid>[/<path>]` URL expands to one `<gateway>/ipfs/<cid>[/<path>]`
-/// candidate for each gateway, in gateway order. The caller sends a request to
-/// each candidate in order until one serves the content. The function also
-/// accepts a redundant `ipfs/` after the scheme.
+/// An `ipfs://<cid>[/<path>]` URL expands to one
+/// `<gateway>/ipfs/<cid>[/<path>]` candidate for each gateway, in gateway
+/// order. The caller sends a request to each candidate in order until one
+/// serves the content. The function also accepts a redundant `ipfs/` after the
+/// scheme.
 ///
 /// The CID keeps its original case. The CID stays in the path, so it does not
 /// pass through URL host normalization. That normalization lowercases a base58
 /// CIDv0.
 ///
-/// Every other URL gives a single candidate, unchanged. An `ipfs://` URL with no
-/// gateways gives no candidates.
+/// Every other URL gives a single candidate, unchanged. An `ipfs://` URL with
+/// no gateways gives no candidates.
 fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
     let Some(rest) = url.strip_prefix("ipfs://") else {
         return vec![url.to_string()];
