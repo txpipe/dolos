@@ -47,10 +47,11 @@ fn gov_action_id_json(id: &GovActionId) -> Value {
 /// digits.
 const MAX_RATIO_DECIMALS: u32 = 19;
 
-/// Render a bounded ratio like the ledger JSON does: a plain number when
-/// the fraction terminates within [`MAX_RATIO_DECIMALS`] digits, else a
-/// numerator/denominator object (cf. the `BoundedRatio` `ToJSON` instance
-/// in cardano-ledger `BaseTypes`).
+/// Render a bounded ratio like the ledger JSON does: the exact decimal as a
+/// plain number when the fraction terminates within [`MAX_RATIO_DECIMALS`]
+/// digits, else a numerator/denominator object in reduced form — the
+/// ledger's `Rational` normalizes on construction (cf. the `BoundedRatio`
+/// `ToJSON` instance in cardano-ledger `BaseTypes`).
 fn ledger_ratio_json(x: &RationalNumber) -> Value {
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 {
@@ -66,31 +67,34 @@ fn ledger_ratio_json(x: &RationalNumber) -> Value {
 
     let g = gcd(x.numerator, x.denominator);
     let n = x.numerator / g;
-    let mut d = x.denominator / g;
+    let d = x.denominator / g;
 
+    let mut remainder = d;
     let mut twos = 0u32;
-    while d.is_multiple_of(2) {
-        d /= 2;
+    while remainder.is_multiple_of(2) {
+        remainder /= 2;
         twos += 1;
     }
 
     let mut fives = 0u32;
-    while d.is_multiple_of(5) {
-        d /= 5;
+    while remainder.is_multiple_of(5) {
+        remainder /= 5;
         fives += 1;
     }
 
     // A remaining factor means a repeating decimal; more digits than the
     // ledger cap means it refuses the number form too.
     let digits = twos.max(fives);
-    if d != 1 || digits > MAX_RATIO_DECIMALS {
-        return rational_json(x);
+    if remainder != 1 || digits > MAX_RATIO_DECIMALS {
+        return json!({ "numerator": n, "denominator": d });
     }
 
-    // The exact decimal: n / (2^twos * 5^fives) scaled to `digits` places.
-    // u128 holds the worst case (u64 numerator times 10^19).
+    // The exact decimal: n / d scaled to `digits` places. u128 holds the
+    // worst case (u64 numerator times 10^19). serde_json's
+    // arbitrary-precision number carries every digit, like the ledger's
+    // `Scientific`.
     let scale = 10u128.pow(digits);
-    let scaled = n as u128 * scale / (x.denominator / g) as u128;
+    let scaled = n as u128 * scale / d as u128;
 
     let exact = if digits == 0 {
         scaled.to_string()
@@ -103,17 +107,10 @@ fn ledger_ratio_json(x: &RationalNumber) -> Value {
         )
     };
 
-    // The ledger emits an exact `Scientific`. A JSON number here goes
-    // through f64, so only use it when it reproduces the exact decimal;
-    // otherwise fall back to the fraction object rather than emit rounded
-    // digits.
     exact
-        .parse::<f64>()
-        .ok()
-        .and_then(serde_json::Number::from_f64)
-        .filter(|number| number.to_string() == exact)
+        .parse::<serde_json::Number>()
         .map(Value::Number)
-        .unwrap_or_else(|| rational_json(x))
+        .unwrap_or_else(|_| json!({ "numerator": n, "denominator": d }))
 }
 
 fn reward_account_json(account: &[u8]) -> Result<Value, StatusCode> {
@@ -451,29 +448,26 @@ mod tests {
             serde_json::json!({ "numerator": 1, "denominator": 2u64.pow(20) })
         );
 
-        // 16 significant digits still round-trip through f64 exactly, so
-        // the number form keeps every digit
-        let fits_f64 = RationalNumber {
-            numerator: 9_007_199_254_740_993,
-            denominator: 10_000_000_000_000_000,
-        };
-        assert_eq!(
-            ledger_ratio_json(&fits_f64),
-            serde_json::json!(0.9007199254740993)
-        );
-
-        // 17 significant digits terminate within the cap but round through
-        // f64: the fraction form beats silently rounded digits
+        // every digit survives, past what f64 could carry: the ledger
+        // emits the exact Scientific and so does the arbitrary-precision
+        // number here
         let past_f64 = RationalNumber {
             numerator: 90_071_992_547_409_931,
             denominator: 100_000_000_000_000_000,
         };
         assert_eq!(
-            ledger_ratio_json(&past_f64),
-            serde_json::json!({
-                "numerator": 90_071_992_547_409_931u64,
-                "denominator": 100_000_000_000_000_000u64,
-            })
+            ledger_ratio_json(&past_f64).to_string(),
+            "0.90071992547409931"
+        );
+
+        // the fraction fallback reduces, like the ledger's Rational does
+        let unreduced = RationalNumber {
+            numerator: 2,
+            denominator: 6,
+        };
+        assert_eq!(
+            ledger_ratio_json(&unreduced),
+            serde_json::json!({ "numerator": 1, "denominator": 3 })
         );
     }
 
