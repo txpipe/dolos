@@ -72,14 +72,23 @@ fn ledger_ratio_json(x: &RationalNumber) -> Value {
     let n = x.numerator / g;
     let d = x.denominator / g;
 
-    // `decimals` over-counts a denominator holding both 2s and 5s, which
-    // only makes the faithfulness cut stricter.
+    // The decimal terminates iff only 2s and 5s remain, in
+    // max(twos, fives) places: each pair of one 2 and one 5 is a single
+    // power of ten.
     let mut remainder = d;
-    let mut decimals = 0u32;
-    while remainder.is_multiple_of(2) || remainder.is_multiple_of(5) {
-        remainder /= if remainder.is_multiple_of(2) { 2 } else { 5 };
-        decimals += 1;
+    let mut twos = 0u32;
+    while remainder.is_multiple_of(2) {
+        remainder /= 2;
+        twos += 1;
     }
+
+    let mut fives = 0u32;
+    while remainder.is_multiple_of(5) {
+        remainder /= 5;
+        fives += 1;
+    }
+
+    let decimals = twos.max(fives);
 
     if remainder != 1 || decimals > MAX_FAITHFUL_DIGITS {
         return json!({ "numerator": n, "denominator": d });
@@ -414,6 +423,17 @@ mod tests {
             denominator: 2,
         };
         assert_eq!(ledger_ratio_json(&half), serde_json::json!(0.5));
+
+        // a power-of-ten denominator holds 2s and 5s in equal measure: the
+        // decimal count is max(twos, fives), never their sum
+        let power_of_ten = RationalNumber {
+            numerator: 577,
+            denominator: 100_000_000,
+        };
+        assert_eq!(
+            ledger_ratio_json(&power_of_ten),
+            serde_json::json!(0.00000577)
+        );
 
         let repeating = RationalNumber {
             numerator: 7,
