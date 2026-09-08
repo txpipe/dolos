@@ -1325,14 +1325,29 @@ mod tests {
         let short = bech32(bech32::Hrp::parse("gov_action").unwrap(), [0u8; 31]).unwrap();
         assert!(parse_gov_action_id(&short).is_err());
 
-        // the index is written in the shortest big-endian form, so a padded
-        // one is a second spelling of an id that already has a canonical form
+        // Blockfrost parses the whole suffix, so a zero-padded index is an
+        // alias of the canonical spelling and resolves to the same proposal
         let padded = bech32(
             bech32::Hrp::parse("gov_action").unwrap(),
             [tx.as_slice(), &[0x00, 0x01]].concat(),
         )
         .unwrap();
-        assert!(parse_gov_action_id(&padded).is_err());
+        assert_eq!(parse_gov_action_id(&padded).unwrap(), (tx, 1));
+
+        let long_zeros = bech32(
+            bech32::Hrp::parse("gov_action").unwrap(),
+            [tx.as_slice(), &[0x00; 8]].concat(),
+        )
+        .unwrap();
+        assert_eq!(parse_gov_action_id(&long_zeros).unwrap(), (tx, 0));
+
+        // an index past u32 can never name a proposal: it parses and misses
+        let huge = bech32(
+            bech32::Hrp::parse("gov_action").unwrap(),
+            [tx.as_slice(), &[0xff; 8]].concat(),
+        )
+        .unwrap();
+        assert_eq!(parse_gov_action_id(&huge).unwrap(), (tx, u32::MAX));
     }
 
     /// CIP-129: the id is the proposing tx hash with the action index
