@@ -145,6 +145,20 @@ the commit point. Two consequences matter for correctness:
   compressed file finishes retiring it; it does not read it, and it does not
   resurrect bytes the raw file no longer has.
 
+## The directory lease
+
+Every open takes an advisory lock on `.lease` in the segments directory —
+shared by default, exclusive when the caller says it will rewrite segments —
+and holds it until the store is dropped, after every other handle. A shared
+open fails while an exclusive holder exists and an exclusive open fails while
+any holder exists, in either case without waiting and with an error naming
+the directory. The lease lives with the files rather than with the archive
+index, so two configurations that point `blocks_path` at one directory
+contend on the same lease whatever index each opens, and offline maintenance
+can never rewrite a segment a running node is reading. The lease is per open
+handle, not per process: a second store on the same directory inside one
+process contends the same way.
+
 ## Opening a store
 
 Opening performs the recovery above for every segment, then parses each

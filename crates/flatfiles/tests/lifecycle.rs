@@ -741,6 +741,7 @@ fn readers_never_observe_a_transition_in_progress() {
                 inflight_reads: 4,
                 ..CacheLimits::default()
             }),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -781,4 +782,68 @@ fn readers_never_observe_a_transition_in_progress() {
     assert!(stats.open_handles <= 2, "{stats:?}");
     store.delete_segments_before(3).unwrap();
     assert_eq!(store.cache_stats().open_handles, 0);
+}
+
+#[test]
+fn the_lease_keeps_maintenance_and_nodes_apart() {
+    use dolos_flatfiles::Access;
+
+    let dir = tempfile::tempdir().unwrap();
+    let node = FlatFileStore::new(dir.path()).unwrap();
+    assert_eq!(node.access(), Access::Shared);
+
+    let exclusive = FlatFileOptions {
+        access: Access::Exclusive,
+        ..Default::default()
+    };
+    let refused = FlatFileStore::with_options(dir.path(), exclusive).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+    assert!(refused
+        .to_string()
+        .contains(&dir.path().display().to_string()));
+
+    drop(node);
+    let maintenance = FlatFileStore::with_options(
+        dir.path(),
+        FlatFileOptions {
+            access: Access::Exclusive,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(maintenance.access(), Access::Exclusive);
+    let refused = FlatFileStore::new(dir.path()).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+
+    drop(maintenance);
+    FlatFileStore::new(dir.path()).unwrap();
+}
+
+#[test]
+fn a_scan_describes_the_directory_without_recovering_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = FlatFileStore::new(dir.path()).unwrap();
+    let entries = populate(&store, 5);
+    let seg1 = in_segment(&entries, 1);
+    store.seal(1, &seg1, &WriterOptions::per_block()).unwrap();
+    drop(store);
+
+    fs::write(dir.path().join("000000.transition"), "seal\n").unwrap();
+    fs::write(dir.path().join("000000.zseg.tmp"), b"partial").unwrap();
+
+    let scanned = FlatFileStore::scan(dir.path()).unwrap();
+    let ids: Vec<u32> = scanned.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, (0..3).collect::<Vec<_>>());
+    let (_, seg0) = &scanned[0];
+    assert!(seg0.raw && seg0.compressed_staging && !seg0.compressed);
+    assert_eq!(seg0.transition, Some(dolos_flatfiles::Transition::Seal));
+    let (_, seg1) = &scanned[1];
+    assert!(seg1.compressed && !seg1.raw && seg1.transition.is_none());
+
+    assert!(dir.path().join("000000.transition").exists());
+    assert!(dir.path().join("000000.zseg.tmp").exists());
+
+    let reopened = FlatFileStore::new(dir.path()).unwrap();
+    assert_eq!(reopened.representation(0), Some(Representation::Raw));
+    assert!(!dir.path().join("000000.transition").exists());
 }

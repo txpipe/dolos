@@ -22,8 +22,10 @@ use crate::compressed::{
     SegmentReader, SegmentRef, SegmentWriter, WriteSummary, WriterOptions,
 };
 use crate::layout::{
-    parse_filename, Representation, SegmentPaths, Transition, TransitionGuard, DICTIONARIES_DIR,
+    parse_filename, Found, Representation, SegmentPaths, Transition, TransitionGuard,
+    DICTIONARIES_DIR,
 };
+use crate::lease::{Access, Lease};
 use crate::BlockLocation;
 
 /// Largest slice of unindexed bytes fed to the compressor as one frame, so
@@ -38,6 +40,9 @@ pub struct FlatFileOptions {
     pub dictionaries: Option<Arc<dyn DictionarySource>>,
     /// Bounds on what the compressed-segment reader retains.
     pub cache: Option<CacheLimits>,
+    /// How the segments directory is held: shared, as a node does, or
+    /// exclusive, as offline maintenance that rewrites segments must.
+    pub access: Access,
 }
 
 /// One segment as the store sees it.
@@ -73,6 +78,9 @@ pub struct FlatFileStore {
     cache: ReadCache,
     segments: RwLock<HashMap<u32, Arc<Segment>>>,
     writers: Mutex<HashMap<u32, File>>,
+    /// Held for the store's lifetime; declared last so it is released after
+    /// every handle above it is closed.
+    lease: Lease,
 }
 
 impl FlatFileStore {
@@ -88,13 +96,18 @@ impl FlatFileStore {
         Self::with_options(segments_dir, FlatFileOptions::default())
     }
 
-    /// Open the store with explicit dictionary and cache settings.
+    /// Open the store with explicit dictionary, cache and access settings.
+    ///
+    /// The segments directory's [`Lease`] is taken first, so a directory
+    /// under exclusive maintenance refuses a shared open and an open store
+    /// refuses an exclusive one, whichever configuration named the directory.
     pub fn with_options(
         segments_dir: impl Into<PathBuf>,
         options: FlatFileOptions,
     ) -> io::Result<Self> {
         let segments_dir = segments_dir.into();
         fs::create_dir_all(&segments_dir)?;
+        let lease = Lease::acquire(&segments_dir, options.access)?;
         let dictionaries = options
             .dictionaries
             .unwrap_or_else(|| Arc::new(DictionaryDir::new(segments_dir.join(DICTIONARIES_DIR))));
@@ -104,9 +117,40 @@ impl FlatFileStore {
             cache: ReadCache::new(options.cache.unwrap_or_default()),
             segments: RwLock::new(HashMap::new()),
             writers: Mutex::new(HashMap::new()),
+            lease,
         };
         store.recover_all()?;
         Ok(store)
+    }
+
+    /// Report every segment's files as they are on disk, without taking the
+    /// lease, recovering anything, or opening a store — what a tool that
+    /// describes a directory needs when a node may hold it. Ascending by
+    /// segment number.
+    pub fn scan(segments_dir: &Path) -> io::Result<Vec<(u32, Found)>> {
+        let mut ids = BTreeSet::new();
+        for entry in fs::read_dir(segments_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if let Some((id, _)) = parse_filename(name) {
+                ids.insert(id);
+            }
+        }
+        ids.into_iter()
+            .map(|id| {
+                SegmentPaths::new(segments_dir, id)
+                    .found()
+                    .map(|found| (id, found))
+            })
+            .collect()
+    }
+
+    /// How this store holds its segments directory.
+    pub fn access(&self) -> Access {
+        self.lease.access()
     }
 
     /// Create a FlatFileStore backed by a temporary directory.
@@ -128,6 +172,11 @@ impl FlatFileStore {
 
     pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats()
+    }
+
+    /// The bounds the compressed-segment reader was opened with.
+    pub fn cache_limits(&self) -> CacheLimits {
+        self.cache.limits()
     }
 
     fn paths(&self, segment_id: u32) -> SegmentPaths {

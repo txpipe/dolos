@@ -173,6 +173,23 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 - `blocks_path`: optional override for block segment files.
 - `cache`: size (MB) of the archive index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
+- `block_compression`: the table below. Omit it to keep raw block segments and default read bounds.
+
+### `storage.archive.block_compression` section
+
+| property     | type    | example       |
+| ------------ | ------- | ------------- |
+| profile      | string  | "per-block"   |
+| dictionary   | string  | "3f9a…c2e1"   |
+| chunk_target | integer | 262144        |
+| cache        | table   | see below     |
+
+- `profile`: the profile `dolos data archive-compression seal` applies: `per-block` (one zstd frame per block, needs `dictionary`) or `chunked` (adjacent blocks share a frame of about `chunk_target` bytes, no dictionary). Naming a `dictionary` without a `profile` selects `per-block`; naming neither selects no profile and the command needs `--profile`.
+- `dictionary`: identity of the installed dictionary per-block sealing compresses with — the 64 hex digits `train-dictionary` reports.
+- `chunk_target`: frame target in bytes for the chunked profile (defaults to 262144, must be greater than zero).
+- `cache`: bounds of the reader that serves compressed segments, separate from the archive index cache: `frame_mb` / `frame_entries` (decoded frames retained), `index_mb` / `index_entries` (parsed seek tables), `dictionary_mb` / `dictionary_entries` (dictionaries and their prepared decoders), `handles` (open segment files), `inflight_reads` (concurrent reads). Each falls back to the reader's default when omitted.
+
+The node never seals on its own in this release; the table is read by the maintenance commands and by the reader. Values no command could act on fail when the archive is opened. See [Archive Compression](../operations/archive-compression) for the profiles' tradeoffs and the runbook.
 
 ### `storage.index` section — removed in v1.7
 
