@@ -1,0 +1,210 @@
+{
+  "command": "target/release/dolos-archive-bench train --corpus /Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks --sample 8,25,40,60,120,250,330,380=1000 --sample 440..447=1500 --seed 0 --max-size 112640 --out /private/tmp/claude-501/-Users-santiago-Brain-txpipe/69ae2495-fa58-49e8-8d17-8881b4a30f94/scratchpad/balanced.dict",
+  "corpus": "/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks",
+  "dictionary": {
+    "bytes": 112640,
+    "sha256": "c47b2eb1f69a997bf01a720f26bcc1b668e0fddb95431e91c90cebf4f9b87139",
+    "zstd_id": 1075630411
+  },
+  "max_size": 112640,
+  "sample_bytes": 241578050,
+  "samples": 20000,
+  "seed": 0,
+  "segments": [
+    {
+      "eras": {
+        "byron": 1000
+      },
+      "file": "000008.segment",
+      "file_bytes": 417786575,
+      "population": 431472,
+      "sample_bytes": 917511,
+      "samples": 1000,
+      "segment": 8,
+      "sha256": "a8b3ae96df83226f56bfaeb314126ab9f91c7639db32806c06116de3d7f4f78d"
+    },
+    {
+      "eras": {
+        "shelley": 1000
+      },
+      "file": "000025.segment",
+      "file_bytes": 31571041,
+      "population": 21430,
+      "sample_bytes": 1494322,
+      "samples": 1000,
+      "segment": 25,
+      "sha256": "228d9293c846c9ad7707bf543e4d34c67617e3f71a02c1f66af395f80eeaba4c"
+    },
+    {
+      "eras": {
+        "allegra": 1000
+      },
+      "file": "000040.segment",
+      "file_bytes": 47839089,
+      "population": 21398,
+      "sample_bytes": 2314028,
+      "samples": 1000,
+      "segment": 40,
+      "sha256": "71bbb31dc72b5e591c21edaf0b631aa8b18e01b155f9858f143f51ce6679d825"
+    },
+    {
+      "eras": {
+        "mary": 1000
+      },
+      "file": "000060.segment",
+      "file_bytes": 141853188,
+      "population": 20789,
+      "sample_bytes": 6564101,
+      "samples": 1000,
+      "segment": 60,
+      "sha256": "894075d1a84cd1db13b99bfab7c61f05bcb34c5259932b7bd53646fea52e5c97"
+    },
+    {
+      "eras": {
+        "alonzo": 1000
+      },
+      "file": "000120.segment",
+      "file_bytes": 1332888300,
+      "population": 20353,
+      "sample_bytes": 65557018,
+      "samples": 1000,
+      "segment": 120,
+      "sha256": "9a855529bd88f07f5c447f05fae5a26f7033333a2ce1e45a9c2c4eb482124bbd"
+    },
+    {
+      "eras": {
+        "babbage": 1000
+      },
+      "file": "000250.segment",
+      "file_bytes": 650089011,
+      "population": 21152,
+      "sample_bytes": 30659668,
+      "samples": 1000,
+      "segment": 250,
+      "sha256": "f6114769d06ec0be93575634fd4c115eb30303ab6d4b30240f159a3865223216"
+    },
+    {
+      "eras": {
+        "conway": 1000
+      },
+      "file": "000330.segment",
+      "file_bytes": 546756416,
+      "population": 21249,
+      "sample_bytes": 25205118,
+      "samples": 1000,
+      "segment": 330,
+      "sha256": "33b84d61914d2820fe334838eb803e44cf309743bc47c09877e9f3c8686f690d"
+    },
+    {
+      "eras": {
+        "conway": 1000
+      },
+      "file": "000380.segment",
+      "file_bytes": 218620398,
+      "population": 21307,
+      "sample_bytes": 9996289,
+      "samples": 1000,
+      "segment": 380,
+      "sha256": "225accefd5d1c4f2ba2d5a336a3b008dd2058a497efa95ce12f4800d57e7eaf5"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000440.segment",
+      "file_bytes": 138224430,
+      "population": 21127,
+      "sample_bytes": 9724835,
+      "samples": 1500,
+      "segment": 440,
+      "sha256": "05a4c3d792bb846baec03f31a619ca7f4d574f52322c468156c736be821806ff"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000441.segment",
+      "file_bytes": 195077992,
+      "population": 21363,
+      "sample_bytes": 13801753,
+      "samples": 1500,
+      "segment": 441,
+      "sha256": "cfc246bf68aa8d04233d904a997a6bf9b21fc2940fc81c2e091c0f693b3b3ac8"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000442.segment",
+      "file_bytes": 136287036,
+      "population": 21370,
+      "sample_bytes": 9402526,
+      "samples": 1500,
+      "segment": 442,
+      "sha256": "172da45e334492ad13586e94e91e3a624277d6b4cf9588a76e20213b54ffd84c"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000443.segment",
+      "file_bytes": 294154097,
+      "population": 21593,
+      "sample_bytes": 19982004,
+      "samples": 1500,
+      "segment": 443,
+      "sha256": "4932919ff34e40eda7224bb1eb03be826c35d51a6b3ed689a5c19a7d8dd5a0ce"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000444.segment",
+      "file_bytes": 157741948,
+      "population": 21466,
+      "sample_bytes": 11462070,
+      "samples": 1500,
+      "segment": 444,
+      "sha256": "e99c13e63eba68304d9669e4f6d891c6f54621acac5a596c420e4a0ef80a6355"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000445.segment",
+      "file_bytes": 149746127,
+      "population": 21335,
+      "sample_bytes": 9491171,
+      "samples": 1500,
+      "segment": 445,
+      "sha256": "4bf8e069f96140c5b4ecfe31d485a94738928b2aba3c9d0d5622de0c530d6e12"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000446.segment",
+      "file_bytes": 207081919,
+      "population": 20821,
+      "sample_bytes": 15560669,
+      "samples": 1500,
+      "segment": 446,
+      "sha256": "e6d35ecfbaa2073f784f2f32881c92197bccd36198b653833069a358408cd83c"
+    },
+    {
+      "eras": {
+        "conway": 1500
+      },
+      "file": "000447.segment",
+      "file_bytes": 131936544,
+      "population": 21011,
+      "sample_bytes": 9444967,
+      "samples": 1500,
+      "segment": 447,
+      "sha256": "6ea49f6cd10797d30106e55ff23cd115e30a3a1a5fc9453be315931c9f4e5e37"
+    }
+  ],
+  "trained_at": "2026-09-08T12:48:54.832602+00:00",
+  "trainer": "ZDICT_trainFromBuffer (zstd::dict::from_samples)",
+  "zstd": "1.5.7"
+}

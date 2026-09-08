@@ -299,3 +299,13 @@ impl DictionarySource for DictionaryDir {
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
     }
 }
+
+/// The dictionary shipped with this crate, trained offline on a recorded
+/// sample of Cardano blocks; `dictionary/PROVENANCE.md` beside the crate
+/// says which. Every build carries it, so a fresh instance needs no corpus
+/// or download.
+pub fn bundled_dictionary() -> Dictionary {
+    Dictionary::new(BUNDLED_DICTIONARY)
+}
+
+static BUNDLED_DICTIONARY: &[u8] = include_bytes!("../../dictionary/cardano.dict");

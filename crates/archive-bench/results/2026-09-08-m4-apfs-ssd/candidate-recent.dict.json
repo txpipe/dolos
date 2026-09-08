@@ -1,0 +1,115 @@
+{
+  "command": "target/release/dolos-archive-bench train --corpus /Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks --segments 440..447 --samples-per-segment 2250 --seed 0 --max-size 112640 --out /private/tmp/claude-501/-Users-santiago-Brain-txpipe/69ae2495-fa58-49e8-8d17-8881b4a30f94/scratchpad/recent.dict",
+  "corpus": "/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks",
+  "dictionary": {
+    "bytes": 112640,
+    "sha256": "bccf69b3e0caf113b2359a7423721c1f00474d0da2ab84370fdc3f64152a69ef",
+    "zstd_id": 1230589085
+  },
+  "max_size": 112640,
+  "sample_bytes": 149580435,
+  "samples": 18000,
+  "samples_per_segment": 2250,
+  "seed": 0,
+  "segments": [
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000440.segment",
+      "file_bytes": 138224430,
+      "population": 21127,
+      "sample_bytes": 14582158,
+      "samples": 2250,
+      "segment": 440,
+      "sha256": "05a4c3d792bb846baec03f31a619ca7f4d574f52322c468156c736be821806ff"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000441.segment",
+      "file_bytes": 195077992,
+      "population": 21363,
+      "sample_bytes": 20967379,
+      "samples": 2250,
+      "segment": 441,
+      "sha256": "cfc246bf68aa8d04233d904a997a6bf9b21fc2940fc81c2e091c0f693b3b3ac8"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000442.segment",
+      "file_bytes": 136287036,
+      "population": 21370,
+      "sample_bytes": 14490092,
+      "samples": 2250,
+      "segment": 442,
+      "sha256": "172da45e334492ad13586e94e91e3a624277d6b4cf9588a76e20213b54ffd84c"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000443.segment",
+      "file_bytes": 294154097,
+      "population": 21593,
+      "sample_bytes": 29898642,
+      "samples": 2250,
+      "segment": 443,
+      "sha256": "4932919ff34e40eda7224bb1eb03be826c35d51a6b3ed689a5c19a7d8dd5a0ce"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000444.segment",
+      "file_bytes": 157741948,
+      "population": 21466,
+      "sample_bytes": 17002938,
+      "samples": 2250,
+      "segment": 444,
+      "sha256": "e99c13e63eba68304d9669e4f6d891c6f54621acac5a596c420e4a0ef80a6355"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000445.segment",
+      "file_bytes": 149746127,
+      "population": 21335,
+      "sample_bytes": 15256375,
+      "samples": 2250,
+      "segment": 445,
+      "sha256": "4bf8e069f96140c5b4ecfe31d485a94738928b2aba3c9d0d5622de0c530d6e12"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000446.segment",
+      "file_bytes": 207081919,
+      "population": 20821,
+      "sample_bytes": 23209339,
+      "samples": 2250,
+      "segment": 446,
+      "sha256": "e6d35ecfbaa2073f784f2f32881c92197bccd36198b653833069a358408cd83c"
+    },
+    {
+      "eras": {
+        "conway": 2250
+      },
+      "file": "000447.segment",
+      "file_bytes": 131936544,
+      "population": 21011,
+      "sample_bytes": 14173512,
+      "samples": 2250,
+      "segment": 447,
+      "sha256": "6ea49f6cd10797d30106e55ff23cd115e30a3a1a5fc9453be315931c9f4e5e37"
+    }
+  ],
+  "trained_at": "2026-09-08T12:40:13.142122+00:00",
+  "trainer": "ZDICT_trainFromBuffer (zstd::dict::from_samples)",
+  "zstd": "1.5.7"
+}
