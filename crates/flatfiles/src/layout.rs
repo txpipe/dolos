@@ -293,6 +293,7 @@ pub fn recover(paths: &SegmentPaths, found: Found) -> io::Result<Option<Represen
         },
         Some(transition) if found.has(transition.to()) => {
             remove_if_present(&paths.representation(transition.from()))?;
+            sync_dir(&paths.dir)?;
             Some(transition.to())
         }
         Some(transition) if found.has(transition.from()) => Some(transition.from()),
@@ -377,15 +378,21 @@ impl<'a> TransitionGuard<'a> {
     }
 
     /// Move the verified staged output into place. From here on the
-    /// destination is authoritative.
+    /// destination is authoritative — the rename is the commit point, so a
+    /// failed directory sync after it reports [`published`](Self::published)
+    /// all the same and leaves the record for [`recover`] to finish.
     pub fn publish(&mut self) -> io::Result<()> {
         fs::rename(
             self.staging(),
             self.paths.representation(self.transition.to()),
         )?;
-        sync_dir(&self.paths.dir)?;
         self.published = true;
-        Ok(())
+        sync_dir(&self.paths.dir)
+    }
+
+    /// Whether the destination has been renamed into place.
+    pub fn published(&self) -> bool {
+        self.published
     }
 
     /// Retire the source representation and the record.

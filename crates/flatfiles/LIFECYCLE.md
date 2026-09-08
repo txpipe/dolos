@@ -41,9 +41,9 @@ to it, or a truncation inside it, thaws the segment — a complete, verified
 raw file at the same logical offsets, published through the transition below
 — and then proceeds exactly as on a raw segment: the append lands at the
 logical end, the truncation cuts at the requested offset. Truncating a
-compressed segment at or past its logical end changes nothing and converts
-nothing. Truncating any segment **to zero** removes it in whatever
-representation it has, without thawing: there is nothing to carry over.
+segment at or past its end changes nothing and converts nothing. Truncating
+any segment **to zero** removes it in whatever representation it has, without
+thawing: there is nothing to carry over.
 
 Pruning (`delete_segments_before`) removes every file of every segment below
 the threshold — both representations, staged outputs and transition records
@@ -77,7 +77,7 @@ run in opposite directions, under the segment's exclusive lock:
    and content hash against what was written. Anything short of a byte-exact
    match is an error.
 5. **Publish.** Rename the staged file over the destination name and fsync
-   the directory. This is the commit point: the destination is now the
+   the directory. The rename is the commit point: the destination is now the
    segment, in memory and on disk.
 6. **Retire.** Unlink the source representation, fsync, unlink the record,
    fsync. Bump the generation and invalidate the cache.
@@ -85,9 +85,10 @@ run in opposite directions, under the segment's exclusive lock:
 A failure before step 5 removes the staged file and the record and returns
 the error; the source representation was never touched, so a full disk, a
 dictionary that is not installed, or a corrupt frame found during
-verification all leave the last good copy in place. A failure during step 6
-returns the error too, but the destination stays authoritative — the store
-has already switched to it, and the record on disk says so to the next open.
+verification all leave the last good copy in place. A failure after the
+rename — the directory fsync of step 5, or anything in step 6 — returns the
+error too, but the destination stays authoritative — the store has already
+switched to it, and the record on disk says so to the next open.
 
 Sealing needs the dictionary it compresses with to be resolvable by the store
 (installed under `dictionaries/` by default), because the verification is a

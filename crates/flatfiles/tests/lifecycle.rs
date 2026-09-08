@@ -228,9 +228,13 @@ fn truncating_inside_a_compressed_segment_thaws_it_first() {
     seal_mixed(dir.path(), &store, &entries);
     let logical_len = store.segments().unwrap()[0].logical_len;
 
-    // At the logical end nothing is cut, so nothing is converted.
+    // At the logical end nothing is cut, so nothing is converted; past the
+    // end of a raw segment nothing is cut and nothing grows either.
     store.truncate(0, logical_len).unwrap();
     assert_eq!(store.representation(0), Some(Representation::Compressed));
+    let raw_len = store.segments().unwrap()[2].logical_len;
+    store.truncate(2, raw_len + 1).unwrap();
+    assert_eq!(store.segments().unwrap()[2].logical_len, raw_len);
 
     let seg0: Vec<&Entry> = entries.iter().filter(|(_, l)| l.segment_id == 0).collect();
     let cut = seg0[20].1;

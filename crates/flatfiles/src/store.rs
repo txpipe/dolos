@@ -413,7 +413,8 @@ impl FlatFileStore {
     ///
     /// A compressed segment is thawed first and truncated as raw; truncating
     /// to zero removes the segment in whichever representation it has,
-    /// without converting it.
+    /// without converting it. An offset at or past the segment's end changes
+    /// nothing in either representation.
     pub fn truncate(&self, segment_id: u32, offset: u64) -> io::Result<()> {
         let Some(segment) = self.segment(segment_id) else {
             return Ok(());
@@ -454,6 +455,9 @@ impl FlatFileStore {
         let file = OpenOptions::new()
             .write(true)
             .open(self.paths(segment_id).representation(Representation::Raw))?;
+        if offset >= file.metadata()?.len() {
+            return Ok(());
+        }
         file.set_len(offset)?;
         file.sync_data()?;
         self.changed(segment_id, &mut state);
@@ -567,9 +571,12 @@ impl FlatFileStore {
         })?;
         drop(raw);
 
-        guard.publish()?;
-        state.representation = Some(Representation::Compressed);
-        self.changed(segment_id, &mut state);
+        let published = guard.publish();
+        if guard.published() {
+            state.representation = Some(Representation::Compressed);
+            self.changed(segment_id, &mut state);
+        }
+        published?;
         guard.finish()?;
 
         Ok(summary)
@@ -644,9 +651,12 @@ impl FlatFileStore {
             )
         })?;
 
-        guard.publish()?;
-        state.representation = Some(Representation::Raw);
-        self.changed(segment_id, state);
+        let published = guard.publish();
+        if guard.published() {
+            state.representation = Some(Representation::Raw);
+            self.changed(segment_id, state);
+        }
+        published?;
         guard.finish()
     }
 }
