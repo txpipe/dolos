@@ -3,7 +3,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -223,5 +225,77 @@ impl<T: DictionarySource + ?Sized> DictionarySource for &T {
 impl<T: DictionarySource + ?Sized> DictionarySource for Arc<T> {
     fn dictionary(&self, id: &DictionaryId) -> io::Result<Option<Dictionary>> {
         (**self).dictionary(id)
+    }
+}
+
+/// Dictionaries installed as files in one directory, named by identity:
+/// `<dir>/<64 hex digits>.dict`.
+///
+/// This is where a store keeps the dictionaries its segments name. A file is
+/// read on demand and its content hash checked against the name, so a
+/// renamed or edited file is refused rather than trusted; a missing file is
+/// `Ok(None)`, which a reader reports as a missing dictionary.
+#[derive(Debug, Clone)]
+pub struct DictionaryDir {
+    dir: PathBuf,
+}
+
+impl DictionaryDir {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Where `id` is expected to live.
+    pub fn file(&self, id: &DictionaryId) -> PathBuf {
+        self.dir.join(format!("{id}.dict"))
+    }
+
+    /// Write `dictionary` under its identity, durably. Installing the same
+    /// dictionary twice is a no-op; a dictionary is never overwritten with
+    /// different bytes because its name is its content hash.
+    pub fn install(&self, dictionary: &Dictionary) -> io::Result<PathBuf> {
+        fs::create_dir_all(&self.dir)?;
+        let target = self.file(&dictionary.id());
+        if let Some(existing) = self.dictionary(&dictionary.id())? {
+            debug_assert_eq!(existing.id(), dictionary.id());
+            return Ok(target);
+        }
+        let staging = self.dir.join(format!("{}.dict.tmp", dictionary.id()));
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&staging)?;
+        file.write_all(dictionary.bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&staging, &target)?;
+        if cfg!(unix) {
+            fs::File::open(&self.dir)?.sync_all()?;
+        }
+        Ok(target)
+    }
+}
+
+impl DictionarySource for DictionaryDir {
+    fn dictionary(&self, id: &DictionaryId) -> io::Result<Option<Dictionary>> {
+        let path = self.file(id);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(io::Error::new(
+                    e.kind(),
+                    format!("cannot read dictionary {}: {e}", path.display()),
+                ))
+            }
+        };
+        Dictionary::verified(bytes, *id)
+            .map(Some)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
     }
 }

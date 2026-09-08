@@ -244,7 +244,9 @@ impl ReadCache {
         Ok(index)
     }
 
-    fn dictionary(
+    /// The prepared dictionary `id` names, resolved through `source` and
+    /// retained under the dictionary budget.
+    pub fn dictionary(
         &self,
         id: DictionaryId,
         source: &dyn DictionarySource,

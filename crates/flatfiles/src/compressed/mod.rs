@@ -20,9 +20,9 @@
 //! [`ReadCache`] serves bounded, concurrent point reads across a store's
 //! segments; [`SegmentReader`] is the unbounded single-segment path.
 //!
-//! This module exposes the codec only. Routing a live `FlatFileStore` through
-//! compressed files, and producing them from raw segments, belongs to the
-//! store's lifecycle work.
+//! This module exposes the codec. Routing a live `FlatFileStore` through
+//! compressed files, and producing them from raw segments, is the store's
+//! own lifecycle (`crate::store`, described in `LIFECYCLE.md`).
 
 mod cache;
 mod dictionary;
@@ -32,7 +32,8 @@ mod writer;
 
 pub use cache::{CacheLimits, CacheStats, ReadCache, SegmentRef};
 pub use dictionary::{
-    Dictionary, DictionaryId, DictionarySet, DictionarySource, NoDictionaries, PreparedDictionary,
+    Dictionary, DictionaryDir, DictionaryId, DictionarySet, DictionarySource, NoDictionaries,
+    PreparedDictionary,
 };
 pub use format::{
     FrameMode, Metadata, SeekEntry, METADATA_FRAME_MAGIC, METADATA_FRAME_SIZE, METADATA_MAGIC,

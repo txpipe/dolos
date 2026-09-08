@@ -20,6 +20,10 @@ pub mod archive;
 pub mod keys;
 pub mod state;
 
+/// The segment file crate the archive's public surface speaks in
+/// (`WriterOptions`, `SegmentInfo`, `Representation`).
+pub use dolos_flatfiles as flatfiles;
+
 // Re-export main types for convenience
 pub use state::{StateStore, StateWriter};
 
