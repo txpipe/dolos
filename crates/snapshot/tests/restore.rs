@@ -555,49 +555,6 @@ fn a_restored_node_is_the_node_it_came_from_on_fjall() {
     roundtrip::<FjallStores>();
 }
 
-/// The stele a node publishes does not depend on how its block segments are
-/// stored: sealed per-block or chunked, the export carries the same logical
-/// block records as the raw store, byte for byte, and restores into the same
-/// node.
-#[test]
-fn a_stele_exported_from_compressed_segments_is_the_raw_stele_and_restores() {
-    use dolos_flatfiles::compressed::WriterOptions;
-
-    let domain: ToyDomain<FjallStores> = harness();
-
-    let raw_root = tempfile::tempdir().unwrap();
-    let raw = export_to(raw_root.path(), &domain);
-
-    // The harness ledger sits inside epoch zero, so one segment holds every
-    // block; sealing it turns the whole archive compressed, first per-block
-    // and then chunked.
-    for (name, options) in [
-        ("per-block", WriterOptions::per_block()),
-        ("chunked", WriterOptions::chunked(4096)),
-    ] {
-        if name == "chunked" {
-            domain.archive().thaw_segment(0).unwrap();
-        }
-        domain.archive().seal_segment(0, &options).unwrap();
-
-        let sealed_root = tempfile::tempdir().unwrap();
-        let sealed = export_to(sealed_root.path(), &domain);
-
-        assert_eq!(raw, sealed, "{name}: the inscription moved");
-        assert_eq!(
-            std::fs::read(raw_root.path().join("inscription.json")).unwrap(),
-            std::fs::read(sealed_root.path().join("inscription.json")).unwrap(),
-            "{name}: the document on disk moved"
-        );
-
-        let blank = Blank::<FjallStores>::open();
-        let summary =
-            restore_into(sealed_root.path(), magic_of(&domain), &blank, shredded()).unwrap();
-        assert_eq!(summary.blocks, blocks_of(domain.archive()).len() as u64);
-        assert_stores_match(&blank, &domain);
-    }
-}
-
 // --------------------------------------------------------------------------
 // 3. Cross-check
 // --------------------------------------------------------------------------

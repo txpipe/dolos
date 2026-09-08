@@ -4,12 +4,12 @@
 use std::io;
 use std::path::Path;
 
-use dolos_flatfiles::compressed::Dictionary;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::codec::Codec;
 use crate::corpus::{select, walk_bytes, Corpus};
+use crate::dictionary::Dictionary;
 use crate::measure::thread_cpu_ns;
 
 #[derive(Debug, Clone)]
@@ -176,7 +176,7 @@ pub fn evaluate(fixtures: &[Fixture], codecs: &[(String, Codec)]) -> io::Result<
 /// Load a dictionary by path, or the one bundled with the flatfiles crate.
 pub fn load_dictionary(spec: &str) -> io::Result<Dictionary> {
     if spec == "bundled" {
-        return Ok(dolos_flatfiles::compressed::bundled_dictionary());
+        return Ok(Dictionary::bundled());
     }
     Ok(Dictionary::new(std::fs::read(Path::new(spec))?))
 }

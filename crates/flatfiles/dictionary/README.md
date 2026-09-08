@@ -1,7 +1,7 @@
 # Bundled dictionary
 
 `cardano.dict` is the zstd dictionary every build of `dolos-flatfiles`
-carries (`compressed::bundled_dictionary`), so a fresh instance compresses
+carries (`dolos_flatfiles::BUNDLED_DICTIONARY`), so a fresh instance compresses
 its first archive block with no corpus, download or setup. It is an asset of
 the segment format, not an operator setting: changing these bytes is a
 format decision, and `tests/bundled_dictionary.rs` pins the hash and the

@@ -1,12 +1,14 @@
-//! The harness's own segment sink and reader: one frame per block at a
-//! physical location, or the same bodies raw for the baseline.
+//! The harness's segment sinks and readers: the production store, a model
+//! of it with one frame per block at a physical location, and the same
+//! bodies raw for the baseline.
 //!
-//! The sink is a model of the direct-write design, not the production
-//! store: a segment file starts with a sixteen-byte header naming the codec
-//! and is then nothing but frames, each appended whole and addressed by its
-//! offset and length. The raw variant appends the bodies unframed. Both
-//! flush with one `sync_data` per touched segment per batch, which is the
-//! durability the archive writer keeps today.
+//! The model sink is not the production store: its segment file starts
+//! with a sixteen-byte header naming the codec and is then nothing but
+//! frames, each appended whole and addressed by its offset and length. The
+//! raw variant appends the bodies unframed. Both flush with one `sync_data`
+//! per touched segment per batch, the durability the archive writer keeps.
+//! The store codec runs `dolos_flatfiles::FlatFileStore` itself, end to
+//! end, so its phases are not split.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -15,8 +17,10 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use dolos_flatfiles::compressed::Dictionary;
+use dolos_flatfiles::{BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, COMPRESSION_LEVEL};
 use serde_json::{json, Value};
+
+use crate::dictionary::Dictionary;
 
 use crate::measure::thread_cpu_ns;
 
@@ -35,6 +39,8 @@ pub enum Codec {
         level: i32,
         dictionary: Option<Dictionary>,
     },
+    /// The production store, appending and reading as the node does.
+    Store,
 }
 
 impl std::fmt::Debug for Codec {
@@ -59,7 +65,14 @@ impl Codec {
                 level,
                 dictionary: Some(_),
             } => format!("zstd{level}-dict"),
+            Codec::Store => "store".into(),
         }
+    }
+
+    /// Whether a reader for this codec can turn caching off at the
+    /// descriptor; the store opens its own.
+    pub fn reads_without_cache(&self) -> bool {
+        !matches!(self, Codec::Store)
     }
 
     /// The record form, named `label` where the caller's name for this
@@ -79,12 +92,19 @@ impl Codec {
                 "dictionary": dictionary.as_ref().map(|d| d.id().to_string()),
                 "dictionary_bytes": dictionary.as_ref().map(|d| d.bytes().len()),
             }),
+            Codec::Store => json!({
+                "codec": "store",
+                "level": COMPRESSION_LEVEL,
+                "dictionary": Dictionary::bundled().id().to_string(),
+                "dictionary_bytes": BUNDLED_DICTIONARY.len(),
+            }),
         }
     }
 
     pub fn encoder(&self) -> io::Result<Encoder> {
         let inner = match self {
             Codec::Raw => None,
+            Codec::Store => return Err(store_has_its_own()),
             Codec::Zstd { level, dictionary } => {
                 let mut c = match dictionary {
                     Some(d) => zstd::bulk::Compressor::with_dictionary(*level, d.bytes())?,
@@ -104,6 +124,7 @@ impl Codec {
     pub fn decoder(&self) -> io::Result<Decoder> {
         let inner = match self {
             Codec::Raw => None,
+            Codec::Store => return Err(store_has_its_own()),
             Codec::Zstd { dictionary, .. } => Some(match dictionary {
                 Some(d) => zstd::bulk::Decompressor::with_dictionary(d.bytes())?,
                 None => zstd::bulk::Decompressor::new()?,
@@ -120,7 +141,7 @@ impl Codec {
         h[0..4].copy_from_slice(MAGIC);
         h[4] = 1;
         match self {
-            Codec::Raw => h[5] = 0,
+            Codec::Raw | Codec::Store => h[5] = 0,
             Codec::Zstd { level, dictionary } => {
                 h[5] = 1;
                 h[6] = *level as i8 as u8;
@@ -131,6 +152,13 @@ impl Codec {
         }
         h
     }
+}
+
+fn store_has_its_own() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the store codec encodes and decodes inside the store",
+    )
 }
 
 /// One reusable encoding context and output buffer: what a writer thread
@@ -228,22 +256,32 @@ pub struct Sink {
     encoders: Vec<Encoder>,
     files: BTreeMap<u32, (File, u64)>,
     fsync: bool,
+    store: Option<FlatFileStore>,
 }
 
 impl Sink {
     /// `encode_threads` above one encodes a batch's blocks in parallel, one
-    /// context per thread; the frames are still written in order.
+    /// context per thread; the frames are still written in order. The store
+    /// codec encodes serially and syncs every batch whatever these say.
     pub fn open(dir: &Path, codec: Codec, encode_threads: usize, fsync: bool) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let encoders = (0..encode_threads.max(1))
-            .map(|_| codec.encoder())
-            .collect::<io::Result<Vec<_>>>()?;
+        let store = match codec {
+            Codec::Store => Some(FlatFileStore::new(dir)?),
+            _ => None,
+        };
+        let encoders = match codec {
+            Codec::Store => Vec::new(),
+            _ => (0..encode_threads.max(1))
+                .map(|_| codec.encoder())
+                .collect::<io::Result<Vec<_>>>()?,
+        };
         Ok(Self {
             dir: dir.to_path_buf(),
             codec,
             encoders,
             files: BTreeMap::new(),
             fsync,
+            store,
         })
     }
 
@@ -266,6 +304,10 @@ impl Sink {
     }
 
     pub fn append_batch(&mut self, items: &[(u32, &[u8])]) -> io::Result<BatchStats> {
+        if let Some(store) = &self.store {
+            return append_to_store(store, items);
+        }
+
         let mut stats = BatchStats::default();
         stats.locations.reserve(items.len());
 
@@ -378,11 +420,51 @@ impl Sink {
 
     /// The segment files written so far, in order.
     pub fn files(&self) -> Vec<PathBuf> {
+        if self.store.is_some() {
+            return segment_files(&self.dir);
+        }
         self.files
             .keys()
             .map(|s| segment_path(&self.dir, *s))
             .collect()
     }
+}
+
+/// One batch through the production store. The store encodes, writes and
+/// syncs inside the call, so the whole of it is `write_ns` and the thread's
+/// CPU over it stands for the encode cost.
+fn append_to_store(store: &FlatFileStore, items: &[(u32, &[u8])]) -> io::Result<BatchStats> {
+    let mut stats = BatchStats::default();
+    let cpu = thread_cpu_ns();
+    let t = Instant::now();
+    let locations = store.append_batch(items)?;
+    stats.write_ns = t.elapsed().as_nanos() as u64;
+    stats.encode_cpu_ns = thread_cpu_ns().saturating_sub(cpu);
+    let mut touched = std::collections::BTreeSet::new();
+    for (loc, &(segment, body)) in locations.iter().zip(items) {
+        touched.insert(segment);
+        stats.raw_bytes += body.len() as u64;
+        stats.encoded_bytes += loc.length as u64;
+        stats.locations.push(Location {
+            segment,
+            offset: loc.offset,
+            length: loc.length,
+            raw_length: body.len() as u32,
+        });
+    }
+    stats.segments_touched = touched.len();
+    Ok(stats)
+}
+
+fn segment_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "segment"))
+        .collect();
+    files.sort();
+    files
 }
 
 /// A caller's look at the decoded bytes of a read.
@@ -403,19 +485,41 @@ pub struct Reader {
     files: BTreeMap<u32, File>,
     frame: Vec<u8>,
     nocache: bool,
+    store: Option<FlatFileStore>,
 }
 
 impl Reader {
     /// `nocache` asks the OS not to cache the segment reads: `F_NOCACHE` on
     /// macOS (which also disables readahead), `POSIX_FADV_DONTNEED` after
-    /// each read on Linux, nothing elsewhere.
+    /// each read on Linux, nothing elsewhere. The store opens its own
+    /// descriptors, so it cannot honor it.
     pub fn open(dir: &Path, codec: &Codec, nocache: bool) -> io::Result<Self> {
+        if let Codec::Store = codec {
+            if nocache {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "the store codec cannot read with caching off at the descriptor",
+                ));
+            }
+            return Ok(Self {
+                dir: dir.to_path_buf(),
+                decoder: Decoder {
+                    inner: None,
+                    buf: Vec::new(),
+                },
+                files: BTreeMap::new(),
+                frame: Vec::new(),
+                nocache,
+                store: Some(FlatFileStore::new(dir)?),
+            });
+        }
         Ok(Self {
             dir: dir.to_path_buf(),
             decoder: codec.decoder()?,
             files: BTreeMap::new(),
             frame: Vec::new(),
             nocache,
+            store: None,
         })
     }
 
@@ -433,6 +537,33 @@ impl Reader {
     /// Read and decode the body at `loc`, checking its length; `verify`
     /// gets the bytes when the caller wants to compare them.
     pub fn read(&mut self, loc: &Location, mut verify: Option<Check<'_>>) -> io::Result<ReadStats> {
+        if let Some(store) = &self.store {
+            let t = Instant::now();
+            let body = store.read(&BlockLocation {
+                segment_id: loc.segment,
+                offset: loc.offset,
+                length: loc.length,
+            })?;
+            let decode_ns = t.elapsed().as_nanos() as u64;
+            if body.len() != loc.raw_length as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "block at {loc:?} decoded to {} bytes, expected {}",
+                        body.len(),
+                        loc.raw_length
+                    ),
+                ));
+            }
+            if let Some(verify) = verify.as_mut() {
+                verify(&body);
+            }
+            return Ok(ReadStats {
+                frame_bytes: loc.length as u64,
+                body_bytes: body.len() as u64,
+                decode_ns,
+            });
+        }
         self.ensure_open(loc.segment)?;
         let file = &self.files[&loc.segment];
         let len = loc.length as usize;

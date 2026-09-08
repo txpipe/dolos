@@ -66,7 +66,5 @@ rustls = { version = "0.23", default-features = false, features = [
 ] }
 
 # The export tests drive real store sets through `dolos-testing`'s harness
-# domain and its backend bindings; the restore suite seals the fjall
-# harness's block segment to export from compressed storage.
+# domain and its backend bindings.
 dolos-testing = { path = "../testing" }
-dolos-flatfiles = { path = "../flatfiles" }

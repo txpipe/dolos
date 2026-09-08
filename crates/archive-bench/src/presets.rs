@@ -270,6 +270,13 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
                 let locations = outcome.locations;
                 let files = store_files(&dir)?;
                 for &regime in &opts.regimes {
+                    if regime == Regime::NoCache && !codec.reads_without_cache() {
+                        eprintln!(
+                            "  skipping regime nocache for {}: the store opens its own descriptors",
+                            codec.label()
+                        );
+                        continue;
+                    }
                     let Some(first) = apply_regime(&files, regime, &opts.evict)? else {
                         eprintln!(
                             "  skipping regime {}: no eviction method on this host (pass --evict-from)",

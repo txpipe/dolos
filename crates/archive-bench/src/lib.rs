@@ -11,6 +11,7 @@
 
 pub mod codec;
 pub mod corpus;
+pub mod dictionary;
 pub mod measure;
 pub mod presets;
 pub mod report;
