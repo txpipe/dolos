@@ -722,7 +722,9 @@ fn sample_transaction(
                 reward_account: Bytes::from(reward_account.to_vec()),
                 gov_action,
                 anchor: Anchor {
-                    url: "https://dolos.test/proposal".to_string(),
+                    // `example.invalid` cannot resolve (RFC 6761). As a result,
+                    // a fetch of this anchor always returns a connection error.
+                    url: "https://example.invalid/proposal".to_string(),
                     content_hash: Hash::from([6u8; 32]),
                 },
             })

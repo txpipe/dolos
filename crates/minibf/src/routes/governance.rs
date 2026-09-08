@@ -836,7 +836,7 @@ mod tests {
         assert_eq!(metadata.id, id);
         assert_eq!(metadata.tx_hash, tx);
         assert_eq!(metadata.cert_index, 0);
-        assert_eq!(metadata.url, "https://dolos.test/proposal");
+        assert_eq!(metadata.url, "https://example.invalid/proposal");
         assert_eq!(metadata.hash, hex::encode([6u8; 32]));
         assert!(metadata.json_metadata.is_none());
         assert!(metadata.bytes.is_none());

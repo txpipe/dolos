@@ -26,7 +26,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -349,22 +349,31 @@ fn is_public_http_url(url: &reqwest::Url) -> bool {
     literal.parse::<IpAddr>().map(is_public_ip).unwrap_or(true)
 }
 
-fn anchor_http_client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .timeout(ANCHOR_FETCH_TIMEOUT)
-        .no_proxy()
-        .dns_resolver(Arc::new(PublicDnsResolver))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() > MAX_ANCHOR_REDIRECTS {
-                attempt.error("too many redirects")
-            } else if is_public_http_url(attempt.url()) {
-                attempt.follow()
-            } else {
-                attempt.error("the redirect target is not public")
-            }
-        }))
-        .user_agent("Dolos MiniBF")
-        .build()
+/// This function returns the shared HTTP client for governance-anchor fetches.
+///
+/// This function creates the client one time and stores the result. All metadata
+/// requests use this client and its connection pool. If the builder returns an
+/// error, this function stores and returns the same error.
+fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Error> {
+    static CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(ANCHOR_FETCH_TIMEOUT)
+            .no_proxy()
+            .dns_resolver(Arc::new(PublicDnsResolver))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() > MAX_ANCHOR_REDIRECTS {
+                    attempt.error("too many redirects")
+                } else if is_public_http_url(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("the redirect target is not public")
+                }
+            }))
+            .user_agent("Dolos MiniBF")
+            .build()
+    });
+
+    CLIENT.as_ref()
 }
 
 fn offchain_hash_mismatch_error(
@@ -527,7 +536,7 @@ pub async fn anchor_offchain_metadata(
     let mut last_error = None;
 
     for candidate in candidates {
-        match fetch_anchor_candidate(&client, &candidate, url, expected_hash).await {
+        match fetch_anchor_candidate(client, &candidate, url, expected_hash).await {
             Ok(metadata) => return (Some(metadata), None),
             Err(error) => last_error = Some(error),
         }
