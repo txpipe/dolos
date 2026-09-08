@@ -470,6 +470,7 @@ async fn proposal_metadata_parts(
     tx: &Hash<32>,
     idx: u32,
     anchor: &pallas::ledger::primitives::conway::Anchor,
+    ipfs_gateways: &[String],
 ) -> Result<
     (
         String,
@@ -483,7 +484,7 @@ async fn proposal_metadata_parts(
     let hash = hex::encode(anchor.content_hash);
 
     let (metadata, error) =
-        anchor_offchain_metadata(&anchor.url, anchor.content_hash.as_ref()).await;
+        anchor_offchain_metadata(&anchor.url, anchor.content_hash.as_ref(), ipfs_gateways).await;
 
     Ok((id, hash, metadata, error))
 }
@@ -510,7 +511,9 @@ where
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
-    let (id, hash, metadata, _error) = proposal_metadata_parts(&tx, cert_index, anchor).await?;
+    let gateways = domain.config.ipfs_gateways();
+    let (id, hash, metadata, _error) =
+        proposal_metadata_parts(&tx, cert_index, anchor, &gateways).await?;
 
     let metadata = metadata.ok_or(StatusCode::NOT_FOUND)?;
 
@@ -544,7 +547,8 @@ where
 
     let anchor = state.anchor.as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
-    let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, anchor).await?;
+    let gateways = domain.config.ipfs_gateways();
+    let (id, hash, metadata, error) = proposal_metadata_parts(&tx, idx, anchor, &gateways).await?;
 
     let (json_metadata, bytes) = match metadata {
         Some(AnchorMetadata { json, bytes }) => (Some(json), Some(bytes)),

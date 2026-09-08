@@ -253,6 +253,12 @@ pub struct AnchorMetadata {
 const MAX_ANCHOR_METADATA_BYTES: usize = 3_000_000;
 const MAX_ANCHOR_REDIRECTS: usize = 3;
 
+/// This is the total timeout for one governance-anchor request. It is more than
+/// a plain HTTP metadata request needs. An `ipfs://` anchor resolves through a
+/// public gateway. A cold content lookup on that gateway can take several
+/// seconds.
+const ANCHOR_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+
 struct PublicDnsResolver;
 
 impl reqwest::dns::Resolve for PublicDnsResolver {
@@ -345,7 +351,7 @@ fn is_public_http_url(url: &reqwest::Url) -> bool {
 
 fn anchor_http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
+        .timeout(ANCHOR_FETCH_TIMEOUT)
         .no_proxy()
         .dns_resolver(Arc::new(PublicDnsResolver))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
@@ -416,6 +422,13 @@ fn offchain_unknown_error(url: &str) -> DrepsInnerMetadataError {
     )
 }
 
+fn offchain_no_gateway_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::UnknownError,
+        format!("The API cannot resolve {url} without an IPFS gateway."),
+    )
+}
+
 async fn read_anchor_body(
     mut response: reqwest::Response,
     url: &str,
@@ -453,18 +466,55 @@ async fn read_anchor_body(
     Ok(body)
 }
 
-/// This function gets metadata from a governance-anchor URL.
+/// This function resolves a governance-anchor URL to an ordered list of HTTP(S)
+/// URLs.
 ///
-/// The function makes sure that the body hash matches `expected_hash`.
-/// It returns the JSON body and raw bytes, or a typed error.
+/// An `ipfs://<cid>[/<path>]` URL expands to one `<gateway>/ipfs/<cid>[/<path>]`
+/// candidate for each gateway, in gateway order. The caller sends a request to
+/// each candidate in order until one serves the content. The function also
+/// accepts a redundant `ipfs/` after the scheme.
+///
+/// The CID keeps its original case. The CID stays in the path, so it does not
+/// pass through URL host normalization. That normalization lowercases a base58
+/// CIDv0.
+///
+/// Every other URL gives a single candidate, unchanged. An `ipfs://` URL with no
+/// gateways gives no candidates.
+fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
+    let Some(rest) = url.strip_prefix("ipfs://") else {
+        return vec![url.to_string()];
+    };
+
+    let rest = rest.strip_prefix("ipfs/").unwrap_or(rest);
+
+    ipfs_gateways
+        .iter()
+        .map(|gateway| format!("{}/ipfs/{rest}", gateway.trim_end_matches('/')))
+        .collect()
+}
+
+/// This function fetches metadata from a governance-anchor URL.
+///
+/// The function resolves an `ipfs://` URL through `ipfs_gateways`. It sends a
+/// request to each gateway in order. It stops at the first gateway that serves
+/// content with a hash equal to `expected_hash`. The function fetches every
+/// other URL directly.
+///
+/// The function returns the JSON body and the raw bytes. If every candidate
+/// fails, the function returns a typed error from the last candidate. Every
+/// error keeps the original on-chain URL.
 pub async fn anchor_offchain_metadata(
     url: &str,
     expected_hash: &[u8],
+    ipfs_gateways: &[String],
 ) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
-    let request_url = match reqwest::Url::parse(url) {
-        Ok(url) if is_public_http_url(&url) => url,
-        _ => return (None, Some(offchain_connection_error(url))),
-    };
+    let candidates = resolve_anchor_urls(url, ipfs_gateways);
+
+    // The candidate list is empty only for an `ipfs://` URL with no gateway. A
+    // direct HTTP(S) URL always gives one candidate.
+    if candidates.is_empty() {
+        return (None, Some(offchain_no_gateway_error(url)));
+    }
 
     let client = match anchor_http_client() {
         Ok(client) => client,
@@ -474,46 +524,67 @@ pub async fn anchor_offchain_metadata(
         }
     };
 
-    let response = match client.get(request_url).send().await {
-        Ok(response) => response,
-        Err(_) => return (None, Some(offchain_connection_error(url))),
-    };
+    let mut last_error = None;
 
-    if response.status() != StatusCode::OK {
-        return (
-            None,
-            Some(offchain_http_response_error(url, response.status())),
-        );
+    for candidate in candidates {
+        match fetch_anchor_candidate(&client, &candidate, url, expected_hash).await {
+            Ok(metadata) => return (Some(metadata), None),
+            Err(error) => last_error = Some(error),
+        }
     }
 
-    let body = match read_anchor_body(response, url).await {
-        Ok(body) => body,
-        Err(error) => return (None, Some(error)),
+    (None, last_error)
+}
+
+/// This function fetches one resolved candidate URL for
+/// [`anchor_offchain_metadata`]. The function makes sure that the body hash
+/// matches `expected_hash`.
+///
+/// `request_url` is the URL that the function fetches. For an `ipfs://` anchor,
+/// `request_url` is a gateway URL. `original_url` is the on-chain URL. Every
+/// error keeps `original_url`, so the caller reports what the chain recorded.
+async fn fetch_anchor_candidate(
+    client: &reqwest::Client,
+    request_url: &str,
+    original_url: &str,
+    expected_hash: &[u8],
+) -> Result<AnchorMetadata, DrepsInnerMetadataError> {
+    let request_url = match reqwest::Url::parse(request_url) {
+        Ok(url) if is_public_http_url(&url) => url,
+        _ => return Err(offchain_connection_error(original_url)),
     };
+
+    let response = client
+        .get(request_url)
+        .send()
+        .await
+        .map_err(|_| offchain_connection_error(original_url))?;
+
+    if response.status() != StatusCode::OK {
+        return Err(offchain_http_response_error(
+            original_url,
+            response.status(),
+        ));
+    }
+
+    let body = read_anchor_body(response, original_url).await?;
 
     let actual_hash = Hasher::<256>::hash(body.as_ref());
 
     if actual_hash.as_ref() != expected_hash {
-        return (
-            None,
-            Some(offchain_hash_mismatch_error(
-                url,
-                expected_hash,
-                actual_hash.as_ref(),
-            )),
-        );
+        return Err(offchain_hash_mismatch_error(
+            original_url,
+            expected_hash,
+            actual_hash.as_ref(),
+        ));
     }
 
-    match serde_json::from_slice(body.as_ref()) {
-        Ok(json) => (
-            Some(AnchorMetadata {
-                json,
-                bytes: format!("\\x{}", hex::encode(body.as_slice())),
-            }),
-            None,
-        ),
-        Err(_) => (None, Some(offchain_decode_error(url))),
-    }
+    serde_json::from_slice(body.as_ref())
+        .map(|json| AnchorMetadata {
+            json,
+            bytes: format!("\\x{}", hex::encode(body.as_slice())),
+        })
+        .map_err(|_| offchain_decode_error(original_url))
 }
 
 #[cfg(test)]
@@ -574,7 +645,7 @@ mod anchor_tests {
                 .expect("Cannot read the test server address.")
         );
 
-        let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32]).await;
+        let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32], &[]).await;
 
         assert!(metadata.is_none());
         assert_eq!(
@@ -661,6 +732,76 @@ mod anchor_tests {
             let url = reqwest::Url::parse(url).expect("Cannot parse the URL.");
             assert!(!is_public_http_url(&url), "{url} is public");
         }
+    }
+
+    #[test]
+    fn resolve_anchor_urls_expands_ipfs_across_gateways_in_order() {
+        assert_eq!(
+            resolve_anchor_urls(
+                "ipfs://bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m",
+                &[
+                    "https://ipfs.io".to_string(),
+                    "https://gateway.pinata.cloud".to_string(),
+                ],
+            ),
+            vec![
+                "https://ipfs.io/ipfs/bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m"
+                    .to_string(),
+                "https://gateway.pinata.cloud/ipfs/bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m"
+                    .to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_keeps_cid_path_and_trims_gateway_slash() {
+        assert_eq!(
+            resolve_anchor_urls(
+                "ipfs://bafyfoo/dir/doc.json",
+                &["https://gateway.example/".to_string()]
+            ),
+            vec!["https://gateway.example/ipfs/bafyfoo/dir/doc.json".to_string()],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_tolerates_redundant_ipfs_prefix() {
+        assert_eq!(
+            resolve_anchor_urls("ipfs://ipfs/bafyfoo", &["https://ipfs.io".to_string()]),
+            vec!["https://ipfs.io/ipfs/bafyfoo".to_string()],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_preserves_cidv0_case() {
+        // A base58 CIDv0 is case-sensitive. The CID stays in the path, so it
+        // does not pass through host normalization. That normalization
+        // lowercases the CID and corrupts it.
+        assert_eq!(
+            resolve_anchor_urls(
+                "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+                &["https://ipfs.io".to_string()],
+            ),
+            vec!["https://ipfs.io/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_string()],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_passes_http_through_as_single_candidate() {
+        for url in [
+            "https://example.com/metadata.json",
+            "http://example.com/a?b=c",
+        ] {
+            assert_eq!(
+                resolve_anchor_urls(url, &["https://ipfs.io".to_string()]),
+                vec![url.to_string()],
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_anchor_urls_without_gateways_yields_no_candidates() {
+        assert!(resolve_anchor_urls("ipfs://bafyfoo", &[]).is_empty());
     }
 }
 
