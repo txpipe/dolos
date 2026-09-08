@@ -42,7 +42,7 @@ projection, and lives in the store that holds what it projects:
 └── scratch  # not a store: stele layers staged in flight by a registry transfer
 ```
 
-Each database is a separate Redb or Fjall store with independent configuration for cache size and durability, depending on the chosen storage backend.
+The persistent WAL uses Redb, while state and archive use separate Fjall databases with independent cache and durability configuration. Builtin memory stores serve ephemeral nodes, tooling, and tests.
 
 ## Crate Architecture
 
@@ -89,15 +89,15 @@ The project follows a modular workspace architecture with clear separation of co
 - **Dependencies**: `dolos-core`, Pallas library for Cardano protocol support
 
 #### `dolos-redb3` (Storage Backend)
-- **Purpose**: Storage backend implementation using the Redb v3 embedded database
+- **Purpose**: Redb v3 implementations retained for the WAL, mempool, and legacy state tests
 - **Components**:
-  - `state`: `StateStore` implementation with UTxO storage and entity tables
-  - `archive`: `ArchiveStore` implementation with block and log storage
   - `wal`: `WalStore` implementation for crash recovery
-- **Role**: Persistence layer implementing the core storage traits
+  - `mempool`: persistent mempool storage
+  - `state`: legacy `StateStore` implementation used by tests, not a supported node configuration backend
+- **Role**: Persistence layer for the WAL and mempool
 
-#### `dolos-fjall` (Alternative Storage Backend)
-- **Purpose**: Alternative storage backend implementation using the Fjall LSM-tree embedded database
+#### `dolos-fjall` (State and Archive Storage)
+- **Purpose**: Persistent state and archive implementation using the Fjall LSM-tree embedded database
 - **Design Philosophy**: Optimized for write-heavy workloads with many keys, ideal for blockchain data
 - **Components**:
   - `state`: `StateStore` implementation with four-keyspace design:
@@ -115,7 +115,7 @@ The project follows a modular workspace architecture with clear separation of co
   - Reduced segment files compared to per-entity keyspaces
   - Chain-agnostic design using dimension hashing
   - LSM-tree optimization for high-write blockchain workloads
-- **Role**: Alternative persistence layer implementing `StateStore` and `ArchiveStore` traits
+- **Role**: Primary persistence layer implementing `StateStore` and `ArchiveStore` traits
 
 ### Service Crates
 
@@ -349,6 +349,6 @@ All agents working on this repository must verify their modifications by running
 - All warnings from `cargo clippy` must be resolved before committing changes
 - Code should follow existing Rust conventions and patterns established in the codebase
 - New implementations should follow the trait-based architecture patterns
-- Storage implementations should maintain consistency between backends (redb3 and fjall)
+- Storage implementations that share a trait should maintain the same observable contract across backends
 
 These verification steps ensure code quality, maintain consistency across storage backends, and prevent introducing technical debt into the codebase.

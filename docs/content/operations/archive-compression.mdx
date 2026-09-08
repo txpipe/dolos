@@ -1,0 +1,152 @@
+---
+title: Archive Compression
+sidebar:
+  order: 6
+---
+
+Dolos keeps archived block bodies in flat segment files, one per epoch, and
+the archive index addresses a block by its byte offset inside its segment.
+A completed segment can be **sealed**: rewritten as independently
+compressed zstd frames that keep every offset meaningful, so the index is
+never rewritten and reads keep working through the same locations. Sealing
+is an explicit, offline maintenance step in this release; the node itself
+still appends raw segments and never compresses on its own.
+
+## Profiles
+
+Both profiles use zstd level 3 and the same on-disk container; they differ
+in where frame boundaries fall.
+
+- **`per-block`** compresses every block as a frame of its own, using a
+  **dictionary** trained on blocks of the same network. A point read decodes
+  exactly one block's bytes, so single-block lookups — transactions, blocks
+  by hash — cost what they cost raw, while the segment shrinks by roughly a
+  third to a half. A dictionary is required: small blocks compress poorly
+  without one.
+- **`chunked`** groups adjacent blocks into frames of about `chunk_target`
+  bytes (256 KiB unless configured) and needs no dictionary. Scans over
+  consecutive blocks — epoch listings, chain walks — read far fewer bytes
+  and decompress once per group, but a single-block read decodes its whole
+  frame first, which costs more CPU per lookup.
+
+The tradeoff was measured on mainnet and preprod archives during the
+research that led to this feature: per-block with a dictionary is close to
+free on the read path and is the safe choice for a node serving point
+lookups; chunked is the profile for scan-heavy workloads. How much any
+storage layer gains in bandwidth or IOPS depends on the workload and the
+device, so measure your own before counting on a number.
+
+## Configuration
+
+```toml
+[storage.archive.block_compression]
+profile = "per-block"          # or "chunked"
+dictionary = "<64 hex digits>" # required by per-block; naming one selects per-block
+chunk_target = 262144          # chunked only, bytes
+
+[storage.archive.block_compression.cache]
+frame_mb = 64                  # decoded frames retained across all segments
+index_mb = 32                  # parsed seek tables retained
+dictionary_mb = 8              # dictionaries and their prepared decoders
+handles = 64                   # open segment files
+inflight_reads = 16            # concurrent reads across compressed segments
+```
+
+The table selects what `seal` applies and bounds the reader that serves
+compressed segments; the reader's cache is separate from the archive index
+cache (`storage.archive.cache`). Omitting the table changes nothing about
+how the node runs: segments stay raw, any already-sealed segment is still
+read under the default bounds, and no background work starts. Values no
+command could act on — a per-block profile without a dictionary, a zero
+chunk target, a dictionary that is not 64 hex digits — fail when the
+archive is opened rather than when a segment is about to be rewritten.
+See the [configuration schema](../configuration/schema#storagearchive-section)
+for the full reference.
+
+## Runbook
+
+Every command below resolves the segment directory through the archive
+configuration and must run with the node **stopped**: `seal` and
+`restore-raw` take the segment directory exclusively and are refused, without
+waiting, while a node or another maintenance command holds it — whichever
+configuration file names the directory. `inspect` only reads the directory
+and can run at any time.
+
+1. **Train a dictionary** (per-block only). Pick a range of completed
+   segments representative of what you will seal — a few recent epochs —
+   and record the seed; the same seed over the same range trains the same
+   dictionary.
+
+   ```sh
+   dolos data archive-compression train-dictionary --from 500 --to 502 --seed 1
+   ```
+
+   The command reports the dictionary's identity, its path under
+   `dictionaries/` in the segment directory, and the sample it was trained
+   on; a `.json` manifest beside the `.dict` file records the same, network
+   magic included. Several dictionaries can stay installed side by side.
+
+2. **Check what a run would do**, then seal. Segment numbers are epoch
+   numbers; the segment holding the archive tip and anything past it are
+   refused, so stop the range one short of the current epoch.
+
+   ```sh
+   dolos data archive-compression seal --from 0 --to 499 --dry-run
+   dolos data archive-compression seal --from 0 --to 499
+   ```
+
+   Pass `--profile`, `--dictionary` and `--chunk-target` to override the
+   configuration for one run. Segments are converted one at a time: each is
+   walked block by block, staged as a complete compressed file beside the
+   original, decoded and compared against the raw bytes, and only then
+   published. A segment that is already compressed is skipped and reported
+   with the profile it actually has; a new profile does not recompress it.
+
+3. **Inspect** the directory at any time — with the node running too:
+
+   ```sh
+   dolos data archive-compression inspect
+   ```
+
+   It lists every segment with its representation, profile, dictionary and
+   logical versus on-disk size, the installed dictionaries and their
+   manifests, and any transition an interruption left pending.
+
+4. **Restore to raw** before running an older binary, or to undo a profile
+   choice:
+
+   ```sh
+   dolos data archive-compression restore-raw --from 0 --to 499
+   ```
+
+`--json` on any command prints the same report as JSON.
+
+## Space, interruption and recovery
+
+- **Headroom.** A conversion stages one whole segment at a time next to the
+  original, so the segment directory needs free space for the largest
+  segment in the range plus a small margin. The command checks before each
+  segment and refuses when it does not fit; nothing is touched.
+- **Interruption.** Killing a run at any point loses nothing: the original
+  representation stays authoritative until the staged file has been
+  verified and renamed into place, and a durable transition record says
+  which file is the segment from then on. The next open of the archive —
+  by the node or by the next maintenance command — finishes or discards the
+  interrupted step. Rerunning the same command resumes where it stopped.
+- **Failures** before publication — no space, a missing dictionary, a
+  corrupt frame found by verification, a stream that does not end on a
+  whole block — return an error naming the segment and leave the raw file
+  as it was.
+
+## Backups and downgrades
+
+Dictionaries are part of durable storage. A segment sealed with one cannot
+be read without it, so a file-level backup of the archive must include the
+`dictionaries/` directory under the segment directory, and a dictionary is
+never modified or deleted by Dolos; retraining installs a new one under a
+new identity. A restored backup opens as it was, dictionaries included.
+
+Older binaries know neither the compressed segment layout nor the directory
+lease. Run `restore-raw` over every compressed segment before starting an
+older binary on the same data, and do not run an older and a newer binary
+against the same segment directory at the same time.

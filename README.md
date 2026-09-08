@@ -67,7 +67,7 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 
 ### Operations & Observability
 
-- **Dual storage backends** — Choose between Redb v3 or Fjall LSM-tree based on your workload
+- **Purpose-built storage** — Fjall LSM trees for state and archive data, with a Redb WAL for crash recovery
 - **OpenTelemetry integration** — Distributed tracing with OTLP export
 - **Prometheus metrics** — Health and performance monitoring endpoints
 - **Rust implementation** — Memory safety, high performance, and small binary size
@@ -76,12 +76,12 @@ Dolos connects directly to the Cardano network using Ouroboros Node-to-Node (N2N
 
 Dolos follows a modular, layered architecture:
 
-- **Core abstractions** (`dolos-core`) — Storage traits (State, Archive, WAL, Index), entity-delta system, and batch processing pipeline
+- **Core abstractions** (`dolos-core`) — Storage traits (State, Archive, WAL), entity-delta system, and batch processing pipeline
 - **Cardano logic** (`dolos-cardano`) — Era-specific block processing, validation, reward calculation, and UTxO delta computation
-- **Storage backends** — Pluggable implementations: Redb v3 or Fjall LSM-tree
+- **Storage backends** — Fjall state/archive stores, a Redb WAL, and builtin in-memory stores for ephemeral nodes and tests
 - **Service layer** — gRPC, REST, and Ouroboros protocol servers
 
-Data is organized into four isolated storage layers: State (current ledger), Archive (historical blocks), WAL (crash recovery), and Index (fast lookups). State mutations use an entity-delta pattern enabling efficient rollbacks without full snapshots.
+Data is organized into three storage layers: State (current ledger and live-UTxO tags), Archive (historical blocks and their lookup indexes), and WAL (crash recovery). State mutations use an entity-delta pattern enabling efficient rollbacks without full snapshots.
 
 ## Quick Start
 

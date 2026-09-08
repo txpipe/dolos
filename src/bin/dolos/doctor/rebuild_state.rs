@@ -319,10 +319,10 @@ fn next_chunk(
 
 /// Replay the archive into the rebuild domain in chunks.
 ///
-/// The range iterator is re-opened per chunk: it holds a redb read
-/// transaction, and one held across writes blocks page reclamation for the
-/// whole run. Returns whether the replay stopped at `stop_epoch` rather than
-/// at the archive tip.
+/// The range iterator is re-opened per chunk: it owns a fjall snapshot, and one
+/// held across the whole replay would pin superseded versions while writes
+/// rebuild the state. Returns whether the replay stopped at `stop_epoch`
+/// rather than at the archive tip.
 fn replay(
     domain: &DomainAdapter,
     source: &ArchiveStoreBackend,

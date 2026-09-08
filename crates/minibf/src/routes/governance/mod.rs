@@ -1,9 +1,16 @@
+mod mapping;
+
+use std::collections::HashMap;
+
+use self::mapping::description_json;
+
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
 use blockfrost_openapi::models::{
+    proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
     proposal_metadata_v2::ProposalMetadataV2,
     proposal_withdrawals_inner::ProposalWithdrawalsInner,
@@ -19,11 +26,10 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
-        primitives::{Coin, Epoch, StakeCredential},
-        traverse::MultiEraBlock,
+        primitives::{conway::GovAction, Coin, Epoch, StakeCredential},
+        traverse::{MultiEraBlock, MultiEraTx},
     },
 };
-use std::collections::HashMap;
 
 use crate::{
     error::Error,
@@ -679,14 +685,259 @@ where
     Ok(Json(page))
 }
 
+// The helpers below reconstruct the `governance_description` JSON that
+// Blockfrost copies from db-sync. db-sync stores the cardano-ledger Aeson
+// encoding of the submitted `GovAction`, so field names follow the ledger
+// JSON instances.
+
+fn governance_type_from_action(action: &GovAction) -> proposal::GovernanceType {
+    match action {
+        GovAction::ParameterChange(..) => proposal::GovernanceType::ParameterChange,
+        GovAction::HardForkInitiation(..) => proposal::GovernanceType::HardForkInitiation,
+        GovAction::TreasuryWithdrawals(..) => proposal::GovernanceType::TreasuryWithdrawals,
+        GovAction::NoConfidence(..) => proposal::GovernanceType::NoConfidence,
+        GovAction::UpdateCommittee(..) => proposal::GovernanceType::NewCommittee,
+        GovAction::NewConstitution(..) => proposal::GovernanceType::NewConstitution,
+        GovAction::Information => proposal::GovernanceType::InfoAction,
+    }
+}
+
+pub struct ProposalModelBuilder {
+    state: ProposalState,
+    gov_action: Option<GovAction>,
+    network: Network,
+    current_epoch: Epoch,
+}
+
+impl ProposalModelBuilder {
+    fn governance_type(&self) -> proposal::GovernanceType {
+        if let Some(action) = &self.gov_action {
+            return governance_type_from_action(action);
+        }
+
+        match &self.state.action {
+            ProposalAction::ParamChange(_) => proposal::GovernanceType::ParameterChange,
+            ProposalAction::HardFork(_) => proposal::GovernanceType::HardForkInitiation,
+            ProposalAction::TreasuryWithdrawal(_) => proposal::GovernanceType::TreasuryWithdrawals,
+            ProposalAction::NoConfidence => proposal::GovernanceType::NoConfidence,
+            ProposalAction::UpdateCommittee { .. } => proposal::GovernanceType::NewCommittee,
+            ProposalAction::NewConstitution { .. } => proposal::GovernanceType::NewConstitution,
+            ProposalAction::Info => proposal::GovernanceType::InfoAction,
+            // read_proposal rejects a legacy row that the archive cannot
+            // resolve, so this arm never renders.
+            ProposalAction::Other => proposal::GovernanceType::InfoAction,
+        }
+    }
+
+    /// Dolos stamps `ratified_epoch` with the epoch the ratifying boundary
+    /// closes. db-sync reports that same epoch as `ratified_epoch` and the
+    /// enactment lands one boundary later, so `enacted_epoch` is one more.
+    fn enactment_epoch(&self) -> Option<Epoch> {
+        let boundary = self.state.ratified_epoch? + 1;
+
+        (self.current_epoch >= boundary).then_some(boundary)
+    }
+
+    /// An unratified proposal counts as expired from its `expires_at` epoch
+    /// on, before any boundary stamp. The expiry drop later stamps
+    /// `canceled_epoch`, one epoch past `expires_at`. A `canceled_epoch` at
+    /// or before `expires_at` is a sibling pruned by a competing enactment
+    /// instead: db-sync reports that as dropped, never as expired.
+    fn expired_epoch(&self) -> Option<Epoch> {
+        if self.state.ratified_epoch.is_some() {
+            return None;
+        }
+
+        let expires = self.state.expires_at()?;
+
+        if self.state.canceled_epoch.is_some_and(|x| x <= expires) {
+            return None;
+        }
+
+        (self.current_epoch >= expires).then_some(expires)
+    }
+
+    /// db-sync marks a proposal as dropped when a competing action gets
+    /// enacted (canceled in dolos terms) or one epoch after it marks the
+    /// proposal as expired.
+    fn dropped_epoch(&self) -> Option<Epoch> {
+        if let Some(canceled) = self.state.canceled_epoch {
+            return (self.current_epoch >= canceled).then_some(canceled);
+        }
+
+        let dropped = self.expired_epoch()? + 1;
+
+        (self.current_epoch >= dropped).then_some(dropped)
+    }
+}
+
+impl IntoModel<Proposal> for ProposalModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<Proposal, StatusCode> {
+        let return_address = self
+            .state
+            .reward_account
+            .as_ref()
+            .map(|cred| stake_cred_to_address(cred, self.network).to_bech32())
+            .transpose()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .unwrap_or_default();
+
+        let enactment = self.enactment_epoch();
+
+        let governance_description = self.gov_action.as_ref().map(description_json).transpose()?;
+
+        let out = Proposal {
+            id: bech32_gov_action(&self.state.tx, self.state.idx)?,
+            tx_hash: hex::encode(self.state.tx),
+            cert_index: self.state.idx as i32,
+            governance_type: self.governance_type(),
+            governance_description,
+            deposit: self.state.deposit.unwrap_or_default().to_string(),
+            return_address,
+            ratified_epoch: self.state.ratified_epoch.map(|x| x as i32),
+            enacted_epoch: enactment.map(|x| x as i32),
+            dropped_epoch: self.dropped_epoch().map(|x| x as i32),
+            expired_epoch: self.expired_epoch().map(|x| x as i32),
+            expiration: self.state.expires_at().unwrap_or_default() as i32,
+        };
+
+        Ok(out)
+    }
+}
+
+/// Recover the submitted `GovAction` from the archived proposal tx. Returns
+/// `None` when the tx is absent (pruned archive), pre-Conway, or carries no
+/// procedure at the index.
+async fn load_gov_action<D>(
+    domain: &Facade<D>,
+    tx: Hash<32>,
+    idx: u32,
+) -> Result<Option<GovAction>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let Some(cbor) = domain.get_tx(tx).await? else {
+        return Ok(None);
+    };
+
+    let Ok(era) = cbor.0.try_into() else {
+        return Ok(None);
+    };
+
+    let Ok(decoded) = MultiEraTx::decode_for_era(era, &cbor.1) else {
+        return Ok(None);
+    };
+
+    let MultiEraTx::Conway(conway_tx) = decoded else {
+        return Ok(None);
+    };
+
+    let action = conway_tx
+        .transaction_body
+        .proposal_procedures
+        .as_ref()
+        .and_then(|procedures| procedures.get(idx as usize))
+        .map(|procedure| procedure.gov_action.clone());
+
+    Ok(action)
+}
+
+async fn read_proposal<D>(
+    domain: &Facade<D>,
+    tx: Hash<32>,
+    idx: u32,
+) -> Result<Json<Proposal>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<ProposalState>: From<D::Entity>,
+{
+    let key = ProposalState::build_entity_key(tx, idx);
+
+    let state = domain
+        .read_cardano_entity::<ProposalState>(key)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Blockfrost never serves pre-Conway protocol updates here, and the
+    // listing already hides them.
+    if !is_gov_action(&state) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let gov_action = load_gov_action(domain, tx, idx).await?;
+
+    // A legacy row keeps no action detail. When the archived tx cannot
+    // resolve it either, any response would guess the type.
+    if matches!(state.action, ProposalAction::Other) && gov_action.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let chain = domain.get_chain_summary()?;
+
+    let (tip, _) = domain
+        .archive()
+        .get_tip()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let (current_epoch, _) = chain.slot_epoch(tip);
+
+    let network = domain.get_network_id()?;
+
+    let model = ProposalModelBuilder {
+        state,
+        gov_action,
+        network,
+        current_epoch,
+    };
+
+    model.into_response()
+}
+
+pub async fn proposal_by_tx_index<D>(
+    Path((tx_hash, cert_index)): Path<(String, String)>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Proposal>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<ProposalState>: From<D::Entity>,
+{
+    let idx: u32 = cert_index.parse().map_err(|_| Error::InvalidCertIndex)?;
+
+    // Blockfrost matches the hash as text against db-sync, so a malformed
+    // one is a lookup that finds nothing rather than a bad request.
+    let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(read_proposal(&domain, tx, idx).await?)
+}
+
+pub async fn proposal_by_gov_action_id<D>(
+    Path(gov_action_id): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Proposal>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<ProposalState>: From<D::Entity>,
+{
+    let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
+
+    Ok(read_proposal(&domain, tx, idx).await?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::{TestApp, TestFault};
     use bech32::{Bech32, Hrp};
-    use dolos_testing::synthetic::SyntheticBlockConfig;
+    use dolos_cardano::model::GovPurpose;
+    use dolos_core::StateWriter as _;
+    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
-    use pallas::{codec::utils::Bytes, ledger::primitives::conway::GovAction};
+    use pallas::{
+        codec::utils::Bytes,
+        ledger::primitives::conway::{GovAction, GovActionId},
+    };
     use std::collections::BTreeMap;
 
     fn invalid_drep() -> &'static str {
@@ -1254,14 +1505,29 @@ mod tests {
         let short = bech32(bech32::Hrp::parse("gov_action").unwrap(), [0u8; 31]).unwrap();
         assert!(parse_gov_action_id(&short).is_err());
 
-        // the index is written in the shortest big-endian form, so a padded
-        // one is a second spelling of an id that already has a canonical form
+        // Blockfrost parses the whole suffix, so a zero-padded index is an
+        // alias of the canonical spelling and resolves to the same proposal
         let padded = bech32(
             bech32::Hrp::parse("gov_action").unwrap(),
             [tx.as_slice(), &[0x00, 0x01]].concat(),
         )
         .unwrap();
-        assert!(parse_gov_action_id(&padded).is_err());
+        assert_eq!(parse_gov_action_id(&padded).unwrap(), (tx, 1));
+
+        let long_zeros = bech32(
+            bech32::Hrp::parse("gov_action").unwrap(),
+            [tx.as_slice(), &[0x00; 8]].concat(),
+        )
+        .unwrap();
+        assert_eq!(parse_gov_action_id(&long_zeros).unwrap(), (tx, 0));
+
+        // an index past u32 can never name a proposal: it parses and misses
+        let huge = bech32(
+            bech32::Hrp::parse("gov_action").unwrap(),
+            [tx.as_slice(), &[0xff; 8]].concat(),
+        )
+        .unwrap();
+        assert_eq!(parse_gov_action_id(&huge).unwrap(), (tx, u32::MAX));
     }
 
     /// CIP-129: the id is the proposing tx hash with the action index
@@ -1293,5 +1559,321 @@ mod tests {
         assert_eq!(payload(1), vec![0x01]);
         assert_eq!(payload(255), vec![0xff]);
         assert_eq!(payload(256), vec![0x01, 0x00]);
+
+        // the parser accepts every suffix length the encoder produces,
+        // like the Blockfrost one does
+        for idx in [0, 1, 255, 256, u32::MAX] {
+            let id = bech32_gov_action(&tx, idx).unwrap();
+            assert_eq!(parse_gov_action_id(&id).unwrap(), (tx, idx));
+        }
+    }
+
+    fn proposal_tx() -> Hash<32> {
+        [7u8; 32].into()
+    }
+
+    /// A proposal that expires after epoch 646 (`expires_at` = 647), with
+    /// the boundary outcome stamps given by the caller.
+    fn lifecycle_state(ratified: Option<Epoch>, canceled: Option<Epoch>) -> ProposalState {
+        ProposalState {
+            slot: 1,
+            tx: proposal_tx(),
+            idx: 0,
+            action: ProposalAction::Info,
+            max_epoch: Some(646),
+            ratified_epoch: ratified,
+            canceled_epoch: canceled,
+            deposit: Some(100_000_000),
+            reward_account: Some(StakeCredential::AddrKeyhash([7u8; 28].into())),
+            proposed_in: Some(640),
+            parent: None,
+            purpose: None,
+            anchor: None,
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        }
+    }
+
+    fn lifecycle_model(state: ProposalState, current_epoch: Epoch) -> Proposal {
+        ProposalModelBuilder {
+            state,
+            gov_action: None,
+            network: Network::Testnet,
+            current_epoch,
+        }
+        .into_model()
+        .expect("failed to build proposal model")
+    }
+
+    /// The expected values mirror the Blockfrost mainnet responses for
+    /// b2a591ac… (enacted), dfd81f8d… (expired), and 729daaf2… (pending
+    /// through its expiration epoch).
+    #[test]
+    fn proposal_lifecycle_epochs_match_db_sync() {
+        // ratified at the boundary closing 525: enacted one epoch later
+        let enacted = lifecycle_model(lifecycle_state(Some(525), None), 653);
+        assert_eq!(enacted.ratified_epoch, Some(525));
+        assert_eq!(enacted.enacted_epoch, Some(526));
+        assert_eq!(enacted.expired_epoch, None);
+        assert_eq!(enacted.dropped_epoch, None);
+
+        // expired at 647: the drop stamps canceled one epoch past expiry
+        let expired = lifecycle_model(lifecycle_state(None, Some(648)), 653);
+        assert_eq!(expired.ratified_epoch, None);
+        assert_eq!(expired.enacted_epoch, None);
+        assert_eq!(expired.expired_epoch, Some(647));
+        assert_eq!(expired.dropped_epoch, Some(648));
+
+        // canceled before expiry: a pruned sibling drops but never expires
+        let pruned = lifecycle_model(lifecycle_state(None, Some(645)), 653);
+        assert_eq!(pruned.expired_epoch, None);
+        assert_eq!(pruned.dropped_epoch, Some(645));
+
+        // in its expiration epoch without a boundary stamp: already expired,
+        // the drop follows one epoch later (mirrors mainnet ab474223…)
+        let expiring = lifecycle_model(lifecycle_state(None, None), 647);
+        assert_eq!(expiring.expired_epoch, Some(647));
+        assert_eq!(expiring.dropped_epoch, None);
+
+        // still votable before its expiration epoch: no outcome yet
+        let pending = lifecycle_model(lifecycle_state(None, None), 646);
+        assert_eq!(pending.expired_epoch, None);
+        assert_eq!(pending.dropped_epoch, None);
+    }
+
+    fn seed_proposal(domain: &ToyDomain) {
+        let state = ProposalState {
+            slot: 1,
+            tx: proposal_tx(),
+            idx: 0,
+            action: ProposalAction::HardFork((11, 0)),
+            max_epoch: Some(1_000),
+            ratified_epoch: None,
+            canceled_epoch: None,
+            deposit: Some(100_000_000),
+            reward_account: Some(StakeCredential::AddrKeyhash([7u8; 28].into())),
+            proposed_in: Some(2),
+            parent: Some(GovActionId {
+                transaction_id: [9u8; 32].into(),
+                action_index: 0,
+            }),
+            purpose: Some(GovPurpose::HardFork),
+            anchor: None,
+            cc_votes: Default::default(),
+            drep_votes: Default::default(),
+            spo_votes: Default::default(),
+        };
+
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&state.key(), &state)
+            .expect("failed to write proposal");
+        writer.commit().expect("failed to commit proposal");
+    }
+
+    fn proposal_lookup_app() -> TestApp {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_proposal(domain))
+    }
+
+    fn assert_proposal_body(body: &[u8]) {
+        let model: Proposal = serde_json::from_slice(body).expect("failed to parse proposal");
+
+        assert_eq!(model.tx_hash, hex::encode(proposal_tx()));
+        assert_eq!(model.cert_index, 0);
+        assert_eq!(
+            model.id,
+            bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id")
+        );
+        assert_eq!(
+            model.governance_type,
+            proposal::GovernanceType::HardForkInitiation
+        );
+        // The seeded state has no archived tx, so no description derives.
+        assert_eq!(model.governance_description, None);
+        assert_eq!(model.deposit, "100000000");
+        assert!(model.return_address.starts_with("stake_test"));
+        assert_eq!(model.ratified_epoch, None);
+        assert_eq!(model.enacted_epoch, None);
+        assert_eq!(model.expiration, 1_001);
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_happy_path() {
+        let app = proposal_lookup_app();
+        let path = format!("/governance/proposals/{}/0", hex::encode(proposal_tx()));
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_proposal_body(&body);
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_hides_legacy_rows() {
+        // A pre-Conway protocol update row carries no deposit and no reward
+        // account. Blockfrost never serves those from this endpoint.
+        let seed_legacy = |domain: &ToyDomain| {
+            let state = ProposalState {
+                slot: 1,
+                tx: proposal_tx(),
+                idx: 0,
+                action: ProposalAction::Other,
+                max_epoch: None,
+                ratified_epoch: None,
+                canceled_epoch: None,
+                deposit: None,
+                reward_account: None,
+                proposed_in: None,
+                parent: None,
+                purpose: None,
+                anchor: None,
+                cc_votes: Default::default(),
+                drep_votes: Default::default(),
+                spo_votes: Default::default(),
+            };
+
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .write_entity_typed(&state.key(), &state)
+                .expect("failed to write proposal");
+            writer.commit().expect("failed to commit proposal");
+        };
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_legacy(domain));
+
+        let path = format!("/governance/proposals/{}/0", hex::encode(proposal_tx()));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
+        let path = format!("/governance/proposals/{id}");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_bad_request() {
+        let app = TestApp::new();
+
+        // Blockfrost treats a malformed hash as a miss, not a bad request
+        let path = "/governance/proposals/not-a-tx-hash/0";
+        assert_status(&app, path, StatusCode::NOT_FOUND).await;
+
+        let path = format!(
+            "/governance/proposals/{}/not-a-number",
+            hex::encode(proposal_tx())
+        );
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_not_found() {
+        let app = TestApp::new();
+        let path = format!("/governance/proposals/{}/0", hex::encode([0xffu8; 32]));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = format!("/governance/proposals/{}/0", hex::encode(proposal_tx()));
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_by_gov_action_id_happy_path() {
+        let app = proposal_lookup_app();
+        let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
+        let path = format!("/governance/proposals/{id}");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_proposal_body(&body);
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_by_gov_action_id_minimal_encoding() {
+        let app = proposal_lookup_app();
+        // CIP-0129 minimal encoding: cert index 0 omits the suffix byte.
+        let hrp = Hrp::parse_unchecked("gov_action");
+        let id = bech32::encode::<Bech32>(hrp, proposal_tx().as_slice())
+            .expect("failed to encode gov action id");
+        let path = format!("/governance/proposals/{id}");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_proposal_body(&body);
+    }
+
+    #[test]
+    fn gov_action_id_matches_cip0129_test_vectors() {
+        // Official test vectors from CIP-0129.
+        let vectors = [
+            (
+                "gov_action1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpzklpgpf",
+                [0u8; 32],
+                17u32,
+            ),
+            (
+                "gov_action1zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zygsq6dmejn",
+                [0x11u8; 32],
+                0u32,
+            ),
+        ];
+
+        for (id, tx, idx) in vectors {
+            let (parsed_tx, parsed_idx) = parse_gov_action_id(id).expect("failed to parse vector");
+            assert_eq!(parsed_tx, Hash::from(tx));
+            assert_eq!(parsed_idx, idx);
+
+            let encoded = bech32_gov_action(&tx.into(), idx).expect("failed to encode vector");
+            assert_eq!(encoded, id);
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_by_gov_action_id_bad_request() {
+        let app = TestApp::new();
+        let path = "/governance/proposals/not-a-gov-action-id";
+        assert_status(&app, path, StatusCode::BAD_REQUEST).await;
+
+        // A valid bech32 string with the wrong prefix must fail too.
+        let hrp = Hrp::parse_unchecked("drep");
+        let payload = [8u8; 33];
+        let wrong_hrp =
+            bech32::encode::<Bech32>(hrp, &payload).expect("failed to encode bech32 id");
+        let path = format!("/governance/proposals/{wrong_hrp}");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_by_gov_action_id_not_found() {
+        let app = TestApp::new();
+        let hrp = Hrp::parse_unchecked("gov_action");
+        let mut payload = [0xffu8; 33];
+        payload[32] = 0;
+        let id = bech32::encode::<Bech32>(hrp, &payload).expect("failed to encode gov action id");
+        let path = format!("/governance/proposals/{id}");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_by_gov_action_id_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
+        let path = format!("/governance/proposals/{id}");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 }

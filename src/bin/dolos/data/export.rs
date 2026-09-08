@@ -1,5 +1,5 @@
 use clap::Parser;
-use dolos::storage::ArchiveStoreBackend;
+use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -126,6 +126,23 @@ fn append_dir_filtered(
     Ok(())
 }
 
+fn ensure_state_exportable(state: &StateStoreBackend, include_state: bool) -> miette::Result<()> {
+    if matches!(state, StateStoreBackend::Memory(_)) && include_state {
+        bail!("the in-memory state keeps nothing on disk to export");
+    }
+
+    Ok(())
+}
+
+fn create_export_file(
+    output: &Path,
+    state: &StateStoreBackend,
+    include_state: bool,
+) -> miette::Result<File> {
+    ensure_state_exportable(state, include_state)?;
+    File::create(output).into_diagnostic()
+}
+
 pub fn run(
     config: &RootConfig,
     args: &Args,
@@ -133,12 +150,12 @@ pub fn run(
 ) -> miette::Result<()> {
     let pb = feedback.indeterminate_progress_bar();
 
-    let export_file = File::create(&args.output).into_diagnostic()?;
-    let encoder = GzEncoder::new(export_file, Compression::default());
-    let mut archive = Builder::new(encoder);
-
     let mut stores = crate::common::open_data_stores(config)?;
     let root = crate::common::ensure_storage_path(config)?;
+
+    let export_file = create_export_file(&args.output, &stores.state, args.include_state)?;
+    let encoder = GzEncoder::new(export_file, Compression::default());
+    let mut archive = Builder::new(encoder);
 
     match &mut stores.archive {
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
@@ -190,4 +207,23 @@ pub fn run(
     archive.finish().into_diagnostic()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn including_an_in_memory_state_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("existing.tar.gz");
+        std::fs::write(&output, b"keep me").unwrap();
+        let state = StateStoreBackend::in_memory().unwrap();
+
+        ensure_state_exportable(&state, false).unwrap();
+
+        let error = create_export_file(&output, &state, true).unwrap_err();
+        assert!(error.to_string().contains("nothing on disk to export"));
+        assert_eq!(std::fs::read(output).unwrap(), b"keep me");
+    }
 }

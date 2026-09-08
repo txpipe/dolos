@@ -2,6 +2,7 @@ use clap::ValueEnum;
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 
+mod archive_compression;
 mod check;
 mod clear_state;
 mod compute_nonce;
@@ -65,6 +66,9 @@ pub enum Command {
     Housekeeping(housekeeping::Args),
     /// imports blocks from immutable DB into archive store only
     ImportArchive(import_archive::Args),
+    /// offline maintenance of compressed block segments
+    #[command(subcommand)]
+    ArchiveCompression(archive_compression::Command),
 }
 
 #[derive(Debug, Parser)]
@@ -97,6 +101,7 @@ pub fn run(
         Command::Stats(x) => stats::run(config, x)?,
         Command::Housekeeping(x) => housekeeping::run(config, x)?,
         Command::ImportArchive(x) => import_archive::run(config, x, feedback)?,
+        Command::ArchiveCompression(x) => archive_compression::run(config, x)?,
     }
 
     Ok(())

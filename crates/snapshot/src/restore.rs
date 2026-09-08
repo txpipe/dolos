@@ -93,13 +93,13 @@
 //! index records by their own stored key, entities by namespace and key, UTxOs
 //! by their `TxoRef`.
 //!
-//! One cost is real and worth stating rather than discovering. The redb archive
-//! appends block bodies to flat files and keeps a slot-keyed table of offsets,
-//! so a redone `blocks` layer leaves the superseded bodies in the segment file
-//! with nothing pointing at them. Reads go through the table, so the node is
-//! correct; the dead space is bounded by one layer and is the price of not
-//! starting over. The preflight carries no addend for it; the reason is on
-//! [`Plan::remaining_uncompressed_size`].
+//! One cost is real and worth stating rather than discovering. The fjall
+//! archive appends block bodies to flat files and keeps a slot-keyed table of
+//! offsets, so a redone `blocks` layer leaves the superseded bodies in the
+//! segment file with nothing pointing at them. Reads go through the table, so
+//! the node is correct; the dead space is bounded by one layer and is the price
+//! of not starting over. The preflight carries no addend for it; the reason is
+//! on [`Plan::remaining_uncompressed_size`].
 //!
 //! ## Memory
 //!
@@ -395,7 +395,7 @@ impl Plan {
     /// runs that would finish.
     ///
     /// **No addend.** A redone layer is rewritten and not appended — every
-    /// write path is keyed — with one exception, the redb archive, which
+    /// write path is keyed — with one exception, the fjall archive, which
     /// leaves the superseded block bodies of an interrupted `blocks` layer as
     /// dead space in its segment file. That is past spend, not future spend:
     /// [`preflight::check`] reads free space at check time, so those bytes are
@@ -907,6 +907,9 @@ pub struct Restoring<'a> {
     pub storage_path: &'a Path,
     /// The operator's `--continue`.
     pub resume: bool,
+    /// The operator explicitly accepted the risk of restoring without checking
+    /// the destination and staging volumes against the stele's declared sizes.
+    pub skip_space_check: bool,
 }
 
 /// Restore `plan`'s layers into a store set.
@@ -1086,7 +1089,7 @@ where
         unsized_layers: outlook.remaining.unsized_layers,
     });
 
-    plan.preflight(node.storage_path, checkpoint.resume(), staging)?;
+    check_restore_space(&plan, node, checkpoint.resume(), staging)?;
 
     let summary = restore(
         stele,
@@ -1099,6 +1102,20 @@ where
     )?;
 
     Ok((plan, outlook, summary))
+}
+
+fn check_restore_space(
+    plan: &Plan,
+    node: Restoring<'_>,
+    resume: &Resume,
+    staging: Option<Staging<'_>>,
+) -> Result<(), Error> {
+    if node.skip_space_check {
+        tracing::warn!("skipping restore disk-space preflight by operator request");
+        Ok(())
+    } else {
+        plan.preflight(node.storage_path, resume, staging)
+    }
 }
 
 /// Restore from a stele directory.
@@ -2154,6 +2171,20 @@ mod tests {
             .preflight(temp.path(), &Resume::none(), None)
             .unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+
+        check_restore_space(
+            &plan,
+            Restoring {
+                network_magic: 0,
+                max_history: None,
+                storage_path: temp.path(),
+                resume: false,
+                skip_space_check: true,
+            },
+            &Resume::none(),
+            None,
+        )
+        .unwrap();
     }
 
     /// The destination need is the resume's, not the plan's: a resumed

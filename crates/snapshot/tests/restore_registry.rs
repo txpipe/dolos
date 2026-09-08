@@ -198,6 +198,7 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
         max_history: None,
         storage_path: storage,
         resume,
+        skip_space_check: false,
     }
 }
 
