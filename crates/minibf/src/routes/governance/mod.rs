@@ -574,13 +574,6 @@ where
     Ok(Json(page))
 }
 
-fn parse_tx_hash(tx_hash: &str) -> Result<Hash<32>, StatusCode> {
-    let bytes = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
-    let bytes: [u8; 32] = bytes.try_into().map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    Ok(bytes.into())
-}
-
 // The helpers below reconstruct the `governance_description` JSON that
 // Blockfrost copies from db-sync. db-sync stores the cardano-ledger Aeson
 // encoding of the submitted `GovAction`, so field names follow the ledger
@@ -799,7 +792,7 @@ where
     D: Domain + Clone + Send + Sync + 'static,
     Option<ProposalState>: From<D::Entity>,
 {
-    let tx = parse_tx_hash(&tx_hash)?;
+    let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
     let idx: u32 = cert_index.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
 
     read_proposal(&domain, tx, idx).await
