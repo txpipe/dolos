@@ -92,7 +92,7 @@ fn main() -> Result<()> {
 
     let feedback = crate::feedback::Feedback::default();
 
-    match (config, args.command) {
+    let result = match (config, args.command) {
         (Ok(config), Command::Daemon(args)) => daemon::run(config, &args),
         (Ok(config), Command::Sync(args)) => sync::run(&config, &args),
         (Ok(config), Command::Serve(args)) => serve::run(config, &args),
@@ -119,5 +119,8 @@ fn main() -> Result<()> {
         (Ok(config), Command::Minikupo(x)) => minikupo::run(&config, &x),
 
         (Err(x), _) => Err(x),
-    }
+    };
+
+    crate::common::shutdown_tracing();
+    result
 }
