@@ -759,6 +759,28 @@ mod anchor_tests {
     }
 
     #[tokio::test]
+    async fn anchor_candidate_accepts_valid_json_and_hash() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let expected_hex = hex::encode(body.as_slice());
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_body(body, None);
+        let (client, request_url) = local_candidate_client(&url);
+
+        let metadata = fetch_anchor_candidate(
+            &client,
+            &request_url,
+            "ipfs://bafy-valid-json",
+            expected_hash.as_ref(),
+        )
+        .await
+        .expect("The valid metadata was rejected.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(metadata.json["name"], "Dolos");
+        assert_eq!(metadata.bytes, format!("\\x{expected_hex}"));
+    }
+
+    #[tokio::test]
     async fn anchor_candidate_rejects_invalid_json() {
         let body = b"not JSON".to_vec();
         let expected_hash = Hasher::<256>::hash(body.as_ref());
