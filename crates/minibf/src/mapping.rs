@@ -602,9 +602,20 @@ mod anchor_tests {
     use super::*;
     use std::{
         io::{Read, Write},
-        net::TcpListener,
+        net::{SocketAddr, TcpListener},
         thread::{self, JoinHandle},
     };
+
+    struct FixedDnsResolver(SocketAddr);
+
+    impl reqwest::dns::Resolve for FixedDnsResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let address = self.0;
+            let addresses = Box::new(std::iter::once(address)) as reqwest::dns::Addrs;
+
+            Box::pin(async move { Ok(addresses) })
+        }
+    }
 
     fn serve_body(body: Vec<u8>, content_length: Option<usize>) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("Cannot bind the test server.");
@@ -640,6 +651,21 @@ mod anchor_tests {
             .send()
             .await
             .expect("Cannot get the test response.")
+    }
+
+    fn local_candidate_client(url: &str) -> (reqwest::Client, String) {
+        let port = reqwest::Url::parse(url)
+            .expect("Cannot parse the test URL.")
+            .port()
+            .expect("The test URL has no port.");
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FixedDnsResolver(address)))
+            .build()
+            .expect("Cannot create the test HTTP client.");
+
+        (client, format!("http://anchor.test:{port}/metadata"))
     }
 
     #[tokio::test]
@@ -713,6 +739,42 @@ mod anchor_tests {
 
         server.join().expect("The test server did not stop.");
         assert_eq!(body.len(), MAX_ANCHOR_METADATA_BYTES);
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_rejects_hash_mismatch() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let (url, server) = serve_body(body, None);
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "ipfs://bafy-mismatched";
+
+        let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
+            .await
+            .err()
+            .expect("The hash mismatch was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::HashMismatch);
+        assert!(error.message.contains(original_url));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_rejects_invalid_json() {
+        let body = b"not JSON".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_body(body, None);
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "ipfs://bafy-invalid-json";
+
+        let error =
+            fetch_anchor_candidate(&client, &request_url, original_url, expected_hash.as_ref())
+                .await
+                .err()
+                .expect("The invalid JSON was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::DecodeError);
+        assert!(error.message.contains(original_url));
     }
 
     #[test]
