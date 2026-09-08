@@ -361,7 +361,7 @@ fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Er
             .no_proxy()
             .dns_resolver(Arc::new(PublicDnsResolver))
             .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() > MAX_ANCHOR_REDIRECTS {
+                if attempt.previous().len() >= MAX_ANCHOR_REDIRECTS {
                     attempt.error("too many redirects")
                 } else if is_public_http_url(attempt.url()) {
                     attempt.follow()
