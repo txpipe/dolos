@@ -56,21 +56,12 @@ const MAX_FAITHFUL_DIGITS: u32 = 15;
 /// and anything longer renders as the fraction object — never as rounded
 /// digits. No plausible on-chain ratio reaches that.
 fn ledger_ratio_json(x: &RationalNumber) -> Value {
-    fn gcd(a: u64, b: u64) -> u64 {
-        if b == 0 {
-            a
-        } else {
-            gcd(b, a % b)
-        }
-    }
-
     if x.denominator == 0 {
         return rational_json(x);
     }
 
-    let g = gcd(x.numerator, x.denominator);
-    let n = x.numerator / g;
-    let d = x.denominator / g;
+    let reduced = num_rational::Ratio::new(x.numerator, x.denominator);
+    let (n, d) = (*reduced.numer(), *reduced.denom());
 
     // The decimal terminates iff only 2s and 5s remain, in
     // max(twos, fives) places: each pair of one 2 and one 5 is a single
