@@ -505,7 +505,7 @@ impl CoreArchiveWriter for ArchiveWriter {
     /// A rollback walks the chain backwards, so at a slot holding more than
     /// one block the one to remove is the newest — position 0 — and the slot
     /// survives until its last block is gone. The segment file is cut at the
-    /// removed block's frame immediately, mirroring the redb writer.
+    /// removed block's frame immediately.
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         let slot = point.slot();
 

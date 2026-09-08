@@ -3,9 +3,10 @@
 //!
 //! Appends are serialized under the writer table; a batch encodes each body
 //! and writes its frame before encoding the next, then syncs every segment
-//! it touched. Reads open the segment file by path, so they never wait on
-//! a writer, and the store keeps no table of segments: a segment exists
-//! when its file does.
+//! it touched and, when one of them is new, the directory that names it.
+//! Reads open the segment file by path, so they never wait on a writer,
+//! and the store keeps no table of segments: a segment exists when its
+//! file does.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -86,8 +87,10 @@ impl FlatFileStore {
     ///
     /// Each item is `(segment_id, body)`. Bodies are compressed and written
     /// in order, one frame each, and every touched segment is synced once
-    /// after its last frame. Returns each body's physical location, in
-    /// input order.
+    /// after its last frame; a segment file created by this batch has its
+    /// directory entry synced too, so a location the caller commits never
+    /// names a segment a crash could unlink. Returns each body's physical
+    /// location, in input order.
     ///
     /// On an error nothing is returned and the touched segments' handles are
     /// dropped, so the next append reopens them at their true end: frames
@@ -111,6 +114,7 @@ impl FlatFileStore {
         touched: &BTreeSet<u32>,
         items: &[(u32, &[u8])],
     ) -> io::Result<Vec<BlockLocation>> {
+        let mut created = false;
         for &segment_id in touched {
             if let std::collections::hash_map::Entry::Vacant(entry) = writers.entry(segment_id) {
                 let file = OpenOptions::new()
@@ -118,6 +122,7 @@ impl FlatFileStore {
                     .append(true)
                     .open(self.segment_path(segment_id))?;
                 let len = file.metadata()?.len();
+                created |= len == 0;
                 entry.insert(Writer { file, len });
             }
         }
@@ -139,6 +144,9 @@ impl FlatFileStore {
 
         for segment_id in touched {
             writers[segment_id].file.sync_data()?;
+        }
+        if created {
+            sync_dir(&self.segments_dir)?;
         }
 
         Ok(locations)
