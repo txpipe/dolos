@@ -6,9 +6,11 @@ does one zstd-3 frame per block, encoded in the foreground on append with
 the bundled dictionary, keep the provisional budgets against an isolated
 raw byte sink? Writes at live-tip and import batch sizes do. Writes at the
 bootstrap batch size and the import-sized writer under query load do not,
-by encode CPU alone, and a per-block optimization that recovers them is
-measured below. Reads are at parity when the disk is the cost and add
-about two microseconds of decode per block when it is not.
+by encode CPU alone. The founder ruled that the cutover keeps the serial
+foreground path regardless (see the ruling below); an optional
+parallel-encode experiment is reported after it as evidence for a later
+hypothesis, not as the design. Reads are at parity when the disk is the
+cost and add about two microseconds of decode per block when it is not.
 
 The records are the `*.jsonl` files beside this report; `tables.md` and
 `tables-encode-threads-4.md` are `dolos-archive-bench report` over them,
@@ -20,11 +22,11 @@ paired repeats. `RUNBOOK.md` has the commands.
 | | |
 |---|---|
 | host | Apple M4 (10 cores), 16 GiB, macOS 26.5.2, internal SSD, APFS, zstd 1.5.7 |
-| harness | `dolos-archive-bench` at `7475c9c7`; the binary that measured every record was built at that commit. `concurrent.jsonl` and `write-encode-threads-4.jsonl` say `dirty: true` because the report renderer, README and smoke test were being edited in the tree while they ran; nothing on the measuring path changed |
+| harness | `dolos-archive-bench` at `7475c9c7`; the binary that measured every benchmark record was built at that commit. `evaluate.jsonl` predates it: the dictionary evaluation ran on the same harness source before it was committed, so its records name the parent `5e4030af` as dirty. `concurrent.jsonl` and `write-encode-threads-4.jsonl` say `dirty: true` because the report renderer, README and smoke test were being edited in the tree while they ran; nothing on the measuring path changed. The tables were re-rendered by the QA revision of `report`, which lists every run it finds (revision, host, corpus) and pairs repeats within one run only; the records themselves are untouched |
 | corpus | mainnet segments 448–451: 84,481 Conway blocks, 423.5 MiB, mean 5,256 B, largest 89,720 B. Disjoint from every segment the bundled dictionary was trained on (8–447) |
 | codecs | `raw` (bodies unframed, the reference), `zstd3` (one dictionary-free frame per block), `zstd3-dict` (the same with the bundled `cardano.dict`, the intended production design) |
-| durability | one `fdatasync` per touched segment per batch, every run; never disabled |
-| cache regimes | `warm`: every segment streamed first. `evict`: 16 GiB of other files streamed through the page cache (macOS has no unprivileged per-file drop), so cold numbers are approximate — the `evict t8` point rows still show a 1–3 µs p50, meaning part of the store stayed cached. `nocache` was not run |
+| durability | one `fdatasync` per touched segment per batch, every run; never disabled. The `concurrent.jsonl` writer records predate the harness writing `fsync` and `encode_threads` into the writer block, so the gate table shows those two as `?` for them; the runbook's step 5 ran with both at their defaults, fsync on and one encoder thread |
+| cache regimes | `warm`: every segment streamed first. `evict`: 16 GiB of other files streamed through the page cache (macOS has no unprivileged per-file drop), so cold numbers are approximate. One workload per codec and repeat was not cold at all: the harness at `7475c9c7` restored the regime before every workload except the one whose name matched the first, and with `--threads 1,8` that is `point-uniform` at `t8`, which therefore read pages the `t1` `page-100` workload had just warmed (its 1–2 µs p50 and 32–45 MiB of disk reads, against 180–240 MiB for its neighbours, say so). Those nine records (`point-uniform [evict t8]`, three codecs by three repeats) are excluded from every cold-cache conclusion in this report and were not rerun; `point-local t8`, `page-100 t8` and `scan` were restored and are cold. The harness now restores by position (`presets::read_plan`, with a regression test) and records the restore on each record. `nocache` was not run |
 | counters | thread CPU, process CPU and disk bytes (`proc_pid_rusage`) and the peak-heap allocator were all available; no record has a null counter |
 | repeats | three, paired: each repeat runs every codec on the same workload before the next |
 
@@ -142,9 +144,12 @@ cost:
 | point-uniform t1 | raw | 5,085 | 89 / 844 / 1,133 | | 244 | 2.42 |
 | | zstd3 | 4,813 | 86 / 880 / 1,166 | | 209 | 2.81 |
 | | zstd3-dict | 4,966 | 79 / 880 / 1,163 | | 184 | 3.08 |
-| point-uniform t8 | raw | 365,083 | 1 / 136 / 233 | | 45 | 0.45 |
+| point-uniform t8 (measured warm, see method; excluded) | raw | 365,083 | 1 / 136 / 233 | | 45 | 0.45 |
 | | zstd3 | 264,083 | 2 / 132 / 541 | | 38 | 0.52 |
 | | zstd3-dict | 294,548 | 2 / 123 / 531 | | 32 | 0.54 |
+| point-local t8 | raw | 83,688 | 100 / 221 / 359 | | 240 | 2.37 |
+| | zstd3 | 98,653 | 94 / 201 / 294 | | 205 | 2.75 |
+| | zstd3-dict | 99,624 | 86 / 206 / 412 | | 181 | 3.03 |
 | page-100 t1 | raw | 626 | | 1.42 / 4.08 | 342 | 0.68 |
 | | zstd3 | 560 | | 1.47 / 4.24 | 254 | 0.68 |
 | | zstd3-dict | 626 | | 1.30 / 3.99 | 203 | 0.69 |
@@ -152,9 +157,11 @@ cost:
 | | zstd3 | 475 ms | | | 312 | 1.00 |
 | | zstd3-dict | 398 ms | | | 249 | 1.00 |
 
-Cold point and page reads are at parity: p95 within 4% single-threaded
-and 10% better with eight threads, reading 25% fewer bytes from disk. The
-read amplification of a cold point read rises from 2.4× to 3.1× because
+Cold point and page reads are at parity: single-threaded p95 within 4%,
+and 7% better for `point-local` at eight threads, reading 25% fewer bytes
+from disk. The `point-uniform t8` rows were measured warm (see method) and
+say nothing about the disk; `point-local t8` stands in for the
+eight-thread cold point case. The read amplification of a cold point read rises from 2.4× to 3.1× because
 a 16 KiB page now holds more of the neighbours' bytes, while the bytes
 themselves fall. A cold scan is slower compressed (398 ms against 321 ms)
 because the single reader decodes serially after each read instead of
@@ -190,7 +197,7 @@ dictionary-free zstd-3, matching the 0.590 / 0.730 the evaluation
 measured on 448–455. The knowledge base's ratios were measured with a
 different, Conway-only dictionary and are not claimed here.
 
-## The failed gates and a per-block optimization
+## The failed gates, the ruling, and the parallel-encode experiment
 
 Two gates fail, both for the same reason: a single writer thread encodes
 the whole batch before writing it, so at 500 blocks the 1.8 s of encode
@@ -199,10 +206,22 @@ the same encode is exposed once readers compete for cores. Neither is an
 I/O effect: the compressed runs write 25–40% fewer bytes and their fdatasync
 is faster.
 
-The runbook's step 7 measured the harness's `--encode-threads 4`: the
-batch's blocks are encoded by four contexts in parallel and the frames
-are still written whole, in order, one per block, with the same
-fdatasync. Medians over three repeats
+**Ruling** (`org/founder`, 2026-09-08, on the escalation these two
+failures raised): the direct-write cutover keeps serial foreground
+encoding with the bundled dictionary. The two misses stand as documented
+implementation risks; they are not waived, and this isolated sink does not
+show that end-to-end bootstrap overhead is negligible. The initial cutover
+adds no parallel batch encoding, payload threshold, extra buffering,
+configuration or housekeeping. The production verdict is still open: the
+acceptance batch (`plans/dolos-archive-compression-acceptance.md`) keeps
+the API and commit gates on the production path and must escalate a
+measured, narrowly scoped per-block optimization if they fail.
+
+**The experiment**, kept as evidence and not as the design: the runbook's
+step 7 measured the harness's `--encode-threads 4` on the import and
+bootstrap batches, the batch's blocks encoded by four contexts in parallel
+and the frames still written whole, in order, one per block, with the
+same fdatasync. Medians over three repeats
 (`write-encode-threads-4.jsonl`, `tables-encode-threads-4.md`):
 
 | workload | codec | blocks/s | batch p50 / p95 / p99 ms | throughput vs raw | p95 vs raw | verdict |
@@ -220,18 +239,20 @@ threads per batch and collects each frame into its own allocation
 (peak heap 1.2–5.4 MiB against 0.15 MiB), and at 500 KiB of payload per
 batch that overhead exceeds the 2.5 ms of encode it parallelizes.
 
-The proposal for the direct-write batch, all inside the one-frame-per-block
-design: encode a batch's blocks in parallel only when the batch carries
-enough payload to pay for it — the measured crossover is between 100 and
-500 blocks at 5 KiB each, so a threshold of roughly 1 MiB of raw batch
-payload — using the existing rayon pool rather than per-batch threads, and
-writing the frames in slot order as today. Below the threshold the
-single-context foreground path is the one measured passing here. If the
-import-sized writer under load still misses after that, the next
-per-block lever is coalescing a batch's frames into one write per segment
-(the 1.7 s of per-frame `write` calls is a floor the raw sink pays too and
-is not compression cost). Nothing in this proposal reintroduces a raw
-mode, a chunk mode, or a weaker fsync.
+What this supports is one hypothesis for a later bootstrap optimization:
+parallel encode pays once a batch carries enough payload. It establishes
+nothing more. The crossover lies somewhere between 100 and 500 blocks at
+5 KiB each, which does not fix a threshold (the ~1 MiB figure proposed to
+the founder is an estimate, not a measurement), and the experiment makes
+the import-sized writer worse rather than addressing its miss under query
+load. What was proposed with the escalation, and not adopted for the
+initial cutover: parallel encode above a payload threshold on the existing
+rayon pool with the single-context path below it, frames written in slot
+order, and frame coalescing per segment as the next lever (the 1.7 s of
+per-frame `write` calls is a floor the raw sink pays too). If the
+acceptance batch fails its production gates, that proposal is where its
+escalation starts, measured on the production path. Nothing in it
+reintroduces a raw mode, a chunk mode, or a weaker fsync.
 
 ## Cross-checks for the successors
 
@@ -240,5 +261,13 @@ mode, a chunk mode, or a weaker fsync.
   verification for speed, and the length check on every read stayed on.
 - `encode_threads: 1` is the foreground design and the default; every
   gate table above except the last used it.
+- The `point-uniform [evict t8]` records in `read.jsonl` were measured
+  warm (see method). Nothing here cites them as cold, and a successor must
+  not either; the eight-thread cold point case is `point-local t8`.
 - To reproduce: `RUNBOOK.md`. To regress: the same commands at a new
   revision, then `dolos-archive-bench report` over both sets of records.
+  The report lists each run and pairs repeats within one run only, so the
+  old and new records render side by side and never share a median; the
+  serial foreground path (`encode_threads 1`, fsync on) is the setting to
+  compare, and the gate rows say which settings each row was measured
+  under.

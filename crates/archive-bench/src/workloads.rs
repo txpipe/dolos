@@ -294,7 +294,7 @@ impl Acc {
         self.point.len() + self.page.len()
     }
 
-    fn json(&self, wall: f64, process: &crate::measure::Counters) -> Value {
+    fn json(&self, wall: f64, process: Option<&crate::measure::Counters>) -> Value {
         let ops = self.ops();
         json!({
             "ops": ops,
@@ -313,8 +313,8 @@ impl Acc {
             "decode_us_per_block": if self.blocks > 0 { self.decode_ns as f64 / 1e3 / self.blocks as f64 } else { 0.0 },
             "thread_cpu_ms": self.cpu_ns as f64 / 1e6,
             "cpu_us_per_op": if ops > 0 { self.cpu_ns as f64 / 1e3 / ops as f64 } else { 0.0 },
-            "disk_read_amplification": process.disk_read.filter(|_| self.frame_bytes > 0).map(|d| d as f64 / self.frame_bytes as f64),
-            "process": process.json(),
+            "disk_read_amplification": process.and_then(|p| p.disk_read).filter(|_| self.frame_bytes > 0).map(|d| d as f64 / self.frame_bytes as f64),
+            "process": process.map(|p| p.json()),
         })
     }
 }
@@ -488,7 +488,7 @@ pub fn run_reads(
     for r in results {
         acc.merge(&r?);
     }
-    let mut metrics = acc.json(wall, &process);
+    let mut metrics = acc.json(wall, Some(&process));
     let extra = json!({
         "kind": "read",
         "workload": params.name,
@@ -599,6 +599,8 @@ pub fn run_concurrent(
                     "blocks": tail.len(),
                     "batches": hist.len(),
                     "batch": params.batch,
+                    "encode_threads": params.encode_threads,
+                    "fsync": params.fsync,
                     "raw_bytes": raw,
                     "encoded_bytes": encoded,
                     "wall_s": wall,
@@ -631,7 +633,9 @@ pub fn run_concurrent(
         "seed": params.seed,
         "wall_s": wall,
         "writer": writer,
-        "reader": acc.json(wall, &process),
+        // The process counters span the writer too, so the readers get none
+        // of their own; the amplification they would derive is not theirs.
+        "reader": acc.json(wall, None),
         "process": process.json(),
     }))
 }

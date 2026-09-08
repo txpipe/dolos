@@ -277,7 +277,7 @@ pub fn filesystem_type(path: &Path) -> Option<String> {
         0x2FC1_2FC1 => "zfs".to_string(),
         0x6969 => "nfs".to_string(),
         0xF15F => "ecryptfs".to_string(),
-        0x6552_4653 => "overlayfs".to_string(),
+        0x794C_7630 => "overlayfs".to_string(),
         other => format!("{other:#x}"),
     };
     Some(name)

@@ -1,5 +1,5 @@
 {
-  "command": "target/release/dolos-archive-bench train --corpus /Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks --segments 8,25,40,60,120,250,330,380,420,440,445,446 --samples-per-segment 1500 --seed 0 --max-size 112640 --out /private/tmp/claude-501/-Users-santiago-Brain-txpipe/69ae2495-fa58-49e8-8d17-8881b4a30f94/scratchpad/stratified.dict",
+  "command": "target/release/dolos-archive-bench train --corpus '/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks' --segments 8,25,40,60,120,250,330,380,420,440,445,446 --samples-per-segment 1500 --seed 0 --max-size 112640 --out /private/tmp/claude-501/-Users-santiago-Brain-txpipe/69ae2495-fa58-49e8-8d17-8881b4a30f94/scratchpad/stratified.dict",
   "corpus": "/Volumes/Santi HDD/dolos-instances/mainnet-v17/blocks",
   "dictionary": {
     "bytes": 112640,

@@ -124,6 +124,80 @@ fn store_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// One read workload of a run and whether the cache is put back into the
+/// regime before it runs.
+pub struct ReadStep {
+    pub params: ReadParams,
+    pub restore: bool,
+}
+
+/// The read workloads of `regime`, in the order they run. A cold regime is
+/// consumed by whichever workload touches the pages first, so every step
+/// after the first restores it; the decision is by position, because the
+/// same names recur at each thread count.
+pub fn read_plan(opts: &Options, regime: Regime, reads: bool, mixed: bool) -> Vec<ReadStep> {
+    let max_threads = opts.threads.iter().copied().max().unwrap_or(1);
+    let mut workloads: Vec<ReadParams> = Vec::new();
+    let base = |name: &str, mix: Mix, ops: usize, threads: usize| ReadParams {
+        name: name.to_string(),
+        mix,
+        ops,
+        threads,
+        seed: opts.seed,
+        regime,
+        scan: false,
+        verify: opts.verify,
+    };
+    if reads {
+        for &threads in &opts.threads {
+            workloads.push(base("point-uniform", Mix::points(), opts.ops, threads));
+            workloads.push(base(
+                "point-local",
+                Mix {
+                    locality: 0.8,
+                    ..Mix::points()
+                },
+                opts.ops,
+                threads,
+            ));
+            workloads.push(base(
+                "page-100",
+                Mix {
+                    point_share: 0.0,
+                    ..Mix::points()
+                },
+                (opts.ops / 20).max(1),
+                threads,
+            ));
+        }
+        let mut scan = base("scan", Mix::points(), 0, 1);
+        scan.scan = true;
+        workloads.push(scan);
+    }
+    if mixed {
+        for (name, share) in [("mix-90-10", 0.9), ("mix-50-50", 0.5), ("mix-10-90", 0.1)] {
+            workloads.push(base(
+                name,
+                Mix {
+                    point_share: share,
+                    locality: 0.5,
+                    ..Mix::points()
+                },
+                opts.ops,
+                max_threads,
+            ));
+        }
+    }
+    workloads
+        .into_iter()
+        .enumerate()
+        .map(|(index, params)| ReadStep {
+            params,
+            restore: regime != Regime::Warm && index > 0,
+        })
+        .collect()
+}
+
 /// Run `preset` over `corpus`, appending one JSON record per measurement
 /// to `out`.
 pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write) -> io::Result<()> {
@@ -178,7 +252,6 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
     }
 
     if reads || mixed {
-        let max_threads = opts.threads.iter().copied().max().unwrap_or(1);
         for repeat in 0..opts.repeat.max(1) {
             for (label, codec) in &opts.codecs {
                 let dir = opts.work.join(label).join("store");
@@ -197,73 +270,22 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
                 let locations = outcome.locations;
                 let files = store_files(&dir)?;
                 for &regime in &opts.regimes {
-                    let Some(cache) = apply_regime(&files, regime, &opts.evict)? else {
+                    let Some(first) = apply_regime(&files, regime, &opts.evict)? else {
                         eprintln!(
                             "  skipping regime {}: no eviction method on this host (pass --evict-from)",
                             regime.label()
                         );
                         continue;
                     };
-                    let mut workloads: Vec<ReadParams> = Vec::new();
-                    let base = |name: &str, mix: Mix, ops: usize, threads: usize| ReadParams {
-                        name: name.to_string(),
-                        mix,
-                        ops,
-                        threads,
-                        seed: opts.seed,
-                        regime,
-                        scan: false,
-                        verify: opts.verify,
-                    };
-                    if reads {
-                        for &threads in &opts.threads {
-                            workloads.push(base("point-uniform", Mix::points(), opts.ops, threads));
-                            workloads.push(base(
-                                "point-local",
-                                Mix {
-                                    locality: 0.8,
-                                    ..Mix::points()
-                                },
-                                opts.ops,
-                                threads,
-                            ));
-                            workloads.push(base(
-                                "page-100",
-                                Mix {
-                                    point_share: 0.0,
-                                    ..Mix::points()
-                                },
-                                (opts.ops / 20).max(1),
-                                threads,
-                            ));
-                        }
-                        let mut scan = base("scan", Mix::points(), 0, 1);
-                        scan.scan = true;
-                        workloads.push(scan);
-                    }
-                    if mixed {
-                        for (name, share) in
-                            [("mix-90-10", 0.9), ("mix-50-50", 0.5), ("mix-10-90", 0.1)]
-                        {
-                            workloads.push(base(
-                                name,
-                                Mix {
-                                    point_share: share,
-                                    locality: 0.5,
-                                    ..Mix::points()
-                                },
-                                opts.ops,
-                                max_threads,
-                            ));
-                        }
-                    }
-                    for params in &workloads {
-                        // A cold regime is consumed by the first workload
-                        // that touches the pages; restore it for each.
-                        if regime != Regime::Warm && params.name != workloads[0].name {
-                            apply_regime(&files, regime, &opts.evict)?;
-                        }
-                        let metrics = run_reads(&dir, codec, &locations, Some(corpus), params)?;
+                    for step in read_plan(opts, regime, reads, mixed) {
+                        let cache = if step.restore {
+                            apply_regime(&files, regime, &opts.evict)?
+                                .unwrap_or_else(|| first.clone())
+                        } else {
+                            first.clone()
+                        };
+                        let metrics =
+                            run_reads(&dir, codec, &locations, Some(corpus), &step.params)?;
                         rec.record(codec, repeat, Some(&cache), metrics)?;
                     }
                 }
@@ -310,4 +332,44 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn options(threads: Vec<usize>) -> Options {
+        Options {
+            work: PathBuf::from("unused"),
+            codecs: Vec::new(),
+            repeat: 1,
+            threads,
+            regimes: Vec::new(),
+            evict: EvictOptions::default(),
+            ops: 200,
+            seed: 0,
+            encode_threads: 1,
+            fsync: true,
+            keep: false,
+            verify: false,
+            write_batches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_cold_regime_is_restored_before_every_later_workload_by_position() {
+        let plan = read_plan(&options(vec![1, 8]), Regime::Evict, true, true);
+        assert_eq!(plan.len(), 10);
+        assert_eq!(plan[3].params.name, plan[0].params.name);
+        assert_eq!(plan[3].params.threads, 8);
+        assert!(!plan[0].restore);
+        assert!(plan[1..].iter().all(|step| step.restore));
+    }
+
+    #[test]
+    fn a_warm_cache_is_never_restored() {
+        let plan = read_plan(&options(vec![1, 8]), Regime::Warm, true, false);
+        assert_eq!(plan.len(), 7);
+        assert!(plan.iter().all(|step| !step.restore));
+    }
 }

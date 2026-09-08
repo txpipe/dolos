@@ -42,9 +42,9 @@ $B bench --preset write --corpus "$MAINNET_SSD" --segments 448..451 \
 
 # 4. reads and mixes, warm and evicted cache, 1 and 8 threads, three paired repeats
 $B bench --preset read --corpus "$MAINNET_SSD" --segments 448..451 \
-   --work "$WORK" --out read.jsonl --repeat 3 --cache warm,evict --evict-from "$EVICT" --evict-gib 20
+   --work "$WORK" --out read.jsonl --repeat 3 --cache warm,evict --evict-from "$EVICT" --evict-gib 16
 $B bench --preset mixed --corpus "$MAINNET_SSD" --segments 448..451 \
-   --work "$WORK" --out mixed.jsonl --repeat 3 --cache warm,evict --evict-from "$EVICT" --evict-gib 20
+   --work "$WORK" --out mixed.jsonl --repeat 3 --cache warm,evict --evict-from "$EVICT" --evict-gib 16
 
 # 5. append under query load
 $B bench --preset concurrent --corpus "$MAINNET_SSD" --segments 448..451 \
@@ -52,4 +52,11 @@ $B bench --preset concurrent --corpus "$MAINNET_SSD" --segments 448..451 \
 
 # 6. tables
 $B report evaluate.jsonl write.jsonl read.jsonl mixed.jsonl concurrent.jsonl > tables.md
+
+# 7. the optional experiment, not the production path: the import and
+#    bootstrap batches again with four encoder threads per batch
+$B bench --preset write --corpus "$MAINNET_SSD" --segments 448..451 \
+   --work "$WORK" --out write-encode-threads-4.jsonl --repeat 3 \
+   --write-batches 100,500 --encode-threads 4
+$B report write-encode-threads-4.jsonl > tables-encode-threads-4.md
 ```

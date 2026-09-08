@@ -301,9 +301,9 @@ impl DictionarySource for DictionaryDir {
 }
 
 /// The dictionary shipped with this crate, trained offline on a recorded
-/// sample of Cardano blocks; `dictionary/PROVENANCE.md` beside the crate
-/// says which. Every build carries it, so a fresh instance needs no corpus
-/// or download.
+/// sample of Cardano blocks; `dictionary/cardano.dict.json` beside the crate
+/// is the provenance and `dictionary/README.md` the selection. Every build
+/// carries it, so a fresh instance needs no corpus or download.
 pub fn bundled_dictionary() -> Dictionary {
     Dictionary::new(BUNDLED_DICTIONARY)
 }

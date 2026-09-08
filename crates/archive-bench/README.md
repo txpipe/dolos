@@ -71,6 +71,20 @@ concurrent query load. These are the provisional gates the cutover plan
 carries; a failure is a finding for the founder, not a reason to weaken
 fsync or add a raw mode.
 
+Only like is compared with like. Records are grouped by run (harness
+revision and dirty state, host), by corpus, by workload, and by every
+setting of the measurement other than its codec and repeat (batch size,
+encoder threads, fsync, reader threads, mix, seed, eviction method); a
+candidate keeps its dictionary identity, so two dictionaries are two
+candidates. The tables open with the runs and corpora they cover and every
+row names its run. A
+verdict needs exactly one raw and one candidate sample per repeat in that
+group: a candidate without a raw partner, repeats that do not match, or a
+repeat recorded twice (a rerun appended to the same file) is reported
+`UNPAIRED` with the reason, its ratios shown and its verdict withheld. An
+older record that never wrote a setting shows it as `?` and never matches
+one that did.
+
 Read workloads get the same ratios against raw in a table of their own,
 without a verdict. The plan's read gate is p95 API point latency, which
 only the production path can measure; against the raw sink a warm point

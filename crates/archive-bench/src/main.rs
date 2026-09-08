@@ -34,7 +34,7 @@ struct CorpusArgs {
     segments: Option<String>,
 
     /// a Cardano node immutable directory instead of segments
-    #[arg(long)]
+    #[arg(long, conflicts_with = "synthetic")]
     immutable: Option<PathBuf>,
 
     /// blocks to skip at the start of --immutable
@@ -323,8 +323,12 @@ fn main() -> anyhow::Result<()> {
                 max_size,
             };
             let (dictionary, mut provenance) = train::train(&spec)?;
-            provenance["command"] =
-                serde_json::Value::String(std::env::args().collect::<Vec<_>>().join(" "));
+            provenance["command"] = serde_json::Value::String(
+                std::env::args()
+                    .map(|arg| shell_word(&arg))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
             std::fs::write(&out, dictionary.bytes())?;
             let mut prov_path = out.clone().into_os_string();
             prov_path.push(".json");
@@ -408,4 +412,14 @@ fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `arg` as a shell would need it typed, so a recorded command replays.
+fn shell_word(arg: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./=,:@+%".contains(c);
+    if !arg.is_empty() && arg.chars().all(plain) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
 }

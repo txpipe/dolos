@@ -13,19 +13,24 @@ fn field(name: &str) -> &'static str {
     &PROVENANCE[start..end]
 }
 
+/// Pull a number field out of the provenance the same way.
+fn number(name: &str) -> usize {
+    let key = format!("\"{name}\": ");
+    let start = PROVENANCE.find(&key).expect("field present") + key.len();
+    PROVENANCE[start..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("numeric field")
+}
+
 #[test]
 fn bundled_dictionary_matches_its_provenance() {
     let dictionary = bundled_dictionary();
     assert_eq!(dictionary.id().to_string(), field("sha256"));
     assert!(dictionary.bytes().len() <= 128 * 1024, "asset over 128 KiB");
-    assert_ne!(dictionary.zstd_id(), 0, "not a trained zstd dictionary");
-    let bytes: usize = PROVENANCE
-        .split("\"bytes\": ")
-        .nth(1)
-        .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next())
-        .and_then(|s| s.parse().ok())
-        .expect("bytes field");
-    assert_eq!(dictionary.bytes().len(), bytes);
+    assert_eq!(dictionary.zstd_id(), number("zstd_id") as u32);
+    assert_eq!(dictionary.bytes().len(), number("bytes"));
 }
 
 #[test]
