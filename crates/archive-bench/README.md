@@ -66,10 +66,17 @@ and named under `environment.counters`.
 
 `report` judges every non-raw codec against raw on the median over paired
 repeats: at least 90% of raw ingestion throughput and at most 10% higher
-p95 commit latency on every write workload, and at most 10% higher p95
-point latency on every read workload. These are the provisional gates the
-cutover plan carries; a failure is a finding for the founder, not a reason
-to weaken fsync or add a raw mode.
+p95 commit latency on every write workload, including the writer under
+concurrent query load. These are the provisional gates the cutover plan
+carries; a failure is a finding for the founder, not a reason to weaken
+fsync or add a raw mode.
+
+Read workloads get the same ratios against raw in a table of their own,
+without a verdict. The plan's read gate is p95 API point latency, which
+only the production path can measure; against the raw sink a warm point
+read is a memcpy out of the page cache, so the ratio says how many
+microseconds decoding adds, not whether an API budget holds. Read the
+absolute columns.
 
 ## Dictionary
 
@@ -102,5 +109,6 @@ and the 128 KiB budget.
 ## Results
 
 `results/` holds the measured runs, one directory per host and date, each
-with the raw `*.jsonl` records and a `REPORT.md` rendered from them with
-the corpus, host and verdicts spelled out.
+with the raw `*.jsonl` records, the `report` output over them, the runbook
+that produced them and a `REPORT.md` with the corpus, host, verdicts and
+findings spelled out.

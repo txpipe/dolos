@@ -255,24 +255,25 @@ pub fn render(records: &[Value]) -> String {
     }
 
     let gates = gates(records);
-    if !gates.is_empty() {
-        out.push_str("## Gates (candidate against raw, medians over repeats)\n\n");
+    let writes: Vec<&Gate> = gates.iter().filter(|g| g.gated).collect();
+    if !writes.is_empty() {
+        out.push_str("## Gates (writes: candidate against raw, medians over repeats)\n\n");
         header(
             &mut out,
             &[
                 "workload",
                 "candidate",
                 "throughput vs raw",
-                "p95 vs raw",
+                "batch p95 vs raw",
                 "verdict",
             ],
         );
-        for g in gates {
+        for g in writes {
             row(
                 &mut out,
                 &[
-                    g.workload,
-                    g.candidate,
+                    g.workload.clone(),
+                    g.candidate.clone(),
                     format!("{:.3}", g.throughput),
                     format!("{:.3}", g.p95),
                     if g.pass { "PASS".into() } else { "FAIL".into() },
@@ -281,14 +282,53 @@ pub fn render(records: &[Value]) -> String {
         }
         out.push('\n');
     }
+    let reads: Vec<&Gate> = gates.iter().filter(|g| !g.gated).collect();
+    if !reads.is_empty() {
+        out.push_str(
+            "## Reads against raw (medians over repeats; microbenchmark, not the API gate)\n\n",
+        );
+        header(
+            &mut out,
+            &[
+                "workload",
+                "candidate",
+                "ops/s vs raw",
+                "point p95 vs raw",
+                "raw p95 µs",
+                "candidate p95 µs",
+            ],
+        );
+        for g in reads {
+            row(
+                &mut out,
+                &[
+                    g.workload.clone(),
+                    g.candidate.clone(),
+                    format!("{:.3}", g.throughput),
+                    format!("{:.3}", g.p95),
+                    format!("{:.0}", g.raw_p95_us),
+                    format!("{:.0}", g.p95_us),
+                ],
+            );
+        }
+        out.push('\n');
+    }
     out
 }
 
+/// One candidate codec against raw on one workload.
 pub struct Gate {
     pub workload: String,
     pub candidate: String,
+    /// Candidate throughput over raw throughput.
     pub throughput: f64,
+    /// Candidate p95 over raw p95.
     pub p95: f64,
+    pub raw_p95_us: f64,
+    pub p95_us: f64,
+    /// Whether the provisional gate applies: writes are gated, reads are
+    /// reported.
+    pub gated: bool,
     pub pass: bool,
 }
 
@@ -310,31 +350,39 @@ fn median(mut v: Vec<f64>) -> f64 {
 
 /// The provisional gates: a compressed codec keeps at least 90% of raw
 /// ingestion throughput and at most 10% more p95 commit latency on every
-/// write workload, and at most 10% more p95 point latency on every read
-/// workload, each judged on the median over paired repeats.
+/// write workload, judged on the median over paired repeats. Read
+/// workloads get the same ratios without a verdict: the plan's read gate is
+/// p95 API point latency, which the production path measures, and against
+/// a raw sink a warm point read is a memcpy, so any decode at all is a
+/// multiple of it.
 pub fn gates(records: &[Value]) -> Vec<Gate> {
     let mut out = Vec::new();
     let mut groups: BTreeMap<(String, String), Samples> = BTreeMap::new();
+    let mut gated: BTreeMap<String, bool> = BTreeMap::new();
     for r in records {
         let m = &r["metrics"];
-        let (thr, p95, key) = match kind(r) {
+        let (thr, p95, key, is_write) = match kind(r) {
             "write" => (
                 f(m, &["blocks_per_s"]),
                 f(m, &["batch_latency", "p95_us"]),
                 workload(r).to_string(),
+                true,
             ),
             "read" if m["point_ops"].as_u64().unwrap_or(0) > 0 => (
                 f(m, &["ops_per_s"]),
                 f(m, &["point_latency", "p95_us"]),
                 format!("{} [{} t{}]", workload(r), s(m, &["regime"]), m["threads"]),
+                false,
             ),
             "concurrent" => (
                 f(m, &["writer", "blocks_per_s"]),
                 f(m, &["writer", "batch_latency", "p95_us"]),
                 format!("{} writer", workload(r)),
+                true,
             ),
             _ => continue,
         };
+        gated.insert(key.clone(), is_write);
         let entry = groups.entry((key, codec(r).to_string())).or_default();
         entry.throughput.push(thr);
         entry.p95.push(p95);
@@ -359,17 +407,18 @@ pub fn gates(records: &[Value]) -> Vec<Gate> {
             } else {
                 0.0
             };
-            let p95 = if raw_p95 > 0.0 {
-                median(samples.p95.clone()) / raw_p95
-            } else {
-                0.0
-            };
+            let p95_us = median(samples.p95.clone());
+            let p95 = if raw_p95 > 0.0 { p95_us / raw_p95 } else { 0.0 };
+            let is_write = gated.get(&w).copied().unwrap_or(false);
             out.push(Gate {
                 workload: w.clone(),
                 candidate: c.clone(),
                 throughput,
                 p95,
-                pass: throughput >= 0.9 && p95 <= 1.1,
+                raw_p95_us: raw_p95,
+                p95_us,
+                gated: is_write,
+                pass: is_write && throughput >= 0.9 && p95 <= 1.1,
             });
         }
     }

@@ -113,9 +113,18 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
     let rendered = report::render(&records);
     assert!(rendered.contains("## Writes"));
     assert!(rendered.contains("## Gates"));
-    assert!(report::gates(&records)
+    assert!(rendered.contains("## Reads against raw"));
+    let gates = report::gates(&records);
+    assert!(gates
         .iter()
-        .any(|g| g.candidate == "zstd3-dict"));
+        .any(|g| g.candidate == "zstd3-dict" && g.gated && g.workload == "write-7"));
+    assert!(gates
+        .iter()
+        .any(|g| g.candidate == "zstd3-dict" && g.gated && g.workload == "append-query-7 writer"));
+    assert!(gates
+        .iter()
+        .any(|g| g.candidate == "zstd3" && !g.gated && g.workload.starts_with("point-uniform")));
+    assert!(gates.iter().all(|g| g.gated || !g.pass));
 }
 
 #[test]
