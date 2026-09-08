@@ -787,28 +787,31 @@ where
 pub async fn proposal_by_tx_index<D>(
     Path((tx_hash, cert_index)): Path<(String, String)>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Proposal>, StatusCode>
+) -> Result<Json<Proposal>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<ProposalState>: From<D::Entity>,
 {
-    let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let idx: u32 = cert_index.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+    let idx: u32 = cert_index.parse().map_err(|_| Error::InvalidCertIndex)?;
 
-    read_proposal(&domain, tx, idx).await
+    // Blockfrost matches the hash as text against db-sync, so a malformed
+    // one is a lookup that finds nothing rather than a bad request.
+    let tx: Hash<32> = tx_hash.parse().map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(read_proposal(&domain, tx, idx).await?)
 }
 
 pub async fn proposal_by_gov_action_id<D>(
     Path(gov_action_id): Path<String>,
     State(domain): State<Facade<D>>,
-) -> Result<Json<Proposal>, StatusCode>
+) -> Result<Json<Proposal>, Error>
 where
     D: Domain + Clone + Send + Sync + 'static,
     Option<ProposalState>: From<D::Entity>,
 {
-    let (tx, idx) = parse_gov_action_id(&gov_action_id)?;
+    let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
 
-    read_proposal(&domain, tx, idx).await
+    Ok(read_proposal(&domain, tx, idx).await?)
 }
 
 #[cfg(test)]
@@ -1570,8 +1573,10 @@ mod tests {
     #[tokio::test]
     async fn governance_proposal_bad_request() {
         let app = TestApp::new();
+
+        // Blockfrost treats a malformed hash as a miss, not a bad request
         let path = "/governance/proposals/not-a-tx-hash/0";
-        assert_status(&app, path, StatusCode::BAD_REQUEST).await;
+        assert_status(&app, path, StatusCode::NOT_FOUND).await;
 
         let path = format!(
             "/governance/proposals/{}/not-a-number",
