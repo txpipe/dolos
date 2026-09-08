@@ -47,6 +47,9 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(String),
+
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 impl From<Error> for StateError {

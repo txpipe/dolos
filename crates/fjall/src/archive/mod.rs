@@ -70,9 +70,9 @@ use fjall::{
 use pallas::ledger::traverse::MultiEraBlock;
 
 use dolos_flatfiles::{
-    compressed::{WriteSummary, WriterOptions},
-    decode_locations, encode_locations, BlockLocation, FlatFileStore, SegmentInfo,
-    SLOTS_PER_SEGMENT,
+    compressed::{CacheLimits, WriteSummary, WriterOptions},
+    decode_locations, encode_locations, Access, BlockLocation, FlatFileOptions, FlatFileStore,
+    SegmentInfo, SLOTS_PER_SEGMENT,
 };
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
@@ -121,6 +121,28 @@ mod keyspace_names {
     pub const EXACT: &str = "index-exact";
 }
 
+/// The compressed-segment reader's bounds from the archive configuration:
+/// each field the operator set, the reader's own default for the rest.
+fn compressed_cache_limits(config: &FjallArchiveConfig) -> CacheLimits {
+    let defaults = CacheLimits::default();
+    let Some(cache) = config.compression.as_ref().and_then(|c| c.cache.as_ref()) else {
+        return defaults;
+    };
+    let mb = |value: Option<usize>, default: usize| value.map_or(default, |mb| mb << 20);
+    CacheLimits {
+        frame_bytes: mb(cache.frame_mb, defaults.frame_bytes),
+        frame_entries: cache.frame_entries.unwrap_or(defaults.frame_entries),
+        index_bytes: mb(cache.index_mb, defaults.index_bytes),
+        index_entries: cache.index_entries.unwrap_or(defaults.index_entries),
+        dictionary_bytes: mb(cache.dictionary_mb, defaults.dictionary_bytes),
+        dictionary_entries: cache
+            .dictionary_entries
+            .unwrap_or(defaults.dictionary_entries),
+        handles: cache.handles.unwrap_or(defaults.handles),
+        inflight_reads: cache.inflight_reads.unwrap_or(defaults.inflight_reads),
+    }
+}
+
 fn io_err(e: std::io::Error) -> ArchiveError {
     ArchiveError::InternalError(e.to_string())
 }
@@ -161,8 +183,36 @@ impl ArchiveStore {
         path: impl AsRef<Path>,
         config: &FjallArchiveConfig,
     ) -> Result<Self, Error> {
+        Self::open_with_access(schema, path, config, Access::Shared)
+    }
+
+    /// Open the store holding its segments directory exclusively, for
+    /// offline maintenance that rewrites segment files. Refuses, without
+    /// waiting, while any other store — a running node, another maintenance
+    /// command — holds the directory, and keeps every later shared open out
+    /// until this store is dropped.
+    pub fn open_exclusive(
+        schema: StateSchema,
+        path: impl AsRef<Path>,
+        config: &FjallArchiveConfig,
+    ) -> Result<Self, Error> {
+        Self::open_with_access(schema, path, config, Access::Exclusive)
+    }
+
+    fn open_with_access(
+        schema: StateSchema,
+        path: impl AsRef<Path>,
+        config: &FjallArchiveConfig,
+        access: Access,
+    ) -> Result<Self, Error> {
         let path = path.as_ref();
         std::fs::create_dir_all(path).map_err(|e| Error::Io(e.to_string()))?;
+
+        // A compression table no command could act on fails here, before
+        // anything is opened, rather than when a segment is about to move.
+        if let Some(compression) = &config.compression {
+            compression.validate().map_err(Error::Config)?;
+        }
 
         let cache_size = config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB);
         let cache_bytes = (cache_size * 1024 * 1024) as u64;
@@ -187,7 +237,13 @@ impl ArchiveStore {
         // Opening recovers any interrupted representation transition and
         // validates every compressed segment's metadata and dictionary, so a
         // segment this build cannot read fails the open, naming the segment.
-        let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
+        let options = FlatFileOptions {
+            dictionaries: None,
+            cache: Some(compressed_cache_limits(config)),
+            access,
+        };
+        let flatfiles = FlatFileStore::with_options(segments_dir, options)
+            .map_err(|e| Error::Io(e.to_string()))?;
 
         Self::from_database(
             db,
@@ -281,8 +337,27 @@ impl ArchiveStore {
             .map_err(|e| Error::Io(e.to_string()))
     }
 
-    /// Every location the blocks table holds inside `segment_id`.
-    fn segment_locations(&self, segment_id: u32) -> Result<Vec<BlockLocation>, Error> {
+    /// The directory the block segment files live in.
+    pub fn segments_dir(&self) -> &Path {
+        self.flatfiles.segments_dir()
+    }
+
+    /// The bounds the compressed-segment reader was opened with.
+    pub fn compressed_cache_limits(&self) -> CacheLimits {
+        self.flatfiles.cache_limits()
+    }
+
+    /// Read the bytes one packed location addresses, from whichever
+    /// representation its segment has.
+    pub fn read_location(&self, location: &BlockLocation) -> Result<Vec<u8>, Error> {
+        self.flatfiles
+            .read(location)
+            .map_err(|e| Error::Io(e.to_string()))
+    }
+
+    /// Every location the blocks table holds inside `segment_id`, in slot
+    /// order, newest first within a slot.
+    pub fn segment_locations(&self, segment_id: u32) -> Result<Vec<BlockLocation>, Error> {
         let first = segment_id as u64 * SLOTS_PER_SEGMENT;
         let end = first + SLOTS_PER_SEGMENT;
         let snapshot = self.db.snapshot();
@@ -313,8 +388,22 @@ impl ArchiveStore {
         options: &WriterOptions,
     ) -> Result<WriteSummary, Error> {
         let locations = self.segment_locations(segment_id)?;
+        self.seal_segment_at(segment_id, &locations, options)
+    }
+
+    /// Compress the block segment `segment_id` in place, cutting frames at
+    /// the boundaries the caller supplies — every body in the segment's
+    /// stream, including the ones the blocks table no longer points at, when
+    /// the caller has walked the stream itself. The boundaries must cover
+    /// the file without overlap; bytes they leave out become filler frames.
+    pub fn seal_segment_at(
+        &self,
+        segment_id: u32,
+        boundaries: &[BlockLocation],
+        options: &WriterOptions,
+    ) -> Result<WriteSummary, Error> {
         self.flatfiles
-            .seal(segment_id, &locations, options)
+            .seal(segment_id, boundaries, options)
             .map_err(|e| Error::Io(e.to_string()))
     }
 

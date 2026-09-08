@@ -354,6 +354,13 @@ pub struct FjallArchiveConfig {
     /// Memtable size in MB before flush (default: 64).
     #[serde(default)]
     pub memtable_size_mb: Option<usize>,
+    /// Compressed block segments: the sealing profile the maintenance
+    /// commands apply and the bounds of the reader that serves compressed
+    /// segments. Omitted, the archive appends raw segments, reads whatever
+    /// representation each segment has under the default bounds, and starts
+    /// no background work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compression: Option<Box<ArchiveCompressionConfig>>,
 }
 
 impl FjallArchiveConfig {
@@ -366,7 +373,135 @@ impl FjallArchiveConfig {
             && self.l0_threshold.is_none()
             && self.worker_threads.is_none()
             && self.memtable_size_mb.is_none()
+            && self.compression.is_none()
     }
+}
+
+/// Default frame target of the chunked profile: 256 KiB.
+pub const DEFAULT_CHUNK_TARGET: u32 = 256 * 1024;
+
+/// How a sealed segment cuts its zstd frames.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompressionProfile {
+    /// One frame per block, compressed with a trained dictionary. Point
+    /// reads touch one block's bytes.
+    #[default]
+    PerBlock,
+    /// Adjacent blocks share a frame of about `chunk_target` bytes, without
+    /// a dictionary. Scans read fewer bytes; a point read decodes its whole
+    /// frame.
+    Chunked,
+}
+
+impl CompressionProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PerBlock => "per-block",
+            Self::Chunked => "chunked",
+        }
+    }
+}
+
+impl std::fmt::Display for CompressionProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The `storage.archive.compression` table.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct ArchiveCompressionConfig {
+    /// The profile `dolos data archive-compression seal` applies:
+    /// `per-block` (the default, which needs `dictionary`) or `chunked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<CompressionProfile>,
+    /// Identity — 64 hex digits, the SHA-256 of its bytes — of the installed
+    /// dictionary per-block sealing compresses with. Naming one selects
+    /// the per-block profile when `profile` is omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary: Option<String>,
+    /// Frame target in bytes for the chunked profile (default 262144).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_target: Option<u32>,
+    /// Bounds of the compressed-segment reader, separate from the archive
+    /// index cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CompressionCacheConfig>,
+}
+
+impl ArchiveCompressionConfig {
+    /// The selected profile: explicit, else per-block when a dictionary is
+    /// named, else `None` — no profile means the seal command needs one on
+    /// its command line.
+    pub fn profile(&self) -> Option<CompressionProfile> {
+        self.profile.or(if self.dictionary.is_some() {
+            Some(CompressionProfile::PerBlock)
+        } else {
+            None
+        })
+    }
+
+    pub fn chunk_target(&self) -> u32 {
+        self.chunk_target.unwrap_or(DEFAULT_CHUNK_TARGET)
+    }
+
+    /// Reject values no command could act on, at load rather than when a
+    /// segment is about to be rewritten.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.chunk_target == Some(0) {
+            return Err(
+                "storage.archive.compression.chunk_target must be greater than zero".to_string(),
+            );
+        }
+        if let Some(dictionary) = &self.dictionary {
+            let is_hex =
+                dictionary.len() == 64 && dictionary.bytes().all(|b| b.is_ascii_hexdigit());
+            if !is_hex {
+                return Err(format!(
+                    "storage.archive.compression.dictionary must be the 64 hex digits of an \
+                     installed dictionary's identity, not {dictionary:?}"
+                ));
+            }
+        }
+        if self.profile == Some(CompressionProfile::PerBlock) && self.dictionary.is_none() {
+            return Err("storage.archive.compression.profile = \"per-block\" needs \
+                 storage.archive.compression.dictionary: train one with \
+                 `dolos data archive-compression train-dictionary`"
+                .to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Bounds of the reader that serves compressed segments. Every field falls
+/// back to the reader's own default when omitted.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct CompressionCacheConfig {
+    /// Decoded frame bytes retained across all segments, in MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_mb: Option<usize>,
+    /// Decoded frames retained across all segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_entries: Option<usize>,
+    /// Parsed seek-table bytes retained, in MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_mb: Option<usize>,
+    /// Parsed seek tables retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_entries: Option<usize>,
+    /// Dictionary bytes and prepared decoders retained, in MB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary_mb: Option<usize>,
+    /// Prepared dictionaries retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dictionary_entries: Option<usize>,
+    /// Open segment files, active reads included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handles: Option<usize>,
+    /// Reads in flight across all compressed segments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_reads: Option<usize>,
 }
 
 /// Archive store configuration.
@@ -1211,5 +1346,91 @@ mod tests {
 
         let json = serde_json::to_value(ArchiveStoreConfig::NoOp).unwrap();
         assert_eq!(json["backend"], "no_op");
+    }
+
+    const DICTIONARY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn compression_config_round_trips_profiles_dictionary_and_cache_limits() {
+        use serde_json::json;
+
+        let source = json!({
+            "backend": "fjall",
+            "compression": {
+                "profile": "chunked",
+                "dictionary": DICTIONARY,
+                "chunk_target": 65536,
+                "cache": { "frame_mb": 128, "handles": 8, "inflight_reads": 4 }
+            }
+        });
+        let archive: ArchiveStoreConfig = serde_json::from_value(source.clone()).unwrap();
+        let ArchiveStoreConfig::Fjall(cfg) = &archive else {
+            panic!("expected the fjall backend");
+        };
+        let compression = cfg.compression.as_ref().unwrap();
+        assert_eq!(compression.profile(), Some(CompressionProfile::Chunked));
+        assert_eq!(compression.dictionary.as_deref(), Some(DICTIONARY));
+        assert_eq!(compression.chunk_target(), 65536);
+        let cache = compression.cache.as_ref().unwrap();
+        assert_eq!(cache.frame_mb, Some(128));
+        assert_eq!(cache.handles, Some(8));
+        assert_eq!(cache.inflight_reads, Some(4));
+        assert_eq!(cache.index_mb, None);
+        assert!(!cfg.is_default());
+
+        assert_eq!(
+            serde_json::to_value(&archive).unwrap()["compression"],
+            source["compression"]
+        );
+    }
+
+    #[test]
+    fn a_dictionary_alone_selects_per_block_and_nothing_selects_no_profile() {
+        let cfg = ArchiveCompressionConfig {
+            dictionary: Some(DICTIONARY.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(cfg.profile(), Some(CompressionProfile::PerBlock));
+        assert_eq!(cfg.chunk_target(), DEFAULT_CHUNK_TARGET);
+        cfg.validate().unwrap();
+
+        let cfg = ArchiveCompressionConfig::default();
+        assert_eq!(cfg.profile(), None);
+        cfg.validate().unwrap();
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap(),
+            serde_json::json!({}),
+            "omitted fields are not serialized"
+        );
+    }
+
+    #[test]
+    fn compression_config_rejects_what_no_command_could_act_on() {
+        let per_block_without_dictionary = ArchiveCompressionConfig {
+            profile: Some(CompressionProfile::PerBlock),
+            ..Default::default()
+        };
+        let err = per_block_without_dictionary.validate().unwrap_err();
+        assert!(
+            err.contains("needs storage.archive.compression.dictionary"),
+            "{err}"
+        );
+
+        let zero_target = ArchiveCompressionConfig {
+            profile: Some(CompressionProfile::Chunked),
+            chunk_target: Some(0),
+            ..Default::default()
+        };
+        let err = zero_target.validate().unwrap_err();
+        assert!(err.contains("chunk_target"), "{err}");
+
+        for bad in ["abc", &DICTIONARY[..63], &format!("{}g", &DICTIONARY[..63])] {
+            let cfg = ArchiveCompressionConfig {
+                dictionary: Some(bad.to_string()),
+                ..Default::default()
+            };
+            let err = cfg.validate().unwrap_err();
+            assert!(err.contains("64 hex digits"), "{bad}: {err}");
+        }
     }
 }

@@ -14,9 +14,11 @@
 
 pub mod compressed;
 mod layout;
+mod lease;
 mod store;
 
-pub use layout::{Representation, Transition, DICTIONARIES_DIR};
+pub use layout::{Found, Representation, SegmentPaths, Transition, DICTIONARIES_DIR};
+pub use lease::{Access, Lease, LEASE_FILE};
 pub use store::{FlatFileOptions, FlatFileStore, SegmentInfo};
 
 /// Number of slots per segment file (one Cardano epoch).

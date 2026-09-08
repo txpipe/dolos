@@ -1420,6 +1420,7 @@ dependencies = [
  "dolos-testing",
  "dolos-trp",
  "flate2",
+ "fs4",
  "futures-core",
  "futures-util",
  "gasket",
@@ -1467,6 +1468,7 @@ dependencies = [
  "trait-variant",
  "vergen-gitcl",
  "xxhash-rust",
+ "zstd",
 ]
 
 [[package]]
