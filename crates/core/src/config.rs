@@ -413,7 +413,8 @@ impl std::fmt::Display for CompressionProfile {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ArchiveCompressionConfig {
     /// The profile `dolos data archive-compression seal` applies:
-    /// `per-block` (the default, which needs `dictionary`) or `chunked`.
+    /// `per-block` (which needs `dictionary`) or `chunked`. Omitted, a named
+    /// `dictionary` selects `per-block`; otherwise `seal` needs `--profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<CompressionProfile>,
     /// Identity — 64 hex digits, the SHA-256 of its bytes — of the installed

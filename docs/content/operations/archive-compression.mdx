@@ -17,12 +17,12 @@ still appends raw segments and never compresses on its own.
 Both profiles use zstd level 3 and the same on-disk container; they differ
 in where frame boundaries fall.
 
-- **`per-block`** (the default) compresses every block as a frame of its
-  own, using a **dictionary** trained on blocks of the same network. A
-  point read decodes exactly one block's bytes, so single-block lookups —
-  transactions, blocks by hash — cost what they cost raw, while the segment
-  shrinks by roughly a third to a half. A dictionary is required: small
-  blocks compress poorly without one.
+- **`per-block`** compresses every block as a frame of its own, using a
+  **dictionary** trained on blocks of the same network. A point read decodes
+  exactly one block's bytes, so single-block lookups — transactions, blocks
+  by hash — cost what they cost raw, while the segment shrinks by roughly a
+  third to a half. A dictionary is required: small blocks compress poorly
+  without one.
 - **`chunked`** groups adjacent blocks into frames of about `chunk_target`
   bytes (256 KiB unless configured) and needs no dictionary. Scans over
   consecutive blocks — epoch listings, chain walks — read far fewer bytes
@@ -31,7 +31,7 @@ in where frame boundaries fall.
 
 The tradeoff was measured on mainnet and preprod archives during the
 research that led to this feature: per-block with a dictionary is close to
-free on the read path and is the safe default for a node serving point
+free on the read path and is the safe choice for a node serving point
 lookups; chunked is the profile for scan-heavy workloads. How much any
 storage layer gains in bandwidth or IOPS depends on the workload and the
 device, so measure your own before counting on a number.
