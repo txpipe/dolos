@@ -572,6 +572,7 @@ where
     let page = read_withdrawals(&domain, tx, idx, &pagination)?;
 
     Ok(Json(page))
+}
 
 fn parse_tx_hash(tx_hash: &str) -> Result<Hash<32>, StatusCode> {
     let bytes = hex::decode(tx_hash).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -618,8 +619,8 @@ impl ProposalModelBuilder {
             ProposalAction::UpdateCommittee { .. } => proposal::GovernanceType::NewCommittee,
             ProposalAction::NewConstitution { .. } => proposal::GovernanceType::NewConstitution,
             ProposalAction::Info => proposal::GovernanceType::InfoAction,
-            // Legacy rows do not keep the action detail. InfoAction is the
-            // neutral fallback.
+            // read_proposal rejects a legacy row that the archive cannot
+            // resolve, so this arm never renders.
             ProposalAction::Other => proposal::GovernanceType::InfoAction,
         }
     }
@@ -754,7 +755,19 @@ where
         .read_cardano_entity::<ProposalState>(key)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    // Blockfrost never serves pre-Conway protocol updates here, and the
+    // listing already hides them.
+    if !is_gov_action(&state) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     let gov_action = load_gov_action(domain, tx, idx).await?;
+
+    // A legacy row keeps no action detail. When the archived tx cannot
+    // resolve it either, any response would guess the type.
+    if matches!(state.action, ProposalAction::Other) && gov_action.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
 
     let chain = domain.get_chain_summary()?;
 
@@ -1355,6 +1368,13 @@ mod tests {
         assert_eq!(payload(1), vec![0x01]);
         assert_eq!(payload(255), vec![0xff]);
         assert_eq!(payload(256), vec![0x01, 0x00]);
+
+        // the parser accepts every suffix length the encoder produces,
+        // like the Blockfrost one does
+        for idx in [0, 1, 255, 256, u32::MAX] {
+            let id = bech32_gov_action(&tx, idx).unwrap();
+            assert_eq!(parse_gov_action_id(&id).unwrap(), (tx, idx));
+        }
     }
 
     fn proposal_tx() -> Hash<32> {
@@ -1503,6 +1523,55 @@ mod tests {
         let (status, body) = app.get_bytes(&path).await;
         assert_eq!(status, StatusCode::OK);
         assert_proposal_body(&body);
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_hides_legacy_rows() {
+        // A pre-Conway protocol update row carries no deposit and no reward
+        // account. Blockfrost never serves those from this endpoint.
+        let seed_legacy = |domain: &ToyDomain| {
+            let state = ProposalState {
+                slot: 1,
+                tx: proposal_tx(),
+                idx: 0,
+                action: ProposalAction::Other,
+                max_epoch: None,
+                ratified_epoch: None,
+                canceled_epoch: None,
+                deposit: None,
+                reward_account: None,
+                proposed_in: None,
+                parent: None,
+                purpose: None,
+                anchor: None,
+                cc_votes: Default::default(),
+                drep_votes: Default::default(),
+                spo_votes: Default::default(),
+            };
+
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .write_entity_typed(&state.key(), &state)
+                .expect("failed to write proposal");
+            writer.commit().expect("failed to commit proposal");
+        };
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed_legacy(domain));
+
+        let path = format!("/governance/proposals/{}/0", hex::encode(proposal_tx()));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
+        let path = format!("/governance/proposals/{id}");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
     #[tokio::test]

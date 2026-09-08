@@ -42,9 +42,15 @@ fn gov_action_id_json(id: &GovActionId) -> Value {
     })
 }
 
-/// Render a ratio like the ledger pparams JSON: a plain number when the
-/// fraction has a terminating decimal form, else a numerator/denominator
-/// object (cf. cardano-api `toRationalJSON`).
+/// The ledger's `maxDecimalsWord64`: a bounded ratio renders as a plain
+/// number only when its decimal expansion terminates within this many
+/// digits.
+const MAX_RATIO_DECIMALS: u32 = 19;
+
+/// Render a bounded ratio like the ledger JSON does: a plain number when
+/// the fraction terminates within [`MAX_RATIO_DECIMALS`] digits, else a
+/// numerator/denominator object (cf. the `BoundedRatio` `ToJSON` instance
+/// in cardano-ledger `BaseTypes`).
 fn ledger_ratio_json(x: &RationalNumber) -> Value {
     fn gcd(a: u64, b: u64) -> u64 {
         if b == 0 {
@@ -58,21 +64,54 @@ fn ledger_ratio_json(x: &RationalNumber) -> Value {
         return rational_json(x);
     }
 
-    let mut d = x.denominator / gcd(x.numerator, x.denominator);
+    let g = gcd(x.numerator, x.denominator);
+    let n = x.numerator / g;
+    let mut d = x.denominator / g;
 
+    let mut twos = 0u32;
     while d.is_multiple_of(2) {
         d /= 2;
+        twos += 1;
     }
 
+    let mut fives = 0u32;
     while d.is_multiple_of(5) {
         d /= 5;
+        fives += 1;
     }
 
-    if d != 1 {
+    // A remaining factor means a repeating decimal; more digits than the
+    // ledger cap means it refuses the number form too.
+    let digits = twos.max(fives);
+    if d != 1 || digits > MAX_RATIO_DECIMALS {
         return rational_json(x);
     }
 
-    serde_json::Number::from_f64(x.numerator as f64 / x.denominator as f64)
+    // The exact decimal: n / (2^twos * 5^fives) scaled to `digits` places.
+    // u128 holds the worst case (u64 numerator times 10^19).
+    let scale = 10u128.pow(digits);
+    let scaled = n as u128 * scale / (x.denominator / g) as u128;
+
+    let exact = if digits == 0 {
+        scaled.to_string()
+    } else {
+        format!(
+            "{}.{:0width$}",
+            scaled / scale,
+            scaled % scale,
+            width = digits as usize
+        )
+    };
+
+    // The ledger emits an exact `Scientific`. A JSON number here goes
+    // through f64, so only use it when it reproduces the exact decimal;
+    // otherwise fall back to the fraction object rather than emit rounded
+    // digits.
+    exact
+        .parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+        .filter(|number| number.to_string() == exact)
         .map(Value::Number)
         .unwrap_or_else(|| rational_json(x))
 }
@@ -155,6 +194,19 @@ fn pparams_update_json(update: &ProtocolParamUpdate) -> Value {
         }
         if let Some(v3) = &x.plutus_v3 {
             cost_models.insert("PlutusV3".into(), json!(v3));
+        }
+
+        // The ledger keeps cost models of languages it does not know under
+        // an "Unknown" object keyed by the numeric language tag (cf. the
+        // conway `pparams-update.json` golden).
+        if !x.unknown.is_empty() {
+            let unknown: serde_json::Map<String, Value> = x
+                .unknown
+                .iter()
+                .map(|(language, model)| (language.to_string(), json!(model)))
+                .collect();
+
+            cost_models.insert("Unknown".into(), Value::Object(unknown));
         }
 
         out.insert("costModels".into(), Value::Object(cost_models));
@@ -293,23 +345,29 @@ pub(super) fn description_json(action: &GovAction) -> Result<HashMap<String, Val
                     parent_json(parent),
                     removed,
                     added,
-                    rational_json(threshold),
+                    ledger_ratio_json(threshold),
                 ])),
             )
         }
-        GovAction::NewConstitution(parent, constitution) => (
-            "NewConstitution",
-            Some(json!([
-                parent_json(parent),
-                {
-                    "anchor": {
-                        "url": constitution.anchor.url,
-                        "dataHash": hex::encode(constitution.anchor.content_hash),
-                    },
-                    "script": constitution.guardrail_script.as_ref().map(hex::encode),
-                },
-            ])),
-        ),
+        GovAction::NewConstitution(parent, constitution) => {
+            let mut body = serde_json::Map::new();
+
+            body.insert(
+                "anchor".into(),
+                json!({
+                    "url": constitution.anchor.url,
+                    "dataHash": hex::encode(constitution.anchor.content_hash),
+                }),
+            );
+
+            // The ledger omits the key entirely when there is no guardrail
+            // script, never emitting a null.
+            if let Some(script) = &constitution.guardrail_script {
+                body.insert("script".into(), json!(hex::encode(script)));
+            }
+
+            ("NewConstitution", Some(json!([parent_json(parent), body])))
+        }
         GovAction::Information => ("InfoAction", None),
     };
 
@@ -324,29 +382,15 @@ pub(super) fn description_json(action: &GovAction) -> Result<HashMap<String, Val
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use pallas::codec::utils::Set;
+    use pallas::ledger::primitives::conway::{Anchor, Constitution, CostModels};
+
     use super::*;
 
-    #[test]
-    fn ledger_ratio_renders_terminating_fractions_as_numbers() {
-        let half = RationalNumber {
-            numerator: 1,
-            denominator: 2,
-        };
-        assert_eq!(ledger_ratio_json(&half), serde_json::json!(0.5));
-
-        let repeating = RationalNumber {
-            numerator: 7,
-            denominator: 19,
-        };
-        assert_eq!(
-            ledger_ratio_json(&repeating),
-            serde_json::json!({ "numerator": 7, "denominator": 19 })
-        );
-    }
-
-    #[test]
-    fn description_uses_ledger_pparams_update_names() {
-        let update = ProtocolParamUpdate {
+    fn empty_pparams_update() -> ProtocolParamUpdate {
+        ProtocolParamUpdate {
             minfee_a: None,
             minfee_b: None,
             max_block_body_size: None,
@@ -355,7 +399,7 @@ mod tests {
             key_deposit: None,
             pool_deposit: None,
             maximum_epoch: None,
-            desired_number_of_stake_pools: Some(600),
+            desired_number_of_stake_pools: None,
             pool_pledge_influence: None,
             expansion_rate: None,
             treasury_growth_rate: None,
@@ -377,6 +421,139 @@ mod tests {
             drep_deposit: None,
             drep_inactivity_period: None,
             minfee_refscript_cost_per_byte: None,
+        }
+    }
+
+    #[test]
+    fn ledger_ratio_renders_terminating_fractions_as_numbers() {
+        let half = RationalNumber {
+            numerator: 1,
+            denominator: 2,
+        };
+        assert_eq!(ledger_ratio_json(&half), serde_json::json!(0.5));
+
+        let repeating = RationalNumber {
+            numerator: 7,
+            denominator: 19,
+        };
+        assert_eq!(
+            ledger_ratio_json(&repeating),
+            serde_json::json!({ "numerator": 7, "denominator": 19 })
+        );
+
+        // terminating, but past the ledger's 19-digit cap
+        let past_cap = RationalNumber {
+            numerator: 1,
+            denominator: 2u64.pow(20),
+        };
+        assert_eq!(
+            ledger_ratio_json(&past_cap),
+            serde_json::json!({ "numerator": 1, "denominator": 2u64.pow(20) })
+        );
+
+        // 16 significant digits still round-trip through f64 exactly, so
+        // the number form keeps every digit
+        let fits_f64 = RationalNumber {
+            numerator: 9_007_199_254_740_993,
+            denominator: 10_000_000_000_000_000,
+        };
+        assert_eq!(
+            ledger_ratio_json(&fits_f64),
+            serde_json::json!(0.9007199254740993)
+        );
+
+        // 17 significant digits terminate within the cap but round through
+        // f64: the fraction form beats silently rounded digits
+        let past_f64 = RationalNumber {
+            numerator: 90_071_992_547_409_931,
+            denominator: 100_000_000_000_000_000,
+        };
+        assert_eq!(
+            ledger_ratio_json(&past_f64),
+            serde_json::json!({
+                "numerator": 90_071_992_547_409_931u64,
+                "denominator": 100_000_000_000_000_000u64,
+            })
+        );
+    }
+
+    #[test]
+    fn description_matches_ledger_optional_encodings() {
+        // the committee threshold follows the bounded-ratio number form
+        let committee = GovAction::UpdateCommittee(
+            None,
+            Set::from(vec![]),
+            BTreeMap::from([(StakeCredential::AddrKeyhash([3u8; 28].into()), 700u64)]),
+            RationalNumber {
+                numerator: 3,
+                denominator: 5,
+            },
+        );
+        let description = description_json(&committee).expect("failed to build description");
+
+        let mut added = serde_json::Map::new();
+        added.insert(format!("keyHash-{}", hex::encode([3u8; 28])), json!(700));
+
+        assert_eq!(
+            description["contents"],
+            serde_json::json!([Value::Null, [], added, 0.6])
+        );
+
+        // a constitution without a guardrail omits the script key entirely
+        let constitution = GovAction::NewConstitution(
+            None,
+            Constitution {
+                anchor: Anchor {
+                    url: "https://example.com".into(),
+                    content_hash: [9u8; 32].into(),
+                },
+                guardrail_script: None,
+            },
+        );
+        let description = description_json(&constitution).expect("failed to build description");
+        assert_eq!(
+            description["contents"],
+            serde_json::json!([
+                Value::Null,
+                {
+                    "anchor": {
+                        "url": "https://example.com",
+                        "dataHash": hex::encode([9u8; 32]),
+                    },
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn cost_models_keep_unknown_languages() {
+        let cost_models = CostModels {
+            plutus_v1: None,
+            plutus_v2: None,
+            plutus_v3: Some(vec![1, 2, 3]),
+            unknown: BTreeMap::from([(10u64, vec![7, 7])]),
+        };
+
+        let update = ProtocolParamUpdate {
+            cost_models_for_script_languages: Some(cost_models),
+            ..empty_pparams_update()
+        };
+
+        let rendered = pparams_update_json(&update);
+        assert_eq!(
+            rendered["costModels"],
+            serde_json::json!({
+                "PlutusV3": [1, 2, 3],
+                "Unknown": { "10": [7, 7] },
+            })
+        );
+    }
+
+    #[test]
+    fn description_uses_ledger_pparams_update_names() {
+        let update = ProtocolParamUpdate {
+            desired_number_of_stake_pools: Some(600),
+            ..empty_pparams_update()
         };
 
         let action = GovAction::ParameterChange(
