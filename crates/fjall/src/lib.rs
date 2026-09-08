@@ -20,8 +20,7 @@ pub mod archive;
 pub mod keys;
 pub mod state;
 
-/// The segment file crate the archive's public surface speaks in
-/// (`WriterOptions`, `SegmentInfo`, `Representation`).
+/// The segment file crate the archive's locations belong to.
 pub use dolos_flatfiles as flatfiles;
 
 // Re-export main types for convenience

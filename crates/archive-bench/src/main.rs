@@ -92,8 +92,8 @@ struct BenchArgs {
     #[arg(long)]
     out: PathBuf,
 
-    /// codecs to pair: raw, zstd3, zstd3-dict
-    #[arg(long, default_value = "raw,zstd3,zstd3-dict")]
+    /// codecs to pair: raw, zstd3, zstd3-dict, store
+    #[arg(long, default_value = "raw,zstd3,zstd3-dict,store")]
     codecs: String,
 
     /// dictionary for the -dict codec: `bundled` or a file
@@ -226,7 +226,8 @@ fn codecs(spec: &str, dictionary: &str) -> anyhow::Result<Vec<(String, Codec)>> 
             "raw" => Codec::Raw,
             "zstd3" => Codec::zstd(3, None),
             "zstd3-dict" => Codec::zstd(3, Some(train::load_dictionary(dictionary)?)),
-            other => anyhow::bail!("unknown codec {other:?}; use raw, zstd3 or zstd3-dict"),
+            "store" => Codec::Store,
+            other => anyhow::bail!("unknown codec {other:?}; use raw, zstd3, zstd3-dict or store"),
         };
         out.push((name.to_string(), codec));
     }

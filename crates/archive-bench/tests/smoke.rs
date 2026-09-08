@@ -3,11 +3,11 @@
 
 use dolos_archive_bench::codec::Codec;
 use dolos_archive_bench::corpus::Corpus;
+use dolos_archive_bench::dictionary::Dictionary;
 use dolos_archive_bench::presets::{run, Options, Preset};
 use dolos_archive_bench::report;
 use dolos_archive_bench::train::{evaluate, Fixture};
 use dolos_archive_bench::workloads::{EvictOptions, Regime};
-use dolos_flatfiles::compressed::bundled_dictionary;
 
 #[test]
 fn smoke_preset_runs_every_workload_and_verifies_bodies() {
@@ -24,8 +24,9 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
             ("zstd3".into(), Codec::zstd(3, None)),
             (
                 "zstd3-dict".into(),
-                Codec::zstd(3, Some(bundled_dictionary())),
+                Codec::zstd(3, Some(Dictionary::bundled())),
             ),
+            ("store".into(), Codec::Store),
         ],
         repeat: 1,
         threads: vec![2],
@@ -60,7 +61,7 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
         .iter()
         .filter(|r| r["metrics"]["kind"] == "write")
         .collect();
-    assert_eq!(writes.len(), 2 * 3);
+    assert_eq!(writes.len(), 2 * 4);
     for w in &writes {
         assert_eq!(w["metrics"]["blocks"], 400);
         let crossings = w["metrics"]["segment_crossings"].as_u64().unwrap();
@@ -74,6 +75,13 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
     assert!(dict["metrics"]["ratio"].as_f64().unwrap() < 0.8);
     assert!(dict["metrics"]["encode_cpu_ms"].as_f64().unwrap() > 0.0);
     assert_eq!(dict["metrics"]["batch_latency"]["count"], 58);
+    let store = writes
+        .iter()
+        .find(|w| w["codec"]["codec"] == "store" && w["metrics"]["batch"] == 7)
+        .unwrap();
+    assert!(store["metrics"]["ratio"].as_f64().unwrap() < 0.8);
+    assert!(store["metrics"]["write_ms"].as_f64().unwrap() > 0.0);
+    assert_eq!(store["codec"]["dictionary"], dict["codec"]["dictionary"]);
 
     let reads: Vec<_> = records
         .iter()
@@ -106,7 +114,7 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
         .iter()
         .filter(|r| r["metrics"]["kind"] == "concurrent")
         .collect();
-    assert_eq!(conc.len(), 3);
+    assert_eq!(conc.len(), 4);
     assert_eq!(conc[0]["metrics"]["writer"]["blocks"], 200);
     assert!(conc[0]["metrics"]["reader"]["ops"].as_u64().unwrap() > 0);
 
@@ -121,6 +129,9 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
     assert!(gates
         .iter()
         .any(|g| g.candidate == "zstd3-dict" && g.gated && g.workload == "append-query-7 writer"));
+    assert!(gates
+        .iter()
+        .any(|g| g.candidate == "store" && g.gated && g.workload == "write-7"));
     assert!(gates
         .iter()
         .any(|g| g.candidate == "zstd3" && !g.gated && g.workload.starts_with("point-uniform")));
@@ -138,7 +149,7 @@ fn evaluation_round_trips_and_ranks_the_dictionary() {
         ("zstd3".to_string(), Codec::zstd(3, None)),
         (
             "zstd3-dict".to_string(),
-            Codec::zstd(3, Some(bundled_dictionary())),
+            Codec::zstd(3, Some(Dictionary::bundled())),
         ),
     ];
     let records = evaluate(&fixtures, &codecs).unwrap();

@@ -39,8 +39,15 @@ Presets:
 | `smoke` | `all` at a size that finishes in seconds; `cargo test -p dolos-archive-bench` runs it on a synthetic corpus |
 
 Codecs (`--codecs`): `raw` (the reference sink: bodies unframed), `zstd3`
-(one dictionary-free zstd level 3 frame per block) and `zstd3-dict` (the
-same with `--dictionary`, by default the one bundled in `dolos-flatfiles`).
+(one dictionary-free zstd level 3 frame per block), `zstd3-dict` (the same
+with `--dictionary`, by default the one bundled in `dolos-flatfiles`) and
+`store` (the production `dolos_flatfiles::FlatFileStore`, appending and
+reading exactly as the node does: one frame per block with the bundled
+dictionary, serial encoding, one `fdatasync` per touched segment per batch).
+The store codec is measured end to end — its records carry the whole append
+in `write_ms` and the whole read in `decode_us_per_block`, with no encode or
+fsync split, and `--encode-threads` and `--no-fsync` do not reach it — and
+it skips the `nocache` regime, since it opens its own descriptors.
 
 Corpora: `--corpus DIR --segments 446..449` walks raw `NNNNNN.segment` files
 as CBOR items and decodes each with pallas for its slot and era;
@@ -92,6 +99,15 @@ read is a memcpy out of the page cache, so the ratio says how many
 microseconds decoding adds, not whether an API budget holds. Read the
 absolute columns.
 
+## Production baseline
+
+The last revision whose store appended raw bodies is dolos `9165dbd8` (the
+merge of #1311, the parent of the direct-write cutover). A matched
+end-to-end comparison — the acceptance batch's gate — runs that revision's
+binary and the current one on the same host, corpus, durability and
+concurrency; the raw sink here stays supplemental evidence of codec and I/O
+cost, not the production baseline.
+
 ## Dictionary
 
 ```sh
@@ -116,9 +132,9 @@ dictionary given, checks the round trip, and reports ratio, encode
 throughput and decode cost per block, per era.
 
 The bundled asset lives at `crates/flatfiles/dictionary/cardano.dict` with
-its provenance beside it; `dolos_flatfiles::compressed::bundled_dictionary`
-exposes it and `crates/flatfiles/tests/bundled_dictionary.rs` pins its hash
-and the 128 KiB budget.
+its provenance beside it; `dolos_flatfiles::BUNDLED_DICTIONARY` exposes it
+and `crates/flatfiles/tests/bundled_dictionary.rs` pins its hash and the
+128 KiB budget.
 
 ## Results
 
