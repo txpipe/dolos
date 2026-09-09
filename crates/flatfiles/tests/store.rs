@@ -550,20 +550,14 @@ fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
 }
 
 #[test]
-fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(4)
-        .build()
-        .unwrap();
+fn automatic_parallel_batches_keep_physical_frame_order() {
     let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
 
     // A first body that takes longest to encode, then two hundred tiny ones
     // whose frames are ready long before it: they must still land after it.
     let mut bodies = bodies(23, 1, 2 << 20, 2 << 20);
     bodies.extend(self::bodies(24, 200, 50, 400));
-    let locations = pool
-        .install(|| store.append_batch(&items(0, &bodies)))
-        .unwrap();
+    let locations = store.append_batch(&items(0, &bodies)).unwrap();
 
     for pair in locations.windows(2) {
         assert_eq!(pair[1].offset, pair[0].offset + pair[0].length as u64);
@@ -577,7 +571,15 @@ fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
         assert_eq!(&decode_independently(frame), body);
     }
     let stats = store.append_stats();
-    assert!(stats.parallel_encoders_peak <= 4, "{stats:?}");
+    assert!(
+        stats.parallel_encoders_peak <= rayon::current_num_threads(),
+        "{stats:?}"
+    );
+    assert_eq!(
+        stats.parallel_batches > 0,
+        rayon::current_num_threads() > 1,
+        "{stats:?}"
+    );
 }
 
 #[test]
