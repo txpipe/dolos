@@ -135,12 +135,11 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             .into_diagnostic()
             .context("failed to decode block from immutable DB")?;
 
-        // One sequential archive writer per chunk; the import writer encodes
-        // the chunk's frames on the Rayon pool that just decoded it.
+        // Write to archive (sequential, as the writer is not thread-safe)
         let writer = archive
-            .start_import_writer()
+            .start_writer()
             .into_diagnostic()
-            .context("starting archive import writer")?;
+            .context("starting archive writer")?;
 
         for block in decoded {
             // Stop if we've passed end_slot

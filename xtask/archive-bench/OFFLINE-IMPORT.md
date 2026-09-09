@@ -1,126 +1,97 @@
-# Offline archive encoding
+# Automatic archive encoding
 
-The opt-in is a writer intent, not a batch-size heuristic or node setting.
-`ArchiveStore::start_writer` remains serial. The default implementation of
-`start_import_writer` delegates to it; Fjall selects bounded parallel encoding.
-The storage adapter forwards the intent, including memory, logs-only and no-op
-backends. Frames, dictionary, zstd level 3 and storage v4 are unchanged.
+The founder revised the offline-only ruling during PR #1317 review: optimize
+eligible batches, rather than reserve parallel encoding for offline callers.
+All callers now use the original APIs. There is no writer intent, batch flag,
+node setting, global switch, second commit hook or offline import method.
+The filename is retained so historical evidence links remain valid.
 
-## Call sites
+## Selection and trade-offs
 
-| Caller | Intent |
+Flatfiles alone selects encoding strategy. A byte-bounded window qualifies
+when it contains at least two bodies totaling at least 256 KiB and the shared
+Rayon pool has more than one worker. Empty/tiny batches, one large body and
+small trailing windows use the original reusable serial encoder, without
+allocating owned frames. Large caller batches consisting only of individually
+oversized windows also stay serial. The cutoff is an internal scheduling
+policy, not a storage format or operator setting.
+
+Parallelism spends additional process CPU and memory to reduce elapsed
+encoding time. Benefits depend on payload sizes, compressibility, CPU count,
+fsync latency and competing work; a fixed byte cutoff is not a universal
+crossover guarantee. One dominant body offers little parallel work, and
+concurrent queries can lose CPU even though readers do not take the writer
+lock. Selection does not claim CPU isolation or unchanged query tail latency.
+These are resource/performance trade-offs, not reasons to distinguish live
+and offline bodies semantically.
+
+Rayon callers stay serial to avoid nested work stealing while holding the
+physical writer lock. A Rayon caller waiting for that lock executes queued
+pool work rather than blocking a worker, so external appenders can finish
+encoding even when pool workers also want the same store. Serial encoding
+never yields while holding the writer lock. No new pool, thread per batch,
+persistent job queue or background encoder is added. Deterministic tests
+exercise worker starvation and nested callers.
+
+## Unified call paths
+
+| Caller | Unchanged entry point |
 | --- | --- |
-| `data import-archive` | Explicit import writer after ordered parallel decode |
-| Mithril `do_import` | `ImportExt::import_blocks_offline` |
-| Snapshot blocks-layer restore | Explicit import writer per existing restore chunk |
-| Offline snapshot backfill replay | `ImportExt::import_blocks_offline` |
-| `ImportExt::import_blocks`, including doctor WAL catch-up and rebuild-state | Serial archive writes; existing no-WAL lifecycle |
-| Normal sync, large roll batches, bootstrap WAL recovery, rollback | Serial archive writes |
+| Archive CLI and logical snapshot block restore | `ArchiveStore::start_writer` |
+| Mithril, offline backfill, doctor catch-up and rebuild | `ImportExt::import_blocks` |
+| Live sync, including large roll batches | `WorkUnit::commit_archive` |
+| Cardano roll work | `WorkBatch::commit_archive` |
+| Fjall archive commit | `FlatFileStore::append_batch` |
 
-The offline import lifecycle invokes `commit_archive_import` only for its
-archive phase. Cardano dispatches this to the roll batch; other work units
-retain their default phase. WAL, state, index, cursor and finalize ordering
-are unchanged. Import intent does not depend on subscribers or input trust.
+There is one method at every layer. Memory, logs-only and no-op backends need
+no optimization hooks. Import still skips WAL and notifications; sync still
+performs its full lifecycle. Encoding selection changes neither lifecycle.
 
-## Resource bounds
+## Resource bounds and durability
 
-Let `B(n) = zstd::compress_bound(n)`, `M = 16 MiB` (the existing admitted-body
-limit), `W = 8 MiB`, and `P = rayon::current_num_threads()` for the executing
-pool. Before any writes, import rejects any body larger than `M`.
+Let `B(n) = zstd::compress_bound(n)`, `M = 16 MiB`, `W = 8 MiB`, and
+`P = rayon::current_num_threads()`. Every batch is size-validated before
+opening or writing segments; oversized refusal now leaves the entire batch
+unwritten for every caller.
 
-A scheduling window has sum of frame bounds at most `W`, or consists of
-one larger admitted body. Thus owned completed frames occupy at most
-`max(W, B(M))` bytes. Contexts are acquired from a call-local pool and reused
-across windows: at most `P` additional contexts exist, alongside the store's
-one existing serial encoder. Each additional context retains at most `B(M)`
-bytes of encoding scratch; exact reservation avoids geometric Vec growth.
-The existing serial encoder keeps its original amortized reservation policy,
-with capacity below `2 * B(M)` on the pinned Rust toolchain. Total
-encoded byte buffers, including any retained serial scratch, are bounded by
-`max(W, B(M)) + (P + 2) * B(M)`, independent of
-the caller's batch length. `import_buffer_bytes_peak` measures actual completed
-frame capacities plus all retained encoder scratch capacities after each
-window, when those buffers coexist. `import_window_bytes_peak` measures
-completed frame lengths alone.
+A window holds frame bounds totaling at most W, or one larger admitted body.
+Owned completed frames occupy at most `max(W, B(M))`. Up to P additional
+contexts reuse exact-reservation scratch across windows; the existing serial
+encoder retains amortized scratch below `2 * B(M)` on the pinned toolchain.
+The conservative encoded-buffer bound is
+`max(W, B(M)) + (P + 2) * B(M)`, independent of transaction length.
+`encoded_buffer_bytes_peak` includes owned frame capacities and all retained
+encoder scratch, including successful serial batches. Native contexts are
+bounded by P + 1; process RSS includes them and allocator overhead.
+Frame-vector metadata is bounded by W / B(0) entries plus P task-vector
+headers. Inputs, pending index records and returned locations already scale
+with the transaction; they are not an extra encoded copy.
 
-These byte counters exclude native zstd context allocations, the shared
-prepared dictionary, allocator bookkeeping and Rayon stacks. Native contexts
-are bounded in count by `P + 1` and operate at the fixed compression level with
-inputs bounded by `M`; process peak RSS includes them. Frame-vector metadata
-is also bounded: even an empty body's nonzero compression bound consumes
-window budget, so at most `W / B(0)` entries (or one oversized-window entry)
-exist, plus at most `P` task-vector headers. The input bodies, pending archive index work and returned locations
-already scale with the caller's transaction; they are not an additional
-encoded copy of the whole transaction.
+One physical writer retains the lock across the whole batch. Frames are
+written in input order. Scheduling windows add no fsyncs or index commits.
+Touched segments and new directory entries sync before locations reach the
+index batch, preserving the existing Fjall durability policy. Error cleanup,
+unindexed dead space, original duplicate locations, same-slot Byron ordering,
+rollback and restart/retry remain covered. No new cross-store atomicity,
+framing, dictionary, compression level or storage-version claim is made.
 
-The shared Rayon pool is reused. No threads or pools are created per batch,
-no persistent work queue is added, and all jobs join before return, including
-errors. Each window is split into at most `P` ordered runs; a task owns its
-encoder across the run, so no mutex is acquired per block. Additional encoder
-contexts and their scratch are dropped at the end of each call. A one-body
-window reuses the store's serial encoder on the calling thread; that existing
-encoder retains its scratch as ordinary writes already do. A one-worker pool works.
-There is no payload-size crossover without measured evidence.
+## Evidence
 
-## Durability and errors
+The initial offline candidate and its exact identities remain immutable in
+`results/2026-09-09-m4-apfs-ssd-offline-import`; those measurements do not
+describe the revised automatic candidate. New evidence is published separately.
 
-One physical writer holds the existing mutation lock for the whole batch.
-Each window is collected in input order, then written in that order. Windows
-do not commit indexes or sync files. All touched segment files and newly
-created directory entries are synced at the original batch boundary before
-locations are published to the index batch. Index durability remains the
-existing Fjall policy; this change makes no cross-store atomicity claim.
+Use `instrument-import.py CHECKOUT` on disposable source trees to add actual
+commit timing, then compare pinned raw production `9165dbd8`, merged serial
+production `b21c8d55`, and the revised candidate with equal release settings,
+correct v3/v4 configs and production durability. Use three paired full-corpus
+500-block repeats; the gates remain 90% raw throughput and at most 110% raw
+commit p95. Also report tiny, modern, bootstrap-sized and concurrent workloads.
 
-Any append error drops touched handles so a retry opens at the true physical
-end. Partial or complete unindexed frames remain dead space as before. Exact
-duplicates retain the original indexed location, same-slot Byron bodies keep
-their canonical ordering, and rollback continues to truncate by location.
-
-Tests cover reversed completion using a condition variable, encoder failure,
-partial writes, segment and directory sync failures, failure before index
-commit, restart/retry, duplicate locations, rollback, one worker, empty and
-maximal inputs, refusal of oversized bodies and growing caller batches.
-Mithril tests run its actual import/resume driver; snapshot tests run its
-actual logical restore. Domain tests compare offline, normal import and live
-sync bodies, cursors, WAL behavior and writer counters.
-
-## Measurement
-
-Use the predecessor's immutable window and host, with no other load tests.
-The production arms are raw `9165dbd8` with v3 config, serial-compressed
-`b21c8d55` with v4 config, and this implementation with v4 config. The merged
-`b21c8d55` tree equals the delivered `3273dd54` tree. Historical evidence
-under `results/2026-09-09-m4-apfs-ssd-acceptance` is immutable.
-
-`instrument-import.py CHECKOUT` emits an apply_patch patch for a disposable
-checkout of each arm. Apply it before building. It adds identical monotonic
-timing immediately around the production archive `writer.commit()` call,
-stores all samples in memory, and writes them once after import if
-`DOLOS_ARCHIVE_BENCH_METRICS` is set. The optimized arm also reports its buffer
-counters. The instrumented sources are measurement artifacts, not production
-configuration or a compression flag. Record the patch and binary hashes.
-
-Build all arms with identical release settings. The node harness sets the
-metrics destination inside each disposable instance. Missing instrumentation
-is represented as null, never as a fabricated percentile. Instrumented and
-uninstrumented records do not pair. The report requires three paired repeats,
-at least 90% raw throughput and at most 110% raw commit p95 for instrumented
-imports. It reports percentiles from individual commits, not elapsed time
-divided by batch count.
-
-```sh
-cargo xtask archive-bench node \
-  --bin baseline=bin/raw:v3 --bin serial=bin/serial:v4 \
-  --bin optimized=bin/optimized:v4 --run offline-import-500 \
-  --immutable "$WINDOW" --genesis "$GENESIS" --work "$WORK" \
-  --out node-500.jsonl --workloads import --chunk-size 500 --repeat 3
-cargo xtask archive-bench report node-500.jsonl
-```
-
-Also measure one-block Byron, representative modern-era bodies and bootstrap
-batches. `bench --codecs store,store-import` exposes the production flatfile
-paths for supporting mixed-size, segment-crossing and memory measurements.
-It is not the production ingestion gate. The smoke preset exercises both
-stores and validates bodies in CI; the offline codec is excluded from
-concurrent reader/writer workloads. No archive-only result establishes a
-full-bootstrap speedup.
+The supporting harness now has one production codec, `store`, which uses
+automatic selection for write and concurrent presets. Historical
+`store-import` results remain readable but that execution option is removed.
+The legacy JSON key `import_buffers` is retained for result compatibility;
+its counters now describe automatic encoding. Deterministic smoke coverage
+runs in CI. Hardware results remain manual and must not overlap other tests
+or load tests. Archive-only timings do not establish a bootstrap speedup.

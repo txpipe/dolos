@@ -179,18 +179,6 @@ pub trait WorkUnit<D: Domain>: Send {
     /// Returns an error if archive persistence fails.
     fn commit_archive(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError>;
 
-    /// Apply computed changes to the archive store under a bulk import.
-    ///
-    /// The offline lifecycle ([`crate::ImportExt::import_blocks_offline`]) runs this in place of
-    /// [`WorkUnit::commit_archive`]; the sync lifecycle never does. The
-    /// default delegates, so only a work unit that writes blocks overrides
-    /// it — to ask the archive for its import writer
-    /// ([`crate::ArchiveStore::start_import_writer`]) rather than the
-    /// ordinary one. Everything else about the phase is the same.
-    fn commit_archive_import(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        self.commit_archive(domain, shard_index)
-    }
-
     /// Shard-agnostic teardown, run once after the last shard's commits.
     ///
     /// The default implementation does nothing.

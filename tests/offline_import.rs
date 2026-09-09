@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 mod node;
 
-use dolos_core::{sync::SyncExt, ArchiveStore, Domain, ImportExt, StateStore, WalStore};
+use dolos_core::{
+    sync::SyncExt, ArchiveStore, ChainLogic, Domain, ImportExt, StateStore, WalStore,
+};
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
     toy_domain::{FjallStores, ToyDomain},
@@ -45,10 +47,11 @@ fn archive_import_cli_preserves_same_slot_byron_order_and_resume() {
 }
 
 #[test]
-fn offline_import_is_explicit_and_normal_import_and_sync_stay_serial() {
+fn import_and_sync_share_encoding_without_changing_their_lifecycles() {
     let (blocks, _, chain_config) = build_synthetic_blocks(SyntheticBlockConfig {
         block_count: 8,
         txs_per_block: 3,
+        metadata_value: "payload".repeat(32 << 10),
         slot: 100,
         ..Default::default()
     });
@@ -57,23 +60,46 @@ fn offline_import_is_explicit_and_normal_import_and_sync_stay_serial() {
         ToyDomain::with_backend(genesis.clone(), chain_config.clone(), None, None);
     let recovery: ToyDomain<FjallStores> =
         ToyDomain::with_backend(genesis.clone(), chain_config.clone(), None, None);
+    let live_batch: ToyDomain<FjallStores> =
+        ToyDomain::with_backend(genesis.clone(), chain_config.clone(), None, None);
     let live: ToyDomain<FjallStores> = ToyDomain::with_backend(genesis, chain_config, None, None);
 
     let offline_wal = offline.wal().find_tip().unwrap().map(|(point, _)| point);
     let recovery_wal = recovery.wal().find_tip().unwrap().map(|(point, _)| point);
-    offline.import_blocks_offline(blocks.clone()).unwrap();
+    offline.import_blocks(blocks.clone()).unwrap();
     recovery.import_blocks(blocks.clone()).unwrap();
+    {
+        let mut chain = live_batch.write_chain();
+        for block in blocks.iter().cloned() {
+            if !chain.can_receive_block() {
+                while let Some(mut work) = chain.pop_work(&live_batch) {
+                    dolos_core::sync::execute_work_unit(&live_batch, &mut work).unwrap();
+                }
+            }
+            assert!(chain.receive_block(block).is_ok());
+        }
+        while let Some(mut work) = chain.pop_work(&live_batch) {
+            dolos_core::sync::execute_work_unit(&live_batch, &mut work).unwrap();
+        }
+    }
     for block in blocks {
         live.roll_forward(block).unwrap();
     }
 
     let stats = offline.archive().append_stats();
-    assert!(stats.import_batches > 0, "{stats:?}");
-    assert_eq!(stats.serial_batches, 0);
-    for domain in [&recovery, &live] {
+    assert_eq!(
+        stats.parallel_batches > 0,
+        rayon::current_num_threads() > 1,
+        "{stats:?}"
+    );
+    assert_eq!(recovery.archive().append_stats(), stats);
+    assert_eq!(live_batch.archive().append_stats(), stats);
+    for domain in [&recovery, &live, &live_batch] {
         let stats = domain.archive().append_stats();
-        assert!(stats.serial_batches > 0, "{stats:?}");
-        assert_eq!(stats.import_batches, 0);
+        assert!(
+            stats.serial_batches + stats.parallel_batches > 0,
+            "{stats:?}"
+        );
         assert_eq!(
             domain
                 .archive()
@@ -100,4 +126,6 @@ fn offline_import_is_explicit_and_normal_import_and_sync_stay_serial() {
         recovery_wal
     );
     assert!(live.wal().find_tip().unwrap().is_some());
+    assert!(live_batch.wal().find_tip().unwrap().is_some());
+    assert_eq!(live.archive().append_stats().parallel_batches, 0);
 }

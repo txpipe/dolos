@@ -108,10 +108,10 @@ pub fn write_corpus(
         "segments": sink.files().len(),
         "heap_peak_bytes": heap_peak,
         "import_buffers": sink.append_stats().map(|stats| json!({
-            "encoders_peak": stats.import_encoders_peak,
-            "window_bytes_peak": stats.import_window_bytes_peak,
-            "buffer_bytes_peak": stats.import_buffer_bytes_peak,
-            "windows": stats.import_windows,
+            "encoders_peak": stats.parallel_encoders_peak,
+            "window_bytes_peak": stats.parallel_window_bytes_peak,
+            "buffer_bytes_peak": stats.encoded_buffer_bytes_peak,
+            "windows": stats.parallel_windows,
         })),
         "process": process.json(),
     });

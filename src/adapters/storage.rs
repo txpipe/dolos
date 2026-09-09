@@ -1046,20 +1046,6 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
-    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        match self {
-            Self::Memory(s) => CoreArchiveStore::start_import_writer(s)
-                .map(|writer| ArchiveWriterBackend::Memory(Box::new(writer))),
-            Self::LogsOnly(inner) => CoreArchiveStore::start_import_writer(inner.as_ref())
-                .map(|writer| ArchiveWriterBackend::LogsOnly(Box::new(writer))),
-            Self::Fjall(s) => CoreArchiveStore::start_import_writer(s)
-                .map(|writer| ArchiveWriterBackend::Fjall(Box::new(writer))),
-            Self::NoOp(s) => {
-                CoreArchiveStore::start_import_writer(s).map(ArchiveWriterBackend::NoOp)
-            }
-        }
-    }
-
     fn read_logs(
         &self,
         ns: Namespace,

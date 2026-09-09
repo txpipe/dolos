@@ -261,8 +261,7 @@ impl ArchiveStore {
         })
     }
 
-    /// Which path each block batch took to the segment files, and the most
-    /// an import batch held at once.
+    /// Automatic encoding decisions and peak per-batch encoding resources.
     pub fn append_stats(&self) -> dolos_flatfiles::AppendStats {
         self.flatfiles.append_stats()
     }
@@ -464,30 +463,17 @@ pub struct ArchiveWriter {
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
-    append: Append,
     #[cfg(test)]
     fail_index_commit: bool,
 }
 
-/// How a writer's blocks reach the segment files at commit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Append {
-    /// One body after another on the committing thread: every ordinary
-    /// writer, live sync and recovery included.
-    Serial,
-    /// Encoded in parallel windows on the shared Rayon pool — the writer an
-    /// offline import asks for. Same frames at the same locations.
-    Import,
-}
-
 impl ArchiveWriter {
-    fn new(store: &ArchiveStore, append: Append) -> Self {
+    fn new(store: &ArchiveStore) -> Self {
         Self {
             batch: Mutex::new(store.db.batch()),
             store: store.clone(),
             pending_blocks: Mutex::new(Vec::new()),
             overlay: Mutex::new(HashMap::new()),
-            append,
             #[cfg(test)]
             fail_index_commit: false,
         }
@@ -652,11 +638,7 @@ impl CoreArchiveWriter for ArchiveWriter {
                 })
                 .collect();
 
-            let locations = match self.append {
-                Append::Serial => self.store.flatfiles.append_batch(&items),
-                Append::Import => self.store.flatfiles.import_batch(&items),
-            }
-            .map_err(io_err)?;
+            let locations = self.store.flatfiles.append_batch(&items).map_err(io_err)?;
 
             let snapshot = self.store.db.snapshot();
 
@@ -907,11 +889,7 @@ impl CoreArchiveStore for ArchiveStore {
     type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        Ok(ArchiveWriter::new(self, Append::Serial))
-    }
-
-    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        Ok(ArchiveWriter::new(self, Append::Import))
+        Ok(ArchiveWriter::new(self))
     }
 
     fn read_logs(
@@ -1286,23 +1264,29 @@ mod tests {
     }
 
     #[test]
-    fn offline_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
+    fn automatic_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
         write(&store, &[(1, body(1, 0))]);
         let original = locations(&store, 1);
-        let mut writer = store.start_import_writer().unwrap();
-        writer.apply(&point(2), &body(2, 0)).unwrap();
+        let second = Arc::new(vec![2; 128 << 10]);
+        let third = Arc::new(vec![3; 128 << 10]);
+        let mut writer = store.start_writer().unwrap();
+        writer.apply(&point(2), &second).unwrap();
+        writer.apply(&point(3), &third).unwrap();
         writer.fail_index_commit = true;
         assert!(writer.commit().is_err());
         assert!(locations(&store, 2).is_empty());
+        assert!(locations(&store, 3).is_empty());
         let dead_end = segment_bytes(&store, 0).len() as u64;
-        let writer = store.start_import_writer().unwrap();
+        let writer = store.start_writer().unwrap();
         writer.apply(&point(1), &body(1, 0)).unwrap();
-        writer.apply(&point(2), &body(2, 0)).unwrap();
+        writer.apply(&point(2), &second).unwrap();
+        writer.apply(&point(3), &third).unwrap();
         writer.commit().unwrap();
         assert_eq!(locations(&store, 1), original);
         assert!(locations(&store, 2)[0].offset >= dead_end);
-        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
+        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *second);
+        assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *third);
     }
 
     #[test]

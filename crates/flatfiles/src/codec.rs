@@ -71,7 +71,7 @@ impl Encoder {
         })
     }
 
-    pub(crate) fn for_import() -> io::Result<Self> {
+    pub(crate) fn for_parallel() -> io::Result<Self> {
         Ok(Self {
             bounded: true,
             ..Self::new()?

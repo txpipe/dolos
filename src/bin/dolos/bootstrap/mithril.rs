@@ -132,7 +132,7 @@ fn do_import<D: dolos_core::Domain>(
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
         let last = domain
-            .import_blocks_offline(batch)
+            .import_blocks(batch)
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);
@@ -232,9 +232,10 @@ mod tests {
     use pallas::ledger::traverse::MultiEraBlock;
 
     #[test]
-    fn mithril_import_resumes_through_the_offline_writer() {
+    fn mithril_import_resumes_through_the_automatic_writer() {
         let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
             block_count: 8,
+            metadata_value: "payload".repeat(32 << 10),
             slot: 100,
             ..Default::default()
         });
@@ -254,8 +255,12 @@ mod tests {
         write_immutable_fixture(dir.path(), &blocks);
         do_import(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
         let stats = domain.archive().append_stats();
-        assert!(stats.import_batches > 0, "{stats:?}");
-        assert_eq!(stats.serial_batches, 1);
+        assert!(stats.serial_batches >= 1, "{stats:?}");
+        assert_eq!(
+            stats.parallel_batches > 0,
+            rayon::current_num_threads() > 1,
+            "{stats:?}"
+        );
         let restored: Vec<_> = domain
             .archive()
             .get_range(None, None)

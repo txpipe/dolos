@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use dolos_flatfiles::{
-    frame_bound, BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, IMPORT_WINDOW_BYTES,
+    frame_bound, BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, ENCODE_WINDOW_BYTES,
     MAX_BODY_BYTES,
 };
 
@@ -262,14 +262,12 @@ fn a_torn_tail_is_never_named_and_never_blocks_earlier_frames() {
 }
 
 #[test]
-fn a_failed_batch_leaves_dead_space_and_the_retry_continues_at_the_true_end() {
+fn oversized_refusal_leaves_the_entire_batch_unwritten_and_retry_continues() {
     let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
     let first = bodies(8, 2, 500, 500);
     let before = store.append_batch(&items(0, &first)).unwrap();
     let len_before = file_len(&store, 0);
 
-    // The first body of the batch is written before the second is refused:
-    // the batch fails as a whole and names nothing.
     let good = bodies(9, 1, 400, 400).remove(0);
     let oversized = vec![1u8; MAX_BODY_BYTES + 1];
     let err = store
@@ -277,8 +275,12 @@ fn a_failed_batch_leaves_dead_space_and_the_retry_continues_at_the_true_end() {
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     let dead = file_len(&store, 0) - len_before;
-    assert!(dead > 0, "the written frame stays as dead space");
-    assert_eq!(store.resource_stats().writers, 0, "the handle is dropped");
+    assert_eq!(dead, 0, "size validation precedes all writes");
+    assert_eq!(
+        store.resource_stats().writers,
+        1,
+        "the untouched handle is retained"
+    );
 
     let retry = store.append_batch(&[(0, good.as_slice())]).unwrap()[0];
     assert_eq!(retry.offset, len_before + dead);
@@ -286,7 +288,7 @@ fn a_failed_batch_leaves_dead_space_and_the_retry_continues_at_the_true_end() {
     assert_eq!(store.read(&before[1]).unwrap(), first[1]);
     assert_eq!(
         walk_frames(&fs::read(store.segment_path(0)).unwrap()).len(),
-        4
+        3
     );
 }
 
@@ -492,6 +494,10 @@ fn assert_same_segments(a: &FlatFileStore, b: &FlatFileStore, segments: &[u32]) 
 
 #[test]
 fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
     let (_b, import) = FlatFileStore::for_tempdir().unwrap();
 
@@ -515,8 +521,8 @@ fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
     let mut all = Vec::new();
     for batch in &batches {
         let items: Vec<(u32, &[u8])> = batch.iter().map(|(s, b)| (*s, b.as_slice())).collect();
-        let from_serial = serial.append_batch(&items).unwrap();
-        let from_import = import.import_batch(&items).unwrap();
+        let from_serial = pool.install(|| serial.append_batch(&items)).unwrap();
+        let from_import = import.append_batch(&items).unwrap();
         assert_eq!(from_serial, from_import);
         assert_eq!(import.resource_stats().writers, 1);
         all.extend(
@@ -531,15 +537,16 @@ fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
     }
 
     let stats = import.append_stats();
-    assert_eq!((stats.serial_batches, stats.import_batches), (0, 3));
-    assert!(stats.import_windows >= 3, "{stats:?}");
+    assert_eq!(stats.serial_batches + stats.parallel_batches, 3);
+    assert!(stats.serial_batches > 0, "{stats:?}");
+    assert_eq!(stats.parallel_batches > 0, rayon::current_num_threads() > 1);
     assert!(
-        stats.import_encoders_peak <= rayon::current_num_threads(),
+        stats.parallel_encoders_peak <= rayon::current_num_threads(),
         "{stats:?}"
     );
     let stats = serial.append_stats();
-    assert_eq!((stats.serial_batches, stats.import_batches), (3, 0));
-    assert_eq!(stats.import_encoders_peak, 0);
+    assert_eq!((stats.serial_batches, stats.parallel_batches), (3, 0));
+    assert_eq!(stats.parallel_encoders_peak, 0);
 }
 
 #[test]
@@ -555,7 +562,7 @@ fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
     let mut bodies = bodies(23, 1, 2 << 20, 2 << 20);
     bodies.extend(self::bodies(24, 200, 50, 400));
     let locations = pool
-        .install(|| store.import_batch(&items(0, &bodies)))
+        .install(|| store.append_batch(&items(0, &bodies)))
         .unwrap();
 
     for pair in locations.windows(2) {
@@ -570,52 +577,59 @@ fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
         assert_eq!(&decode_independently(frame), body);
     }
     let stats = store.append_stats();
-    assert!(stats.import_encoders_peak <= 4, "{stats:?}");
+    assert!(stats.parallel_encoders_peak <= 4, "{stats:?}");
 }
 
 #[test]
-fn import_windows_bound_what_is_held_encoded_without_moving_a_frame() {
+fn parallel_windows_bound_what_is_held_encoded_without_moving_a_frame() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
     let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
     let (_b, import) = FlatFileStore::for_tempdir().unwrap();
 
     // Bodies of a quarter window each: the batch spans several windows, and
     // a segment boundary falls inside one of them.
-    let bodies = bodies(25, 12, IMPORT_WINDOW_BYTES / 4, IMPORT_WINDOW_BYTES / 4);
+    let bodies = bodies(25, 12, ENCODE_WINDOW_BYTES / 4, ENCODE_WINDOW_BYTES / 4);
     let items: Vec<(u32, &[u8])> = bodies
         .iter()
         .enumerate()
         .map(|(i, b)| (if i < 7 { 0 } else { 1 }, b.as_slice()))
         .collect();
-    let from_serial = serial.append_batch(&items).unwrap();
-    let from_import = import.import_batch(&items).unwrap();
+    let from_serial = pool.install(|| serial.append_batch(&items)).unwrap();
+    let from_import = import.append_batch(&items).unwrap();
     assert_eq!(from_serial, from_import);
     assert_same_segments(&serial, &import, &[0, 1]);
 
     let stats = import.append_stats();
-    assert_eq!(stats.import_batches, 1);
-    assert!(stats.import_windows >= 3, "{stats:?}");
+    assert_eq!(
+        stats.parallel_batches,
+        u64::from(rayon::current_num_threads() > 1)
+    );
+    if rayon::current_num_threads() > 1 {
+        assert!(stats.parallel_windows >= 3, "{stats:?}");
+    }
     assert!(
-        stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES,
+        stats.parallel_window_bytes_peak <= ENCODE_WINDOW_BYTES,
         "{stats:?}"
     );
 }
 
 #[test]
 fn retained_encoding_buffers_are_bounded_as_the_callers_batch_grows() {
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(3)
-        .build()
-        .unwrap();
     let body = vec![42u8; 128 << 10];
     for count in [100, 10_000] {
         let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
         let items = vec![(0, body.as_slice()); count];
-        pool.install(|| store.import_batch(&items)).unwrap();
+        store.append_batch(&items).unwrap();
         let stats = store.append_stats();
-        assert!(stats.import_encoders_peak <= 3);
-        assert!(stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES);
+        assert!(stats.parallel_encoders_peak <= rayon::current_num_threads());
+        assert!(stats.parallel_window_bytes_peak <= ENCODE_WINDOW_BYTES);
         assert!(
-            stats.import_buffer_bytes_peak <= IMPORT_WINDOW_BYTES + 3 * frame_bound(body.len())
+            stats.encoded_buffer_bytes_peak
+                <= ENCODE_WINDOW_BYTES
+                    + (rayon::current_num_threads() + 2) * frame_bound(body.len())
         );
     }
 }
@@ -626,7 +640,7 @@ fn a_maximal_body_is_a_window_of_its_own_and_a_larger_one_is_refused_unwritten()
     let small = bodies(26, 2, 300, 300);
     let maximal = vec![7u8; MAX_BODY_BYTES];
     let locations = store
-        .import_batch(&[
+        .append_batch(&[
             (0, small[0].as_slice()),
             (0, maximal.as_slice()),
             (0, small[1].as_slice()),
@@ -635,9 +649,10 @@ fn a_maximal_body_is_a_window_of_its_own_and_a_larger_one_is_refused_unwritten()
     assert_eq!(store.read(&locations[1]).unwrap(), maximal);
     assert_eq!(store.read(&locations[2]).unwrap(), small[1]);
     let stats = store.append_stats();
-    assert_eq!(stats.import_windows, 3, "{stats:?}");
+    assert_eq!(stats.parallel_windows, 0, "{stats:?}");
+    assert_eq!(stats.serial_batches, 1, "{stats:?}");
     assert!(
-        stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)),
+        stats.parallel_window_bytes_peak <= ENCODE_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)),
         "{stats:?}"
     );
 
@@ -646,12 +661,12 @@ fn a_maximal_body_is_a_window_of_its_own_and_a_larger_one_is_refused_unwritten()
     let len_before = file_len(&store, 0);
     let oversized = vec![1u8; MAX_BODY_BYTES + 1];
     let err = store
-        .import_batch(&[(0, small[0].as_slice()), (1, oversized.as_slice())])
+        .append_batch(&[(0, small[0].as_slice()), (1, oversized.as_slice())])
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     assert_eq!(file_len(&store, 0), len_before);
     assert!(!store.segment_path(1).exists());
-    assert_eq!(store.append_stats().import_batches, 1);
+    assert_eq!(store.append_stats().parallel_batches, 0);
 }
 
 #[test]
@@ -662,37 +677,38 @@ fn an_import_batch_works_on_one_worker_with_one_body_and_with_none() {
         .unwrap();
     let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
 
-    assert!(store.import_batch(&[]).unwrap().is_empty());
+    assert!(store.append_batch(&[]).unwrap().is_empty());
     assert_eq!(store.resource_stats().writers, 0);
 
     let one = bodies(27, 1, 500, 500);
     let loc = pool
-        .install(|| store.import_batch(&items(0, &one)))
+        .install(|| store.append_batch(&items(0, &one)))
         .unwrap();
     assert_eq!(store.read(&loc[0]).unwrap(), one[0]);
 
     let many = bodies(28, 300, 100, 5_000);
     let locations = pool
-        .install(|| store.import_batch(&items(0, &many)))
+        .install(|| store.append_batch(&items(0, &many)))
         .unwrap();
     for (loc, body) in locations.iter().zip(&many) {
         assert_eq!(&store.read(loc).unwrap(), body);
     }
 
     let stats = store.append_stats();
-    assert_eq!(stats.import_batches, 3);
-    assert_eq!(stats.import_encoders_peak, 1, "{stats:?}");
+    assert_eq!(stats.serial_batches, 3);
+    assert_eq!(stats.parallel_batches, 0);
+    assert_eq!(stats.parallel_encoders_peak, 0, "{stats:?}");
 }
 
 #[test]
 fn an_import_batch_fails_like_a_serial_one_and_the_retry_continues_at_the_true_end() {
     let (dir, store) = FlatFileStore::for_tempdir().unwrap();
     let first = bodies(29, 3, 500, 500);
-    let before = store.import_batch(&items(0, &first)).unwrap();
+    let before = store.append_batch(&items(0, &first)).unwrap();
     fs::create_dir(dir.path().join("000001.segment")).unwrap();
 
     let err = store
-        .import_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
+        .append_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
         .unwrap_err();
     assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
     assert_eq!(
@@ -703,7 +719,7 @@ fn an_import_batch_fails_like_a_serial_one_and_the_retry_continues_at_the_true_e
 
     fs::remove_dir(dir.path().join("000001.segment")).unwrap();
     let retry = store
-        .import_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
+        .append_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
         .unwrap();
     assert_eq!(retry[0].offset, before[2].offset + before[2].length as u64);
     assert_eq!(retry[1].offset, 0);

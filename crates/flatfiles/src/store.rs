@@ -1,29 +1,18 @@
 //! The segment store: frames appended to per-segment files, read back by
 //! physical location, and cut at frame boundaries by rollback.
 //!
-//! Appends are serialized under the writer table; a batch encodes each body
-//! and writes its frame before encoding the next, then syncs every segment
-//! it touched and, when one of them is new, the directory that names it.
-//! Between batches the store keeps one append handle, for the newest
-//! segment the last batch touched; every other segment is reopened at its
-//! true end when a batch next names it. Reads open the segment file by
-//! path, so they never wait on a writer, and the store keeps no table of
-//! segments: a segment exists when its file does. What the store holds is
-//! therefore bounded by the operations in flight, not by the history it
-//! stores: one encoder, one append handle, a small pool of decoders.
-//!
-//! An offline import ([`FlatFileStore::import_batch`]) is the one batch
-//! that encodes elsewhere than on the appending thread: its bodies are
-//! encoded on the shared Rayon pool in windows bounded by encoded size, and
-//! each window's frames are then written in input order through the same
-//! handles, the same syncs and the same failure handling as any batch. The
-//! segment files it leaves are byte for byte what the serial batch writes.
+//! Appends use one physical writer and sync touched segments and new directory
+//! entries before returning locations. Eligible multi-body windows encode on
+//! the shared Rayon pool; small windows and Rayon callers encode serially.
+//! Both strategies produce the same ordered frames and commit boundary.
+//! Completed frames and encoder scratch are bounded independently of batch
+//! length. Between batches, one append handle and the serial encoder remain.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 use rayon::prelude::*;
 
@@ -34,11 +23,22 @@ use crate::BlockLocation;
 /// at most a megabyte of buffers.
 const MAX_IDLE_DECODERS: usize = 8;
 
-/// Encoded output an import window may hold before its frames are written,
+/// Encoded output a parallel window may hold before its frames are written,
 /// as the sum of its bodies' frame bounds. A window always admits its first
-/// body, so what an import batch holds encoded at once is at most the larger
+/// body, so what a parallel batch holds encoded at once is at most the larger
 /// of this and one maximal body's frame bound, however long the batch.
-pub const IMPORT_WINDOW_BYTES: usize = 8 << 20;
+pub const ENCODE_WINDOW_BYTES: usize = 8 << 20;
+
+const PARALLEL_MIN_BYTES: usize = 256 << 10;
+
+fn parallel_eligible(items: &[(u32, &[u8])], workers: usize) -> bool {
+    workers > 1
+        && items.len() > 1
+        && items
+            .iter()
+            .fold(0usize, |total, (_, body)| total.saturating_add(body.len()))
+            >= PARALLEL_MIN_BYTES
+}
 
 const SEGMENT_EXTENSION: &str = "segment";
 
@@ -53,21 +53,21 @@ pub struct ResourceStats {
 }
 
 /// What the store's appends have done since it was opened: which path
-/// each batch took, and the most an import batch held at once.
+/// each batch took, and its peak encoding resources.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AppendStats {
     /// Batches [`FlatFileStore::append_batch`] encoded on the calling thread.
     pub serial_batches: u64,
-    /// Batches [`FlatFileStore::import_batch`] encoded in parallel windows.
-    pub import_batches: u64,
-    /// Windows the import batches were scheduled in.
-    pub import_windows: u64,
-    /// Most encoder contexts one import batch had alive at once.
-    pub import_encoders_peak: usize,
-    /// Most encoded bytes one import window held before writing them.
-    pub import_window_bytes_peak: usize,
+    /// Batches with at least one parallel encoding window.
+    pub parallel_batches: u64,
+    /// Scheduling windows in batches using the parallel path.
+    pub parallel_windows: u64,
+    /// Most additional encoder contexts one batch had alive at once.
+    pub parallel_encoders_peak: usize,
+    /// Most encoded bytes one parallel window held before writing them.
+    pub parallel_window_bytes_peak: usize,
     /// Peak allocated output and retained encoder scratch bytes together.
-    pub import_buffer_bytes_peak: usize,
+    pub encoded_buffer_bytes_peak: usize,
 }
 
 struct Writer {
@@ -100,7 +100,7 @@ enum TestEvent {
 }
 
 /// Cut a batch into runs whose frame bounds sum to at most
-/// [`IMPORT_WINDOW_BYTES`]. A run always holds at least one body, so a body
+/// [`ENCODE_WINDOW_BYTES`]. A run always holds at least one body, so a body
 /// whose bound alone exceeds the budget is a run of its own.
 fn windows_of<'a>(items: &'a [(u32, &'a [u8])]) -> impl Iterator<Item = &'a [(u32, &'a [u8])]> {
     let mut rest = items;
@@ -112,7 +112,7 @@ fn windows_of<'a>(items: &'a [(u32, &'a [u8])]) -> impl Iterator<Item = &'a [(u3
         let mut count = 0usize;
         for (_, body) in rest {
             let bound = frame_bound(body.len());
-            if count > 0 && held + bound > IMPORT_WINDOW_BYTES {
+            if count > 0 && held + bound > ENCODE_WINDOW_BYTES {
                 break;
             }
             held += bound;
@@ -160,7 +160,7 @@ impl FlatFileStore {
 
     pub fn resource_stats(&self) -> ResourceStats {
         ResourceStats {
-            writers: self.writers.lock().unwrap().len(),
+            writers: self.lock_writers().len(),
             idle_decoders: self.decoders.lock().unwrap().len(),
         }
     }
@@ -178,56 +178,89 @@ impl FlatFileStore {
     /// names a segment a crash could unlink. Returns each body's physical
     /// location, in input order.
     ///
+    /// Multi-body windows totaling at least 256 KiB may encode on Rayon.
+    /// Small windows, single-worker hosts and callers already on Rayon stay
+    /// serial. Selection never depends on the caller's lifecycle.
+    ///
     /// On an error nothing is returned and the touched segments' handles are
     /// dropped, so the next append reopens them at their true end: frames
     /// the failed batch left behind, whole or torn, are dead space that no
     /// location will ever name.
     pub fn append_batch(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
+        if let Some((_, body)) = items.iter().find(|(_, body)| body.len() > MAX_BODY_BYTES) {
+            return Err(oversized(body.len()));
+        }
+        if rayon::current_thread_index().is_none()
+            && windows_of(items)
+                .any(|window| parallel_eligible(window, 2) && rayon::current_num_threads() > 1)
+        {
+            return self.append_parallel(items);
+        }
         let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
-        let mut writers = self.writers.lock().unwrap();
+        let mut writers = self.lock_writers();
         let result = self.append_locked(&mut writers, &touched, items);
         self.settle(&mut writers, &touched, result.is_ok());
         if result.is_ok() {
-            self.appends.lock().unwrap().serial_batches += 1;
+            let capacity = self.encoder.lock().unwrap().capacity();
+            let mut stats = self.appends.lock().unwrap();
+            stats.serial_batches += 1;
+            stats.encoded_buffer_bytes_peak = stats.encoded_buffer_bytes_peak.max(capacity);
         }
         result
     }
 
-    /// Append a batch of block bodies for an offline import.
+    /// Append a batch containing eligible parallel windows.
     ///
     /// The contract is [`Self::append_batch`]'s — the same frames at the
     /// same locations in input order, the same syncs before it returns, the
     /// same dead space and reopened handles after a failure — with the
     /// encoding spread over the shared Rayon pool instead of running on the
     /// calling thread. Bodies are scheduled in windows of at most
-    /// [`IMPORT_WINDOW_BYTES`] of frame bound: a window's frames are encoded
+    /// [`ENCODE_WINDOW_BYTES`] of frame bound: a window's frames are encoded
     /// in parallel, each on its own context, and written in order before the
     /// next window is encoded, so what the batch holds encoded at once is one
     /// window however long the batch is. The contexts belong to the call —
     /// at most one per pool thread, each keeping a scratch buffer no larger
     /// than the bound of the largest body it encoded — and are dropped with
     /// it: no thread is created and nothing keeps encoding after the call
-    /// returns. A window of one body is encoded on the calling thread.
+    /// returns. Small windows are encoded on the calling thread.
     ///
-    /// A body over [`MAX_BODY_BYTES`] fails the batch before anything is
-    /// written.
-    pub fn import_batch(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
-        if let Some((_, body)) = items.iter().find(|(_, body)| body.len() > MAX_BODY_BYTES) {
-            return Err(oversized(body.len()));
-        }
+    /// The public entry point validates every body's size before this call.
+    fn append_parallel(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
         let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
-        let mut writers = self.writers.lock().unwrap();
-        let result = self.import_locked(&mut writers, &touched, items);
+        let mut writers = self.lock_writers();
+        let result = self.parallel_locked(&mut writers, &touched, items);
         self.settle(&mut writers, &touched, result.is_ok());
         result.map(|(locations, run)| {
             let mut stats = self.appends.lock().unwrap();
-            stats.import_batches += 1;
-            stats.import_windows += run.windows;
-            stats.import_encoders_peak = stats.import_encoders_peak.max(run.encoders);
-            stats.import_window_bytes_peak = stats.import_window_bytes_peak.max(run.window_bytes);
-            stats.import_buffer_bytes_peak = stats.import_buffer_bytes_peak.max(run.buffer_bytes);
+            stats.parallel_batches += 1;
+            stats.parallel_windows += run.windows;
+            stats.parallel_encoders_peak = stats.parallel_encoders_peak.max(run.encoders);
+            stats.parallel_window_bytes_peak =
+                stats.parallel_window_bytes_peak.max(run.window_bytes);
+            stats.encoded_buffer_bytes_peak = stats.encoded_buffer_bytes_peak.max(run.buffer_bytes);
             locations
         })
+    }
+
+    /// Rayon callers never encode in parallel while holding this lock.
+    /// Waiters help queued jobs so an external appender can finish encoding
+    /// even when all workers also want this store.
+    fn lock_writers(&self) -> MutexGuard<'_, HashMap<u32, Writer>> {
+        if rayon::current_thread_index().is_none() {
+            return self.writers.lock().unwrap();
+        }
+        loop {
+            match self.writers.try_lock() {
+                Ok(writers) => return writers,
+                Err(TryLockError::Poisoned(error)) => panic!("{error}"),
+                Err(TryLockError::WouldBlock) => {
+                    if rayon::yield_now() != Some(rayon::Yield::Executed) {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
     }
 
     /// Open a handle for every touched segment that has none, at the file's
@@ -328,28 +361,38 @@ impl FlatFileStore {
         Ok(locations)
     }
 
-    fn import_locked(
+    fn parallel_locked(
         &self,
         writers: &mut HashMap<u32, Writer>,
         touched: &BTreeSet<u32>,
         items: &[(u32, &[u8])],
-    ) -> io::Result<(Vec<BlockLocation>, ImportRun)> {
+    ) -> io::Result<(Vec<BlockLocation>, EncodeRun)> {
         let created = self.open_handles(writers, touched)?;
 
         let mut encoders: Vec<Option<Encoder>> = (0..rayon::current_num_threads().min(items.len()))
             .map(|_| None)
             .collect();
         let mut locations = Vec::with_capacity(items.len());
-        let mut run = ImportRun::default();
+        let mut run = EncodeRun::default();
         for window in windows_of(items) {
-            let frames: Vec<Vec<Vec<u8>>> = if window.len() == 1 {
-                vec![vec![self
-                    .encoder
-                    .lock()
-                    .unwrap()
-                    .encode(window[0].1)?
-                    .to_vec()]]
-            } else {
+            run.windows += 1;
+            if !parallel_eligible(window, encoders.len()) {
+                let mut encoder = self.encoder.lock().unwrap();
+                for &(segment_id, body) in window {
+                    let frame = encoder.encode(body)?;
+                    locations.push(self.write_frame(writers, segment_id, frame)?);
+                }
+                run.buffer_bytes = run.buffer_bytes.max(
+                    encoder.capacity()
+                        + encoders
+                            .iter()
+                            .flatten()
+                            .map(Encoder::capacity)
+                            .sum::<usize>(),
+                );
+                continue;
+            }
+            let frames: Vec<Vec<Vec<u8>>> = {
                 let chunk_size = window.len().div_ceil(encoders.len());
                 window
                     .par_chunks(chunk_size)
@@ -357,7 +400,7 @@ impl FlatFileStore {
                     .enumerate()
                     .map(|(_chunk_index, (chunk, encoder))| {
                         if encoder.is_none() {
-                            *encoder = Some(Encoder::for_import()?);
+                            *encoder = Some(Encoder::for_parallel()?);
                         }
                         let encoder = encoder.as_mut().unwrap();
                         #[cfg(test)]
@@ -379,7 +422,6 @@ impl FlatFileStore {
                     })
                     .collect::<io::Result<_>>()?
             };
-            run.windows += 1;
             run.window_bytes = run
                 .window_bytes
                 .max(frames.iter().flatten().map(Vec::len).sum());
@@ -446,7 +488,7 @@ impl FlatFileStore {
     /// Everything from `offset` on is discarded; an offset at or past the
     /// end changes nothing, and zero removes the segment file.
     pub fn truncate(&self, segment_id: u32, offset: u64) -> io::Result<()> {
-        let mut writers = self.writers.lock().unwrap();
+        let mut writers = self.lock_writers();
         writers.remove(&segment_id);
         let path = self.segment_path(segment_id);
 
@@ -470,7 +512,7 @@ impl FlatFileStore {
     /// Delete every segment numbered below `segment_id`, releasing the
     /// handles the store holds on them.
     pub fn delete_segments_before(&self, segment_id: u32) -> io::Result<()> {
-        let mut writers = self.writers.lock().unwrap();
+        let mut writers = self.lock_writers();
         let mut removed = false;
         for entry in fs::read_dir(&self.segments_dir)? {
             let entry = entry?;
@@ -491,9 +533,9 @@ impl FlatFileStore {
     }
 }
 
-/// What one import batch used.
+/// What one parallel batch used.
 #[derive(Default)]
-struct ImportRun {
+struct EncodeRun {
     windows: u64,
     encoders: usize,
     window_bytes: usize,
@@ -600,18 +642,26 @@ mod tests {
             }
             Ok(())
         }));
+        let first = vec![1; PARALLEL_MIN_BYTES / 2];
+        let second = vec![2; PARALLEL_MIN_BYTES / 2];
         let locations = pool
-            .install(|| store.import_batch(&[(0, b"first"), (0, b"second")]))
+            .install(|| store.append_parallel(&[(0, &first), (0, &second)]))
             .unwrap();
         assert_eq!(*progress.0.lock().unwrap(), vec![1, 0]);
         assert_eq!(locations[0].offset, 0);
         assert_eq!(locations[1].offset, locations[0].length as u64);
-        assert_eq!(store.read(&locations[0]).unwrap(), b"first");
-        assert_eq!(store.read(&locations[1]).unwrap(), b"second");
+        assert_eq!(store.read(&locations[0]).unwrap(), first);
+        assert_eq!(store.read(&locations[1]).unwrap(), second);
     }
 
     #[test]
     fn import_failures_drop_handles_and_retry_after_the_true_end() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let first = vec![1; PARALLEL_MIN_BYTES / 2];
+        let second = vec![2; PARALLEL_MIN_BYTES / 2];
         for failure in [
             TestEvent::Encode(1),
             TestEvent::Write,
@@ -626,8 +676,8 @@ mod tests {
                     Ok(())
                 }
             }));
-            assert!(store
-                .import_batch(&[(0, b"first"), (0, b"second")])
+            assert!(pool
+                .install(|| store.append_parallel(&[(0, &first), (0, &second)]))
                 .is_err());
             assert_eq!(store.resource_stats().writers, 0);
             let end = fs::metadata(store.segment_path(0)).unwrap().len();
@@ -636,19 +686,106 @@ mod tests {
             }
             drop(store);
             let store = FlatFileStore::new(dir.path()).unwrap();
-            let locations = store
-                .import_batch(&[(0, b"first"), (0, b"second")])
-                .unwrap();
+            let locations = store.append_batch(&[(0, &first), (0, &second)]).unwrap();
             assert_eq!(locations[0].offset, end);
-            assert_eq!(store.read(&locations[0]).unwrap(), b"first");
-            assert_eq!(store.read(&locations[1]).unwrap(), b"second");
+            assert_eq!(store.read(&locations[0]).unwrap(), first);
+            assert_eq!(store.read(&locations[1]).unwrap(), second);
         }
+    }
+
+    #[test]
+    fn selection_depends_on_parallel_work_not_the_number_of_blocks_alone() {
+        let body = vec![0; PARALLEL_MIN_BYTES];
+        assert!(!parallel_eligible(&[], 8));
+        assert!(!parallel_eligible(&[(0, &body)], 8));
+        assert!(!parallel_eligible(&vec![(0, b"x".as_slice()); 5000], 8));
+        assert!(!parallel_eligible(
+            &[
+                (0, &body[..body.len() / 2]),
+                (0, &body[..body.len() / 2 - 1])
+            ],
+            8
+        ));
+        assert!(parallel_eligible(&[(0, &body[..body.len() / 2]); 2], 8));
+        assert!(!parallel_eligible(&[(0, body.as_slice()); 2], 1));
+    }
+
+    #[test]
+    fn rayon_waiters_execute_queued_work_instead_of_blocking_every_worker() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+        let store = std::sync::Arc::new(store);
+        let writers = store.lock_writers();
+        let (started, arrivals) = std::sync::mpsc::channel();
+        let (finished, completions) = std::sync::mpsc::channel();
+        for _worker in 0..2 {
+            let store = store.clone();
+            let started = started.clone();
+            let finished = finished.clone();
+            pool.spawn(move || {
+                started.send(()).unwrap();
+                store.append_batch(&[(0, b"body")]).unwrap();
+                finished.send(()).unwrap();
+            });
+        }
+        for _worker in 0..2 {
+            arrivals
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        let (helped, signal) = std::sync::mpsc::channel();
+        pool.spawn(move || helped.send(()).unwrap());
+        let progress = signal.recv_timeout(std::time::Duration::from_secs(10));
+        drop(writers);
+        assert!(progress.is_ok());
+        for _worker in 0..2 {
+            completions
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn concurrent_rayon_callers_and_external_writes_finish_without_pool_starvation() {
+        let (completed, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(2)
+                .build()
+                .unwrap();
+            let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+            let store = std::sync::Arc::new(store);
+            std::thread::scope(|scope| {
+                let external = store.clone();
+                scope.spawn(move || {
+                    let body = vec![7; PARALLEL_MIN_BYTES / 2];
+                    for _repeat in 0..8 {
+                        external.append_batch(&[(0, body.as_slice()); 8]).unwrap();
+                    }
+                });
+                pool.install(|| {
+                    (0..8usize).into_par_iter().for_each(|_| {
+                        let body = vec![9; PARALLEL_MIN_BYTES / 2];
+                        let locations = store.append_batch(&[(0, body.as_slice()); 8]).unwrap();
+                        assert_eq!(store.read(&locations[0]).unwrap(), body);
+                    });
+                });
+            });
+            assert!(store.append_stats().serial_batches >= 8);
+            completed.send(()).unwrap();
+        });
+        result
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
     }
 
     #[test]
     fn windows_admit_a_first_body_of_any_size_and_close_at_the_budget() {
         let small = vec![0u8; 1000];
-        let half = vec![0u8; IMPORT_WINDOW_BYTES / 2];
+        let half = vec![0u8; ENCODE_WINDOW_BYTES / 2];
         let huge = vec![0u8; MAX_BODY_BYTES];
         let items: Vec<(u32, &[u8])> = vec![
             (0, &half),
@@ -663,7 +800,7 @@ mod tests {
         assert!(windows_of(&[]).next().is_none());
         for window in windows_of(&items) {
             let held: usize = window.iter().map(|(_, b)| frame_bound(b.len())).sum();
-            assert!(held <= IMPORT_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)));
+            assert!(held <= ENCODE_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)));
         }
     }
 

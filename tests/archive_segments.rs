@@ -60,7 +60,7 @@ fn write<S: CoreArchiveStore>(store: &S, blocks: &[(BlockSlot, Vec<u8>)]) {
 }
 
 fn import<S: CoreArchiveStore>(store: &S, blocks: &[(BlockSlot, Vec<u8>)]) {
-    let writer = store.start_import_writer().unwrap();
+    let writer = store.start_writer().unwrap();
     for (slot, body) in blocks {
         writer
             .apply(&point(*slot), &Arc::new(body.clone()))

@@ -229,31 +229,6 @@ where
         }
     }
 
-    fn commit_archive_import(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
-        match self {
-            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_archive_import(
-                w,
-                domain,
-                shard_index,
-            ),
-            Self::Roll(w) => {
-                <roll::RollWorkUnit as WorkUnit<D>>::commit_archive_import(w, domain, shard_index)
-            }
-            Self::Rupd(w) => {
-                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_archive_import(w, domain, shard_index)
-            }
-            Self::Ewrap(w) => {
-                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive_import(w, domain, shard_index)
-            }
-            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive_import(
-                w,
-                domain,
-                shard_index,
-            ),
-            Self::ForcedStop => Ok(()),
-        }
-    }
-
     fn finalize(&mut self, domain: &D) -> Result<(), DomainError> {
         match self {
             Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::finalize(w, domain),

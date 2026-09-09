@@ -159,7 +159,7 @@ pub(crate) fn drain_pending_work<D: Domain>(
 pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
     debug!("executing work unit");
 
-    run_lifecycle(domain, work, Lifecycle::Sync)?;
+    run_lifecycle(domain, work, true)?;
 
     update_mempool(domain, work);
 
@@ -172,21 +172,13 @@ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Resul
     Ok(())
 }
 
-/// Which lifecycle a work unit runs under.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Lifecycle {
-    /// Every phase, WAL included; the caller notifies tips afterwards.
-    Sync,
-    /// Import or recovery without WAL commits, using serial archive writes.
-    Import,
-    /// Offline immutable history with parallel archive encoding.
-    OfflineImport,
-}
-
+/// Run the work-unit phase lifecycle: initialize, the per-shard loop, then
+/// finalize. Shared between sync and import; `include_wal` toggles the WAL
+/// commit (disabled in import mode).
 pub(crate) fn run_lifecycle<D: Domain>(
     domain: &D,
     work: &mut D::WorkUnit,
-    lifecycle: Lifecycle,
+    include_wal: bool,
 ) -> Result<(), DomainError> {
     debug!(phase = "initialize", "running phase");
     work.initialize(domain)?;
@@ -211,17 +203,14 @@ pub(crate) fn run_lifecycle<D: Domain>(
         work.load(domain, shard)?;
         debug!(phase = "compute", "running phase");
         work.compute(shard)?;
-        if lifecycle == Lifecycle::Sync {
+        if include_wal {
             debug!(phase = "commit_wal", "running phase");
             work.commit_wal(domain, shard)?;
         }
         debug!(phase = "commit_state", "running phase");
         work.commit_state(domain, shard)?;
         debug!(phase = "commit_archive", "running phase");
-        match lifecycle {
-            Lifecycle::Sync | Lifecycle::Import => work.commit_archive(domain, shard)?,
-            Lifecycle::OfflineImport => work.commit_archive_import(domain, shard)?,
-        }
+        work.commit_archive(domain, shard)?;
     }
 
     debug!(phase = "finalize", "running phase");

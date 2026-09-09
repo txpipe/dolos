@@ -293,23 +293,6 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError>;
 
-    /// A writer for an offline bulk import.
-    ///
-    /// The contract is [`ArchiveStore::start_writer`]'s — the same blocks at
-    /// the same locations, the same duplicate and same-slot rules, one commit
-    /// boundary — for a caller loading history with no reader and no other
-    /// writer beside it, so a backend may spend more of the host on the
-    /// batch: the fjall archive encodes its frames in parallel. The opt-in is
-    /// this call, made at the offline boundary and nowhere else: `dolos data
-    /// import-archive`, the import lifecycle behind
-    /// [`crate::ImportExt::import_blocks_offline`] (the Mithril bootstrap and the
-    /// stele publisher's replay) and the logical snapshot restore of a
-    /// `blocks` layer. The sync pipeline, the WAL catch-up and rollback never
-    /// reach it. The default is the ordinary writer.
-    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        self.start_writer()
-    }
-
     fn read_logs(
         &self,
         ns: Namespace,

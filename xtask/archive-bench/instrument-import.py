@@ -21,16 +21,17 @@ after = after.replace(
     "        benchmark_commits.push(benchmark_started.elapsed().as_nanos() as u64);",
 )
 buffers = "serde_json::Value::Null"
-if ".start_import_writer()" in before:
+archive_source = source.parents[4] / "crates/fjall/src/archive/mod.rs"
+if "pub fn append_stats(" in archive_source.read_text():
     buffers = """match &archive {
         dolos::adapters::ArchiveStoreBackend::Fjall(store) => {
             let stats = store.append_stats();
             serde_json::json!({
-                "encoders_peak": stats.import_encoders_peak,
-                "window_bytes_peak": stats.import_window_bytes_peak,
-                "buffer_bytes_peak": stats.import_buffer_bytes_peak,
-                "windows": stats.import_windows,
-                "import_batches": stats.import_batches,
+                "encoders_peak": stats.parallel_encoders_peak,
+                "window_bytes_peak": stats.parallel_window_bytes_peak,
+                "buffer_bytes_peak": stats.encoded_buffer_bytes_peak,
+                "windows": stats.parallel_windows,
+                "parallel_batches": stats.parallel_batches,
                 "serial_batches": stats.serial_batches,
             })
         }
