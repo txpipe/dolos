@@ -1,4 +1,6 @@
+mod dreps;
 mod mapping;
+mod metadata;
 
 use std::collections::HashMap;
 
@@ -13,12 +15,16 @@ use blockfrost_openapi::models::{
     proposal::{self, Proposal},
     proposal_withdrawals_inner::ProposalWithdrawalsInner,
     proposals_inner::{GovernanceType, ProposalsInner},
+    DrepsInner,
 };
 use dolos_cardano::{
     model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
-    pallas_extras, ChainSummary, PParamsSet,
+    ChainSummary, PParamsSet,
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
+use futures::{stream, StreamExt as _, TryStreamExt as _};
+use metadata::{fetch_drep_metadata, OffchainStore};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -27,177 +33,155 @@ use pallas::{
         traverse::{MultiEraBlock, MultiEraTx},
     },
 };
+use serde::Deserialize;
 
 use crate::{
     error::Error,
-    mapping::{bech32, bech32_gov_action, parse_gov_action_id, stake_cred_to_address, IntoModel},
+    mapping::{bech32_gov_action, parse_gov_action_id, stake_cred_to_address, IntoModel},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
 
-fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusCode> {
-    match drep_id {
-        "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
-        "drep_always_no_confidence" => Ok((drep_id.to_string(), vec![1], false, true)),
-        drep_id => {
-            let (hrp, payload) = bech32::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+/// How many anchor fetches one page runs at a time. A page asks for up to
+/// 100 rows and every miss costs a round trip capped at the fetch timeout,
+/// so the bound keeps a slow page from opening 100 outbound connections at
+/// once while a cached row still costs nothing.
+const MAX_CONCURRENT_METADATA_FETCHES: usize = 8;
 
-            match (hrp.as_str(), payload.len()) {
-                ("drep", 29) => {
-                    let header_byte = payload.first().ok_or(StatusCode::BAD_REQUEST)?;
+fn chain_context<D: Domain>(
+    domain: &Facade<D>,
+) -> Result<(ChainSummary, BlockSlot, PParamsSet), StatusCode> {
+    let chain = domain.get_chain_summary()?;
+    let tip = domain.get_tip_slot()?;
+    let pparams = domain.get_current_effective_pparams()?;
 
-                    // first 4 bits need to be equal to 0010
-                    if header_byte & 0b11110000 != 0b00100000 {
-                        return Err(StatusCode::BAD_REQUEST);
-                    }
+    Ok((chain, tip, pparams))
+}
 
-                    Ok((drep_id.to_string(), payload, false, false))
-                }
-                ("drep", 28) => Ok((
-                    drep_id.to_string(),
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                ("drep_vkh", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                ("drep_script", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                _ => Err(StatusCode::BAD_REQUEST),
-            }
+/// Query parameters of `/governance/dreps`: the shared pagination set plus
+/// the endpoint's own `order_by`, `retired` and `expired`. Blockfrost does
+/// not define `from`/`to` here.
+#[derive(Debug, Deserialize)]
+pub struct DrepsListParameters {
+    pub count: Option<String>,
+    pub page: Option<String>,
+    pub order: Option<String>,
+    pub order_by: Option<String>,
+    pub retired: Option<String>,
+    pub expired: Option<String>,
+}
+
+impl DrepsListParameters {
+    fn pagination(&self) -> PaginationParameters {
+        PaginationParameters {
+            count: self.count.clone(),
+            page: self.page.clone(),
+            order: self.order.clone(),
+            from: None,
+            to: None,
+        }
+    }
+
+    /// `order_by` accepts only `amount`, mirroring the openapi enum.
+    fn order_by_amount(&self) -> Result<bool, Error> {
+        match self.order_by.as_deref() {
+            None => Ok(false),
+            Some("amount") => Ok(true),
+            Some(_) => Err(StatusCode::BAD_REQUEST.into()),
         }
     }
 }
 
-pub struct DrepModelBuilder<'a> {
-    drep_id: String,
-    drep_id_encoded: Vec<u8>,
-    is_legacy: bool,
-    state: Option<DRepState>,
-    pparams: PParamsSet,
-    chain: &'a ChainSummary,
-    tip: BlockSlot,
-}
-
-impl<'a> DrepModelBuilder<'a> {
-    fn is_special_case(&self) -> bool {
-        ["drep_always_abstain", "drep_always_no_confidence"].contains(&self.drep_id.as_str())
-    }
-
-    fn first_active_epoch(&self) -> Option<Epoch> {
-        if self.is_special_case() {
-            return None;
-        }
-
-        if self
-            .state
-            .as_ref()
-            .map(|x| x.is_unregistered())
-            .unwrap_or(true)
-        {
-            return None;
-        }
-
-        self.state
-            .as_ref()?
-            .registered_at
-            .map(|x| self.chain.slot_epoch(x.0).0)
-    }
-
-    fn last_active_epoch(&self) -> Option<Epoch> {
-        if self.is_special_case() {
-            return None;
-        }
-
-        self.state
-            .as_ref()?
-            .last_active_slot
-            .map(|x| self.chain.slot_epoch(x).0)
-    }
-
-    fn is_drep_expired(&self) -> bool {
-        if self.is_special_case() {
-            return false;
-        }
-
-        if self.is_drep_retired() {
-            return false;
-        }
-
-        let last_active_epoch = self.last_active_epoch();
-
-        let inactivity_period = self.pparams.drep_inactivity_period().unwrap_or_default();
-
-        let expiring_epoch = last_active_epoch.map(|x| x + inactivity_period);
-
-        let (current_epoch, _) = self.chain.slot_epoch(self.tip);
-
-        expiring_epoch
-            .map(|expiration| expiration <= current_epoch)
-            .unwrap_or(false)
-    }
-
-    fn is_drep_retired(&self) -> bool {
-        if self.is_special_case() {
-            return false;
-        }
-
-        let Some(state) = self.state.as_ref() else {
-            return false;
-        };
-
-        match (state.registered_at, state.unregistered_at) {
-            (Some(registered), Some(unregistered)) => unregistered > registered,
-            (Some(_), None) => false,
-            _ => false,
-        }
-    }
-
-    fn is_drep_active(&self) -> bool {
-        !self.is_drep_retired()
+/// Blockfrost validates these as booleans and rejects anything else.
+fn parse_bool_filter(value: Option<&str>) -> Result<Option<bool>, Error> {
+    match value {
+        None => Ok(None),
+        Some("true") => Ok(Some(true)),
+        Some("false") => Ok(Some(false)),
+        Some(_) => Err(StatusCode::BAD_REQUEST.into()),
     }
 }
 
-impl<'a> IntoModel<blockfrost_openapi::models::drep::Drep> for DrepModelBuilder<'a> {
-    type SortKey = ();
+pub async fn all_dreps<D: Domain>(
+    Query(params): Query<DrepsListParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepsInner>>, Error>
+where
+    Option<DRepState>: From<D::Entity>,
+{
+    let order_by_amount = params.order_by_amount()?;
+    let retired = parse_bool_filter(params.retired.as_deref())?;
+    let expired = parse_bool_filter(params.expired.as_deref())?;
 
-    fn into_model(self) -> Result<blockfrost_openapi::models::drep::Drep, StatusCode> {
-        let expired = self.is_drep_expired();
+    let pagination = Pagination::try_from(params.pagination())?;
+    pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-        let out = blockfrost_openapi::models::drep::Drep {
-            drep_id: self.drep_id.clone(),
-            hex: if self.is_special_case() {
-                "".to_string()
-            } else if self.is_legacy {
-                hex::encode(&self.drep_id_encoded[1..])
-            } else {
-                hex::encode(&self.drep_id_encoded)
-            },
-            amount: self
-                .state
-                .as_ref()
-                .map(|x| x.voting_power.to_string())
-                .unwrap_or_default(),
-            active: self.is_drep_active(),
-            active_epoch: self.first_active_epoch().map(|x| x as i32),
-            has_script: pallas_extras::drep_id_is_script(&self.drep_id_encoded),
-            retired: self.is_drep_retired(),
-            expired,
-            last_active_epoch: self.last_active_epoch().map(|x| x as i32),
-        };
+    let (chain, tip, pparams) = chain_context(&domain)?;
 
-        Ok(out)
+    let mut dreps = vec![];
+
+    for item in domain.iter_cardano_entities::<DRepState>(None)? {
+        let (key, state) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Blockfrost applies the filters before pagination, so every page
+        // holds up to `count` matching rows.
+        if retired.is_some_and(|wanted| drep_is_retired(&state) != wanted) {
+            continue;
+        }
+
+        if expired.is_some_and(|wanted| drep_is_expired(&state, &chain, tip, &pparams) != wanted) {
+            continue;
+        }
+
+        let appeared_at = state.first_seen_at.unwrap_or((u64::MAX, usize::MAX));
+
+        dreps.push((appeared_at, key, state));
     }
+
+    if order_by_amount {
+        // `order` flips only the amount; the appearance order stays the
+        // ascending tie-breaker, like Blockfrost's `ORDER BY amount, id ASC`.
+        dreps.sort_by(|(a_order, a_key, a_state), (b_order, b_key, b_state)| {
+            let amounts = match pagination.order {
+                Order::Desc => b_state.voting_power.cmp(&a_state.voting_power),
+                Order::Asc => a_state.voting_power.cmp(&b_state.voting_power),
+            };
+
+            amounts.then_with(|| (a_order, a_key).cmp(&(b_order, b_key)))
+        });
+    } else {
+        dreps.sort_by(|(a_order, a_key, _), (b_order, b_key, _)| {
+            (a_order, a_key).cmp(&(b_order, b_key))
+        });
+
+        if matches!(pagination.order, Order::Desc) {
+            dreps.reverse();
+        }
+    }
+
+    let store = OffchainStore::new(
+        &domain.storage_config().path,
+        domain.config.max_offchain_cache_bytes(),
+    );
+
+    let items = dreps
+        .into_iter()
+        .skip(pagination.from())
+        .take(pagination.count)
+        .map(|(_, _, state)| async {
+            let metadata = fetch_drep_metadata(&store, state.anchor.clone()).await;
+            let mut model = drep_list_item(state, &pparams, &chain, tip)?;
+            model.metadata = metadata.map(Box::new);
+            Ok::<_, StatusCode>(model)
+        });
+
+    // buffered keeps the page order while bounding the outbound fan-out
+    let page = stream::iter(items)
+        .buffered(MAX_CONCURRENT_METADATA_FETCHES)
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    Ok(Json(page))
 }
 
 pub async fn drep_by_id<D: Domain>(
@@ -207,37 +191,27 @@ pub async fn drep_by_id<D: Domain>(
 where
     Option<DRepState>: From<D::Entity>,
 {
-    let (drep, drep_bytes, is_legacy, is_special_case) =
-        parse_drep_id(&drep).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = parse_drep_id(&drep)?;
 
-    let drep_state = if is_special_case {
-        None
+    let drep_state = if parsed.is_special {
+        domain.read_cardano_entity::<DRepState>(parsed.encoded.clone())?
     } else {
         Some(
             domain
-                .read_cardano_entity::<DRepState>(drep_bytes.clone())?
+                .read_cardano_entity::<DRepState>(parsed.encoded.clone())?
                 .ok_or(StatusCode::NOT_FOUND)?,
         )
     };
 
-    let chain = domain
-        .get_chain_summary()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let (tip, _) = domain
-        .archive()
-        .get_tip()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let pparams = domain.get_current_effective_pparams()?;
+    let (chain, tip, pparams) = chain_context(&domain)?;
 
     let model = DrepModelBuilder {
-        drep_id: drep,
-        drep_id_encoded: drep_bytes,
-        is_legacy,
+        drep_id: parsed.drep_id,
+        drep_id_encoded: parsed.encoded,
+        is_legacy: parsed.is_legacy,
+        is_special: parsed.is_special,
         state: drep_state,
-        pparams,
+        pparams: &pparams,
         chain: &chain,
         tip,
     };
@@ -817,12 +791,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::bech32;
+    use crate::mapping::bech32_drep;
     use crate::test_support::{TestApp, TestFault};
     use bech32::{Bech32, Hrp};
-    use dolos_cardano::model::GovPurpose;
+    use blockfrost_openapi::models::drep::Drep as DrepModel;
+    use dolos_cardano::{
+        model::{drep_to_entity_key, DRepExpiry, GovPurpose},
+        pallas_extras,
+    };
     use dolos_core::StateWriter as _;
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
+    use pallas::ledger::primitives::conway::DRep;
     use pallas::{
         codec::utils::Bytes,
         ledger::primitives::conway::{GovAction, GovActionId},
@@ -833,12 +814,20 @@ mod tests {
         "not-a-drep"
     }
 
+    fn encode_id(hrp: &str, payload: &[u8]) -> String {
+        let hrp = Hrp::parse_unchecked(hrp);
+        bech32::encode::<Bech32>(hrp, payload).expect("failed to encode bech32 id")
+    }
+
     fn missing_drep() -> String {
-        let mut payload = Vec::with_capacity(29);
-        payload.push(0b00100010);
-        payload.extend_from_slice(&[8u8; 28]);
-        let hrp = Hrp::parse_unchecked("drep");
-        bech32::encode::<Bech32>(hrp, &payload).expect("failed to encode missing drep")
+        let payload = [vec![pallas_extras::DREP_KEY_PREFIX], vec![8u8; 28]].concat();
+        encode_id("drep", &payload)
+    }
+
+    fn vector_drep_hash(app: &TestApp) -> Vec<u8> {
+        let (_, payload) = bech32::decode(&app.vectors().drep_id).expect("invalid vector drep id");
+
+        payload[1..].to_vec()
     }
 
     async fn assert_status(app: &TestApp, path: &str, expected: StatusCode) {
@@ -846,21 +835,25 @@ mod tests {
         assert_eq!(status, expected);
     }
 
-    #[tokio::test]
-    async fn governance_drep_happy_path() {
-        let app = TestApp::new();
-        let drep = &app.vectors().drep_id;
-        let path = format!("/governance/dreps/{drep}");
+    async fn get_drep(app: &TestApp, drep_id: &str) -> DrepModel {
+        let path = format!("/governance/dreps/{drep_id}");
         let (status, body) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
-        let _model: blockfrost_openapi::models::drep::Drep =
-            serde_json::from_slice(&body).expect("failed to parse drep model");
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&body)
+        );
+
+        serde_json::from_slice(&body).expect("failed to parse drep model")
     }
 
     #[tokio::test]
     async fn governance_drep_bad_request() {
         let app = TestApp::new();
         let path = format!("/governance/dreps/{}", invalid_drep());
+
         assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
@@ -869,6 +862,7 @@ mod tests {
         let app = TestApp::new();
         let missing = missing_drep();
         let path = format!("/governance/dreps/{missing}");
+
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
     }
 
@@ -877,7 +871,356 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}");
+
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_happy_path() {
+        let app = TestApp::builder()
+            .with_cfg(SyntheticBlockConfig {
+                drep_deposit: 7777,
+                ..Default::default()
+            })
+            .with_protocol(9)
+            .build();
+
+        let drep_id = app.vectors().drep_id.clone();
+        let model = get_drep(&app, &drep_id).await;
+
+        let (_, payload) = bech32::decode(&drep_id).expect("invalid vector drep id");
+
+        let expected = DrepModel {
+            drep_id,
+            hex: hex::encode(&payload),
+            // the ledger's drep_distr counts the DRep's own deposit
+            amount: "7777".to_string(),
+            active: true,
+            active_epoch: Some(2),
+            has_script: false,
+            retired: false,
+            expired: false,
+            last_active_epoch: Some(2),
+        };
+
+        assert_eq!(model, expected);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_special_ids() {
+        let app = TestApp::new();
+
+        for id in ["drep_always_abstain", "drep_always_no_confidence"] {
+            let model = get_drep(&app, id).await;
+
+            let expected = DrepModel {
+                drep_id: id.to_string(),
+                hex: "".to_string(),
+                amount: "0".to_string(),
+                active: true,
+                active_epoch: None,
+                has_script: false,
+                retired: false,
+                expired: false,
+                last_active_epoch: None,
+            };
+
+            assert_eq!(model, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_by_id_accepts_legacy_encodings() {
+        let app = TestApp::new();
+        let hash = vector_drep_hash(&app);
+        let cip105 = encode_id("drep", &hash);
+        let cip129 = get_drep(&app, &app.vectors().drep_id.clone()).await;
+
+        let expected = DrepModel {
+            drep_id: cip105.clone(),
+            hex: hex::encode(&hash),
+            ..cip129
+        };
+
+        assert_eq!(get_drep(&app, &cip105).await, expected);
+
+        // Blockfrost rejects the drep_vkh prefix
+        let path = format!("/governance/dreps/{}", encode_id("drep_vkh", &hash));
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn governance_drep_by_id_script_variant_not_found() {
+        let app = TestApp::new();
+        let hash = vector_drep_hash(&app);
+
+        let path = format!("/governance/dreps/{}", encode_id("drep_script", &hash));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        let cip129_script = [vec![pallas_extras::DREP_SCRIPT_PREFIX], hash].concat();
+        let path = format!("/governance/dreps/{}", encode_id("drep", &cip129_script));
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+    }
+
+    async fn get_dreps_list(app: &TestApp, path: &str) -> Vec<DrepsInner> {
+        let (status, body) = app.get_bytes(path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        serde_json::from_slice(&body).expect("failed to parse dreps list")
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_happy_path() {
+        let app = TestApp::builder()
+            .with_cfg(SyntheticBlockConfig {
+                drep_deposit: 7777,
+                ..Default::default()
+            })
+            .with_protocol(9)
+            .build();
+
+        let models = get_dreps_list(&app, "/governance/dreps").await;
+
+        let drep_id = app.vectors().drep_id.clone();
+        let (_, payload) = bech32::decode(&drep_id).expect("invalid vector drep id");
+
+        assert_eq!(
+            models,
+            vec![DrepsInner {
+                drep_id,
+                hex: hex::encode(&payload),
+                // the ledger's drep_distr counts the DRep's own deposit
+                amount: "7777".to_string(),
+                has_script: false,
+                retired: false,
+                expired: false,
+                last_active_epoch: Some(2),
+                metadata: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_pagination() {
+        let app = TestApp::new();
+
+        let models = get_dreps_list(&app, "/governance/dreps?page=2").await;
+        assert!(models.is_empty());
+
+        let models = get_dreps_list(&app, "/governance/dreps?order=desc&count=1").await;
+        assert_eq!(models.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_bad_request() {
+        let app = TestApp::new();
+
+        assert_status(&app, "/governance/dreps?count=0", StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            "/governance/dreps?order=sideways",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps?order_by=alphabet",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps?retired=banana",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+        assert_status(
+            &app,
+            "/governance/dreps?expired=banana",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_filters_apply_before_pagination() {
+        let app = TestApp::new();
+
+        // the synthetic drep is registered and active: it survives the
+        // negative filters and disappears behind the positive ones
+        let models = get_dreps_list(&app, "/governance/dreps?retired=false&expired=false").await;
+        assert_eq!(models.len(), 1);
+
+        let models = get_dreps_list(&app, "/governance/dreps?retired=true").await;
+        assert!(models.is_empty());
+
+        let models = get_dreps_list(&app, "/governance/dreps?expired=true").await;
+        assert!(models.is_empty());
+    }
+
+    /// Three DReps whose voting powers and first sightings disagree, so
+    /// ordering by amount cannot be mistaken for the default ordering and
+    /// each direction names a different row first.
+    fn amount_app() -> TestApp {
+        TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+
+            // seen in this order, so appearance order is a, b, c while the
+            // amounts run the other way
+            for (byte, power, seen) in [(0xa1u8, 300u64, 10u64), (0xb2, 100, 20), (0xc3, 200, 30)] {
+                let identifier = DRep::Key([byte; 28].into());
+
+                let mut state = DRepState::new(identifier.clone());
+                state.registered_at = Some((seen, 0));
+                state.first_seen_at = Some((seen, 0));
+                state.voting_power = power;
+                state.expiry = Some(DRepExpiry::new(u64::MAX, 0));
+
+                writer
+                    .write_entity_typed(&drep_to_entity_key(&identifier), &state)
+                    .expect("failed to write drep");
+            }
+
+            writer.commit().expect("failed to commit dreps");
+        })
+    }
+
+    /// The seeded DReps in the order they first appeared, which is the
+    /// listing's default order.
+    fn seeded_ids() -> Vec<String> {
+        [0xa1u8, 0xb2, 0xc3]
+            .iter()
+            .map(|byte| bech32_drep(&DRep::Key([*byte; 28].into())).expect("failed to encode"))
+            .collect()
+    }
+
+    fn listed_ids(models: &[DrepsInner], seeded: &[String]) -> Vec<String> {
+        models
+            .iter()
+            .map(|x| x.drep_id.clone())
+            .filter(|id| seeded.contains(id))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_order_by_amount() {
+        let app = amount_app();
+        let seeded = seeded_ids();
+        let (a, b, c) = (seeded[0].clone(), seeded[1].clone(), seeded[2].clone());
+
+        // default: the order they were first seen, amounts ignored
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
+
+        // by amount ascending: 100, 200, 300
+        let models = get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await;
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![b.clone(), c.clone(), a.clone()]
+        );
+
+        // and descending is that read backwards
+        let models = get_dreps_list(
+            &app,
+            "/governance/dreps?count=100&order_by=amount&order=desc",
+        )
+        .await;
+        assert_eq!(listed_ids(&models, &seeded), vec![a, c, b]);
+    }
+
+    /// A DRep that never registered and never voted — a vote-delegation
+    /// target the chain only ever mentioned — has no last-active epoch, and
+    /// Blockfrost's SQL sends that row to the `ELSE FALSE` arm however old
+    /// it is. Verified against live Blockfrost on preview, where 13 such
+    /// DReps sit in the first 3000 rows.
+    #[tokio::test]
+    async fn governance_dreps_list_never_active_dreps_never_expire() {
+        let identifier = DRep::Key([0xd4u8; 28].into());
+
+        let app = {
+            let identifier = identifier.clone();
+
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
+                let writer = domain
+                    .state()
+                    .start_writer()
+                    .expect("failed to start writer");
+
+                // seen at the very first slot and silent ever since, with the
+                // ledger expiry the boundary would have long since tripped
+                let mut state = DRepState::new(identifier.clone());
+                state.first_seen_at = Some((0, 0));
+                state.expiry = Some(DRepExpiry::new(0, 0));
+                state.expired = true;
+
+                writer
+                    .write_entity_typed(&drep_to_entity_key(&identifier), &state)
+                    .expect("failed to write drep");
+                writer.commit().expect("failed to commit drep");
+            })
+        };
+
+        let drep_id = bech32_drep(&identifier).expect("failed to encode");
+        let model = get_drep(&app, &drep_id).await;
+
+        assert_eq!(model.last_active_epoch, None);
+        assert!(!model.retired);
+        assert!(!model.expired, "Blockfrost reports these as not expired");
+
+        // and the filter agrees with the field
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100&expired=true").await;
+        assert!(listed.iter().all(|x| x.drep_id != drep_id));
+
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100&expired=false").await;
+        assert!(listed.iter().any(|x| x.drep_id == drep_id));
+    }
+
+    /// Ordering by amount has to hold across a page boundary, not just
+    /// inside one page, which is what the Blockfrost suite checks too.
+    #[tokio::test]
+    async fn governance_dreps_list_order_by_amount_spans_pages() {
+        let app = amount_app();
+        let seeded = seeded_ids();
+
+        let mut paged = vec![];
+
+        for page in 1..=4 {
+            let path = format!("/governance/dreps?count=1&order_by=amount&page={page}");
+            paged.extend(listed_ids(&get_dreps_list(&app, &path).await, &seeded));
+        }
+
+        let whole = listed_ids(
+            &get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await,
+            &seeded,
+        );
+
+        assert_eq!(paged, whole);
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_scan_limit() {
+        let app = TestApp::new();
+
+        // page * count above `max_scan_items` (default 3000)
+        assert_status(
+            &app,
+            "/governance/dreps?page=1000&count=100",
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn governance_dreps_list_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+
+        assert_status(&app, "/governance/dreps", StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
     /// Three blocks: the first tx of block 1 proposes two actions, block 2
