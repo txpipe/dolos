@@ -612,6 +612,11 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
 
     let (domain, blank, _) = round_trip::<FjallStores>(default_budget());
     let archive_dir = blank.stores.path().join("archive");
+
+    let appends = blank.archive.append_stats();
+    assert!(appends.serial_batches > 0, "{appends:?}");
+    assert_eq!(appends.parallel_batches, 0, "{appends:?}");
+
     let restored = blocks_of(&blank.archive);
     assert_eq!(restored, blocks_of(domain.archive()), "order and bodies");
     let hashes = |blocks: &[(u64, Vec<u8>)]| -> Vec<String> {
@@ -633,6 +638,12 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
     assert_eq!(
         blank.archive.get_tip().unwrap().map(|(s, _)| s),
         Some(tip_slot + 20)
+    );
+    let after = blank.archive.append_stats();
+    assert_eq!(
+        (after.serial_batches, after.parallel_batches),
+        (appends.serial_batches + 1, appends.parallel_batches),
+        "an ordinary append after the restore is serial"
     );
     assert_eq!(
         blank
@@ -701,6 +712,35 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
     assert!(!pruned.is_empty());
     assert!(restored.ends_with(&pruned), "pruning keeps a suffix");
     assert_segments_are_frames(&archive_dir, &blank.archive);
+}
+
+#[test]
+fn large_snapshot_block_chunks_use_automatic_parallel_encoding() {
+    use dolos_core::ImportExt;
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+    let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 8,
+        slot: 100,
+        metadata_value: "payload".repeat(32 << 10),
+        ..Default::default()
+    });
+    let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
+        std::sync::Arc::new(dolos_cardano::include::preview::load()),
+        config,
+        None,
+        None,
+    );
+    domain.import_blocks(blocks).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+    let blank = Blank::<FjallStores>::open();
+    restore_into(temp.path(), magic_of(&domain), &blank, default_budget()).unwrap();
+    assert_eq!(blocks_of(&blank.archive), blocks_of(domain.archive()));
+    let stats = blank.archive.append_stats();
+    assert_eq!(
+        stats.parallel_batches > 0,
+        domain.archive().append_stats().parallel_batches > 0
+    );
 }
 
 // --------------------------------------------------------------------------

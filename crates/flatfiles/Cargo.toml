@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+rayon.workspace = true
 tempfile = "3"
 zstd = "0.13"
 

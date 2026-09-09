@@ -333,6 +333,7 @@ impl ChildUsage {
             "sys_ms": self.sys_ns as f64 / 1e6,
             "cpu_ms": (self.user_ns + self.sys_ns) as f64 / 1e6,
             "max_rss_bytes": self.max_rss,
+            "exit_status": self.status,
         })
     }
 }
@@ -941,6 +942,8 @@ impl Instance {
             name,
         } = *job;
         let mut cmd = self.command(bin);
+        let metrics_path = self.dir.join("import-metrics.json");
+        cmd.env("DOLOS_ARCHIVE_BENCH_METRICS", &metrics_path);
         cmd.args(["data", "import-archive", "--source"])
             .arg(immutable)
             .arg("--chunk-size")
@@ -967,6 +970,7 @@ impl Instance {
         let archive_bytes = dir_bytes(&archive);
         let per_sec = |count: u64| if wall > 0.0 { count as f64 / wall } else { 0.0 };
         let batches = blocks.div_ceil(chunk.max(1) as u64);
+        let instrumentation = read_import_metrics(&metrics_path)?;
         Ok(json!({
             "kind": "node-import",
             "workload": name,
@@ -984,8 +988,28 @@ impl Instance {
             "index_bytes": archive_bytes.saturating_sub(segment_bytes),
             "archive_bytes": archive_bytes,
             "process": usage.json(),
+            "instrumentation": instrumentation,
         }))
     }
+}
+
+fn read_import_metrics(path: &Path) -> io::Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut metrics: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    let samples = metrics["commit_ns"]
+        .as_array()
+        .ok_or_else(|| io::Error::other("missing commit_ns"))?;
+    let mut latency = histogram();
+    for sample in samples {
+        let nanos = sample
+            .as_u64()
+            .ok_or_else(|| io::Error::other("invalid commit sample"))?;
+        latency.record(nanos.max(1)).map_err(io::Error::other)?;
+    }
+    metrics["commit_latency"] = histogram_json(&latency);
+    Ok(Some(metrics))
 }
 
 impl Instance {
@@ -1464,5 +1488,18 @@ mod tests {
         assert!(s.import && s.read && !s.live && !s.mixed);
         assert!(Selection::parse("").is_err());
         assert!(Selection::parse("bogus").is_err());
+    }
+
+    #[test]
+    fn missing_samples_are_absent_and_percentiles_come_from_individual_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("metrics.json");
+        assert!(read_import_metrics(&path).unwrap().is_none());
+        std::fs::write(&path, r#"{"commit_ns":[1000,2000,9000000]}"#).unwrap();
+        let metrics = read_import_metrics(&path).unwrap().unwrap();
+        assert_eq!(metrics["commit_latency"]["count"], 3);
+        assert!(metrics["commit_latency"]["p95_us"].as_f64().unwrap() >= 9000.0);
+        std::fs::write(&path, r#"{"commit_ns":["invalid"]}"#).unwrap();
+        assert!(read_import_metrics(&path).is_err());
     }
 }

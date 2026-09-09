@@ -53,6 +53,10 @@ pub struct CorpusArgs {
     #[arg(long)]
     synthetic: Option<usize>,
 
+    /// Replace the middle synthetic body with seeded random bytes of this size.
+    #[arg(long, requires = "synthetic")]
+    synthetic_large_bytes: Option<usize>,
+
     /// most blocks per segment (or in total for --immutable)
     #[arg(long)]
     limit_blocks: Option<usize>,
@@ -61,7 +65,17 @@ pub struct CorpusArgs {
 impl CorpusArgs {
     fn load(&self, seed: u64) -> anyhow::Result<Corpus> {
         if let Some(count) = self.synthetic {
-            return Ok(Corpus::synthetic(seed, count, 2));
+            let mut corpus = Corpus::synthetic(seed, count, 2);
+            if let Some(bytes) = self.synthetic_large_bytes {
+                anyhow::ensure!(
+                    count > 0 && bytes > 0 && bytes <= dolos_flatfiles::MAX_BODY_BYTES,
+                    "large synthetic body must be admitted and the corpus nonempty"
+                );
+                let mut rng = corpus::Rng::new(seed);
+                corpus.blocks[count / 2].body = (0..bytes).map(|_| rng.next_u64() as u8).collect();
+                corpus.source["large_body_bytes"] = serde_json::json!(bytes);
+            }
+            return Ok(corpus);
         }
         if let Some(dir) = &self.immutable {
             return Ok(Corpus::from_immutable(
@@ -241,7 +255,7 @@ fn codecs(spec: &str, dictionary: &str) -> anyhow::Result<Vec<(String, Codec)>> 
             "zstd3-dict" => Codec::zstd(3, Some(train::load_dictionary(dictionary)?)),
             "store" => Codec::Store,
             other => anyhow::bail!(
-                "unknown codec {other:?}; use raw, zstd1, zstd1-dict, zstd3, zstd3-dict or store"
+                "unknown codec {other:?}; use raw, zstd1, zstd1-dict, zstd3, zstd3-dict, store"
             ),
         };
         out.push((name.to_string(), codec));

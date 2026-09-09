@@ -1,0 +1,1567 @@
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1544,6 +1544,7 @@
+ name = "dolos-flatfiles"
+ version = "1.7.0-alpha.1"
+ dependencies = [
++ "rayon",
+  "sha2 0.10.9",
+  "tempfile",
+  "zstd",
+--- a/crates/cardano/src/lib.rs
++++ b/crates/cardano/src/lib.rs
+@@ -225,6 +225,31 @@
+             Self::Estart(w) => {
+                 <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive(w, domain, shard_index)
+             }
++            Self::ForcedStop => Ok(()),
++        }
++    }
++
++    fn commit_archive_import(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
++        match self {
++            Self::Genesis(w) => <genesis::GenesisWorkUnit as WorkUnit<D>>::commit_archive_import(
++                w,
++                domain,
++                shard_index,
++            ),
++            Self::Roll(w) => {
++                <roll::RollWorkUnit as WorkUnit<D>>::commit_archive_import(w, domain, shard_index)
++            }
++            Self::Rupd(w) => {
++                <rupd::RupdWorkUnit as WorkUnit<D>>::commit_archive_import(w, domain, shard_index)
++            }
++            Self::Ewrap(w) => {
++                <ewrap::EwrapWorkUnit as WorkUnit<D>>::commit_archive_import(w, domain, shard_index)
++            }
++            Self::Estart(w) => <estart::EstartWorkUnit as WorkUnit<D>>::commit_archive_import(
++                w,
++                domain,
++                shard_index,
++            ),
+             Self::ForcedStop => Ok(()),
+         }
+     }
+--- a/crates/cardano/src/roll/batch.rs
++++ b/crates/cardano/src/roll/batch.rs
+@@ -382,7 +382,26 @@
+         D: Domain<Chain = CardanoLogic>,
+     {
+         let writer = domain.archive().start_writer()?;
+-
++        self.commit_archive_through::<D>(writer)
++    }
++
++    /// The same commit through the archive's import writer, for the import
++    /// lifecycle only.
++    pub fn commit_archive_import<D>(&mut self, domain: &D) -> Result<(), DomainError>
++    where
++        D: Domain<Chain = CardanoLogic>,
++    {
++        let writer = domain.archive().start_import_writer()?;
++        self.commit_archive_through::<D>(writer)
++    }
++
++    fn commit_archive_through<D>(
++        &mut self,
++        writer: <D::Archive as ArchiveStore>::Writer,
++    ) -> Result<(), DomainError>
++    where
++        D: Domain<Chain = CardanoLogic>,
++    {
+         for block in self.blocks.iter() {
+             let point = block.point();
+             let raw = block.raw();
+--- a/crates/cardano/src/roll/work_unit.rs
++++ b/crates/cardano/src/roll/work_unit.rs
+@@ -123,6 +123,14 @@
+         Ok(())
+     }
+ 
++    fn commit_archive_import(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
++        debug!("committing roll batch to archive through the import writer");
++
++        self.batch.commit_archive_import(domain)?;
++
++        Ok(())
++    }
++
+     fn tip_events(&self) -> Vec<TipEvent> {
+         if !self.live_mode {
+             return Vec::new();
+--- a/crates/core/src/archive.rs
++++ b/crates/core/src/archive.rs
+@@ -293,6 +293,23 @@
+ 
+     fn start_writer(&self) -> Result<Self::Writer, ArchiveError>;
+ 
++    /// A writer for an offline bulk import.
++    ///
++    /// The contract is [`ArchiveStore::start_writer`]'s — the same blocks at
++    /// the same locations, the same duplicate and same-slot rules, one commit
++    /// boundary — for a caller loading history with no reader and no other
++    /// writer beside it, so a backend may spend more of the host on the
++    /// batch: the fjall archive encodes its frames in parallel. The opt-in is
++    /// this call, made at the offline boundary and nowhere else: `dolos data
++    /// import-archive`, the import lifecycle behind
++    /// [`crate::ImportExt::import_blocks_offline`] (the Mithril bootstrap and the
++    /// stele publisher's replay) and the logical snapshot restore of a
++    /// `blocks` layer. The sync pipeline, the WAL catch-up and rollback never
++    /// reach it. The default is the ordinary writer.
++    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
++        self.start_writer()
++    }
++
+     fn read_logs(
+         &self,
+         ns: Namespace,
+--- a/crates/core/src/import.rs
++++ b/crates/core/src/import.rs
+@@ -12,8 +12,9 @@
+ use tracing::{debug, instrument};
+ 
+ use crate::{
+-    sync::run_lifecycle, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, RawBlock,
+-    StateError, StateStore, WalError, WalStore, WorkUnit,
++    sync::{run_lifecycle, Lifecycle},
++    BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, RawBlock, StateError, StateStore,
++    WalError, WalStore, WorkUnit,
+ };
+ 
+ /// Extension trait for bulk block import operations.
+@@ -35,32 +36,52 @@
+     ///
+     /// The slot of the last imported block.
+     fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
++
++    /// Import immutable history while the domain is offline, allowing
++    /// bounded parallel archive encoding. Recovery uses `import_blocks`.
++    fn import_blocks_offline(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
+ }
+ 
+ impl<D: Domain> ImportExt for D {
+-    fn import_blocks(&self, mut raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+-        let mut last = 0;
+-        let mut chain = self.write_chain();
++    fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
++        import_blocks(self, raw, Lifecycle::Import)
++    }
+ 
+-        for block in raw.drain(..) {
+-            if !chain.can_receive_block() {
+-                drain_pending_work::<D>(&mut *chain, self)?;
+-            }
+-
+-            last = chain.receive_block(block)?;
+-        }
+-
+-        // One last drain to ensure we're up to date
+-        drain_pending_work::<D>(&mut *chain, self)?;
+-
+-        Ok(last)
++    fn import_blocks_offline(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
++        import_blocks(self, raw, Lifecycle::OfflineImport)
+     }
+ }
+ 
++fn import_blocks<D: Domain>(
++    domain: &D,
++    mut raw: Vec<RawBlock>,
++    lifecycle: Lifecycle,
++) -> Result<BlockSlot, DomainError> {
++    let mut last = 0;
++    let mut chain = domain.write_chain();
++
++    for block in raw.drain(..) {
++        if !chain.can_receive_block() {
++            drain_pending_work::<D>(&mut *chain, domain, lifecycle)?;
++        }
++
++        last = chain.receive_block(block)?;
++    }
++
++    // One last drain to ensure we're up to date
++    drain_pending_work::<D>(&mut *chain, domain, lifecycle)?;
++
++    Ok(last)
++}
++
+ /// Drain all pending work from the chain logic using import lifecycle.
+-fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(), DomainError> {
++fn drain_pending_work<D: Domain>(
++    chain: &mut D::Chain,
++    domain: &D,
++    lifecycle: Lifecycle,
++) -> Result<(), DomainError> {
+     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
+-        execute_work_unit(domain, &mut work)?;
++        execute_work_unit(domain, &mut work, lifecycle)?;
+     }
+ 
+     Ok(())
+@@ -72,18 +93,23 @@
+ /// 1. `initialize()` - Shard-agnostic setup
+ /// 2. For each shard `0..total_shards()`: a. `load()` - Load required data from
+ ///    storage b. `compute()` - Execute computation over loaded data c.
+-///    `commit_state()` - Apply changes to state store d. `commit_archive()` -
+-///    Apply changes to archive store
++///    `commit_state()` - Apply changes to state store d.
++///    `commit_archive()` - Apply archive changes, using
++///    `commit_archive_import()` only for explicit offline imports
+ /// 3. `finalize()` - Shard-agnostic teardown
+ ///
+ /// Skipped phases:
+ /// - `commit_wal()` - Not needed for immutable data import
+ /// - `notify_tip()` - No subscribers during bulk import
+ #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
+-fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
++fn execute_work_unit<D: Domain>(
++    domain: &D,
++    work: &mut D::WorkUnit,
++    lifecycle: Lifecycle,
++) -> Result<(), DomainError> {
+     debug!("executing work unit (import)");
+ 
+-    run_lifecycle(domain, work, false)?;
++    run_lifecycle(domain, work, lifecycle)?;
+ 
+     // Skip tip notifications for import - no live subscribers
+     debug!("skipping tip notifications (import mode)");
+--- a/crates/core/src/sync.rs
++++ b/crates/core/src/sync.rs
+@@ -159,7 +159,7 @@
+ pub fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+     debug!("executing work unit");
+ 
+-    run_lifecycle(domain, work, true)?;
++    run_lifecycle(domain, work, Lifecycle::Sync)?;
+ 
+     update_mempool(domain, work);
+ 
+@@ -172,13 +172,21 @@
+     Ok(())
+ }
+ 
+-/// Run the work-unit phase lifecycle: initialize, the per-shard loop, then
+-/// finalize. Shared between sync and import; `include_wal` toggles the WAL
+-/// commit (disabled in import mode).
++/// Which lifecycle a work unit runs under.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum Lifecycle {
++    /// Every phase, WAL included; the caller notifies tips afterwards.
++    Sync,
++    /// Import or recovery without WAL commits, using serial archive writes.
++    Import,
++    /// Offline immutable history with parallel archive encoding.
++    OfflineImport,
++}
++
+ pub(crate) fn run_lifecycle<D: Domain>(
+     domain: &D,
+     work: &mut D::WorkUnit,
+-    include_wal: bool,
++    lifecycle: Lifecycle,
+ ) -> Result<(), DomainError> {
+     debug!(phase = "initialize", "running phase");
+     work.initialize(domain)?;
+@@ -203,14 +211,17 @@
+         work.load(domain, shard)?;
+         debug!(phase = "compute", "running phase");
+         work.compute(shard)?;
+-        if include_wal {
++        if lifecycle == Lifecycle::Sync {
+             debug!(phase = "commit_wal", "running phase");
+             work.commit_wal(domain, shard)?;
+         }
+         debug!(phase = "commit_state", "running phase");
+         work.commit_state(domain, shard)?;
+         debug!(phase = "commit_archive", "running phase");
+-        work.commit_archive(domain, shard)?;
++        match lifecycle {
++            Lifecycle::Sync | Lifecycle::Import => work.commit_archive(domain, shard)?,
++            Lifecycle::OfflineImport => work.commit_archive_import(domain, shard)?,
++        }
+     }
+ 
+     debug!(phase = "finalize", "running phase");
+--- a/crates/core/src/work_unit.rs
++++ b/crates/core/src/work_unit.rs
+@@ -179,6 +179,18 @@
+     /// Returns an error if archive persistence fails.
+     fn commit_archive(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError>;
+ 
++    /// Apply computed changes to the archive store under a bulk import.
++    ///
++    /// The offline lifecycle ([`crate::ImportExt::import_blocks_offline`]) runs this in place of
++    /// [`WorkUnit::commit_archive`]; the sync lifecycle never does. The
++    /// default delegates, so only a work unit that writes blocks overrides
++    /// it — to ask the archive for its import writer
++    /// ([`crate::ArchiveStore::start_import_writer`]) rather than the
++    /// ordinary one. Everything else about the phase is the same.
++    fn commit_archive_import(&mut self, domain: &D, shard_index: u32) -> Result<(), DomainError> {
++        self.commit_archive(domain, shard_index)
++    }
++
+     /// Shard-agnostic teardown, run once after the last shard's commits.
+     ///
+     /// The default implementation does nothing.
+--- a/crates/fjall/src/archive/mod.rs
++++ b/crates/fjall/src/archive/mod.rs
+@@ -261,6 +261,12 @@
+         })
+     }
+ 
++    /// Which path each block batch took to the segment files, and the most
++    /// an import batch held at once.
++    pub fn append_stats(&self) -> dolos_flatfiles::AppendStats {
++        self.flatfiles.append_stats()
++    }
++
+     /// Get a reference to the underlying database
+     pub fn database(&self) -> &Database {
+         &self.db
+@@ -458,9 +464,35 @@
+     batch: Mutex<OwnedWriteBatch>,
+     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
+     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
++    append: Append,
++    #[cfg(test)]
++    fail_index_commit: bool,
++}
++
++/// How a writer's blocks reach the segment files at commit.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum Append {
++    /// One body after another on the committing thread: every ordinary
++    /// writer, live sync and recovery included.
++    Serial,
++    /// Encoded in parallel windows on the shared Rayon pool — the writer an
++    /// offline import asks for. Same frames at the same locations.
++    Import,
+ }
+ 
+ impl ArchiveWriter {
++    fn new(store: &ArchiveStore, append: Append) -> Self {
++        Self {
++            batch: Mutex::new(store.db.batch()),
++            store: store.clone(),
++            pending_blocks: Mutex::new(Vec::new()),
++            overlay: Mutex::new(HashMap::new()),
++            append,
++            #[cfg(test)]
++            fail_index_commit: false,
++        }
++    }
++
+     fn resolve_locations(
+         &self,
+         overlay: &HashMap<BlockSlot, Vec<BlockLocation>>,
+@@ -620,7 +652,11 @@
+                 })
+                 .collect();
+ 
+-            let locations = self.store.flatfiles.append_batch(&items).map_err(io_err)?;
++            let locations = match self.append {
++                Append::Serial => self.store.flatfiles.append_batch(&items),
++                Append::Import => self.store.flatfiles.import_batch(&items),
++            }
++            .map_err(io_err)?;
+ 
+             let snapshot = self.store.db.snapshot();
+ 
+@@ -644,6 +680,12 @@
+             }
+         }
+ 
++        #[cfg(test)]
++        if self.fail_index_commit {
++            return Err(io_err(std::io::Error::other(
++                "injected index commit failure",
++            )));
++        }
+         let batch = batch.durability(Some(PersistMode::Buffer));
+         batch.commit().map_err(fjall_err)?;
+ 
+@@ -865,12 +907,11 @@
+     type ExactIter = ExactIter;
+ 
+     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+-        Ok(ArchiveWriter {
+-            batch: Mutex::new(self.db.batch()),
+-            store: self.clone(),
+-            pending_blocks: Mutex::new(Vec::new()),
+-            overlay: Mutex::new(HashMap::new()),
+-        })
++        Ok(ArchiveWriter::new(self, Append::Serial))
++    }
++
++    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
++        Ok(ArchiveWriter::new(self, Append::Import))
+     }
+ 
+     fn read_logs(
+@@ -1245,6 +1286,26 @@
+     }
+ 
+     #[test]
++    fn offline_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
++        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
++        write(&store, &[(1, body(1, 0))]);
++        let original = locations(&store, 1);
++        let mut writer = store.start_import_writer().unwrap();
++        writer.apply(&point(2), &body(2, 0)).unwrap();
++        writer.fail_index_commit = true;
++        assert!(writer.commit().is_err());
++        assert!(locations(&store, 2).is_empty());
++        let dead_end = segment_bytes(&store, 0).len() as u64;
++        let writer = store.start_import_writer().unwrap();
++        writer.apply(&point(1), &body(1, 0)).unwrap();
++        writer.apply(&point(2), &body(2, 0)).unwrap();
++        writer.commit().unwrap();
++        assert_eq!(locations(&store, 1), original);
++        assert!(locations(&store, 2)[0].offset >= dead_end);
++        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
++    }
++
++    #[test]
+     fn a_repeated_import_keeps_the_original_frame_and_leaves_the_copy_unnamed() {
+         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+         write(&store, &[(5, body(5, 0)), (9, body(9, 0))]);
+--- a/crates/flatfiles/Cargo.toml
++++ b/crates/flatfiles/Cargo.toml
+@@ -4,6 +4,7 @@
+ edition.workspace = true
+ 
+ [dependencies]
++rayon.workspace = true
+ tempfile = "3"
+ zstd = "0.13"
+ 
+--- a/crates/flatfiles/src/codec.rs
++++ b/crates/flatfiles/src/codec.rs
+@@ -27,6 +27,20 @@
+ /// back before the decoder is pooled.
+ const POOLED_BUFFER_BYTES: usize = 1 << 20;
+ 
++/// The most bytes the frame for a `len`-byte body can take: what an
++/// encoder reserves before compressing it, and what an import window
++/// budgets for it before it is encoded.
++pub fn frame_bound(len: usize) -> usize {
++    zstd::zstd_safe::compress_bound(len)
++}
++
++pub(crate) fn oversized(len: usize) -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidInput,
++        format!("a {len}-byte body exceeds the {MAX_BODY_BYTES}-byte frame limit"),
++    )
++}
++
+ fn encoder_dictionary() -> &'static EncoderDictionary<'static> {
+     static DICTIONARY: OnceLock<EncoderDictionary<'static>> = OnceLock::new();
+     DICTIONARY.get_or_init(|| EncoderDictionary::copy(BUNDLED_DICTIONARY, COMPRESSION_LEVEL))
+@@ -41,6 +55,7 @@
+ pub struct Encoder {
+     compressor: Compressor<'static>,
+     frame: Vec<u8>,
++    bounded: bool,
+ }
+ 
+ impl Encoder {
+@@ -52,6 +67,14 @@
+         Ok(Self {
+             compressor,
+             frame: Vec::new(),
++            bounded: false,
++        })
++    }
++
++    pub(crate) fn for_import() -> io::Result<Self> {
++        Ok(Self {
++            bounded: true,
++            ..Self::new()?
+         })
+     }
+ 
+@@ -59,21 +82,23 @@
+     /// until the next call.
+     pub fn encode(&mut self, body: &[u8]) -> io::Result<&[u8]> {
+         if body.len() > MAX_BODY_BYTES {
+-            return Err(io::Error::new(
+-                io::ErrorKind::InvalidInput,
+-                format!(
+-                    "a {}-byte body exceeds the {MAX_BODY_BYTES}-byte frame limit",
+-                    body.len()
+-                ),
+-            ));
++            return Err(oversized(body.len()));
+         }
+         self.frame.clear();
+-        let bound = zstd::zstd_safe::compress_bound(body.len());
++        let bound = frame_bound(body.len());
+         if self.frame.capacity() < bound {
+-            self.frame.reserve(bound);
++            if self.bounded {
++                self.frame.reserve_exact(bound);
++            } else {
++                self.frame.reserve(bound);
++            }
+         }
+         let n = self.compressor.compress_to_buffer(body, &mut self.frame)?;
+         Ok(&self.frame[..n])
++    }
++
++    pub(crate) fn capacity(&self) -> usize {
++        self.frame.capacity()
+     }
+ }
+ 
+--- a/crates/flatfiles/src/lib.rs
++++ b/crates/flatfiles/src/lib.rs
+@@ -6,14 +6,16 @@
+ //! by its physical offset and length inside its segment; the archive index
+ //! holds those locations and this crate decodes the frame they name. The
+ //! crate knows nothing about Cardano and depends on little beyond the
+-//! standard library: `zstd` for the frames and `tempfile` for throwaway
+-//! stores.
++//! standard library: `zstd` for the frames, `rayon` for the offline import's
++//! parallel encoding and `tempfile` for throwaway stores.
+ 
+ mod codec;
+ mod store;
+ 
+-pub use codec::{BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
+-pub use store::{parse_segment_filename, FlatFileStore, ResourceStats};
++pub use codec::{frame_bound, BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
++pub use store::{
++    parse_segment_filename, AppendStats, FlatFileStore, ResourceStats, IMPORT_WINDOW_BYTES,
++};
+ 
+ /// Number of slots per segment file (one Cardano epoch).
+ pub const SLOTS_PER_SEGMENT: u64 = 432_000;
+--- a/crates/flatfiles/src/store.rs
++++ b/crates/flatfiles/src/store.rs
+@@ -11,6 +11,13 @@
+ //! segments: a segment exists when its file does. What the store holds is
+ //! therefore bounded by the operations in flight, not by the history it
+ //! stores: one encoder, one append handle, a small pool of decoders.
++//!
++//! An offline import ([`FlatFileStore::import_batch`]) is the one batch
++//! that encodes elsewhere than on the appending thread: its bodies are
++//! encoded on the shared Rayon pool in windows bounded by encoded size, and
++//! each window's frames are then written in input order through the same
++//! handles, the same syncs and the same failure handling as any batch. The
++//! segment files it leaves are byte for byte what the serial batch writes.
+ 
+ use std::collections::{BTreeSet, HashMap};
+ use std::fs::{self, File, OpenOptions};
+@@ -18,12 +25,20 @@
+ use std::path::{Path, PathBuf};
+ use std::sync::Mutex;
+ 
+-use crate::codec::{Decoder, Encoder};
++use rayon::prelude::*;
++
++use crate::codec::{frame_bound, oversized, Decoder, Encoder, MAX_BODY_BYTES};
+ use crate::BlockLocation;
+ 
+ /// Decoders kept idle for the next read. Each holds one zstd context and
+ /// at most a megabyte of buffers.
+ const MAX_IDLE_DECODERS: usize = 8;
++
++/// Encoded output an import window may hold before its frames are written,
++/// as the sum of its bodies' frame bounds. A window always admits its first
++/// body, so what an import batch holds encoded at once is at most the larger
++/// of this and one maximal body's frame bound, however long the batch.
++pub const IMPORT_WINDOW_BYTES: usize = 8 << 20;
+ 
+ const SEGMENT_EXTENSION: &str = "segment";
+ 
+@@ -37,6 +52,24 @@
+     pub idle_decoders: usize,
+ }
+ 
++/// What the store's appends have done since it was opened: which path
++/// each batch took, and the most an import batch held at once.
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
++pub struct AppendStats {
++    /// Batches [`FlatFileStore::append_batch`] encoded on the calling thread.
++    pub serial_batches: u64,
++    /// Batches [`FlatFileStore::import_batch`] encoded in parallel windows.
++    pub import_batches: u64,
++    /// Windows the import batches were scheduled in.
++    pub import_windows: u64,
++    /// Most encoder contexts one import batch had alive at once.
++    pub import_encoders_peak: usize,
++    /// Most encoded bytes one import window held before writing them.
++    pub import_window_bytes_peak: usize,
++    /// Peak allocated output and retained encoder scratch bytes together.
++    pub import_buffer_bytes_peak: usize,
++}
++
+ struct Writer {
+     file: File,
+     len: u64,
+@@ -48,6 +81,47 @@
+     writers: Mutex<HashMap<u32, Writer>>,
+     encoder: Mutex<Encoder>,
+     decoders: Mutex<Vec<Decoder>>,
++    appends: Mutex<AppendStats>,
++    #[cfg(test)]
++    hook: Mutex<Option<TestHook>>,
++}
++
++#[cfg(test)]
++type TestHook = std::sync::Arc<dyn Fn(TestEvent) -> io::Result<()> + Send + Sync>;
++
++#[cfg(test)]
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum TestEvent {
++    Encode(usize),
++    Encoded(usize),
++    Write,
++    Sync,
++    DirectorySync,
++}
++
++/// Cut a batch into runs whose frame bounds sum to at most
++/// [`IMPORT_WINDOW_BYTES`]. A run always holds at least one body, so a body
++/// whose bound alone exceeds the budget is a run of its own.
++fn windows_of<'a>(items: &'a [(u32, &'a [u8])]) -> impl Iterator<Item = &'a [(u32, &'a [u8])]> {
++    let mut rest = items;
++    std::iter::from_fn(move || {
++        if rest.is_empty() {
++            return None;
++        }
++        let mut held = 0usize;
++        let mut count = 0usize;
++        for (_, body) in rest {
++            let bound = frame_bound(body.len());
++            if count > 0 && held + bound > IMPORT_WINDOW_BYTES {
++                break;
++            }
++            held += bound;
++            count += 1;
++        }
++        let (window, tail) = rest.split_at(count);
++        rest = tail;
++        Some(window)
++    })
+ }
+ 
+ impl FlatFileStore {
+@@ -60,6 +134,9 @@
+             writers: Mutex::new(HashMap::new()),
+             encoder: Mutex::new(Encoder::new()?),
+             decoders: Mutex::new(Vec::new()),
++            appends: Mutex::new(AppendStats::default()),
++            #[cfg(test)]
++            hook: Mutex::new(None),
+         })
+     }
+ 
+@@ -86,6 +163,10 @@
+             writers: self.writers.lock().unwrap().len(),
+             idle_decoders: self.decoders.lock().unwrap().len(),
+         }
++    }
++
++    pub fn append_stats(&self) -> AppendStats {
++        *self.appends.lock().unwrap()
+     }
+ 
+     /// Append a batch of block bodies to their segment files.
+@@ -105,23 +186,57 @@
+         let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
+         let mut writers = self.writers.lock().unwrap();
+         let result = self.append_locked(&mut writers, &touched, items);
+-        match (&result, touched.iter().next_back()) {
+-            (Ok(_), Some(newest)) => writers.retain(|id, _| id == newest),
+-            _ => {
+-                for id in &touched {
+-                    writers.remove(id);
+-                }
+-            }
++        self.settle(&mut writers, &touched, result.is_ok());
++        if result.is_ok() {
++            self.appends.lock().unwrap().serial_batches += 1;
+         }
+         result
+     }
+ 
+-    fn append_locked(
++    /// Append a batch of block bodies for an offline import.
++    ///
++    /// The contract is [`Self::append_batch`]'s — the same frames at the
++    /// same locations in input order, the same syncs before it returns, the
++    /// same dead space and reopened handles after a failure — with the
++    /// encoding spread over the shared Rayon pool instead of running on the
++    /// calling thread. Bodies are scheduled in windows of at most
++    /// [`IMPORT_WINDOW_BYTES`] of frame bound: a window's frames are encoded
++    /// in parallel, each on its own context, and written in order before the
++    /// next window is encoded, so what the batch holds encoded at once is one
++    /// window however long the batch is. The contexts belong to the call —
++    /// at most one per pool thread, each keeping a scratch buffer no larger
++    /// than the bound of the largest body it encoded — and are dropped with
++    /// it: no thread is created and nothing keeps encoding after the call
++    /// returns. A window of one body is encoded on the calling thread.
++    ///
++    /// A body over [`MAX_BODY_BYTES`] fails the batch before anything is
++    /// written.
++    pub fn import_batch(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
++        if let Some((_, body)) = items.iter().find(|(_, body)| body.len() > MAX_BODY_BYTES) {
++            return Err(oversized(body.len()));
++        }
++        let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
++        let mut writers = self.writers.lock().unwrap();
++        let result = self.import_locked(&mut writers, &touched, items);
++        self.settle(&mut writers, &touched, result.is_ok());
++        result.map(|(locations, run)| {
++            let mut stats = self.appends.lock().unwrap();
++            stats.import_batches += 1;
++            stats.import_windows += run.windows;
++            stats.import_encoders_peak = stats.import_encoders_peak.max(run.encoders);
++            stats.import_window_bytes_peak = stats.import_window_bytes_peak.max(run.window_bytes);
++            stats.import_buffer_bytes_peak = stats.import_buffer_bytes_peak.max(run.buffer_bytes);
++            locations
++        })
++    }
++
++    /// Open a handle for every touched segment that has none, at the file's
++    /// true end. Reports whether one of them was created by this batch.
++    fn open_handles(
+         &self,
+         writers: &mut HashMap<u32, Writer>,
+         touched: &BTreeSet<u32>,
+-        items: &[(u32, &[u8])],
+-    ) -> io::Result<Vec<BlockLocation>> {
++    ) -> io::Result<bool> {
+         let mut created = false;
+         for &segment_id in touched {
+             if let std::collections::hash_map::Entry::Vacant(entry) = writers.entry(segment_id) {
+@@ -134,30 +249,165 @@
+                 entry.insert(Writer { file, len });
+             }
+         }
++        Ok(created)
++    }
++
++    fn write_frame(
++        &self,
++        writers: &mut HashMap<u32, Writer>,
++        segment_id: u32,
++        frame: &[u8],
++    ) -> io::Result<BlockLocation> {
++        let writer = writers.get_mut(&segment_id).unwrap();
++        #[cfg(test)]
++        if let Err(error) = self.test_event(TestEvent::Write) {
++            writer.file.write_all(&frame[..frame.len() / 2])?;
++            return Err(error);
++        }
++        writer.file.write_all(frame)?;
++        let location = BlockLocation {
++            segment_id,
++            offset: writer.len,
++            length: frame.len() as u32,
++        };
++        writer.len += frame.len() as u64;
++        Ok(location)
++    }
++
++    fn sync_touched(
++        &self,
++        writers: &HashMap<u32, Writer>,
++        touched: &BTreeSet<u32>,
++        created: bool,
++    ) -> io::Result<()> {
++        for segment_id in touched {
++            #[cfg(test)]
++            self.test_event(TestEvent::Sync)?;
++            writers[segment_id].file.sync_data()?;
++        }
++        if created {
++            #[cfg(test)]
++            self.test_event(TestEvent::DirectorySync)?;
++            sync_dir(&self.segments_dir)?;
++        }
++        Ok(())
++    }
++
++    /// Keep one handle after a batch, for the newest segment it touched;
++    /// after a failure drop every handle it touched, so the next batch
++    /// reopens them at their true end.
++    fn settle(&self, writers: &mut HashMap<u32, Writer>, touched: &BTreeSet<u32>, ok: bool) {
++        match (ok, touched.iter().next_back()) {
++            (true, Some(newest)) => writers.retain(|id, _| id == newest),
++            _ => {
++                for id in touched {
++                    writers.remove(id);
++                }
++            }
++        }
++    }
++
++    fn append_locked(
++        &self,
++        writers: &mut HashMap<u32, Writer>,
++        touched: &BTreeSet<u32>,
++        items: &[(u32, &[u8])],
++    ) -> io::Result<Vec<BlockLocation>> {
++        let created = self.open_handles(writers, touched)?;
+ 
+         let mut encoder = self.encoder.lock().unwrap();
+         let mut locations = Vec::with_capacity(items.len());
+         for &(segment_id, body) in items {
+             let frame = encoder.encode(body)?;
+-            let writer = writers.get_mut(&segment_id).unwrap();
+-            writer.file.write_all(frame)?;
+-            locations.push(BlockLocation {
+-                segment_id,
+-                offset: writer.len,
+-                length: frame.len() as u32,
+-            });
+-            writer.len += frame.len() as u64;
++            locations.push(self.write_frame(writers, segment_id, frame)?);
+         }
+         drop(encoder);
+ 
+-        for segment_id in touched {
+-            writers[segment_id].file.sync_data()?;
+-        }
+-        if created {
+-            sync_dir(&self.segments_dir)?;
+-        }
++        self.sync_touched(writers, touched, created)?;
+ 
+         Ok(locations)
++    }
++
++    fn import_locked(
++        &self,
++        writers: &mut HashMap<u32, Writer>,
++        touched: &BTreeSet<u32>,
++        items: &[(u32, &[u8])],
++    ) -> io::Result<(Vec<BlockLocation>, ImportRun)> {
++        let created = self.open_handles(writers, touched)?;
++
++        let mut encoders: Vec<Option<Encoder>> = (0..rayon::current_num_threads().min(items.len()))
++            .map(|_| None)
++            .collect();
++        let mut locations = Vec::with_capacity(items.len());
++        let mut run = ImportRun::default();
++        for window in windows_of(items) {
++            let frames: Vec<Vec<Vec<u8>>> = if window.len() == 1 {
++                vec![vec![self
++                    .encoder
++                    .lock()
++                    .unwrap()
++                    .encode(window[0].1)?
++                    .to_vec()]]
++            } else {
++                let chunk_size = window.len().div_ceil(encoders.len());
++                window
++                    .par_chunks(chunk_size)
++                    .zip(encoders.par_iter_mut())
++                    .enumerate()
++                    .map(|(_chunk_index, (chunk, encoder))| {
++                        if encoder.is_none() {
++                            *encoder = Some(Encoder::for_import()?);
++                        }
++                        let encoder = encoder.as_mut().unwrap();
++                        #[cfg(test)]
++                        let mut index = _chunk_index * chunk_size;
++                        chunk
++                            .iter()
++                            .map(|&(_, body)| {
++                                #[cfg(test)]
++                                self.test_event(TestEvent::Encode(index))?;
++                                let frame = encoder.encode(body)?.to_vec();
++                                #[cfg(test)]
++                                {
++                                    self.test_event(TestEvent::Encoded(index))?;
++                                    index += 1;
++                                }
++                                Ok(frame)
++                            })
++                            .collect::<io::Result<Vec<_>>>()
++                    })
++                    .collect::<io::Result<_>>()?
++            };
++            run.windows += 1;
++            run.window_bytes = run
++                .window_bytes
++                .max(frames.iter().flatten().map(Vec::len).sum());
++            run.buffer_bytes = run.buffer_bytes.max(
++                self.encoder.lock().unwrap().capacity()
++                    + encoders
++                        .iter()
++                        .flatten()
++                        .map(Encoder::capacity)
++                        .sum::<usize>()
++                    + frames.iter().flatten().map(Vec::capacity).sum::<usize>(),
++            );
++            for (&(segment_id, _), frame) in window.iter().zip(frames.iter().flatten()) {
++                locations.push(self.write_frame(writers, segment_id, frame)?);
++            }
++        }
++        run.encoders = encoders.iter().flatten().count();
++        drop(encoders);
++
++        self.sync_touched(writers, touched, created)?;
++
++        Ok((locations, run))
++    }
++
++    #[cfg(test)]
++    fn test_event(&self, event: TestEvent) -> io::Result<()> {
++        let hook = self.hook.lock().unwrap().clone();
++        hook.map_or(Ok(()), |hook| hook(event))
+     }
+ 
+     /// Read and decode the body at `loc`.
+@@ -241,6 +491,15 @@
+     }
+ }
+ 
++/// What one import batch used.
++#[derive(Default)]
++struct ImportRun {
++    windows: u64,
++    encoders: usize,
++    window_bytes: usize,
++    buffer_bytes: usize,
++}
++
+ impl std::fmt::Debug for FlatFileStore {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("FlatFileStore")
+@@ -314,6 +573,101 @@
+     use super::*;
+ 
+     #[test]
++    fn ordered_writes_after_deterministically_reversed_encoding() {
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(2)
++            .build()
++            .unwrap();
++        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++        let progress = std::sync::Arc::new((Mutex::new(Vec::new()), std::sync::Condvar::new()));
++        let observed = progress.clone();
++        *store.hook.lock().unwrap() = Some(std::sync::Arc::new(move |event| {
++            let (completed, ready) = &*observed;
++            if event == TestEvent::Encode(0) {
++                let (completed, timeout) = ready
++                    .wait_timeout_while(
++                        completed.lock().unwrap(),
++                        std::time::Duration::from_secs(10),
++                        |completed| completed.is_empty(),
++                    )
++                    .unwrap();
++                assert!(!timeout.timed_out());
++                assert_eq!(*completed, vec![1]);
++            }
++            if let TestEvent::Encoded(index) = event {
++                completed.lock().unwrap().push(index);
++                ready.notify_all();
++            }
++            Ok(())
++        }));
++        let locations = pool
++            .install(|| store.import_batch(&[(0, b"first"), (0, b"second")]))
++            .unwrap();
++        assert_eq!(*progress.0.lock().unwrap(), vec![1, 0]);
++        assert_eq!(locations[0].offset, 0);
++        assert_eq!(locations[1].offset, locations[0].length as u64);
++        assert_eq!(store.read(&locations[0]).unwrap(), b"first");
++        assert_eq!(store.read(&locations[1]).unwrap(), b"second");
++    }
++
++    #[test]
++    fn import_failures_drop_handles_and_retry_after_the_true_end() {
++        for failure in [
++            TestEvent::Encode(1),
++            TestEvent::Write,
++            TestEvent::Sync,
++            TestEvent::DirectorySync,
++        ] {
++            let (dir, store) = FlatFileStore::for_tempdir().unwrap();
++            *store.hook.lock().unwrap() = Some(std::sync::Arc::new(move |event| {
++                if event == failure {
++                    Err(io::Error::other("injected"))
++                } else {
++                    Ok(())
++                }
++            }));
++            assert!(store
++                .import_batch(&[(0, b"first"), (0, b"second")])
++                .is_err());
++            assert_eq!(store.resource_stats().writers, 0);
++            let end = fs::metadata(store.segment_path(0)).unwrap().len();
++            if failure == TestEvent::Encode(1) {
++                assert_eq!(end, 0);
++            }
++            drop(store);
++            let store = FlatFileStore::new(dir.path()).unwrap();
++            let locations = store
++                .import_batch(&[(0, b"first"), (0, b"second")])
++                .unwrap();
++            assert_eq!(locations[0].offset, end);
++            assert_eq!(store.read(&locations[0]).unwrap(), b"first");
++            assert_eq!(store.read(&locations[1]).unwrap(), b"second");
++        }
++    }
++
++    #[test]
++    fn windows_admit_a_first_body_of_any_size_and_close_at_the_budget() {
++        let small = vec![0u8; 1000];
++        let half = vec![0u8; IMPORT_WINDOW_BYTES / 2];
++        let huge = vec![0u8; MAX_BODY_BYTES];
++        let items: Vec<(u32, &[u8])> = vec![
++            (0, &half),
++            (0, &small),
++            (0, &half), // over the budget with the two before it: a new window
++            (1, &huge), // over the budget alone: its own window
++            (1, &small),
++            (1, &small),
++        ];
++        let windows: Vec<usize> = windows_of(&items).map(<[_]>::len).collect();
++        assert_eq!(windows, vec![2, 1, 1, 2]);
++        assert!(windows_of(&[]).next().is_none());
++        for window in windows_of(&items) {
++            let held: usize = window.iter().map(|(_, b)| frame_bound(b.len())).sum();
++            assert!(held <= IMPORT_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)));
++        }
++    }
++
++    #[test]
+     fn segment_filenames_parse_only_in_canonical_form() {
+         assert_eq!(parse_segment_filename("000012.segment"), Some(12));
+         assert_eq!(parse_segment_filename("12.segment"), None);
+--- a/crates/flatfiles/tests/store.rs
++++ b/crates/flatfiles/tests/store.rs
+@@ -5,7 +5,10 @@
+ use std::io::{self, Write};
+ use std::sync::Arc;
+ 
+-use dolos_flatfiles::{BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, MAX_BODY_BYTES};
++use dolos_flatfiles::{
++    frame_bound, BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, IMPORT_WINDOW_BYTES,
++    MAX_BODY_BYTES,
++};
+ 
+ struct Rng(u64);
+ 
+@@ -475,3 +478,238 @@
+     assert!(stats.idle_decoders <= 8, "{stats:?}");
+     assert_eq!(stats.writers, 1);
+ }
++
++/// The two stores hold the same bytes in every one of `segments`.
++fn assert_same_segments(a: &FlatFileStore, b: &FlatFileStore, segments: &[u32]) {
++    for &segment in segments {
++        assert_eq!(
++            fs::read(a.segment_path(segment)).unwrap(),
++            fs::read(b.segment_path(segment)).unwrap(),
++            "segment {segment} differs"
++        );
++    }
++}
++
++#[test]
++fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
++    let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
++    let (_b, import) = FlatFileStore::for_tempdir().unwrap();
++
++    // Three batches of varied bodies over three segments, one of them
++    // crossing a segment inside the batch.
++    let batches: Vec<Vec<(u32, Vec<u8>)>> = vec![
++        bodies(20, 120, 100, 6_000)
++            .into_iter()
++            .map(|b| (0, b))
++            .collect(),
++        bodies(21, 90, 100, 20_000)
++            .into_iter()
++            .enumerate()
++            .map(|(i, b)| (if i < 40 { 0 } else { 1 }, b))
++            .collect(),
++        bodies(22, 60, 1, 3_000)
++            .into_iter()
++            .map(|b| (2, b))
++            .collect(),
++    ];
++    let mut all = Vec::new();
++    for batch in &batches {
++        let items: Vec<(u32, &[u8])> = batch.iter().map(|(s, b)| (*s, b.as_slice())).collect();
++        let from_serial = serial.append_batch(&items).unwrap();
++        let from_import = import.import_batch(&items).unwrap();
++        assert_eq!(from_serial, from_import);
++        assert_eq!(import.resource_stats().writers, 1);
++        all.extend(
++            from_import
++                .into_iter()
++                .zip(batch.iter().map(|(_, b)| b.clone())),
++        );
++    }
++    assert_same_segments(&serial, &import, &[0, 1, 2]);
++    for (loc, body) in &all {
++        assert_eq!(&import.read(loc).unwrap(), body);
++    }
++
++    let stats = import.append_stats();
++    assert_eq!((stats.serial_batches, stats.import_batches), (0, 3));
++    assert!(stats.import_windows >= 3, "{stats:?}");
++    assert!(
++        stats.import_encoders_peak <= rayon::current_num_threads(),
++        "{stats:?}"
++    );
++    let stats = serial.append_stats();
++    assert_eq!((stats.serial_batches, stats.import_batches), (3, 0));
++    assert_eq!(stats.import_encoders_peak, 0);
++}
++
++#[test]
++fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(4)
++        .build()
++        .unwrap();
++    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++
++    // A first body that takes longest to encode, then two hundred tiny ones
++    // whose frames are ready long before it: they must still land after it.
++    let mut bodies = bodies(23, 1, 2 << 20, 2 << 20);
++    bodies.extend(self::bodies(24, 200, 50, 400));
++    let locations = pool
++        .install(|| store.import_batch(&items(0, &bodies)))
++        .unwrap();
++
++    for pair in locations.windows(2) {
++        assert_eq!(pair[1].offset, pair[0].offset + pair[0].length as u64);
++    }
++    let bytes = fs::read(store.segment_path(0)).unwrap();
++    let frames = walk_frames(&bytes);
++    assert_eq!(frames.len(), bodies.len());
++    for ((offset, length), (loc, body)) in frames.iter().zip(locations.iter().zip(&bodies)) {
++        assert_eq!((loc.offset, loc.length), (*offset, *length));
++        let frame = &bytes[*offset as usize..(*offset + *length as u64) as usize];
++        assert_eq!(&decode_independently(frame), body);
++    }
++    let stats = store.append_stats();
++    assert!(stats.import_encoders_peak <= 4, "{stats:?}");
++}
++
++#[test]
++fn import_windows_bound_what_is_held_encoded_without_moving_a_frame() {
++    let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
++    let (_b, import) = FlatFileStore::for_tempdir().unwrap();
++
++    // Bodies of a quarter window each: the batch spans several windows, and
++    // a segment boundary falls inside one of them.
++    let bodies = bodies(25, 12, IMPORT_WINDOW_BYTES / 4, IMPORT_WINDOW_BYTES / 4);
++    let items: Vec<(u32, &[u8])> = bodies
++        .iter()
++        .enumerate()
++        .map(|(i, b)| (if i < 7 { 0 } else { 1 }, b.as_slice()))
++        .collect();
++    let from_serial = serial.append_batch(&items).unwrap();
++    let from_import = import.import_batch(&items).unwrap();
++    assert_eq!(from_serial, from_import);
++    assert_same_segments(&serial, &import, &[0, 1]);
++
++    let stats = import.append_stats();
++    assert_eq!(stats.import_batches, 1);
++    assert!(stats.import_windows >= 3, "{stats:?}");
++    assert!(
++        stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES,
++        "{stats:?}"
++    );
++}
++
++#[test]
++fn retained_encoding_buffers_are_bounded_as_the_callers_batch_grows() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(3)
++        .build()
++        .unwrap();
++    let body = vec![42u8; 128 << 10];
++    for count in [100, 10_000] {
++        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++        let items = vec![(0, body.as_slice()); count];
++        pool.install(|| store.import_batch(&items)).unwrap();
++        let stats = store.append_stats();
++        assert!(stats.import_encoders_peak <= 3);
++        assert!(stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES);
++        assert!(
++            stats.import_buffer_bytes_peak <= IMPORT_WINDOW_BYTES + 3 * frame_bound(body.len())
++        );
++    }
++}
++
++#[test]
++fn a_maximal_body_is_a_window_of_its_own_and_a_larger_one_is_refused_unwritten() {
++    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++    let small = bodies(26, 2, 300, 300);
++    let maximal = vec![7u8; MAX_BODY_BYTES];
++    let locations = store
++        .import_batch(&[
++            (0, small[0].as_slice()),
++            (0, maximal.as_slice()),
++            (0, small[1].as_slice()),
++        ])
++        .unwrap();
++    assert_eq!(store.read(&locations[1]).unwrap(), maximal);
++    assert_eq!(store.read(&locations[2]).unwrap(), small[1]);
++    let stats = store.append_stats();
++    assert_eq!(stats.import_windows, 3, "{stats:?}");
++    assert!(
++        stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)),
++        "{stats:?}"
++    );
++
++    // One byte more is refused before the batch touches a file: the first
++    // body is not written and the new segment is not created.
++    let len_before = file_len(&store, 0);
++    let oversized = vec![1u8; MAX_BODY_BYTES + 1];
++    let err = store
++        .import_batch(&[(0, small[0].as_slice()), (1, oversized.as_slice())])
++        .unwrap_err();
++    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
++    assert_eq!(file_len(&store, 0), len_before);
++    assert!(!store.segment_path(1).exists());
++    assert_eq!(store.append_stats().import_batches, 1);
++}
++
++#[test]
++fn an_import_batch_works_on_one_worker_with_one_body_and_with_none() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(1)
++        .build()
++        .unwrap();
++    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++
++    assert!(store.import_batch(&[]).unwrap().is_empty());
++    assert_eq!(store.resource_stats().writers, 0);
++
++    let one = bodies(27, 1, 500, 500);
++    let loc = pool
++        .install(|| store.import_batch(&items(0, &one)))
++        .unwrap();
++    assert_eq!(store.read(&loc[0]).unwrap(), one[0]);
++
++    let many = bodies(28, 300, 100, 5_000);
++    let locations = pool
++        .install(|| store.import_batch(&items(0, &many)))
++        .unwrap();
++    for (loc, body) in locations.iter().zip(&many) {
++        assert_eq!(&store.read(loc).unwrap(), body);
++    }
++
++    let stats = store.append_stats();
++    assert_eq!(stats.import_batches, 3);
++    assert_eq!(stats.import_encoders_peak, 1, "{stats:?}");
++}
++
++#[test]
++fn an_import_batch_fails_like_a_serial_one_and_the_retry_continues_at_the_true_end() {
++    let (dir, store) = FlatFileStore::for_tempdir().unwrap();
++    let first = bodies(29, 3, 500, 500);
++    let before = store.import_batch(&items(0, &first)).unwrap();
++    fs::create_dir(dir.path().join("000001.segment")).unwrap();
++
++    let err = store
++        .import_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
++        .unwrap_err();
++    assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
++    assert_eq!(
++        file_len(&store, 0),
++        before[2].offset + before[2].length as u64
++    );
++    assert_eq!(store.resource_stats().writers, 0, "the handles are dropped");
++
++    fs::remove_dir(dir.path().join("000001.segment")).unwrap();
++    let retry = store
++        .import_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
++        .unwrap();
++    assert_eq!(retry[0].offset, before[2].offset + before[2].length as u64);
++    assert_eq!(retry[1].offset, 0);
++    assert_eq!(store.read(&retry[1]).unwrap(), first[0]);
++    assert_eq!(store.resource_stats().writers, 1, "only the newest handle");
++    for (loc, body) in before.iter().zip(&first) {
++        assert_eq!(&store.read(loc).unwrap(), body);
++    }
++}
+--- a/crates/snapshot/src/backfill.rs
++++ b/crates/snapshot/src/backfill.rs
+@@ -900,7 +900,7 @@
+ 
+             let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
+ 
+-            match domain.import_blocks(batch) {
++            match domain.import_blocks_offline(batch) {
+                 Ok(last) => self.replay.reached(last),
+                 Err(DomainError::StopEpochReached) => return Ok(Import::Boundary),
+                 Err(e) => return Err(Error::Import(e)),
+--- a/crates/snapshot/src/restore.rs
++++ b/crates/snapshot/src/restore.rs
+@@ -1253,6 +1253,10 @@
+ }
+ 
+ /// One epoch's blocks, appended to the archive in stream order.
++///
++/// A restore is an offline bulk load, so each chunk goes through the
++/// archive's import writer; the frames and locations are the ones the
++/// ordinary writer would produce.
+ fn restore_blocks<R: SteleReader, A: ArchiveStore>(
+     reader: &Reader<'_, R>,
+     descriptor: &LayerDescriptor,
+@@ -1263,7 +1267,7 @@
+         blocks::decode,
+         |record| record.body.len(),
+         |chunk| {
+-            let writer = archive.start_writer()?;
++            let writer = archive.start_import_writer()?;
+ 
+             for record in chunk {
+                 let point = ChainPoint::Specific(record.slot, record.hash);
+--- a/crates/snapshot/tests/restore.rs
++++ b/crates/snapshot/tests/restore.rs
+@@ -612,6 +612,13 @@
+ 
+     let (domain, blank, _) = round_trip::<FjallStores>(default_budget());
+     let archive_dir = blank.stores.path().join("archive");
++
++    // The blocks layers went through the archive's import writer, and
++    // nothing else did: a restore is the offline load that path is for.
++    let appends = blank.archive.append_stats();
++    assert!(appends.import_batches > 0, "{appends:?}");
++    assert_eq!(appends.serial_batches, 0, "{appends:?}");
++
+     let restored = blocks_of(&blank.archive);
+     assert_eq!(restored, blocks_of(domain.archive()), "order and bodies");
+     let hashes = |blocks: &[(u64, Vec<u8>)]| -> Vec<String> {
+@@ -633,6 +640,12 @@
+     assert_eq!(
+         blank.archive.get_tip().unwrap().map(|(s, _)| s),
+         Some(tip_slot + 20)
++    );
++    let after = blank.archive.append_stats();
++    assert_eq!(
++        (after.serial_batches, after.import_batches),
++        (1, appends.import_batches),
++        "an ordinary append after the restore is serial"
+     );
+     assert_eq!(
+         blank
+--- a/crates/testing/src/blocks.rs
++++ b/crates/testing/src/blocks.rs
+@@ -14,6 +14,24 @@
+     },
+ };
+ use std::collections::BTreeMap;
++
++/// Write one deterministic immutable chunk and an excluded volatile tail.
++pub fn write_immutable_fixture(dir: &std::path::Path, blocks: &[RawBlock]) {
++    let mut primary = vec![1u8];
++    let mut secondary = Vec::new();
++    let mut chunk = Vec::new();
++    for (index, body) in blocks.iter().enumerate() {
++        primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
++        secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
++        secondary.extend_from_slice(&[0u8; 48]);
++        chunk.extend_from_slice(body);
++    }
++    primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
++    std::fs::write(dir.join("00000.primary"), primary).unwrap();
++    std::fs::write(dir.join("00000.secondary"), secondary).unwrap();
++    std::fs::write(dir.join("00000.chunk"), chunk).unwrap();
++    std::fs::write(dir.join("00001.chunk"), []).unwrap();
++}
+ 
+ pub fn slot_to_hash(slot: u64) -> BlockHash {
+     let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+--- a/src/adapters/storage.rs
++++ b/src/adapters/storage.rs
+@@ -1043,6 +1043,20 @@
+             Self::Fjall(s) => CoreArchiveStore::start_writer(s)
+                 .map(|writer| ArchiveWriterBackend::Fjall(Box::new(writer))),
+             Self::NoOp(s) => CoreArchiveStore::start_writer(s).map(ArchiveWriterBackend::NoOp),
++        }
++    }
++
++    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
++        match self {
++            Self::Memory(s) => CoreArchiveStore::start_import_writer(s)
++                .map(|writer| ArchiveWriterBackend::Memory(Box::new(writer))),
++            Self::LogsOnly(inner) => CoreArchiveStore::start_import_writer(inner.as_ref())
++                .map(|writer| ArchiveWriterBackend::LogsOnly(Box::new(writer))),
++            Self::Fjall(s) => CoreArchiveStore::start_import_writer(s)
++                .map(|writer| ArchiveWriterBackend::Fjall(Box::new(writer))),
++            Self::NoOp(s) => {
++                CoreArchiveStore::start_import_writer(s).map(ArchiveWriterBackend::NoOp)
++            }
+         }
+     }
+ 
+--- a/src/bin/dolos/bootstrap/mithril.rs
++++ b/src/bin/dolos/bootstrap/mithril.rs
+@@ -66,12 +66,10 @@
+     }
+ }
+ 
+-fn define_starting_point(
++fn define_starting_point<S: dolos_core::StateStore>(
+     args: &Args,
+-    state: &dolos::storage::StateStoreBackend,
++    state: &S,
+ ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
+-    use dolos_core::StateStore;
+-
+     if let Some(point) = &args.start_from {
+         Ok(point.clone().try_into().unwrap())
+     } else {
+@@ -90,8 +88,8 @@
+ 
+ /// Inner import function that can return errors.
+ /// The outer function ensures shutdown is called regardless of success/failure.
+-fn do_import(
+-    domain: &dolos::adapters::DomainAdapter,
++fn do_import<D: dolos_core::Domain>(
++    domain: &D,
+     args: &Args,
+     immutable_path: &Path,
+     feedback: &Feedback,
+@@ -134,7 +132,7 @@
+         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
+ 
+         let last = domain
+-            .import_blocks(batch)
++            .import_blocks_offline(batch)
+             .map_err(|e| miette::miette!(e.to_string()))?;
+ 
+         progress.set_position(last);
+@@ -221,3 +219,65 @@
+ 
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use dolos_core::{ArchiveStore, Domain};
++    use dolos_testing::{
++        blocks::write_immutable_fixture,
++        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
++        toy_domain::{FjallStores, ToyDomain},
++    };
++    use pallas::ledger::traverse::MultiEraBlock;
++
++    #[test]
++    fn mithril_import_resumes_through_the_offline_writer() {
++        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
++            block_count: 8,
++            slot: 100,
++            ..Default::default()
++        });
++        let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
++            Arc::new(dolos_cardano::include::preview::load()),
++            config,
++            None,
++            None,
++        );
++        domain.import_blocks(vec![blocks[0].clone()]).unwrap();
++        let first = MultiEraBlock::decode(&blocks[0]).unwrap();
++        let args = Args {
++            start_from: Some(ChainPoint::Specific(first.slot(), first.hash())),
++            ..Default::default()
++        };
++        let dir = tempfile::tempdir().unwrap();
++        write_immutable_fixture(dir.path(), &blocks);
++        do_import(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
++        let stats = domain.archive().append_stats();
++        assert!(stats.import_batches > 0, "{stats:?}");
++        assert_eq!(stats.serial_batches, 1);
++        let restored: Vec<_> = domain
++            .archive()
++            .get_range(None, None)
++            .unwrap()
++            .map(|(_, body)| body)
++            .collect();
++        assert_eq!(
++            restored,
++            blocks
++                .iter()
++                .map(|body| body.as_ref().clone())
++                .collect::<Vec<_>>()
++        );
++        let before = domain.archive().append_stats();
++        do_import(
++            &domain,
++            &Args::default(),
++            dir.path(),
++            &Feedback::hidden(),
++            3,
++        )
++        .unwrap();
++        assert_eq!(domain.archive().append_stats(), before);
++    }
++}
+--- a/src/bin/dolos/data/import_archive.rs
++++ b/src/bin/dolos/data/import_archive.rs
+@@ -105,6 +105,7 @@
+     progress.set_position(cursor.slot_or_default());
+ 
+     let mut reached_end = false;
++    let mut benchmark_commits = Vec::new();
+ 
+     for chunk in iter.chunks(args.chunk_size).into_iter() {
+         if reached_end {
+@@ -135,11 +136,12 @@
+             .into_diagnostic()
+             .context("failed to decode block from immutable DB")?;
+ 
+-        // Write to archive (sequential, as the writer is not thread-safe)
++        // One sequential archive writer per chunk; the import writer encodes
++        // the chunk's frames on the Rayon pool that just decoded it.
+         let writer = archive
+-            .start_writer()
++            .start_import_writer()
+             .into_diagnostic()
+-            .context("starting archive writer")?;
++            .context("starting archive import writer")?;
+ 
+         for block in decoded {
+             // Stop if we've passed end_slot
+@@ -158,13 +160,33 @@
+             progress.set_position(block.slot);
+         }
+ 
++        let benchmark_started = std::time::Instant::now();
+         writer
+             .commit()
+             .into_diagnostic()
+             .context("committing archive batch")?;
++        benchmark_commits.push(benchmark_started.elapsed().as_nanos() as u64);
+     }
+ 
+     progress.finish_with_message("archive import complete");
++    if let Some(path) = std::env::var_os("DOLOS_ARCHIVE_BENCH_METRICS") {
++        let buffers = match &archive {
++        dolos::adapters::ArchiveStoreBackend::Fjall(store) => {
++            let stats = store.append_stats();
++            serde_json::json!({
++                "encoders_peak": stats.import_encoders_peak,
++                "window_bytes_peak": stats.import_window_bytes_peak,
++                "buffer_bytes_peak": stats.import_buffer_bytes_peak,
++                "windows": stats.import_windows,
++                "import_batches": stats.import_batches,
++                "serial_batches": stats.serial_batches,
++            })
++        }
++        _ => serde_json::Value::Null,
++    };
++        let metrics = serde_json::json!({"commit_ns": benchmark_commits, "buffers": buffers});
++        std::fs::write(path, serde_json::to_vec(&metrics).unwrap()).unwrap();
++    }
+ 
+     Ok(())
+ }
