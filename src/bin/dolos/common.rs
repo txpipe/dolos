@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
@@ -355,60 +355,6 @@ pub async fn monitor_drivers(
     first_failure.map_or(Ok(()), Err)
 }
 
-/// Clear the storage an accepted upgrade replaces.
-///
-/// The wipe is [`storage::clear_storage`]'s recursive removal of
-/// `storage.path`, and it only runs when that is the whole of the old data:
-/// a store configured outside the root would survive it, and a config
-/// recorded at the new version over a surviving store is the mismatch the
-/// version gate exists to refuse. So a store outside the root, or a symlink
-/// anywhere under it, aborts before anything is deleted and names what to
-/// remove by hand. A root that does not exist is nothing to clear.
-pub fn cleanup_data(config: &RootConfig) -> miette::Result<()> {
-    let root = &config.storage.path;
-
-    let outside = storage::stores_outside_root(&config.storage).into_diagnostic()?;
-
-    if !outside.is_empty() {
-        let listed = outside
-            .iter()
-            .map(|path| format!("  {}", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        miette::bail!(
-            "the configuration keeps stores outside the storage root {}, so clearing the \
-             root would leave them behind:\n{listed}\nRemove the storage root and each of \
-             those directories by hand, then run `dolos init` again",
-            root.display(),
-        );
-    }
-
-    let links = storage::symlinks_under(root).into_diagnostic()?;
-
-    if !links.is_empty() {
-        let listed = links
-            .iter()
-            .map(|path| format!("  {}", path.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        miette::bail!(
-            "the storage root {} holds symbolic links, and clearing it would not reach \
-             what they point at:\n{listed}\nRemove the storage root and the linked \
-             directories by hand, then run `dolos init` again",
-            root.display(),
-        );
-    }
-
-    if !root.exists() {
-        info!(path = %root.display(), "no storage to clear");
-        return Ok(());
-    }
-
-    storage::clear_storage(root).into_diagnostic()
-}
-
 #[cfg(test)]
 mod tests {
     use dolos_core::config::StelaeConfig;
@@ -482,141 +428,6 @@ mod tests {
             },
             "the DOLOS_ prefix no longer reaches [stelae.registry]",
         );
-    }
-
-    /// A configuration over `root` with every store on its disk backend at
-    /// its default path, so the root is all the data there is.
-    fn config_over(root: &std::path::Path) -> RootConfig {
-        let toml = format!(
-            r#"
-            [upstream]
-            peer_address = "unused.example:3001"
-
-            [storage]
-            version = "v4"
-            path = {path}
-
-            [storage.mempool]
-            backend = "redb"
-
-            [genesis]
-            byron_path = "byron.json"
-            shelley_path = "shelley.json"
-            alonzo_path = "alonzo.json"
-            conway_path = "conway.json"
-
-            [chain]
-            type = "cardano"
-            magic = 2
-            is_testnet = true
-            "#,
-            path = toml::Value::String(root.display().to_string()),
-        );
-
-        toml::from_str(&toml).unwrap()
-    }
-
-    /// The directory-based stores with files nested inside them, a block
-    /// segment, and a restore's progress file: what a wipe has to take.
-    fn old_store_under(root: &std::path::Path) -> Vec<PathBuf> {
-        let files = vec![
-            root.join("wal").join("journal"),
-            root.join("state").join("index").join("000001.sst"),
-            root.join("archive").join("index").join("000001.sst"),
-            root.join("archive").join("000000.segment"),
-            dolos_snapshot::restore::progress_path_in(root),
-        ];
-
-        for file in &files {
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(file, b"a store built by v1.6").unwrap();
-        }
-
-        files
-    }
-
-    /// The stores are directories, not files under the root, and the wipe
-    /// takes them whole — the restore progress file with them — and leaves
-    /// an empty root for the bootstrap that follows.
-    #[test]
-    fn cleanup_clears_the_nested_stores_and_the_restore_progress() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("data");
-        let files = old_store_under(&root);
-
-        cleanup_data(&config_over(&root)).unwrap();
-
-        assert!(!files.iter().any(|file| file.exists()));
-        assert!(root.is_dir());
-        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
-    }
-
-    /// A root that is not there is nothing to clear, not a failure.
-    #[test]
-    fn cleanup_of_a_missing_root_is_nothing_to_do() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("never-created");
-
-        cleanup_data(&config_over(&root)).unwrap();
-
-        assert!(!root.exists(), "a root that was not there is not created");
-    }
-
-    /// A store configured outside the root would survive a wipe of the root,
-    /// so the cleanup refuses before deleting anything and names it.
-    #[test]
-    fn cleanup_refuses_a_store_outside_the_root_before_deleting_anything() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("data");
-        let blocks = dir.path().join("blocks");
-        let files = old_store_under(&root);
-
-        std::fs::create_dir_all(&blocks).unwrap();
-        std::fs::write(blocks.join("000000.segment"), b"a store built by v1.6").unwrap();
-
-        let mut config = config_over(&root);
-        let dolos_core::config::ArchiveStoreConfig::Fjall(archive) = &mut config.storage.archive
-        else {
-            panic!("the default archive backend is fjall");
-        };
-        archive.blocks_path = Some(blocks.clone());
-
-        let error =
-            cleanup_data(&config).expect_err("a store outside the root refuses the cleanup");
-
-        let message = error.to_string();
-        assert!(message.contains(&blocks.display().to_string()), "{message}");
-        assert!(message.contains("by hand"), "{message}");
-        assert!(files.iter().all(|file| file.is_file()));
-        assert!(blocks.join("000000.segment").is_file());
-    }
-
-    /// A symlink under the root points at data the wipe would not reach, so
-    /// the cleanup refuses before deleting anything and names the link.
-    #[cfg(unix)]
-    #[test]
-    fn cleanup_refuses_a_root_with_symlinks_before_deleting_anything() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("data");
-        let elsewhere = dir.path().join("elsewhere");
-        let files = old_store_under(&root);
-
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::fs::write(elsewhere.join("000000.segment"), b"a store built by v1.6").unwrap();
-        std::os::unix::fs::symlink(&elsewhere, root.join("blocks")).unwrap();
-
-        let error = cleanup_data(&config_over(&root))
-            .expect_err("a symlink under the root refuses the cleanup");
-
-        let message = error.to_string();
-        assert!(
-            message.contains(&root.join("blocks").display().to_string()),
-            "{message}"
-        );
-        assert!(message.contains("by hand"), "{message}");
-        assert!(files.iter().all(|file| file.is_file()));
-        assert!(root.join("blocks").is_symlink());
-        assert!(elsewhere.join("000000.segment").is_file());
     }
 
     #[tokio::test]

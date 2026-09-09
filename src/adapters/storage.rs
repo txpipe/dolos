@@ -21,7 +21,7 @@ use dolos_core::{
     },
     config::{
         ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
-        RootConfig, StateStoreConfig, StorageConfig, StorageVersion, WalStoreConfig,
+        RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
     ExactRecord, IndexRecord, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
@@ -65,105 +65,6 @@ pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
         .map_err(|e| Error::StorageError(format!("recreating storage directory: {e}")))?;
 
     Ok(())
-}
-
-/// The configured store paths a wipe of `storage.path` would not reach.
-///
-/// Every store the configuration names has to sit under the root for a wipe of
-/// the root to be the whole of the old data: a store configured elsewhere — an
-/// absolute path, or a relative one that climbs out — would survive it. The
-/// comparison is lexical, on the paths as the stores resolve them: symlinks are
-/// not followed, so a link under the root reads as under the root, and what it
-/// points at is never in question here.
-pub fn stores_outside_root(storage: &StorageConfig) -> Result<Vec<PathBuf>, Error> {
-    let cwd = std::env::current_dir()?;
-    let root = normalize(&cwd, &storage.path);
-
-    let blocks_path = match &storage.archive {
-        ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.clone(),
-        ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
-    };
-
-    let outside = [
-        storage.wal_path(),
-        storage.state_path(),
-        storage.archive_path(),
-        blocks_path,
-        storage.mempool_path(),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|path| !normalize(&cwd, path).starts_with(&root))
-    .collect();
-
-    Ok(outside)
-}
-
-/// Every symlink under `root`, the root itself included, without following any.
-///
-/// A wipe that reaches a symlink cannot know whether the store behind it is
-/// the operator's to lose, so a caller that intends to delete asks first and
-/// refuses on a non-empty answer. Walks with `symlink_metadata`, so a link to
-/// a directory is reported and never descended into.
-pub fn symlinks_under(root: &Path) -> Result<Vec<PathBuf>, Error> {
-    let mut found = Vec::new();
-
-    let Ok(metadata) = std::fs::symlink_metadata(root) else {
-        return Ok(found);
-    };
-
-    if metadata.file_type().is_symlink() {
-        found.push(root.to_path_buf());
-        return Ok(found);
-    }
-
-    if !metadata.is_dir() {
-        return Ok(found);
-    }
-
-    let mut pending = vec![root.to_path_buf()];
-
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-
-            if file_type.is_symlink() {
-                found.push(entry.path());
-            } else if file_type.is_dir() {
-                pending.push(entry.path());
-            }
-        }
-    }
-
-    found.sort();
-
-    Ok(found)
-}
-
-/// Make `path` absolute against `cwd` and fold `.` and `..` lexically.
-fn normalize(cwd: &Path, path: &Path) -> PathBuf {
-    use std::path::Component;
-
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
-
-    let mut out = PathBuf::new();
-
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-
-    out
 }
 
 /// What to do about data already in storage.
@@ -1583,76 +1484,6 @@ mod tests {
             .expect("the current version opens");
 
         assert!(root.is_dir());
-    }
-
-    /// The stores at their default paths all sit under the root; a store
-    /// configured elsewhere — absolute, or relative and climbing out — is what
-    /// gets reported. A relative override inside the root is not.
-    #[test]
-    fn stores_outside_root_reports_what_a_wipe_of_the_root_would_miss() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("data");
-        let elsewhere = temp.path().join("elsewhere");
-
-        let mut storage = config_over(&root, "v4").storage;
-
-        assert!(stores_outside_root(&storage).unwrap().is_empty());
-
-        let StateStoreConfig::Fjall(state) = &mut storage.state else {
-            panic!("the fixture leaves state on fjall");
-        };
-        state.path = Some(PathBuf::from("inner/state"));
-
-        assert!(stores_outside_root(&storage).unwrap().is_empty());
-
-        let StateStoreConfig::Fjall(state) = &mut storage.state else {
-            panic!("the fixture leaves state on fjall");
-        };
-        state.path = Some(elsewhere.join("state"));
-
-        let ArchiveStoreConfig::Fjall(archive) = &mut storage.archive else {
-            panic!("the fixture leaves the archive on fjall");
-        };
-        archive.path = Some(PathBuf::from("../sibling/archive"));
-        archive.blocks_path = Some(elsewhere.join("blocks"));
-
-        let outside = stores_outside_root(&storage).unwrap();
-
-        assert_eq!(
-            outside,
-            vec![
-                elsewhere.join("state"),
-                root.join("../sibling/archive"),
-                elsewhere.join("blocks"),
-            ]
-        );
-    }
-
-    /// A link under the root is reported and not descended into, and a root
-    /// that is itself a link is reported as the whole answer.
-    #[cfg(unix)]
-    #[test]
-    fn symlinks_under_reports_links_without_following_them() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("data");
-        let elsewhere = temp.path().join("elsewhere");
-
-        std::fs::create_dir_all(root.join("state")).unwrap();
-        std::fs::write(root.join("state").join("journal"), b"state").unwrap();
-        std::fs::create_dir_all(&elsewhere).unwrap();
-        std::fs::write(elsewhere.join("000000.segment"), b"blocks").unwrap();
-        std::os::unix::fs::symlink(&elsewhere, root.join("archive")).unwrap();
-
-        assert_eq!(symlinks_under(&root).unwrap(), vec![root.join("archive")]);
-
-        let linked_root = temp.path().join("linked");
-        std::os::unix::fs::symlink(&root, &linked_root).unwrap();
-
-        assert_eq!(symlinks_under(&linked_root).unwrap(), vec![linked_root]);
-
-        assert!(symlinks_under(&temp.path().join("missing"))
-            .unwrap()
-            .is_empty());
     }
 
     /// `in_memory` has to reach the builtin stores, not a memory-mode disk

@@ -109,26 +109,14 @@ The `storage` section controls how Dolos stores data in the local file system. E
 | version  | string | "v4"   |
 
 - `path`: root directory where all data will be stored.
-- `version`: storage schema version (`v0` - `v4`). This release reads `v4`
-  only, and this field is the whole of the compatibility check: the version
-  the configuration declares against the one the binary carries, with nothing
-  inspected on disk. Every command that opens a store — the daemon, the
-  `data` and `doctor` tooling, and `bootstrap` alike — refuses an older
-  version before it creates or opens anything, with an error naming the
-  remedy. `v4` is the v1.7 layout: the archive's block bodies as independent
-  zstd (level 3) frames compressed with the dictionary bundled in the binary,
-  and the standalone index store folded into the state and archive stores.
-  It has no compression knobs; there is nothing to tune. The remedy is
-  `dolos init`: an older configuration it can read gets the offer to clear
-  the data directory and re-bootstrap, and declining leaves the setup exactly
-  as it was found; a configuration it cannot read — one naming a removed
-  backend, or carrying the retired `block_compression` table — gets
-  manual-removal instructions instead, because init does not guess where the
-  old data lives. Init also refuses to clear a data directory that keeps a
-  store outside it or holds symbolic links, and names what to remove by hand.
-  A data directory written by an older layout and relabelled `v4` by hand is
-  unsupported: it is not detected, and it is not guaranteed to fail. See the
-  [migration guide](https://docs.txpipe.io/dolos/migration/dolos-v1-7).
+- `version`: storage schema version (`v0` - `v4`). This release only reads
+  `v4`, which stores independently compressed zstd-3 block frames using the
+  bundled dictionary and folds the former index store into state and archive;
+  there are no compression settings. Run `dolos init` to upgrade a readable
+  older configuration, or follow the manual steps in the
+  [migration guide](https://docs.txpipe.io/dolos/migration/dolos-v1-7) when it
+  cannot be read. Relabelling an older data directory as `v4` is unsupported
+  and is not detected.
 
 Besides the stores, this directory holds `scratch/`: where `dolos snapshot
 publish`, `dolos snapshot backfill`, `dolos bootstrap stelae` and `dolos
