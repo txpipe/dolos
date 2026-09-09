@@ -98,9 +98,24 @@ pub fn drep_is_retired(state: &DRepState) -> bool {
     state.is_unregistered()
 }
 
-/// Blockfrost's `expired` flag: a still-registered DRep whose last activity
-/// lies more than `drep_activity` epochs behind the tip. The epoch where the
-/// two are exactly equal is still active.
+/// Blockfrost's `expired` flag.
+///
+/// Blockfrost derives this in SQL from the epoch of the DRep's latest
+/// registration or vote: `registered AND current_epoch - last_active_epoch >
+/// drep_activity`. A DRep that has neither registered nor voted has no such
+/// epoch, and SQL's `NULL > n` sends that row to the `ELSE FALSE` arm, so
+/// Blockfrost never reports one as expired — which is why the `None` case
+/// here answers `false` rather than falling back to anything.
+///
+/// Deliberately *not* read off the ledger expiry dolos keeps in
+/// [`DRepState::expiry`] and `expired`. That value is the Haskell ledger's
+/// own, dormancy credit and all, and it is what the epoch boundary rules on;
+/// Blockfrost's flag is a db-sync heuristic that knows nothing of either.
+/// The two part company exactly on the DReps that were never registered:
+/// the ledger expires them, Blockfrost does not. Serving the ledger value
+/// here disagreed with live Blockfrost on 13 of the first 3000 preview
+/// DReps, all of them never-registered vote-delegation targets, so the
+/// endpoint keeps Blockfrost's rule and the ledger keeps its own.
 pub fn drep_is_expired(
     state: &DRepState,
     chain: &ChainSummary,

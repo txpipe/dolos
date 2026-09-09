@@ -191,6 +191,19 @@ impl DRepState {
             }
         }
     }
+
+    /// When the DRep first appeared on chain, as far as this row can tell. A
+    /// row written before `first_seen_at` existed falls back to its earliest
+    /// lifecycle stamp, the closest on-chain reference it kept; a row with
+    /// neither has no answer.
+    pub fn first_seen(&self) -> Option<(BlockSlot, TxOrder)> {
+        self.first_seen_at.or_else(|| {
+            [self.registered_at, self.unregistered_at]
+                .into_iter()
+                .flatten()
+                .min()
+        })
+    }
 }
 
 entity_boilerplate!(DRepState, "dreps");
@@ -414,14 +427,10 @@ impl dolos_core::EntityDelta for DRepSeen {
         // field, so its lifecycle stamps are earlier on-chain references than
         // any new sighting
         if entity.first_seen_at.is_none() {
-            entity.first_seen_at = [
-                entity.registered_at,
-                entity.unregistered_at,
-                Some((self.slot, self.txorder)),
-            ]
-            .into_iter()
-            .flatten()
-            .min();
+            entity.first_seen_at = [entity.first_seen(), Some((self.slot, self.txorder))]
+                .into_iter()
+                .flatten()
+                .min();
         }
     }
 
@@ -1072,6 +1081,22 @@ mod prop_tests {
 
         seen.undo(&mut entity);
         assert_eq!(entity.unwrap().first_seen_at, None);
+    }
+
+    #[test]
+    fn first_seen_falls_back_to_lifecycle_stamps() {
+        let mut state = DRepState::new(DRep::Key([1u8; 28].into()));
+        assert_eq!(state.first_seen(), None);
+
+        // a legacy row: re-registered after a retirement, so the earliest
+        // stamp is the unregistration
+        state.registered_at = Some((300, 0));
+        state.unregistered_at = Some((200, 1));
+        assert_eq!(state.first_seen(), Some((200, 1)));
+
+        // once recorded, the sighting wins over any stamp
+        state.first_seen_at = Some((100, 2));
+        assert_eq!(state.first_seen(), Some((100, 2)));
     }
 }
 
