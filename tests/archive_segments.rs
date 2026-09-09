@@ -19,7 +19,10 @@ use dolos_core::{
     BlockSlot, ChainPoint, StateSchema,
 };
 use dolos_fjall::archive::ArchiveStore;
-use dolos_fjall::flatfiles::{BUNDLED_DICTIONARY, MAX_BODY_BYTES, SLOTS_PER_SEGMENT};
+use dolos_fjall::flatfiles::{
+    FlatFileStore, BUNDLED_DICTIONARY, MAX_BODY_BYTES, SLOTS_PER_SEGMENT,
+};
+use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
 
 fn open(dir: &Path) -> ArchiveStore {
     let config = dolos_core::config::FjallArchiveConfig {
@@ -64,36 +67,30 @@ fn undo<S: CoreArchiveStore>(store: &S, slots: &[BlockSlot]) {
     writer.commit().unwrap();
 }
 
+/// Blocks as a history writes them: slot and body.
+type Blocks = [(BlockSlot, Vec<u8>)];
+
 /// Four segments, with a slot in segments 0 and 1 holding two blocks (the
 /// Byron boundary shape) and every segment written in more than one batch.
-fn write_history<S: CoreArchiveStore>(store: &S) {
-    write(
-        store,
-        &[
-            (slot(0, 1), body(slot(0, 1), 0)),
-            (slot(0, 5), body(slot(0, 5), 0)),
-            (slot(0, 9), body(slot(0, 9), 0)),
-            (slot(1, 0), body(slot(1, 0), 0)),
-            (slot(1, 4), body(slot(1, 4), 0)),
-        ],
-    );
-    write(
-        store,
-        &[
-            (slot(0, 9), body(slot(0, 9), 1)),
-            (slot(0, 13), body(slot(0, 13), 0)),
-            (slot(1, 8), body(slot(1, 8), 0)),
-            (slot(1, 8), body(slot(1, 8), 1)),
-        ],
-    );
-    write(
-        store,
-        &[
-            (slot(2, 2), body(slot(2, 2), 0)),
-            (slot(2, 6), body(slot(2, 6), 0)),
-            (slot(3, 1), body(slot(3, 1), 0)),
-        ],
-    );
+fn write_history(write: &dyn Fn(&Blocks)) {
+    write(&[
+        (slot(0, 1), body(slot(0, 1), 0)),
+        (slot(0, 5), body(slot(0, 5), 0)),
+        (slot(0, 9), body(slot(0, 9), 0)),
+        (slot(1, 0), body(slot(1, 0), 0)),
+        (slot(1, 4), body(slot(1, 4), 0)),
+    ]);
+    write(&[
+        (slot(0, 9), body(slot(0, 9), 1)),
+        (slot(0, 13), body(slot(0, 13), 0)),
+        (slot(1, 8), body(slot(1, 8), 0)),
+        (slot(1, 8), body(slot(1, 8), 1)),
+    ]);
+    write(&[
+        (slot(2, 2), body(slot(2, 2), 0)),
+        (slot(2, 6), body(slot(2, 6), 0)),
+        (slot(3, 1), body(slot(3, 1), 0)),
+    ]);
 }
 
 /// Everything an archive answers about its blocks.
@@ -166,11 +163,18 @@ struct Pair {
 
 impl Pair {
     fn new() -> Self {
+        Self::with(write_history)
+    }
+
+    /// Both stores receive whatever `history` writes.
+    fn with(history: impl Fn(&dyn Fn(&Blocks))) -> Self {
         let memory = MemoryArchiveStore::new(StateSchema::default());
         let dir = tempfile::tempdir().unwrap();
         let fjall = open(dir.path());
-        write_history(&fjall);
-        write_history(&memory);
+        history(&|blocks| {
+            write(&fjall, blocks);
+            write(&memory, blocks);
+        });
         Self {
             memory,
             fjall: Some(fjall),
@@ -178,15 +182,25 @@ impl Pair {
         }
     }
 
+    /// Close the fjall store, leaving the directory as a crash would.
+    fn close(&mut self) {
+        drop(self.fjall.take());
+    }
+
     fn fjall(&self) -> &ArchiveStore {
         self.fjall.as_ref().expect("the fjall store is open")
     }
 
     fn assert_agree(&self, what: &str) {
+        self.assert_views_agree(what);
+        self.assert_segments_are_frames(what);
+    }
+
+    /// The two stores answer alike, whatever the segment files hold.
+    fn assert_views_agree(&self, what: &str) {
         let expected = view(&self.memory);
         assert_eq!(view(self.fjall()), expected, "fjall diverged: {what}");
         assert!(!expected.forward.is_empty(), "{what}: the fixture is empty");
-        self.assert_segments_are_frames(what);
     }
 
     /// Close the fjall store and open it again from disk.
@@ -393,6 +407,173 @@ fn pruning_drops_whole_segments_and_survives_a_reopen() {
         vec!["000001.segment", "000002.segment", "000003.segment"]
     );
 
+    pair.reopen();
+    pair.assert_agree("after reopening");
+}
+
+/// The segments a fjall store at `dir` writes to, opened the way the store
+/// itself opens them, so frames can be planted where a crash would leave
+/// them: appended and synced, with no index entry naming them.
+fn segments_of(dir: &Path) -> FlatFileStore {
+    FlatFileStore::new(dir).unwrap()
+}
+
+#[test]
+fn frames_a_crash_left_unindexed_are_dead_space_the_next_batch_lands_past() {
+    let mut pair = Pair::new();
+    let before = fs::read(pair.segment_path(0)).unwrap();
+
+    // The archive writer appends and syncs frames before it commits their
+    // locations. A crash between the two leaves whole frames nothing names.
+    pair.close();
+    let orphans = [body(slot(0, 15), 3), body(slot(0, 16), 3)];
+    let planted = segments_of(pair.dir.path())
+        .append_batch(&[(0, orphans[0].as_slice()), (0, orphans[1].as_slice())])
+        .unwrap();
+    let dead_end = planted[1].offset + planted[1].length as u64;
+    assert_eq!(fs::metadata(pair.segment_path(0)).unwrap().len(), dead_end);
+
+    pair.reopen();
+    pair.assert_agree("after a crash between the append and the index commit");
+    assert_eq!(pair.fjall().get_block_by_slot(&slot(0, 15)).unwrap(), None);
+
+    // The next batch continues at the file's true end, past the dead frames,
+    // and nothing before it is rewritten.
+    let more = [(slot(0, 15), body(slot(0, 15), 4))];
+    write(pair.fjall(), &more);
+    write(&pair.memory, &more);
+    pair.assert_agree("after appending past the dead space");
+    let after = fs::read(pair.segment_path(0)).unwrap();
+    assert_eq!(after[..before.len()], before[..]);
+    assert!(after.len() > dead_end as usize);
+
+    pair.reopen();
+    pair.assert_agree("after reopening");
+}
+
+#[test]
+fn a_torn_tail_after_the_last_indexed_frame_never_blocks_the_store() {
+    let mut pair = Pair::new();
+    let indexed_end = fs::metadata(pair.segment_path(0)).unwrap().len();
+
+    // Half a frame at the end of the file: the write a crash interrupted.
+    pair.close();
+    let torn = body(slot(0, 20), 5);
+    let planted = segments_of(pair.dir.path())
+        .append_batch(&[(0, torn.as_slice())])
+        .unwrap()[0];
+    let torn_end = planted.offset + planted.length as u64 / 2;
+    fs::OpenOptions::new()
+        .write(true)
+        .open(pair.segment_path(0))
+        .unwrap()
+        .set_len(torn_end)
+        .unwrap();
+
+    // The store never scans a segment, so the torn bytes stay as dead
+    // space nothing names; the whole-file frame walk does not apply here,
+    // and every answer comes from the locations the index holds.
+    pair.reopen();
+    pair.assert_views_agree("after a torn append");
+
+    let more = [(slot(0, 20), body(slot(0, 20), 6))];
+    write(pair.fjall(), &more);
+    write(&pair.memory, &more);
+    pair.assert_views_agree("after appending past the torn tail");
+    let bytes = fs::read(pair.segment_path(0)).unwrap();
+    assert!(
+        bytes.len() > torn_end as usize,
+        "the retry lands past the tear"
+    );
+    assert!(indexed_end < torn_end);
+    assert_eq!(
+        pair.fjall().get_block_by_slot(&slot(0, 20)).unwrap(),
+        Some(body(slot(0, 20), 6)),
+        "the frame past the tear reads back"
+    );
+
+    pair.reopen();
+    pair.assert_views_agree("after reopening");
+}
+
+#[test]
+fn a_torn_indexed_frame_fails_its_own_reads_and_a_rollback_repairs_the_segment() {
+    let mut pair = Pair::new();
+    let tip = slot(3, 1);
+    let whole = fs::read(pair.segment_path(3)).unwrap();
+
+    // The frame a location names is cut in half underneath the open store —
+    // what a disk that lied about durability leaves behind.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(pair.segment_path(3))
+        .unwrap()
+        .set_len(whole.len() as u64 / 2)
+        .unwrap();
+
+    assert!(pair.fjall().get_block_by_slot(&tip).is_err());
+    assert!(pair.fjall().get_blocks_by_slot(&tip).is_err());
+    let readable: Vec<_> = pair.fjall().get_range(None, None).unwrap().collect();
+    let mut expected = view(&pair.memory).forward;
+    expected.retain(|(s, _)| *s != tip);
+    assert_eq!(readable, expected, "the range skips the torn block only");
+    assert_eq!(
+        pair.fjall().get_block_by_slot(&slot(2, 6)).unwrap(),
+        pair.memory.get_block_by_slot(&slot(2, 6)).unwrap()
+    );
+
+    // Rolling the block back cuts the segment at the torn frame's start; a
+    // re-append lands there and the stores agree again.
+    undo(pair.fjall(), &[tip]);
+    undo(&pair.memory, &[tip]);
+    pair.assert_agree("after rolling back the torn block");
+    let again = [(tip, body(tip, 8))];
+    write(pair.fjall(), &again);
+    write(&pair.memory, &again);
+    pair.assert_agree("after re-appending");
+
+    pair.reopen();
+    pair.assert_agree("after reopening");
+}
+
+#[test]
+fn real_block_shapes_across_a_byron_boundary_are_frames_the_oracle_agrees_with() {
+    // A Byron epoch boundary (an EBB sharing its slot with the epoch's first
+    // block) in the first segment, then Conway blocks chained across the
+    // boundary into the second: the shapes a fresh node's first frames take.
+    let epoch = 1;
+    let ebb = make_byron_ebb(epoch, pallas::crypto::hash::Hash::new([9u8; 32]));
+    let mut chain = vec![(byron_ebb_slot(epoch), ebb.1.as_ref().clone())];
+    let main = make_conway_block_with_prev(byron_ebb_slot(epoch), ebb.0.hash(), 1);
+    chain.push((byron_ebb_slot(epoch), main.1.as_ref().clone()));
+    let mut prev = main.0.hash();
+    let mut number = 2;
+    for k in 1..6u64 {
+        let at = SLOTS_PER_SEGMENT - 3 + k;
+        let block = make_conway_block_with_prev(at, prev, number);
+        prev = block.0.hash();
+        number += 1;
+        chain.push((at, block.1.as_ref().clone()));
+    }
+
+    let mut pair = Pair::with(|write| {
+        write(&chain[..2]);
+        write(&chain[2..5]);
+        write(&chain[5..]);
+    });
+    pair.assert_agree("after writing real block shapes");
+    assert_eq!(
+        pair.segment_files(),
+        vec!["000000.segment", "000001.segment"]
+    );
+    assert_eq!(
+        pair.fjall()
+            .get_blocks_by_slot(&byron_ebb_slot(epoch))
+            .unwrap()
+            .len(),
+        2,
+        "the boundary slot holds the EBB and the block"
+    );
     pair.reopen();
     pair.assert_agree("after reopening");
 }

@@ -1,7 +1,12 @@
 # Runbook
 
 The commands that produced the records in this directory, in the order
-they ran. Paths below are portable placeholders, not workstation locations.
+they ran. They are kept as they were typed: the harness was then the
+standalone `dolos-archive-bench` crate, dissolved since into
+`cargo xtask archive-bench`, so `B` below is spelled today as
+`B="cargo xtask archive-bench"` with the same subcommands and options.
+The measurements are not re-run here; the revisions in the records are
+the ones that produced them. Paths below are portable placeholders, not workstation locations.
 Point these variables at local copies before running. The corpus is named by
 the segment files' SHA-256 in `cardano.dict.json` and by segment id in every
 record. Path redaction changes neither the measured values nor corpus hashes.

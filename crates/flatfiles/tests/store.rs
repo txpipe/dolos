@@ -114,7 +114,7 @@ fn reads_return_original_bytes_for_every_shape_of_body() {
     for (loc, (_, body)) in locations.iter().zip(&batch) {
         assert_eq!(&store.read(loc).unwrap(), body, "{loc:?}");
     }
-    assert_eq!(store.resource_stats().writers, 3);
+    assert_eq!(store.resource_stats().writers, 1, "only the newest segment");
 }
 
 #[test]
@@ -367,7 +367,7 @@ fn pruning_removes_the_segments_below_and_releases_their_handles() {
         .collect();
     let locations = store.append_batch(&batch).unwrap();
     fs::write(dir.path().join("notes.txt"), b"not a segment").unwrap();
-    assert_eq!(store.resource_stats().writers, 4);
+    assert_eq!(store.resource_stats().writers, 1);
 
     store.delete_segments_before(2).unwrap();
 
@@ -375,12 +375,19 @@ fn pruning_removes_the_segments_below_and_releases_their_handles() {
     assert!(!store.segment_path(1).exists());
     assert!(store.segment_path(2).exists());
     assert!(dir.path().join("notes.txt").exists());
-    assert_eq!(store.resource_stats().writers, 2);
+    assert_eq!(store.resource_stats().writers, 1);
     assert_eq!(
         store.read(&locations[0]).unwrap_err().kind(),
         io::ErrorKind::NotFound
     );
     assert_eq!(store.read(&locations[3]).unwrap(), bodies[3]);
+
+    store.delete_segments_before(4).unwrap();
+    assert_eq!(
+        store.resource_stats().writers,
+        0,
+        "the pruned handle is released"
+    );
 }
 
 #[test]
@@ -420,5 +427,51 @@ fn concurrent_reads_beside_appends_are_consistent_and_keep_bounded_decoders() {
     let stats = store.resource_stats();
     assert!(stats.idle_decoders <= 8, "{stats:?}");
     assert!(stats.idle_decoders >= 1, "{stats:?}");
-    assert_eq!(stats.writers, 2);
+    assert_eq!(stats.writers, 1);
+}
+
+#[test]
+fn what_the_store_holds_is_bounded_by_the_work_in_flight_not_the_history() {
+    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+    let mut all = Vec::new();
+    // Sixty segments, one batch each, then a batch that spans four of them
+    // the way a bootstrap import does when its chunk crosses epochs.
+    for segment in 0..60u32 {
+        let bodies = bodies(200 + segment as u64, 20, 200, 2_000);
+        all.push((
+            bodies.clone(),
+            store.append_batch(&items(segment, &bodies)).unwrap(),
+        ));
+        let stats = store.resource_stats();
+        assert_eq!(stats.writers, 1, "segment {segment}: {stats:?}");
+    }
+    let spanning: Vec<Vec<u8>> = bodies(999, 4, 300, 300);
+    let batch: Vec<(u32, &[u8])> = spanning
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (60 + i as u32, b.as_slice()))
+        .collect();
+    let locs = store.append_batch(&batch).unwrap();
+    assert_eq!(store.resource_stats().writers, 1);
+    for (loc, body) in locs.iter().zip(&spanning) {
+        assert_eq!(&store.read(loc).unwrap(), body);
+    }
+
+    // Re-appending to an old segment reopens it at its true end.
+    let again = bodies(1000, 1, 300, 300);
+    let before = fs::metadata(store.segment_path(3)).unwrap().len();
+    let loc = store.append_batch(&items(3, &again)).unwrap()[0];
+    assert_eq!(loc.offset, before);
+    assert_eq!(store.read(&loc).unwrap(), again[0]);
+    assert_eq!(store.resource_stats().writers, 1);
+
+    // Reading everything ever written pools no more than eight decoders.
+    for (bodies, locations) in &all {
+        for (loc, body) in locations.iter().zip(bodies) {
+            assert_eq!(&store.read(loc).unwrap(), body);
+        }
+    }
+    let stats = store.resource_stats();
+    assert!(stats.idle_decoders <= 8, "{stats:?}");
+    assert_eq!(stats.writers, 1);
 }

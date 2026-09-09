@@ -7,10 +7,10 @@ use std::path::Path;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::codec::Codec;
-use crate::corpus::{select, walk_bytes, Corpus};
-use crate::dictionary::Dictionary;
-use crate::measure::thread_cpu_ns;
+use super::codec::Codec;
+use super::corpus::{select, walk_bytes, Corpus};
+use super::dictionary::Dictionary;
+use super::measure::thread_cpu_ns;
 
 #[derive(Debug, Clone)]
 pub struct TrainSpec {
@@ -162,7 +162,7 @@ pub fn evaluate(fixtures: &[Fixture], codecs: &[(String, Codec)]) -> io::Result<
             );
             records.push(json!({
                 "preset": "evaluate",
-                "environment": crate::measure::environment(&[]),
+                "environment": super::measure::environment(&[]),
                 "corpus": fixture.corpus.json(),
                 "codec": codec.json_as(label),
                 "repeat": 0,

@@ -1,13 +1,13 @@
 //! The smoke preset over a synthetic corpus: every workload runs, every
 //! body read back matches, and the records carry what a report needs.
 
-use dolos_archive_bench::codec::Codec;
-use dolos_archive_bench::corpus::Corpus;
-use dolos_archive_bench::dictionary::Dictionary;
-use dolos_archive_bench::presets::{run, Options, Preset};
-use dolos_archive_bench::report;
-use dolos_archive_bench::train::{evaluate, Fixture};
-use dolos_archive_bench::workloads::{EvictOptions, Regime};
+use xtask::archive_bench::codec::Codec;
+use xtask::archive_bench::corpus::Corpus;
+use xtask::archive_bench::dictionary::Dictionary;
+use xtask::archive_bench::presets::{run, Options, Preset};
+use xtask::archive_bench::report;
+use xtask::archive_bench::train::{evaluate, Fixture};
+use xtask::archive_bench::workloads::{EvictOptions, Regime};
 
 #[test]
 fn smoke_preset_runs_every_workload_and_verifies_bodies() {

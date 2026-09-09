@@ -124,6 +124,21 @@ fn settings(r: &Value) -> Value {
             "readers": m["readers"],
             "seed": m["seed"],
         }),
+        "node-import" => json!({
+            "chunk": m["chunk"],
+            "blocks": m["blocks"],
+        }),
+        "node-read" => json!({
+            "cache": match r["cache"]["method"].as_str() {
+                Some(method) => Value::String(method.into()),
+                None if m["regime"] == "warm" => Value::String("primed".into()),
+                None => Value::Null,
+            },
+            "mix": m["mix"],
+            "ops": m["ops"],
+            "scan": m["scan"],
+            "seed": m["seed"],
+        }),
         _ => Value::Null,
     }
 }
@@ -534,6 +549,7 @@ pub fn render(records: &[Value]) -> String {
         }
         out.push('\n');
     }
+    render_node(records, &mut out);
     out
 }
 
@@ -609,10 +625,19 @@ impl Samples {
 
 /// Why `raw` and `candidate` are not one sample of each per repeat.
 fn pairing_problem(raw: Option<&Samples>, candidate: &Samples) -> Option<String> {
+    pairing_problem_against("raw", raw, candidate)
+}
+
+/// [`pairing_problem`] with the reference side named.
+fn pairing_problem_against(
+    base: &str,
+    raw: Option<&Samples>,
+    candidate: &Samples,
+) -> Option<String> {
     let Some(raw) = raw else {
-        return Some("no raw record in this run".into());
+        return Some(format!("no {base} record in this run"));
     };
-    for (side, samples) in [("raw", raw), ("candidate", candidate)] {
+    for (side, samples) in [(base, raw), ("candidate", candidate)] {
         let dup = samples.duplicates();
         if !dup.is_empty() {
             return Some(format!(
@@ -623,7 +648,7 @@ fn pairing_problem(raw: Option<&Samples>, candidate: &Samples) -> Option<String>
     }
     if raw.by_repeat.keys().ne(candidate.by_repeat.keys()) {
         return Some(format!(
-            "raw repeats {} against candidate repeats {}",
+            "{base} repeats {} against candidate repeats {}",
             raw.repeats(),
             candidate.repeats()
         ));
@@ -728,6 +753,313 @@ pub fn gates(records: &[Value]) -> Vec<Gate> {
                 p95_us,
                 gated: is_write,
                 pass: is_write && problem.is_none() && throughput >= 0.9 && p95 <= 1.1,
+                problem,
+            });
+        }
+    }
+    out
+}
+
+/// The label the node-level gates measure every other label against.
+pub const BASELINE_LABEL: &str = "baseline";
+
+fn node_label(r: &Value) -> &str {
+    s(r, &["node", "label"])
+}
+
+fn node_run(r: &Value) -> &str {
+    s(r, &["run"])
+}
+
+/// Node-level records: imports and reads per binary label, then the
+/// `baseline` label against every other label.
+fn render_node(records: &[Value], out: &mut String) {
+    let imports: Vec<&Value> = records
+        .iter()
+        .filter(|r| kind(r) == "node-import")
+        .collect();
+    if !imports.is_empty() {
+        out.push_str("## Node imports\n\n");
+        header(
+            out,
+            &[
+                "run",
+                "workload",
+                "label",
+                "revision",
+                "storage",
+                "rep",
+                "blocks",
+                "blocks/s",
+                "raw MB/s",
+                "ms/batch",
+                "cpu µs/block",
+                "max RSS MiB",
+                "segments MiB",
+                "ratio",
+                "index MiB",
+            ],
+        );
+        for r in imports {
+            let m = &r["metrics"];
+            row(
+                out,
+                &[
+                    node_run(r).into(),
+                    workload(r).into(),
+                    node_label(r).into(),
+                    s(r, &["node", "version"]).into(),
+                    s(r, &["node", "storage_version"]).into(),
+                    r["repeat"].to_string(),
+                    m["blocks"].to_string(),
+                    format!("{:.0}", f(m, &["blocks_per_s"])),
+                    format!("{:.1}", f(m, &["raw_mb_per_s"])),
+                    format!("{:.2}", f(m, &["ms_per_batch"])),
+                    format!("{:.1}", f(m, &["cpu_us_per_block"])),
+                    format!("{:.0}", f(m, &["process", "max_rss_bytes"]) / 1_048_576.0),
+                    format!("{:.1}", f(m, &["segment_bytes"]) / 1_048_576.0),
+                    format!("{:.3}", f(m, &["ratio"])),
+                    format!("{:.1}", f(m, &["index_bytes"]) / 1_048_576.0),
+                ],
+            );
+        }
+        out.push('\n');
+    }
+
+    let reads: Vec<&Value> = records.iter().filter(|r| kind(r) == "node-read").collect();
+    if !reads.is_empty() {
+        out.push_str("## Node reads (through minibf)\n\n");
+        header(
+            out,
+            &[
+                "run",
+                "workload",
+                "cache",
+                "thr",
+                "label",
+                "rep",
+                "ops/s",
+                "blocks/s",
+                "point p50 µs",
+                "p95 µs",
+                "p99 µs",
+                "page p50 ms",
+                "p95 ms",
+                "server cpu ms",
+                "server disk MiB",
+            ],
+        );
+        for r in reads {
+            let m = &r["metrics"];
+            row(
+                out,
+                &[
+                    node_run(r).into(),
+                    workload(r).into(),
+                    format!(
+                        "{} {}",
+                        s(m, &["regime"]),
+                        r["cache"]["method"].as_str().unwrap_or("")
+                    )
+                    .trim()
+                    .to_string(),
+                    m["threads"].to_string(),
+                    node_label(r).into(),
+                    r["repeat"].to_string(),
+                    format!("{:.0}", f(m, &["ops_per_s"])),
+                    format!("{:.0}", f(m, &["blocks_per_s"])),
+                    format!("{:.0}", f(m, &["point_latency", "p50_us"])),
+                    format!("{:.0}", f(m, &["point_latency", "p95_us"])),
+                    format!("{:.0}", f(m, &["point_latency", "p99_us"])),
+                    ms(f(m, &["page_latency", "p50_us"])),
+                    ms(f(m, &["page_latency", "p95_us"])),
+                    format!("{:.0}", f(m, &["server", "cpu_ms"])),
+                    format!("{:.1}", f(m, &["server", "disk_read_bytes"]) / 1_048_576.0),
+                ],
+            );
+        }
+        out.push('\n');
+    }
+
+    let gates = node_gates(records);
+    if !gates.is_empty() {
+        out.push_str(
+            "## Node gates (each label against `baseline`; medians over paired repeats within one run name)\n\n",
+        );
+        header(
+            out,
+            &[
+                "run",
+                "workload",
+                "settings",
+                "label",
+                "throughput vs baseline",
+                "point p95 vs baseline",
+                "baseline p95 µs",
+                "label p95 µs",
+                "gate",
+                "verdict",
+            ],
+        );
+        for g in &gates {
+            row(
+                out,
+                &[
+                    g.run.clone(),
+                    g.workload.clone(),
+                    g.settings.clone(),
+                    g.label.clone(),
+                    format!("{:.3}", g.throughput),
+                    g.p95
+                        .map(|p| format!("{p:.3}"))
+                        .unwrap_or_else(|| "-".into()),
+                    g.baseline_p95_us
+                        .map(|p| format!("{p:.0}"))
+                        .unwrap_or_else(|| "-".into()),
+                    g.p95_us
+                        .map(|p| format!("{p:.0}"))
+                        .unwrap_or_else(|| "-".into()),
+                    g.gate.into(),
+                    g.verdict(),
+                ],
+            );
+        }
+        out.push('\n');
+    }
+}
+
+/// One label against `baseline` on one node-level workload of one run.
+pub struct NodeGate {
+    pub run: String,
+    pub workload: String,
+    pub settings: String,
+    pub label: String,
+    /// Label throughput over baseline throughput (blocks/s for imports and
+    /// scans, ops/s for point and page workloads).
+    pub throughput: f64,
+    /// Label point p95 over baseline point p95, for workloads with point
+    /// reads.
+    pub p95: Option<f64>,
+    pub baseline_p95_us: Option<f64>,
+    pub p95_us: Option<f64>,
+    /// What the verdict is judged on: `throughput >= 0.9` for ingestion,
+    /// `p95 <= 1.1` for API point reads, nothing for pages and scans.
+    pub gate: &'static str,
+    pub pass: bool,
+    pub problem: Option<String>,
+}
+
+impl NodeGate {
+    pub fn verdict(&self) -> String {
+        match (&self.problem, self.gate, self.pass) {
+            (Some(problem), _, _) => format!("UNPAIRED: {problem}"),
+            (None, "-", _) => "-".into(),
+            (None, _, true) => "PASS".into(),
+            (None, _, false) => "FAIL".into(),
+        }
+    }
+}
+
+/// The production gates: ingestion keeps at least 90% of the baseline
+/// binary's throughput, and API point reads keep p95 latency within 10% of
+/// it, judged on the median over paired repeats. Records pair only within
+/// one run name, corpus, workload and set of settings, and need one sample
+/// per label per repeat; anything else is reported unpaired.
+pub fn node_gates(records: &[Value]) -> Vec<NodeGate> {
+    type Group = BTreeMap<String, Samples>;
+    let mut groups: BTreeMap<(String, String, String), Group> = BTreeMap::new();
+    let mut gate_of: BTreeMap<String, &'static str> = BTreeMap::new();
+    for r in records {
+        let m = &r["metrics"];
+        let (thr, p95, key, gate) = match kind(r) {
+            "node-import" => (
+                f(m, &["blocks_per_s"]),
+                f64::NAN,
+                workload(r).to_string(),
+                "throughput >= 0.9",
+            ),
+            "node-read" => {
+                let key = format!("{} [{} t{}]", workload(r), s(m, &["regime"]), m["threads"]);
+                if m["point_ops"].as_u64().unwrap_or(0) > 0 {
+                    (
+                        f(m, &["ops_per_s"]),
+                        f(m, &["point_latency", "p95_us"]),
+                        key,
+                        "point p95 <= 1.1",
+                    )
+                } else {
+                    let thr = if m["scan"].as_bool().unwrap_or(false) {
+                        f(m, &["blocks_per_s"])
+                    } else {
+                        f(m, &["ops_per_s"])
+                    };
+                    (thr, f64::NAN, key, "-")
+                }
+            }
+            _ => continue,
+        };
+        gate_of.insert(key.clone(), gate);
+        let scope = (
+            node_run(r).to_string(),
+            key,
+            canonical(&json!({ "corpus": r["corpus"], "settings": settings(r) })),
+        );
+        let entry = groups
+            .entry(scope)
+            .or_default()
+            .entry(node_label(r).to_string())
+            .or_default();
+        entry.label = node_label(r).to_string();
+        entry
+            .by_repeat
+            .entry(r["repeat"].as_u64().unwrap_or(0))
+            .or_default()
+            .push((thr, p95));
+    }
+    let mut out = Vec::new();
+    for ((run, workload, settings), labels) in &groups {
+        // Imports carry no p95; their samples are NaN and drop out here.
+        let finite_median = |v: Vec<f64>| -> Option<f64> {
+            let finite: Vec<f64> = v.into_iter().filter(|p| p.is_finite()).collect();
+            (!finite.is_empty()).then(|| median(finite))
+        };
+        let baseline = labels.get(BASELINE_LABEL);
+        let base_thr = baseline.map(|b| median(b.throughput())).unwrap_or(0.0);
+        let base_p95 = baseline.and_then(|b| finite_median(b.p95()));
+        let gate = gate_of.get(workload).copied().unwrap_or("-");
+        for candidate in labels.values().filter(|c| c.label != BASELINE_LABEL) {
+            let throughput = if base_thr > 0.0 {
+                median(candidate.throughput()) / base_thr
+            } else {
+                0.0
+            };
+            let p95_us = finite_median(candidate.p95());
+            let p95 = match (base_p95, p95_us) {
+                (Some(b), Some(c)) if b > 0.0 => Some(c / b),
+                _ => None,
+            };
+            let problem = pairing_problem_against(BASELINE_LABEL, baseline, candidate);
+            let pass = problem.is_none()
+                && match gate {
+                    "throughput >= 0.9" => throughput >= 0.9,
+                    "point p95 <= 1.1" => p95.is_some_and(|p| p <= 1.1),
+                    _ => false,
+                };
+            out.push(NodeGate {
+                run: run.clone(),
+                workload: workload.clone(),
+                settings: compact(
+                    &serde_json::from_str::<Value>(settings)
+                        .map(|v| v["settings"].clone())
+                        .unwrap_or(Value::Null),
+                ),
+                label: candidate.label.clone(),
+                throughput,
+                p95,
+                baseline_p95_us: base_p95,
+                p95_us,
+                gate,
+                pass,
                 problem,
             });
         }

@@ -68,3 +68,9 @@ rustls = { version = "0.23", default-features = false, features = [
 # The export tests drive real store sets through `dolos-testing`'s harness
 # domain and its backend bindings.
 dolos-testing = { path = "../testing" }
+
+# The restore suite walks a restored fjall archive's segment files with
+# libzstd alone and decodes the blocks it appends afterwards.
+dolos-fjall = { path = "../fjall" }
+pallas = { workspace = true }
+zstd = "0.13"

@@ -1,30 +1,38 @@
+//! Developer benchmarks for the archive's compressed block segments.
+//!
+//! `cargo xtask archive-bench` measures the archive's write and read paths
+//! on real block corpora and renders paired comparisons from the records.
+//! The store-level workloads run the production `dolos_flatfiles` store
+//! beside a modelled sink (one frame per block, or raw bodies) so codec and
+//! I/O cost can be told apart; the node-level workloads drive `dolos`
+//! binaries through their import and API paths so two revisions can be
+//! measured on the same host, corpus, durability and concurrency. Nothing
+//! here is a production code path. Presets are the regression guard;
+//! `archive-bench/results/` under this crate holds the measured evidence.
+
+pub mod codec;
+pub mod corpus;
+pub mod dictionary;
+pub mod measure;
+pub mod node;
+pub mod presets;
+pub mod report;
+pub mod train;
+pub mod workloads;
+
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-use dolos_archive_bench::codec::Codec;
-use dolos_archive_bench::corpus::{parse_segments, Corpus};
-use dolos_archive_bench::measure::PeakAlloc;
-use dolos_archive_bench::presets::{self, Options, Preset};
-use dolos_archive_bench::report;
-use dolos_archive_bench::train::{self, Fixture, TrainSpec};
-use dolos_archive_bench::workloads::{EvictOptions, Regime};
+use clap::Subcommand;
 
-#[global_allocator]
-static ALLOC: PeakAlloc = PeakAlloc;
-
-#[derive(Parser)]
-#[command(
-    name = "dolos-archive-bench",
-    about = "Benchmarks for per-block compressed archive segments"
-)]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
+use codec::Codec;
+use corpus::{parse_segments, Corpus};
+use presets::{Options, Preset};
+use train::{Fixture, TrainSpec};
+use workloads::{EvictOptions, Regime};
 
 #[derive(clap::Args)]
-struct CorpusArgs {
+pub struct CorpusArgs {
     /// directory of raw `NNNNNN.segment` files
     #[arg(long, conflicts_with_all = ["immutable", "synthetic"])]
     corpus: Option<PathBuf>,
@@ -76,7 +84,7 @@ impl CorpusArgs {
 
 /// Options of the `bench` subcommand.
 #[derive(clap::Args)]
-struct BenchArgs {
+pub struct BenchArgs {
     #[command(flatten)]
     corpus: CorpusArgs,
 
@@ -92,7 +100,7 @@ struct BenchArgs {
     #[arg(long)]
     out: PathBuf,
 
-    /// codecs to pair: raw, zstd3, zstd3-dict, store
+    /// codecs to pair: raw, zstd1, zstd1-dict, zstd3, zstd3-dict, store
     #[arg(long, default_value = "raw,zstd3,zstd3-dict,store")]
     codecs: String,
 
@@ -150,9 +158,12 @@ struct BenchArgs {
 }
 
 #[derive(Subcommand)]
-enum Command {
-    /// Run a preset and append JSON records to --out
+pub enum Cmd {
+    /// Run a store-level preset and append JSON records to --out
     Bench(Box<BenchArgs>),
+
+    /// Drive a dolos binary through import and API workloads
+    Node(Box<node::NodeArgs>),
 
     /// Train a dictionary on a seeded sample of segments
     Train {
@@ -208,7 +219,7 @@ enum Command {
     Report { files: Vec<PathBuf> },
 }
 
-fn parse_list<T: std::str::FromStr>(s: &str) -> anyhow::Result<Vec<T>>
+pub fn parse_list<T: std::str::FromStr>(s: &str) -> anyhow::Result<Vec<T>>
 where
     T::Err: std::fmt::Display,
 {
@@ -224,19 +235,41 @@ fn codecs(spec: &str, dictionary: &str) -> anyhow::Result<Vec<(String, Codec)>> 
     for name in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let codec = match name {
             "raw" => Codec::Raw,
+            "zstd1" => Codec::zstd(1, None),
+            "zstd1-dict" => Codec::zstd(1, Some(train::load_dictionary(dictionary)?)),
             "zstd3" => Codec::zstd(3, None),
             "zstd3-dict" => Codec::zstd(3, Some(train::load_dictionary(dictionary)?)),
             "store" => Codec::Store,
-            other => anyhow::bail!("unknown codec {other:?}; use raw, zstd3, zstd3-dict or store"),
+            other => anyhow::bail!(
+                "unknown codec {other:?}; use raw, zstd1, zstd1-dict, zstd3, zstd3-dict or store"
+            ),
         };
         out.push((name.to_string(), codec));
     }
     Ok(out)
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        Command::Bench(args) => {
+/// The command line as a shell would need it typed, so a recorded command
+/// replays.
+pub fn command_line() -> String {
+    std::env::args()
+        .map(|arg| shell_word(&arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_word(arg: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./=,:@+%".contains(c);
+    if !arg.is_empty() && arg.chars().all(plain) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
+pub fn run(cmd: Cmd) -> anyhow::Result<()> {
+    match cmd {
+        Cmd::Bench(args) => {
             let BenchArgs {
                 corpus,
                 preset,
@@ -291,7 +324,8 @@ fn main() -> anyhow::Result<()> {
             presets::run(preset, &corpus, &opts, &mut file)?;
             eprintln!("results appended to {}", out.display());
         }
-        Command::Train {
+        Cmd::Node(args) => node::run(*args)?,
+        Cmd::Train {
             corpus,
             segments,
             samples_per_segment,
@@ -324,12 +358,7 @@ fn main() -> anyhow::Result<()> {
                 max_size,
             };
             let (dictionary, mut provenance) = train::train(&spec)?;
-            provenance["command"] = serde_json::Value::String(
-                std::env::args()
-                    .map(|arg| shell_word(&arg))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            );
+            provenance["command"] = serde_json::Value::String(command_line());
             std::fs::write(&out, dictionary.bytes())?;
             let mut prov_path = out.clone().into_os_string();
             prov_path.push(".json");
@@ -341,7 +370,7 @@ fn main() -> anyhow::Result<()> {
                 out.display()
             );
         }
-        Command::Evaluate {
+        Cmd::Evaluate {
             fixtures,
             dictionaries,
             limit_blocks,
@@ -407,20 +436,10 @@ fn main() -> anyhow::Result<()> {
             }
             print!("{}", report::render(&records));
         }
-        Command::Report { files } => {
+        Cmd::Report { files } => {
             let records = report::load(&files)?;
             print!("{}", report::render(&records));
         }
     }
     Ok(())
-}
-
-/// `arg` as a shell would need it typed, so a recorded command replays.
-fn shell_word(arg: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./=,:@+%".contains(c);
-    if !arg.is_empty() && arg.chars().all(plain) {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
-    }
 }

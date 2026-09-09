@@ -23,3 +23,14 @@ postgres = "0.19"
 postgres-native-tls = "0.5"
 bech32 = { workspace = true }
 pallas = { workspace = true }
+chrono = { workspace = true, features = ["clock"] }
+dolos-flatfiles = { path = "../crates/flatfiles" }
+hdrhistogram = "7.5"
+libc = "0.2"
+sha2 = "0.10"
+tokio = { workspace = true }
+tonic = "0.12.3"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

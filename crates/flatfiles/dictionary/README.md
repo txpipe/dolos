@@ -23,14 +23,16 @@ command over the same files yields the same bytes.
 ## How it was chosen
 
 Three candidates were trained from the same corpus with the same seed and
-evaluated with `dolos-archive-bench evaluate` on data disjoint from every
+evaluated with the harness's `evaluate` command (then
+`dolos-archive-bench evaluate`, now `cargo xtask archive-bench evaluate`)
+on data disjoint from every
 training segment: mainnet segments 448–455 (156,621 Conway blocks, 877 MiB,
 the held-out window), one 20,000-block fixture per mainnet era, preprod
 segments 50, 150 and 300, and 20,000 preview blocks from a node immutable
 directory. Ratios are compressed over raw bytes at zstd level 3, one frame
 per block; the dictionary-free column is the same codec without a
 dictionary. Records and the other candidates' provenance are in
-`crates/archive-bench/results/2026-09-08-m4-apfs-ssd/`.
+`xtask/archive-bench/results/2026-09-08-m4-apfs-ssd/`.
 
 | fixture | no dictionary | stratified (16 segments, 1,500 each) | recent (440–447 only) | **balanced (bundled)** |
 |---|---|---|---|---|

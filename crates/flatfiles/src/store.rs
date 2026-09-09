@@ -4,9 +4,13 @@
 //! Appends are serialized under the writer table; a batch encodes each body
 //! and writes its frame before encoding the next, then syncs every segment
 //! it touched and, when one of them is new, the directory that names it.
-//! Reads open the segment file by path, so they never wait on a writer,
-//! and the store keeps no table of segments: a segment exists when its
-//! file does.
+//! Between batches the store keeps one append handle, for the newest
+//! segment the last batch touched; every other segment is reopened at its
+//! true end when a batch next names it. Reads open the segment file by
+//! path, so they never wait on a writer, and the store keeps no table of
+//! segments: a segment exists when its file does. What the store holds is
+//! therefore bounded by the operations in flight, not by the history it
+//! stores: one encoder, one append handle, a small pool of decoders.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -26,7 +30,8 @@ const SEGMENT_EXTENSION: &str = "segment";
 /// What a store holds open between operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceStats {
-    /// Append handles, one per segment written since open or its last cut.
+    /// Append handles: at most one, for the newest segment the last batch
+    /// touched.
     pub writers: usize,
     /// Decoders pooled for reuse.
     pub idle_decoders: usize,
@@ -100,9 +105,12 @@ impl FlatFileStore {
         let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
         let mut writers = self.writers.lock().unwrap();
         let result = self.append_locked(&mut writers, &touched, items);
-        if result.is_err() {
-            for id in &touched {
-                writers.remove(id);
+        match (&result, touched.iter().next_back()) {
+            (Ok(_), Some(newest)) => writers.retain(|id, _| id == newest),
+            _ => {
+                for id in &touched {
+                    writers.remove(id);
+                }
             }
         }
         result

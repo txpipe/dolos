@@ -1471,24 +1471,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dolos-archive-bench"
-version = "1.7.0-alpha.1"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dolos-flatfiles",
- "hdrhistogram",
- "libc",
- "pallas",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "zstd",
-]
-
-[[package]]
 name = "dolos-cardano"
 version = "1.7.0-alpha.1"
 dependencies = [
@@ -1664,6 +1646,7 @@ version = "1.7.0-alpha.1"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
+ "dolos-fjall",
  "dolos-mithril",
  "dolos-testing",
  "hex",
@@ -1681,6 +1664,7 @@ dependencies = [
  "tokio-util",
  "toml 0.8.20",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
@@ -7127,18 +7111,27 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",
+ "chrono",
  "clap",
  "dolos",
  "dolos-cardano",
  "dolos-core",
+ "dolos-flatfiles",
+ "hdrhistogram",
  "hex",
+ "libc",
  "pallas",
  "postgres",
  "postgres-native-tls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
  "toml 0.8.20",
+ "tonic 0.12.3",
  "xshell",
+ "zstd",
 ]
 
 [[package]]

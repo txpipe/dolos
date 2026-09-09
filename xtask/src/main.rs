@@ -1,12 +1,18 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use xshell::{cmd, Shell};
+use xtask::archive_bench;
+use xtask::archive_bench::measure::PeakAlloc;
 
 mod bootstrap;
 mod config;
 mod ground_truth;
 mod test_instance;
 mod util;
+
+// The benchmark harness reads transient heap peaks off the global allocator.
+#[global_allocator]
+static ALLOC: PeakAlloc = PeakAlloc;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -20,6 +26,10 @@ struct Cli {
 enum Commands {
     /// Run e2e tests
     E2eTest,
+
+    /// Archive segment benchmarks (bench, node, train, evaluate, report)
+    #[command(subcommand)]
+    ArchiveBench(archive_bench::Cmd),
 
     /// Bootstrap a local Mithril snapshot into an instance
     BootstrapMithrilLocal(bootstrap::BootstrapArgs),
@@ -45,6 +55,7 @@ fn main() -> Result<()> {
             println!("Running sync tests...");
             cmd!(sh, "cargo test --test sync -- --ignored --nocapture").run()?;
         }
+        Commands::ArchiveBench(cmd) => archive_bench::run(cmd)?,
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,

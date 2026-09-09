@@ -196,7 +196,6 @@ lto = "thin"
 
 [workspace]
 members = [
-    "crates/archive-bench",
     "crates/cardano",
     "crates/core",
     "crates/fjall",
