@@ -5,10 +5,10 @@ use miette::{Context as _, IntoDiagnostic};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
 use std::sync::Arc;
-use std::{fs, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 use tracing_subscriber::{filter::Targets, prelude::*};
 
 use dolos::adapters::DomainAdapter;
@@ -353,24 +353,6 @@ pub async fn monitor_drivers(
     }
 
     first_failure.map_or(Ok(()), Err)
-}
-
-pub fn cleanup_data(config: &RootConfig) -> Result<(), std::io::Error> {
-    let root = &config.storage.path;
-
-    if root.is_dir() {
-        for entry_result in fs::read_dir(root)? {
-            let entry = entry_result?;
-            let entry_path = entry.path();
-            if entry_path.is_file() {
-                fs::remove_file(&entry_path)?;
-            }
-        }
-        fs::remove_dir(root)?; // Remove the now-empty directory
-    } else {
-        info!("Path is not a directory, ignoring.");
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -53,7 +53,7 @@ impl Node {
             peer_address = "unused.example:3001"
 
             [storage]
-            version = "v3"
+            version = "v4"
             path = {data}
 
             [genesis]

@@ -2,7 +2,7 @@
 peer_address = "backbone.mainnet.cardanofoundation.org:3001"
 
 [storage]
-version = "v3"
+version = "v4"
 path = "data"
 
 [genesis]
