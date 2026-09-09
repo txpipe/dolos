@@ -81,12 +81,31 @@ The initial offline candidate and its exact identities remain immutable in
 `results/2026-09-09-m4-apfs-ssd-offline-import`; those measurements do not
 describe the revised automatic candidate. New evidence is published separately.
 
-Use `instrument-import.py CHECKOUT` on disposable source trees to add actual
+Use the checked-in measurement patches on disposable source trees to add actual
 commit timing, then compare pinned raw production `9165dbd8`, merged serial
 production `b21c8d55`, and the revised candidate with equal release settings,
 correct v3/v4 configs and production durability. Use three paired full-corpus
 500-block repeats; the gates remain 90% raw throughput and at most 110% raw
 commit p95. Also report tiny, modern, bootstrap-sized and concurrent workloads.
+
+Historical runbooks mention a Python patch generator that has since been
+removed. Reproduce the instrumentation directly from the saved patches instead:
+set `EVIDENCE` to the absolute path of this directory's `results` directory,
+then run the matching command from each disposable checkout's root.
+
+```sh
+# Raw checkout at 9165dbd8:
+git apply "$EVIDENCE/2026-09-09-m4-apfs-ssd-offline-import/measured-raw.patch"
+# Serial checkout at b21c8d55:
+git apply "$EVIDENCE/2026-09-09-m4-apfs-ssd-offline-import/measured-serial.patch"
+# Automatic checkout at 5d13f2da; apply only measurement instrumentation:
+git apply --include=src/bin/dolos/data/import_archive.rs \
+  "$EVIDENCE/2026-09-09-m4-apfs-ssd-automatic/measured-automatic.patch"
+```
+
+The automatic patch also contains the implementation delta from the serial
+base; the path filter avoids applying that delta twice. Historical results,
+patches and runbooks remain unchanged.
 
 The supporting harness now has one production codec, `store`, which uses
 automatic selection for write and concurrent presets. Historical
