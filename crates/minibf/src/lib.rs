@@ -27,6 +27,7 @@ use dolos_core::{
     TemporalKey, TxOrder,
 };
 
+pub mod block_meta;
 mod cache;
 mod error;
 pub(crate) mod hacks;
