@@ -239,6 +239,23 @@ fn ms(us: f64) -> String {
 
 /// Render every record kind present as a markdown section.
 pub fn render(records: &[Value]) -> String {
+    if records
+        .iter()
+        .any(|record| record["metrics"]["kind"] == "minibf")
+    {
+        let other: Vec<_> = records
+            .iter()
+            .filter(|record| record["metrics"]["kind"] != "minibf")
+            .cloned()
+            .collect();
+        let mut rendered = if other.is_empty() {
+            String::new()
+        } else {
+            render(&other)
+        };
+        rendered.push_str(&super::minibf::report::assess(records, &Default::default()).0);
+        return rendered;
+    }
     let mut out = String::new();
     let runs = runs(records);
     if !runs.is_empty() {

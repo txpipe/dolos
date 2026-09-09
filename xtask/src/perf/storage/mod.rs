@@ -1,6 +1,6 @@
 //! Developer benchmarks for the archive's compressed block segments.
 //!
-//! `cargo xtask archive-bench` measures the archive's write and read paths
+//! `cargo xtask perf storage` measures the archive's write and read paths
 //! on real block corpora and renders paired comparisons from the records.
 //! The store-level workloads run the production `dolos_flatfiles` store
 //! beside a modelled sink (one frame per block, or raw bodies) so codec and
@@ -12,13 +12,12 @@
 
 pub mod codec;
 pub mod corpus;
-pub mod dictionary;
-pub mod measure;
 pub mod node;
 pub mod presets;
-pub mod report;
 pub mod train;
 pub mod workloads;
+
+use super::{command_line, dictionary, measure, parse_list, report};
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -96,9 +95,9 @@ impl CorpusArgs {
     }
 }
 
-/// Options of the `bench` subcommand.
+/// Options of the `run` subcommand.
 #[derive(clap::Args)]
-pub struct BenchArgs {
+pub struct RunArgs {
     #[command(flatten)]
     corpus: CorpusArgs,
 
@@ -174,7 +173,8 @@ pub struct BenchArgs {
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Run a store-level preset and append JSON records to --out
-    Bench(Box<BenchArgs>),
+    #[command(alias = "bench")]
+    Run(Box<RunArgs>),
 
     /// Drive a dolos binary through import and API workloads
     Node(Box<node::NodeArgs>),
@@ -233,17 +233,6 @@ pub enum Cmd {
     Report { files: Vec<PathBuf> },
 }
 
-pub fn parse_list<T: std::str::FromStr>(s: &str) -> anyhow::Result<Vec<T>>
-where
-    T::Err: std::fmt::Display,
-{
-    s.split(',')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(|p| p.parse::<T>().map_err(|e| anyhow::anyhow!("{p}: {e}")))
-        .collect()
-}
-
 fn codecs(spec: &str, dictionary: &str) -> anyhow::Result<Vec<(String, Codec)>> {
     let mut out = Vec::new();
     for name in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
@@ -263,28 +252,10 @@ fn codecs(spec: &str, dictionary: &str) -> anyhow::Result<Vec<(String, Codec)>> 
     Ok(out)
 }
 
-/// The command line as a shell would need it typed, so a recorded command
-/// replays.
-pub fn command_line() -> String {
-    std::env::args()
-        .map(|arg| shell_word(&arg))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_word(arg: &str) -> String {
-    let plain = |c: char| c.is_ascii_alphanumeric() || "-_./=,:@+%".contains(c);
-    if !arg.is_empty() && arg.chars().all(plain) {
-        arg.to_string()
-    } else {
-        format!("'{}'", arg.replace('\'', "'\\''"))
-    }
-}
-
 pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
-        Cmd::Bench(args) => {
-            let BenchArgs {
+        Cmd::Run(args) => {
+            let RunArgs {
                 corpus,
                 preset,
                 work,

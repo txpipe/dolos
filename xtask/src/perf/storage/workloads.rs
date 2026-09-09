@@ -25,6 +25,7 @@ pub struct WriteParams {
 
 pub struct WriteOutcome {
     pub locations: Vec<Location>,
+    pub files: Vec<std::path::PathBuf>,
     pub metrics: Value,
 }
 
@@ -82,6 +83,7 @@ pub fn write_corpus(
     let process = counters().delta(&before);
     let heap_peak = heap_peak().map(|p| p.saturating_sub(heap_base));
     let blocks = locations.len() as u64;
+    let files = sink.files();
     let metrics = json!({
         "kind": "write",
         "workload": params.name,
@@ -105,7 +107,7 @@ pub fn write_corpus(
         "batch_latency": histogram_json(&batch_hist),
         "fsync_latency": histogram_json(&fsync_hist),
         "segment_crossings": crossings,
-        "segments": sink.files().len(),
+        "segments": files.len(),
         "heap_peak_bytes": heap_peak,
         "import_buffers": sink.append_stats().map(|stats| json!({
             "encoders_peak": stats.parallel_encoders_peak,
@@ -115,7 +117,11 @@ pub fn write_corpus(
         })),
         "process": process.json(),
     });
-    Ok(WriteOutcome { locations, metrics })
+    Ok(WriteOutcome {
+        locations,
+        files,
+        metrics,
+    })
 }
 
 /// What the page cache holds when a read workload starts.
@@ -428,8 +434,29 @@ impl<'a> Worker<'a> {
         for i in range {
             self.read_one(i)?;
         }
-        self.acc.page.record(t.elapsed().as_nanos() as u64).unwrap();
+        record_scan_latency(&mut self.acc.page, t.elapsed())?;
         Ok(())
+    }
+}
+
+fn record_scan_latency(
+    histogram: &mut hdrhistogram::Histogram<u64>,
+    elapsed: std::time::Duration,
+) -> io::Result<()> {
+    let nanos = u64::try_from(elapsed.as_nanos()).map_err(io::Error::other)?;
+    histogram.record(nanos.max(1)).map_err(io::Error::other)
+}
+
+#[cfg(test)]
+mod scan_tests {
+    use super::*;
+
+    #[test]
+    fn over_range_scans_fail_without_panicking_or_clipping() {
+        let mut histogram = histogram();
+        record_scan_latency(&mut histogram, std::time::Duration::from_secs(1)).unwrap();
+        assert!(record_scan_latency(&mut histogram, std::time::Duration::from_secs(7200)).is_err());
+        assert_eq!(histogram.len(), 1);
     }
 }
 

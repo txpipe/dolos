@@ -1,13 +1,13 @@
 //! The smoke preset over a synthetic corpus: every workload runs, every
 //! body read back matches, and the records carry what a report needs.
 
-use xtask::archive_bench::codec::Codec;
-use xtask::archive_bench::corpus::Corpus;
-use xtask::archive_bench::dictionary::Dictionary;
-use xtask::archive_bench::presets::{run, Options, Preset};
-use xtask::archive_bench::report;
-use xtask::archive_bench::train::{evaluate, Fixture};
-use xtask::archive_bench::workloads::{EvictOptions, Regime};
+use xtask::perf::dictionary::Dictionary;
+use xtask::perf::report;
+use xtask::perf::storage::codec::Codec;
+use xtask::perf::storage::corpus::Corpus;
+use xtask::perf::storage::presets::{run, Options, Preset};
+use xtask::perf::storage::train::{evaluate, Fixture};
+use xtask::perf::storage::workloads::{EvictOptions, Regime};
 
 #[test]
 fn automatic_store_selects_parallel_in_a_two_worker_process() {
@@ -16,8 +16,9 @@ fn automatic_store_selects_parallel_in_a_two_worker_process() {
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
         .env("RAYON_NUM_THREADS", "2")
         .args([
-            "archive-bench",
-            "bench",
+            "perf",
+            "storage",
+            "run",
             "--preset",
             "write",
             "--synthetic",
@@ -200,5 +201,34 @@ fn evaluation_round_trips_and_ranks_the_dictionary() {
     for r in &records {
         assert_eq!(r["metrics"]["blocks"], 300);
         assert!(r["metrics"]["ratio"].as_f64().unwrap() < 1.0);
+    }
+}
+
+#[test]
+fn write_outcome_carries_the_sink_segment_files() {
+    use xtask::perf::storage::workloads::{write_corpus, WriteParams};
+
+    let corpus = Corpus::synthetic(3, 400, 2);
+    for codec in [Codec::Raw, Codec::Store] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("unrelated.txt"), "not a segment").unwrap();
+        let outcome = write_corpus(
+            &corpus,
+            &codec,
+            directory.path(),
+            &WriteParams {
+                name: "files".into(),
+                batch: 100,
+                encode_threads: 1,
+                fsync: true,
+            },
+        )
+        .unwrap();
+        assert!(!outcome.files.is_empty());
+        assert_eq!(outcome.metrics["segments"], outcome.files.len());
+        assert!(outcome.files.iter().all(|file| file.is_file()
+            && file
+                .extension()
+                .is_some_and(|extension| extension == "segment")));
     }
 }

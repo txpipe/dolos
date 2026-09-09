@@ -449,6 +449,14 @@ fn terminate(child: &mut Child) -> io::Result<ChildUsage> {
     wait_child(child)
 }
 
+fn serving_outcome(
+    served: anyhow::Result<()>,
+    cleanup: io::Result<ChildUsage>,
+) -> anyhow::Result<ChildUsage> {
+    served?;
+    Ok(cleanup?)
+}
+
 fn dir_bytes(dir: &Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -1328,8 +1336,7 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
                         }
                         Ok(())
                     })();
-                    let usage = terminate(&mut server)?;
-                    served?;
+                    let usage = serving_outcome(served, terminate(&mut server))?;
                     if usage.status != 0 && usage.status != -(libc_sigterm()) {
                         eprintln!(
                             "  warning: {} serve exited with {}",
@@ -1384,6 +1391,21 @@ fn libc_sigterm() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_does_not_mask_workload_errors() {
+        let result = serving_outcome(
+            Err(anyhow::anyhow!("server exited before listening")),
+            Err(io::Error::from_raw_os_error(libc::ECHILD)),
+        );
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "server exited before listening"
+        );
+        let result = serving_outcome(Ok(()), Err(io::Error::other("cleanup failed")));
+        assert_eq!(result.err().unwrap().to_string(), "cleanup failed");
+        assert!(serving_outcome(Ok(()), Ok(ChildUsage::default())).is_ok());
+    }
 
     #[test]
     fn a_binary_spec_names_its_label_path_and_version() {

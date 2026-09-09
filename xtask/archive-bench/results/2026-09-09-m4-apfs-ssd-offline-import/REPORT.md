@@ -68,7 +68,7 @@ the historical arm has no such counter, not a measured zero. The counters
 include retained serial scratch, extra encoder scratch and owned completed
 frames. They exclude native zstd contexts and allocator/vector metadata,
 which are included in process RSS and bounded as documented in the
-[implementation notes](../../OFFLINE-IMPORT.md).
+[implementation notes](../../../perf/encoding.md).
 
 The one-block Byron shape is the first 2,000 inherited blocks. The modern
 shape contains the required original Byron origin anchor followed by 1,999

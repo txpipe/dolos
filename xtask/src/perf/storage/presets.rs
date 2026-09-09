@@ -115,15 +115,6 @@ fn clean(dir: &Path, keep: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn store_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "segment"))
-        .collect();
-    files.sort();
-    Ok(files)
-}
-
 /// One read workload of a run and whether the cache is put back into the
 /// regime before it runs.
 pub struct ReadStep {
@@ -268,7 +259,7 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
                     },
                 )?;
                 let locations = outcome.locations;
-                let files = store_files(&dir)?;
+                let files = outcome.files;
                 for &regime in &opts.regimes {
                     if regime == Regime::NoCache && !codec.reads_without_cache() {
                         eprintln!(
