@@ -1,5 +1,8 @@
 # archive-bench
 
+Minibf route, live-replay and real-node HTTP benchmarks are documented in
+[MINIBF.md](MINIBF.md), including paired version comparisons and CI work guards.
+
 Developer benchmarks for the archive's compressed block segments, run as
 `cargo xtask archive-bench`. Not part of the `dolos` binary and not a
 production code path. Two layers of workloads:

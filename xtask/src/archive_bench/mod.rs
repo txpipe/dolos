@@ -14,6 +14,7 @@ pub mod codec;
 pub mod corpus;
 pub mod dictionary;
 pub mod measure;
+pub mod minibf;
 pub mod node;
 pub mod presets;
 pub mod report;
@@ -164,6 +165,23 @@ pub enum Cmd {
 
     /// Drive a dolos binary through import and API workloads
     Node(Box<node::NodeArgs>),
+
+    /// Measure verified minibf routes on fresh persistent fixtures
+    Minibf(Box<minibf::Args>),
+
+    /// Pair benchmark-enabled revisions in alternating order
+    MinibfCompare(Box<minibf::CompareArgs>),
+
+    /// Calibrate verified HTTP workloads against a prepared, stable-tip node
+    MinibfHttp(Box<minibf::http::Args>),
+
+    /// Enforce paired minibf budgets, failing on missing or invalid evidence
+    MinibfCheck {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        #[command(flatten)]
+        budgets: minibf::report::Budgets,
+    },
 
     /// Train a dictionary on a seeded sample of segments
     Train {
@@ -325,6 +343,16 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
             eprintln!("results appended to {}", out.display());
         }
         Cmd::Node(args) => node::run(*args)?,
+        Cmd::Minibf(args) => minibf::run(*args)?,
+        Cmd::MinibfCompare(args) => minibf::compare(*args)?,
+        Cmd::MinibfHttp(args) => minibf::http::run(*args)?,
+        Cmd::MinibfCheck { files, budgets } => {
+            budgets.validate()?;
+            let records = report::load(&files)?;
+            let (rendered, passed) = minibf::report::assess(&records, &budgets);
+            print!("{rendered}");
+            anyhow::ensure!(passed, "minibf comparison did not pass; see report");
+        }
         Cmd::Train {
             corpus,
             segments,

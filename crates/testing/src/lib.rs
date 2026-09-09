@@ -23,6 +23,8 @@ use dolos_core::*;
 pub mod archive;
 pub mod blocks;
 pub mod faults;
+pub mod measured;
+pub mod performance;
 pub mod synthetic;
 
 pub mod toy_domain;

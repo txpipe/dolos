@@ -207,6 +207,25 @@ pub struct FjallStores {
 }
 
 impl FjallStores {
+    pub fn open_in(
+        parent: &std::path::Path,
+        state_config: &dolos_core::config::FjallStateConfig,
+        archive_config: &dolos_core::config::FjallArchiveConfig,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let dir = tempfile::tempdir_in(parent)?;
+        let state = dolos_fjall::StateStore::open(dir.path().join("state"), state_config)?;
+        let archive = dolos_fjall::archive::ArchiveStore::open(
+            dolos_cardano::model::build_schema(),
+            dir.path().join("archive"),
+            archive_config,
+        )?;
+        Ok(Self {
+            state,
+            archive,
+            _dir: Arc::new(dir),
+        })
+    }
+
     /// Where the stores live: `state/` and `archive/` under it.
     pub fn path(&self) -> &std::path::Path {
         self._dir.path()
@@ -297,6 +316,17 @@ impl ToyDomain<MemoryStores> {
 }
 
 impl<B: ToyStores> ToyDomain<B> {
+    pub fn with_persistent_wal(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, WalError> {
+        self.wal = dolos_redb3::wal::RedbWalStore::open(
+            path,
+            &dolos_core::config::RedbWalConfig::default(),
+        )?;
+        Ok(self)
+    }
+
     /// The general constructor: the backend is named by the caller.
     ///
     /// `ToyDomain::new` and friends are this with [`MemoryStores`] filled in.
@@ -310,7 +340,16 @@ impl<B: ToyStores> ToyDomain<B> {
         storage_config: Option<StorageConfig>,
     ) -> Self {
         let stores = B::open();
+        Self::with_stores(genesis, config, initial_delta, storage_config, stores)
+    }
 
+    pub fn with_stores(
+        genesis: Arc<dolos_core::Genesis>,
+        config: CardanoConfig,
+        initial_delta: Option<UtxoSetDelta>,
+        storage_config: Option<StorageConfig>,
+        stores: B,
+    ) -> Self {
         let (tip_broadcast, _) = tokio::sync::broadcast::channel(100);
 
         let chain = dolos_cardano::CardanoLogic::initialize::<Self>(
