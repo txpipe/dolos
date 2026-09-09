@@ -93,7 +93,7 @@ impl Codec {
                 "dictionary_bytes": dictionary.as_ref().map(|d| d.bytes().len()),
             }),
             Codec::Store => json!({
-                "codec": "store",
+                "codec": self.label(),
                 "level": COMPRESSION_LEVEL,
                 "dictionary": Dictionary::bundled().id().to_string(),
                 "dictionary_bytes": BUNDLED_DICTIONARY.len(),
@@ -287,6 +287,10 @@ impl Sink {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    pub fn append_stats(&self) -> Option<dolos_flatfiles::AppendStats> {
+        self.store.as_ref().map(FlatFileStore::append_stats)
     }
 
     fn file(&mut self, segment: u32) -> io::Result<&mut (File, u64)> {
@@ -494,7 +498,7 @@ impl Reader {
     /// each read on Linux, nothing elsewhere. The store opens its own
     /// descriptors, so it cannot honor it.
     pub fn open(dir: &Path, codec: &Codec, nocache: bool) -> io::Result<Self> {
-        if let Codec::Store = codec {
+        if matches!(codec, Codec::Store) {
             if nocache {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,

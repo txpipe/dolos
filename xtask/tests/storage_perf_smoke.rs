@@ -10,6 +10,38 @@ use xtask::perf::storage::train::{evaluate, Fixture};
 use xtask::perf::storage::workloads::{EvictOptions, Regime};
 
 #[test]
+fn automatic_store_selects_parallel_in_a_two_worker_process() {
+    let work = tempfile::tempdir().unwrap();
+    let output = work.path().join("results.jsonl");
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
+        .env("RAYON_NUM_THREADS", "2")
+        .args([
+            "archive-bench",
+            "bench",
+            "--preset",
+            "write",
+            "--synthetic",
+            "400",
+            "--codecs",
+            "store",
+            "--write-batches",
+            "400",
+            "--repeat",
+            "1",
+            "--work",
+        ])
+        .arg(work.path().join("store"))
+        .arg("--out")
+        .arg(&output)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let contents = std::fs::read_to_string(output).unwrap();
+    let record: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
+    assert_eq!(record["metrics"]["import_buffers"]["encoders_peak"], 2);
+}
+
+#[test]
 fn smoke_preset_runs_every_workload_and_verifies_bodies() {
     let work = tempfile::tempdir().unwrap();
     let corpus = Corpus::synthetic(1, 400, 2);
@@ -38,7 +70,7 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
         fsync: true,
         keep: false,
         verify: true,
-        write_batches: vec![1, 7],
+        write_batches: vec![1, 7, 400],
     };
     let mut out = Vec::new();
     run(Preset::Smoke, &corpus, &opts, &mut out).unwrap();
@@ -61,7 +93,7 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
         .iter()
         .filter(|r| r["metrics"]["kind"] == "write")
         .collect();
-    assert_eq!(writes.len(), 2 * 4);
+    assert_eq!(writes.len(), 3 * 4);
     for w in &writes {
         assert_eq!(w["metrics"]["blocks"], 400);
         let crossings = w["metrics"]["segment_crossings"].as_u64().unwrap();
@@ -82,6 +114,17 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
     assert!(store["metrics"]["ratio"].as_f64().unwrap() < 0.8);
     assert!(store["metrics"]["write_ms"].as_f64().unwrap() > 0.0);
     assert_eq!(store["codec"]["dictionary"], dict["codec"]["dictionary"]);
+    assert_eq!(store["metrics"]["import_buffers"]["encoders_peak"], 0);
+    let large = writes
+        .iter()
+        .find(|record| record["codec"]["codec"] == "store" && record["metrics"]["batch"] == 400)
+        .unwrap();
+    assert!(
+        large["metrics"]["import_buffers"]["buffer_bytes_peak"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let reads: Vec<_> = records
         .iter()
