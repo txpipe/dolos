@@ -600,10 +600,10 @@ fn assert_segments_are_frames<A: ArchiveStore>(archive: &std::path::Path, store:
     }
 }
 
-/// Done criterion 2 of the acceptance batch: a logical snapshot restored into
-/// a fresh store lands as frames, in the order and with the hashes it left
-/// with, and the restored archive then appends, answers, rolls back and
-/// prunes like any other — a duplicate import included.
+/// A logical snapshot restored into a fresh store lands as frames, in the
+/// order and with the hashes it left with, and the restored archive then
+/// appends, answers, rolls back and prunes like any other — a duplicate
+/// import included.
 #[test]
 fn a_restored_fjall_archive_is_frames_and_keeps_working() {
     use dolos_core::ArchiveWriter as _;

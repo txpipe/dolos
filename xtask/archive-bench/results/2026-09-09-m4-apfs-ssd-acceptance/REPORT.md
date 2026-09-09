@@ -12,7 +12,7 @@ API point workload — uniform and local, 1 and 8 threads, warm and evicted
 cache — holds the 10% p95 budget. Bootstrap-shaped ingestion (batches of
 500 blocks) does **not** hold the 90% throughput budget: the cutover binary
 imports the corpus at 61% of the baseline's rate, because the serial
-foreground encode adds about 2.5 s of CPU to a 17 s import. The measured
+foreground encode adds about 2.5 s of CPU to a 3.5 s import. The measured
 per-block optimization — the same store at zstd level 1 — recovers to 77%
 for a compressed size 17% larger, and does not close the gap either. This
 is the constraint the plan asks to be reported to `org/founder` rather than
@@ -60,11 +60,11 @@ fsync, index commit); the child's CPU and peak RSS are the kernel's
 
 The live-tip shape is bound by the `fdatasync` and the index commit — 4.2 ms
 a block on every binary — and the encode hides under it entirely. At the
-bootstrap shape nothing hides it: the baseline imports 643 MiB in 17.5 s and
-the candidate in 28.8 s, and the difference is the encode running serially
+bootstrap shape nothing hides it: the baseline imports 643 MiB in 3.5 s and
+the candidate in 5.7 s, and the difference is the encode running serially
 on the import thread (about 250 MiB per CPU-second at level 3, in line with
 the store-level measurement below). Level 1 encodes at roughly twice that
-rate and brings the import to 22.9 s, still 23% slower than raw, while
+rate and brings the import to 4.5 s, still 23% below the raw throughput, while
 storing 17% more bytes. Peak resident memory is unchanged by compression
 (80–82 MiB at batch 500): the encoder holds one context and one output
 buffer.

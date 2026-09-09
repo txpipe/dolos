@@ -1149,6 +1149,7 @@ pub fn run(args: NodeArgs) -> anyhow::Result<()> {
     if regimes.contains(&Regime::NoCache) {
         anyhow::bail!("the node harness reads through the server; nocache has no meaning here");
     }
+    anyhow::ensure!(args.live_blocks > 0, "--live-blocks must be at least 1");
     let evict = EvictOptions {
         from: args.evict_from.clone(),
         bytes: args.evict_gib << 30,
