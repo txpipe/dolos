@@ -25,14 +25,17 @@ pub struct BlockRefMeta {
     pub tx_index: TxOrder,
 }
 
-/// Maximum number of metadata entries, including misses, retained between batches.
+/// Maximum number of metadata entries, including misses, retained between
+/// batches.
 pub const MAX_BLOCK_META_DEPS: usize = 4096;
 
-/// Resolves each distinct hash once per batch through one shared blocking limiter.
+/// Resolves each distinct hash once per batch through one shared blocking
+/// limiter.
 ///
 /// Cached hits and misses avoid subsequent fetches until eviction. The memo is
-/// bounded; batch results are owned and complete even when larger than the memo.
-/// Eviction only costs a later re-fetch. This does not impose a request-size cap.
+/// bounded; batch results are owned and complete even when larger than the
+/// memo. Eviction only costs a later re-fetch. This does not impose a
+/// request-size cap.
 pub struct BlockMetaResolver<D: Domain> {
     query: AsyncQueryFacade<D>,
     memo: HashMap<TxHash, Option<BlockRefMeta>>,
@@ -54,15 +57,17 @@ impl<D: Domain> BlockMetaResolver<D> {
         }
     }
 
-    /// Number of distinct uncached hashes submitted for fetching, including misses.
+    /// Number of distinct uncached hashes submitted for fetching, including
+    /// misses.
     pub fn fetches(&self) -> usize {
         self.fetches
     }
 
     /// Return owned metadata for the requested hashes, omitting archive misses.
     ///
-    /// Every hash is fetched at most once in this call, including batches larger
-    /// than the memo capacity. Errors propagate without being cached as misses.
+    /// Every hash is fetched at most once in this call, including batches
+    /// larger than the memo capacity. Errors propagate without being cached
+    /// as misses.
     pub async fn resolve_batch(
         &mut self,
         hashes: impl IntoIterator<Item = TxHash>,
