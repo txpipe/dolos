@@ -23,8 +23,8 @@ use dolos_cardano::{
 };
 use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
 use dreps::{drep_is_expired, drep_is_retired, drep_list_item, parse_drep_id, DrepModelBuilder};
-use futures::future::join_all;
-use metadata::fetch_drep_metadata;
+use futures::{stream, StreamExt as _, TryStreamExt as _};
+use metadata::{fetch_drep_metadata, OffchainStore};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -41,6 +41,12 @@ use crate::{
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
+
+/// How many anchor fetches one page runs at a time. A page asks for up to
+/// 100 rows and every miss costs a round trip capped at the fetch timeout,
+/// so the bound keeps a slow page from opening 100 outbound connections at
+/// once while a cached row still costs nothing.
+const MAX_CONCURRENT_METADATA_FETCHES: usize = 8;
 
 fn chain_context<D: Domain>(
     domain: &Facade<D>,
@@ -153,21 +159,27 @@ where
         }
     }
 
+    let store = OffchainStore::new(
+        &domain.storage_config().path,
+        domain.config.max_offchain_cache_bytes(),
+    );
+
     let items = dreps
         .into_iter()
         .skip(pagination.from())
         .take(pagination.count)
         .map(|(_, _, state)| async {
-            let metadata = fetch_drep_metadata(state.anchor.clone()).await;
+            let metadata = fetch_drep_metadata(&store, state.anchor.clone()).await;
             let mut model = drep_list_item(state, &pparams, &chain, tip)?;
             model.metadata = metadata.map(Box::new);
             Ok::<_, StatusCode>(model)
         });
 
-    let page = join_all(items)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, StatusCode>>()?;
+    // buffered keeps the page order while bounding the outbound fan-out
+    let page = stream::iter(items)
+        .buffered(MAX_CONCURRENT_METADATA_FETCHES)
+        .try_collect::<Vec<_>>()
+        .await?;
 
     Ok(Json(page))
 }
@@ -780,13 +792,18 @@ where
 mod tests {
     use super::*;
     use crate::mapping::bech32;
+    use crate::mapping::bech32_drep;
     use crate::test_support::{TestApp, TestFault};
     use bech32::{Bech32, Hrp};
     use blockfrost_openapi::models::drep::Drep as DrepModel;
-    use dolos_cardano::{model::GovPurpose, pallas_extras};
+    use dolos_cardano::{
+        model::{drep_to_entity_key, DRepExpiry, GovPurpose},
+        pallas_extras,
+    };
     use dolos_core::StateWriter as _;
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
+    use pallas::ledger::primitives::conway::DRep;
     use pallas::{
         codec::utils::Bytes,
         ledger::primitives::conway::{GovAction, GovActionId},
@@ -1041,15 +1058,149 @@ mod tests {
         assert!(models.is_empty());
     }
 
+    /// Three DReps whose voting powers and first sightings disagree, so
+    /// ordering by amount cannot be mistaken for the default ordering and
+    /// each direction names a different row first.
+    fn amount_app() -> TestApp {
+        TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), |domain, _| {
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+
+            // seen in this order, so appearance order is a, b, c while the
+            // amounts run the other way
+            for (byte, power, seen) in [(0xa1u8, 300u64, 10u64), (0xb2, 100, 20), (0xc3, 200, 30)] {
+                let identifier = DRep::Key([byte; 28].into());
+
+                let mut state = DRepState::new(identifier.clone());
+                state.registered_at = Some((seen, 0));
+                state.first_seen_at = Some((seen, 0));
+                state.voting_power = power;
+                state.expiry = Some(DRepExpiry::new(u64::MAX, 0));
+
+                writer
+                    .write_entity_typed(&drep_to_entity_key(&identifier), &state)
+                    .expect("failed to write drep");
+            }
+
+            writer.commit().expect("failed to commit dreps");
+        })
+    }
+
+    /// The seeded DReps in the order they first appeared, which is the
+    /// listing's default order.
+    fn seeded_ids() -> Vec<String> {
+        [0xa1u8, 0xb2, 0xc3]
+            .iter()
+            .map(|byte| bech32_drep(&DRep::Key([*byte; 28].into())).expect("failed to encode"))
+            .collect()
+    }
+
+    fn listed_ids(models: &[DrepsInner], seeded: &[String]) -> Vec<String> {
+        models
+            .iter()
+            .map(|x| x.drep_id.clone())
+            .filter(|id| seeded.contains(id))
+            .collect()
+    }
+
     #[tokio::test]
     async fn governance_dreps_list_order_by_amount() {
-        let app = TestApp::new();
+        let app = amount_app();
+        let seeded = seeded_ids();
+        let (a, b, c) = (seeded[0].clone(), seeded[1].clone(), seeded[2].clone());
 
-        let models = get_dreps_list(&app, "/governance/dreps?order_by=amount").await;
-        assert_eq!(models.len(), 1);
+        // default: the order they were first seen, amounts ignored
+        let models = get_dreps_list(&app, "/governance/dreps?count=100").await;
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![a.clone(), b.clone(), c.clone()]
+        );
 
-        let models = get_dreps_list(&app, "/governance/dreps?order_by=amount&order=desc").await;
-        assert_eq!(models.len(), 1);
+        // by amount ascending: 100, 200, 300
+        let models = get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await;
+        assert_eq!(
+            listed_ids(&models, &seeded),
+            vec![b.clone(), c.clone(), a.clone()]
+        );
+
+        // and descending is that read backwards
+        let models = get_dreps_list(
+            &app,
+            "/governance/dreps?count=100&order_by=amount&order=desc",
+        )
+        .await;
+        assert_eq!(listed_ids(&models, &seeded), vec![a, c, b]);
+    }
+
+    /// A DRep that never registered and never voted — a vote-delegation
+    /// target the chain only ever mentioned — has no last-active epoch, and
+    /// Blockfrost's SQL sends that row to the `ELSE FALSE` arm however old
+    /// it is. Verified against live Blockfrost on preview, where 13 such
+    /// DReps sit in the first 3000 rows.
+    #[tokio::test]
+    async fn governance_dreps_list_never_active_dreps_never_expire() {
+        let identifier = DRep::Key([0xd4u8; 28].into());
+
+        let app = {
+            let identifier = identifier.clone();
+
+            TestApp::new_with_cfg_and_setup(SyntheticBlockConfig::default(), move |domain, _| {
+                let writer = domain
+                    .state()
+                    .start_writer()
+                    .expect("failed to start writer");
+
+                // seen at the very first slot and silent ever since, with the
+                // ledger expiry the boundary would have long since tripped
+                let mut state = DRepState::new(identifier.clone());
+                state.first_seen_at = Some((0, 0));
+                state.expiry = Some(DRepExpiry::new(0, 0));
+                state.expired = true;
+
+                writer
+                    .write_entity_typed(&drep_to_entity_key(&identifier), &state)
+                    .expect("failed to write drep");
+                writer.commit().expect("failed to commit drep");
+            })
+        };
+
+        let drep_id = bech32_drep(&identifier).expect("failed to encode");
+        let model = get_drep(&app, &drep_id).await;
+
+        assert_eq!(model.last_active_epoch, None);
+        assert!(!model.retired);
+        assert!(!model.expired, "Blockfrost reports these as not expired");
+
+        // and the filter agrees with the field
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100&expired=true").await;
+        assert!(listed.iter().all(|x| x.drep_id != drep_id));
+
+        let listed = get_dreps_list(&app, "/governance/dreps?count=100&expired=false").await;
+        assert!(listed.iter().any(|x| x.drep_id == drep_id));
+    }
+
+    /// Ordering by amount has to hold across a page boundary, not just
+    /// inside one page, which is what the Blockfrost suite checks too.
+    #[tokio::test]
+    async fn governance_dreps_list_order_by_amount_spans_pages() {
+        let app = amount_app();
+        let seeded = seeded_ids();
+
+        let mut paged = vec![];
+
+        for page in 1..=4 {
+            let path = format!("/governance/dreps?count=1&order_by=amount&page={page}");
+            paged.extend(listed_ids(&get_dreps_list(&app, &path).await, &seeded));
+        }
+
+        let whole = listed_ids(
+            &get_dreps_list(&app, "/governance/dreps?count=100&order_by=amount").await,
+            &seeded,
+        );
+
+        assert_eq!(paged, whole);
     }
 
     #[tokio::test]

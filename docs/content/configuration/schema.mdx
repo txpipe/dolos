@@ -125,6 +125,11 @@ here because this volume is already sized for the data; a mainnet transfer
 stages gigabytes. All but `verify` take `--scratch-dir` to point somewhere
 else.
 
+It also holds `offchain/`: the DRep metadata MiniBF fetched and verified
+against its on-chain hash, kept so a restart does not fetch it again. It stays
+within `serve.minibf.max_offchain_cache_mb`, dropping the oldest bodies first,
+and deleting it costs nothing but the next fetch.
+
 `dolos snapshot backfill` adds `mithril/`, the immutable window it replays
 from, for the same reason — the download is data-volume sized, and the command
 deletes the files it has consumed as it goes. `--download-dir` moves it.
@@ -318,12 +323,14 @@ The `serve.minibf` section controls the options for the HTTP endpoint that hosts
 | token_registry_url | string  | "https://token-registry.io"     |
 | url                | string  | "https://minibf.local"          |
 | max_scan_items     | integer | 3000                             |
+| max_offchain_cache_mb | integer | 256 (default)                    |
 
 - `listen_address`: the local address (`IP:PORT`) to listen for incoming connections (`[::]` represents any IP address).
 - `permissive_cors`: allow cross-origin requests from any origin (defaults to `true`).
 - `token_registry_url`: optional token registry base URL used for off-chain asset metadata.
 - `url`: optional public URL used in the `/` root response.
 - `max_scan_items`: caps page-based scans for heavy endpoints (defaults to 3000 if unset).
+- `max_offchain_cache_mb`: disk the verified DRep metadata cache may use under `<storage.path>/offchain`, in MB (defaults to 256). `0` keeps the cache in memory only and writes nothing.
 
 ## `serve.minikupo` section
 
