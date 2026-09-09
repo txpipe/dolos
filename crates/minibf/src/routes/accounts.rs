@@ -23,6 +23,7 @@ use dolos_cardano::{
     model::{AccountState, DRepState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
+use dolos_core::block_meta::BlockMetaResolver;
 use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _, TemporalKey};
 use futures_util::StreamExt;
 use pallas::{
@@ -39,7 +40,6 @@ use pallas::ledger::primitives::alonzo::Certificate as AlonzoCert;
 use pallas::ledger::primitives::conway::Certificate as ConwayCert;
 
 use crate::{
-    block_meta::BlockMetaResolver,
     error::Error,
     inputs::{for_each_touched_output, InputDeps, InputResolver},
     mapping::{self, bech32_drep, bech32_pool, IntoModel},

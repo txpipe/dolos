@@ -1594,7 +1594,6 @@ dependencies = [
  "bech32 0.11.1",
  "dolos-cardano",
  "dolos-core",
- "dolos-minibf",
  "dolos-testing",
  "hex",
  "http-body-util",

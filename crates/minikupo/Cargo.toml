@@ -24,7 +24,6 @@ axum = { version = "0.8.4" }
 
 dolos-core = { path = "../core" }
 dolos-cardano = { path = "../cardano" }
-dolos-minibf = { path = "../minibf" }
 
 [dev-dependencies]
 dolos-testing = { path = "../testing" }

@@ -5,8 +5,8 @@ use axum::{
     Json,
 };
 use dolos_cardano::{indexes::CardanoStateIndexExt, network_from_genesis, pallas_extras};
+use dolos_core::block_meta::BlockMetaResolver;
 use dolos_core::{ArchiveStore as _, Domain, EraCbor, StateStore as _, TxoRef, UtxoSet};
-use dolos_minibf::block_meta::BlockMetaResolver;
 use pallas::codec::minicbor;
 use pallas::ledger::{
     addresses::{Address, StakeAddress},

@@ -4,10 +4,10 @@ use pallas::ledger::traverse::MultiEraOutput;
 use std::collections::{HashMap, HashSet};
 
 use dolos_cardano::indexes::AsyncCardanoQueryExt;
+use dolos_core::block_meta::BlockMetaResolver;
 use dolos_core::{Domain, StateStore as _, TxHash, TxoIdx, TxoRef};
 
 use crate::{
-    block_meta::BlockMetaResolver,
     mapping::{IntoModel, UtxoOutputModelBuilder},
     pagination::{Order, Pagination},
     Facade,
