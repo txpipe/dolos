@@ -1,6 +1,6 @@
 # xtask
 
-Custom developer tasks for Dolos. These commands help bootstrap test instances from Mithril snapshots and generate ground-truth fixtures from cardano-db-sync.
+Custom developer tasks for Dolos. These commands help bootstrap test instances from Mithril snapshots, generate ground-truth fixtures from cardano-db-sync, and benchmark the archive's block segments.
 
 If `cargo xtask` isn't available yet, install the helper once:
 
@@ -131,6 +131,26 @@ Output fields per entity:
 - **pools** — `pool_bech32,pool_hash,total_lovelace`
 - **accounts** — `stake,pool,lovelace`
 - **rewards** — `stake,pool,amount,type,earned_epoch`
+
+### `archive-bench`
+
+Benchmarks for the archive's compressed block segments: store-level
+workloads over the production `dolos-flatfiles` store beside a modelled
+sink, node-level workloads that drive `dolos` binaries through their import
+and API paths so two revisions can be paired, dictionary training and
+evaluation, and a report renderer with gate verdicts.
+
+```
+cargo xtask archive-bench bench --preset all --corpus <DIR> --segments 448..451 --work <DIR> --out results.jsonl
+cargo xtask archive-bench node --bin baseline=<PATH>:v3 --bin candidate=<PATH> --run <NAME> --immutable <DIR> --genesis <DIR> --work <DIR> --out node.jsonl
+cargo xtask archive-bench report results.jsonl node.jsonl
+cargo xtask archive-bench train --corpus <DIR> --sample 440..447=1500 --out cardano.dict
+cargo xtask archive-bench evaluate --fixture label=<DIR>:448..455 --dictionary bundled
+```
+
+Every option, the gates, the corpus requirements and the committed results
+are described in [`archive-bench/README.md`](archive-bench/README.md). The
+`smoke` preset runs under `cargo test -p xtask`.
 
 ### `e2e-test`
 

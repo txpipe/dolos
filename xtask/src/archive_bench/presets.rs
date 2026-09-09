@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::codec::Codec;
-use crate::corpus::Corpus;
-use crate::workloads::{
+use super::codec::Codec;
+use super::corpus::Corpus;
+use super::workloads::{
     apply_regime, run_concurrent, run_reads, write_corpus, ConcurrentParams, EvictOptions, Mix,
     ReadParams, Regime, WriteParams,
 };
@@ -204,7 +204,7 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
     std::fs::create_dir_all(&opts.work)?;
     let mut rec = Recorder {
         out,
-        environment: crate::measure::environment(&[&opts.work]),
+        environment: super::measure::environment(&[&opts.work]),
         corpus: corpus.json(),
         preset: preset.label(),
     };

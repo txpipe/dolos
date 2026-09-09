@@ -555,6 +555,154 @@ fn a_restored_node_is_the_node_it_came_from_on_fjall() {
     roundtrip::<FjallStores>();
 }
 
+/// Every segment file under `archive` is nothing but zstd frames for the
+/// bundled dictionary, and every body the store answers with is one of them.
+fn assert_segments_are_frames<A: ArchiveStore>(archive: &std::path::Path, store: &A) {
+    use dolos_fjall::flatfiles::{BUNDLED_DICTIONARY, MAX_BODY_BYTES};
+
+    let dictionary_id = zstd::zstd_safe::get_dict_id_from_dict(BUNDLED_DICTIONARY).unwrap();
+    let mut decompressor = zstd::bulk::Decompressor::with_dictionary(BUNDLED_DICTIONARY).unwrap();
+    let mut on_disk: Vec<Vec<u8>> = Vec::new();
+    let mut files: Vec<_> = std::fs::read_dir(archive)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "segment"))
+        .collect();
+    files.sort();
+    assert!(
+        !files.is_empty(),
+        "no segment file under {}",
+        archive.display()
+    );
+    for file in files {
+        let bytes = std::fs::read(&file).unwrap();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            let size = zstd::zstd_safe::find_frame_compressed_size(&bytes[cursor..])
+                .unwrap_or_else(|_| panic!("{}: not a frame at {cursor}", file.display()));
+            let frame = &bytes[cursor..cursor + size];
+            assert_eq!(
+                zstd::zstd_safe::get_dict_id_from_frame(frame),
+                Some(dictionary_id),
+                "{}: frame at {cursor} was not written with the bundled dictionary",
+                file.display()
+            );
+            on_disk.push(decompressor.decompress(frame, MAX_BODY_BYTES).unwrap());
+            cursor += size;
+        }
+    }
+    on_disk.sort();
+    for (slot, body) in blocks_of(store) {
+        assert!(
+            on_disk.binary_search(&body).is_ok(),
+            "the block at slot {slot} is not a frame on disk"
+        );
+    }
+}
+
+/// A logical snapshot restored into a fresh store lands as frames, in the
+/// order and with the hashes it left with, and the restored archive then
+/// appends, answers, rolls back and prunes like any other — a duplicate
+/// import included.
+#[test]
+fn a_restored_fjall_archive_is_frames_and_keeps_working() {
+    use dolos_core::ArchiveWriter as _;
+    use dolos_testing::blocks::make_conway_block_with_prev;
+    use pallas::ledger::traverse::MultiEraBlock;
+
+    let (domain, blank, _) = round_trip::<FjallStores>(default_budget());
+    let archive_dir = blank.stores.path().join("archive");
+    let restored = blocks_of(&blank.archive);
+    assert_eq!(restored, blocks_of(domain.archive()), "order and bodies");
+    let hashes = |blocks: &[(u64, Vec<u8>)]| -> Vec<String> {
+        blocks
+            .iter()
+            .map(|(_, b)| MultiEraBlock::decode(b).unwrap().hash().to_string())
+            .collect()
+    };
+    assert_eq!(hashes(&restored), hashes(&blocks_of(domain.archive())));
+    assert_segments_are_frames(&archive_dir, &blank.archive);
+
+    // Append past the restored tip.
+    let (tip_slot, tip_body) = restored.last().cloned().unwrap();
+    let tip = MultiEraBlock::decode(&tip_body).unwrap();
+    let next = make_conway_block_with_prev(tip_slot + 20, Some(tip.hash()), tip.number() + 1);
+    let writer = blank.archive.start_writer().unwrap();
+    writer.apply(&next.0, &next.1).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(
+        blank.archive.get_tip().unwrap().map(|(s, _)| s),
+        Some(tip_slot + 20)
+    );
+    assert_eq!(
+        blank
+            .archive
+            .get_block_by_slot(&(tip_slot + 20))
+            .unwrap()
+            .as_deref(),
+        Some(next.1.as_ref().as_slice())
+    );
+    let mut appended = restored.clone();
+    appended.push((tip_slot + 20, next.1.as_ref().clone()));
+    assert_eq!(blocks_of(&blank.archive), appended);
+    assert_segments_are_frames(&archive_dir, &blank.archive);
+
+    // A block imported again (a resumed restore rewriting a layer) keeps
+    // its original frame: the store answers the same, and only dead space
+    // grows.
+    let segment_bytes = || -> u64 {
+        std::fs::read_dir(&archive_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "segment"))
+            .map(|e| e.metadata().unwrap().len())
+            .sum()
+    };
+    let before = segment_bytes();
+    let (again_slot, again_body) = restored[restored.len() / 2].clone();
+    let again_point = ChainPoint::Specific(
+        again_slot,
+        MultiEraBlock::decode(&again_body).unwrap().hash(),
+    );
+    let writer = blank.archive.start_writer().unwrap();
+    writer
+        .apply(&again_point, &std::sync::Arc::new(again_body))
+        .unwrap();
+    writer.commit().unwrap();
+    assert_eq!(
+        blocks_of(&blank.archive),
+        appended,
+        "a duplicate changes no answer"
+    );
+    assert!(
+        segment_bytes() > before,
+        "the duplicate frame is dead space"
+    );
+
+    // Roll the appended block back.
+    let writer = blank.archive.start_writer().unwrap();
+    writer.undo(&next.0).unwrap();
+    writer.commit().unwrap();
+    assert_eq!(
+        blocks_of(&blank.archive),
+        restored,
+        "the rollback restores the history"
+    );
+    assert_eq!(
+        blank.archive.get_tip().unwrap().map(|(s, _)| s),
+        Some(tip_slot)
+    );
+    assert_segments_are_frames(&archive_dir, &blank.archive);
+
+    // Prune to the last slot only: whatever the fixture spans, what remains
+    // is a suffix of the history and still frames.
+    blank.archive.prune_history(1, None).unwrap();
+    let pruned = blocks_of(&blank.archive);
+    assert!(!pruned.is_empty());
+    assert!(restored.ends_with(&pruned), "pruning keeps a suffix");
+    assert_segments_are_frames(&archive_dir, &blank.archive);
+}
+
 // --------------------------------------------------------------------------
 // 3. Cross-check
 // --------------------------------------------------------------------------

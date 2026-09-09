@@ -34,6 +34,6 @@ fn check_directory(directory: &Path) {
 #[test]
 fn published_artifacts_exclude_workstation_paths_and_sessions() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    check_directory(&root.join("results"));
-    check_directory(&root.join("../flatfiles/dictionary"));
+    check_directory(&root.join("archive-bench/results"));
+    check_directory(&root.join("../crates/flatfiles/dictionary"));
 }

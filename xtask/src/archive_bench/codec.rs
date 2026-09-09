@@ -20,9 +20,9 @@ use std::time::Instant;
 use dolos_flatfiles::{BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, COMPRESSION_LEVEL};
 use serde_json::{json, Value};
 
-use crate::dictionary::Dictionary;
+use super::dictionary::Dictionary;
 
-use crate::measure::thread_cpu_ns;
+use super::measure::thread_cpu_ns;
 
 /// Largest decoded block the reader will allocate for.
 pub const MAX_BLOCK: usize = 16 << 20;

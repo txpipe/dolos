@@ -55,7 +55,7 @@ impl Rng {
     }
 }
 
-fn era_name(block: &MultiEraBlock) -> &'static str {
+pub fn era_name(block: &MultiEraBlock) -> &'static str {
     use pallas::ledger::traverse::Era;
     match block.era() {
         Era::Byron => "byron",

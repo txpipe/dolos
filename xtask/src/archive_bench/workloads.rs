@@ -9,9 +9,9 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use serde_json::{json, Value};
 
-use crate::codec::{evict_file, prime_file, Codec, Location, Sink};
-use crate::corpus::{Corpus, Rng};
-use crate::measure::{
+use super::codec::{evict_file, prime_file, Codec, Location, Sink};
+use super::corpus::{Corpus, Rng};
+use super::measure::{
     counters, heap_current, heap_peak, heap_reset_peak, histogram, histogram_json, thread_cpu_ns,
 };
 
@@ -294,7 +294,7 @@ impl Acc {
         self.point.len() + self.page.len()
     }
 
-    fn json(&self, wall: f64, process: Option<&crate::measure::Counters>) -> Value {
+    fn json(&self, wall: f64, process: Option<&super::measure::Counters>) -> Value {
         let ops = self.ops();
         json!({
             "ops": ops,
@@ -320,11 +320,11 @@ impl Acc {
 }
 
 struct Worker<'a> {
-    reader: crate::codec::Reader,
+    reader: super::codec::Reader,
     rng: Rng,
     cursor: usize,
     locations: &'a [Location],
-    bodies: Option<&'a [crate::corpus::Block]>,
+    bodies: Option<&'a [super::corpus::Block]>,
     mix: &'a Mix,
     acc: Acc,
 }
@@ -336,13 +336,13 @@ impl<'a> Worker<'a> {
         nocache: bool,
         seed: u64,
         locations: &'a [Location],
-        bodies: Option<&'a [crate::corpus::Block]>,
+        bodies: Option<&'a [super::corpus::Block]>,
         mix: &'a Mix,
     ) -> io::Result<Self> {
         let mut rng = Rng::new(seed);
         let cursor = rng.below(locations.len());
         Ok(Self {
-            reader: crate::codec::Reader::open(dir, codec, nocache)?,
+            reader: super::codec::Reader::open(dir, codec, nocache)?,
             rng,
             cursor,
             locations,

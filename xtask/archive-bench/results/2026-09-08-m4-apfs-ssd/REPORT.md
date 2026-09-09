@@ -265,7 +265,7 @@ reintroduces a raw mode, a chunk mode, or a weaker fsync.
   warm (see method). Nothing here cites them as cold, and a successor must
   not either; the eight-thread cold point case is `point-local t8`.
 - To reproduce: `RUNBOOK.md`. To regress: the same commands at a new
-  revision, then `dolos-archive-bench report` over both sets of records.
+  revision, then `cargo xtask archive-bench report` over both sets of records.
   The report lists each run and pairs repeats within one run only, so the
   old and new records render side by side and never share a median; the
   serial foreground path (`encode_threads 1`, fsync on) is the setting to

@@ -206,6 +206,13 @@ pub struct FjallStores {
     _dir: Arc<tempfile::TempDir>,
 }
 
+impl FjallStores {
+    /// Where the stores live: `state/` and `archive/` under it.
+    pub fn path(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+}
+
 impl ToyStores for FjallStores {
     type State = dolos_fjall::StateStore;
     type Archive = dolos_fjall::archive::ArchiveStore;

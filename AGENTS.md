@@ -146,7 +146,7 @@ The project follows a modular workspace architecture with clear separation of co
 
 #### `xtask` (Development Automation)
 - **Purpose**: Development task automation following cargo-xtask pattern
-- **Role**: Build scripts and development utilities
+- **Role**: Build scripts and development utilities, including `cargo xtask archive-bench` — the archive segment benchmarks (store-level presets, node-level paired runs of two `dolos` binaries, dictionary tooling, report); see `xtask/archive-bench/README.md`
 
 ## Dependency Flow
 
