@@ -218,13 +218,28 @@ impl ChainSummary {
     /// `EraTransition::entering_conway`). `None` when no known era has
     /// reached Conway.
     pub fn first_conway_epoch(&self) -> Option<u64> {
-        for (protocol, era) in self.iter_past_with_protocol() {
-            if *protocol >= 9 {
+        self.first_epoch_with_protocol(9)
+    }
+
+    /// Epoch at which the chain entered Mary — the first era with
+    /// protocol >= 4, which is where native assets appear. Nothing before
+    /// it can mint, so listings of assets can start their scan here. `None`
+    /// when no known era has reached Mary.
+    pub fn first_mary_epoch(&self) -> Option<u64> {
+        self.first_epoch_with_protocol(4)
+    }
+
+    /// Start epoch of the first era whose protocol is at least `protocol`.
+    /// A hard fork can jump over a version, so this is a threshold rather
+    /// than an equality check.
+    fn first_epoch_with_protocol(&self, protocol: u16) -> Option<u64> {
+        for (era_protocol, era) in self.iter_past_with_protocol() {
+            if *era_protocol >= protocol {
                 return Some(era.start.epoch);
             }
         }
         match self.protocols.last() {
-            Some(last) if *last >= 9 => Some(self.edge().start.epoch),
+            Some(last) if *last >= protocol => Some(self.edge().start.epoch),
             _ => None,
         }
     }
@@ -366,5 +381,33 @@ mod tests {
         jumped.append_era(8, era(8, 300));
         jumped.append_era(10, era(10, 480));
         assert_eq!(jumped.first_conway_epoch(), Some(480));
+    }
+
+    #[test]
+    fn first_mary_epoch_finds_first_multi_asset_era() {
+        // empty summary
+        assert_eq!(ChainSummary::default().first_mary_epoch(), None);
+
+        // Byron, Shelley and Allegra have no native assets
+        let mut summary = ChainSummary::default();
+        summary.append_era(1, era(1, 0));
+        summary.append_era(2, era(2, 208));
+        summary.append_era(3, era(3, 236));
+        assert_eq!(summary.first_mary_epoch(), None);
+
+        // Mary at the edge
+        summary.append_era(4, era(4, 251));
+        assert_eq!(summary.first_mary_epoch(), Some(251));
+
+        // later eras keep the original Mary entry
+        summary.append_era(6, era(6, 290));
+        summary.append_era(9, era(9, 507));
+        assert_eq!(summary.first_mary_epoch(), Some(251));
+
+        // a chain that starts past Mary (testnets) has assets from epoch 0
+        let mut recent = ChainSummary::default();
+        recent.append_era(6, era(6, 0));
+        recent.append_era(9, era(9, 100));
+        assert_eq!(recent.first_mary_epoch(), Some(0));
     }
 }

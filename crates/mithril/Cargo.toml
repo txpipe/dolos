@@ -1,0 +1,30 @@
+[package]
+name = "dolos-mithril"
+description = "Acquiring immutable chain data from a mithril aggregator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dolos-core = { path = "../core" }
+
+tracing.workspace = true
+
+# `rustls-no-provider` keeps reqwest's hard-wired aws-lc-rs crypto provider
+# out of the build; the program installs ring as the process-default provider
+# instead — `dolos`'s `main()`, and the fixture under `cargo test`.
+mithril-client = { version = "0.14.5", default-features = false, features = [
+    "fs",
+    "num-integer-backend",
+    "rustls-no-provider",
+] }
+
+[dev-dependencies]
+tempfile = "3.20.0"
+
+# The crypto-provider fixture installs `ring` as the process-default provider —
+# under `cargo test` the test binary is the program. Mirrors the same
+# dev-dependency in `crates/snapshot`.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+] }

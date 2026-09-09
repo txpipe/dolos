@@ -6,12 +6,12 @@
 //! nothing — run it with:
 //!
 //! ```text
-//! cargo test -p dolos-snapshot --features oci --test publish -- --ignored --nocapture
+//! cargo test -p dolos-snapshot --test publish -- --ignored --nocapture
 //! ```
 //!
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
-//! same knob `crates/stelae/tests/oci.rs` uses, so this suite can be pointed at
-//! another implementation.
+//! same knob the stelae repo's `tests/oci.rs` uses, so this suite can be
+//! pointed at another implementation.
 //!
 //! ## The properties
 //!
@@ -54,8 +54,6 @@
 //! published later in full has a *different scope* and is correctly rebuilt
 //! rather than inherited. Reuse across a sequence is a property of a publisher
 //! that stops on epoch boundaries, which is what ADR-004's pipeline does.
-
-#![cfg(feature = "oci")]
 
 mod node;
 mod registry_fixture;
@@ -835,7 +833,6 @@ fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
         &following,
     )
@@ -862,7 +859,6 @@ fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
         &export::First,
     )
@@ -967,12 +963,17 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
 
     // The no-predecessor path: an empty repository states no sizes, so nothing
     // can be measured, so nothing is refused. A first publish runs.
-    assert_eq!(registry::staging_peak(&repository).unwrap(), None);
-    registry::preflight(&repository).unwrap();
+    assert_eq!(
+        registry::staging_peak(&repository, &DolosProfile).unwrap(),
+        None
+    );
+    registry::preflight(&repository, &DolosProfile).unwrap();
 
     node.publish(&repository, &node.first, false);
 
-    let peak = registry::staging_peak(&repository).unwrap().unwrap();
+    let peak = registry::staging_peak(&repository, &DolosProfile)
+        .unwrap()
+        .unwrap();
 
     assert_eq!(
         peak.unsized_layers, 0,
@@ -1056,14 +1057,16 @@ fn a_publish_sizes_its_staging_off_the_stele_before_it() {
         },
     );
 
-    let alone = registry::staging_peak(&serial).unwrap().unwrap();
+    let alone = registry::staging_peak(&serial, &DolosProfile)
+        .unwrap()
+        .unwrap();
 
     assert_eq!(alone.bytes(), state_bytes + others[0]);
     assert!(alone.bytes() < inspected.total_compressed);
 
     // And the volume the fixture stages on holds it, so the publish that
     // follows is not refused.
-    registry::preflight(&repository).unwrap();
+    registry::preflight(&repository, &DolosProfile).unwrap();
 
     eprintln!(
         "staging peak: {} bytes ({state_bytes} across sixteen shards, {:?} for the {staged} \
@@ -1318,7 +1321,7 @@ fn publishing<'a>(
     repository: &'a registry::Registry,
     storage: &'a tempfile::TempDir,
 ) -> registry::Publishing<'a> {
-    registry::Publishing::new(repository).recording_in(storage.path())
+    registry::Publishing::new(repository).recording_in(record_path(storage))
 }
 
 fn record_path(storage: &tempfile::TempDir) -> std::path::PathBuf {

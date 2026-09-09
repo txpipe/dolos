@@ -12,7 +12,7 @@
 
 mod node;
 
-use dolos_core::{ArchiveStore as _, IndexStore as _, StateStore as _, WalStore as _};
+use dolos_core::{ArchiveStore as _, StateStore as _, WalStore as _};
 use node::{assert_ok, Node};
 
 /// What a node holds, in the four numbers a restore has to reproduce.
@@ -28,7 +28,7 @@ struct Contents {
     cursor: Option<dolos_core::ChainPoint>,
     blocks: usize,
     utxos: usize,
-    index_cursor: Option<dolos_core::ChainPoint>,
+    exact_records: usize,
 }
 
 impl Contents {
@@ -40,7 +40,11 @@ impl Contents {
             cursor: stores.state.read_cursor().unwrap(),
             blocks: stores.archive.get_range(None, None).unwrap().count(),
             utxos: stores.state.iter_utxos().unwrap().count(),
-            index_cursor: stores.indexes.cursor().unwrap(),
+            exact_records: stores
+                .archive
+                .iter_exact_records(0..u64::MAX)
+                .unwrap()
+                .count(),
         };
 
         // Every store is closed before the caller does anything else: the next
@@ -54,7 +58,7 @@ impl Contents {
         assert!(self.cursor.is_some(), "no cursor");
         assert!(self.blocks > 0, "no blocks");
         assert!(self.utxos > 0, "no utxos");
-        assert!(self.index_cursor.is_some(), "no index cursor");
+        assert!(self.exact_records > 0, "no exact index records");
     }
 }
 

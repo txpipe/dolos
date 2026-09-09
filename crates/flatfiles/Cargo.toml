@@ -5,3 +5,7 @@ edition.workspace = true
 
 [dependencies]
 tempfile = "3"
+zstd = "0.13"
+
+[dev-dependencies]
+sha2 = "0.10"

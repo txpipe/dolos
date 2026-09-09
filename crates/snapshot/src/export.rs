@@ -66,8 +66,8 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexRecord, IndexStore, LogKey, Namespace,
-    StateStore, TemporalKey,
+    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexRecord, LogKey, Namespace, StateStore,
+    TemporalKey,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -112,7 +112,7 @@ impl EpochWindow {
     }
 }
 
-/// How many `indexes` layers one traversal of the index store fills.
+/// How many `indexes` layers one traversal of the archive store fills.
 ///
 /// ## Why a publish needs a band at all
 ///
@@ -148,11 +148,11 @@ impl IndexBand {
     ///
     /// A zstd compression context at level 9 and the framing around it.
     /// Measured at **10.3 MiB** by `measure_layer_sink_residency` in the root
-    /// package's `tests/index_roundtrip.rs` — thirty-two sinks opened against a
-    /// real stele and each given records to compress, since a context that has
-    /// never compressed anything has not yet allocated its window. Pinned above
-    /// the measurement rather than at it, so a zstd whose level-9 parameters
-    /// grow does not silently overrun the ceiling.
+    /// package's `tests/archive_index_roundtrip.rs` — thirty-two sinks opened
+    /// against a real stele and each given records to compress, since a
+    /// context that has never compressed anything has not yet allocated its
+    /// window. Pinned above the measurement rather than at it, so a zstd
+    /// whose level-9 parameters grow does not silently overrun the ceiling.
     ///
     /// A constant because [`DEFAULT`](IndexBand::DEFAULT) is arithmetic over it
     /// rather than a number someone liked.
@@ -278,11 +278,11 @@ pub struct Plan {
     /// derived from `summary` — which epochs are worth a dump is operational
     /// (decision 0026).
     pub retained: RetainedEpochs,
-    /// How many `indexes` layers one traversal of the index store fills.
+    /// How many `indexes` layers one traversal of the archive store fills.
     ///
     /// Execution rather than geometry: it changes neither which layers this
     /// publish writes nor a byte of what is in them, only how many passes over
-    /// the index store it takes to fill them. It rides on the plan because
+    /// the archive store it takes to fill them. It rides on the plan because
     /// every driver that walks these stores — [`export`], [`reproduce`],
     /// [`verify_reproduction`] — pays the same cost and should take the same
     /// band without each call site spelling it. See [`IndexBand`].
@@ -440,118 +440,11 @@ pub fn plan<S: StateStore>(
     )
 }
 
-/// The publish this one follows.
-///
-/// Two questions, one concept: what a new inscription attests about the steles
-/// before it, and which of their layers it may carry forward rather than build
-/// again. Both are answers only the previous publish has, and holding them
-/// together is what lets a publisher rebuild everything while still chaining —
-/// the `--rebuild` case, which suppresses [`Predecessor::adopt`] and leaves
-/// [`Predecessor::history`] exactly as it was.
-///
-/// The publish this one follows can be **this publish, interrupted**, which is
-/// what [`Predecessor::landed`] is for: a stele that never got sealed left
-/// layers behind that a restart may carry forward on exactly the terms a
-/// predecessor's do. Nothing here decides where that is written down — that is
-/// the implementor's, as `adopt` already is.
-///
-/// `Sync`, because [`export`] drives its layer producers from a pool of
-/// threads and each producer asks these questions for its own layers. An
-/// implementor that keeps state — an adoption counter, a resumption record —
-/// keeps it behind its own synchronization.
-pub trait Predecessor: Sync {
-    /// The history the new inscription carries: every prior publication,
-    /// contiguous and ascending, ending at `sequence - 1`.
-    ///
-    /// Assembling it is the implementor's business, and the protocol holds it
-    /// to the invariant when the document is validated
-    /// (`stelae::inscription`).
-    fn history(&self) -> &[HistoryEntry];
-
-    /// The descriptor to adopt for a layer of `kind` at `scope`, or `None` to
-    /// build it from the stores.
-    ///
-    /// An implementation that answers `Some` **has already arranged for the
-    /// transport to carry the layer's blob**; all that is left for [`export`]
-    /// is to not walk the store. That ordering is why this returns a descriptor
-    /// rather than a boolean: the answer and the arrangement are one act, and
-    /// an export that reused a descriptor whose blob nothing carried would
-    /// publish a manifest with a hole in it.
-    ///
-    /// The default reuses nothing, which is what makes [`First`] one line and
-    /// what a transport with no notion of "already there" — a directory —
-    /// wants.
-    fn adopt(
-        &self,
-        kind: &str,
-        scope: &serde_json::Value,
-    ) -> Result<Option<LayerDescriptor>, Error> {
-        let _ = (kind, scope);
-
-        Ok(None)
-    }
-
-    /// Whether a layer of `kind` at `scope` would be carried forward rather
-    /// than built — [`Predecessor::adopt`]'s question, asked without arranging
-    /// anything.
-    ///
-    /// Separate because `adopt` *acts*: it puts the blob in the transport and
-    /// counts the layer as reused. Forecasting how many layers a publish will
-    /// write has to ask the same question without taking either step, and a
-    /// forecast that called `adopt` would double-count every layer it looked
-    /// at.
-    ///
-    /// It may answer `true` where `adopt` will later answer `None`, in exactly
-    /// one case: a layer an interrupted publish recorded, whose blob the
-    /// repository has since dropped. That is only discovered by reaching for
-    /// it, which is the step this deliberately does not take — so this is the
-    /// honest forecast and `adopt` is the outcome.
-    ///
-    /// The default reuses nothing, matching [`Predecessor::adopt`]'s.
-    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
-        let _ = (kind, scope);
-
-        Ok(false)
-    }
-
-    /// Note that `descriptor`'s layer is in the transport and will be in the
-    /// manifest, whether it was built here or adopted.
-    ///
-    /// Called once per epoch layer, the moment it lands, so an implementor
-    /// writing it down leaves a record that means "this layer is up" rather
-    /// than "this layer was attempted" — the same boundary
-    /// [`crate::restore::Checkpoint`] records on its side. Layers land from
-    /// concurrent producers, so calls interleave; the record is keyed by kind
-    /// and scope, never by arrival order. The state shards are deliberately
-    /// never offered: they describe a moving tip, and a restart must rebuild
-    /// them.
-    ///
-    /// A failure here **fails the publish**. Recording is not a courtesy: a
-    /// record that silently stopped being written would cost the hours it
-    /// exists to save, at the moment nobody is watching.
-    ///
-    /// The default does nothing, which is what a publish with no host behind it
-    /// — a directory, a reproduction — wants.
-    fn landed(&self, descriptor: &LayerDescriptor) -> Result<(), Error> {
-        let _ = descriptor;
-
-        Ok(())
-    }
-}
-
-/// The first stele of a repository: no history, nothing to inherit.
-///
-/// The protocol permits an empty history at any sequence, so this is not only
-/// the very first publish — it is every publish into a directory, which has no
-/// way to be asked what it already holds.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct First;
-
-impl Predecessor for First {
-    fn history(&self) -> &[HistoryEntry] {
-        &[]
-    }
-}
+/// The publish this one follows, which is [`stelae_driver::Predecessor`]: two
+/// questions — what a new inscription attests about the steles before it, and
+/// which of their layers it may carry forward — over documents, and nothing a
+/// store or a profile owns.
+pub use stelae_driver::{First, Predecessor};
 
 /// The stele this one follows, held as a document rather than as a repository.
 ///
@@ -655,11 +548,15 @@ impl Predecessor for Following {
         &self,
         kind: &str,
         scope: &serde_json::Value,
-    ) -> Result<Option<LayerDescriptor>, Error> {
+    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
         Ok(self.dumps.get(&crate::scope_key(kind, scope)?).cloned())
     }
 
-    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
+    fn carried_forward(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<bool, stelae_driver::Error> {
         Ok(self.dumps.contains_key(&crate::scope_key(kind, scope)?))
     }
 }
@@ -708,11 +605,15 @@ impl Predecessor for Attested {
         &self,
         kind: &str,
         scope: &serde_json::Value,
-    ) -> Result<Option<LayerDescriptor>, Error> {
+    ) -> Result<Option<LayerDescriptor>, stelae_driver::Error> {
         Ok(self.dumps.get(&crate::scope_key(kind, scope)?).cloned())
     }
 
-    fn carried_forward(&self, kind: &str, scope: &serde_json::Value) -> Result<bool, Error> {
+    fn carried_forward(
+        &self,
+        kind: &str,
+        scope: &serde_json::Value,
+    ) -> Result<bool, stelae_driver::Error> {
         Ok(self.dumps.contains_key(&crate::scope_key(kind, scope)?))
     }
 }
@@ -748,68 +649,9 @@ fn retained_dumps(
         .collect()
 }
 
-/// The history a stele at `sequence` carries when it follows `previous`.
-///
-/// The three legal readings of what came before, and the one refusal:
-///
-/// - **nothing there** — an empty history, which the protocol permits at any
-///   sequence. The first stele of a repository carries no history, and so does
-///   a publisher deliberately starting a new one at epoch 500;
-/// - **the stele before this one** — the old history plus an entry naming it.
-///   Contiguous by construction, so the protocol's invariant passes rather than
-///   being relied upon;
-/// - **anything else** — refused, naming both sequences and, for a gap, the
-///   distance between them. A gap means a publisher skipped epochs, an equal
-///   sequence means it is republishing one, and a higher one means the
-///   repository is ahead of this node. All three are operational faults with
-///   different fixes, so the message says which.
-///
-/// Whether a deliberate gap ever gets a policy is not this function's to
-/// invent; there is no flag here that overrides the refusal.
-///
-/// It lives here rather than in [`crate::registry`] because a verifier reaches
-/// it without a registry, and because that module is behind a feature: a rule
-/// this load-bearing should not be compiled out of a build that still has to
-/// reproduce a chained digest.
-pub fn history_for(
-    previous: Option<&Inscription>,
-    sequence: u64,
-) -> Result<Vec<HistoryEntry>, Error> {
-    let Some(previous) = previous else {
-        return Ok(Vec::new());
-    };
-
-    let latest = previous.sequence;
-
-    let reason = match latest.checked_add(1) {
-        Some(next) if next == sequence => {
-            let mut history = previous.history.clone();
-
-            history.push(HistoryEntry {
-                sequence: latest,
-                inscription_digest: previous.digest()?,
-            });
-
-            return Ok(history);
-        }
-        _ if latest >= sequence => {
-            "this stele is at or behind the repository's latest; a republish would restart the \
-             chain rather than extend it"
-                .to_owned()
-        }
-        _ => format!(
-            "this node is {} sequences ahead, and a publish must follow the repository's latest \
-             stele: this one would leave a gap no later stele could close",
-            sequence - latest,
-        ),
-    };
-
-    Err(Error::HistoryBreak {
-        latest,
-        publishing: sequence,
-        reason,
-    })
-}
+/// The history rule, which is [`stelae::inscription::history_for`]: it reads a
+/// predecessor's sequence and digest and composes nothing this profile owns.
+pub use stelae::inscription::history_for;
 
 /// Refuse a predecessor from another chain.
 ///
@@ -829,53 +671,9 @@ pub fn same_network(previous: &Inscription, plan: &Plan) -> Result<(), Error> {
     Ok(())
 }
 
-/// Where a node stands relative to the newest stele already published.
-///
-/// The comparison a publisher on a timer needs *before* anything is built, and
-/// both halves of it are already in hand: the sequence a repository's latest
-/// stele carries, and the sequence [`plan`] derived from the node's cursor.
-/// Without it the ordinary case — nothing has closed since last time — arrives
-/// as the [`Error::HistoryBreak`] refusal a skipped epoch does, and a job on a
-/// timer cannot tell the two apart.
-///
-/// A pure comparison over two numbers rather than a method on a transport, so
-/// the cases can be checked without one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
-    /// Nothing has been published; this stele would start the chain.
-    Empty,
-    /// The published chain has already reached this node. Not an error: a
-    /// publisher whose node has not entered a new epoch has nothing to do.
-    UpToDate { latest: u64 },
-    /// The chain ends exactly one sequence back; this stele extends it.
-    Next { latest: u64 },
-    /// The node is further ahead than one sequence, so a publish would leave a
-    /// gap. `distance` is how far — the number the refusal reports alongside
-    /// both sequences, because "you skipped some" and "you skipped forty" are
-    /// different incidents.
-    Ahead { latest: u64, distance: u64 },
-}
-
-impl Standing {
-    /// Read a node at `sequence` against a repository whose latest stele is
-    /// `latest`.
-    pub fn read(latest: Option<u64>, sequence: u64) -> Self {
-        let Some(latest) = latest else {
-            return Self::Empty;
-        };
-
-        match sequence.checked_sub(latest) {
-            None | Some(0) => Self::UpToDate { latest },
-            Some(1) => Self::Next { latest },
-            Some(distance) => Self::Ahead { latest, distance },
-        }
-    }
-
-    /// Whether a publish should go ahead.
-    pub fn publishable(&self) -> bool {
-        matches!(self, Self::Empty | Self::Next { .. })
-    }
-}
+/// Where a node stands against the repository's newest stele, which is
+/// [`stelae_driver::Standing`]: a comparison over two sequence numbers.
+pub use stelae_driver::Standing;
 
 /// Export a complete stele into `stele`: every layer, then the inscription.
 ///
@@ -903,13 +701,11 @@ impl Standing {
 /// through here, because the two halves of what an operator wants to see live
 /// in two places — this loop knows which layer of how many, and only the
 /// transport knows how much of it has moved.
-#[allow(clippy::too_many_arguments)]
-pub fn export<W, A, S, I>(
+pub fn export<W, A, S>(
     stele: &W,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
@@ -918,7 +714,6 @@ where
     W: SteleWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     stele.observe(observer.clone());
 
@@ -961,7 +756,7 @@ where
     // the jobs around it.
     for band in plan.epochs.chunks(plan.band.epochs()) {
         jobs.push(Job::band(move || {
-            write_indexes(stele, plan, indexes, band, previous, cursor)
+            write_indexes(stele, plan, archive, band, previous, cursor)
         }));
     }
 
@@ -1031,19 +826,17 @@ where
 /// crate. Refuses a directory that already holds an inscription: republishing
 /// over a stele in place would leave its old blobs behind, indistinguishable
 /// from the new ones.
-pub fn publish<A, S, I>(
+pub fn publish<A, S>(
     root: impl Into<std::path::PathBuf>,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = stelae::dir::SteleDir::create(root)?;
 
@@ -1052,7 +845,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         &First,
         observer,
@@ -1075,18 +867,16 @@ where
 /// the same stores chained differently are different digests. Pass
 /// [`First`] for a stele that starts a chain and [`Following`] for one that
 /// extends a predecessor's.
-pub fn reproduce<A, S, I>(
+pub fn reproduce<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     // Silent, and not for want of a caller to thread one through: a
     // reproduction stores nothing and moves nothing, so the only thing it could
@@ -1098,11 +888,55 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         previous,
         &Observer::silent(),
     )
+}
+
+/// A reproduced stele's document: the bytes a verifier hashes, and what they
+/// hash to.
+///
+/// The canonical encoding rather than the [`Inscription`], because that is what
+/// `dolos snapshot digest` writes and what `--chain-from` reads back: anything
+/// that re-encoded it would carry a digest nobody else computes.
+#[derive(Debug, Clone)]
+pub struct Document {
+    /// The canonical inscription, byte for byte.
+    pub canonical: Vec<u8>,
+    /// Its sha256, which is the stele's identity.
+    pub identity: stelae::Digest,
+    pub layers: usize,
+    pub uncompressed_size: u64,
+}
+
+/// Reproduce a stele from local stores and canonicalize it, writing nothing.
+///
+/// What a publish costs, minus the I/O and the upload: every layer is
+/// compressed, because a reproduction that skipped compression would not be
+/// doing the work a publish does.
+///
+/// `previous` is the chain this reproduction is told to follow. It is an input
+/// and not an inference — `history` rides inside the canonical document, so the
+/// same stores chained differently are two different digests, deliberately.
+pub fn digest_document<A, S>(
+    plan: &Plan,
+    archive: &A,
+    state: &S,
+    previous: &dyn Predecessor,
+) -> Result<Document, Error>
+where
+    A: ArchiveStore,
+    S: StateStore,
+{
+    let inscription = reproduce(plan, archive, state, None, previous)?;
+
+    Ok(Document {
+        canonical: inscription.canonicalize()?,
+        identity: inscription.digest()?,
+        layers: inscription.layers.len(),
+        uncompressed_size: inscription.uncompressed_size(),
+    })
 }
 
 /// Reproduce `published` from local stores and hold the two documents against
@@ -1129,18 +963,16 @@ where
 /// [`Attested`] takes the published history verbatim and so — unlike
 /// [`Following::new`] — checks nothing about it; this is where that check
 /// lands.
-pub fn verify_reproduction<A, S, I>(
+pub fn verify_reproduction<A, S>(
     published: &Inscription,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     if plan.sequence != published.sequence {
         return Err(Error::ReproductionMismatch {
@@ -1163,7 +995,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         &Attested::of(published),
         &Observer::silent(),
@@ -1745,9 +1576,9 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// ## This is a scan, not a seek, which is why it is banded
 ///
 /// Neither traversal can seek to a slot, so a pass here costs a walk of the
-/// whole index store however few epochs it fills, and one epoch per pass makes
-/// a first publish O(N²). [`IndexBand`] states why the store cannot seek, what
-/// turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
+/// whole archive store however few epochs it fills, and one epoch per pass
+/// makes a first publish O(N²). [`IndexBand`] states why the store cannot seek,
+/// what turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
 ///
 /// ## Positions are handed out before anything is written
 ///
@@ -1778,10 +1609,10 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// index layers rather than the ones before the dying epoch. There is nothing
 /// to save there — resuming into the middle of a band would have to re-traverse
 /// the store for the rest of it anyway.
-fn write_indexes<W: SteleWriter, I: IndexStore>(
+fn write_indexes<W: SteleWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
-    store: &I,
+    store: &A,
     band: &[EpochWindow],
     previous: &dyn Predecessor,
     cursor: &Cursor<'_>,
@@ -1881,7 +1712,7 @@ struct Building<K> {
 /// Send one index record to the layer whose epoch its slot falls in.
 ///
 /// A binary search rather than a walk of the band: this runs once per record,
-/// and a mainnet index store holds hundreds of millions of them.
+/// and a mainnet archive store holds hundreds of millions of them.
 ///
 /// A record that lands in no layer is **dropped on purpose** — see
 /// [`write_indexes`] for the two ways the band's span can cover a slot no layer
@@ -2423,89 +2254,6 @@ mod chain_tests {
         }
     }
 
-    /// The first stele of a repository carries no history, at any sequence.
-    #[test]
-    fn an_empty_repository_starts_a_history() {
-        assert!(history_for(None, 0).unwrap().is_empty());
-        assert!(history_for(None, 500).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_publish_that_follows_latest_extends_the_chain() {
-        let previous = inscription(3, vec![entry(1), entry(2)]);
-
-        let history = history_for(Some(&previous), 4).unwrap();
-
-        assert_eq!(
-            history.iter().map(|e| e.sequence).collect::<Vec<_>>(),
-            vec![1, 2, 3],
-            "the old history plus an entry naming the stele it came from"
-        );
-
-        assert_eq!(history[2].inscription_digest, previous.digest().unwrap());
-
-        // The invariant holds by construction rather than by inspection: a
-        // document built on this history validates.
-        inscription(4, history).validate().unwrap();
-    }
-
-    /// All three refusals name both sequences, because which of the three it is
-    /// decides what the publisher does about it.
-    #[test]
-    fn a_publish_that_does_not_follow_latest_is_refused() {
-        let previous = inscription(497, vec![]);
-
-        for publishing in [500, 497, 496] {
-            let err = history_for(Some(&previous), publishing).unwrap_err();
-            let message = err.to_string();
-
-            assert!(
-                matches!(err, Error::HistoryBreak { .. }),
-                "{publishing}: {err:?}"
-            );
-
-            assert!(message.contains("497"), "{publishing}: {message}");
-            assert!(
-                message.contains(&publishing.to_string()),
-                "{publishing}: {message}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_gap_and_a_republish_are_told_apart() {
-        let previous = inscription(497, vec![]);
-
-        assert!(history_for(Some(&previous), 500)
-            .unwrap_err()
-            .to_string()
-            .contains("gap"));
-
-        assert!(history_for(Some(&previous), 497)
-            .unwrap_err()
-            .to_string()
-            .contains("republish"));
-
-        assert!(history_for(Some(&previous), 496)
-            .unwrap_err()
-            .to_string()
-            .contains("republish"));
-    }
-
-    /// A gap says how far. "The repository is at 497 and you are at 500" is a
-    /// different incident from being one epoch out, and the operator reading
-    /// the message should not have to subtract to find out which they have.
-    #[test]
-    fn a_gap_names_the_distance_alongside_both_sequences() {
-        let previous = inscription(497, vec![]);
-
-        let message = history_for(Some(&previous), 500).unwrap_err().to_string();
-
-        assert!(message.contains("497"), "{message}");
-        assert!(message.contains("500"), "{message}");
-        assert!(message.contains("3 sequences ahead"), "{message}");
-    }
-
     /// The only thing standing between a publisher and a history chained onto
     /// another chain's stele.
     ///
@@ -2700,53 +2448,6 @@ mod chain_tests {
             ),
             "{err:?}"
         );
-    }
-
-    /// The four readings of a repository a publisher on a timer meets, and the
-    /// one that used to arrive as a refusal.
-    #[test]
-    fn a_repository_is_read_as_empty_current_next_or_ahead() {
-        assert_eq!(Standing::read(None, 500), Standing::Empty);
-
-        // The ordinary case for a job that runs more often than epochs close.
-        assert_eq!(
-            Standing::read(Some(500), 500),
-            Standing::UpToDate { latest: 500 }
-        );
-
-        // And a node genuinely behind the repository, which is up to date in
-        // the only sense this comparison is for: there is nothing to publish.
-        assert_eq!(
-            Standing::read(Some(501), 500),
-            Standing::UpToDate { latest: 501 }
-        );
-
-        assert_eq!(
-            Standing::read(Some(499), 500),
-            Standing::Next { latest: 499 }
-        );
-
-        assert_eq!(
-            Standing::read(Some(497), 500),
-            Standing::Ahead {
-                latest: 497,
-                distance: 3
-            }
-        );
-
-        for standing in [Standing::Empty, Standing::Next { latest: 1 }] {
-            assert!(standing.publishable(), "{standing:?}");
-        }
-
-        for standing in [
-            Standing::UpToDate { latest: 1 },
-            Standing::Ahead {
-                latest: 1,
-                distance: 2,
-            },
-        ] {
-            assert!(!standing.publishable(), "{standing:?}");
-        }
     }
 
     /// A verifier chains with the chain the stele attests, exactly as written.

@@ -34,7 +34,7 @@
 use clap::Parser;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
-    export,
+    node,
     registry::{self, Point, Repository},
 };
 use miette::{Context as _, IntoDiagnostic as _};
@@ -66,7 +66,7 @@ pub struct Args {
     #[arg(long, action)]
     reproduce: bool,
 
-    /// epochs whose index layers one traversal of the index store fills; a
+    /// epochs whose index layers one traversal of the archive store fills; a
     /// larger band trades resident memory for fewer traversals, and changes
     /// nothing about the stele it produces. Defaults to the measured value
     /// that keeps the index pass inside 1 GiB
@@ -88,12 +88,12 @@ pub struct Args {
 }
 
 pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
-    let auth = crate::common::stele_registry_auth(&config.stelae)?;
+    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
 
     // A verification streams every blob through a staged file. No
     // `--scratch-dir` of its own: it reads what is already published rather
     // than moving a node's own data.
-    let scratch = crate::common::stele_scratch_dir(&config.storage, None);
+    let scratch = node::scratch_dir(&config.storage, None);
 
     let registry = registry::open(
         &args.repo,
@@ -141,28 +141,21 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("opening the data stores")?;
 
-    let genesis = crate::common::open_genesis_files(&config.genesis)?;
+    let selection = super::Selection {
+        epochs: args.epochs,
+        index_band: args.index_band,
+        producers: args.producers,
+    };
 
-    let plan = export::plan(
-        &stores.state,
-        u64::from(genesis.network_magic()),
-        super::retained_epochs(config)?,
-    )
-    .into_diagnostic()
-    .context("planning the reproduction")?;
-
-    let plan = super::restrict(plan, args.epochs);
-    let plan = super::banded(plan, args.index_band);
-    let plan = super::produced(plan, args.producers);
+    let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
 
     super::report_plan(&plan)?;
 
-    let reproduced = export::verify_reproduction(
+    let reproduced = dolos_snapshot::export::verify_reproduction(
         &verified.inscription,
         &plan,
         &stores.archive,
         &stores.state,
-        &stores.indexes,
         None,
     )
     .into_diagnostic()

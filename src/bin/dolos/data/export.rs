@@ -1,5 +1,5 @@
 use clap::Parser;
-use dolos::storage::ArchiveStoreBackend;
+use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -22,10 +22,6 @@ pub struct Args {
     // Whether to include state
     #[arg(long, action)]
     include_state: bool,
-
-    // Whether to include indexes
-    #[arg(long, action)]
-    include_indexes: bool,
 
     /// Skip the compact and integrity check of the archive database
     #[arg(long, action)]
@@ -130,18 +126,21 @@ fn append_dir_filtered(
     Ok(())
 }
 
-fn prepare_archive(
-    archive: &mut dolos_redb3::archive::ArchiveStore,
-    pb: &crate::feedback::ProgressBar,
-) -> miette::Result<()> {
-    let db = archive.db_mut();
-    pb.set_message("compacting archive");
-    db.compact().into_diagnostic()?;
-
-    pb.set_message("checking archive integrity");
-    db.check_integrity().into_diagnostic()?;
+fn ensure_state_exportable(state: &StateStoreBackend, include_state: bool) -> miette::Result<()> {
+    if matches!(state, StateStoreBackend::Memory(_)) && include_state {
+        bail!("the in-memory state keeps nothing on disk to export");
+    }
 
     Ok(())
+}
+
+fn create_export_file(
+    output: &Path,
+    state: &StateStoreBackend,
+    include_state: bool,
+) -> miette::Result<File> {
+    ensure_state_exportable(state, include_state)?;
+    File::create(output).into_diagnostic()
 }
 
 pub fn run(
@@ -151,26 +150,30 @@ pub fn run(
 ) -> miette::Result<()> {
     let pb = feedback.indeterminate_progress_bar();
 
-    let export_file = File::create(&args.output).into_diagnostic()?;
-    let encoder = GzEncoder::new(export_file, Compression::default());
-    let mut archive = Builder::new(encoder);
-
     let mut stores = crate::common::open_data_stores(config)?;
     let root = crate::common::ensure_storage_path(config)?;
+
+    let export_file = create_export_file(&args.output, &stores.state, args.include_state)?;
+    let encoder = GzEncoder::new(export_file, Compression::default());
+    let mut archive = Builder::new(encoder);
 
     match &mut stores.archive {
         ArchiveStoreBackend::LogsOnly(_) if !args.skip_sanitization => {
             bail!("archive sanitization needs exclusive access to the archive database")
         }
-        // Sanitization requires direct backend access: redb compacts and
-        // integrity-checks the database file, fjall major-compacts both
-        // keyspaces (an LSM has no offline integrity check to run).
-        ArchiveStoreBackend::Redb(s) if !args.skip_sanitization => prepare_archive(s, &pb)?,
+        // The memory archive holds its blocks in process, so there is no
+        // `<root>/archive` for `--include-archive` to pick up. The other
+        // stores may still be on disk, so only the archive half is refused.
+        ArchiveStoreBackend::Memory(_) if args.include_archive => {
+            bail!("the in-memory archive keeps nothing on disk to export")
+        }
+        // Sanitization requires direct backend access: fjall major-compacts
+        // both keyspaces (an LSM has no offline integrity check to run).
         ArchiveStoreBackend::Fjall(s) if !args.skip_sanitization => {
             pb.set_message("compacting archive");
             s.compact().into_diagnostic()?;
         }
-        ArchiveStoreBackend::Redb(_)
+        ArchiveStoreBackend::Memory(_)
         | ArchiveStoreBackend::LogsOnly(_)
         | ArchiveStoreBackend::Fjall(_) => {}
         ArchiveStoreBackend::NoOp(_) => {
@@ -183,7 +186,6 @@ pub fn run(
     stores.wal.shutdown().into_diagnostic()?;
     stores.state.shutdown().into_diagnostic()?;
     stores.archive.shutdown().into_diagnostic()?;
-    stores.indexes.shutdown().into_diagnostic()?;
     drop(stores);
 
     if args.include_archive {
@@ -202,15 +204,26 @@ pub fn run(
         pb.set_message("creating archive");
     }
 
-    if args.include_indexes {
-        let path = root.join("index");
-
-        append_path_filtered(&mut archive, &path, Path::new("index"))?;
-
-        pb.set_message("creating archive");
-    }
-
     archive.finish().into_diagnostic()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn including_an_in_memory_state_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("existing.tar.gz");
+        std::fs::write(&output, b"keep me").unwrap();
+        let state = StateStoreBackend::in_memory().unwrap();
+
+        ensure_state_exportable(&state, false).unwrap();
+
+        let error = create_export_file(&output, &state, true).unwrap_err();
+        assert!(error.to_string().contains("nothing on disk to export"));
+        assert_eq!(std::fs::read(output).unwrap(), b"keep me");
+    }
 }

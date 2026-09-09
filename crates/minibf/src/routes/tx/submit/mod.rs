@@ -48,7 +48,6 @@ pub async fn route<D: Domain + SubmitExt>(
             MempoolError::PlutusNotSupported => StatusCode::BAD_REQUEST,
             MempoolError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::StateError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            MempoolError::IndexError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::PParamsNotAvailable => StatusCode::INTERNAL_SERVER_ERROR,
             MempoolError::DuplicateTx => StatusCode::CONFLICT,
         },

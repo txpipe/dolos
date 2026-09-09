@@ -43,9 +43,9 @@ use dolos_cardano::{
     pallas::ledger::traverse::MultiEraBlock, EraBoundary,
 };
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
-    ArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, Domain, EntityKey, ExactRecord,
-    IndexRecord, IndexStore, IndexWriter as _, LogKey, Namespace, StateStore, StateWriter as _,
+    builtin::{MemoryArchiveStore, MemoryStateStore},
+    ArchiveError, ArchiveStore, ArchiveWriter as _, BlockBody, BlockSlot, ChainPoint, Domain,
+    EntityKey, ExactRecord, IndexRecord, LogKey, Namespace, StateStore, StateWriter as _,
     TagRecord, TemporalKey,
 };
 use dolos_snapshot::{
@@ -104,22 +104,16 @@ fn skeleton_point() -> ChainPoint {
     ChainPoint::Specific(SKELETON_SLOT, dolos_core::BlockHash::new([0x0b; 32]))
 }
 
-/// An archive, state and index store holding nothing but a cursor.
-fn empty_stores() -> (
-    dolos_redb3::archive::ArchiveStore,
-    MemoryStateStore,
-    MemoryIndexStore,
-) {
-    let archive =
-        dolos_redb3::archive::ArchiveStore::in_memory(dolos_cardano::model::build_schema())
-            .unwrap();
+/// An archive and a state store holding nothing but a cursor.
+fn empty_stores() -> (MemoryArchiveStore, MemoryStateStore) {
+    let archive = MemoryArchiveStore::new(dolos_cardano::model::build_schema());
 
     let state = MemoryStateStore::new();
     let writer = state.start_writer().unwrap();
     writer.set_cursor(skeleton_point()).unwrap();
     writer.commit().unwrap();
 
-    (archive, state, MemoryIndexStore::new())
+    (archive, state)
 }
 
 /// Done criterion 4.
@@ -134,7 +128,7 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (archive, state, index) = empty_stores();
+    let (archive, state) = empty_stores();
 
     let plan = Plan::new(
         &skeleton_summary(),
@@ -149,7 +143,6 @@ fn an_empty_store_set_exports_the_pinned_skeleton() {
         &plan,
         &archive,
         &state,
-        &index,
         None,
         &export::First,
         &Observer::silent(),
@@ -195,7 +188,7 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (archive, state, index) = empty_stores();
+    let (archive, state) = empty_stores();
 
     let stray = NAMESPACES
         .into_iter()
@@ -221,7 +214,6 @@ fn a_log_under_an_uncovered_namespace_fails_the_export() {
         &plan,
         &archive,
         &state,
-        &index,
         None,
         &export::First,
         &Observer::silent(),
@@ -534,7 +526,7 @@ fn expected_indexes<B: ToyStores>(domain: &ToyDomain<B>, window: &EpochWindow) -
     let slots = window.slots();
 
     let mut tags: Vec<TagRecord> = domain
-        .indexes()
+        .archive()
         .iter_archive_tags(&archive_dimensions::ALL, slots.clone())
         .unwrap()
         .map(Result::unwrap)
@@ -543,7 +535,7 @@ fn expected_indexes<B: ToyStores>(domain: &ToyDomain<B>, window: &EpochWindow) -
     tags.sort();
 
     let mut exact: Vec<ExactRecord> = domain
-        .indexes()
+        .archive()
         .iter_exact_records(slots)
         .unwrap()
         .map(Result::unwrap)
@@ -605,11 +597,10 @@ fn expected_state<B: ToyStores>(
 
 /// Done criterion 3, and the claim ADR-004 rests on.
 ///
-/// The two domains differ in exactly one thing: the state and index stores are
-/// the builtin in-memory pair in one and the on-disk fjall pair in the other.
-/// The archive is redb in both, because there is no second archive backend to
-/// compare against. Same genesis, same blocks, same seeding — so the same
-/// inscription, byte for byte, or the format does not mean what it claims.
+/// The two domains share no store implementation: the builtin in-memory state,
+/// index and archive in one, the on-disk fjall trio in the other. Same genesis,
+/// same blocks, same seeding — so the same inscription, byte for byte, or the
+/// format does not mean what it claims.
 #[test]
 fn both_backends_publish_the_same_inscription() {
     // At the live cursor, which is what a publisher actually stands at, and
@@ -841,7 +832,6 @@ fn a_failing_producer_fails_the_pooled_export() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &export::First,
         &Observer::silent(),
@@ -1080,15 +1070,9 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
     let temp = tempfile::tempdir().unwrap();
     let cut = export_plan(temp.path(), &domain, &cutting);
 
-    let reproduced = export::verify_reproduction(
-        &cut,
-        &cutting,
-        domain.archive(),
-        domain.state(),
-        domain.indexes(),
-        None,
-    )
-    .unwrap();
+    let reproduced =
+        export::verify_reproduction(&cut, &cutting, domain.archive(), domain.state(), None)
+            .unwrap();
 
     assert_eq!(reproduced, cut);
     assert_eq!(dumps_in(&reproduced)[&1].len(), state_layer_count());
@@ -1099,7 +1083,6 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
         &cutting,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &export::First,
     )
@@ -1116,7 +1099,6 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
         &following_plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &export::Following::read(&canonical, &following_plan).unwrap(),
     )
@@ -1132,7 +1114,6 @@ fn a_reproduction_rebuilds_the_dump_it_cuts_and_trusts_the_ones_it_inherits() {
         &following_plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
     )
     .unwrap();
@@ -1267,7 +1248,6 @@ fn a_discarding_export_reproduces_what_a_publish_stores() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &export::First,
         &Observer::silent(),
@@ -1322,7 +1302,6 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &Observer::silent(),
     )
@@ -1333,7 +1312,6 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &export::First,
         &Observer::silent(),
@@ -1356,7 +1334,6 @@ fn a_restricted_reproduction_matches_the_same_restricted_publish() {
         &plan_for(&domain),
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &export::First,
         &Observer::silent(),
@@ -1402,7 +1379,6 @@ fn a_directory_publish_reports_every_layer_and_record() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &watcher.observer(),
     )
@@ -1467,7 +1443,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &watcher.observer(),
     )
@@ -1478,7 +1453,6 @@ fn a_silent_publish_writes_exactly_what_a_watched_one_does() {
         &plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &Observer::silent(),
     )
@@ -1506,7 +1480,7 @@ struct Counted<S> {
     exacts: Arc<AtomicUsize>,
 }
 
-impl<S: IndexStore> Counted<S> {
+impl<S: ArchiveStore> Counted<S> {
     fn new(inner: S) -> Self {
         Self {
             inner,
@@ -1525,48 +1499,76 @@ impl<S: IndexStore> Counted<S> {
     }
 }
 
-impl<S: IndexStore> IndexStore for Counted<S> {
+impl<S: ArchiveStore> ArchiveStore for Counted<S> {
+    type BlockIter<'a> = S::BlockIter<'a>;
     type Writer = S::Writer;
+    type LogIter = S::LogIter;
+    type EntityValueIter = S::EntityValueIter;
     type SlotIter = S::SlotIter;
     type TagIter = S::TagIter;
     type ExactIter = S::ExactIter;
 
-    fn start_writer(&self) -> Result<Self::Writer, dolos_core::IndexError> {
+    fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         self.inner.start_writer()
     }
 
-    fn initialize_schema(&self) -> Result<(), dolos_core::IndexError> {
-        self.inner.initialize_schema()
-    }
-
-    fn copy(&self, target: &Self) -> Result<(), dolos_core::IndexError> {
-        self.inner.copy(&target.inner)
-    }
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, dolos_core::IndexError> {
-        self.inner.cursor()
-    }
-
-    fn utxos_by_tag(
+    fn read_logs(
         &self,
-        dimension: dolos_core::TagDimension,
-        key: &[u8],
-    ) -> Result<dolos_core::UtxoSet, dolos_core::IndexError> {
-        self.inner.utxos_by_tag(dimension, key)
+        ns: Namespace,
+        keys: &[&LogKey],
+    ) -> Result<Vec<Option<dolos_core::EntityValue>>, ArchiveError> {
+        self.inner.read_logs(ns, keys)
     }
 
-    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
+    fn iter_logs(
+        &self,
+        ns: Namespace,
+        range: std::ops::Range<LogKey>,
+    ) -> Result<Self::LogIter, ArchiveError> {
+        self.inner.iter_logs(ns, range)
+    }
+
+    fn get_block_by_slot(&self, slot: &BlockSlot) -> Result<Option<BlockBody>, ArchiveError> {
+        self.inner.get_block_by_slot(slot)
+    }
+
+    fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
+        self.inner.get_blocks_by_slot(slot)
+    }
+
+    fn get_range<'a>(
+        &self,
+        from: Option<BlockSlot>,
+        to: Option<BlockSlot>,
+    ) -> Result<Self::BlockIter<'a>, ArchiveError> {
+        self.inner.get_range(from, to)
+    }
+
+    fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
+        self.inner.find_intersect(intersect)
+    }
+
+    fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
+        self.inner.get_tip()
+    }
+
+    fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
+        self.inner.prune_history(max_slots, max_prune)
+    }
+
+    fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
+        self.inner.truncate_front(after)
+    }
+
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         self.inner.slot_by_block_hash(hash)
     }
 
-    fn slot_by_block_number(
-        &self,
-        number: u64,
-    ) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
         self.inner.slot_by_block_number(number)
     }
 
-    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, dolos_core::IndexError> {
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         self.inner.slot_by_tx_hash(hash)
     }
 
@@ -1576,7 +1578,7 @@ impl<S: IndexStore> IndexStore for Counted<S> {
         key: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, dolos_core::IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         self.inner.slots_by_tag(dimension, key, start, end)
     }
 
@@ -1584,7 +1586,7 @@ impl<S: IndexStore> IndexStore for Counted<S> {
         &self,
         dimensions: &[dolos_core::TagDimension],
         slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::TagIter, dolos_core::IndexError> {
+    ) -> Result<Self::TagIter, ArchiveError> {
         self.tags.fetch_add(1, Ordering::Relaxed);
 
         self.inner.iter_archive_tags(dimensions, slots)
@@ -1593,7 +1595,7 @@ impl<S: IndexStore> IndexStore for Counted<S> {
     fn iter_exact_records(
         &self,
         slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::ExactIter, dolos_core::IndexError> {
+    ) -> Result<Self::ExactIter, ArchiveError> {
         self.exacts.fetch_add(1, Ordering::Relaxed);
 
         self.inner.iter_exact_records(slots)
@@ -1606,8 +1608,8 @@ impl<S: IndexStore> IndexStore for Counted<S> {
 /// Two blocks per epoch, each carrying tags in every dimension and the three
 /// exact kinds a block produces. Nothing here has to be a real ledger: what the
 /// banded pass does with a record is decided by its slot alone.
-fn index_across_the_skeleton() -> MemoryIndexStore {
-    let store = MemoryIndexStore::new();
+fn index_across_the_skeleton() -> MemoryArchiveStore {
+    let store = MemoryArchiveStore::new(dolos_cardano::model::build_schema());
     let writer = store.start_writer().unwrap();
 
     let mut archive = Vec::new();
@@ -1629,13 +1631,8 @@ fn index_across_the_skeleton() -> MemoryIndexStore {
         }
     }
 
-    writer
-        .apply(&dolos_core::IndexDelta {
-            cursor: ChainPoint::Slot(SKELETON_SLOT),
-            utxo: Default::default(),
-            archive,
-        })
-        .unwrap();
+    writer.apply_index(&archive).unwrap();
+    writer.commit().unwrap();
 
     store
 }
@@ -1646,8 +1643,8 @@ fn export_banded(band: usize) -> (usize, usize, usize, Vec<u8>) {
     let temp = tempfile::tempdir().unwrap();
     let stele = SteleDir::create(temp.path()).unwrap();
 
-    let (archive, state, _) = empty_stores();
-    let indexes = Counted::new(index_across_the_skeleton());
+    let (_, state) = empty_stores();
+    let archive = Counted::new(index_across_the_skeleton());
 
     let plan = Plan::new(
         &skeleton_summary(),
@@ -1665,7 +1662,6 @@ fn export_banded(band: usize) -> (usize, usize, usize, Vec<u8>) {
         &plan,
         &archive,
         &state,
-        &indexes,
         None,
         &export::First,
         &watcher.observer(),
@@ -1674,7 +1670,7 @@ fn export_banded(band: usize) -> (usize, usize, usize, Vec<u8>) {
 
     watcher.assert_well_formed(inscription.layers.len());
 
-    let (tags, exacts) = indexes.traversals();
+    let (tags, exacts) = archive.traversals();
 
     (
         tags,

@@ -5,7 +5,9 @@ use axum::{
     Router, ServiceExt,
 };
 use dolos_cardano::{
-    model::{AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState},
+    model::{
+        AccountState, AssetState, DRepState, EpochState, FixedNamespace, PoolState, ProposalState,
+    },
     ChainSummary, PParamsSet, StakeLog,
 };
 use pallas::{
@@ -349,6 +351,7 @@ where
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
 {
     build_router_with_facade(Facade::<D> {
         inner: domain,
@@ -365,6 +368,7 @@ where
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
     let app = Router::new()
@@ -398,6 +402,10 @@ where
         .route(
             "/accounts/{stake_address}/utxos",
             get(routes::accounts::by_stake_utxos::<D>),
+        )
+        .route(
+            "/accounts/{stake_address}/history",
+            get(routes::accounts::by_stake_history::<D>),
         )
         .route(
             "/accounts/{stake_address}/rewards",
@@ -566,6 +574,7 @@ where
             "/txs/{tx_hash}/stakes",
             get(routes::txs::by_hash_stakes::<D>),
         )
+        .route("/assets", get(routes::assets::all::<D>))
         .route(
             "/assets/policy/{policy_id}",
             get(routes::assets::by_policy::<D>),
@@ -621,6 +630,22 @@ where
             "/governance/proposals",
             get(routes::governance::proposals::<D>),
         )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}",
+            get(routes::governance::proposal_by_tx_index::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}",
+            get(routes::governance::proposal_by_gov_action_id::<D>),
+        )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/withdrawals",
+            get(routes::governance::proposal_withdrawals::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/withdrawals",
+            get(routes::governance::proposal_withdrawals_by_gov_action::<D>),
+        )
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -664,6 +689,7 @@ where
     Option<AssetState>: From<D::Entity>,
     Option<EpochState>: From<D::Entity>,
     Option<DRepState>: From<D::Entity>,
+    Option<ProposalState>: From<D::Entity>,
 {
     type Config = MinibfConfig;
 

@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use dolos_cardano::CardanoDelta;
 use dolos_core::{
-    config::SyncConfig, ArchiveWriter, ChainPoint, Domain, LogEntry, LogValue, WalStore,
+    config::SyncConfig, ArchiveStore as _, ArchiveWriter, ChainPoint, Domain, LogEntry, LogValue,
+    WalStore,
 };
 use dolos_testing::{
     faults::{FaultyToyDomain, TestFault},

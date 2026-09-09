@@ -1,12 +1,14 @@
 //! Fjall-based archive store implementation for Dolos.
 //!
 //! The archive keeps block bodies in flat segment files ([`dolos_flatfiles`],
-//! shared byte for byte with the redb backend) and holds two kinds of index
-//! rows — a blocks location table and the derived-log namespaces — in an LSM
-//! tree. Behavior is pinned to the redb archive by the shared conformance
-//! suite (`tests/archive_conformance.rs`).
+//! one zstd frame per body, named by the frame's physical location) and
+//! holds the rows that point into the history — a blocks location table,
+//! the derived-log namespaces, and the two index projections of the blocks
+//! — in an LSM tree. Behavior is
+//! pinned by the shared conformance suite (`tests/archive_conformance.rs`),
+//! with the builtin memory archive as the oracle.
 //!
-//! ## Two Keyspace Design
+//! ## Four Keyspace Design
 //!
 //! 1. **`archive-blocks`**: slot → packed 16-byte [`BlockLocation`]s, newest
 //!    first. Key is the 8-byte big-endian slot; the value encoding is
@@ -20,19 +22,46 @@
 //!    per-namespace LSM trees blow the file-descriptor limit during heavy
 //!    compaction.
 //!
+//! 3. **`archive-tags`**: block tag queries (append-only). Key:
+//!    `[dim_hash:8][key_hash:8][slot:8]` → empty. See [`tags`].
+//!
+//! 4. **`index-exact`**: exact-match lookups (block hash, block number, tx hash
+//!    → slot). Key: `[dim_hash:8][key_data:var]` → `[slot:8]`. See [`exact`].
+//!
+//! The two index keyspaces are projections of the blocks and are written in
+//! the same batch as the block locations, so the history and its lookups
+//! commit together. They keep the compaction settings the standalone index
+//! store gave them. A rollback removes its entries through
+//! [`CoreArchiveWriter::undo_index`]; `truncate_front` does not touch them.
+//!
+//! ## Pruning the index keyspaces
+//!
+//! The slot is the *last* key component of a tag entry and the *value* of an
+//! exact entry, so neither keyspace can be range-deleted by slot the way the
+//! blocks and logs are. `prune_history` instead sweeps them: a full walk of
+//! both keyspaces removing every entry below the cutoff. Under sliding
+//! history the retained entry set is one window wide once the sweep has run,
+//! so a walk costs the window, not the chain — and the sweep is amortized
+//! across housekeeping rounds, running only when the cutoff has advanced by
+//! a sixteenth of the window since the last one. A node restored from a
+//! full-history stele pays one whole-keyspace scan on its first sweep.
+//!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
 //! leaves, and an LSM memtable sorts its batch regardless of arrival order.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Bound, Range};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dolos_core::{
-    config::FjallArchiveConfig, ArchiveError, ArchiveStore as CoreArchiveStore,
-    ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot, ChainPoint, EntityValue, LogKey,
-    Namespace, RawBlock, StateSchema,
+    config::FjallArchiveConfig, key_hash, ArchiveError, ArchiveIndexDelta,
+    ArchiveStore as CoreArchiveStore, ArchiveWriter as CoreArchiveWriter, BlockBody, BlockSlot,
+    ChainPoint, EntityValue, ExactKind, IndexRecord, LogKey, Namespace, RawBlock, StateSchema,
+    TagDimension, KEY_HASH_SIZE,
 };
 use fjall::{
     compaction::Leveled, Database, Keyspace, KeyspaceCreateOptions, OwnedWriteBatch, PersistMode,
@@ -42,17 +71,39 @@ use pallas::ledger::traverse::MultiEraBlock;
 
 use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
+use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::Error;
 
+pub mod exact;
 pub mod log_keys;
+pub mod scan;
+pub mod tags;
 
 use log_keys::{
     build_log_key, build_temporal_bound, decode_log_key, namespace_end, namespace_start,
     PREFIXED_LOG_KEY_SIZE,
 };
 
+pub use exact::ExactRecordIterator as ExactIter;
+pub use tags::{SlotIterator as SlotIter, TagRecordIterator as TagIter};
+
 /// Default cache size in MB
 const DEFAULT_CACHE_SIZE_MB: usize = 500;
+
+/// Compaction settings of the two index keyspaces: what the standalone index
+/// store applied to them before they moved here, kept so their behavior does
+/// not change.
+const INDEX_L0_THRESHOLD: u8 = 8;
+const INDEX_MEMTABLE_SIZE_MB: usize = 128;
+
+/// The index keyspaces are swept once the prune cutoff has advanced by this
+/// fraction of the retained window since the last sweep.
+const INDEX_SWEEP_WINDOW_DIVISOR: u64 = 16;
+
+/// Most removals one sweep batch carries before it is committed and a new
+/// one started, so the first sweep after a full-history restore — tens of
+/// millions of entries — never builds one memory-resident batch.
+const INDEX_SWEEP_BATCH_KEYS: usize = 100_000;
 
 /// Keyspace names for the archive store
 mod keyspace_names {
@@ -60,6 +111,10 @@ mod keyspace_names {
     pub const BLOCKS: &str = "archive-blocks";
     /// Unified log namespaces keyspace
     pub const LOGS: &str = "archive-logs";
+    /// Archive tags keyspace (append-only)
+    pub const TAGS: &str = "archive-tags";
+    /// Exact-match keyspace (block hash, tx hash, block number -> slot)
+    pub const EXACT: &str = "index-exact";
 }
 
 fn io_err(e: std::io::Error) -> ArchiveError {
@@ -72,17 +127,21 @@ fn fjall_err(e: fjall::Error) -> ArchiveError {
 
 /// Fjall-based archive store.
 ///
-/// Block bodies live in flat segment files (shared, byte-identical layout
-/// with the redb backend); only the location table and the log namespaces
-/// live in the LSM tree.
+/// Block bodies live in flat segment files; the location table, the log
+/// namespaces and the two index keyspaces live in the LSM tree.
 #[derive(Clone)]
 pub struct ArchiveStore {
     db: Database,
     blocks: Keyspace,
     logs: Keyspace,
+    tags: Keyspace,
+    exact: Keyspace,
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     flush_on_commit: bool,
+    /// The prune cutoff the index keyspaces were last swept up to; zero
+    /// until the first sweep after open, which is why that one always runs.
+    last_index_sweep: Arc<AtomicU64>,
     _tempdir: Option<Arc<tempfile::TempDir>>,
 }
 
@@ -178,13 +237,26 @@ impl ArchiveStore {
         let blocks = db.keyspace(keyspace_names::BLOCKS, build_opts)?;
         let logs = db.keyspace(keyspace_names::LOGS, build_opts)?;
 
+        let index_opts = || {
+            KeyspaceCreateOptions::default()
+                .compaction_strategy(Arc::new(
+                    Leveled::default().with_l0_threshold(INDEX_L0_THRESHOLD),
+                ))
+                .max_memtable_size((INDEX_MEMTABLE_SIZE_MB as u64) * 1024 * 1024)
+        };
+        let tags = db.keyspace(keyspace_names::TAGS, index_opts)?;
+        let exact = db.keyspace(keyspace_names::EXACT, index_opts)?;
+
         Ok(Self {
             db,
             blocks,
             logs,
+            tags,
+            exact,
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
             flush_on_commit,
+            last_index_sweep: Arc::new(AtomicU64::new(0)),
             _tempdir: tempdir,
         })
     }
@@ -196,21 +268,17 @@ impl ArchiveStore {
 
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
     pub fn disk_usage(&self) -> Vec<(&'static str, u64, std::path::PathBuf)> {
-        vec![
-            (
-                keyspace_names::BLOCKS,
-                self.blocks.disk_space(),
-                self.blocks.path().to_path_buf(),
-            ),
-            (
-                keyspace_names::LOGS,
-                self.logs.disk_space(),
-                self.logs.path().to_path_buf(),
-            ),
+        [
+            (keyspace_names::BLOCKS, &self.blocks),
+            (keyspace_names::LOGS, &self.logs),
+            (keyspace_names::TAGS, &self.tags),
+            (keyspace_names::EXACT, &self.exact),
         ]
+        .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
+        .to_vec()
     }
 
-    /// Fully compact both keyspaces and sync the result to disk.
+    /// Fully compact every keyspace and sync the result to disk.
     ///
     /// The export path runs this as its sanitization step — the LSM analogue
     /// of redb's pre-export compaction — so an exported database directory
@@ -218,6 +286,8 @@ impl ArchiveStore {
     pub fn compact(&self) -> Result<(), Error> {
         self.blocks.major_compact()?;
         self.logs.major_compact()?;
+        self.tags.major_compact()?;
+        self.exact.major_compact()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -276,18 +346,106 @@ impl ArchiveStore {
             None => Ok(vec![]),
         }
     }
+
+    /// Remove every index entry below `prune_before` if the cutoff has moved
+    /// far enough since the last sweep to be worth a walk of both keyspaces.
+    ///
+    /// The threshold is a sixteenth of the retained window (at least one
+    /// slot), so a sliding node walks its window-sized index about sixteen
+    /// times per window of chain instead of once per housekeeping round. The
+    /// first prune after open always sweeps.
+    fn sweep_indexes(
+        &self,
+        snapshot: &Snapshot,
+        prune_before: BlockSlot,
+        max_slots: u64,
+    ) -> Result<(), ArchiveError> {
+        let last = self.last_index_sweep.load(Ordering::Acquire);
+        let threshold = (max_slots / INDEX_SWEEP_WINDOW_DIVISOR).max(1);
+
+        if last != 0 && prune_before.saturating_sub(last) < threshold {
+            tracing::debug!(
+                cutoff_slot = prune_before,
+                last_sweep = last,
+                threshold,
+                "index sweep deferred"
+            );
+            return Ok(());
+        }
+
+        let tags = self.sweep_below(snapshot, &self.tags, prune_before, |key, _| {
+            tags::slot_of_entry(key)
+        })?;
+        let exact = self.sweep_below(snapshot, &self.exact, prune_before, |_, value| {
+            exact::slot_of_entry(value)
+        })?;
+
+        self.last_index_sweep.store(prune_before, Ordering::Release);
+
+        tracing::info!(
+            cutoff_slot = prune_before,
+            tags,
+            exact,
+            "swept archive index entries below cutoff"
+        );
+
+        Ok(())
+    }
+
+    /// Walk `keyspace` under `snapshot` and remove every entry whose slot,
+    /// as `slot_of` reads it from the entry, is below `prune_before`.
+    ///
+    /// Removals are committed in batches of at most
+    /// [`INDEX_SWEEP_BATCH_KEYS`], in sequence. Returns the number removed.
+    fn sweep_below(
+        &self,
+        snapshot: &Snapshot,
+        keyspace: &Keyspace,
+        prune_before: BlockSlot,
+        slot_of: impl Fn(&[u8], &[u8]) -> Result<BlockSlot, Error>,
+    ) -> Result<u64, ArchiveError> {
+        let mut removed = 0u64;
+        let mut batch = self.db.batch();
+
+        for guard in snapshot.iter(keyspace) {
+            let (key, value) = guard.into_inner().map_err(fjall_err)?;
+
+            if slot_of(&key, &value)? >= prune_before {
+                continue;
+            }
+
+            batch.remove(keyspace, key);
+            removed += 1;
+
+            if batch.len() >= INDEX_SWEEP_BATCH_KEYS {
+                let full = std::mem::replace(&mut batch, self.db.batch());
+                full.durability(Some(PersistMode::Buffer))
+                    .commit()
+                    .map_err(fjall_err)?;
+            }
+        }
+
+        if !batch.is_empty() {
+            batch
+                .durability(Some(PersistMode::Buffer))
+                .commit()
+                .map_err(fjall_err)?;
+        }
+
+        Ok(removed)
+    }
 }
 
 /// Writer for batched archive operations.
 ///
-/// Log writes go straight into the shared write batch: fjall applies a
-/// batch's items to the memtable in order, and the memtable replaces on an
-/// identical key, so the last write to a key within one batch is the one
-/// that survives — the same end state redb's writer reaches by collapsing
-/// each batch to its last writes. Blocks are buffered until `commit` so
-/// their bodies can be appended to the segment files (and fsynced) before
-/// any index entry that points at them is committed, the same crash window
-/// the redb writer keeps.
+/// Log writes and index entries go straight into the shared write batch:
+/// fjall applies a batch's items to the memtable in order, and the memtable
+/// replaces on an identical key, so the last write to a key within one batch
+/// is the one that survives — the same end state redb's writer reaches by
+/// collapsing each batch to its last writes. Blocks are buffered until
+/// `commit` so their bodies can be appended to the segment files (and
+/// fsynced) before any entry that points at them is committed, the same
+/// crash window the redb writer keeps.
 ///
 /// `overlay` is the writer-local view of every blocks-table slot this
 /// writer has touched. The write batch is invisible to reads until commit,
@@ -346,8 +504,8 @@ impl CoreArchiveWriter for ArchiveWriter {
     ///
     /// A rollback walks the chain backwards, so at a slot holding more than
     /// one block the one to remove is the newest — position 0 — and the slot
-    /// survives until its last block is gone. The segment file is truncated
-    /// at the removed block's offset immediately, mirroring the redb writer.
+    /// survives until its last block is gone. The segment file is cut at the
+    /// removed block's frame immediately.
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         let slot = point.slot();
 
@@ -382,10 +540,73 @@ impl CoreArchiveWriter for ArchiveWriter {
         Ok(())
     }
 
+    fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        let mut batch = self.batch.lock().unwrap();
+
+        exact::apply(&mut batch, &self.store.exact, deltas)?;
+        tags::apply(&mut batch, &self.store.tags, deltas)?;
+
+        Ok(())
+    }
+
+    fn undo_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
+        let mut batch = self.batch.lock().unwrap();
+
+        exact::undo(&mut batch, &self.store.exact, deltas)?;
+        tags::undo(&mut batch, &self.store.tags, deltas)?;
+
+        Ok(())
+    }
+
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), ArchiveError> {
+        let mut batch = self.batch.lock().unwrap();
+
+        // Records arrive sorted, hence grouped by dimension/kind: hash each
+        // group's dimension once instead of once per record. The cached
+        // dimension is owned because a record no longer outlives its own
+        // iteration step — the clone is one per group, not one per record.
+        let mut tag_dim: Option<(Cow<'static, str>, [u8; DIM_HASH_SIZE])> = None;
+        let mut exact_dim: Option<(ExactKind, [u8; DIM_HASH_SIZE])> = None;
+
+        for record in records {
+            match record {
+                IndexRecord::Tag(tag) => {
+                    let dim_hash = match &tag_dim {
+                        Some((cached, hash)) if cached == &tag.dimension => *hash,
+                        _ => {
+                            let hash = hash_dimension(dim_prefix::BLOCK, tag.dimension());
+                            tag_dim = Some((tag.dimension.clone(), hash));
+                            hash
+                        }
+                    };
+
+                    tags::insert_prehashed(&mut batch, &self.store.tags, &tag, dim_hash);
+                }
+                IndexRecord::Exact(exact) => {
+                    let dim_hash = match exact_dim {
+                        Some((cached, hash)) if cached == exact.kind => hash,
+                        _ => {
+                            let hash = hash_dimension(dim_prefix::EXACT, exact.kind.as_str());
+                            exact_dim = Some((exact.kind, hash));
+                            hash
+                        }
+                    };
+
+                    exact::insert_prehashed(&mut batch, &self.store.exact, &exact, dim_hash);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn commit(self) -> Result<(), ArchiveError> {
         // 1. Batch-append all pending blocks to flat files (fsync inside).
-        // 2. Insert all index entries into the write batch.
-        // 3. Commit the batch (log rows are already in it).
+        // 2. Insert all location entries into the write batch.
+        // 3. Commit the batch (log rows and index entries are already in it).
         let pending = self.pending_blocks.into_inner().unwrap();
         let mut overlay = self.overlay.into_inner().unwrap();
         let mut batch = self.batch.into_inner().unwrap();
@@ -441,11 +662,12 @@ impl CoreArchiveWriter for ArchiveWriter {
 ///
 /// An identical body means this block is being written again (a resumed
 /// restore rewriting the layer it was in the middle of): the entry that
-/// points at the original stays exactly where it is, and the copy just
+/// points at the original stays exactly where it is, and the frame just
 /// appended is the one nothing points at — dead space, not corruption.
 /// Repointing would move an index entry forward in the segment past a block
 /// it precedes in the chain, and `undo` truncates at the offset it removes,
-/// so that block's bytes would go with the cut.
+/// so that block's bytes would go with the cut. A location names a frame,
+/// not a body length, so the comparison decodes each candidate.
 ///
 /// Anything else is a second block at the same slot, and it takes position
 /// 0: blocks arrive in chain order, so the newcomer is the one the slot
@@ -461,10 +683,6 @@ fn merge_location(
     }
 
     for loc in existing.iter() {
-        if loc.length as usize != body.len() {
-            continue;
-        }
-
         let stored = flatfiles.read(loc).map_err(io_err)?;
 
         if stored == **body {
@@ -642,6 +860,9 @@ impl CoreArchiveStore for ArchiveStore {
     type Writer = ArchiveWriter;
     type LogIter = LogIter;
     type EntityValueIter = EmptyEntityValueIter;
+    type SlotIter = SlotIter;
+    type TagIter = TagIter;
+    type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         Ok(ArchiveWriter {
@@ -858,6 +1079,10 @@ impl CoreArchiveStore for ArchiveStore {
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
 
+        // The index keyspaces cannot be range-deleted by slot; they are swept
+        // under the same snapshot, after the rows that point at the blocks.
+        self.sweep_indexes(&snapshot, prune_before, max_slots)?;
+
         Ok(done)
     }
 
@@ -924,5 +1149,149 @@ impl CoreArchiveStore for ArchiveStore {
         batch.commit().map_err(fjall_err)?;
 
         Ok(())
+    }
+
+    fn slot_by_block_hash(&self, block_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+        exact::get_by_block_hash(&snapshot, &self.exact, block_hash).map_err(ArchiveError::from)
+    }
+
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+        exact::get_by_block_number(&snapshot, &self.exact, number).map_err(ArchiveError::from)
+    }
+
+    fn slot_by_tx_hash(&self, tx_hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+        exact::get_by_tx_hash(&snapshot, &self.exact, tx_hash).map_err(ArchiveError::from)
+    }
+
+    fn slots_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError> {
+        // The stored key form is the write path's, not this method's: the same
+        // `key_hash` an insert used, so a query cannot look under bytes an
+        // insert would not have written. `None` is a key with no valid stored
+        // form — today only a `metadata` label that is not eight bytes wide —
+        // which is a malformed query rather than an empty result.
+        let Some(hash) = key_hash(dimension, key) else {
+            return Err(Error::Codec(format!(
+                "{dimension} key must be {KEY_HASH_SIZE} bytes, got {}",
+                key.len(),
+            ))
+            .into());
+        };
+
+        let snapshot = self.db.snapshot();
+
+        SlotIter::new(&snapshot, &self.tags, dimension, hash, start, end)
+            .map_err(ArchiveError::from)
+    }
+
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, ArchiveError> {
+        // One snapshot for the whole traversal: every dimension prefix is read
+        // from the same MVCC view, so the record set is consistent even under
+        // concurrent writes.
+        let snapshot = self.db.snapshot();
+
+        Ok(TagIter::new(snapshot, &self.tags, dimensions, slots))
+    }
+
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        Ok(ExactIter::new(snapshot, &self.exact, slots))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(slot: u64) -> ChainPoint {
+        ChainPoint::Specific(slot, pallas::crypto::hash::Hash::new([0u8; 32]))
+    }
+
+    fn body(slot: BlockSlot, tag: u8) -> RawBlock {
+        Arc::new(
+            format!("block at slot {slot} tag {tag} ")
+                .repeat(12)
+                .into_bytes(),
+        )
+    }
+
+    fn write(store: &ArchiveStore, blocks: &[(BlockSlot, RawBlock)]) {
+        let writer = store.start_writer().unwrap();
+        for (slot, body) in blocks {
+            writer.apply(&point(*slot), body).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
+    fn locations(store: &ArchiveStore, slot: BlockSlot) -> Vec<BlockLocation> {
+        store.stored_locations(&store.db.snapshot(), slot).unwrap()
+    }
+
+    fn segment_bytes(store: &ArchiveStore, segment: u32) -> Vec<u8> {
+        std::fs::read(store.flatfiles.segment_path(segment)).unwrap()
+    }
+
+    #[test]
+    fn a_repeated_import_keeps_the_original_frame_and_leaves_the_copy_unnamed() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(5, body(5, 0)), (9, body(9, 0))]);
+        let original = locations(&store, 5);
+        let len_before = segment_bytes(&store, 0).len();
+
+        write(&store, &[(5, body(5, 0))]);
+
+        assert_eq!(locations(&store, 5), original);
+        assert!(
+            segment_bytes(&store, 0).len() > len_before,
+            "the copy is appended"
+        );
+        assert_eq!(store.get_block_by_slot(&5).unwrap().unwrap(), *body(5, 0));
+
+        // A different body at the same slot is a second block, newest first.
+        write(&store, &[(5, body(5, 1))]);
+        let both = locations(&store, 5);
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[1], original[0]);
+        assert_eq!(
+            store.get_blocks_by_slot(&5).unwrap(),
+            vec![(*body(5, 0)).clone(), (*body(5, 1)).clone()]
+        );
+    }
+
+    #[test]
+    fn a_rollback_cuts_at_the_frame_and_retained_frames_are_not_rewritten() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(1, body(1, 0)), (2, body(2, 0)), (3, body(3, 0))]);
+        let before = segment_bytes(&store, 0);
+        let cut = locations(&store, 3)[0].offset;
+        let retained = locations(&store, 2);
+
+        let writer = store.start_writer().unwrap();
+        writer.undo(&point(3)).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(segment_bytes(&store, 0), before[..cut as usize]);
+        assert!(locations(&store, 3).is_empty());
+
+        write(&store, &[(3, body(3, 1))]);
+        let after = segment_bytes(&store, 0);
+        assert_eq!(after[..cut as usize], before[..cut as usize]);
+        assert_eq!(locations(&store, 3)[0].offset, cut);
+        assert_eq!(locations(&store, 2), retained);
+        assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *body(3, 1));
+        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
     }
 }

@@ -6,11 +6,11 @@
 //! nothing — run it with:
 //!
 //! ```text
-//! cargo test -p dolos-snapshot --features oci --test restore_registry -- --ignored --nocapture
+//! cargo test -p dolos-snapshot --test restore_registry -- --ignored --nocapture
 //! ```
 //!
 //! `STELAE_TEST_REGISTRY_IMAGE` chooses the server (default `registry:2`), the
-//! same knob `tests/publish.rs` and `crates/stelae/tests/oci.rs` use.
+//! same knob `tests/publish.rs` and the stelae repo's `tests/oci.rs` use.
 //!
 //! ## The four properties
 //!
@@ -41,21 +41,19 @@
 //! after a wall-clock delay would sometimes interrupt nothing over a loopback
 //! registry — the fixture stele is kilobytes — and pass for the wrong reason.
 
-#![cfg(feature = "oci")]
-
 mod node;
 mod registry_fixture;
 mod watcher;
 
-use dolos_cardano::indexes::{archive_dimensions, index_delta_from_utxo_delta};
+use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
-    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, IndexStore,
-    LogKey, StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    ArchiveStore, BlockHash, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey,
+    StateStore, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     export::Plan,
     registry::{self, Point},
-    restore::{self, Budget, Checkpoint},
+    restore::{self, default_budget, progress_path_in, Checkpoint},
     state_layer_count, Error, Network, NAMESPACES, UTXOS,
 };
 use dolos_testing::toy_domain::{MemoryStores, ToyDomain, ToyStores};
@@ -141,7 +139,6 @@ impl Node {
             plan,
             self.domain.archive(),
             self.domain.state(),
-            self.domain.indexes(),
             None,
             &Observer::silent(),
         )
@@ -201,14 +198,13 @@ fn restoring(storage: &std::path::Path, magic: u64, resume: bool) -> restore::Re
         max_history: None,
         storage_path: storage,
         resume,
+        skip_space_check: false,
     }
 }
 
 /// Where a restore writes, for a blank store set.
-fn target<B: ToyStores>(
-    blank: &Blank<B>,
-) -> restore::Target<'_, impl ArchiveStore, B::State, B::Indexes> {
-    restore::Target::new(&blank.archive, blank.state(), blank.indexes())
+fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveStore, B::State> {
+    restore::Target::new(&blank.archive, blank.state())
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +240,6 @@ fn a_registry_restore_is_a_directory_restore() {
             &node.first,
             node.domain.archive(),
             node.domain.state(),
-            node.domain.indexes(),
             None,
             &dolos_snapshot::export::First,
             &Observer::silent(),
@@ -352,7 +347,8 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
     assert!(epoch_layers.len() >= 2);
 
     // The interruption, at the second epoch layer the driver reaches.
-    let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+    let mut checkpoint =
+        Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
 
     let err = restore::restore(
         &Interrupted {
@@ -362,7 +358,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
         &index,
         &plan,
         target(&blank),
-        Budget::default(),
+        default_budget(),
         &mut checkpoint,
         &Observer::silent(),
     )
@@ -373,7 +369,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
         "{err:?}"
     );
 
-    let progress = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let progress = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .expect("a killed restore left no progress file");
 
@@ -400,7 +396,7 @@ fn a_killed_registry_restore_resumes_where_it_stopped() {
     assert_eq!(resumed.layers_fetched, PER_PUBLISH - 1);
 
     assert_eq!(
-        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
         None,
         "a finished restore left its progress file behind"
     );
@@ -463,7 +459,8 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
     let shards: Vec<Digest> = plan.tip_layers().map(|l| l.diff_id).collect();
     let epoch_layers = plan.immutable_layers().count();
 
-    let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+    let mut checkpoint =
+        Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
 
     restore::restore(
         &Interrupted {
@@ -473,13 +470,13 @@ fn a_pre_seeded_node_fetches_only_what_it_lacks() {
         &index,
         &plan,
         target(&blank),
-        Budget::default(),
+        default_budget(),
         &mut checkpoint,
         &Observer::silent(),
     )
     .unwrap_err();
 
-    let seeded = RestoreProgress::load(&Checkpoint::path_in(storage.path()))
+    let seeded = RestoreProgress::load(&progress_path_in(storage.path()))
         .unwrap()
         .unwrap()
         .completed
@@ -565,7 +562,7 @@ fn a_point_that_names_no_stele_is_refused() {
     );
 
     assert_eq!(
-        RestoreProgress::load(&Checkpoint::path_in(storage.path())).unwrap(),
+        RestoreProgress::load(&progress_path_in(storage.path())).unwrap(),
         None,
         "a restore that never started left a progress file"
     );
@@ -688,7 +685,8 @@ impl SteleReader for Interrupted<'_> {
 fn assert_stores_match<B: ToyStores>(left: &Blank<B>, right: &Blank<B>) {
     assert_state_matches(left.state(), right.state());
     assert_archive_matches(&left.archive, &right.archive);
-    assert_indexes_match(left.indexes(), right.indexes(), left.state());
+    assert_indexes_match(&left.archive, &right.archive);
+    assert_utxo_tags_match(left.state(), right.state());
 }
 
 fn assert_state_matches<S: StateStore>(left: &S, right: &S) {
@@ -748,11 +746,8 @@ fn assert_archive_matches<A: ArchiveStore>(left: &A, right: &A) {
     assert!(any, "the fixture wrote no logs, so this proves nothing");
 }
 
-/// Both halves of the index store: the archive records the layers carry, and
-/// the live-UTxO dimensions they deliberately do not.
-fn assert_indexes_match<I: IndexStore, S: StateStore>(left: &I, right: &I, state: &S) {
-    assert_eq!(left.cursor().unwrap(), right.cursor().unwrap(), "cursor");
-
+/// The index half of the archive: the records the `indexes` layers carry.
+fn assert_indexes_match<A: ArchiveStore>(left: &A, right: &A) {
     let tags = tags_of(right);
     assert!(!tags.is_empty(), "the fixture produced no archive tags");
     assert_eq!(tags_of(left), tags, "archive tags");
@@ -760,19 +755,22 @@ fn assert_indexes_match<I: IndexStore, S: StateStore>(left: &I, right: &I, state
     let exact = exact_of(right);
     assert!(!exact.is_empty(), "the fixture produced no exact records");
     assert_eq!(exact_of(left), exact, "exact records");
+}
 
+/// The live-UTxO tags, which the layers deliberately do not carry.
+fn assert_utxo_tags_match<S: StateStore>(left: &S, right: &S) {
     let delta = UtxoSetDelta {
-        produced_utxo: utxos_of(state)
+        produced_utxo: utxos_of(right)
             .into_iter()
             .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
             .collect(),
         ..Default::default()
     };
 
-    let rebuilt = index_delta_from_utxo_delta(ChainPoint::Origin, &delta);
+    let rebuilt = utxo_index_delta_from_utxo_delta(&delta);
     let mut asked = 0usize;
 
-    for (txo, tags) in &rebuilt.utxo.produced {
+    for (txo, tags) in &rebuilt.produced {
         for tag in tags {
             let a: UtxoSet = left.utxos_by_tag(tag.dimension, &tag.key).unwrap();
             let b: UtxoSet = right.utxos_by_tag(tag.dimension, &tag.key).unwrap();
@@ -818,7 +816,7 @@ fn logs_of<A: ArchiveStore>(store: &A, ns: &'static str) -> Vec<(LogKey, Vec<u8>
         .collect()
 }
 
-fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
+fn tags_of<A: ArchiveStore>(store: &A) -> Vec<TagRecord> {
     let mut found: Vec<TagRecord> = store
         .iter_archive_tags(&archive_dimensions::ALL, 0..u64::MAX)
         .unwrap()
@@ -829,7 +827,7 @@ fn tags_of<I: IndexStore>(store: &I) -> Vec<TagRecord> {
     found
 }
 
-fn exact_of<I: IndexStore>(store: &I) -> Vec<ExactRecord> {
+fn exact_of<A: ArchiveStore>(store: &A) -> Vec<ExactRecord> {
     let mut found: Vec<ExactRecord> = store
         .iter_exact_records(0..u64::MAX)
         .unwrap()
@@ -944,7 +942,8 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
         let epoch_layers: Vec<Digest> = plan.immutable_layers().map(|l| l.diff_id).collect();
         assert!(epoch_layers.len() >= 2);
 
-        let mut checkpoint = Checkpoint::open(storage.path(), identity, false).unwrap();
+        let mut checkpoint =
+            Checkpoint::open(progress_path_in(storage.path()), identity, false).unwrap();
 
         restore::restore(
             &Interrupted {
@@ -954,7 +953,7 @@ fn a_resumed_registry_restore_reports_what_it_skipped() {
             &index,
             &plan,
             target(&blank),
-            Budget::default(),
+            default_budget(),
             &mut checkpoint,
             &Observer::silent(),
         )

@@ -33,9 +33,6 @@ pub enum Error {
     #[error("state error: {0}")]
     StateError(#[from] StateError),
 
-    #[error("index error: {0}")]
-    IndexError(#[from] IndexError),
-
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 

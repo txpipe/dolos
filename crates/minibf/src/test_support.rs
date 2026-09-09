@@ -118,7 +118,7 @@ impl TestApp {
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, fault)
+        Self::from_domain(domain, vectors, fault, None)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -127,16 +127,32 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
-        Self::from_domain(domain, vectors, None)
+        Self::from_domain(domain, vectors, None, None)
     }
 
-    fn from_domain(domain: ToyDomain, vectors: SyntheticVectors, fault: Option<TestFault>) -> Self {
+    /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
+    /// can be exercised without building a chain of thousands of blocks.
+    pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
+        let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
+        Self::from_domain(domain, vectors, None, Some(max_scan_items))
+    }
+
+    fn from_domain(
+        domain: ToyDomain,
+        vectors: SyntheticVectors,
+        fault: Option<TestFault>,
+        max_scan_items: Option<u64>,
+    ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
         let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        let cfg = match max_scan_items {
+            Some(max) => cfg.with_max_scan_items(max),
+            None => cfg,
+        };
 
         let facade = Facade {
             inner: domain.clone(),

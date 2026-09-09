@@ -101,7 +101,7 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 ## `storage` section
 
-The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, index, mempool) can be configured independently with its own backend and options.
+The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, mempool) can be configured independently with its own backend and options.
 
 | property | type   | example |
 | -------- | ------ | ------- |
@@ -150,7 +150,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
+- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb state directory has to be re-bootstrapped (a stelae restore is the shortest path).
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
 - `cache`: size (MB) of the state cache.
 - `max_history`: maximum number of slots to keep before pruning.
@@ -170,29 +170,19 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads   | integer | 4         |
 | memtable_size_mb | integer | 64        |
 
-- `backend`: `fjall`, `redb`, `in_memory`, or `no_op` (defaults to `fjall`). Unlike the state and index stores, `redb` remains a supported archive backend when selected explicitly. Both persistent backends share the same block segment file layout; only the index format differs, so an archive written by one cannot be opened by the other without re-bootstrapping.
+- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole archive in process memory, block bodies included: ephemeral — everything is lost on restart — so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the archive entirely. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb archive has to be re-bootstrapped (a stelae restore is the shortest path).
 - `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
-- `blocks_path`: optional override for block segment files (both persistent backends).
-- `cache`: size (MB) of the archive index cache (both persistent backends).
+- `blocks_path`: optional override for block segment files.
+- `cache`: size (MB) of the archive index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
-### `storage.index` section
+Block segment files are always compressed: every block body is written as one zstd frame with the dictionary bundled in the binary and addressed by its physical location, from the first block of a fresh instance on. Nothing about this is configurable — there is no profile, dictionary path, cache bound or maintenance command — and the layout is part of storage `v4`, so a data directory written by an earlier layout has to be re-bootstrapped (a stelae restore is the shortest path). A key the archive table does not know, such as the `block_compression` table of an earlier build, fails the configuration load rather than being ignored.
 
-| property         | type    | example |
-| ---------------- | ------- | ------- |
-| backend          | string  | "fjall" |
-| path             | string  | "index" |
-| cache            | integer | 500     |
-| max_journal_size | integer | 1024    |
-| flush_on_commit  | boolean | false   |
-| l0_threshold     | integer | 8       |
-| worker_threads   | integer | 8       |
-| memtable_size_mb | integer | 128     |
+### `storage.index` section — removed in v1.7
 
-- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole index in process memory: ephemeral — everything is lost on restart — and RAM-resident, so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the index layer entirely. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
-- `path`: optional override for the index path (defaults to `<storage.path>/index`).
-- `cache`: size (MB) of the index cache.
-- `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
+The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. Drop the table from the configuration; v1.7 bumps the storage version, so an existing data directory has to be re-bootstrapped (a stelae restore is the shortest path) and its configuration revisited anyway.
+
+Any tuning the table carried (`cache`, `worker_threads`, `max_journal_size`, and the rest) should be re-applied to `storage.state` and `storage.archive`, which now carry the keyspaces. `index.backend = "no_op"` had no replacement and needs none: `archive.backend = "no_op"` is the ledger-only switch and drops the historical lookups with the archive, while the live-UTxO tags stay with the UTxO set they project.
 
 ### `storage.mempool` section
 

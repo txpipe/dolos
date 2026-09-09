@@ -45,7 +45,7 @@ pub mod wal;
 pub mod work_unit;
 
 pub use bootstrap::BootstrapExt;
-pub use import::ImportExt;
+pub use import::{seed_wal_from_state, ImportExt, WalSeed, WalSeedError};
 pub use submit::SubmitExt;
 pub use sync::SyncExt;
 pub use work_unit::{MempoolUpdate, WorkUnit};
@@ -80,7 +80,12 @@ pub type TxHash = Hash<32>;
 /// and the resolved inputs stored in the WAL.
 pub struct UndoBlockData {
     pub utxo_delta: UtxoSetDelta,
-    pub index_delta: IndexDelta,
+    /// The tags the block's outputs and inputs carried, for
+    /// `StateWriter::undo_utxo_tags` to take back out beside `utxo_delta`.
+    pub utxo_index_delta: UtxoIndexDelta,
+    /// The archive tags and exact entries the block wrote, for
+    /// `ArchiveWriter::undo_index` to take back out beside the block.
+    pub archive_index_deltas: Vec<ArchiveIndexDelta>,
     pub tx_hashes: Vec<TxHash>,
 }
 
@@ -91,7 +96,12 @@ pub struct UndoBlockData {
 /// replay blocks that are in the WAL but not yet applied to indexes.
 pub struct CatchUpBlockData {
     pub utxo_delta: UtxoSetDelta,
-    pub index_delta: IndexDelta,
+    /// The tag changes `utxo_delta` implies, applied beside it through the
+    /// state writer.
+    pub utxo_index_delta: UtxoIndexDelta,
+    /// The archive tags and exact entries the block projects, applied beside
+    /// it through the archive writer.
+    pub archive_index_deltas: Vec<ArchiveIndexDelta>,
     pub tx_hashes: Vec<TxHash>,
 }
 
@@ -429,9 +439,6 @@ pub enum ChainError {
     StateError(#[from] StateError),
 
     #[error(transparent)]
-    IndexError(#[from] IndexError),
-
-    #[error(transparent)]
     ArchiveError(#[from] ArchiveError),
 
     #[error("genesis field missing: {0}")]
@@ -603,9 +610,6 @@ pub enum DomainError {
     #[error("archive error: {0}")]
     ArchiveError(#[from] ArchiveError),
 
-    #[error("index error: {0}")]
-    IndexError(#[from] IndexError),
-
     #[error("mempool error: {0}")]
     MempoolError(#[from] MempoolError),
 
@@ -655,7 +659,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     type Wal: WalStore<Delta = Self::EntityDelta>;
     type State: StateStore;
     type Archive: ArchiveStore;
-    type Indexes: IndexStore;
     type Mempool: MempoolStore;
     type TipSubscription: TipSubscription;
 
@@ -669,7 +672,6 @@ pub trait Domain: Send + Sync + Clone + 'static {
     fn wal(&self) -> &Self::Wal;
     fn state(&self) -> &Self::State;
     fn archive(&self) -> &Self::Archive;
-    fn indexes(&self) -> &Self::Indexes;
     fn mempool(&self) -> &Self::Mempool;
 
     fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError>;

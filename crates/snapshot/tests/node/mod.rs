@@ -74,10 +74,9 @@ pub fn harness<B: ToyStores>() -> ToyDomain<B> {
     domain
 }
 
-/// An archive, state and index store with nothing in them: where a restore
-/// writes.
+/// An archive and a state store with nothing in them: where a restore writes.
 ///
-/// The same three backends [`harness`] binds — the archive included, via the
+/// The same backends [`harness`] binds — the archive included, via the
 /// `ToyStores` binding — so a comparison between a restored node and a
 /// replayed one is about the drivers and not about the stores, and the
 /// fjall-bound suites exercise a restore *into* a fjall archive.
@@ -99,16 +98,11 @@ impl<B: ToyStores> Blank<B> {
     pub fn state(&self) -> &B::State {
         self.stores.state()
     }
-
-    pub fn indexes(&self) -> &B::Indexes {
-        self.stores.indexes()
-    }
 }
 
 // The re-export mirrors the module's own rule stated above: every test binary
 // compiles this file in full, so the suites that never open a registry see an
 // import they do not use.
-#[cfg(feature = "oci")]
 #[allow(unused_imports)]
 pub use registry_node::Node;
 
@@ -119,7 +113,6 @@ pub use registry_node::Node;
 /// stele the one suite publishes is what the other verifies, and a second
 /// copy of the fixture would be a second answer to "where do the two plans
 /// stand".
-#[cfg(feature = "oci")]
 mod registry_node {
     use dolos_core::{BlockHash, ChainPoint, Domain as _};
     use dolos_snapshot::{
@@ -221,7 +214,6 @@ mod registry_node {
                 plan,
                 self.domain.archive(),
                 self.domain.state(),
-                self.domain.indexes(),
                 None,
                 observer,
             )
@@ -241,7 +233,6 @@ mod registry_node {
                 plan,
                 self.domain.archive(),
                 self.domain.state(),
-                self.domain.indexes(),
                 None,
                 &Observer::silent(),
             )
@@ -333,7 +324,6 @@ pub fn export_plan<B: ToyStores>(
         plan,
         domain.archive(),
         domain.state(),
-        domain.indexes(),
         None,
         &First,
         &Observer::silent(),

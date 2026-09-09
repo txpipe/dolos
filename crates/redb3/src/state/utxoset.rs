@@ -132,8 +132,8 @@ mod tests {
     use std::{collections::HashSet, str::FromStr as _, sync::Arc};
 
     use dolos_core::{
-        ChainPoint, IndexDelta, IndexStore as _, IndexWriter as _, StateSchema, StateStore as _,
-        StateWriter as _, Tag, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
+        builtin::MemoryStateStore, StateSchema, StateStore as _, StateWriter as _, Tag, TxoRef,
+        UtxoIndexDelta, UtxoMap, UtxoSet, UtxoSetDelta,
     };
     use dolos_testing::*;
     use pallas::ledger::{
@@ -153,13 +153,16 @@ mod tests {
         pub const ASSET: &str = "asset";
     }
 
-    fn build_indexes(_store: &StateStore) -> crate::indexes::IndexStore {
-        crate::indexes::IndexStore::in_memory().unwrap()
+    /// This backend does not carry the live-UTxO tags; the builtin memory
+    /// state store holds them beside it so the tests can look UTxOs up by
+    /// address.
+    fn build_indexes(_store: &StateStore) -> MemoryStateStore {
+        MemoryStateStore::new()
     }
 
     fn get_test_address_utxos(
         store: &StateStore,
-        indexes: &crate::indexes::IndexStore,
+        indexes: &MemoryStateStore,
         address: TestAddress,
     ) -> UtxoMap {
         let bobs = indexes
@@ -168,14 +171,11 @@ mod tests {
         store.get_utxos(bobs.into_iter().collect()).unwrap()
     }
 
-    /// Build an IndexDelta from a UtxoSetDelta for testing.
+    /// Build a UtxoIndexDelta from a UtxoSetDelta for testing.
     /// This is a simplified version that extracts address tags from UTxO
     /// outputs. Handles both forward (produced/consumed) and rollback
     /// (recovered/undone) cases.
-    fn build_index_delta_from_utxo_delta(
-        cursor: ChainPoint,
-        utxo_delta: &UtxoSetDelta,
-    ) -> IndexDelta {
+    fn build_index_delta_from_utxo_delta(utxo_delta: &UtxoSetDelta) -> UtxoIndexDelta {
         let mut produced = Vec::new();
         let mut consumed = Vec::new();
 
@@ -213,11 +213,7 @@ mod tests {
             }
         }
 
-        IndexDelta {
-            cursor,
-            utxo: UtxoIndexDelta { produced, consumed },
-            archive: Vec::new(),
-        }
+        UtxoIndexDelta { produced, consumed }
     }
 
     fn extract_utxo_tags(output: &MultiEraOutput) -> Vec<Tag> {
@@ -265,10 +261,8 @@ mod tests {
             let index_writer = $indexes.start_writer().unwrap();
             for delta in $deltas.iter() {
                 writer.apply_utxoset(&delta).unwrap();
-                // Build index delta from UTxO delta
-                let cursor = $store.read_cursor().unwrap().unwrap_or(ChainPoint::Origin);
-                let index_delta = build_index_delta_from_utxo_delta(cursor, &delta);
-                index_writer.apply(&index_delta).unwrap();
+                let index_delta = build_index_delta_from_utxo_delta(&delta);
+                index_writer.apply_utxo_tags(&index_delta).unwrap();
             }
             writer.commit().unwrap();
             index_writer.commit().unwrap();
@@ -486,10 +480,11 @@ mod tests {
                 .count();
 
             let count = indexes
-                .count_utxo_by_address(address.to_bytes().as_slice())
-                .unwrap();
+                .utxos_by_tag(dimensions::ADDRESS, address.to_bytes().as_slice())
+                .unwrap()
+                .len();
 
-            assert_eq!(expected as u64, count);
+            assert_eq!(expected, count);
         }
     }
 
@@ -518,12 +513,11 @@ mod tests {
                 })
                 .collect();
 
-            let iterator = indexes
-                .iter_utxo_by_address(address.to_bytes().as_slice())
+            let found = indexes
+                .utxos_by_tag(dimensions::ADDRESS, address.to_bytes().as_slice())
                 .unwrap();
 
-            for key in iterator {
-                let key = key.unwrap();
+            for key in found {
                 assert!(expected.remove(&key));
             }
 

@@ -26,8 +26,8 @@
 use dolos_core::{EntityValue, LogKey};
 use stelae::frame::{self, CanonicalCbor};
 
-use super::{blob, close, fixed, open};
 use crate::Error;
+use stelae::codec::{blob, close, fixed, open};
 
 /// The name this codec refuses under.
 ///

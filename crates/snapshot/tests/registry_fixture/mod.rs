@@ -4,9 +4,9 @@
 //! published by one is what the other reads and a second copy would be a second
 //! answer to "what is a registry, for a test".
 //!
-//! **Still a second copy of `Fixture` in `crates/stelae/tests/oci.rs`**, and
-//! deliberately. `stelae` must never depend on a `dolos-*` package — that is
-//! the boundary ADR-004 sets and `cargo tree` checks — so a fixture *that*
+//! **Still a second copy of `Fixture` in the stelae repo's `tests/oci.rs`**,
+//! and deliberately. `stelae` must never depend on a `dolos-*` package — that
+//! is the boundary ADR-004 sets and `cargo tree` checks — so a fixture *that*
 //! suite could import too would have to live somewhere neither crate owns. Two
 //! copies across the boundary is the cheaper of the two prices; two copies
 //! inside one crate is not, which is why this file exists. Keep the two in

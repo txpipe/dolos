@@ -36,31 +36,22 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("removing range from chain")?;
 
-    // Compaction requires direct redb access
+    // Compaction requires direct backend access
     match &mut stores.archive {
         ArchiveStoreBackend::LogsOnly(_) => {
             bail!("chain compaction needs exclusive access to the archive database")
         }
-        ArchiveStoreBackend::Redb(s) => {
-            let db = s.db_mut();
-
-            while db.compact().into_diagnostic()? {
-                info!("chain compaction round");
-            }
-
-            info!("chain segment trimmed");
-        }
         ArchiveStoreBackend::Fjall(s) => {
             // Background compaction would reclaim the space eventually; a
-            // major compaction makes the prune's effect immediate, matching
-            // what the command promises for redb.
+            // major compaction makes the prune's effect immediate, which is
+            // what the command promises.
             s.compact().into_diagnostic()?;
 
             info!("chain segment trimmed");
         }
-        ArchiveStoreBackend::NoOp(_) => {
-            // No compaction needed for noop
-            info!("noop archive, skipping compaction");
+        ArchiveStoreBackend::Memory(_) | ArchiveStoreBackend::NoOp(_) => {
+            // Nothing on disk to reclaim.
+            info!("ephemeral archive, skipping compaction");
         }
     }
 

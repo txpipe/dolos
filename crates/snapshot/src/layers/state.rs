@@ -15,11 +15,11 @@
 //!
 //! ## One record shape, including for UTxOs
 //!
-//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the sixteen
-//! entity namespaces, rather than as a special layer kind. That is what keeps
-//! the format's state vocabulary to a single record, and it makes the planned
-//! refactor folding UTxOs into the entity system (#1042) invisible from
-//! outside: the day `utxos` becomes an ordinary namespace, nothing in this
+//! ADR-004 treats the UTxO set as namespace [`crate::UTXOS`] beside the
+//! thirteen entity namespaces, rather than as a special layer kind. That is
+//! what keeps the format's state vocabulary to a single record, and it makes
+//! the planned refactor folding UTxOs into the entity system (#1042) invisible
+//! from outside: the day `utxos` becomes an ordinary namespace, nothing in this
 //! file changes.
 //!
 //! The namespace still governs the *codec parameters* — the key width above
@@ -50,8 +50,8 @@
 use dolos_core::{state::KEY_SIZE, EntityKey, EntityValue, Era, EraCbor, Namespace, TxoRef};
 use stelae::frame::{self, CanonicalCbor};
 
-use super::{blob, close, open, uint};
 use crate::{namespaces, Error, UTXOS};
+use stelae::codec::{blob, close, open, uint};
 
 /// The name this codec refuses under.
 ///

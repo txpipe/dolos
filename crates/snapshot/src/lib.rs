@@ -8,8 +8,8 @@
 //! the tag a sequence renders as, what goes in `position`, `parameters` and
 //! each layer's `scope`, and the byte-exact codec for every record shape.
 //!
-//! The normative specification is `adrs/004_stelae_snapshots.md`; this crate is
-//! that document's record table (§"Layer formats") made executable.
+//! The normative specification is `PROFILE.md` beside this crate; this crate
+//! is that document's record table (§"Layer formats") made executable.
 //!
 //! ## What is here, and what is deliberately not
 //!
@@ -52,20 +52,60 @@
 //!   that cannot fit its volume says so at minute zero.
 //! - `registry` (feature `oci`) — publishing into an OCI repository: the
 //!   history chain, and the layers a publish inherits instead of rebuilding.
+//! - [`planning`] — the epoch selection every command that walks these stores
+//!   takes, and the arithmetic each of them reports.
+//! - [`node`] — what a node's own configuration says about reaching a registry:
+//!   which identity, and where it stages.
+//! - `publisher` (feature `oci`) — the order a repository publish's steps go
+//!   in, and what each reading of the repository means for one.
+//! - `backfill` (feature `backfill`) — the publisher daemon that replays
+//!   mithril immutable data one epoch at a time and publishes a stele at each
+//!   boundary. The fetch itself is `dolos-mithril`'s, which knows nothing of
+//!   steles.
 
+#[cfg(feature = "backfill")]
+pub mod backfill;
 pub mod export;
 pub mod layers;
 pub mod namespaces;
-pub mod preflight;
-#[cfg(feature = "oci")]
+pub mod node;
+pub mod planning;
+pub mod publisher;
 pub mod registry;
-mod reporting;
 pub mod restore;
+
+/// The free-space policy, which is [`stelae_driver`]'s: it is one rule over
+/// paths and byte counts and knows nothing about what fills them. Re-exported
+/// at its old path.
+pub use stelae_driver::preflight;
+
+/// The bounded patience a run spends on an external that fails in bursts, which
+/// is [`stelae_driver`]'s: one policy over attempts and a clock, and nothing
+/// about what is being retried. Re-exported so a binary reaching for it never
+/// has to name the driver crate.
+pub use stelae_driver::retry;
+
+/// The layer and record arithmetic both drivers report through, which is
+/// [`stelae_driver`]'s for the same reason. Not public here, because it never
+/// was.
+pub(crate) use stelae_driver::reporting;
+
+/// The pair that identifies one layer, which is [`stelae_driver::scope_key`]:
+/// canonical-JSON equality over a scope this crate composed but the driver only
+/// compares.
+pub(crate) use stelae_driver::scope_key;
 
 /// The observer seam both drivers report through, re-exported so a binary
 /// rendering one never has to name the protocol crate — the same property
 /// [`export::publish`] and [`restore::restore_dir`] hold for the transports.
 pub use stelae::progress;
+
+/// The protocol surface a host reaches through this crate rather than by
+/// naming `stelae` itself: only this crate depends on the stelae crates, so
+/// there is one pin point and one place to absorb upstream churn. These cover
+/// what a test or a binary opens a stele with; anything else a consumer needs
+/// joins the list rather than justifying a second dependency edge.
+pub use stelae::{dir, inscription, transport, SteleReader};
 
 use dolos_cardano::model::{
     AccountEpochLog, AccountState, AssetState, DRepState, DatumState, EpochState, EraSummary,
@@ -92,7 +132,10 @@ pub const PROFILE_VERSION: u64 = 1;
 
 pub const BLOCKS: &str = "blocks";
 pub const INDEXES: &str = "indexes";
-pub const DIGESTS: &str = "digests";
+
+/// Spelled by the codec that reads and writes the kind, so the vocabulary has
+/// one definition on both sides of the crate boundary.
+pub use layers::digests::DIGESTS;
 
 /// The namespaces the ledger writes epoch-boundary logs under, byte-sorted.
 ///
@@ -198,7 +241,8 @@ pub fn state_ns_for(kind: &str) -> Option<Namespace> {
 }
 
 /// Whether `kind` is one of the fourteen state kinds — the tip predicate the
-/// staging arithmetic in [`registry`] sums under.
+/// driver's staging arithmetic sums under, reaching it through
+/// [`stelae_driver::DriverProfile::is_state_kind`].
 pub fn is_state_kind(kind: &str) -> bool {
     state_ns_for(kind).is_some()
 }
@@ -340,30 +384,6 @@ pub fn is_inheritable(kind: &str, scope: &serde_json::Value) -> bool {
             .is_some()
 }
 
-/// The pair that identifies one layer: its kind, and the canonical encoding of
-/// its profile-owned scope.
-///
-/// Canonical rather than [`serde_json::Value`] equality, because two scopes are
-/// one layer exactly when they are the same bytes inside the canonical
-/// document — the only sense of "the same scope" the protocol has.
-///
-/// One function rather than three, and that is the point of it being here
-/// instead of beside any one caller. Every table keyed this way is compared
-/// against another table keyed this way: the predecessor's inheritable layers
-/// against what a publish asks for, an interrupted publish's record against the
-/// same, a reproduction's layers against the published ones. Three copies of
-/// four lines would agree until one of them was corrected, and the failure that
-/// follows is silent — a layer rebuilt instead of inherited, or a divergence
-/// reported between two documents that say the same thing.
-pub(crate) fn scope_key(kind: &str, scope: &serde_json::Value) -> Result<(String, String), Error> {
-    let canonical = stelae::inscription::canonical_json(scope)?;
-
-    let canonical = String::from_utf8(canonical)
-        .map_err(|e| Error::malformed_inscription("layer scope", e.to_string()))?;
-
-    Ok((kind.to_owned(), canonical))
-}
-
 /// The epoch kinds a window always produces a layer for.
 ///
 /// The log kinds are the exception, and the only one: a log layer exists if and
@@ -497,13 +517,16 @@ pub const COMPRESSION_LEVEL: i32 = 9;
 /// Errors raised by this profile.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// Anything the protocol refused that this enum does not name itself. The
+    /// driver's refusals arrive here too, through the same flattening — see the
+    /// two [`From`] implementations below.
     #[error("stelae error: {0}")]
-    Stelae(#[from] stelae::Error),
+    Stelae(stelae::Error),
 
-    /// Raised where a record's validity is the index store's judgement rather
-    /// than this crate's — exact-key widths, above all. Surfacing the store's
+    /// Raised where a record's validity is the record type's judgement rather
+    /// than this crate's — exact-key widths, above all. Surfacing that
     /// refusal keeps one validation site instead of two that can disagree.
-    #[error("index store error: {0}")]
+    #[error("index record error: {0}")]
     Index(#[from] dolos_core::IndexError),
 
     #[error("archive store error: {0}")]
@@ -619,8 +642,9 @@ pub enum Error {
     /// Raised only from a number that was actually measured against free space
     /// that was actually read — everything else warns and proceeds. One
     /// variant for both directions because it is one policy; see
-    /// [`crate::preflight`]. There is deliberately no flag that overrides it:
-    /// `--scratch-dir` pointed at a bigger volume is the escape hatch.
+    /// [`crate::preflight`], where it is raised. There is deliberately no flag
+    /// that overrides it: `--scratch-dir` pointed at a bigger volume is the
+    /// escape hatch.
     #[error("not enough space: {0}")]
     NotEnoughSpace(String),
 
@@ -629,7 +653,8 @@ pub enum Error {
     /// Both sequences are in the message because the fix depends on which of
     /// them is wrong: a gap means a publisher skipped epochs, an equal or lower
     /// sequence means it is republishing one. There is deliberately no flag
-    /// that overrides this — see [`crate::registry`].
+    /// that overrides this — see [`stelae::inscription::history_for`], where it
+    /// is raised.
     ///
     /// `reason` is owned rather than static so a gap can state its *distance*.
     /// "The repository is at 500 and you are at 540" is a different incident
@@ -678,6 +703,45 @@ pub enum Error {
     /// shard would already have attested it.
     #[error("snapshot.state_epochs is not a list of retained epochs: {0}")]
     RetainedEpochs(String),
+
+    /// `[stelae.registry]` naming two identities at once.
+    ///
+    /// Not a precedence rule, because on a registry whose credentials carry
+    /// different capabilities, guessing is the difference between a publish and
+    /// a 403 nobody can explain.
+    #[error(
+        "[stelae.registry] sets both `token` and `user`; a registry client authenticates as one \
+         identity and which one was meant is not something to guess at — drop the one you did not \
+         mean, or unset DOLOS_STELAE_REGISTRY_TOKEN / DOLOS_STELAE_REGISTRY_USER"
+    )]
+    AmbiguousRegistryIdentity,
+
+    /// A secret that arrived with nobody to be. Anonymous would be the quiet
+    /// answer and the wrong one: the operator supplied a secret and it would go
+    /// unused.
+    #[error(
+        "[stelae.registry] sets `password` with no `user`; basic registry credentials are a pair"
+    )]
+    OrphanRegistryPassword,
+
+    /// The repository has already reached this node, and `--require-new` said
+    /// that is a failure. The ordinary reading of the same standing is
+    /// [`publisher::Next::Nothing`], which carries this exact sentence.
+    #[error("{0}")]
+    NothingToPublish(String),
+
+    /// A publish further ahead than one sequence, which would leave a gap no
+    /// later stele could close.
+    #[error(
+        "this repository's latest stele is sequence {latest} and this node is at sequence \
+         {sequence}, {distance} sequences ahead: a publish must follow the repository's latest \
+         stele, and this one would leave a gap no later stele could close"
+    )]
+    PublishWouldGap {
+        latest: u64,
+        sequence: u64,
+        distance: u64,
+    },
 }
 
 impl Error {
@@ -702,6 +766,66 @@ impl Error {
         Self::MalformedInscription {
             field: field.into(),
             reason: reason.into(),
+        }
+    }
+}
+
+/// Refusals the protocol and the driver raise on this crate's behalf keep the
+/// variant they had before those crates existed.
+///
+/// `?` still converts, so no caller changed; what does not change either is
+/// what a caller *matches* or an operator *reads*. The record-shape checks
+/// ([`stelae::codec`]), the free-space policy ([`stelae_driver::preflight`]),
+/// the ordering contracts and the history rule
+/// ([`stelae::inscription::history_for`]) were all this crate's errors before
+/// they moved, and each is matched on somewhere — a test, or the CLI's
+/// exit-code mapping. Wrapping them would have renamed every one of those
+/// refusals and prefixed every message; a `match` arm apiece is what a move
+/// that changes nothing observable costs.
+impl From<stelae::Error> for Error {
+    fn from(error: stelae::Error) -> Self {
+        match error {
+            stelae::Error::MalformedRecord { kind, reason } => {
+                Self::MalformedRecord { kind, reason }
+            }
+            stelae::Error::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            } => Self::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            },
+            other => Self::Stelae(other),
+        }
+    }
+}
+
+impl From<stelae_driver::Error> for Error {
+    fn from(error: stelae_driver::Error) -> Self {
+        match error {
+            stelae_driver::Error::Stelae(error) => error.into(),
+            stelae_driver::Error::NotEnoughSpace(reason) => Self::NotEnoughSpace(reason),
+            stelae_driver::Error::MalformedRecord { kind, reason } => {
+                Self::MalformedRecord { kind, reason }
+            }
+            stelae_driver::Error::OutOfOrder { kind, reason } => Self::OutOfOrder { kind, reason },
+            stelae_driver::Error::MalformedInscription { field, reason } => {
+                Self::MalformedInscription { field, reason }
+            }
+            stelae_driver::Error::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            } => Self::HistoryBreak {
+                latest,
+                publishing,
+                reason,
+            },
+            stelae_driver::Error::DatasetMismatch { expected, found } => {
+                Self::NetworkMismatch { expected, found }
+            }
         }
     }
 }
@@ -750,6 +874,68 @@ impl Profile for DolosProfile {
 
     fn max_record(&self) -> usize {
         MAX_RECORD
+    }
+}
+
+/// The lifecycle's half of the same answer.
+///
+/// Five questions [`Profile`] deliberately does not ask, because none of them
+/// is about naming: which kinds a closed window produces, which of them carry
+/// the tip, which layers may be carried forward, and whether two documents
+/// stand on one chain. Every one of them is already decided somewhere in this
+/// crate — the constants, the state split, the inheritance rule and the
+/// position check — so this is delegation and not a second statement of any of
+/// it.
+impl stelae_driver::DriverProfile for DolosProfile {
+    fn epoch_kinds(&self) -> &[&str] {
+        &EPOCH_KINDS
+    }
+
+    fn dense_epoch_kinds(&self) -> &[&str] {
+        &DENSE_EPOCH_KINDS
+    }
+
+    fn is_state_kind(&self, kind: &str) -> bool {
+        is_state_kind(kind)
+    }
+
+    fn is_inheritable(&self, kind: &str, scope: &serde_json::Value) -> bool {
+        is_inheritable(kind, scope)
+    }
+
+    /// Two steles stand on the same dataset when their `position` names the
+    /// same network magic. The check a publish and a reproduction share, and
+    /// the refusal an operator reads is still [`Error::NetworkMismatch`] — the
+    /// driver carries the two numbers and this crate spells the sentence.
+    fn check_same_dataset(
+        &self,
+        previous: &stelae::inscription::Inscription,
+        position: &serde_json::Value,
+    ) -> Result<(), stelae_driver::Error> {
+        // Read on the driver's terms and refused in this crate's words. The
+        // only failure `read_position` has is a malformed field, which is a
+        // refusal the driver names too — so the round trip back through
+        // `From<stelae_driver::Error>` restores the very variant and message
+        // this crate would have raised on its own.
+        let magic = |value: &serde_json::Value| match read_position(value) {
+            Ok(position) => Ok(position.network.magic()),
+            Err(Error::MalformedInscription { field, reason }) => {
+                Err(stelae_driver::Error::MalformedInscription { field, reason })
+            }
+            Err(other) => Err(stelae_driver::Error::MalformedInscription {
+                field: "position".to_owned(),
+                reason: other.to_string(),
+            }),
+        };
+
+        let found = magic(&previous.position)?;
+        let expected = magic(position)?;
+
+        if found != expected {
+            return Err(stelae_driver::Error::DatasetMismatch { expected, found });
+        }
+
+        Ok(())
     }
 }
 

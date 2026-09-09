@@ -2,20 +2,27 @@
 //!
 //! Every test is written against the `ArchiveStore`/`ArchiveWriter` traits
 //! and instantiated per backend by the `conformance_suite!` macro at the
-//! bottom, so redb — the shipping backend — pins the semantics the fjall
-//! prototype must match: block reads and walks (including the Byron
-//! boundary slot family), undo's segment truncation, prune and truncate
-//! boundaries, and the log namespaces' write/read/range behavior.
+//! bottom, so the builtin memory archive — small enough to read as a
+//! specification — pins the semantics the shipping fjall backend must match:
+//! block reads and walks (including the Byron boundary slot family), undo's
+//! segment truncation, prune and truncate boundaries, the log namespaces'
+//! write/read/range behavior, and the index entries a block projects (the
+//! exact lookups and the archive tags, written in the block's own commit
+//! and pruned with it).
+//! The index half's export/restore contract has its own suite,
+//! `archive_index_roundtrip`.
 //!
-//! The block tests are ports of the redb crate's inline archive tests
-//! (`crates/redb3/src/archive/tests.rs`); the log tests are new here, since
-//! the redb suite exercised logs only through backend-specific internals.
+//! The suite was written against the retired redb archive, whose block tests
+//! it ports; the memory archive took over as the oracle when redb retired
+//! (decision 0039).
 
 use std::sync::Arc;
 
+use dolos_cardano::indexes::archive_dimensions;
 use dolos_core::{
-    ArchiveStore as CoreArchiveStore, ArchiveWriter as _, BlockSlot, ChainPoint, EntityKey, LogKey,
-    NamespaceType, RawBlock, StateSchema, TemporalKey,
+    builtin::MemoryArchiveStore, ArchiveIndexDelta, ArchiveStore as CoreArchiveStore,
+    ArchiveWriter as _, BlockSlot, ChainPoint, EntityKey, LogKey, NamespaceType, RawBlock,
+    StateSchema, Tag, TemporalKey,
 };
 
 use dolos_testing::blocks::{byron_ebb_slot, make_byron_ebb, make_conway_block_with_prev};
@@ -45,18 +52,14 @@ trait Backend {
     fn open() -> (Self::Store, Self::Guard);
 }
 
-struct Redb;
+struct Memory;
 
-impl Backend for Redb {
-    type Store = dolos_redb3::archive::ArchiveStore;
+impl Backend for Memory {
+    type Store = MemoryArchiveStore;
     type Guard = ();
 
     fn open() -> (Self::Store, Self::Guard) {
-        (
-            dolos_redb3::archive::ArchiveStore::in_memory(schema())
-                .expect("failed to open redb archive store"),
-            (),
-        )
+        (MemoryArchiveStore::new(schema()), ())
     }
 }
 
@@ -998,10 +1001,9 @@ fn truncate_front_drops_logs_at_the_cut_slot<B: Backend>() {
     store.truncate_front(&point(200)).unwrap();
 
     // The block at the cut slot survives; log rows at the cut slot go with
-    // everything after it. This asymmetry is what the redb backend does —
-    // its block removal is strictly-after while its log removal compares
-    // full keys against the bare temporal prefix — and both backends must
-    // agree on it.
+    // everything after it. The asymmetry comes from the block removal being
+    // strictly-after while the log removal compares full keys against the
+    // bare temporal prefix, and both backends must agree on it.
     assert_eq!(stored_slots(&store), vec![100, 200]);
 
     let walked: Vec<LogKey> = store
@@ -1034,6 +1036,313 @@ fn logs_and_blocks_share_one_writer_commit<B: Backend>() {
     );
 }
 
+// Index entries: the archive's projection of its blocks
+
+/// The index entries one block projects: its hash, its number, one
+/// transaction and one address tag, all derived from `seed` so two deltas
+/// never share an entry.
+fn index_delta(slot: u64, seed: u8) -> ArchiveIndexDelta {
+    ArchiveIndexDelta {
+        slot,
+        block_hash: vec![seed; 32],
+        block_number: Some(slot),
+        tx_hashes: vec![vec![0x80 | seed; 32]],
+        tags: vec![Tag::new(archive_dimensions::ADDRESS, vec![seed; 28])],
+    }
+}
+
+fn tagged_slots<S: CoreArchiveStore>(store: &S, key: &[u8], start: u64, end: u64) -> Vec<u64> {
+    store
+        .slots_by_tag(archive_dimensions::ADDRESS, key, start, end)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+/// A block and the entries that resolve to it land in one commit, and every
+/// exact lookup then answers with the block's slot.
+fn apply_index_then_slot_by_tx_hash_resolves<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let delta = index_delta(100, 0x01);
+
+    let writer = store.start_writer().unwrap();
+    writer
+        .apply(&point(100), &Arc::new(fake_block(100)))
+        .unwrap();
+    writer.apply_index(std::slice::from_ref(&delta)).unwrap();
+
+    // Nothing is visible before the commit: the entries ride the block's
+    // batch rather than landing ahead of it.
+    assert_eq!(store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(), None);
+
+    writer.commit().unwrap();
+
+    assert_eq!(
+        store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        store.slot_by_block_hash(&delta.block_hash).unwrap(),
+        Some(100)
+    );
+    assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
+    assert_eq!(tagged_slots(&store, &delta.tags[0].key, 0, u64::MAX), [100]);
+
+    assert_eq!(
+        store.get_block_by_slot(&100).unwrap(),
+        Some(fake_block(100)),
+        "the block the entries point at is there too"
+    );
+}
+
+/// A rollback takes back exactly the undone block's entries, and nothing of
+/// the block before it.
+fn undo_index_removes_exactly_what_apply_index_added<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let kept = index_delta(100, 0x01);
+    let undone = index_delta(200, 0x02);
+
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(&[kept.clone(), undone.clone()]).unwrap();
+    writer.commit().unwrap();
+
+    let writer = store.start_writer().unwrap();
+    writer.undo_index(std::slice::from_ref(&undone)).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(store.slot_by_tx_hash(&undone.tx_hashes[0]).unwrap(), None);
+    assert_eq!(store.slot_by_block_hash(&undone.block_hash).unwrap(), None);
+    assert_eq!(store.slot_by_block_number(200).unwrap(), None);
+    assert!(tagged_slots(&store, &undone.tags[0].key, 0, u64::MAX).is_empty());
+
+    assert_eq!(
+        store.slot_by_tx_hash(&kept.tx_hashes[0]).unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        store.slot_by_block_hash(&kept.block_hash).unwrap(),
+        Some(100)
+    );
+    assert_eq!(store.slot_by_block_number(100).unwrap(), Some(100));
+    assert_eq!(tagged_slots(&store, &kept.tags[0].key, 0, u64::MAX), [100]);
+}
+
+/// `slots_by_tag` takes both bounds inclusive — unlike the record traversals,
+/// whose range is half-open — so the slot at `end` is an answer.
+fn slots_by_tag_bounds_are_inclusive<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let key = vec![0xAA; 28];
+
+    let deltas: Vec<_> = [10u64, 20, 30]
+        .into_iter()
+        .map(|slot| ArchiveIndexDelta {
+            slot,
+            block_hash: vec![slot as u8; 32],
+            block_number: Some(slot),
+            tx_hashes: Vec::new(),
+            tags: vec![Tag::new(archive_dimensions::ADDRESS, key.clone())],
+        })
+        .collect();
+
+    let writer = store.start_writer().unwrap();
+    writer.apply_index(&deltas).unwrap();
+    writer.commit().unwrap();
+
+    assert_eq!(tagged_slots(&store, &key, 10, 30), [10, 20, 30]);
+    assert_eq!(tagged_slots(&store, &key, 10, 20), [10, 20]);
+    assert_eq!(tagged_slots(&store, &key, 20, 30), [20, 30]);
+    assert_eq!(tagged_slots(&store, &key, 20, 20), [20]);
+    assert_eq!(tagged_slots(&store, &key, 11, 29), [20]);
+    assert!(tagged_slots(&store, &key, 21, 29).is_empty());
+}
+
+// Index entries: prune
+
+/// The one tag key every block of a prune test carries, so `slots_by_tag`
+/// on it lists whatever blocks the store still holds.
+const SHARED_TAG_KEY: [u8; 28] = [0xAA; 28];
+
+/// The index entries of a block at `slot`, derived from the slot alone so a
+/// test can probe any block it wrote without keeping the deltas around: the
+/// block number is the slot, the hashes carry the slot in their leading
+/// bytes.
+fn slot_delta(slot: u64) -> ArchiveIndexDelta {
+    let mut block_hash = vec![0u8; 32];
+    block_hash[..8].copy_from_slice(&slot.to_be_bytes());
+
+    let mut tx_hash = vec![0xFFu8; 32];
+    tx_hash[8..16].copy_from_slice(&slot.to_be_bytes());
+
+    ArchiveIndexDelta {
+        slot,
+        block_hash,
+        block_number: Some(slot),
+        tx_hashes: vec![tx_hash],
+        tags: vec![Tag::new(
+            archive_dimensions::ADDRESS,
+            SHARED_TAG_KEY.to_vec(),
+        )],
+    }
+}
+
+/// Write a block and its [`slot_delta`] entries at every slot, one commit.
+fn write_indexed_blocks<S: CoreArchiveStore>(store: &S, slots: &[u64]) {
+    let writer = store.start_writer().unwrap();
+    for &slot in slots {
+        writer
+            .apply(&point(slot), &Arc::new(fake_block(slot)))
+            .unwrap();
+        writer.apply_index(&[slot_delta(slot)]).unwrap();
+    }
+    writer.commit().unwrap();
+}
+
+/// Whether every exact lookup of the block at `slot` still resolves.
+///
+/// The three answer together or not at all: a block's entries are pruned
+/// as one, so a split answer is a defect this helper would hide.
+fn exact_entries_present<S: CoreArchiveStore>(store: &S, slot: u64) -> bool {
+    let delta = slot_delta(slot);
+    let answers = [
+        store.slot_by_block_hash(&delta.block_hash).unwrap(),
+        store.slot_by_tx_hash(&delta.tx_hashes[0]).unwrap(),
+        store.slot_by_block_number(slot).unwrap(),
+    ];
+
+    match answers {
+        [Some(a), Some(b), Some(c)] if a == slot && b == slot && c == slot => true,
+        [None, None, None] => false,
+        other => panic!("the exact entries of slot {slot} disagree: {other:?}"),
+    }
+}
+
+/// Pruning the blocks below the cutoff prunes their index entries with
+/// them: no exact lookup resolves a pruned block and no tag names it, while
+/// every block still held keeps every entry.
+fn prune_history_drops_tags_and_exact_below_the_cutoff<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let slots: Vec<u64> = (0..=1_000).step_by(100).collect();
+    write_indexed_blocks(&store, &slots);
+
+    // Start 0, tip 1000, window 500: prune before slot 500.
+    let done = store.prune_history(500, None).unwrap();
+    assert!(done);
+
+    for &slot in &slots {
+        let retained = slot >= 500;
+        assert_eq!(
+            store.get_block_by_slot(&slot).unwrap().is_some(),
+            retained,
+            "block at {slot}"
+        );
+        assert_eq!(
+            exact_entries_present(&store, slot),
+            retained,
+            "exact entries of {slot}"
+        );
+    }
+
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX),
+        [500, 600, 700, 800, 900, 1_000]
+    );
+}
+
+/// The cutoff is exclusive for index entries exactly as it is for blocks and
+/// logs: the entries of the block at the cutoff slot survive, the entries of
+/// the block one slot before it go.
+fn prune_keeps_index_entries_at_the_cutoff_slot<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    write_indexed_blocks(&store, &[0, 499, 500, 501, 1_000]);
+
+    // Start 0, tip 1000, window 500: prune before slot 500.
+    let done = store.prune_history(500, None).unwrap();
+    assert!(done);
+
+    assert!(!exact_entries_present(&store, 0));
+    assert!(!exact_entries_present(&store, 499));
+    assert!(exact_entries_present(&store, 500));
+    assert!(exact_entries_present(&store, 501));
+    assert!(exact_entries_present(&store, 1_000));
+
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX),
+        [500, 501, 1_000]
+    );
+}
+
+/// A tag query whose range straddles the cutoff answers only the retained
+/// side of it, and a range entirely below the cutoff answers nothing —
+/// the same shape `get_range` has over the pruned blocks.
+fn slots_by_tag_after_prune_answers_only_retained_slots<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let slots: Vec<u64> = (0..=1_000).step_by(100).collect();
+    write_indexed_blocks(&store, &slots);
+
+    // Start 0, tip 1000, window 300: prune before slot 700.
+    let done = store.prune_history(300, None).unwrap();
+    assert!(done);
+
+    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 100, 800), [700, 800]);
+    assert!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 699).is_empty());
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, u64::MAX),
+        [700, 800, 900, 1_000]
+    );
+}
+
+/// The fjall backend sweeps its index keyspaces only when the cutoff has
+/// advanced by a sixteenth of the window since the last sweep, so between
+/// sweeps a pruned block's entries linger; the memory backend has no such
+/// cadence, which is why this is not a conformance case.
+///
+/// Window 1600 makes the threshold 100 slots; each round prunes 40. The
+/// first prune after open always sweeps, the next two fall inside the
+/// threshold and leave the entries of the blocks they pruned in place, and
+/// the fourth crosses it and removes them.
+#[test]
+fn fjall_index_sweep_is_amortized_across_prune_rounds() {
+    let (store, _guard) = Fjall::open();
+
+    let slots: Vec<u64> = (0..=3_000).step_by(10).collect();
+    write_indexed_blocks(&store, &slots);
+
+    let max_slots = 1_600;
+    let max_prune = Some(40);
+
+    // Round 1: cutoff 40, first sweep after open.
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!exact_entries_present(&store, 30));
+    assert!(exact_entries_present(&store, 40));
+
+    // Rounds 2 and 3: cutoffs 80 and 120, inside the threshold. The blocks
+    // are gone, their entries are not yet.
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert_eq!(store.get_block_by_slot(&40).unwrap(), None);
+    assert_eq!(store.get_block_by_slot(&110).unwrap(), None);
+    assert!(exact_entries_present(&store, 40));
+    assert!(exact_entries_present(&store, 110));
+    assert_eq!(
+        tagged_slots(&store, &SHARED_TAG_KEY, 0, 120),
+        [40, 50, 60, 70, 80, 90, 100, 110, 120]
+    );
+
+    // Round 4: cutoff 160, past the threshold: everything below it goes.
+    assert!(!store.prune_history(max_slots, max_prune).unwrap());
+    assert!(!exact_entries_present(&store, 40));
+    assert!(!exact_entries_present(&store, 110));
+    assert!(!exact_entries_present(&store, 150));
+    assert!(exact_entries_present(&store, 160));
+    assert_eq!(tagged_slots(&store, &SHARED_TAG_KEY, 0, 170), [160, 170]);
+}
+
 // ---------------------------------------------------------------------------
 // Cross-backend agreement: both backends walk identical data identically
 // ---------------------------------------------------------------------------
@@ -1043,7 +1352,7 @@ fn logs_and_blocks_share_one_writer_commit<B: Backend>() {
 /// benchmark protocol runs on a real replay.
 #[test]
 fn backends_agree_on_identical_writes() {
-    let (redb, _g1) = Redb::open();
+    let (memory, _g1) = Memory::open();
     let (fjall, _g2) = Fjall::open();
 
     let seed_rows: Vec<(LogKey, Vec<u8>)> = (0u64..50)
@@ -1055,11 +1364,11 @@ fn backends_agree_on_identical_writes() {
         })
         .collect();
 
-    for store in [&redb as &dyn WriteSurface, &fjall as &dyn WriteSurface] {
+    for store in [&memory as &dyn WriteSurface, &fjall as &dyn WriteSurface] {
         store.write(&seed_rows);
     }
 
-    let from_redb: Vec<(LogKey, Vec<u8>)> = redb
+    let from_memory: Vec<(LogKey, Vec<u8>)> = memory
         .iter_logs(NS_A, LogKey::full_range())
         .unwrap()
         .collect::<Result<_, _>>()
@@ -1070,8 +1379,11 @@ fn backends_agree_on_identical_writes() {
         .collect::<Result<_, _>>()
         .unwrap();
 
-    assert_eq!(from_redb, seed_rows, "the walk must return the seeded rows");
-    assert_eq!(from_redb, from_fjall);
+    assert_eq!(
+        from_memory, seed_rows,
+        "the walk must return the seeded rows"
+    );
+    assert_eq!(from_memory, from_fjall);
 }
 
 /// Object-safe helper so the agreement test writes through both backends
@@ -1148,10 +1460,16 @@ macro_rules! full_suite {
                 prune_keeps_logs_at_the_cutoff_slot,
                 truncate_front_drops_logs_at_the_cut_slot,
                 logs_and_blocks_share_one_writer_commit,
+                apply_index_then_slot_by_tx_hash_resolves,
+                undo_index_removes_exactly_what_apply_index_added,
+                slots_by_tag_bounds_are_inclusive,
+                prune_history_drops_tags_and_exact_below_the_cutoff,
+                prune_keeps_index_entries_at_the_cutoff_slot,
+                slots_by_tag_after_prune_answers_only_retained_slots,
             ]
         );
     };
 }
 
-full_suite!(redb, Redb);
+full_suite!(memory, Memory);
 full_suite!(fjall, Fjall);

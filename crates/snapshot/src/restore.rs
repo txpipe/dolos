@@ -6,7 +6,7 @@
 //!
 //! ## The order is the specification
 //!
-//! ADR-004 §"Restore pipeline" fixes the sequence, and it is not an
+//! PROFILE.md §"Restore pipeline" fixes the sequence, and it is not an
 //! implementation preference — each step exists because of what the one before
 //! it established:
 //!
@@ -17,36 +17,41 @@
 //! 2. Select layers ([`plan`]) and preflight free space ([`Plan::preflight`]).
 //!    Selection is profile-side by necessity: a layer's `scope` is opaque to
 //!    the protocol, so nothing but this crate can read an epoch out of one.
-//! 3. [`dolos_core::IndexStore::initialize_schema`].
-//! 4. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
-//!    `indexes`.
-//! 5. The state tip — every shard of every `state-{ns}` kind — with
-//!    `set_cursor` **last**.
-//! 6. Rebuild the live-UTxO index dimensions from the restored UTxO set. They
-//!    are never shipped — ADR-004's Amendment 2 — so this is where they come
-//!    back.
+//! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
+//!    `indexes` — all three into the archive store.
+//! 4. The state tip — every shard of every `state-{ns}` kind.
+//! 5. Rebuild the live-UTxO tags from the restored UTxO set, into the state
+//!    store beside it. They are never shipped — ADR-004's Amendment 2 — so this
+//!    is where they come back, and `set_cursor` lands after them, as the last
+//!    write of the restore.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
 //!
-//! ## Why `set_cursor` is last, and what that does and does not buy
+//! ## Why `set_cursor` is the last write
 //!
-//! `has_existing_data()` reads the state cursor and nothing else, so writing it
-//! only after every shard has landed means an interrupted restore leaves a
-//! store set the next `bootstrap` treats as empty rather than as a node.
+//! `has_existing_data()` reads the state cursor and nothing else, so a node
+//! reads as restored exactly when that cursor is there. Writing it after step 6
+//! makes it the completion marker for the whole restore rather than for the
+//! state tip alone: a node whose ledger is complete and whose live-UTxO
+//! dimensions are not has no cursor, and the next `bootstrap` treats it as
+//! empty — which is what it is.
 //!
-//! It buys that and no more. Step 6 runs *after* the cursor is set, so an
-//! interruption between the two leaves a node whose ledger is complete and
-//! whose live-UTxO indexes are not — and `has_existing_data()` will say it is
-//! restored.
+//! PROFILE.md §"Restore pipeline" moves the cursor rather than marking
+//! completeness a second time in the progress file, and the implementation is
+//! why it can: [`rebuild_utxo_tags`] never reads the cursor off the state
+//! store, so nothing between the tip and the rebuild consumes the cursor and
+//! the write moves on its own. It also
+//! costs nothing on resume — the tip is never checkpointed and the rebuild is
+//! unconditional, so a resumed restore already redoes precisely the work that
+//! now follows the cursor.
 //!
-//! `--continue` **improves** that and does not close it. A resumed restore
-//! always redoes the state tip and always rebuilds the live-UTxO index, because
-//! the tip is never checkpointed — so the partial-`utxo::*` node is repairable
-//! by an operator who resumes, where before it could only be thrown away. What
-//! it does not answer is whether `set_cursor` should move *after* step 6. That
-//! is ADR-004's ordering, it is an open question with its owner, and nothing
-//! here reorders the pipeline to pre-empt it.
+//! What it leaves is worth stating rather than discovering: an interruption
+//! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
+//! `--continue` repairs it cheaply, because the epoch layers stay checkpointed;
+//! without it the stele is restored again from the top over keyed writes, which
+//! is a rewrite and not a duplication — the behaviour every interruption before
+//! the tip already had.
 //!
 //! ## Resume, and where the checkpoint goes
 //!
@@ -88,12 +93,13 @@
 //! index records by their own stored key, entities by namespace and key, UTxOs
 //! by their `TxoRef`.
 //!
-//! One cost is real and worth stating rather than discovering. The redb archive
-//! appends block bodies to flat files and keeps a slot-keyed table of offsets,
-//! so a redone `blocks` layer leaves the superseded bodies in the segment file
-//! with nothing pointing at them. Reads go through the table, so the node is
-//! correct; the dead space is bounded by one layer and is the price of not
-//! starting over.
+//! One cost is real and worth stating rather than discovering. The fjall
+//! archive appends block bodies to flat files and keeps a slot-keyed table of
+//! offsets, so a redone `blocks` layer leaves the superseded bodies in the
+//! segment file with nothing pointing at them. Reads go through the table, so
+//! the node is correct; the dead space is bounded by one layer and is the price
+//! of not starting over. The preflight carries no addend for it; the reason is
+//! on [`Plan::remaining_uncompressed_size`].
 //!
 //! ## Memory
 //!
@@ -119,18 +125,18 @@ use std::{
     sync::Arc,
 };
 
-use dolos_cardano::indexes::index_delta_from_utxo_delta;
+use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, IndexStore,
-    IndexWriter, Namespace, StateStore, StateWriter, TxoRef, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, Namespace,
+    StateStore, StateWriter, TxoRef, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
     inscription::{Inscription, LayerDescriptor},
-    plan::{Remaining, RestoreProgress, Resume},
+    plan::{Remaining, Resume},
     progress::{Event, Observer, Outcome},
     transport::{BlobIndex, SteleReader},
-    Digest, LayerHeader,
+    LayerHeader,
 };
 use tracing::info;
 
@@ -142,36 +148,24 @@ use crate::{
     RETIRED_SCHEMA_REV, SCOPE_REQUIRED, STATE_KINDS, UTXOS,
 };
 
-/// What a restore holds at once.
-///
-/// A store writer batches until `commit` and a layer arrives as a stream, so
-/// nothing bounds a restore's memory except these numbers. Both commit ceilings
-/// are needed and neither subsumes the other: an index record is tens of bytes
-/// and only a count bounds it, while one epoch of mainnet blocks is gigabytes
-/// and only a byte budget bounds that.
-#[derive(Debug, Clone, Copy)]
-pub struct Budget {
-    /// Per-record and window bounds on the layer read itself.
-    pub limits: Limits,
-    /// Records accumulated before a write batch is committed.
-    pub commit_records: usize,
-    /// Bytes accumulated before a write batch is committed.
-    pub commit_bytes: usize,
-}
+pub use stelae_driver::restore::{Budget, Checkpoint, Outlook};
 
-impl Default for Budget {
-    fn default() -> Self {
-        Self {
-            // The profile's ceiling, not the protocol's default: a restore that
-            // read under a tighter limit than the publisher wrote under would
-            // refuse this profile's own steles.
-            limits: Limits {
-                max_record: crate::MAX_RECORD,
-                ..Limits::default()
-            },
-            commit_records: 50_000,
-            commit_bytes: 64 * 1024 * 1024,
-        }
+/// This profile's restore [`Budget`].
+///
+/// The driver deliberately gives `Budget` no default — the read limits are
+/// the publishing profile's ceilings, not the protocol's — so this is where
+/// the numbers live.
+pub fn default_budget() -> Budget {
+    Budget {
+        // The profile's ceiling, not the protocol's default: a restore that
+        // read under a tighter limit than the publisher wrote under would
+        // refuse this profile's own steles.
+        limits: Limits {
+            max_record: crate::MAX_RECORD,
+            ..Limits::default()
+        },
+        commit_records: 50_000,
+        commit_bytes: 64 * 1024 * 1024,
     }
 }
 
@@ -251,6 +245,27 @@ pub struct Plan {
     pub skipped_unknown: Vec<LayerDescriptor>,
 }
 
+/// One retained state dump a stele carries, as a report counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CarriedDump {
+    /// The epoch the dump's scope names.
+    pub epoch: u64,
+    /// How many state layers it carries.
+    pub carried: usize,
+}
+
+impl CarriedDump {
+    /// Whether the dump carries every state layer an epoch has.
+    pub fn is_whole(&self) -> bool {
+        self.carried == crate::state_layer_count()
+    }
+
+    /// How many it would carry if it were.
+    pub fn expected() -> usize {
+        crate::state_layer_count()
+    }
+}
+
 impl Plan {
     /// Every layer this restore will read.
     pub fn layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
@@ -273,6 +288,45 @@ impl Plan {
     /// documentation for the two independent reasons it holds.
     pub fn tip_layers(&self) -> impl Iterator<Item = &LayerDescriptor> {
         self.state.values().flatten()
+    }
+
+    /// The distinct layer kinds this restore skipped for want of a codec,
+    /// byte-sorted.
+    ///
+    /// Derived here rather than in a report, because it is what an operator
+    /// acts on: an epoch dropped by `sync.max_history` is this node's own
+    /// configuration, and a layer dropped for a kind this build does not
+    /// implement is a stele from a publisher ahead of it. Empty for every stele
+    /// this profile publishes today.
+    pub fn skipped_kinds(&self) -> Vec<&str> {
+        let mut kinds: Vec<&str> = self
+            .skipped_unknown
+            .iter()
+            .map(|layer| layer.kind.as_str())
+            .collect();
+
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        kinds
+    }
+
+    /// The retained dumps this stele carries, each with whether it is whole.
+    ///
+    /// A dump may be short of a whole epoch: only the tip is checked for
+    /// completeness — a publisher whose predecessor did not carry every shard
+    /// of an epoch warns and publishes the short dump anyway — so an epoch
+    /// that restores and an epoch missing nine of its shards would
+    /// otherwise be indistinguishable in a report, and the second is not a
+    /// repository that restores that epoch.
+    pub fn carried_dumps(&self) -> Vec<CarriedDump> {
+        self.state_dumps
+            .iter()
+            .map(|(epoch, kinds)| CarriedDump {
+                epoch: *epoch,
+                carried: kinds.values().map(Vec::len).sum(),
+            })
+            .collect()
     }
 
     /// The retained dumps this stele carries and this restore does not read.
@@ -302,15 +356,23 @@ impl Plan {
         index: &BlobIndex,
         resume: &Resume,
     ) -> Result<Remaining, Error> {
-        let epochs = self
-            .immutable_layers()
-            .filter(|descriptor| !resume.is_done(&descriptor.diff_id));
+        Ok(Remaining::of(stele, index, self.remaining_layers(resume))?)
+    }
 
-        Ok(Remaining::of(
-            stele,
-            index,
-            epochs.chain(self.tip_layers()),
-        )?)
+    /// The layers a run with `resume` behind it still has to read: the
+    /// immutable ones it has not recorded, and every tip layer.
+    ///
+    /// One definition for both halves of "what is left" — the compressed bytes
+    /// [`Plan::remaining`] reports and the uncompressed room
+    /// [`Plan::remaining_uncompressed_size`] demands. Two filters saying the
+    /// same thing is two places for the resume rule to drift.
+    pub fn remaining_layers<'a>(
+        &'a self,
+        resume: &'a Resume,
+    ) -> impl Iterator<Item = &'a LayerDescriptor> {
+        self.immutable_layers()
+            .filter(|descriptor| !resume.is_done(&descriptor.diff_id))
+            .chain(self.tip_layers())
     }
 
     /// Uncompressed bytes across the selected layers.
@@ -322,6 +384,30 @@ impl Plan {
         self.layers().map(|l| l.uncompressed_size).sum()
     }
 
+    /// Uncompressed bytes a run with `resume` behind it still has to write.
+    ///
+    /// [`Plan::uncompressed_size`] made resume-aware, and the number
+    /// [`Plan::preflight`] sizes the destination on: the layers a resumed run
+    /// will actually write, which is the immutable ones the resume has not
+    /// recorded plus every tip layer. Charging a resume for layers its own
+    /// earlier attempt already committed measures it against free space those
+    /// layers consumed and then bills for them a second time, which refuses
+    /// runs that would finish.
+    ///
+    /// **No addend.** A redone layer is rewritten and not appended — every
+    /// write path is keyed — with one exception, the fjall archive, which
+    /// leaves the superseded block bodies of an interrupted `blocks` layer as
+    /// dead space in its segment file. That is past spend, not future spend:
+    /// [`preflight::check`] reads free space at check time, so those bytes are
+    /// already out of what it compares against, and the layer that left them
+    /// is not recorded as done, so its full uncompressed size is charged
+    /// again.
+    pub fn remaining_uncompressed_size(&self, resume: &Resume) -> u64 {
+        self.remaining_layers(resume)
+            .map(|l| l.uncompressed_size)
+            .sum()
+    }
+
     /// Refuse a restore that cannot fit, before it starts writing.
     ///
     /// Two needs, one policy ([`crate::preflight`]): the stores this restore
@@ -331,17 +417,27 @@ impl Plan {
     /// the storage filesystem they are two claims on one pool of free bytes,
     /// and the default `<storage.path>/scratch` makes that the ordinary case.
     ///
+    /// Both needs are resume-aware, and for the same reason: what a run has to
+    /// fit is what *this* run will move, not what the plan describes. The
+    /// destination's is [`Plan::remaining_uncompressed_size`], the staging
+    /// volume's is the largest layer the caller's [`Remaining`] names.
+    ///
     /// The destination comparison is deliberately against the *uncompressed*
-    /// size of the selected layers rather than against a prediction of what the
+    /// size of those layers rather than against a prediction of what the
     /// stores will occupy. It is the only number the inscription carries, it is
     /// an underestimate for every backend (a store keeps indexes and slack of
     /// its own), and an underestimate is the safe direction for a check whose
     /// job is to catch the obviously-doomed run.
-    pub fn preflight(&self, path: &Path, staging: Option<Staging<'_>>) -> Result<(), Error> {
+    pub fn preflight(
+        &self,
+        path: &Path,
+        resume: &Resume,
+        staging: Option<Staging<'_>>,
+    ) -> Result<(), Error> {
         let mut needs = vec![preflight::Need::of(
             "restoring it",
             path,
-            self.uncompressed_size(),
+            self.remaining_uncompressed_size(resume),
         )];
 
         if let Some(staging) = staging {
@@ -361,7 +457,7 @@ impl Plan {
             ));
         }
 
-        preflight::check(&needs)
+        Ok(preflight::check(&needs)?)
     }
 }
 
@@ -720,7 +816,7 @@ fn scope_uint(descriptor: &LayerDescriptor, field: &str) -> Result<u64, Error> {
 
 /// Name of the progress file inside a node's storage directory.
 ///
-/// ADR-004's, spelled exactly as it spells it. "Snapshot" is this profile's
+/// PROFILE.md's, spelled exactly as it spells it. "Snapshot" is this profile's
 /// word for a stele — Dolos says `dolos snapshot`, the protocol says *stele* —
 /// which is why the name lives here and not in `stelae`, whose
 /// [`stelae::plan::RestoreProgress`] takes a path a caller chose.
@@ -751,166 +847,45 @@ pub struct Summary {
     pub layers_skipped: usize,
 }
 
-/// Where a restore records what it has finished, and what it inherits.
+impl Summary {
+    /// Tally [`Checkpoint::fetch`]'s decision.
+    ///
+    /// The driver returns the outcome precisely so the count cannot drift
+    /// from the checkpoint's own choice.
+    fn count(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Skipped => self.layers_skipped += 1,
+            _ => self.layers_fetched += 1,
+        }
+    }
+}
+
+/// Where a node with storage at `storage_path` keeps its progress file.
 ///
-/// One value rather than three arguments, because the three are one idea: the
-/// file, the set of layers it says are done, and the identity of the stele
-/// being restored into it.
-pub struct Checkpoint {
-    path: PathBuf,
-    resume: Resume,
-    progress: RestoreProgress,
+/// The [`Checkpoint`] takes the path it is given — the driver never derives
+/// dolos layout — and this is where dolos derives it. The `resume` flag a
+/// checkpoint is opened with is the operator's `--continue`, and the driver's
+/// ignore-unless-resuming rule is the reason `--force` is safe: clearing
+/// storage removes this file with the rest of it, and even a progress file
+/// that somehow survived its stores cannot skip layers onto empty ones.
+pub fn progress_path_in(storage_path: &Path) -> PathBuf {
+    storage_path.join(PROGRESS_FILE)
 }
 
-impl Checkpoint {
-    /// Where a node with storage at `storage_path` keeps its progress file.
-    pub fn path_in(storage_path: &Path) -> PathBuf {
-        storage_path.join(PROGRESS_FILE)
-    }
-
-    /// Open the checkpoint for restoring the stele `identity` into
-    /// `storage_path`.
-    ///
-    /// `resume` is the operator's `--continue`, and it gates whether anything
-    /// on disk is *honoured* — not merely whether it is read. A restore
-    /// that is not resuming is starting over: it takes an empty [`Resume`]
-    /// and its first checkpoint overwrites whatever was there.
-    ///
-    /// That asymmetry is deliberate and is the reason `--force` is safe. A
-    /// progress file that outlived its stores would name layers whose data is
-    /// gone, and honouring one nobody asked to honour would skip them onto
-    /// empty stores — a node missing a slice of chain that nothing would
-    /// report. Clearing storage removes this file with the rest of it, and
-    /// the rule here means even a file that somehow survived cannot do that
-    /// damage.
-    pub fn open(storage_path: &Path, identity: Digest, resume: bool) -> Result<Self, Error> {
-        let path = Self::path_in(storage_path);
-
-        let existing = match resume {
-            true => RestoreProgress::load(&path)?,
-            false => None,
-        };
-
-        let resume = Resume::from_progress(existing.as_ref());
-
-        // The new identity, the old completions. The completions are what the
-        // resume rule is about — content, not the document that described it —
-        // and the digest is what tells a later reader which stele a
-        // half-finished restore was aimed at.
-        let progress = RestoreProgress {
-            inscription_digest: identity,
-            completed: existing.map(|p| p.completed).unwrap_or_default(),
-        };
-
-        Ok(Self {
-            path,
-            resume,
-            progress,
-        })
-    }
-
-    /// A restore that checkpoints nowhere.
-    ///
-    /// For a caller driving [`restore`] without a node behind it — the test
-    /// suites, above all, which compare store sets rather than resumes.
-    pub fn none() -> Self {
-        Self {
-            path: PathBuf::new(),
-            resume: Resume::none(),
-            progress: RestoreProgress::new(Digest::from_bytes([0; 32])),
-        }
-    }
-
-    /// What this checkpoint inherits, for the remaining-bytes accounting.
-    pub fn resume(&self) -> &Resume {
-        &self.resume
-    }
-
-    /// Read `descriptor`'s layer unless an earlier attempt already committed
-    /// it.
-    ///
-    /// The one place a layer is decided about, so that the skip, the count and
-    /// the checkpoint cannot drift apart. `fetch` runs to completion — every
-    /// per-kind driver below commits before it returns — and only then is the
-    /// layer recorded, which is what makes the record mean "committed" rather
-    /// than "attempted".
-    /// Returns the outcome alongside the count, rather than leaving a caller to
-    /// ask the resume the same question a second time: this method is the one
-    /// place a layer is decided about, and what an observer reports has to be
-    /// that decision and not a re-derivation of it.
-    fn fetch<T: Default>(
-        &mut self,
-        descriptor: &LayerDescriptor,
-        summary: &mut Summary,
-        fetch: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<(T, Outcome), Error> {
-        if self.resume.is_done(&descriptor.diff_id) {
-            info!(
-                kind = descriptor.kind,
-                scope = %descriptor.scope,
-                "skipping a layer an earlier attempt completed"
-            );
-
-            summary.layers_skipped += 1;
-
-            return Ok((T::default(), Outcome::Skipped));
-        }
-
-        let out = fetch()?;
-
-        summary.layers_fetched += 1;
-        self.record(descriptor.diff_id)?;
-
-        Ok((out, Outcome::Transferred))
-    }
-
-    fn record(&mut self, diff_id: Digest) -> Result<(), Error> {
-        if self.path.as_os_str().is_empty() {
-            return Ok(());
-        }
-
-        self.progress.record(diff_id);
-        self.progress.save(&self.path)?;
-
-        Ok(())
-    }
-
-    /// Delete the progress file.
-    ///
-    /// Called after the live-UTxO rebuild and never after `set_cursor`, which
-    /// are two different moments and only the later one means the restore is
-    /// finished. Clearing it at the cursor would take away the resume that
-    /// repairs exactly the window between them.
-    fn clear(&self) -> Result<(), Error> {
-        if self.path.as_os_str().is_empty() {
-            return Ok(());
-        }
-
-        RestoreProgress::remove(&self.path)?;
-
-        Ok(())
-    }
-}
-
-/// The three stores a restore writes into.
+/// The two stores a restore writes into.
 ///
 /// One value because they are one node. Threading them separately through four
 /// call layers is what took every signature here to the edge, and they have
 /// never once been supplied from different places.
 #[derive(Debug, Clone, Copy)]
-pub struct Target<'a, A, S, I> {
+pub struct Target<'a, A, S> {
     pub archive: &'a A,
     pub state: &'a S,
-    pub indexes: &'a I,
 }
 
-impl<'a, A, S, I> Target<'a, A, S, I> {
-    pub fn new(archive: &'a A, state: &'a S, indexes: &'a I) -> Self {
-        Self {
-            archive,
-            state,
-            indexes,
-        }
+impl<'a, A, S> Target<'a, A, S> {
+    pub fn new(archive: &'a A, state: &'a S) -> Self {
+        Self { archive, state }
     }
 }
 
@@ -932,6 +907,9 @@ pub struct Restoring<'a> {
     pub storage_path: &'a Path,
     /// The operator's `--continue`.
     pub resume: bool,
+    /// The operator explicitly accepted the risk of restoring without checking
+    /// the destination and staging volumes against the stele's declared sizes.
+    pub skip_space_check: bool,
 }
 
 /// Restore `plan`'s layers into a store set.
@@ -947,11 +925,11 @@ pub struct Restoring<'a> {
 /// while the download that dominates a registry restore is only visible to the
 /// transport. [`Observer::silent`] is what a caller with nothing to render
 /// passes, and a silent run is byte-for-byte the run this was before the seam.
-pub fn restore<R, A, S, I>(
+pub fn restore<R, A, S>(
     stele: &R,
     index: &BlobIndex,
     plan: &Plan,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     budget: Budget,
     checkpoint: &mut Checkpoint,
     observer: &Observer,
@@ -960,13 +938,8 @@ where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
-    let Target {
-        archive,
-        state,
-        indexes,
-    } = target;
+    let Target { archive, state } = target;
 
     stele.observe(observer.clone());
 
@@ -981,8 +954,6 @@ where
     let cursor = Cursor::new(observer, plan.layers().count());
     let mut summary = Summary::default();
 
-    indexes.initialize_schema()?;
-
     for epoch in &plan.epochs {
         info!(
             epoch = epoch.epoch,
@@ -993,11 +964,11 @@ where
         if let Some(descriptor) = &epoch.blocks {
             let at = cursor.open(BLOCKS, &descriptor.scope);
 
-            let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
-                restore_blocks(&reader, descriptor, archive)
-            })?;
+            let (count, outcome) =
+                checkpoint.fetch(descriptor, || restore_blocks(&reader, descriptor, archive))?;
 
             cursor.close(at, BLOCKS, outcome);
+            summary.count(outcome);
             summary.blocks += count;
         }
 
@@ -1005,22 +976,23 @@ where
             let kind = descriptor.kind.as_str();
             let at = cursor.open(kind, &descriptor.scope);
 
-            let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
+            let (count, outcome) = checkpoint.fetch(descriptor, || {
                 restore_logs(&reader, descriptor, archive, ns)
             })?;
 
             cursor.close(at, kind, outcome);
+            summary.count(outcome);
             summary.logs += count;
         }
 
         if let Some(descriptor) = &epoch.indexes {
             let at = cursor.open(INDEXES, &descriptor.scope);
 
-            let (count, outcome) = checkpoint.fetch(descriptor, &mut summary, || {
-                restore_indexes(&reader, descriptor, indexes)
-            })?;
+            let (count, outcome) =
+                checkpoint.fetch(descriptor, || restore_indexes(&reader, descriptor, archive))?;
 
             cursor.close(at, INDEXES, outcome);
+            summary.count(outcome);
             summary.index_records += count;
         }
     }
@@ -1045,35 +1017,23 @@ where
         }
     }
 
-    // Last, so that until this commit lands `has_existing_data()` reports an
-    // empty node rather than a half-restored one.
+    info!(utxos = summary.utxos, "rebuilding the live-utxo tags");
+
+    rebuild_utxo_tags(state, budget)?;
+
+    // The last write of the restore, the live-utxo dimensions above included:
+    // until this commit lands `has_existing_data()` reports an empty node
+    // rather than a half-restored one.
     let writer = state.start_writer()?;
     writer.set_cursor(plan.position.point.clone())?;
     writer.commit()?;
 
-    info!(utxos = summary.utxos, "rebuilding the live-utxo indexes");
-
-    rebuild_utxo_indexes(state, indexes, &plan.position.point, budget)?;
-
-    // Here and not one step earlier. The window between `set_cursor` and the
-    // rebuild above is the one an operator repairs by resuming, and a progress
-    // file deleted at the cursor would have taken that away.
+    // After the cursor, because the cursor is what says the restore finished.
+    // A progress file deleted before it would take away the resume that makes
+    // an interruption cheap.
     checkpoint.clear()?;
 
     Ok(summary)
-}
-
-/// What a restore is about to do, once the stele has been read.
-///
-/// Returned alongside the [`Plan`] so a caller can report the *remaining*
-/// download rather than the original one — the whole point of the accounting on
-/// a resumed run.
-#[derive(Debug, Clone, Copy)]
-pub struct Outlook {
-    /// Layers still to fetch, and what they weigh compressed.
-    pub remaining: Remaining,
-    /// Layers an earlier attempt had already committed.
-    pub inherited: usize,
 }
 
 /// Open, verify and read a stele into the stores, in one call.
@@ -1091,23 +1051,23 @@ pub struct Outlook {
 /// a registry hands over the directory it was opened with. Asking the
 /// transport is what keeps the volume the preflight sizes and the volume the
 /// transport writes to the same volume.
-pub(crate) fn restore_stele<R, A, S, I>(
+pub(crate) fn restore_stele<R, A, S>(
     stele: &R,
     node: Restoring<'_>,
     scratch_dir: Option<&Path>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     R: SteleReader,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let plan = plan(stele, node.network_magic, node.max_history)?;
 
     let identity = stele.read_inscription()?.digest()?;
-    let mut checkpoint = Checkpoint::open(node.storage_path, identity, node.resume)?;
+    let mut checkpoint =
+        Checkpoint::open(progress_path_in(node.storage_path), identity, node.resume)?;
 
     let index = stele.blob_index()?;
 
@@ -1116,12 +1076,12 @@ where
         inherited: checkpoint.resume().len(),
     };
 
-    // Below the sizes rather than above them, and still ADR-004's step 2:
-    // what the staging volume has to hold is the largest layer this run will
-    // *actually* pull, which is a question about the resume and so cannot be
-    // asked before the checkpoint is open. Nothing between the plan and here
-    // writes — `Checkpoint::open` only reads the progress file and
-    // `blob_index` only reads blobs — so the preflight still refuses before
+    // Below the checkpoint rather than above it, and still ADR-004's step 2:
+    // both needs are questions about what this run will actually move — the
+    // largest layer it will pull, and the layers it still has to write — so
+    // neither can be asked before the resume is known. Nothing between the plan
+    // and here writes — `Checkpoint::open` only reads the progress file and
+    // `blob_index` only reads the stele — so the preflight still refuses before
     // the first byte is written, which is the whole of its promise.
     let staging = scratch_dir.map(|dir| Staging {
         dir,
@@ -1129,14 +1089,14 @@ where
         unsized_layers: outlook.remaining.unsized_layers,
     });
 
-    plan.preflight(node.storage_path, staging)?;
+    check_restore_space(&plan, node, checkpoint.resume(), staging)?;
 
     let summary = restore(
         stele,
         &index,
         &plan,
         target,
-        Budget::default(),
+        default_budget(),
         &mut checkpoint,
         observer,
     )?;
@@ -1144,22 +1104,37 @@ where
     Ok((plan, outlook, summary))
 }
 
+fn check_restore_space(
+    plan: &Plan,
+    node: Restoring<'_>,
+    resume: &Resume,
+    staging: Option<Staging<'_>>,
+) -> Result<(), Error> {
+    if node.skip_space_check {
+        tracing::warn!("skipping restore disk-space preflight by operator request");
+        Ok(())
+    } else {
+        plan.preflight(node.storage_path, resume, staging)
+    }
+}
+
 /// Restore from a stele directory.
 ///
-/// `blob_index` is the expensive part and is unavoidable for a directory: an
-/// inscription names layers by identity and a directory has no manifest, so the
-/// map from a descriptor to the file holding it is rebuilt by decompressing
-/// every blob once. A registry supplies it off its manifest instead.
-pub fn restore_dir<A, S, I>(
+/// An inscription names layers by identity, so a reader needs a map from a
+/// descriptor to the file holding it. A stele sealed by this implementation
+/// carries one — `stelae::dir::BLOB_INDEX_FILE`, the sidecar that makes a
+/// directory a degenerate registry — and `blob_index` reads it. One published
+/// before that file existed has none, and the map is rebuilt by decompressing
+/// every blob once *before* the restore decompresses the ones it wants.
+pub fn restore_dir<A, S>(
     root: impl Into<std::path::PathBuf>,
     node: Restoring<'_>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = stelae::dir::SteleDir::open(root)?;
 
@@ -1340,17 +1315,20 @@ fn restore_logs<R: SteleReader, A: ArchiveStore>(
 /// is this caller's, which is what the trait says, and the sort order the
 /// backends want holds across the whole layer because that is what the codec's
 /// `OrderCheck` made the exporter prove.
-fn restore_indexes<R: SteleReader, I: IndexStore>(
+///
+/// The records go into the archive, beside the blocks they project — the same
+/// store `restore_blocks` wrote the epoch's `blocks` layer into.
+fn restore_indexes<R: SteleReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
-    indexes: &I,
+    archive: &A,
 ) -> Result<u64, Error> {
     reader.drain(
         descriptor,
         indexes::decode,
         |_| std::mem::size_of::<IndexRecord>(),
         |chunk| {
-            let writer = indexes.start_writer()?;
+            let writer = archive.start_writer()?;
 
             writer.append_prehashed(chunk)?;
             writer.commit()?;
@@ -1418,23 +1396,14 @@ fn restore_state<R: SteleReader, S: StateStore>(
     Ok((entities, 0))
 }
 
-/// Rebuild the live-UTxO index dimensions from the restored UTxO set.
+/// Rebuild the live-UTxO tags from the restored UTxO set.
 ///
 /// `utxo::{address,payment,stake,policy,asset}` track the current UTxO set, so
 /// ADR-004's Amendment 2 leaves them out of the epoch layers and rebuilds them
 /// here: linear over a set that has just been written anyway, and cheaper than
-/// shipping them.
-///
-/// The last call also aligns the index cursor, which
-/// [`IndexWriter::append_prehashed`] deliberately never touches. It runs
-/// unconditionally — a stele with an empty UTxO set still has to leave a cursor
-/// behind, or `bootstrap` reads the index store as never indexed.
-fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
-    state: &S,
-    indexes: &I,
-    cursor: &ChainPoint,
-    budget: Budget,
-) -> Result<(), Error> {
+/// shipping them. The tags land in the state store beside the set, in chunks
+/// of `budget.commit_records`.
+fn rebuild_utxo_tags<S: StateStore>(state: &S, budget: Budget) -> Result<(), Error> {
     let mut chunk: Vec<(TxoRef, Arc<EraCbor>)> = Vec::new();
 
     let apply = |chunk: Vec<(TxoRef, Arc<EraCbor>)>| -> Result<(), Error> {
@@ -1443,9 +1412,9 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
             ..Default::default()
         };
 
-        let writer = indexes.start_writer()?;
+        let writer = state.start_writer()?;
 
-        writer.apply(&index_delta_from_utxo_delta(cursor.clone(), &delta))?;
+        writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))?;
         writer.commit()?;
 
         Ok(())
@@ -1461,7 +1430,10 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
         }
     }
 
-    // Unconditional: this is the call that leaves the cursor.
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
     apply(chunk)
 }
 
@@ -1472,10 +1444,120 @@ fn rebuild_utxo_indexes<S: StateStore, I: IndexStore>(
 /// explicit that nothing is written to the stores from it.
 pub const UNRESTORED_KINDS: [&str; 1] = [DIGESTS];
 
+/// Where a `--source` points.
+///
+/// The scheme is what selects a restore path, which is why this is parsed
+/// rather than sniffed: a directory that happens to look like a stele and a URL
+/// that says it is one are different claims, and only the second is the
+/// operator's.
+///
+/// Parsed by a command's argument parser rather than inside its body, so an
+/// unusable source is refused before `--force` has cleared anything. The flags
+/// that decide what to do with existing data are handled a layer above, and a
+/// source rejected any later would have cost the operator the node they still
+/// had.
+#[derive(Debug, Clone)]
+pub enum Source {
+    /// A stele directory on this filesystem.
+    Dir(std::path::PathBuf),
+    /// A stele repository in an OCI registry.
+    Repo(crate::registry::Repository),
+}
+
+impl std::str::FromStr for Source {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        use crate::registry::{Repository, SCHEME};
+
+        // `file:///abs/path` is the spelled-out form and leaves a leading slash
+        // behind, which is the absolute path. `file://relative/path` is the one
+        // an operator actually types, and leaves a relative one. Both work, and
+        // neither is guessed at: what follows the scheme is the path.
+        if let Some(path) = raw.strip_prefix("file://") {
+            if path.is_empty() {
+                return Err(format!("{raw:?} names no directory"));
+            }
+
+            return Ok(Self::Dir(std::path::PathBuf::from(path)));
+        }
+
+        if raw.starts_with(SCHEME) {
+            return raw
+                .parse::<Repository>()
+                .map(Self::Repo)
+                .map_err(|e| e.to_string());
+        }
+
+        Err(format!(
+            "{raw:?} is not a stele source; it is `file://DIR` or `{SCHEME}HOST/PATH`",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use std::path::PathBuf;
+
+    use super::Source;
+
+    #[test]
+    fn a_file_source_names_a_directory() {
+        for (raw, expected) in [
+            ("file:///var/lib/dolos/stele", "/var/lib/dolos/stele"),
+            ("file://stele", "stele"),
+            ("file://./stele", "./stele"),
+        ] {
+            let Source::Dir(dir) = raw.parse::<Source>().unwrap() else {
+                panic!("{raw:?} did not parse as a directory");
+            };
+
+            assert_eq!(dir, PathBuf::from(expected), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_oci_source_names_a_repository() {
+        let Source::Repo(repo) = "oci://ghcr.io/txpipe/dolos-snapshots/mainnet"
+            .parse::<Source>()
+            .unwrap()
+        else {
+            panic!("an oci url did not parse as a repository");
+        };
+
+        assert_eq!(repo.registry(), "ghcr.io");
+        assert_eq!(repo.repository(), "txpipe/dolos-snapshots/mainnet");
+    }
+
+    /// A source a restore cannot use is refused by the parse, not carried to
+    /// the registry — the whole reason `--source` is a parsed type, and what
+    /// makes the refusal land before `--force` clears anything.
+    ///
+    /// Only the scheme dispatch is this type's. What makes a *repository*
+    /// usable is the transport's and is tested there; these are the two cases
+    /// that get here either way, plus one that proves an unusable repository
+    /// does propagate.
+    #[test]
+    fn an_unusable_source_is_refused() {
+        for raw in [
+            "https://example.invalid/snapshot", // not a scheme this understands
+            "/var/lib/dolos/stele",             // a path is not a URL
+            "file://",
+            "",
+            // And a repository the transport refuses is refused here too,
+            // rather than being carried as far as a connection.
+            "oci://ghcr.io",
+            "oci://ghcr.io/txpipe/dolos:v1",
+        ] {
+            assert!(raw.parse::<Source>().is_err(), "{raw:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use stelae::{inscription::LayerDescriptor, Digest};
+    use stelae::{inscription::LayerDescriptor, Digest, RestoreProgress};
 
     use super::*;
     use crate::MAINNET_MAGIC;
@@ -2068,12 +2150,16 @@ mod tests {
             skipped_unknown: Vec::new(),
         };
 
-        plan.preflight(temp.path(), None).unwrap();
+        plan.preflight(temp.path(), &Resume::none(), None).unwrap();
 
         // A directory that does not exist yet is measured through its parent,
         // which is the shape a fresh node's storage path has.
-        plan.preflight(&temp.path().join("not").join("created").join("yet"), None)
-            .unwrap();
+        plan.preflight(
+            &temp.path().join("not").join("created").join("yet"),
+            &Resume::none(),
+            None,
+        )
+        .unwrap();
 
         let tip = crate::state_layer_count() as u64;
 
@@ -2081,8 +2167,108 @@ mod tests {
             descriptor.uncompressed_size = u64::MAX / tip;
         }
 
-        let err = plan.preflight(temp.path(), None).unwrap_err();
+        let err = plan
+            .preflight(temp.path(), &Resume::none(), None)
+            .unwrap_err();
         assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+
+        check_restore_space(
+            &plan,
+            Restoring {
+                network_magic: 0,
+                max_history: None,
+                storage_path: temp.path(),
+                resume: false,
+                skip_space_check: true,
+            },
+            &Resume::none(),
+            None,
+        )
+        .unwrap();
+    }
+
+    /// The destination need is the resume's, not the plan's: a resumed
+    /// restore is charged for the layers it still has to write and not for the
+    /// ones an earlier attempt already put on the volume.
+    ///
+    /// Two-sided, because both directions are failures. Charging for committed
+    /// layers refuses a run that would finish; charging for none of them would
+    /// pass a run that dies at hour eight.
+    #[test]
+    fn the_preflight_charges_a_resume_only_for_what_is_left() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let mut layers = state_layers();
+        layers.push(epoch_descriptor(BLOCKS, 0, 0xa0));
+        layers.push(epoch_descriptor(BLOCKS, 1, 0xa1));
+        layers.push(epoch_descriptor(BLOCKS, 2, 0xa2));
+
+        let stele = inscription(layers);
+
+        let mut plan = Plan {
+            position: read_position(&stele.position).unwrap(),
+            sequence: stele.sequence,
+            epochs: select_epochs(&stele).unwrap(),
+            state: select_state(&stele).unwrap().tip,
+            state_dumps: BTreeMap::new(),
+            skipped_epochs: 0,
+            skipped_unknown: Vec::new(),
+        };
+
+        // Epochs 0 and 1 are each larger than any volume; epoch 2 and the tip
+        // keep their hundred bytes. So the whole plan cannot fit anywhere, and
+        // what is left once the first two are committed fits everywhere.
+        for epoch in plan.epochs.iter_mut().take(2) {
+            epoch.blocks.as_mut().unwrap().uncompressed_size = u64::MAX / 4;
+        }
+
+        let blocks_of = |epochs: std::ops::Range<usize>| {
+            let mut progress = RestoreProgress::new(Digest::from_bytes([0xdd; 32]));
+
+            for epoch in &plan.epochs[epochs] {
+                progress.record(epoch.blocks.as_ref().unwrap().diff_id);
+            }
+
+            Resume::from_progress(Some(&progress))
+        };
+
+        let tip = crate::state_layer_count() as u64;
+
+        // An empty resume asks for exactly what it asked for before there was
+        // a resume at all.
+        assert_eq!(
+            plan.remaining_uncompressed_size(&Resume::none()),
+            plan.uncompressed_size()
+        );
+
+        let err = plan
+            .preflight(temp.path(), &Resume::none(), None)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+
+        // Both impossible epochs committed: what is left is epoch 2 and the
+        // tip, and the run proceeds on a volume that could never have held the
+        // whole stele.
+        let resume = blocks_of(0..2);
+        assert_eq!(
+            plan.remaining_uncompressed_size(&resume),
+            (tip + 1) * 100,
+            "the tip is always redone and is always charged"
+        );
+        plan.preflight(temp.path(), &resume, None).unwrap();
+
+        // One of them committed: the other is still ahead of this run, and it
+        // is still refused. Subtracting too much is the dangerous direction.
+        let err = plan
+            .preflight(temp.path(), &blocks_of(0..1), None)
+            .unwrap_err();
+        assert!(matches!(err, Error::NotEnoughSpace(_)), "{err:?}");
+
+        // Every epoch committed leaves the tip, which no resume ever skips.
+        assert_eq!(
+            plan.remaining_uncompressed_size(&blocks_of(0..3)),
+            tip * 100
+        );
     }
 
     /// The staging half: a scratch volume that cannot hold the largest layer
@@ -2110,6 +2296,7 @@ mod tests {
         let staging = |largest_layer, unsized_layers| {
             plan.preflight(
                 temp.path(),
+                &Resume::none(),
                 Some(Staging {
                     dir: &scratch,
                     largest_layer,

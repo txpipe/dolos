@@ -25,8 +25,8 @@
 //! and `(kind, key)` — and a leading discriminant that sorts `0` before `1`.
 //! The layer therefore carries every tag record first, then every exact record,
 //! which is also the shape the two source iterators hand over
-//! ([`dolos_core::IndexStore::iter_archive_tags`] then
-//! [`dolos_core::IndexStore::iter_exact_records`]). Both runs are strictly
+//! ([`dolos_core::ArchiveStore::iter_archive_tags`] then
+//! [`dolos_core::ArchiveStore::iter_exact_records`]). Both runs are strictly
 //! ascending, so "sorted, deduped" is one rule rather than two.
 //!
 //! Exact records dedupe on `(kind, key)` and not on the slot behind it: a block
@@ -39,8 +39,8 @@ use dolos_core::{
 };
 use stelae::frame::{self, CanonicalCbor};
 
-use super::{blob, close, fixed, open, text, uint};
 use crate::{Error, INDEXES};
+use stelae::codec::{blob, close, fixed, open, text, uint};
 
 /// Leading discriminant of a tag record.
 pub const TAG_DISCRIMINANT: u64 = 0;

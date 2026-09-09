@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::{MemoryIndexStore, MemoryStateStore},
-    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, IndexError,
-    IndexStore, LogEntry, LogKey, LogValue, Namespace, StateError, StateStore, TagDimension,
-    TipEvent, WalError, WalStore,
+    builtin::{MemoryArchiveStore, MemoryStateStore},
+    ArchiveError, ArchiveStore, BlockBody, BlockSlot, ChainPoint, Domain, DomainError, LogEntry,
+    LogKey, LogValue, Namespace, StateError, StateStore, StateWriter, TagDimension, TipEvent,
+    UtxoIndexDelta, WalError, WalStore,
 };
 
 use crate::toy_domain::{Mempool, TipSubscription, ToyDomain};
@@ -15,7 +15,14 @@ pub enum TestFault {
     None,
     StateStoreError,
     ArchiveStoreError,
-    IndexStoreError,
+    /// Only [`StateWriter::apply_utxo_tags`] fails; every other state call
+    /// succeeds.
+    ///
+    /// The narrow one, for a caller that has to reach a specific write and
+    /// would never get there if opening the store failed too — a stele restore
+    /// above all, whose only tag write is the live-UTxO rebuild that runs
+    /// after every layer has landed.
+    StateTagsApplyError,
     WalStoreError,
     GenesisError,
 }
@@ -26,7 +33,6 @@ pub struct FaultyToyDomain {
     genesis_override: Option<Arc<dolos_core::Genesis>>,
     state: FaultyStateStore,
     archive: FaultyArchiveStore,
-    indexes: FaultyIndexStore,
     wal: FaultyWalStore,
 }
 
@@ -34,7 +40,6 @@ impl FaultyToyDomain {
     pub fn new(inner: ToyDomain, fault: TestFault) -> Self {
         let state = FaultyStateStore::new(inner.state().clone(), fault);
         let archive = FaultyArchiveStore::new(inner.archive().clone(), fault);
-        let indexes = FaultyIndexStore::new(inner.indexes().clone(), fault);
         let wal = FaultyWalStore::new(inner.wal().clone(), fault);
         let genesis_override = match fault {
             TestFault::GenesisError => {
@@ -49,7 +54,6 @@ impl FaultyToyDomain {
             genesis_override,
             state,
             archive,
-            indexes,
             wal,
         }
     }
@@ -83,7 +87,7 @@ impl StateStore for FaultyStateStore {
     type EntityIter = <MemoryStateStore as StateStore>::EntityIter;
     type EntityValueIter = <MemoryStateStore as StateStore>::EntityValueIter;
     type UtxoIter = <MemoryStateStore as StateStore>::UtxoIter;
-    type Writer = <MemoryStateStore as StateStore>::Writer;
+    type Writer = FaultyStateWriter;
 
     fn read_cursor(&self) -> Result<Option<ChainPoint>, StateError> {
         if self.should_fault() {
@@ -107,7 +111,10 @@ impl StateStore for FaultyStateStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer()
+        Ok(FaultyStateWriter {
+            inner: self.inner.start_writer()?,
+            fault: self.fault,
+        })
     }
 
     fn iter_entities(
@@ -139,6 +146,17 @@ impl StateStore for FaultyStateStore {
         self.inner.get_utxos(refs)
     }
 
+    fn utxos_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+    ) -> Result<dolos_core::UtxoSet, StateError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner.utxos_by_tag(dimension, key)
+    }
+
     fn iter_utxos(&self) -> Result<Self::UtxoIter, StateError> {
         if self.should_fault() {
             return Err(self.fault_err());
@@ -147,14 +165,59 @@ impl StateStore for FaultyStateStore {
     }
 }
 
+pub struct FaultyStateWriter {
+    inner: <MemoryStateStore as StateStore>::Writer,
+    fault: TestFault,
+}
+
+impl StateWriter for FaultyStateWriter {
+    fn set_cursor(&self, cursor: ChainPoint) -> Result<(), StateError> {
+        self.inner.set_cursor(cursor)
+    }
+
+    fn write_entity(
+        &self,
+        ns: Namespace,
+        key: &dolos_core::EntityKey,
+        value: &dolos_core::EntityValue,
+    ) -> Result<(), StateError> {
+        self.inner.write_entity(ns, key, value)
+    }
+
+    fn delete_entity(&self, ns: Namespace, key: &dolos_core::EntityKey) -> Result<(), StateError> {
+        self.inner.delete_entity(ns, key)
+    }
+
+    fn apply_utxoset(&self, delta: &dolos_core::UtxoSetDelta) -> Result<(), StateError> {
+        self.inner.apply_utxoset(delta)
+    }
+
+    fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        if matches!(self.fault, TestFault::StateTagsApplyError) {
+            return Err(StateError::InternalStoreError(
+                "fault injection: state tags apply".into(),
+            ));
+        }
+        self.inner.apply_utxo_tags(delta)
+    }
+
+    fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError> {
+        self.inner.undo_utxo_tags(delta)
+    }
+
+    fn commit(self) -> Result<(), StateError> {
+        self.inner.commit()
+    }
+}
+
 #[derive(Clone)]
 pub struct FaultyArchiveStore {
-    inner: dolos_redb3::archive::ArchiveStore,
+    inner: MemoryArchiveStore,
     fault: TestFault,
 }
 
 impl FaultyArchiveStore {
-    pub fn new(inner: dolos_redb3::archive::ArchiveStore, fault: TestFault) -> Self {
+    pub fn new(inner: MemoryArchiveStore, fault: TestFault) -> Self {
         Self { inner, fault }
     }
 
@@ -168,16 +231,19 @@ impl FaultyArchiveStore {
 }
 
 impl ArchiveStore for FaultyArchiveStore {
-    type BlockIter<'a> = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::BlockIter<'a>;
-    type Writer = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::Writer;
-    type LogIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::LogIter;
-    type EntityValueIter = <dolos_redb3::archive::ArchiveStore as ArchiveStore>::EntityValueIter;
+    type BlockIter<'a> = <MemoryArchiveStore as ArchiveStore>::BlockIter<'a>;
+    type Writer = <MemoryArchiveStore as ArchiveStore>::Writer;
+    type LogIter = <MemoryArchiveStore as ArchiveStore>::LogIter;
+    type EntityValueIter = <MemoryArchiveStore as ArchiveStore>::EntityValueIter;
+    type SlotIter = <MemoryArchiveStore as ArchiveStore>::SlotIter;
+    type TagIter = <MemoryArchiveStore as ArchiveStore>::TagIter;
+    type ExactIter = <MemoryArchiveStore as ArchiveStore>::ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.start_writer().map_err(ArchiveError::from)
+        self.inner.start_writer()
     }
 
     fn read_logs(
@@ -206,18 +272,14 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_block_by_slot(slot)
-            .map_err(ArchiveError::from)
+        self.inner.get_block_by_slot(slot)
     }
 
     fn get_blocks_by_slot(&self, slot: &BlockSlot) -> Result<Vec<BlockBody>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .get_blocks_by_slot(slot)
-            .map_err(ArchiveError::from)
+        self.inner.get_blocks_by_slot(slot)
     }
 
     fn get_range<'a>(
@@ -228,32 +290,28 @@ impl ArchiveStore for FaultyArchiveStore {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_range(from, to).map_err(ArchiveError::from)
+        self.inner.get_range(from, to)
     }
 
     fn find_intersect(&self, intersect: &[ChainPoint]) -> Result<Option<ChainPoint>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .find_intersect(intersect)
-            .map_err(ArchiveError::from)
+        self.inner.find_intersect(intersect)
     }
 
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner.get_tip().map_err(ArchiveError::from)
+        self.inner.get_tip()
     }
 
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
-        self.inner
-            .prune_history(max_slots, max_prune)
-            .map_err(ArchiveError::from)
+        self.inner.prune_history(max_slots, max_prune)
     }
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError> {
@@ -262,88 +320,22 @@ impl ArchiveStore for FaultyArchiveStore {
         }
         self.inner.truncate_front(after)
     }
-}
 
-#[derive(Clone)]
-pub struct FaultyIndexStore {
-    inner: MemoryIndexStore,
-    fault: TestFault,
-}
-
-impl FaultyIndexStore {
-    pub fn new(inner: MemoryIndexStore, fault: TestFault) -> Self {
-        Self { inner, fault }
-    }
-
-    fn should_fault(&self) -> bool {
-        matches!(self.fault, TestFault::IndexStoreError)
-    }
-
-    fn fault_err(&self) -> IndexError {
-        IndexError::DbError("fault injection: index store".into())
-    }
-}
-
-impl IndexStore for FaultyIndexStore {
-    type Writer = <MemoryIndexStore as IndexStore>::Writer;
-    type SlotIter = <MemoryIndexStore as IndexStore>::SlotIter;
-    type TagIter = <MemoryIndexStore as IndexStore>::TagIter;
-    type ExactIter = <MemoryIndexStore as IndexStore>::ExactIter;
-
-    fn start_writer(&self) -> Result<Self::Writer, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.start_writer()
-    }
-
-    fn initialize_schema(&self) -> Result<(), IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.initialize_schema()
-    }
-
-    fn copy(&self, target: &Self) -> Result<(), IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.copy(&target.inner)
-    }
-
-    fn cursor(&self) -> Result<Option<ChainPoint>, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.cursor()
-    }
-
-    fn utxos_by_tag(
-        &self,
-        dimension: TagDimension,
-        key: &[u8],
-    ) -> Result<dolos_core::UtxoSet, IndexError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.utxos_by_tag(dimension, key)
-    }
-
-    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner.slot_by_block_hash(hash)
     }
 
-    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, IndexError> {
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner.slot_by_block_number(number)
     }
 
-    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, IndexError> {
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -356,7 +348,7 @@ impl IndexStore for FaultyIndexStore {
         key: &[u8],
         start: BlockSlot,
         end: BlockSlot,
-    ) -> Result<Self::SlotIter, IndexError> {
+    ) -> Result<Self::SlotIter, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -367,7 +359,7 @@ impl IndexStore for FaultyIndexStore {
         &self,
         dimensions: &[TagDimension],
         slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::TagIter, IndexError> {
+    ) -> Result<Self::TagIter, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -377,7 +369,7 @@ impl IndexStore for FaultyIndexStore {
     fn iter_exact_records(
         &self,
         slots: std::ops::Range<BlockSlot>,
-    ) -> Result<Self::ExactIter, IndexError> {
+    ) -> Result<Self::ExactIter, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
@@ -500,7 +492,6 @@ impl Domain for FaultyToyDomain {
     type Chain = dolos_cardano::CardanoLogic;
     type WorkUnit = dolos_cardano::CardanoWorkUnit;
     type TipSubscription = TipSubscription;
-    type Indexes = FaultyIndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &dolos_core::config::StorageConfig {
@@ -536,10 +527,6 @@ impl Domain for FaultyToyDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
-    }
-
-    fn indexes(&self) -> &Self::Indexes {
-        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {

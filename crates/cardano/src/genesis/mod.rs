@@ -1,10 +1,10 @@
 use dolos_core::{
-    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, Genesis, IndexStore as _,
-    IndexWriter as _, StateStore as _, StateWriter as _,
+    config::CardanoConfig, ChainError, ChainPoint, Domain, EntityKey, Genesis, StateStore as _,
+    StateWriter as _,
 };
 
 use crate::{
-    gov_from_conway_genesis, indexes::index_delta_from_utxo_delta, pots::Pots,
+    gov_from_conway_genesis, indexes::utxo_index_delta_from_utxo_delta, pots::Pots,
     utils::nonce_stability_window, EndStats, EpochState, EpochValue, EraBoundary, EraSummary,
     GovState, Lovelace, Nonces, PParamsSet, RollingStats, SingletonEntity as _,
 };
@@ -146,36 +146,28 @@ pub fn bootstrap_gov<D: Domain>(state: &D::State, genesis: &Genesis) -> Result<(
 
 pub fn bootstrap_utxos<D: Domain>(
     state: &D::State,
-    indexes: &D::Indexes,
     genesis: &Genesis,
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
     let state_writer = state.start_writer()?;
-    let index_writer = indexes.start_writer()?;
 
     // Genesis UTxOs from Byron and Shelley genesis files
     let origin_delta = crate::utxoset::compute_origin_delta(genesis);
     state_writer.apply_utxoset(&origin_delta)?;
-
-    let origin_index_delta = index_delta_from_utxo_delta(ChainPoint::Origin, &origin_delta);
-    index_writer.apply(&origin_index_delta)?;
+    state_writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&origin_delta))?;
 
     // Custom UTxOs from config (e.g., for testing)
     let custom_delta = crate::utxoset::build_custom_utxos_delta(config)?;
     state_writer.apply_utxoset(&custom_delta)?;
-
-    let custom_index_delta = index_delta_from_utxo_delta(ChainPoint::Origin, &custom_delta);
-    index_writer.apply(&custom_index_delta)?;
+    state_writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&custom_delta))?;
 
     state_writer.commit()?;
-    index_writer.commit()?;
 
     Ok(())
 }
 
 pub fn execute<D: Domain>(
     state: &D::State,
-    indexes: &D::Indexes,
     genesis: &Genesis,
     config: &CardanoConfig,
 ) -> Result<(), ChainError> {
@@ -185,7 +177,7 @@ pub fn execute<D: Domain>(
 
     bootstrap_gov::<D>(state, genesis)?;
 
-    bootstrap_utxos::<D>(state, indexes, genesis, config)?;
+    bootstrap_utxos::<D>(state, genesis, config)?;
 
     staking::bootstrap::<D>(state, genesis)?;
 

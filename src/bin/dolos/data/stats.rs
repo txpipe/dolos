@@ -1,4 +1,4 @@
-use dolos::storage::{ArchiveStoreBackend, IndexStoreBackend, StateStoreBackend};
+use dolos::storage::{ArchiveStoreBackend, StateStoreBackend};
 use dolos_core::config::RootConfig;
 use dolos_redb3::TableFootprint;
 use miette::{bail, IntoDiagnostic as _};
@@ -45,36 +45,13 @@ pub fn run(config: &RootConfig, _args: &Args) -> miette::Result<()> {
         StateStoreBackend::Memory(_) => (),
     }
 
-    match &stores.indexes {
-        IndexStoreBackend::Redb(indexes) => {
-            let stats = indexes.utxo_index_stats().into_diagnostic()?;
-
-            json.insert("indexes".to_string(), redb_section(stats));
-        }
-        IndexStoreBackend::Fjall(indexes) => {
-            json.insert("indexes".to_string(), fjall_section(indexes.disk_usage()));
-        }
-        IndexStoreBackend::Memory(_) | IndexStoreBackend::NoOp(_) => (),
-    }
-
     match &stores.archive {
-        ArchiveStoreBackend::Redb(archive) => {
-            let stats = archive.stats().into_diagnostic()?;
-
-            let tables = stats
-                .into_iter()
-                .map(|(name, footprint)| (name, footprint_to_json(&footprint)))
-                .collect();
-
-            json.insert(
-                "archive".to_string(),
-                json!({ "engine": "redb", "tables": serde_json::Value::Object(tables) }),
-            );
-        }
         ArchiveStoreBackend::Fjall(archive) => {
             json.insert("archive".to_string(), fjall_section(archive.disk_usage()));
         }
-        ArchiveStoreBackend::LogsOnly(_) | ArchiveStoreBackend::NoOp(_) => (),
+        ArchiveStoreBackend::Memory(_)
+        | ArchiveStoreBackend::LogsOnly(_)
+        | ArchiveStoreBackend::NoOp(_) => (),
     }
 
     if json.is_empty() {

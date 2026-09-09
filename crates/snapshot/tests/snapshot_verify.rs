@@ -6,7 +6,7 @@
 //! nothing — run it with:
 //!
 //! ```text
-//! cargo test -p dolos-snapshot --features oci --test snapshot_verify -- --ignored --nocapture
+//! cargo test -p dolos-snapshot --test snapshot_verify -- --ignored --nocapture
 //! ```
 //!
 //! ## What this suite proves
@@ -31,8 +31,6 @@
 //! is the mutable tag, and everything it points at. Each tamper here is
 //! therefore a manifest (or config blob) rewritten under `latest` — the shape
 //! of attack a verifier actually faces.
-
-#![cfg(feature = "oci")]
 
 mod node;
 mod registry_fixture;
@@ -264,7 +262,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
     )
     .unwrap();
@@ -276,7 +273,6 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
         &node.first,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
     )
     .unwrap_err();
@@ -352,7 +348,6 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
         &following,
     )

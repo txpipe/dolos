@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dolos_core::{
-    builtin::MemoryStateStore, config::FjallStateConfig, ChainPoint, EntityKey, EraCbor, TxoRef,
-    UtxoSetDelta,
+    builtin::MemoryStateStore, config::FjallStateConfig, ChainPoint, EntityKey, EraCbor, Tag,
+    TxoRef, UtxoIndexDelta, UtxoSet, UtxoSetDelta,
 };
 use dolos_core::{StateStore as CoreStateStore, StateWriter as CoreStateWriter};
 
@@ -109,6 +109,21 @@ macro_rules! conformance_suite {
             fn consumption_wins_within_one_delta() {
                 super::consumption_wins_within_one_delta::<$backend>();
             }
+
+            #[test]
+            fn apply_then_utxos_by_tag_finds_the_ref() {
+                super::apply_then_utxos_by_tag_finds_the_ref::<$backend>();
+            }
+
+            #[test]
+            fn undo_utxo_tags_removes_exactly_what_apply_added() {
+                super::undo_utxo_tags_removes_exactly_what_apply_added::<$backend>();
+            }
+
+            #[test]
+            fn consumed_refs_leave_the_tag() {
+                super::consumed_refs_leave_the_tag::<$backend>();
+            }
         }
     };
 }
@@ -147,6 +162,171 @@ fn all_utxos<S: CoreStateStore>(store: &S) -> Vec<(TxoRef, EraCbor)> {
         .expect("iter_utxos failed")
         .collect::<Result<Vec<_>, _>>()
         .expect("utxo iteration failed")
+}
+
+const ADDRESS: &str = "address";
+const POLICY: &str = "policy";
+
+fn tagged(n: u8, idx: u32, tags: &[(&'static str, u8)]) -> (TxoRef, Vec<Tag>) {
+    let tags = tags
+        .iter()
+        .map(|(dimension, key)| Tag::new(dimension, vec![*key; 4]))
+        .collect();
+
+    (txo(n, idx), tags)
+}
+
+fn apply_tags<S: CoreStateStore>(store: &S, delta: &UtxoIndexDelta) {
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .apply_utxo_tags(delta)
+        .expect("apply_utxo_tags failed");
+    writer.commit().expect("commit failed");
+}
+
+fn by_tag<S: CoreStateStore>(store: &S, dimension: &'static str, key: u8) -> UtxoSet {
+    store
+        .utxos_by_tag(dimension, &[key; 4])
+        .expect("utxos_by_tag failed")
+}
+
+fn refs(items: &[TxoRef]) -> UtxoSet {
+    items.iter().cloned().collect()
+}
+
+/// A produced ref answers under every tag it carries, and only there.
+fn apply_then_utxos_by_tag_finds_the_ref<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    assert!(
+        by_tag(&store, ADDRESS, 1).is_empty(),
+        "a fresh store holds no tags"
+    );
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+                tagged(1, 1, &[(ADDRESS, 1)]),
+                tagged(2, 0, &[(ADDRESS, 2), (POLICY, 9)]),
+            ],
+            consumed: vec![],
+        },
+    );
+
+    assert_eq!(
+        by_tag(&store, ADDRESS, 1),
+        refs(&[txo(1, 0), txo(1, 1)]),
+        "every ref tagged under the key, and no other"
+    );
+    assert_eq!(by_tag(&store, ADDRESS, 2), refs(&[txo(2, 0)]));
+    assert_eq!(
+        by_tag(&store, POLICY, 9),
+        refs(&[txo(1, 0), txo(2, 0)]),
+        "dimensions are independent"
+    );
+    assert!(
+        by_tag(&store, POLICY, 1).is_empty(),
+        "the same key under another dimension is another tag"
+    );
+    assert!(by_tag(&store, ADDRESS, 3).is_empty());
+}
+
+/// A rollback has to leave the tags where they started: the refs the delta
+/// produced are gone, the refs it consumed are back, and nothing else moved.
+fn undo_utxo_tags_removes_exactly_what_apply_added<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+                tagged(2, 0, &[(ADDRESS, 2)]),
+            ],
+            consumed: vec![],
+        },
+    );
+
+    let block = UtxoIndexDelta {
+        produced: vec![tagged(3, 0, &[(ADDRESS, 1), (POLICY, 9)])],
+        consumed: vec![tagged(2, 0, &[(ADDRESS, 2)])],
+    };
+
+    apply_tags(&store, &block);
+
+    assert_eq!(by_tag(&store, ADDRESS, 1), refs(&[txo(1, 0), txo(3, 0)]));
+    assert!(by_tag(&store, ADDRESS, 2).is_empty());
+
+    let writer = store.start_writer().expect("start_writer failed");
+    writer
+        .undo_utxo_tags(&block)
+        .expect("undo_utxo_tags failed");
+    writer.commit().expect("commit failed");
+
+    assert_eq!(
+        by_tag(&store, ADDRESS, 1),
+        refs(&[txo(1, 0)]),
+        "undo removed what the block produced, and only that"
+    );
+    assert_eq!(
+        by_tag(&store, POLICY, 9),
+        refs(&[txo(1, 0)]),
+        "under every dimension the block tagged"
+    );
+    assert_eq!(
+        by_tag(&store, ADDRESS, 2),
+        refs(&[txo(2, 0)]),
+        "undo restored what the block consumed"
+    );
+}
+
+/// Consuming a ref takes it out from under its tags — and nothing but its
+/// own tags: a neighbour sharing the key stays.
+fn consumed_refs_leave_the_tag<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![
+                tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)]),
+                tagged(1, 1, &[(ADDRESS, 1)]),
+            ],
+            consumed: vec![],
+        },
+    );
+
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![],
+            consumed: vec![tagged(1, 0, &[(ADDRESS, 1), (POLICY, 9)])],
+        },
+    );
+
+    assert_eq!(
+        by_tag(&store, ADDRESS, 1),
+        refs(&[txo(1, 1)]),
+        "the consumed ref left, its neighbour under the same key stayed"
+    );
+    assert!(
+        by_tag(&store, POLICY, 9).is_empty(),
+        "a key with no refs left answers empty rather than erroring"
+    );
+
+    // Produced and consumed in one delta: consumption wins, as it does for
+    // the UTxO set itself.
+    apply_tags(
+        &store,
+        &UtxoIndexDelta {
+            produced: vec![tagged(5, 0, &[(ADDRESS, 5)])],
+            consumed: vec![tagged(5, 0, &[(ADDRESS, 5)])],
+        },
+    );
+
+    assert!(by_tag(&store, ADDRESS, 5).is_empty());
 }
 
 fn cursor_starts_empty_and_survives_commit<B: Backend>() {
