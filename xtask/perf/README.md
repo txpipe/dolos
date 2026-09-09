@@ -49,6 +49,7 @@ New scripts should use the commands above.
 Historical records and their original commands remain under `archive-bench/results`:
 [compression study](../archive-bench/results/2026-09-08-m4-apfs-ssd/REPORT.md) and
 [cutover acceptance](../archive-bench/results/2026-09-09-m4-apfs-ssd-acceptance/REPORT.md).
+The [encoding notes](encoding.md#evidence) cover subsequent automatic-encoding runs.
 Each run separates findings (`REPORT.md`), reproduction (`RUNBOOK.md`), generated
 tables and raw JSONL. They are evidence, not current CLI instructions.
 

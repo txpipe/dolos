@@ -148,7 +148,7 @@ Peak encoded buffers are 4,841,487 bytes at batch 500 and 5,836,179 at batch
 incompressible body among mixed synthetic bodies stays serial in its own
 window: peak scratch is 16,842,752 bytes, without an owned copy of that frame.
 The general bound remains `max(W, B(M)) + (P + 2) * B(M)`; native contexts
-are bounded by P + 1. See the [implementation notes](../../OFFLINE-IMPORT.md).
+are bounded by P + 1. See the [implementation notes](../../../perf/encoding.md).
 
 [verification.json](verification.json) records completed exit statuses:
 clippy/build exit 0; default tests 1,457 passed / 48 ignored; all-features

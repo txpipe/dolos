@@ -75,9 +75,9 @@ framing, dictionary, compression level or storage-version claim is made.
 ## Evidence
 
 The initial offline candidate and its exact identities are recorded in
-`results/2026-09-09-m4-apfs-ssd-offline-import`; those measurements do not
+`../archive-bench/results/2026-09-09-m4-apfs-ssd-offline-import`; those measurements do not
 describe the automatic candidate, whose evidence is in
-`results/2026-09-09-m4-apfs-ssd-automatic`.
+`../archive-bench/results/2026-09-09-m4-apfs-ssd-automatic`.
 
 Use the checked-in measurement patches on disposable source trees to add actual
 commit timing, then compare pinned raw production `9165dbd8`, merged serial
@@ -88,7 +88,7 @@ commit p95. Also report tiny, modern, bootstrap-sized and concurrent workloads.
 
 Historical runbooks mention a Python patch generator that has since been
 removed. Reproduce the instrumentation directly from the saved patches instead:
-set `EVIDENCE` to the absolute path of this directory's `results` directory,
+set `EVIDENCE` to the absolute path of `xtask/archive-bench/results`,
 then run the matching command from each disposable checkout's root.
 
 ```sh

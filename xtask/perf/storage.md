@@ -26,6 +26,8 @@ not current compressed flatfiles. Use `--preset all --repeat 3` for a fuller run
 Raw/zstd sinks isolate codec cost; `store` uses the production `FlatFileStore`.
 Raw is **not** a supported production mode. The store measures whole operations,
 not separate codec/fsync time; `--encode-threads` and `--no-fsync` do not affect it.
+The production store now selects serial or bounded parallel encoding
+automatically; see [encoding policy and evidence](encoding.md).
 
 Cache choices are `warm`, `evict` and `nocache`. On macOS, eviction requires
 `--evict-from DIR --evict-gib N` and is approximate. `nocache` also disables
@@ -62,8 +64,9 @@ the era summary. Ambiguous boundary slots are excluded from RPC queries; scans
 cover the contiguous tail. An arbitrary copied window is insufficient.
 
 Reports pair against the `baseline` label: import throughput must be ≥90% and
-point-read p95 ≤110% of baseline. Pages/scans have ratios but no verdict. Node
-commit time is a mean, not a batch-latency percentile.
+point-read p95 ≤110% of baseline. Pages/scans have ratios but no verdict.
+Uninstrumented nodes report mean batch time; explicitly instrumented records
+also gate commit p95 at ≤110% of baseline and do not pair with uninstrumented runs.
 
 ## Dictionary experiments
 

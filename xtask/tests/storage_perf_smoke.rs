@@ -16,8 +16,9 @@ fn automatic_store_selects_parallel_in_a_two_worker_process() {
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
         .env("RAYON_NUM_THREADS", "2")
         .args([
-            "archive-bench",
-            "bench",
+            "perf",
+            "storage",
+            "run",
             "--preset",
             "write",
             "--synthetic",
