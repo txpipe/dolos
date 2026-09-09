@@ -97,8 +97,6 @@ Check the [Configuration Schema](../configuration/schema) for detailed info on h
 
 Dolos provides many, but not all of the Blockfrost endpoints. The following list represent the endpoints currently supported by Dolos:
 
-Two of them report lifetime totals — `/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` — by folding every transaction the address or account ever took part in, read from the archive on each request. They are only as complete as the history the node keeps: with `sync.max_history` set, the sums and `tx_count` cover the retained window instead of the whole chain, so a node serving them should run with full history.
-
 | Endpoint                                                   | Description                                              |
 | ---------------------------------------------------------- | -------------------------------------------------------- |
 | `/`                                                        | Service info (version, revision)                         |
@@ -189,3 +187,7 @@ Two of them report lifetime totals — `/addresses/{address}/total` and `/accoun
 | `/txs/{tx_hash}/stakes`                                    | Get stakes for a specific transaction                    |
 | `/txs/{tx_hash}/utxos`                                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
+
+## Lifetime totals and `sync.max_history`
+
+`/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` fold every transaction kept in the archive. When `sync.max_history` is set, blocks pruned by housekeeping are not counted, so the sums and `tx_count` only cover the retained window. Run with full history if you need true lifetime totals.
