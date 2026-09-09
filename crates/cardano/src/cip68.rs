@@ -429,7 +429,8 @@ mod tests {
 
     #[test]
     fn rejects_metadata_missing_a_required_property() {
-        // fungible properties and no image: this datum does not meet a non-fungible standard
+        // fungible properties and no image: this datum does not meet a non-fungible
+        // standard
         let value = metadata(&[
             ("name", JsonValue::String("token".into())),
             ("description", JsonValue::String("a token".into())),
