@@ -30,6 +30,8 @@ use std::{
 
 use blockfrost_openapi::models::{
     address_content::{AddressContent, Type as AddressType},
+    address_content_extended::{AddressContentExtended, Type as AddressExtendedType},
+    address_content_extended_amount_inner::AddressContentExtendedAmountInner,
     address_utxo_content_inner::AddressUtxoContentInner,
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
@@ -412,6 +414,26 @@ pub enum AddressKind {
     Byron,
 }
 
+impl AddressKind {
+    /// Every address model shares these three response fields:
+    /// - the stake address that controls the key
+    /// - whether the address is from the Byron era
+    /// - whether the payment part is a script
+    ///
+    /// A bare payment credential has no stake part. As a result, it reports no
+    /// stake address.
+    fn parts(self) -> (Option<String>, bool, bool) {
+        match self {
+            AddressKind::Payment { script } => (None, false, script),
+            AddressKind::Shelley {
+                stake_address,
+                script,
+            } => (stake_address, false, script),
+            AddressKind::Byron => (None, true, false),
+        }
+    }
+}
+
 pub struct AddressModelBuilder {
     pub address: String,
     pub amount: Vec<TxContentOutputAmountInner>,
@@ -422,20 +444,43 @@ impl IntoModel<AddressContent> for AddressModelBuilder {
     type SortKey = ();
 
     fn into_model(self) -> Result<AddressContent, StatusCode> {
-        let (stake_address, r#type, script) = match self.kind {
-            AddressKind::Payment { script } => (None, AddressType::Shelley, script),
-            AddressKind::Shelley {
-                stake_address,
-                script,
-            } => (stake_address, AddressType::Shelley, script),
-            AddressKind::Byron => (None, AddressType::Byron, false),
-        };
+        let (stake_address, byron, script) = self.kind.parts();
 
         Ok(AddressContent {
             address: self.address,
             amount: self.amount,
             stake_address,
-            r#type,
+            r#type: if byron {
+                AddressType::Byron
+            } else {
+                AddressType::Shelley
+            },
+            script,
+        })
+    }
+}
+
+pub struct AddressExtendedModelBuilder {
+    pub address: String,
+    pub amount: Vec<AddressContentExtendedAmountInner>,
+    pub kind: AddressKind,
+}
+
+impl IntoModel<AddressContentExtended> for AddressExtendedModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<AddressContentExtended, StatusCode> {
+        let (stake_address, byron, script) = self.kind.parts();
+
+        Ok(AddressContentExtended {
+            address: self.address,
+            amount: self.amount,
+            stake_address,
+            r#type: if byron {
+                AddressExtendedType::Byron
+            } else {
+                AddressExtendedType::Shelley
+            },
             script,
         })
     }

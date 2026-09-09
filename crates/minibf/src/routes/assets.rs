@@ -16,7 +16,10 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     cip25::{cip25_metadata_is_valid, Cip25MetadataVersion},
-    cip68::{cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map, Cip68TokenStandard},
+    cip68::{
+        cip68_metadata_is_valid, cip_68_reference_asset, encode_to_hex, parse_cip68_metadata_map,
+        Cip68TokenStandard,
+    },
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::AssetState,
     ChainSummary,
@@ -50,6 +53,9 @@ struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,
     metadata: HashMap<String, serde_json::Value>,
     extra: Option<String>,
+    /// This field is set when the metadata comes from a CIP-68 reference
+    /// datum. Only this datum can declare decimal places.
+    cip68: Option<Cip68TokenStandard>,
 }
 impl OnchainMetadata {
     fn from_plutus_data(
@@ -77,15 +83,24 @@ impl OnchainMetadata {
             return Ok(None);
         };
 
+        // a datum whose version the standard does not define describes nothing.
+        // a datum that does not meet the scheme of its label describes nothing too.
+        // then the asset uses the CIP-25 metadata from its minting transaction
+        let version = match version {
+            1 => OnchainMetadataStandard::Cip68v1,
+            2 => OnchainMetadataStandard::Cip68v2,
+            3 => OnchainMetadataStandard::Cip68v3,
+            _ => return Ok(None),
+        };
+
         let metadata = parse_cip68_metadata_map(map.as_slice(), standard)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        let version = match version {
-            1 => Some(OnchainMetadataStandard::Cip68v1),
-            2 => Some(OnchainMetadataStandard::Cip68v2),
-            3 => Some(OnchainMetadataStandard::Cip68v3),
-            _ => None,
-        };
+        if !cip68_metadata_is_valid(&metadata, standard) {
+            return Ok(None);
+        }
+
+        let version = Some(version);
 
         let extra = constr
             .fields
@@ -98,6 +113,7 @@ impl OnchainMetadata {
             metadata,
             version,
             extra,
+            cip68: Some(standard),
         }))
     }
 
@@ -152,7 +168,29 @@ impl OnchainMetadata {
             metadata,
             version,
             extra,
+            cip68: None,
         }))
+    }
+
+    /// The decimal places that the asset declares on chain. Only the CIP-68
+    /// fungible standard and rich fungible standard define this property.
+    /// CIP-25 has no equivalent.
+    fn decimals(&self) -> Option<i32> {
+        match self.cip68 {
+            Some(Cip68TokenStandard::Ft) | Some(Cip68TokenStandard::Rft) => self
+                .metadata
+                .get("decimals")
+                .and_then(serde_json::Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok()),
+            _ => None,
+        }
+    }
+
+    /// Whether the asset has usable on-chain metadata. A CIP-25 label that has
+    /// no entry for this asset parses into an empty map. An empty map is the
+    /// same as no metadata.
+    fn is_present(&self) -> bool {
+        !self.metadata.is_empty()
     }
 }
 
@@ -292,10 +330,11 @@ async fn last_cip68_metadata_from_tx<D>(
     tx: &MultiEraTx<'_>,
     ref_asset_bytes: &[u8],
     standard: Cip68TokenStandard,
-) -> Result<Option<OnchainMetadata>, StatusCode>
+) -> Result<(bool, Option<OnchainMetadata>), StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
+    let mut found_datum = false;
     let mut last_metadata = None;
 
     for output in tx.outputs().iter() {
@@ -304,13 +343,14 @@ where
         }
 
         if let Some(datum_option) = output.datum() {
+            found_datum = true;
             if let Some(out) = metadata_from_datum_option(domain, &datum_option, standard).await? {
                 last_metadata = Some(out);
             }
         }
     }
 
-    Ok(last_metadata)
+    Ok((found_datum, last_metadata))
 }
 
 struct AssetModelBuilder {
@@ -339,6 +379,8 @@ impl AssetModelBuilder {
             None => None,
         };
 
+        let mut latest_cip68_datum_found = false;
+
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
             let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
             let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
@@ -351,9 +393,12 @@ impl AssetModelBuilder {
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 {
                     let tx = decode_era_tx(era, &cbor)?;
-                    if let Some(metadata) =
-                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard).await?
-                    {
+                    let (found_datum, metadata) =
+                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard)
+                            .await?;
+                    latest_cip68_datum_found = found_datum;
+
+                    if let Some(metadata) = metadata {
                         return Ok(Some(metadata));
                     }
                 }
@@ -377,11 +422,15 @@ impl AssetModelBuilder {
         if let Some(EraCbor(era, cbor)) = &cip25_tx {
             let tx = decode_era_tx(*era, cbor)?;
 
-            if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-                if let Some(metadata) =
-                    last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard).await?
-                {
-                    return Ok(Some(metadata));
+            if !latest_cip68_datum_found {
+                if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
+                    let (_, metadata) =
+                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard)
+                            .await?;
+
+                    if let Some(metadata) = metadata {
+                        return Ok(Some(metadata));
+                    }
                 }
             }
 
@@ -503,17 +552,14 @@ where
     Ok((subject, state))
 }
 
-pub async fn by_subject<D>(
-    Path(unit): Path<String>,
-    State(domain): State<Facade<D>>,
-) -> Result<Json<Asset>, Error>
+/// Loads the minting state and the minting transaction that holds the
+/// metadata of an asset.
+async fn load_asset_builder<D>(domain: &Facade<D>, unit: String) -> Result<AssetModelBuilder, Error>
 where
-    Option<AssetState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
+    Option<AssetState>: From<D::Entity>,
 {
-    let (subject, asset_state) = resolve_asset_state(&domain, &unit)?;
-
-    let registry_url = domain.config.token_registry_url.clone();
+    let (subject, asset_state) = resolve_asset_state(domain, &unit)?;
 
     let initial_tx = if let Some(initial_tx) = asset_state.initial_tx {
         domain
@@ -525,13 +571,81 @@ where
         None
     };
 
-    let model = AssetModelBuilder {
+    Ok(AssetModelBuilder {
         subject,
         unit,
         asset_state,
         initial_tx,
-        registry_url,
-    };
+        registry_url: domain.config.token_registry_url.clone(),
+    })
+}
+
+/// The facts that an amount entry reports about its unit, in addition to the
+/// quantity.
+pub(crate) struct AssetAmountExtras {
+    pub decimals: Option<i32>,
+    pub has_nft_onchain_metadata: bool,
+}
+
+impl AssetAmountExtras {
+    /// Lovelace is not a minted asset. It holds no metadata. Its six decimal
+    /// places are a property of the currency itself.
+    pub fn lovelace() -> Self {
+        Self {
+            decimals: Some(6),
+            has_nft_onchain_metadata: false,
+        }
+    }
+
+    /// The values that an asset reports when the code can derive nothing for
+    /// it.
+    fn bare() -> Self {
+        Self {
+            decimals: None,
+            has_nft_onchain_metadata: false,
+        }
+    }
+
+    /// Derives the metadata facts of a single unit. If the standard declares
+    /// decimal places, they come from the CIP-68 reference datum. If it does
+    /// not, they come from the off-chain token registry.
+    pub async fn resolve<D>(domain: &Facade<D>, unit: &str) -> Result<Self, Error>
+    where
+        D: Domain + Clone + Send + Sync + 'static,
+        Option<AssetState>: From<D::Entity>,
+    {
+        let builder = match load_asset_builder(domain, unit.to_string()).await {
+            Ok(builder) => builder,
+            // an asset that a live utxo holds always has minting state. a
+            // missing state must not make the whole address request fail
+            Err(Error::InvalidAsset) | Err(Error::Code(StatusCode::NOT_FOUND)) => {
+                return Ok(Self::bare())
+            }
+            Err(err) => return Err(err),
+        };
+
+        let onchain = builder.onchain_metadata(domain).await?;
+        let registry = builder.offchain_metadata(unit).await?;
+
+        Ok(Self {
+            decimals: onchain
+                .as_ref()
+                .and_then(OnchainMetadata::decimals)
+                .or_else(|| registry.and_then(|metadata| metadata.decimals)),
+            has_nft_onchain_metadata: onchain.is_some_and(|x| x.is_present()),
+        })
+    }
+}
+
+pub async fn by_subject<D>(
+    Path(unit): Path<String>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Asset>, Error>
+where
+    Option<AssetState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let model = load_asset_builder(&domain, unit).await?;
 
     Ok(Json(model.into_model(&domain).await?))
 }

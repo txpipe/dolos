@@ -145,6 +145,47 @@ pub fn property_scheme_for_key(standard: Cip68TokenStandard, key: &str) -> Optio
     }
 }
 
+/// These are the properties that a standard requires. A datum that does not
+/// have all of them describes no asset. As a result, it has no metadata.
+fn required_properties(standard: Cip68TokenStandard) -> &'static [&'static str] {
+    match standard {
+        // the 222 standard and the 444 standard both show the asset
+        Cip68TokenStandard::Nft | Cip68TokenStandard::Rft => &["name", "image"],
+        Cip68TokenStandard::Ft => &["name", "description"],
+    }
+}
+
+fn value_matches_kind(value: &JsonValue, kind: PropertyKind) -> bool {
+    match kind {
+        PropertyKind::Bytestring => value.is_string(),
+        PropertyKind::Number => value.is_number(),
+        PropertyKind::Array => value.is_array(),
+    }
+}
+
+/// Whether a parsed datum meets the scheme of its standard. The datum must
+/// have every required property. Each property that the scheme declares must
+/// have the kind of value that the scheme gives it. A property that the
+/// scheme does not declare can have any value.
+pub fn cip68_metadata_is_valid(
+    metadata: &HashMap<String, JsonValue>,
+    standard: Cip68TokenStandard,
+) -> bool {
+    if !required_properties(standard)
+        .iter()
+        .all(|key| metadata.contains_key(*key))
+    {
+        return false;
+    }
+
+    metadata.iter().all(
+        |(key, value)| match property_scheme_for_key(standard, key) {
+            Some(scheme) => value_matches_kind(value, scheme.kind),
+            None => true,
+        },
+    )
+}
+
 pub fn cip_68_reference_asset(
     policy_id: &str,
     asset_name: &str,
@@ -361,6 +402,64 @@ mod tests {
         let hex = label_hex(222);
         let bytes = hex::decode(hex).expect("valid hex");
         assert_eq!(parse_cip67_label_from_asset_name(&bytes), Some(222));
+    }
+
+    fn metadata(pairs: &[(&str, JsonValue)]) -> HashMap<String, JsonValue> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn accepts_metadata_that_meets_the_scheme() {
+        let nft = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("image", JsonValue::String("ipfs://x".into())),
+        ]);
+        assert!(cip68_metadata_is_valid(&nft, Cip68TokenStandard::Nft));
+
+        let ft = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("description", JsonValue::String("a token".into())),
+            ("decimals", JsonValue::Number(6.into())),
+        ]);
+        assert!(cip68_metadata_is_valid(&ft, Cip68TokenStandard::Ft));
+    }
+
+    #[test]
+    fn rejects_metadata_missing_a_required_property() {
+        // fungible properties and no image: this datum does not meet a non-fungible standard
+        let value = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("description", JsonValue::String("a token".into())),
+        ]);
+
+        assert!(!cip68_metadata_is_valid(&value, Cip68TokenStandard::Nft));
+        assert!(!cip68_metadata_is_valid(&value, Cip68TokenStandard::Rft));
+        assert!(cip68_metadata_is_valid(&value, Cip68TokenStandard::Ft));
+    }
+
+    #[test]
+    fn rejects_declared_property_of_the_wrong_kind() {
+        let value = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("description", JsonValue::String("a token".into())),
+            ("decimals", JsonValue::String("02".into())),
+        ]);
+
+        assert!(!cip68_metadata_is_valid(&value, Cip68TokenStandard::Ft));
+    }
+
+    #[test]
+    fn ignores_properties_the_scheme_does_not_declare() {
+        let value = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("image", JsonValue::String("ipfs://x".into())),
+            ("decimals", JsonValue::String("02".into())),
+        ]);
+
+        assert!(cip68_metadata_is_valid(&value, Cip68TokenStandard::Nft));
     }
 
     #[test]
