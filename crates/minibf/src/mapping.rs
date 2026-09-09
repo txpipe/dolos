@@ -195,9 +195,11 @@ pub fn bech32_gov_action(tx: &Hash<32>, idx: u32) -> Result<String, StatusCode> 
 /// Read a CIP-129 governance action id back into the proposing tx hash and
 /// the action index, the inverse of [`bech32_gov_action`].
 ///
-/// The index is whatever big-endian bytes trail the hash, so both the
-/// one-byte form Blockfrost writes for index 0 and the bare 32-byte form
-/// explorers write for it resolve to the same proposal.
+/// The index is whatever big-endian bytes trail the hash, at any length and
+/// zero padding included: Blockfrost parses the whole suffix, so a padded
+/// `00 01` and the bare 32-byte form are both aliases it serves. An index
+/// past `u32` can never name a proposal; it saturates so the lookup misses
+/// instead of failing the parse.
 pub fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
     let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -209,11 +211,14 @@ pub fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
         return Err(StatusCode::BAD_REQUEST);
     };
 
-    if idx.len() > 4 || (idx.len() > 1 && idx[0] == 0) {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let significant = idx.iter().position(|byte| *byte != 0).unwrap_or(idx.len());
+    let idx = &idx[significant..];
 
-    let idx = idx.iter().fold(0u32, |acc, byte| (acc << 8) | *byte as u32);
+    let idx = if idx.len() > size_of::<u32>() {
+        u32::MAX
+    } else {
+        idx.iter().fold(0u32, |acc, byte| (acc << 8) | *byte as u32)
+    };
 
     Ok((Hash::from(tx), idx))
 }
