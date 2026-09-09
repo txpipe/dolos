@@ -7,9 +7,12 @@ pub mod storage;
 
 #[derive(clap::Subcommand)]
 pub enum Cmd {
-    #[command(subcommand, about = "Storage, codec and import benchmarks")]
+    #[command(
+        subcommand,
+        about = "Storage, codec and import performance experiments"
+    )]
     Storage(storage::Cmd),
-    #[command(subcommand, about = "Minibf endpoint and HTTP benchmarks")]
+    #[command(subcommand, about = "Minibf endpoint and HTTP performance experiments")]
     Minibf(minibf::Cmd),
     #[command(about = "Render shared benchmark records")]
     Report {

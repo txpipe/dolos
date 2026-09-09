@@ -1,13 +1,13 @@
 //! The smoke preset over a synthetic corpus: every workload runs, every
 //! body read back matches, and the records carry what a report needs.
 
-use xtask::bench::dictionary::Dictionary;
-use xtask::bench::report;
-use xtask::bench::storage::codec::Codec;
-use xtask::bench::storage::corpus::Corpus;
-use xtask::bench::storage::presets::{run, Options, Preset};
-use xtask::bench::storage::train::{evaluate, Fixture};
-use xtask::bench::storage::workloads::{EvictOptions, Regime};
+use xtask::perf::dictionary::Dictionary;
+use xtask::perf::report;
+use xtask::perf::storage::codec::Codec;
+use xtask::perf::storage::corpus::Corpus;
+use xtask::perf::storage::presets::{run, Options, Preset};
+use xtask::perf::storage::train::{evaluate, Fixture};
+use xtask::perf::storage::workloads::{EvictOptions, Regime};
 
 #[test]
 fn smoke_preset_runs_every_workload_and_verifies_bodies() {

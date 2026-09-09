@@ -8,7 +8,7 @@ fn binary() -> &'static str {
 fn storage_and_minibf_have_separate_command_trees() {
     for subject in ["storage", "minibf"] {
         let output = Command::new(binary())
-            .args(["bench", subject, "--help"])
+            .args(["perf", subject, "--help"])
             .output()
             .unwrap();
         assert!(output.status.success());
@@ -22,6 +22,12 @@ fn storage_and_minibf_have_separate_command_trees() {
         }
     }
     assert!(Command::new(binary())
+        .args(["perf", "storage", "run", "--help"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(Command::new(binary())
         .args(["archive-bench", "bench", "--help"])
         .status()
         .unwrap()
@@ -33,7 +39,7 @@ fn paired_runner_uses_minibf_command_and_shared_report() {
     let temp = tempfile::tempdir().unwrap();
     let records = temp.path().join("paired.jsonl");
     let result = Command::new(binary())
-        .args(["bench", "minibf", "compare", "--bin"])
+        .args(["perf", "minibf", "compare", "--bin"])
         .arg(format!("baseline={}", binary()))
         .arg("--bin")
         .arg(format!("candidate={}", binary()))
@@ -63,7 +69,7 @@ fn paired_runner_uses_minibf_command_and_shared_report() {
         2
     );
     let report = Command::new(binary())
-        .args(["bench", "report"])
+        .args(["perf", "report"])
         .arg(&records)
         .output()
         .unwrap();
@@ -72,7 +78,7 @@ fn paired_runner_uses_minibf_command_and_shared_report() {
         .unwrap()
         .contains("INSUFFICIENT"));
     let gate = Command::new(binary())
-        .args(["bench", "minibf", "check"])
+        .args(["perf", "minibf", "check"])
         .arg(&records)
         .output()
         .unwrap();

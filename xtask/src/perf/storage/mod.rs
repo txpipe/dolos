@@ -1,6 +1,6 @@
 //! Developer benchmarks for the archive's compressed block segments.
 //!
-//! `cargo xtask bench storage` measures the archive's write and read paths
+//! `cargo xtask perf storage` measures the archive's write and read paths
 //! on real block corpora and renders paired comparisons from the records.
 //! The store-level workloads run the production `dolos_flatfiles` store
 //! beside a modelled sink (one frame per block, or raw bodies) so codec and
@@ -81,9 +81,9 @@ impl CorpusArgs {
     }
 }
 
-/// Options of the `bench` subcommand.
+/// Options of the `run` subcommand.
 #[derive(clap::Args)]
-pub struct BenchArgs {
+pub struct RunArgs {
     #[command(flatten)]
     corpus: CorpusArgs,
 
@@ -159,7 +159,8 @@ pub struct BenchArgs {
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Run a store-level preset and append JSON records to --out
-    Bench(Box<BenchArgs>),
+    #[command(alias = "bench")]
+    Run(Box<RunArgs>),
 
     /// Drive a dolos binary through import and API workloads
     Node(Box<node::NodeArgs>),
@@ -239,8 +240,8 @@ fn codecs(spec: &str, dictionary: &str) -> anyhow::Result<Vec<(String, Codec)>> 
 
 pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
-        Cmd::Bench(args) => {
-            let BenchArgs {
+        Cmd::Run(args) => {
+            let RunArgs {
                 corpus,
                 preset,
                 work,

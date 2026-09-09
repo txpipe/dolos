@@ -1,14 +1,14 @@
-# Storage benchmarks
+# Storage performance experiments
 
 Minibf route, live-replay and real-node HTTP benchmarks are documented in
 [MINIBF.md](MINIBF.md), including paired version comparisons and CI work guards.
 
 Developer benchmarks for the archive's compressed block segments, run as
-`cargo xtask bench storage`. The former `cargo xtask archive-bench` entry point
+`cargo xtask perf storage`. The former `cargo xtask archive-bench` entry point
 remains compatible with existing storage scripts. Not part of the `dolos` binary and not a
 production code path. Two layers of workloads:
 
-- **store level** (`bench`): the production `dolos_flatfiles::FlatFileStore`
+- **store level** (`run`): the production `dolos_flatfiles::FlatFileStore`
   beside a modelled sink — one zstd frame per block at a physical location,
   or the same bodies raw — on the same append, point, page, mixed and
   append-under-query workloads, so codec cost and I/O cost can be told apart.
@@ -31,12 +31,12 @@ directory per host and date.
 ## Store level
 
 ```sh
-cargo xtask bench storage bench \
+cargo xtask perf storage run \
   --preset all \
   --corpus /path/to/raw/segments --segments 448..451 \
   --work /fast/disk/archive-bench.noindex \
   --out results.jsonl --repeat 3 --cache warm,evict --evict-from /some/big/dir
-cargo xtask bench report results.jsonl
+cargo xtask perf report results.jsonl
 ```
 
 `bench` appends one JSON record per measurement to `--out`; every record
@@ -117,7 +117,7 @@ not whether an API budget holds. The API budget is the node level's.
 ## Node level
 
 ```sh
-cargo xtask bench storage node \
+cargo xtask perf storage node \
   --bin baseline=/path/to/dolos-9165dbd8:v3 \
   --bin candidate=target/release/dolos \
   --run 2026-09-09-m4 \
@@ -126,7 +126,7 @@ cargo xtask bench storage node \
   --work /fast/disk/archive-bench.noindex/work \
   --out node.jsonl --repeat 3 --threads 1,8 --ops 20000 \
   --cache warm,evict --evict-from /some/big/dir --evict-gib 16
-cargo xtask bench report node.jsonl
+cargo xtask perf report node.jsonl
 ```
 
 Every `--bin` is `LABEL=PATH[:STORAGE_VERSION]` (the version the binary's
@@ -199,11 +199,11 @@ cargo build --release --bin dolos`) and pass the binary's path.
 ## Dictionary
 
 ```sh
-cargo xtask bench storage train \
+cargo xtask perf storage train \
   --corpus /path/to/mainnet/segments \
   --sample 8,25,40,60,120,250,330,380=1000 --sample 440..447=1500 \
   --seed 0 --max-size 112640 --out cardano.dict
-cargo xtask bench storage evaluate \
+cargo xtask perf storage evaluate \
   --fixture mainnet-heldout=/path/to/mainnet/segments:448..455 \
   --fixture preprod=/path/to/preprod/segments:100,200,300 \
   --fixture preview=immutable:/path/to/preview/immutable \

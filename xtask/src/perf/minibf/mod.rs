@@ -473,7 +473,7 @@ pub fn compare(args: CompareArgs) -> anyhow::Result<()> {
         }
         for (label, binary) in ordered {
             let status = std::process::Command::new(binary)
-                .arg("bench")
+                .arg("perf")
                 .arg("minibf")
                 .arg("run")
                 .args(&child_args)

@@ -1,24 +1,28 @@
-# Minibf performance benchmarks
+# Minibf performance experiments
 
-Storage and minibf are separate benchmark subjects, with shared machinery:
+Storage and minibf are separate performance experiment subjects, with shared machinery:
+
+`cargo bench` retains the Rust microbenchmarks; `cargo xtask perf` orchestrates
+performance experiments. The xtask integration tests are `perf_cli`,
+`storage_perf_smoke` and `minibf_perf`.
 
 | Layer | Entry point | Subject |
 |---|---|---|
 | Storage | `cargo bench --bench archive_backends` | Isolated log scans, local indexes, compressed body reads and scans |
-| Storage corpus and node runs | `cargo xtask bench storage bench` / `bench storage node` | Compression, I/O and import workloads on matched corpora |
-| Routes and replay | `cargo xtask bench minibf run` | Actual minibf routers on fresh Fjall state/archive and a persistent redb WAL |
-| Real-data calibration | `cargo xtask bench minibf http` | Verified HTTP requests against an independently prepared, stable-tip node |
+| Storage corpus and node runs | `cargo xtask perf storage run` / `perf storage node` | Compression, I/O and import workloads on matched corpora |
+| Routes and replay | `cargo xtask perf minibf run` | Actual minibf routers on fresh Fjall state/archive and a persistent redb WAL |
+| Real-data calibration | `cargo xtask perf minibf http` | Verified HTTP requests against an independently prepared, stable-tip node |
 
 There is no redb archive comparison or production compression switch. The new
 measurement adapters live in `dolos-testing`; production store and route
 implementations are unchanged.
 
-The Rust modules mirror this split: `xtask::bench::storage` contains storage
-workloads and `xtask::bench::minibf` contains actual minibf router/HTTP workloads.
+The Rust modules mirror this split: `xtask::perf::storage` contains storage
+workloads and `xtask::perf::minibf` contains actual minibf router/HTTP workloads.
 Neither subject owns the other. Clocks, counters, provenance, dictionary identity,
-the request load driver and JSONL reporting live under `xtask::bench`; reusable
+the request load driver and JSONL reporting live under `xtask::perf`; reusable
 chain fixtures and store instrumentation remain in `dolos-testing`.
-`cargo xtask bench report` renders records from either subject or a mixed file.
+`cargo xtask perf report` renders records from either subject or a mixed file.
 The old `archive-bench` command remains a compatibility entry point for existing
 storage scripts, not an umbrella for minibf. Documentation and historical result
 files retain their `xtask/archive-bench/` paths.
@@ -30,10 +34,10 @@ Build the xtask from the revision being measured. A globally installed
 
 ```sh
 cargo build --release -p xtask
-target/release/cargo-xtask bench minibf run \
+target/release/cargo-xtask perf minibf run \
   --work /path/to/scratch --out smoke.jsonl --run smoke \
   --repeat 1 --requests 10
-target/release/cargo-xtask bench report smoke.jsonl
+target/release/cargo-xtask perf report smoke.jsonl
 ```
 
 Smoke results deliberately lack the repetitions and samples to pass timing gates.
@@ -41,7 +45,7 @@ Ordinary CI runs correctness/work guards, not elapsed-time thresholds:
 
 ```sh
 cargo test -p dolos-testing --test benchmark_fixtures
-cargo test -p xtask --test minibf_bench
+cargo test -p xtask --test minibf_perf
 cargo test --bench archive_backends
 ```
 
@@ -97,7 +101,7 @@ the cache regime is named `route-primed`, never cold.
 For example, sweep selectivity and pagination while holding the rest fixed:
 
 ```sh
-target/release/cargo-xtask bench minibf run \
+target/release/cargo-xtask perf minibf run \
   --work /path/to/scratch --out medium.jsonl --run medium \
   --blocks 256 --log-rows 100000 --pool-stride 32 \
   --page 20 --page-size 5 --requests 1000 --repeat 3 \
@@ -107,7 +111,7 @@ target/release/cargo-xtask bench minibf run \
 The storage bench additionally includes logs-only populations and a real Alonzo
 block fixture. Its existing filler-byte cases remain isolated storage guards;
 they are not representative compression-ratio measurements. The existing
-`bench storage bench` and `bench storage node` commands retain their real-corpus and cache
+`perf storage run` and `perf storage node` commands retain their real-corpus and cache
 experiments.
 
 ## Request load and live replay
@@ -131,7 +135,7 @@ alongside a server. It records completed blocks and whole-roll-forward latency
 (including all lifecycle work), not a fictional index-commit percentile.
 
 ```sh
-target/release/cargo-xtask bench minibf run \
+target/release/cargo-xtask perf minibf run \
   --work /path/to/scratch --out live.jsonl --run live \
   --live --blocks 256 --requests 1000 --rates 25,100 \
   --timeout-ms 1000 --write-interval-ms 250 \
@@ -154,12 +158,12 @@ without this harness needs the benchmark-only changes applied to its worktree;
 the runner does not build or modify revisions for you.
 
 ```sh
-target/release/cargo-xtask bench minibf compare \
+target/release/cargo-xtask perf minibf compare \
   --bin baseline=/path/to/baseline/cargo-xtask \
   --bin candidate=/path/to/candidate/cargo-xtask -- \
   --work /path/to/scratch --out paired.jsonl --run comparison-01 \
   --requests 1000 --repeat 3
-target/release/cargo-xtask bench minibf check paired.jsonl \
+target/release/cargo-xtask perf minibf check paired.jsonl \
   --max-p95-ratio 1.10 --max-p99-ratio 1.20 --min-throughput-ratio 0.90 \
   --min-repeats 3 --min-samples 1000
 ```
@@ -210,7 +214,7 @@ whole value. Use full responses when practical; a projection verifies only the
 selected fields. Never derive the oracle solely from the candidate.
 
 ```sh
-target/release/cargo-xtask bench minibf http \
+target/release/cargo-xtask perf minibf http \
   --url http://127.0.0.1:3000 --manifest mainnet.json \
   --server-binary /path/to/baseline/dolos --server-revision <commit> \
   --run mainnet-01 --label baseline --out mainnet.jsonl \

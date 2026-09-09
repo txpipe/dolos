@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use super::cases::Case;
-use crate::bench::load::drive_requests;
-use crate::bench::{command_line, measure, parse_list};
+use crate::perf::load::drive_requests;
+use crate::perf::{command_line, measure, parse_list};
 
 #[derive(clap::Args)]
 pub struct Args {
