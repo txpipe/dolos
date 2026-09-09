@@ -9,8 +9,6 @@ mod eval;
 mod feedback;
 mod serve;
 mod snapshot;
-#[cfg(feature = "utils")]
-mod storage_cleanup;
 mod sync;
 
 #[cfg(feature = "utils")]

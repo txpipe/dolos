@@ -18,7 +18,7 @@ use std::{
 
 use dolos::storage::{CURRENT_STORAGE_VERSION, MIGRATION_GUIDE_URL};
 
-use crate::{feedback::Feedback, storage_cleanup};
+use crate::{data::cleanup, feedback::Feedback};
 
 /// The config file `dolos init` writes, and the one whose failure to parse
 /// tells us an older setup is present.
@@ -628,7 +628,7 @@ impl ConfigEditor {
             ));
         }
 
-        storage_cleanup::run(&self.0).context("cleaning up data")?;
+        cleanup::clear(&self.0).context("cleaning up data")?;
 
         self.0.storage.version = CURRENT_STORAGE_VERSION;
 

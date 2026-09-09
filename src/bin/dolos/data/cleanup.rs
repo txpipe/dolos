@@ -1,15 +1,32 @@
 use std::path::{Component, Path, PathBuf};
 
 use dolos_core::config::{ArchiveStoreConfig, RootConfig, StorageConfig};
-use miette::IntoDiagnostic;
+use miette::{bail, IntoDiagnostic};
 use tracing::info;
+
+#[derive(Debug, clap::Args)]
+pub struct Args {
+    /// confirm deletion of all managed data
+    #[arg(long)]
+    force: bool,
+}
+
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
+    crate::common::setup_tracing(&config.logging, &config.telemetry)?;
+
+    if !args.force {
+        bail!("refusing to clear all managed data without --force");
+    }
+
+    clear(config)
+}
 
 /// Clear the storage an accepted upgrade replaces.
 ///
 /// The configured root must contain every store and no symbolic links. This
 /// keeps the operation both complete and bounded: it never follows a link or
 /// widens deletion to a separately configured path.
-pub fn run(config: &RootConfig) -> miette::Result<()> {
+pub fn clear(config: &RootConfig) -> miette::Result<()> {
     let root = &config.storage.path;
     let outside = stores_outside_root(&config.storage).into_diagnostic()?;
 
@@ -190,7 +207,7 @@ mod tests {
         let root = dir.path().join("data");
         let files = old_store_under(&root);
 
-        run(&config_over(&root)).unwrap();
+        clear(&config_over(&root)).unwrap();
 
         assert!(!files.iter().any(|file| file.exists()));
         assert!(root.is_dir());
@@ -202,7 +219,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("never-created");
 
-        run(&config_over(&root)).unwrap();
+        clear(&config_over(&root)).unwrap();
 
         assert!(!root.exists());
     }
@@ -258,7 +275,7 @@ mod tests {
         };
         archive.blocks_path = Some(blocks.clone());
 
-        let error = run(&config).expect_err("an outside store refuses cleanup");
+        let error = clear(&config).expect_err("an outside store refuses cleanup");
         let message = error.to_string();
 
         assert!(message.contains(&blocks.display().to_string()), "{message}");
@@ -301,7 +318,7 @@ mod tests {
         std::fs::write(elsewhere.join("000000.segment"), b"a store built by v1.6").unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join("blocks")).unwrap();
 
-        let error = run(&config_over(&root)).expect_err("a symlink refuses cleanup");
+        let error = clear(&config_over(&root)).expect_err("a symlink refuses cleanup");
         let message = error.to_string();
 
         assert!(
@@ -323,7 +340,7 @@ mod tests {
         let files = old_store_under(&actual_root);
         std::os::unix::fs::symlink(&actual_root, &linked_root).unwrap();
 
-        let error = run(&config_over(&linked_root)).expect_err("a root symlink refuses cleanup");
+        let error = clear(&config_over(&linked_root)).expect_err("a root symlink refuses cleanup");
         let message = error.to_string();
 
         assert!(
