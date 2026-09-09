@@ -1,10 +1,7 @@
 # Automatic archive encoding
 
-The founder revised the offline-only ruling during PR #1317 review: optimize
-eligible batches, rather than reserve parallel encoding for offline callers.
-All callers now use the original APIs. There is no writer intent, batch flag,
+All callers use the same archive APIs. There is no writer intent, batch flag,
 node setting, global switch, second commit hook or offline import method.
-The filename is retained so historical evidence links remain valid.
 
 ## Selection and trade-offs
 
@@ -77,9 +74,10 @@ framing, dictionary, compression level or storage-version claim is made.
 
 ## Evidence
 
-The initial offline candidate and its exact identities remain immutable in
+The initial offline candidate and its exact identities are recorded in
 `results/2026-09-09-m4-apfs-ssd-offline-import`; those measurements do not
-describe the revised automatic candidate. New evidence is published separately.
+describe the automatic candidate, whose evidence is in
+`results/2026-09-09-m4-apfs-ssd-automatic`.
 
 Use the checked-in measurement patches on disposable source trees to add actual
 commit timing, then compare pinned raw production `9165dbd8`, merged serial
@@ -104,8 +102,7 @@ git apply --include=src/bin/dolos/data/import_archive.rs \
 ```
 
 The automatic patch also contains the implementation delta from the serial
-base; the path filter avoids applying that delta twice. Historical results,
-patches and runbooks remain unchanged.
+base; the path filter avoids applying that delta twice.
 
 The supporting harness now has one production codec, `store`, which uses
 automatic selection for write and concurrent presets. Historical

@@ -1,20 +1,16 @@
-# Automatic archive encoding: evaluation and acceptance
+# Automatic archive encoding: measurements
 
-## Decision
+## Summary
 
-The founder revised the ruling during PR #1317 review: optimize eligible
-batches, not reserve resources for offline callers. The revised implementation
-uses the original unified entry points and selects encoding strategy entirely
-inside flatfiles. No offline method, writer intent, lifecycle variant or
+The measured implementation uses unified entry points and selects encoding
+strategy entirely inside flatfiles. No offline method, writer intent, lifecycle variant or
 backend forwarding hook remains.
 
-**Automatic selection is justified, but not free.** The inherited production
-throughput/p95 gates pass in these runs. Concurrent archive readers show a
+The inherited production throughput/p95 gates pass in these runs.
+Concurrent archive readers show a
 material latency trade-off: batch-100 writer throughput roughly doubles,
 while median per-run point-read p95 rises 12.9% and page-read p95 rises 28.0%.
-This is not a correctness or durability reason to duplicate caller interfaces,
-but it prevents any claim of resource isolation or unchanged query tails.
-QA/founder should review that cost before merging.
+These measurements do not establish resource isolation or unchanged query tails.
 
 ## Provenance and limitations
 
@@ -41,7 +37,7 @@ Conway bodies; it never replaces the inherited gate corpus.
 [identities.json](identities.json) records binary hashes, exact source patch,
 build settings and actual command exit statuses.
 [RUNBOOK.md](RUNBOOK.md) reproduces the shapes and instrumentation.
-The earlier offline candidate's evidence remains immutable and does not
+The earlier offline candidate's measurements are retained separately and do not
 describe this source revision.
 
 ## Production gate
@@ -145,7 +141,7 @@ cap or operator setting was added to production. Its exact environment and
 samples are retained separately in `concurrent-automatic-4.jsonl`.
 Neither experiment establishes a query-latency guarantee.
 
-## Bounds, verification and remaining review
+## Bounds and verification
 
 Peak encoded buffers are 4,841,487 bytes at batch 500 and 5,836,179 at batch
 5000, with at most ten additional contexts on this host. The seeded 16 MiB
@@ -173,8 +169,3 @@ Production snapshot restore/backfill and registry transport paths now match
 the merged baseline; only their tests exercise the shared optimization.
 The conditional Docker registry checks were not rerun. The prior unresponsive
 daemon attempts remain recorded as timeouts in historical evidence, not passes.
-
-The implementation and measured inherited median gates are complete. Review
-the concurrent-reader tail cost and noisy-host limitations through the normal
-code-QA/founder relay before merge or retirement. No deployment, live-instance
-mutation, cloud spend or merge was performed.

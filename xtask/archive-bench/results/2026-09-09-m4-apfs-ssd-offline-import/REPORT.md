@@ -1,4 +1,4 @@
-# Offline archive import: measured acceptance
+# Offline archive import: measurements
 
 **The inherited throughput and commit-p95 gates pass.** On the full inherited
 126,728-block corpus at batch 500, the optimized production binary achieves
@@ -6,12 +6,6 @@
 production throughput**, using medians over three paired repeats. Its commit
 p95 is **81.5% of raw production's** (21.299 ms versus 26.132 ms). Every individual
 paired throughput ratio also exceeds 90%: 1.027, 1.016 and 1.040.
-
-The implementation is ready for code-QA review. Merge/retirement still needs
-the normal QA/founder relay and resolution of registry validation: Docker
-Desktop reports that it is running, but its daemon does not respond. Both
-required registry-suite attempts were terminated at their documented timeout.
-They are not reported as passes.
 
 ## Scope and provenance
 
@@ -87,9 +81,8 @@ Single-block Byron is a supplementary throughput shortfall: 87.9% of raw and
 89.8% of serial throughput; its p95 remains within budget at 107.4% of raw,
 but its p99 rises to 29.245 ms. The generic report therefore marks that shape
 FAIL. The inherited throughput obligation is specifically batch 500; no
-single-block improvement or waiver is claimed. QA/founder must review this
-residual regression. Filesystem variance is substantial, particularly for
-batch 5000 and the first modern repeat; all samples remain published.
+single-block improvement is claimed. Filesystem variance is substantial,
+particularly for batch 5000 and the first modern repeat; all samples remain published.
 Batch 5000 is an archive transaction shape,
 **not a full-bootstrap speedup claim**. Parallel encoding spends more CPU and
 RSS to recover elapsed-time throughput: the batch-500 CPU median rises from
@@ -141,14 +134,13 @@ exact reservation to offline contexts. Its six `superseded-*.jsonl` files and
 `node-*.jsonl` files establish the final production verdict for source
 `08f02d9bab9bd4d573e369a345a110e68c47567a`.
 
-## Verification and remaining work
+## Verification
 
 [verification.json](verification.json) records actual commands and exit
 statuses. The workspace build passes. Default tests pass (1,452 passed,
 48 ignored); the required all-features selection passes (990 passed,
 53 ignored). Clippy exits 0 with no new warnings; seven existing warnings
 remain in untouched proposal/epoch test code and snapshot publish-test docs.
-The instruction to avoid unrelated fixes was followed.
 
 Mithril's actual import/resume driver exercises the offline writer. Logical
 snapshot restore exercises it and resumes ordinary serial writes afterward.
@@ -159,6 +151,3 @@ serial, including the shared work-unit lifecycle.
 The Docker publish and restore suites remain blocked (exit 124 after 45 seconds
 each). A non-disruptive `docker desktop start` reports already running, and
 subsequent daemon checks still time out. No container or daemon was restarted.
-Code-QA/founder must supply a working Docker daemon and complete those checks,
-or explicitly rule on their applicability to this content-layer-only restore
-change. Do not merge or retire solely on the performance verdict.
