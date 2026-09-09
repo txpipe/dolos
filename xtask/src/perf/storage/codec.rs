@@ -527,7 +527,7 @@ impl Reader {
         if !self.files.contains_key(&segment) {
             let file = File::open(segment_path(&self.dir, segment))?;
             if self.nocache {
-                set_nocache(&file);
+                set_nocache(&file)?;
             }
             self.files.insert(segment, file);
         }
@@ -619,13 +619,32 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
 }
 
 #[cfg(target_os = "macos")]
-fn set_nocache(file: &File) {
+fn set_nocache(file: &File) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
-    unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn set_nocache(_file: &File) {}
+fn set_nocache(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod nocache_tests {
+    use super::*;
+
+    #[test]
+    fn nocache_reports_unsupported_descriptors() {
+        let file = tempfile::tempfile().unwrap();
+        set_nocache(&file).unwrap();
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let descriptor: std::os::fd::OwnedFd = socket.into();
+        assert!(set_nocache(&File::from(descriptor)).is_err());
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn drop_cache(file: &File, offset: u64, len: u64) {

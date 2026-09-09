@@ -135,6 +135,10 @@ async fn check_tip(client: &Client, base: &Url, manifest: &Manifest) -> anyhow::
 
 pub fn run(args: Args) -> anyhow::Result<()> {
     anyhow::ensure!(
+        args.project_id_env.is_none() || args.url.scheme() == "https",
+        "--project-id-env requires HTTPS; refusing cleartext credentials"
+    );
+    anyhow::ensure!(
         matches!(args.url.scheme(), "http" | "https") && args.url.host_str().is_some(),
         "url must use HTTP(S)"
     );

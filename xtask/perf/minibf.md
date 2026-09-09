@@ -41,6 +41,9 @@ LSM depth, epoch transitions, pruning or the production traffic mix.
 `--concurrency` bounds in-flight requests; excess arrivals count as rejected.
 Late in-process requests are drained, since cancellation cannot stop their
 blocking work. Errors, timeouts and rejections preserve records and fail the run.
+The timeout is a completion budget, not a hard process deadline; a stuck blocking
+operation requires an external process watchdog. Cancelling only its future
+would free a concurrency slot while the storage work was still running.
 
 Each request validates fixture-derived identities, ordering and values, then
 checks the complete normalized response hash. Warmup primes the route: this is
@@ -60,6 +63,8 @@ Process resources include the harness; lifetime peak RSS is not per-request RSS.
 ```
 
 The writer uses normal `roll_forward`, including WAL/state/archive commits.
+Bootstrap anchors the WAL at the imported tip; replay can roll back to that
+anchor, not into the pre-import history.
 The tail must span arrival duration plus timeout; the interval is a minimum
 delay, not guaranteed ingestion throughput. Latest/reverse-tip cases are excluded.
 Counters include API and writer work; writer latency covers the whole roll-forward.

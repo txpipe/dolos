@@ -103,15 +103,16 @@ pub fn evaluate(fixtures: &[Fixture], codecs: &[(String, Codec)]) -> io::Result<
             let mut decoder = codec.decoder()?;
             let mut frames: Vec<Vec<u8>> = Vec::with_capacity(fixture.corpus.blocks.len());
             let mut per_era: std::collections::BTreeMap<&str, (u64, u64)> = Default::default();
-            let cpu = thread_cpu_ns();
+            let mut encode_ns = 0u64;
             for block in &fixture.corpus.blocks {
+                let cpu = thread_cpu_ns();
                 let frame = encoder.encode(&block.body)?;
+                encode_ns = encode_ns.saturating_add(thread_cpu_ns().saturating_sub(cpu));
                 let e = per_era.entry(block.era).or_default();
                 e.0 += block.body.len() as u64;
                 e.1 += frame.len() as u64;
                 frames.push(frame.to_vec());
             }
-            let encode_ns = thread_cpu_ns().saturating_sub(cpu);
             let cpu = thread_cpu_ns();
             for (block, frame) in fixture.corpus.blocks.iter().zip(&frames) {
                 let body = decoder.decode(frame)?;

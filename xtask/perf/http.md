@@ -46,7 +46,7 @@ Run the candidate with its URL, binary, revision and label. Keep the manifest,
 run name and request settings identical. Repeat with increasing `--repeat-start`,
 alternating arm order; use at least three pairs before applying
 [`perf minibf check`](minibf.md#compare-revisions) to the combined JSONL.
-For authentication, `--project-id-env VARIABLE_NAME` reads a secret without
+Authentication requires HTTPS. `--project-id-env VARIABLE_NAME` reads a secret without
 recording its value in the command.
 
 ## Interpretation

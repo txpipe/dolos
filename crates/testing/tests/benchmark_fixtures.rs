@@ -83,3 +83,26 @@ fn measurement_preserves_reverse_iteration_and_does_not_count_skips_as_reads() {
     logs.next().unwrap().unwrap();
     assert_eq!(archive.counters.snapshot().log_rows, 1);
 }
+
+#[test]
+fn persistent_wal_is_anchored_at_imported_tip_before_live_replay() {
+    use dolos_core::{BootstrapExt, Domain, StateStore, SyncExt, WalStore};
+    use dolos_testing::performance::{ApiFixture, FixtureShape};
+
+    let fixture = ApiFixture::new(MemoryStores::open(), FixtureShape::default()).unwrap();
+    let imported_tip = fixture.domain.state().read_cursor().unwrap().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let domain = fixture
+        .domain
+        .with_persistent_wal(directory.path().join("wal"))
+        .unwrap();
+    assert_eq!(domain.wal().find_tip().unwrap().unwrap().0, imported_tip);
+    assert!(domain.wal().read_entry(&imported_tip).unwrap().is_some());
+    for block in &fixture.tail[..2] {
+        domain.roll_forward(block.clone()).unwrap();
+    }
+    domain.check_integrity().unwrap();
+    domain.rollback(&imported_tip).unwrap();
+    assert_eq!(domain.state().read_cursor().unwrap(), Some(imported_tip));
+    domain.bootstrap().unwrap();
+}

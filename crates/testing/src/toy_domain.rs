@@ -319,11 +319,12 @@ impl<B: ToyStores> ToyDomain<B> {
     pub fn with_persistent_wal(
         mut self,
         path: impl AsRef<std::path::Path>,
-    ) -> Result<Self, WalError> {
+    ) -> Result<Self, DomainError> {
         self.wal = dolos_redb3::wal::RedbWalStore::open(
             path,
             &dolos_core::config::RedbWalConfig::default(),
         )?;
+        self.bootstrap()?;
         Ok(self)
     }
 

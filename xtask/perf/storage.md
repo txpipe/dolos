@@ -31,6 +31,8 @@ Cache choices are `warm`, `evict` and `nocache`. On macOS, eviction requires
 `--evict-from DIR --evict-gib N` and is approximate. `nocache` also disables
 readahead; the production store skips it. Unsupported regimes are reported and
 skipped. Do not weaken durability to obtain a passing comparison.
+Cache-setting failures and out-of-range scan latencies fail the experiment;
+they are not reported as successful measurements with altered cache or timing.
 
 Store reports pair codecs against raw with identical settings and repeats.
 Provisional write gates require throughput ≥90% of raw and p95 commit latency

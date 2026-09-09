@@ -159,3 +159,32 @@ fn evaluation_round_trips_and_ranks_the_dictionary() {
         assert!(r["metrics"]["ratio"].as_f64().unwrap() < 1.0);
     }
 }
+
+#[test]
+fn write_outcome_carries_the_sink_segment_files() {
+    use xtask::perf::storage::workloads::{write_corpus, WriteParams};
+
+    let corpus = Corpus::synthetic(3, 400, 2);
+    for codec in [Codec::Raw, Codec::Store] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("unrelated.txt"), "not a segment").unwrap();
+        let outcome = write_corpus(
+            &corpus,
+            &codec,
+            directory.path(),
+            &WriteParams {
+                name: "files".into(),
+                batch: 100,
+                encode_threads: 1,
+                fsync: true,
+            },
+        )
+        .unwrap();
+        assert!(!outcome.files.is_empty());
+        assert_eq!(outcome.metrics["segments"], outcome.files.len());
+        assert!(outcome.files.iter().all(|file| file.is_file()
+            && file
+                .extension()
+                .is_some_and(|extension| extension == "segment")));
+    }
+}

@@ -12,6 +12,37 @@ use xtask::perf::minibf::{
     report::{assess, Budgets},
 };
 
+#[test]
+fn http_credentials_are_rejected_before_loading_inputs_or_secrets() {
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
+        .args([
+            "perf",
+            "minibf",
+            "http",
+            "--url",
+            "http://127.0.0.1:1",
+            "--manifest",
+            "missing-manifest.json",
+            "--server-binary",
+            "missing-dolos",
+            "--server-revision",
+            "test",
+            "--out",
+            "unused.jsonl",
+            "--run",
+            "test",
+            "--label",
+            "baseline",
+            "--project-id-env",
+            "DOLOS_PERF_TEST_ABSENT_SECRET",
+        ])
+        .env_remove("DOLOS_PERF_TEST_ABSENT_SECRET")
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("--project-id-env requires HTTPS"));
+}
+
 async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
     let fixture = ApiFixture::new(stores, FixtureShape::default()).unwrap();
     let router = dolos_minibf::build_router(
