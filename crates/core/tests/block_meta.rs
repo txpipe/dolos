@@ -8,7 +8,7 @@ use dolos_testing::{
 };
 
 use dolos_core::{
-    block_meta::BlockMetaResolver, indexes::ArchiveIndexDelta, ArchiveStore as _,
+    async_query::BlockMetaResolver, indexes::ArchiveIndexDelta, ArchiveStore as _,
     ArchiveWriter as _, AsyncQueryFacade, ChainPoint, Domain as _, TxHash,
 };
 use pallas::ledger::traverse::MultiEraBlock;

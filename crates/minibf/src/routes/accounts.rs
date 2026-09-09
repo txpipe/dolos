@@ -23,7 +23,7 @@ use dolos_cardano::{
     model::{AccountState, DRepState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
-use dolos_core::block_meta::BlockMetaResolver;
+use dolos_core::async_query::BlockMetaResolver;
 use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _, TemporalKey};
 use futures_util::StreamExt;
 use pallas::{

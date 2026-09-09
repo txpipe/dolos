@@ -29,7 +29,6 @@ use tracing::info;
 
 pub mod archive;
 pub mod async_query;
-pub mod block_meta;
 pub mod bootstrap;
 pub mod builtin;
 pub mod cbor;
