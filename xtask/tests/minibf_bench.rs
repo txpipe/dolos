@@ -7,7 +7,7 @@ use dolos_testing::{
     toy_domain::{FjallStores, MemoryStores, ToyStores},
 };
 use serde_json::{json, Value};
-use xtask::archive_bench::minibf::{
+use xtask::bench::minibf::{
     cases, drive,
     report::{assess, Budgets},
 };
@@ -190,8 +190,9 @@ fn live_replay_cli_records_writer_progress() {
     let output = temp.path().join("live.jsonl");
     let result = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
         .args([
-            "archive-bench",
+            "bench",
             "minibf",
+            "run",
             "--run",
             "smoke",
             "--repeat",
@@ -271,8 +272,9 @@ async fn http_calibration_checks_responses_and_refuses_tip_changes() {
         let result = tokio::task::spawn_blocking(move || {
             std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
                 .args([
-                    "archive-bench",
-                    "minibf-http",
+                    "bench",
+                    "minibf",
+                    "http",
                     "--run",
                     "smoke",
                     "--label",
