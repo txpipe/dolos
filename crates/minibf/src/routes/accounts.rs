@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashMap},
-    ops::Deref,
-};
+use std::{collections::BTreeSet, ops::Deref};
 
 use axum::{
     extract::{Path, Query, State},
@@ -26,13 +23,9 @@ use dolos_cardano::{
     model::{AccountState, DRepState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
-use dolos_core::{
-    async_query::BlockRefMeta, ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _,
-    TemporalKey, TxHash,
-};
-use futures::future::join_all;
+use dolos_core::async_query::BlockMetaResolver;
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _, TemporalKey};
 use futures_util::StreamExt;
-use itertools::Itertools;
 use pallas::{
     codec::minicbor,
     crypto::hash::{Hash, Hasher},
@@ -359,26 +352,11 @@ where
 
     // chain position of each utxo's tx: Blockfrost orders assets by the
     // position of the oldest (asc) or newest (desc) utxo holding them
-    let tx_deps: Vec<TxHash> = utxos.keys().map(|txo_ref| txo_ref.0).unique().collect();
-
-    // one facade for the whole fan-out so its blocking-task limiter is shared
-    let query = domain.query();
-
-    let block_deps: HashMap<TxHash, BlockRefMeta> = join_all(tx_deps.iter().map(|tx| {
-        let tx = *tx;
-        let query = &query;
-        async move {
-            match query.block_meta_by_tx_hash(tx.to_vec()).await {
-                Ok(Some(block_data)) => Some(Ok((tx, block_data))),
-                Ok(None) => None,
-                Err(_) => Some(Err(StatusCode::INTERNAL_SERVER_ERROR)),
-            }
-        }
-    }))
-    .await
-    .into_iter()
-    .flatten()
-    .collect::<Result<_, _>>()?;
+    let mut block_meta = BlockMetaResolver::new(domain.query());
+    let block_deps = block_meta
+        .resolve_batch(utxos.keys().map(|txo_ref| txo_ref.0))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let by_unit = mapping::aggregate_account_assets(&utxos, &block_deps)?;
 
@@ -1209,6 +1187,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::test_support::{TestApp, TestFault};
     use blockfrost_openapi::models::{
