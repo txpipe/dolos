@@ -1253,6 +1253,10 @@ fn check_layer_magic(
 }
 
 /// One epoch's blocks, appended to the archive in stream order.
+///
+/// A restore is an offline bulk load, so each chunk goes through the
+/// archive's import writer; the frames and locations are the ones the
+/// ordinary writer would produce.
 fn restore_blocks<R: SteleReader, A: ArchiveStore>(
     reader: &Reader<'_, R>,
     descriptor: &LayerDescriptor,
@@ -1263,7 +1267,7 @@ fn restore_blocks<R: SteleReader, A: ArchiveStore>(
         blocks::decode,
         |record| record.body.len(),
         |chunk| {
-            let writer = archive.start_writer()?;
+            let writer = archive.start_import_writer()?;
 
             for record in chunk {
                 let point = ChainPoint::Specific(record.slot, record.hash);

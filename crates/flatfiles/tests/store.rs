@@ -5,7 +5,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use dolos_flatfiles::{BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, MAX_BODY_BYTES};
+use dolos_flatfiles::{
+    frame_bound, BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, IMPORT_WINDOW_BYTES,
+    MAX_BODY_BYTES,
+};
 
 struct Rng(u64);
 
@@ -474,4 +477,239 @@ fn what_the_store_holds_is_bounded_by_the_work_in_flight_not_the_history() {
     let stats = store.resource_stats();
     assert!(stats.idle_decoders <= 8, "{stats:?}");
     assert_eq!(stats.writers, 1);
+}
+
+/// The two stores hold the same bytes in every one of `segments`.
+fn assert_same_segments(a: &FlatFileStore, b: &FlatFileStore, segments: &[u32]) {
+    for &segment in segments {
+        assert_eq!(
+            fs::read(a.segment_path(segment)).unwrap(),
+            fs::read(b.segment_path(segment)).unwrap(),
+            "segment {segment} differs"
+        );
+    }
+}
+
+#[test]
+fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
+    let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
+    let (_b, import) = FlatFileStore::for_tempdir().unwrap();
+
+    // Three batches of varied bodies over three segments, one of them
+    // crossing a segment inside the batch.
+    let batches: Vec<Vec<(u32, Vec<u8>)>> = vec![
+        bodies(20, 120, 100, 6_000)
+            .into_iter()
+            .map(|b| (0, b))
+            .collect(),
+        bodies(21, 90, 100, 20_000)
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| (if i < 40 { 0 } else { 1 }, b))
+            .collect(),
+        bodies(22, 60, 1, 3_000)
+            .into_iter()
+            .map(|b| (2, b))
+            .collect(),
+    ];
+    let mut all = Vec::new();
+    for batch in &batches {
+        let items: Vec<(u32, &[u8])> = batch.iter().map(|(s, b)| (*s, b.as_slice())).collect();
+        let from_serial = serial.append_batch(&items).unwrap();
+        let from_import = import.import_batch(&items).unwrap();
+        assert_eq!(from_serial, from_import);
+        assert_eq!(import.resource_stats().writers, 1);
+        all.extend(
+            from_import
+                .into_iter()
+                .zip(batch.iter().map(|(_, b)| b.clone())),
+        );
+    }
+    assert_same_segments(&serial, &import, &[0, 1, 2]);
+    for (loc, body) in &all {
+        assert_eq!(&import.read(loc).unwrap(), body);
+    }
+
+    let stats = import.append_stats();
+    assert_eq!((stats.serial_batches, stats.import_batches), (0, 3));
+    assert!(stats.import_windows >= 3, "{stats:?}");
+    assert!(
+        stats.import_encoders_peak <= rayon::current_num_threads(),
+        "{stats:?}"
+    );
+    let stats = serial.append_stats();
+    assert_eq!((stats.serial_batches, stats.import_batches), (3, 0));
+    assert_eq!(stats.import_encoders_peak, 0);
+}
+
+#[test]
+fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap();
+    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+
+    // A first body that takes longest to encode, then two hundred tiny ones
+    // whose frames are ready long before it: they must still land after it.
+    let mut bodies = bodies(23, 1, 2 << 20, 2 << 20);
+    bodies.extend(self::bodies(24, 200, 50, 400));
+    let locations = pool
+        .install(|| store.import_batch(&items(0, &bodies)))
+        .unwrap();
+
+    for pair in locations.windows(2) {
+        assert_eq!(pair[1].offset, pair[0].offset + pair[0].length as u64);
+    }
+    let bytes = fs::read(store.segment_path(0)).unwrap();
+    let frames = walk_frames(&bytes);
+    assert_eq!(frames.len(), bodies.len());
+    for ((offset, length), (loc, body)) in frames.iter().zip(locations.iter().zip(&bodies)) {
+        assert_eq!((loc.offset, loc.length), (*offset, *length));
+        let frame = &bytes[*offset as usize..(*offset + *length as u64) as usize];
+        assert_eq!(&decode_independently(frame), body);
+    }
+    let stats = store.append_stats();
+    assert!(stats.import_encoders_peak <= 4, "{stats:?}");
+}
+
+#[test]
+fn import_windows_bound_what_is_held_encoded_without_moving_a_frame() {
+    let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
+    let (_b, import) = FlatFileStore::for_tempdir().unwrap();
+
+    // Bodies of a quarter window each: the batch spans several windows, and
+    // a segment boundary falls inside one of them.
+    let bodies = bodies(25, 12, IMPORT_WINDOW_BYTES / 4, IMPORT_WINDOW_BYTES / 4);
+    let items: Vec<(u32, &[u8])> = bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (if i < 7 { 0 } else { 1 }, b.as_slice()))
+        .collect();
+    let from_serial = serial.append_batch(&items).unwrap();
+    let from_import = import.import_batch(&items).unwrap();
+    assert_eq!(from_serial, from_import);
+    assert_same_segments(&serial, &import, &[0, 1]);
+
+    let stats = import.append_stats();
+    assert_eq!(stats.import_batches, 1);
+    assert!(stats.import_windows >= 3, "{stats:?}");
+    assert!(
+        stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES,
+        "{stats:?}"
+    );
+}
+
+#[test]
+fn retained_encoding_buffers_are_bounded_as_the_callers_batch_grows() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(3)
+        .build()
+        .unwrap();
+    let body = vec![42u8; 128 << 10];
+    for count in [100, 10_000] {
+        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+        let items = vec![(0, body.as_slice()); count];
+        pool.install(|| store.import_batch(&items)).unwrap();
+        let stats = store.append_stats();
+        assert!(stats.import_encoders_peak <= 3);
+        assert!(stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES);
+        assert!(
+            stats.import_buffer_bytes_peak <= IMPORT_WINDOW_BYTES + 3 * frame_bound(body.len())
+        );
+    }
+}
+
+#[test]
+fn a_maximal_body_is_a_window_of_its_own_and_a_larger_one_is_refused_unwritten() {
+    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+    let small = bodies(26, 2, 300, 300);
+    let maximal = vec![7u8; MAX_BODY_BYTES];
+    let locations = store
+        .import_batch(&[
+            (0, small[0].as_slice()),
+            (0, maximal.as_slice()),
+            (0, small[1].as_slice()),
+        ])
+        .unwrap();
+    assert_eq!(store.read(&locations[1]).unwrap(), maximal);
+    assert_eq!(store.read(&locations[2]).unwrap(), small[1]);
+    let stats = store.append_stats();
+    assert_eq!(stats.import_windows, 3, "{stats:?}");
+    assert!(
+        stats.import_window_bytes_peak <= IMPORT_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)),
+        "{stats:?}"
+    );
+
+    // One byte more is refused before the batch touches a file: the first
+    // body is not written and the new segment is not created.
+    let len_before = file_len(&store, 0);
+    let oversized = vec![1u8; MAX_BODY_BYTES + 1];
+    let err = store
+        .import_batch(&[(0, small[0].as_slice()), (1, oversized.as_slice())])
+        .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(file_len(&store, 0), len_before);
+    assert!(!store.segment_path(1).exists());
+    assert_eq!(store.append_stats().import_batches, 1);
+}
+
+#[test]
+fn an_import_batch_works_on_one_worker_with_one_body_and_with_none() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+
+    assert!(store.import_batch(&[]).unwrap().is_empty());
+    assert_eq!(store.resource_stats().writers, 0);
+
+    let one = bodies(27, 1, 500, 500);
+    let loc = pool
+        .install(|| store.import_batch(&items(0, &one)))
+        .unwrap();
+    assert_eq!(store.read(&loc[0]).unwrap(), one[0]);
+
+    let many = bodies(28, 300, 100, 5_000);
+    let locations = pool
+        .install(|| store.import_batch(&items(0, &many)))
+        .unwrap();
+    for (loc, body) in locations.iter().zip(&many) {
+        assert_eq!(&store.read(loc).unwrap(), body);
+    }
+
+    let stats = store.append_stats();
+    assert_eq!(stats.import_batches, 3);
+    assert_eq!(stats.import_encoders_peak, 1, "{stats:?}");
+}
+
+#[test]
+fn an_import_batch_fails_like_a_serial_one_and_the_retry_continues_at_the_true_end() {
+    let (dir, store) = FlatFileStore::for_tempdir().unwrap();
+    let first = bodies(29, 3, 500, 500);
+    let before = store.import_batch(&items(0, &first)).unwrap();
+    fs::create_dir(dir.path().join("000001.segment")).unwrap();
+
+    let err = store
+        .import_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
+        .unwrap_err();
+    assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        file_len(&store, 0),
+        before[2].offset + before[2].length as u64
+    );
+    assert_eq!(store.resource_stats().writers, 0, "the handles are dropped");
+
+    fs::remove_dir(dir.path().join("000001.segment")).unwrap();
+    let retry = store
+        .import_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
+        .unwrap();
+    assert_eq!(retry[0].offset, before[2].offset + before[2].length as u64);
+    assert_eq!(retry[1].offset, 0);
+    assert_eq!(store.read(&retry[1]).unwrap(), first[0]);
+    assert_eq!(store.resource_stats().writers, 1, "only the newest handle");
+    for (loc, body) in before.iter().zip(&first) {
+        assert_eq!(&store.read(loc).unwrap(), body);
+    }
 }

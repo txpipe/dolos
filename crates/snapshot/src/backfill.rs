@@ -900,7 +900,7 @@ impl<D: Domain> Driver<'_, D> {
 
             let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-            match domain.import_blocks(batch) {
+            match domain.import_blocks_offline(batch) {
                 Ok(last) => self.replay.reached(last),
                 Err(DomainError::StopEpochReached) => return Ok(Import::Boundary),
                 Err(e) => return Err(Error::Import(e)),

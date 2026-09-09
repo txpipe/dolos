@@ -12,8 +12,9 @@
 use tracing::{debug, instrument};
 
 use crate::{
-    sync::run_lifecycle, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, RawBlock,
-    StateError, StateStore, WalError, WalStore, WorkUnit,
+    sync::{run_lifecycle, Lifecycle},
+    BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, RawBlock, StateError, StateStore,
+    WalError, WalStore, WorkUnit,
 };
 
 /// Extension trait for bulk block import operations.
@@ -35,32 +36,52 @@ pub trait ImportExt: Domain {
     ///
     /// The slot of the last imported block.
     fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
+
+    /// Import immutable history while the domain is offline, allowing
+    /// bounded parallel archive encoding. Recovery uses `import_blocks`.
+    fn import_blocks_offline(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError>;
 }
 
 impl<D: Domain> ImportExt for D {
-    fn import_blocks(&self, mut raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
-        let mut last = 0;
-        let mut chain = self.write_chain();
+    fn import_blocks(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+        import_blocks(self, raw, Lifecycle::Import)
+    }
 
-        for block in raw.drain(..) {
-            if !chain.can_receive_block() {
-                drain_pending_work::<D>(&mut *chain, self)?;
-            }
-
-            last = chain.receive_block(block)?;
-        }
-
-        // One last drain to ensure we're up to date
-        drain_pending_work::<D>(&mut *chain, self)?;
-
-        Ok(last)
+    fn import_blocks_offline(&self, raw: Vec<RawBlock>) -> Result<BlockSlot, DomainError> {
+        import_blocks(self, raw, Lifecycle::OfflineImport)
     }
 }
 
+fn import_blocks<D: Domain>(
+    domain: &D,
+    mut raw: Vec<RawBlock>,
+    lifecycle: Lifecycle,
+) -> Result<BlockSlot, DomainError> {
+    let mut last = 0;
+    let mut chain = domain.write_chain();
+
+    for block in raw.drain(..) {
+        if !chain.can_receive_block() {
+            drain_pending_work::<D>(&mut *chain, domain, lifecycle)?;
+        }
+
+        last = chain.receive_block(block)?;
+    }
+
+    // One last drain to ensure we're up to date
+    drain_pending_work::<D>(&mut *chain, domain, lifecycle)?;
+
+    Ok(last)
+}
+
 /// Drain all pending work from the chain logic using import lifecycle.
-fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(), DomainError> {
+fn drain_pending_work<D: Domain>(
+    chain: &mut D::Chain,
+    domain: &D,
+    lifecycle: Lifecycle,
+) -> Result<(), DomainError> {
     while let Some(mut work) = <D::Chain as ChainLogic>::pop_work::<D>(chain, domain) {
-        execute_work_unit(domain, &mut work)?;
+        execute_work_unit(domain, &mut work, lifecycle)?;
     }
 
     Ok(())
@@ -72,18 +93,23 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 /// 1. `initialize()` - Shard-agnostic setup
 /// 2. For each shard `0..total_shards()`: a. `load()` - Load required data from
 ///    storage b. `compute()` - Execute computation over loaded data c.
-///    `commit_state()` - Apply changes to state store d. `commit_archive()` -
-///    Apply changes to archive store
+///    `commit_state()` - Apply changes to state store d.
+///    `commit_archive()` - Apply archive changes, using
+///    `commit_archive_import()` only for explicit offline imports
 /// 3. `finalize()` - Shard-agnostic teardown
 ///
 /// Skipped phases:
 /// - `commit_wal()` - Not needed for immutable data import
 /// - `notify_tip()` - No subscribers during bulk import
 #[instrument(skip_all, name = "work_unit", fields(name = %work.name()))]
-fn execute_work_unit<D: Domain>(domain: &D, work: &mut D::WorkUnit) -> Result<(), DomainError> {
+fn execute_work_unit<D: Domain>(
+    domain: &D,
+    work: &mut D::WorkUnit,
+    lifecycle: Lifecycle,
+) -> Result<(), DomainError> {
     debug!("executing work unit (import)");
 
-    run_lifecycle(domain, work, false)?;
+    run_lifecycle(domain, work, lifecycle)?;
 
     // Skip tip notifications for import - no live subscribers
     debug!("skipping tip notifications (import mode)");

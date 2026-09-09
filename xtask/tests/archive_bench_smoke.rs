@@ -27,6 +27,7 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
                 Codec::zstd(3, Some(Dictionary::bundled())),
             ),
             ("store".into(), Codec::Store),
+            ("store-import".into(), Codec::StoreImport),
         ],
         repeat: 1,
         threads: vec![2],
@@ -61,7 +62,7 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
         .iter()
         .filter(|r| r["metrics"]["kind"] == "write")
         .collect();
-    assert_eq!(writes.len(), 2 * 4);
+    assert_eq!(writes.len(), 2 * 5);
     for w in &writes {
         assert_eq!(w["metrics"]["blocks"], 400);
         let crossings = w["metrics"]["segment_crossings"].as_u64().unwrap();
@@ -82,6 +83,24 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
     assert!(store["metrics"]["ratio"].as_f64().unwrap() < 0.8);
     assert!(store["metrics"]["write_ms"].as_f64().unwrap() > 0.0);
     assert_eq!(store["codec"]["dictionary"], dict["codec"]["dictionary"]);
+    let import = writes
+        .iter()
+        .find(|record| {
+            record["codec"]["codec"] == "store-import" && record["metrics"]["batch"] == 7
+        })
+        .unwrap();
+    assert!(
+        import["metrics"]["import_buffers"]["windows"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(
+        import["metrics"]["import_buffers"]["buffer_bytes_peak"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
 
     let reads: Vec<_> = records
         .iter()

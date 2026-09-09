@@ -66,12 +66,10 @@ impl Default for Args {
     }
 }
 
-fn define_starting_point(
+fn define_starting_point<S: dolos_core::StateStore>(
     args: &Args,
-    state: &dolos::storage::StateStoreBackend,
+    state: &S,
 ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
-    use dolos_core::StateStore;
-
     if let Some(point) = &args.start_from {
         Ok(point.clone().try_into().unwrap())
     } else {
@@ -90,8 +88,8 @@ fn define_starting_point(
 
 /// Inner import function that can return errors.
 /// The outer function ensures shutdown is called regardless of success/failure.
-fn do_import(
-    domain: &dolos::adapters::DomainAdapter,
+fn do_import<D: dolos_core::Domain>(
+    domain: &D,
     args: &Args,
     immutable_path: &Path,
     feedback: &Feedback,
@@ -134,7 +132,7 @@ fn do_import(
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
         let last = domain
-            .import_blocks(batch)
+            .import_blocks_offline(batch)
             .map_err(|e| miette::miette!(e.to_string()))?;
 
         progress.set_position(last);
@@ -220,4 +218,66 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     info!("bootstrap complete, run `dolos daemon` to start the node");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dolos_core::{ArchiveStore, Domain};
+    use dolos_testing::{
+        blocks::write_immutable_fixture,
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        toy_domain::{FjallStores, ToyDomain},
+    };
+    use pallas::ledger::traverse::MultiEraBlock;
+
+    #[test]
+    fn mithril_import_resumes_through_the_offline_writer() {
+        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+            block_count: 8,
+            slot: 100,
+            ..Default::default()
+        });
+        let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
+            Arc::new(dolos_cardano::include::preview::load()),
+            config,
+            None,
+            None,
+        );
+        domain.import_blocks(vec![blocks[0].clone()]).unwrap();
+        let first = MultiEraBlock::decode(&blocks[0]).unwrap();
+        let args = Args {
+            start_from: Some(ChainPoint::Specific(first.slot(), first.hash())),
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write_immutable_fixture(dir.path(), &blocks);
+        do_import(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
+        let stats = domain.archive().append_stats();
+        assert!(stats.import_batches > 0, "{stats:?}");
+        assert_eq!(stats.serial_batches, 1);
+        let restored: Vec<_> = domain
+            .archive()
+            .get_range(None, None)
+            .unwrap()
+            .map(|(_, body)| body)
+            .collect();
+        assert_eq!(
+            restored,
+            blocks
+                .iter()
+                .map(|body| body.as_ref().clone())
+                .collect::<Vec<_>>()
+        );
+        let before = domain.archive().append_stats();
+        do_import(
+            &domain,
+            &Args::default(),
+            dir.path(),
+            &Feedback::hidden(),
+            3,
+        )
+        .unwrap();
+        assert_eq!(domain.archive().append_stats(), before);
+    }
 }

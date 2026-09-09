@@ -59,6 +59,54 @@ fn write<S: CoreArchiveStore>(store: &S, blocks: &[(BlockSlot, Vec<u8>)]) {
     writer.commit().unwrap();
 }
 
+fn import<S: CoreArchiveStore>(store: &S, blocks: &[(BlockSlot, Vec<u8>)]) {
+    let writer = store.start_import_writer().unwrap();
+    for (slot, body) in blocks {
+        writer
+            .apply(&point(*slot), &Arc::new(body.clone()))
+            .unwrap();
+    }
+    writer.commit().unwrap();
+}
+
+#[test]
+fn offline_import_preserves_duplicates_rollback_and_restart() {
+    let memory = MemoryArchiveStore::new(StateSchema::default());
+    let dir = tempfile::tempdir().unwrap();
+    let fjall = open(dir.path());
+    write_history(&|blocks| {
+        import(&fjall, blocks);
+        write(&memory, blocks);
+    });
+    let mut pair = Pair {
+        memory,
+        fjall: Some(fjall),
+        dir,
+    };
+    pair.assert_agree("offline history");
+    let original = fs::read(pair.segment_path(0)).unwrap();
+    import(pair.fjall(), &[(slot(0, 5), body(slot(0, 5), 0))]);
+    pair.assert_agree("duplicate");
+    pair.reopen();
+    undo(
+        pair.fjall(),
+        &[slot(3, 1), slot(2, 6), slot(2, 2), slot(1, 8)],
+    );
+    undo(
+        &pair.memory,
+        &[slot(3, 1), slot(2, 6), slot(2, 2), slot(1, 8)],
+    );
+    pair.assert_agree("rollback after duplicate");
+    assert_eq!(
+        &fs::read(pair.segment_path(0)).unwrap()[..original.len()],
+        &original
+    );
+    import(pair.fjall(), &[(slot(1, 9), body(slot(1, 9), 0))]);
+    write(&pair.memory, &[(slot(1, 9), body(slot(1, 9), 0))]);
+    pair.reopen();
+    pair.assert_agree("restart after offline retry");
+}
+
 fn undo<S: CoreArchiveStore>(store: &S, slots: &[BlockSlot]) {
     let writer = store.start_writer().unwrap();
     for slot in slots {

@@ -261,6 +261,12 @@ impl ArchiveStore {
         })
     }
 
+    /// Which path each block batch took to the segment files, and the most
+    /// an import batch held at once.
+    pub fn append_stats(&self) -> dolos_flatfiles::AppendStats {
+        self.flatfiles.append_stats()
+    }
+
     /// Get a reference to the underlying database
     pub fn database(&self) -> &Database {
         &self.db
@@ -458,9 +464,35 @@ pub struct ArchiveWriter {
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
+    append: Append,
+    #[cfg(test)]
+    fail_index_commit: bool,
+}
+
+/// How a writer's blocks reach the segment files at commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Append {
+    /// One body after another on the committing thread: every ordinary
+    /// writer, live sync and recovery included.
+    Serial,
+    /// Encoded in parallel windows on the shared Rayon pool — the writer an
+    /// offline import asks for. Same frames at the same locations.
+    Import,
 }
 
 impl ArchiveWriter {
+    fn new(store: &ArchiveStore, append: Append) -> Self {
+        Self {
+            batch: Mutex::new(store.db.batch()),
+            store: store.clone(),
+            pending_blocks: Mutex::new(Vec::new()),
+            overlay: Mutex::new(HashMap::new()),
+            append,
+            #[cfg(test)]
+            fail_index_commit: false,
+        }
+    }
+
     fn resolve_locations(
         &self,
         overlay: &HashMap<BlockSlot, Vec<BlockLocation>>,
@@ -620,7 +652,11 @@ impl CoreArchiveWriter for ArchiveWriter {
                 })
                 .collect();
 
-            let locations = self.store.flatfiles.append_batch(&items).map_err(io_err)?;
+            let locations = match self.append {
+                Append::Serial => self.store.flatfiles.append_batch(&items),
+                Append::Import => self.store.flatfiles.import_batch(&items),
+            }
+            .map_err(io_err)?;
 
             let snapshot = self.store.db.snapshot();
 
@@ -644,6 +680,12 @@ impl CoreArchiveWriter for ArchiveWriter {
             }
         }
 
+        #[cfg(test)]
+        if self.fail_index_commit {
+            return Err(io_err(std::io::Error::other(
+                "injected index commit failure",
+            )));
+        }
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
 
@@ -865,12 +907,11 @@ impl CoreArchiveStore for ArchiveStore {
     type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        Ok(ArchiveWriter {
-            batch: Mutex::new(self.db.batch()),
-            store: self.clone(),
-            pending_blocks: Mutex::new(Vec::new()),
-            overlay: Mutex::new(HashMap::new()),
-        })
+        Ok(ArchiveWriter::new(self, Append::Serial))
+    }
+
+    fn start_import_writer(&self) -> Result<Self::Writer, ArchiveError> {
+        Ok(ArchiveWriter::new(self, Append::Import))
     }
 
     fn read_logs(
@@ -1242,6 +1283,26 @@ mod tests {
 
     fn segment_bytes(store: &ArchiveStore, segment: u32) -> Vec<u8> {
         std::fs::read(store.flatfiles.segment_path(segment)).unwrap()
+    }
+
+    #[test]
+    fn offline_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(1, body(1, 0))]);
+        let original = locations(&store, 1);
+        let mut writer = store.start_import_writer().unwrap();
+        writer.apply(&point(2), &body(2, 0)).unwrap();
+        writer.fail_index_commit = true;
+        assert!(writer.commit().is_err());
+        assert!(locations(&store, 2).is_empty());
+        let dead_end = segment_bytes(&store, 0).len() as u64;
+        let writer = store.start_import_writer().unwrap();
+        writer.apply(&point(1), &body(1, 0)).unwrap();
+        writer.apply(&point(2), &body(2, 0)).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(locations(&store, 1), original);
+        assert!(locations(&store, 2)[0].offset >= dead_end);
+        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
     }
 
     #[test]

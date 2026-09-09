@@ -107,6 +107,12 @@ pub fn write_corpus(
         "segment_crossings": crossings,
         "segments": sink.files().len(),
         "heap_peak_bytes": heap_peak,
+        "import_buffers": sink.append_stats().map(|stats| json!({
+            "encoders_peak": stats.import_encoders_peak,
+            "window_bytes_peak": stats.import_window_bytes_peak,
+            "buffer_bytes_peak": stats.import_buffer_bytes_peak,
+            "windows": stats.import_windows,
+        })),
         "process": process.json(),
     });
     Ok(WriteOutcome { locations, metrics })

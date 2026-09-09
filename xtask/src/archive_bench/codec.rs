@@ -41,6 +41,7 @@ pub enum Codec {
     },
     /// The production store, appending and reading as the node does.
     Store,
+    StoreImport,
 }
 
 impl std::fmt::Debug for Codec {
@@ -66,13 +67,14 @@ impl Codec {
                 dictionary: Some(_),
             } => format!("zstd{level}-dict"),
             Codec::Store => "store".into(),
+            Codec::StoreImport => "store-import".into(),
         }
     }
 
     /// Whether a reader for this codec can turn caching off at the
     /// descriptor; the store opens its own.
     pub fn reads_without_cache(&self) -> bool {
-        !matches!(self, Codec::Store)
+        !matches!(self, Codec::Store | Codec::StoreImport)
     }
 
     /// The record form, named `label` where the caller's name for this
@@ -92,8 +94,8 @@ impl Codec {
                 "dictionary": dictionary.as_ref().map(|d| d.id().to_string()),
                 "dictionary_bytes": dictionary.as_ref().map(|d| d.bytes().len()),
             }),
-            Codec::Store => json!({
-                "codec": "store",
+            Codec::Store | Codec::StoreImport => json!({
+                "codec": self.label(),
                 "level": COMPRESSION_LEVEL,
                 "dictionary": Dictionary::bundled().id().to_string(),
                 "dictionary_bytes": BUNDLED_DICTIONARY.len(),
@@ -104,7 +106,7 @@ impl Codec {
     pub fn encoder(&self) -> io::Result<Encoder> {
         let inner = match self {
             Codec::Raw => None,
-            Codec::Store => return Err(store_has_its_own()),
+            Codec::Store | Codec::StoreImport => return Err(store_has_its_own()),
             Codec::Zstd { level, dictionary } => {
                 let mut c = match dictionary {
                     Some(d) => zstd::bulk::Compressor::with_dictionary(*level, d.bytes())?,
@@ -124,7 +126,7 @@ impl Codec {
     pub fn decoder(&self) -> io::Result<Decoder> {
         let inner = match self {
             Codec::Raw => None,
-            Codec::Store => return Err(store_has_its_own()),
+            Codec::Store | Codec::StoreImport => return Err(store_has_its_own()),
             Codec::Zstd { dictionary, .. } => Some(match dictionary {
                 Some(d) => zstd::bulk::Decompressor::with_dictionary(d.bytes())?,
                 None => zstd::bulk::Decompressor::new()?,
@@ -141,7 +143,7 @@ impl Codec {
         h[0..4].copy_from_slice(MAGIC);
         h[4] = 1;
         match self {
-            Codec::Raw | Codec::Store => h[5] = 0,
+            Codec::Raw | Codec::Store | Codec::StoreImport => h[5] = 0,
             Codec::Zstd { level, dictionary } => {
                 h[5] = 1;
                 h[6] = *level as i8 as u8;
@@ -266,11 +268,11 @@ impl Sink {
     pub fn open(dir: &Path, codec: Codec, encode_threads: usize, fsync: bool) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let store = match codec {
-            Codec::Store => Some(FlatFileStore::new(dir)?),
+            Codec::Store | Codec::StoreImport => Some(FlatFileStore::new(dir)?),
             _ => None,
         };
         let encoders = match codec {
-            Codec::Store => Vec::new(),
+            Codec::Store | Codec::StoreImport => Vec::new(),
             _ => (0..encode_threads.max(1))
                 .map(|_| codec.encoder())
                 .collect::<io::Result<Vec<_>>>()?,
@@ -289,6 +291,10 @@ impl Sink {
         &self.dir
     }
 
+    pub fn append_stats(&self) -> Option<dolos_flatfiles::AppendStats> {
+        self.store.as_ref().map(FlatFileStore::append_stats)
+    }
+
     fn file(&mut self, segment: u32) -> io::Result<&mut (File, u64)> {
         if !self.files.contains_key(&segment) {
             let path = segment_path(&self.dir, segment);
@@ -305,7 +311,7 @@ impl Sink {
 
     pub fn append_batch(&mut self, items: &[(u32, &[u8])]) -> io::Result<BatchStats> {
         if let Some(store) = &self.store {
-            return append_to_store(store, items);
+            return append_to_store(store, items, matches!(self.codec, Codec::StoreImport));
         }
 
         let mut stats = BatchStats::default();
@@ -433,11 +439,19 @@ impl Sink {
 /// One batch through the production store. The store encodes, writes and
 /// syncs inside the call, so the whole of it is `write_ns` and the thread's
 /// CPU over it stands for the encode cost.
-fn append_to_store(store: &FlatFileStore, items: &[(u32, &[u8])]) -> io::Result<BatchStats> {
+fn append_to_store(
+    store: &FlatFileStore,
+    items: &[(u32, &[u8])],
+    offline: bool,
+) -> io::Result<BatchStats> {
     let mut stats = BatchStats::default();
     let cpu = thread_cpu_ns();
     let t = Instant::now();
-    let locations = store.append_batch(items)?;
+    let locations = if offline {
+        store.import_batch(items)?
+    } else {
+        store.append_batch(items)?
+    };
     stats.write_ns = t.elapsed().as_nanos() as u64;
     stats.encode_cpu_ns = thread_cpu_ns().saturating_sub(cpu);
     let mut touched = std::collections::BTreeSet::new();
@@ -494,7 +508,7 @@ impl Reader {
     /// each read on Linux, nothing elsewhere. The store opens its own
     /// descriptors, so it cannot honor it.
     pub fn open(dir: &Path, codec: &Codec, nocache: bool) -> io::Result<Self> {
-        if let Codec::Store = codec {
+        if matches!(codec, Codec::Store | Codec::StoreImport) {
             if nocache {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,

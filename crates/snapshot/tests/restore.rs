@@ -612,6 +612,13 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
 
     let (domain, blank, _) = round_trip::<FjallStores>(default_budget());
     let archive_dir = blank.stores.path().join("archive");
+
+    // The blocks layers went through the archive's import writer, and
+    // nothing else did: a restore is the offline load that path is for.
+    let appends = blank.archive.append_stats();
+    assert!(appends.import_batches > 0, "{appends:?}");
+    assert_eq!(appends.serial_batches, 0, "{appends:?}");
+
     let restored = blocks_of(&blank.archive);
     assert_eq!(restored, blocks_of(domain.archive()), "order and bodies");
     let hashes = |blocks: &[(u64, Vec<u8>)]| -> Vec<String> {
@@ -633,6 +640,12 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
     assert_eq!(
         blank.archive.get_tip().unwrap().map(|(s, _)| s),
         Some(tip_slot + 20)
+    );
+    let after = blank.archive.append_stats();
+    assert_eq!(
+        (after.serial_batches, after.import_batches),
+        (1, appends.import_batches),
+        "an ordinary append after the restore is serial"
     );
     assert_eq!(
         blank

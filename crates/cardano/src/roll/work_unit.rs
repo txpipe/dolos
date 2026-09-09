@@ -123,6 +123,14 @@ where
         Ok(())
     }
 
+    fn commit_archive_import(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
+        debug!("committing roll batch to archive through the import writer");
+
+        self.batch.commit_archive_import(domain)?;
+
+        Ok(())
+    }
+
     fn tip_events(&self) -> Vec<TipEvent> {
         if !self.live_mode {
             return Vec::new();

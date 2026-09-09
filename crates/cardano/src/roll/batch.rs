@@ -382,7 +382,26 @@ impl WorkBatch {
         D: Domain<Chain = CardanoLogic>,
     {
         let writer = domain.archive().start_writer()?;
+        self.commit_archive_through::<D>(writer)
+    }
 
+    /// The same commit through the archive's import writer, for the import
+    /// lifecycle only.
+    pub fn commit_archive_import<D>(&mut self, domain: &D) -> Result<(), DomainError>
+    where
+        D: Domain<Chain = CardanoLogic>,
+    {
+        let writer = domain.archive().start_import_writer()?;
+        self.commit_archive_through::<D>(writer)
+    }
+
+    fn commit_archive_through<D>(
+        &mut self,
+        writer: <D::Archive as ArchiveStore>::Writer,
+    ) -> Result<(), DomainError>
+    where
+        D: Domain<Chain = CardanoLogic>,
+    {
         for block in self.blocks.iter() {
             let point = block.point();
             let raw = block.raw();

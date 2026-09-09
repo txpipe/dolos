@@ -127,6 +127,7 @@ fn settings(r: &Value) -> Value {
         "node-import" => json!({
             "chunk": m["chunk"],
             "blocks": m["blocks"],
+            "commit_instrumented": m["instrumentation"]["commit_latency"].is_object(),
         }),
         "node-read" => json!({
             "cache": match r["cache"]["method"].as_str() {
@@ -798,6 +799,10 @@ fn render_node(records: &[Value], out: &mut String) {
                 "segments MiB",
                 "ratio",
                 "index MiB",
+                "commit p50 ms",
+                "commit p95 ms",
+                "commit p99 ms",
+                "encoded buffers MiB",
             ],
         );
         for r in imports {
@@ -820,6 +825,22 @@ fn render_node(records: &[Value], out: &mut String) {
                     format!("{:.1}", f(m, &["segment_bytes"]) / 1_048_576.0),
                     format!("{:.3}", f(m, &["ratio"])),
                     format!("{:.1}", f(m, &["index_bytes"]) / 1_048_576.0),
+                    m["instrumentation"]["commit_latency"]["p50_us"]
+                        .as_f64()
+                        .map(ms)
+                        .unwrap_or_else(|| "-".into()),
+                    m["instrumentation"]["commit_latency"]["p95_us"]
+                        .as_f64()
+                        .map(ms)
+                        .unwrap_or_else(|| "-".into()),
+                    m["instrumentation"]["commit_latency"]["p99_us"]
+                        .as_f64()
+                        .map(ms)
+                        .unwrap_or_else(|| "-".into()),
+                    m["instrumentation"]["buffers"]["buffer_bytes_peak"]
+                        .as_f64()
+                        .map(|bytes| format!("{:.2}", bytes / 1_048_576.0))
+                        .unwrap_or_else(|| "-".into()),
                 ],
             );
         }
@@ -894,7 +915,7 @@ fn render_node(records: &[Value], out: &mut String) {
                 "settings",
                 "label",
                 "throughput vs baseline",
-                "point p95 vs baseline",
+                "p95 vs baseline",
                 "baseline p95 µs",
                 "label p95 µs",
                 "gate",
@@ -937,13 +958,12 @@ pub struct NodeGate {
     /// Label throughput over baseline throughput (blocks/s for imports and
     /// scans, ops/s for point and page workloads).
     pub throughput: f64,
-    /// Label point p95 over baseline point p95, for workloads with point
-    /// reads.
+    /// Label commit or point-read p95 over the matching baseline p95.
     pub p95: Option<f64>,
     pub baseline_p95_us: Option<f64>,
     pub p95_us: Option<f64>,
-    /// What the verdict is judged on: `throughput >= 0.9` for ingestion,
-    /// `p95 <= 1.1` for API point reads, nothing for pages and scans.
+    /// Ingestion throughput and instrumented commit p95, API point p95,
+    /// or no gate for pages and scans.
     pub gate: &'static str,
     pub pass: bool,
     pub problem: Option<String>,
@@ -968,15 +988,21 @@ impl NodeGate {
 pub fn node_gates(records: &[Value]) -> Vec<NodeGate> {
     type Group = BTreeMap<String, Samples>;
     let mut groups: BTreeMap<(String, String, String), Group> = BTreeMap::new();
-    let mut gate_of: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut gate_of: BTreeMap<(String, String, String), &'static str> = BTreeMap::new();
     for r in records {
         let m = &r["metrics"];
         let (thr, p95, key, gate) = match kind(r) {
             "node-import" => (
                 f(m, &["blocks_per_s"]),
-                f64::NAN,
+                m["instrumentation"]["commit_latency"]["p95_us"]
+                    .as_f64()
+                    .unwrap_or(f64::NAN),
                 workload(r).to_string(),
-                "throughput >= 0.9",
+                if m["instrumentation"]["commit_latency"].is_object() {
+                    "throughput >= 0.9, commit p95 <= 1.1 (3 pairs)"
+                } else {
+                    "throughput >= 0.9"
+                },
             ),
             "node-read" => {
                 let key = format!("{} [{} t{}]", workload(r), s(m, &["regime"]), m["threads"]);
@@ -998,12 +1024,12 @@ pub fn node_gates(records: &[Value]) -> Vec<NodeGate> {
             }
             _ => continue,
         };
-        gate_of.insert(key.clone(), gate);
         let scope = (
             node_run(r).to_string(),
             key,
             canonical(&json!({ "corpus": r["corpus"], "settings": settings(r) })),
         );
+        gate_of.insert(scope.clone(), gate);
         let entry = groups
             .entry(scope)
             .or_default()
@@ -1018,7 +1044,6 @@ pub fn node_gates(records: &[Value]) -> Vec<NodeGate> {
     }
     let mut out = Vec::new();
     for ((run, workload, settings), labels) in &groups {
-        // Imports carry no p95; their samples are NaN and drop out here.
         let finite_median = |v: Vec<f64>| -> Option<f64> {
             let finite: Vec<f64> = v.into_iter().filter(|p| p.is_finite()).collect();
             (!finite.is_empty()).then(|| median(finite))
@@ -1026,7 +1051,10 @@ pub fn node_gates(records: &[Value]) -> Vec<NodeGate> {
         let baseline = labels.get(BASELINE_LABEL);
         let base_thr = baseline.map(|b| median(b.throughput())).unwrap_or(0.0);
         let base_p95 = baseline.and_then(|b| finite_median(b.p95()));
-        let gate = gate_of.get(workload).copied().unwrap_or("-");
+        let gate = gate_of
+            .get(&(run.clone(), workload.clone(), settings.clone()))
+            .copied()
+            .unwrap_or("-");
         for candidate in labels.values().filter(|c| c.label != BASELINE_LABEL) {
             let throughput = if base_thr > 0.0 {
                 median(candidate.throughput()) / base_thr
@@ -1042,6 +1070,11 @@ pub fn node_gates(records: &[Value]) -> Vec<NodeGate> {
             let pass = problem.is_none()
                 && match gate {
                     "throughput >= 0.9" => throughput >= 0.9,
+                    "throughput >= 0.9, commit p95 <= 1.1 (3 pairs)" => {
+                        throughput >= 0.9
+                            && p95.is_some_and(|ratio| ratio <= 1.1)
+                            && candidate.by_repeat.len() >= 3
+                    }
                     "point p95 <= 1.1" => p95.is_some_and(|p| p <= 1.1),
                     _ => false,
                 };
@@ -1122,6 +1155,35 @@ mod tests {
 
     fn raw() -> Value {
         json!({ "codec": "raw" })
+    }
+
+    #[test]
+    fn instrumented_import_gate_requires_three_pairs_and_real_commit_p95() {
+        let records = |repeats, p95| -> Vec<Value> {
+            (0..repeats)
+                .flat_map(|repeat| {
+                    [("baseline", 100.0, 10.0), ("optimized", 95.0, p95)].map(
+                        |(label, throughput, latency)| {
+                            json!({
+                                "run": "test", "repeat": repeat, "node": {"label": label},
+                                "corpus": {"blocks": 1000},
+                                "metrics": {
+                                    "kind": "node-import", "workload": "import-500",
+                                    "chunk": 500, "blocks": 1000, "blocks_per_s": throughput,
+                                    "instrumentation": {"commit_latency": {"p95_us": latency}}
+                                }
+                            })
+                        },
+                    )
+                })
+                .collect()
+        };
+        assert!(!node_gates(&records(2, 10.0))[0].pass);
+        assert!(node_gates(&records(3, 10.5))[0].pass);
+        assert!(!node_gates(&records(3, 11.5))[0].pass);
+        let mut mixed = records(3, 10.5);
+        mixed[0]["metrics"]["instrumentation"] = Value::Null;
+        assert!(!node_gates(&mixed)[0].pass);
     }
 
     fn dict(id: &str) -> Value {

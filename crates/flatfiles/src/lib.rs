@@ -6,14 +6,16 @@
 //! by its physical offset and length inside its segment; the archive index
 //! holds those locations and this crate decodes the frame they name. The
 //! crate knows nothing about Cardano and depends on little beyond the
-//! standard library: `zstd` for the frames and `tempfile` for throwaway
-//! stores.
+//! standard library: `zstd` for the frames, `rayon` for the offline import's
+//! parallel encoding and `tempfile` for throwaway stores.
 
 mod codec;
 mod store;
 
-pub use codec::{BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
-pub use store::{parse_segment_filename, FlatFileStore, ResourceStats};
+pub use codec::{frame_bound, BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
+pub use store::{
+    parse_segment_filename, AppendStats, FlatFileStore, ResourceStats, IMPORT_WINDOW_BYTES,
+};
 
 /// Number of slots per segment file (one Cardano epoch).
 pub const SLOTS_PER_SEGMENT: u64 = 432_000;

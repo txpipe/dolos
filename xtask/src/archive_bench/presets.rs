@@ -312,6 +312,9 @@ pub fn run(preset: Preset, corpus: &Corpus, opts: &Options, out: &mut dyn Write)
             for &batch in &batches {
                 for (label, codec) in &opts.codecs {
                     let dir = opts.work.join(label).join(format!("concurrent-{batch}"));
+                    if matches!(codec, Codec::StoreImport) {
+                        continue;
+                    }
                     clean(&dir, false)?;
                     let metrics = run_concurrent(
                         corpus,
