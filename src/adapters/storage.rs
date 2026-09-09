@@ -21,7 +21,7 @@ use dolos_core::{
     },
     config::{
         ArchiveStoreConfig, FjallStateConfig, MempoolStoreConfig, RedbStateConfig, RedbWalConfig,
-        RootConfig, StateStoreConfig, StorageVersion, WalStoreConfig,
+        RootConfig, StateStoreConfig, StorageConfig, StorageVersion, WalStoreConfig,
     },
     ArchiveIndexDelta, BlockBody, BlockSlot, ChainPoint, EntityDelta, EntityKey, EntityValue,
     ExactRecord, IndexRecord, LogEntry, LogValue, MempoolError, MempoolEvent, MempoolStore,
@@ -65,6 +65,105 @@ pub fn clear_storage(storage_path: &Path) -> Result<(), Error> {
         .map_err(|e| Error::StorageError(format!("recreating storage directory: {e}")))?;
 
     Ok(())
+}
+
+/// The configured store paths a wipe of `storage.path` would not reach.
+///
+/// Every store the configuration names has to sit under the root for a wipe of
+/// the root to be the whole of the old data: a store configured elsewhere — an
+/// absolute path, or a relative one that climbs out — would survive it. The
+/// comparison is lexical, on the paths as the stores resolve them: symlinks are
+/// not followed, so a link under the root reads as under the root, and what it
+/// points at is never in question here.
+pub fn stores_outside_root(storage: &StorageConfig) -> Result<Vec<PathBuf>, Error> {
+    let cwd = std::env::current_dir()?;
+    let root = normalize(&cwd, &storage.path);
+
+    let blocks_path = match &storage.archive {
+        ArchiveStoreConfig::Fjall(cfg) => cfg.blocks_path.clone(),
+        ArchiveStoreConfig::InMemory | ArchiveStoreConfig::NoOp => None,
+    };
+
+    let outside = [
+        storage.wal_path(),
+        storage.state_path(),
+        storage.archive_path(),
+        blocks_path,
+        storage.mempool_path(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| !normalize(&cwd, path).starts_with(&root))
+    .collect();
+
+    Ok(outside)
+}
+
+/// Every symlink under `root`, the root itself included, without following any.
+///
+/// A wipe that reaches a symlink cannot know whether the store behind it is
+/// the operator's to lose, so a caller that intends to delete asks first and
+/// refuses on a non-empty answer. Walks with `symlink_metadata`, so a link to
+/// a directory is reported and never descended into.
+pub fn symlinks_under(root: &Path) -> Result<Vec<PathBuf>, Error> {
+    let mut found = Vec::new();
+
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return Ok(found);
+    };
+
+    if metadata.file_type().is_symlink() {
+        found.push(root.to_path_buf());
+        return Ok(found);
+    }
+
+    if !metadata.is_dir() {
+        return Ok(found);
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+
+            if file_type.is_symlink() {
+                found.push(entry.path());
+            } else if file_type.is_dir() {
+                pending.push(entry.path());
+            }
+        }
+    }
+
+    found.sort();
+
+    Ok(found)
+}
+
+/// Make `path` absolute against `cwd` and fold `.` and `..` lexically.
+fn normalize(cwd: &Path, path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+
+    let mut out = PathBuf::new();
+
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+
+    out
 }
 
 /// What to do about data already in storage.
@@ -112,6 +211,8 @@ pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
 ) -> Result<Existing, Error> {
+    check_storage_version(&config.storage.version)?;
+
     if policy.r#continue {
         return Ok(Existing::Proceed);
     }
@@ -142,6 +243,13 @@ pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
 /// The migration guide the refusal points an operator at.
 pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v1-7";
 
+/// Refuse a configuration at any storage version but the current one.
+///
+/// The comparison is the whole compatibility policy: the version the config
+/// declares against the one the binary carries, and nothing on disk. Every
+/// store opener runs it before touching its path, so a refused configuration
+/// has had no directory created and no store opened on its behalf — which is
+/// what lets `dolos init` remain the one deliberate way past it.
 fn check_storage_version(version: &StorageVersion) -> Result<(), Error> {
     if *version != CURRENT_STORAGE_VERSION {
         return Err(Error::StorageError(format!(
@@ -165,12 +273,16 @@ pub fn open_wal_store<D>(config: &RootConfig) -> Result<WalStoreBackend<D>, Erro
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    check_storage_version(&config.storage.version)?;
+
     let path = config.storage.wal_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(WalStoreBackend::open(&path, &config.storage.wal)?)
 }
 
 pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
+    check_storage_version(&config.storage.version)?;
+
     let path = config.storage.archive_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(ArchiveStoreBackend::open(
@@ -181,6 +293,8 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    check_storage_version(&config.storage.version)?;
+
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -191,6 +305,8 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
 }
 
 pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> {
+    check_storage_version(&config.storage.version)?;
+
     match &config.storage.mempool {
         MempoolStoreConfig::InMemory => Ok(MempoolBackend::Ephemeral(
             dolos_core::builtin::EphemeralMempool::new(),
@@ -1347,11 +1463,40 @@ impl MempoolStore for MempoolBackend {
 mod tests {
     use super::*;
 
-    fn refusal(result: Result<(), Error>) -> String {
-        match result {
-            Err(Error::StorageError(message)) => message,
-            other => panic!("expected a storage refusal, got {other:?}"),
-        }
+    fn refusal<T>(result: Result<T, Error>) -> String {
+        result.err().expect("expected a refusal").to_string()
+    }
+
+    /// A node configuration over `root`, with every store on its disk backend
+    /// at its default path so that the root is all the data there is.
+    fn config_over(root: &Path, version: &str) -> RootConfig {
+        let toml = format!(
+            r#"
+            [upstream]
+            peer_address = "unused.example:3001"
+
+            [storage]
+            version = "{version}"
+            path = {path}
+
+            [storage.mempool]
+            backend = "redb"
+
+            [genesis]
+            byron_path = "byron.json"
+            shelley_path = "shelley.json"
+            alonzo_path = "alonzo.json"
+            conway_path = "conway.json"
+
+            [chain]
+            type = "cardano"
+            magic = 2
+            is_testnet = true
+            "#,
+            path = toml::Value::String(root.display().to_string()),
+        );
+
+        toml::from_str(&toml).unwrap()
     }
 
     /// A v1.6-era configuration is refused, and the refusal names both the
@@ -1385,6 +1530,129 @@ mod tests {
         }
 
         check_storage_version(&CURRENT_STORAGE_VERSION).unwrap();
+    }
+
+    /// Every path that opens a store on its own — the per-store openers the
+    /// dump, doctor and bootstrap commands use, and bootstrap's look at
+    /// existing data — refuses a stale configuration before it creates or
+    /// opens anything, the same way the daemon's `open_data_stores` does.
+    #[test]
+    fn a_stale_config_is_refused_before_any_store_is_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let stale = config_over(&root, "v3");
+
+        let refusals = [
+            refusal(open_data_stores::<dolos_cardano::CardanoDelta>(&stale)),
+            refusal(open_wal_store::<dolos_cardano::CardanoDelta>(&stale)),
+            refusal(open_state_store(&stale)),
+            refusal(open_archive_store(&stale)),
+            refusal(open_mempool_store(&stale)),
+            refusal(has_existing_data(&stale)),
+            refusal(inspect_existing_data(
+                &stale,
+                ExistingDataPolicy {
+                    force: true,
+                    ..Default::default()
+                },
+            )),
+            refusal(inspect_existing_data(
+                &stale,
+                ExistingDataPolicy {
+                    r#continue: true,
+                    ..Default::default()
+                },
+            )),
+        ];
+
+        for message in refusals {
+            assert!(
+                message.contains("dolos init"),
+                "every entry point refuses with the same remedy: {message}"
+            );
+        }
+
+        assert!(
+            !root.exists(),
+            "a refused configuration must not have had its storage created"
+        );
+
+        let current = config_over(&root, "v4");
+
+        open_data_stores::<dolos_cardano::CardanoDelta>(&current)
+            .expect("the current version opens");
+
+        assert!(root.is_dir());
+    }
+
+    /// The stores at their default paths all sit under the root; a store
+    /// configured elsewhere — absolute, or relative and climbing out — is what
+    /// gets reported. A relative override inside the root is not.
+    #[test]
+    fn stores_outside_root_reports_what_a_wipe_of_the_root_would_miss() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let elsewhere = temp.path().join("elsewhere");
+
+        let mut storage = config_over(&root, "v4").storage;
+
+        assert!(stores_outside_root(&storage).unwrap().is_empty());
+
+        let StateStoreConfig::Fjall(state) = &mut storage.state else {
+            panic!("the fixture leaves state on fjall");
+        };
+        state.path = Some(PathBuf::from("inner/state"));
+
+        assert!(stores_outside_root(&storage).unwrap().is_empty());
+
+        let StateStoreConfig::Fjall(state) = &mut storage.state else {
+            panic!("the fixture leaves state on fjall");
+        };
+        state.path = Some(elsewhere.join("state"));
+
+        let ArchiveStoreConfig::Fjall(archive) = &mut storage.archive else {
+            panic!("the fixture leaves the archive on fjall");
+        };
+        archive.path = Some(PathBuf::from("../sibling/archive"));
+        archive.blocks_path = Some(elsewhere.join("blocks"));
+
+        let outside = stores_outside_root(&storage).unwrap();
+
+        assert_eq!(
+            outside,
+            vec![
+                elsewhere.join("state"),
+                root.join("../sibling/archive"),
+                elsewhere.join("blocks"),
+            ]
+        );
+    }
+
+    /// A link under the root is reported and not descended into, and a root
+    /// that is itself a link is reported as the whole answer.
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_under_reports_links_without_following_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let elsewhere = temp.path().join("elsewhere");
+
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::fs::write(root.join("state").join("journal"), b"state").unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("000000.segment"), b"blocks").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("archive")).unwrap();
+
+        assert_eq!(symlinks_under(&root).unwrap(), vec![root.join("archive")]);
+
+        let linked_root = temp.path().join("linked");
+        std::os::unix::fs::symlink(&root, &linked_root).unwrap();
+
+        assert_eq!(symlinks_under(&linked_root).unwrap(), vec![linked_root]);
+
+        assert!(symlinks_under(&temp.path().join("missing"))
+            .unwrap()
+            .is_empty());
     }
 
     /// `in_memory` has to reach the builtin stores, not a memory-mode disk

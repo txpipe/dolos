@@ -616,7 +616,9 @@ impl ConfigEditor {
     /// data, so the setup stays exactly as it was found and the daemon keeps
     /// refusing it. Recording the new version without performing the migration
     /// would be the tool producing the config/data mismatch the version gate
-    /// puts on the operator alone.
+    /// puts on the operator alone — which is also why the version is assigned
+    /// only after the cleanup has succeeded: a cleanup that refuses or fails
+    /// ends the init with the editor, and the config on disk, as they were.
     fn apply_storage_upgrade(mut self, delete: bool) -> miette::Result<Self> {
         if !delete {
             return Err(miette!(
@@ -626,9 +628,7 @@ impl ConfigEditor {
             ));
         }
 
-        cleanup_data(&self.0)
-            .into_diagnostic()
-            .context("cleaning up data")?;
+        cleanup_data(&self.0).context("cleaning up data")?;
 
         self.0.storage.version = CURRENT_STORAGE_VERSION;
 
@@ -813,6 +813,16 @@ impl ConfigEditor {
     }
 }
 
+/// Whether a config file is present that this dolos could not read.
+///
+/// A load that failed with the file on disk is an older setup, not a missing
+/// one: a v1.6 `dolos.toml` naming a removed backend, or carrying the retired
+/// `block_compression` table, does not parse here. `storage_upgrade` records
+/// what follows from that.
+fn existing_config_is_unreadable(config: &miette::Result<RootConfig>, config_file: &Path) -> bool {
+    config.is_err() && config_file.exists()
+}
+
 pub fn run(
     config: miette::Result<RootConfig>,
     args: &Args,
@@ -820,9 +830,7 @@ pub fn run(
 ) -> miette::Result<()> {
     crate::banner::print_init_banner();
 
-    // A config that exists but did not parse is an older setup, not a missing
-    // one; `storage_upgrade` records what follows from that.
-    let unparseable_existing = config.is_err() && Path::new(CONFIG_FILE).exists();
+    let unparseable_existing = existing_config_is_unreadable(&config, Path::new(CONFIG_FILE));
 
     config
         .map(|x| ConfigEditor(x, None))
@@ -851,6 +859,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dolos_snapshot::restore::progress_path_in;
 
     /// A fresh config is seeded at the version this binary reads, so the
     /// upgrade prompt does not fire on a node init just created.
@@ -893,14 +902,38 @@ mod tests {
         editor
     }
 
+    /// Lay out what an older node leaves under `root`: the directory-based
+    /// stores with their files nested inside, a block segment, and the
+    /// progress file of a restore that never finished. Returns every file
+    /// written, so a test can say whether all of it is still there.
+    fn old_store_under(root: &Path) -> Vec<PathBuf> {
+        let files = vec![
+            root.join("wal").join("journal"),
+            root.join("state").join("index").join("000001.sst"),
+            root.join("archive").join("index").join("000001.sst"),
+            root.join("archive").join("000000.segment"),
+            progress_path_in(root),
+        ];
+
+        for file in &files {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"a store built by v1.6").unwrap();
+        }
+
+        files
+    }
+
+    fn all_present(files: &[PathBuf]) -> bool {
+        files.iter().all(|file| file.is_file())
+    }
+
     /// Declining the offer costs the operator nothing: no data removed, and no
     /// version recorded that the data does not back.
     #[test]
     fn declining_the_upgrade_touches_neither_data_nor_version() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        std::fs::create_dir(&data).unwrap();
-        std::fs::write(data.join("state"), b"a store built by v1.6").unwrap();
+        let files = old_store_under(&data);
 
         let error = editor_over(&data)
             .apply_storage_upgrade(false)
@@ -912,24 +945,101 @@ mod tests {
             "the abort must point at the migration guide: {error}"
         );
         assert!(
-            data.join("state").exists(),
+            all_present(&files),
             "declining must leave the store in place"
         );
     }
 
-    /// Accepting is the only path that deletes, and it records the new version
-    /// only once the data it describes is gone.
+    /// Accepting is the only path that deletes. The stores are directories
+    /// with files nested inside them, not flat files under the root, and the
+    /// wipe has to take all of it — the restore progress file included — and
+    /// hand back an empty root for the bootstrap that follows. The version is
+    /// recorded only once that has happened.
     #[test]
-    fn accepting_the_upgrade_clears_the_data_and_records_the_version() {
+    fn accepting_the_upgrade_clears_the_nested_stores_and_records_the_version() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        std::fs::create_dir(&data).unwrap();
-        std::fs::write(data.join("state"), b"a store built by v1.6").unwrap();
+        let files = old_store_under(&data);
 
         let editor = editor_over(&data).apply_storage_upgrade(true).unwrap();
 
-        assert!(!data.exists(), "accepting must clear the store");
+        assert!(
+            !files.iter().any(|file| file.exists()),
+            "accepting must clear every store under the root"
+        );
+        assert!(data.is_dir(), "the root comes back for the bootstrap");
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
         assert_eq!(editor.0.storage.version, CURRENT_STORAGE_VERSION);
+    }
+
+    /// A store the configuration keeps outside the root would survive a wipe
+    /// of the root, and a config recorded at the new version over a surviving
+    /// store is the mismatch the gate exists to refuse. So the accept path
+    /// stops before deleting anything, names the directory to remove by hand,
+    /// and — because the error carries the editor away with it — leaves no
+    /// upgraded config to save.
+    #[test]
+    fn a_store_outside_the_root_aborts_before_anything_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let elsewhere = dir.path().join("elsewhere").join("state");
+        let files = old_store_under(&data);
+
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("journal"), b"a store built by v1.6").unwrap();
+
+        let mut editor = editor_over(&data);
+        let dolos_core::config::StateStoreConfig::Fjall(state) = &mut editor.0.storage.state else {
+            panic!("the default state backend is fjall");
+        };
+        state.path = Some(elsewhere.clone());
+
+        let error = editor
+            .apply_storage_upgrade(true)
+            .err()
+            .expect("a store outside the root aborts the init");
+
+        // The CLI prints the whole chain; `Display` alone is the outer context.
+        let message = error
+            .chain()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(": ");
+        assert!(
+            message.contains(&elsewhere.display().to_string()),
+            "the abort must name the store to remove by hand: {message}"
+        );
+        assert!(
+            message.contains("by hand"),
+            "the abort must ask for manual removal: {message}"
+        );
+        assert!(all_present(&files), "nothing under the root may be deleted");
+        assert!(
+            elsewhere.join("journal").is_file(),
+            "nothing outside the root may be deleted"
+        );
+    }
+
+    /// A cleanup that fails partway is an init that fails, not one that
+    /// records a version over whatever survived.
+    #[test]
+    fn a_failed_cleanup_records_no_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+
+        // A root that is not a directory cannot be cleared as one.
+        std::fs::write(&data, b"not a directory").unwrap();
+
+        let error = editor_over(&data)
+            .apply_storage_upgrade(true)
+            .err()
+            .expect("a failed cleanup aborts the init");
+
+        assert!(
+            error.to_string().contains("cleaning up data"),
+            "the abort must say what failed: {error}"
+        );
+        assert_eq!(std::fs::read(&data).unwrap(), b"not a directory");
     }
 
     /// A config init cannot read never reaches the deletion: the store's path
@@ -939,8 +1049,7 @@ mod tests {
     fn an_unreadable_config_aborts_without_deleting_anything() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().join("data");
-        std::fs::create_dir(&data).unwrap();
-        std::fs::write(data.join("state"), b"a store built by v1.6").unwrap();
+        let files = old_store_under(&data);
 
         let error = editor_over(&data)
             .prompt_storage_upgrade(true)
@@ -952,9 +1061,179 @@ mod tests {
             "the abort must point at the migration guide: {error}"
         );
         assert!(
-            data.join("state").exists(),
+            all_present(&files),
             "an unreadable config must leave every directory alone"
         );
+    }
+
+    /// A v1.6 `dolos.toml` over `root`. With `block_compression` the table is
+    /// one this release retired, so the file does not parse; without it the
+    /// same file is a readable `v3` configuration.
+    fn v1_6_config(root: &Path, block_compression: bool) -> String {
+        let table = if block_compression {
+            "\n[storage.archive.block_compression]\nprofile = \"per-block\"\n"
+        } else {
+            ""
+        };
+
+        format!(
+            r#"
+[upstream]
+peer_address = "unused.example:3001"
+
+[storage]
+version = "v3"
+path = {path}
+
+[storage.archive]
+backend = "fjall"
+{table}
+[genesis]
+byron_path = "byron.json"
+shelley_path = "shelley.json"
+alonzo_path = "alonzo.json"
+conway_path = "conway.json"
+
+[chain]
+type = "cardano"
+magic = 2
+is_testnet = true
+"#,
+            path = toml::Value::String(root.display().to_string()),
+        )
+    }
+
+    /// The whole of what init does with an existing v1.6 setup, driven by the
+    /// actual config bytes rather than an editor built for the test.
+    ///
+    /// A file carrying the retired `block_compression` table does not load,
+    /// so init sees an existing config it cannot read: it aborts with the
+    /// manual instructions, and neither the file nor the data changes. The
+    /// same file without the table loads as `v3` and gets the offer: declining
+    /// changes nothing either, and accepting clears the nested stores and
+    /// records `v4`.
+    #[test]
+    fn a_v1_6_config_is_refused_or_upgraded_without_ever_being_guessed_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config_file = dir.path().join(CONFIG_FILE);
+
+        let unreadable = v1_6_config(&data, true);
+        std::fs::write(&config_file, &unreadable).unwrap();
+        let files = old_store_under(&data);
+
+        let loaded = toml::from_str::<RootConfig>(&unreadable).into_diagnostic();
+        let message = loaded
+            .as_ref()
+            .err()
+            .expect("the retired table fails the load")
+            .to_string();
+        assert!(
+            message.contains("block_compression"),
+            "the load failure must name the retired table: {message}"
+        );
+
+        assert!(existing_config_is_unreadable(&loaded, &config_file));
+        assert!(
+            !existing_config_is_unreadable(&loaded, &dir.path().join("absent.toml")),
+            "a load failure with no file on disk is a fresh init"
+        );
+
+        // What `run` builds for that case: an editor filled from defaults,
+        // whose storage path is not the one the file names.
+        let editor = ConfigEditor::default();
+        assert_ne!(editor.0.storage.path, data);
+
+        let error = editor
+            .prompt_storage_upgrade(true)
+            .err()
+            .expect("an unreadable config aborts the init");
+
+        assert!(error.to_string().contains(MIGRATION_GUIDE_URL));
+        assert_eq!(std::fs::read_to_string(&config_file).unwrap(), unreadable);
+        assert!(all_present(&files), "the abort must delete nothing");
+
+        let readable = v1_6_config(&data, false);
+        std::fs::write(&config_file, &readable).unwrap();
+
+        let config: RootConfig = toml::from_str(&readable).unwrap();
+        assert_eq!(config.storage.version, StorageVersion::V3);
+        assert_eq!(
+            storage_upgrade(&config.storage.version, false),
+            StorageUpgrade::Offer
+        );
+
+        ConfigEditor(config, None)
+            .apply_storage_upgrade(false)
+            .err()
+            .expect("declining aborts the init");
+
+        assert_eq!(std::fs::read_to_string(&config_file).unwrap(), readable);
+        assert!(all_present(&files), "declining must delete nothing");
+
+        let config: RootConfig = toml::from_str(&readable).unwrap();
+        let upgraded = ConfigEditor(config, None)
+            .apply_storage_upgrade(true)
+            .unwrap();
+
+        assert!(!files.iter().any(|file| file.exists()));
+        assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0);
+        assert_eq!(upgraded.0.storage.version, CURRENT_STORAGE_VERSION);
+    }
+
+    /// The setup a fresh init writes is a working `v4` one: the saved config
+    /// reads back at the current version, the stores open through the same
+    /// gate every command uses, and the first block appended lands in a
+    /// segment file as a zstd frame with nothing having been configured for
+    /// it.
+    #[test]
+    fn a_fresh_v4_init_appends_compressed_frames() {
+        use dolos_core::archive::{ArchiveStore as _, ArchiveWriter as _};
+        use dolos_core::{ChainPoint, RawBlock};
+
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let config_file = dir.path().join(CONFIG_FILE);
+
+        let mut editor = ConfigEditor::default();
+        editor.0.storage.path = data.clone();
+        editor.save(&config_file).unwrap();
+
+        let config: RootConfig =
+            toml::from_str(&std::fs::read_to_string(&config_file).unwrap()).unwrap();
+        assert_eq!(config.storage.version, CURRENT_STORAGE_VERSION);
+
+        let stores = crate::common::open_data_stores(&config).unwrap();
+
+        let body: RawBlock = std::sync::Arc::new("a block body ".repeat(64).into_bytes());
+        let point = ChainPoint::Specific(7, pallas::crypto::hash::Hash::new([7u8; 32]));
+
+        let writer = stores.archive.start_writer().unwrap();
+        writer.apply(&point, &body).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(
+            stores.archive.get_block_by_slot(&7).unwrap().unwrap(),
+            *body
+        );
+
+        let segments: Vec<PathBuf> = std::fs::read_dir(data.join("archive"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "segment"))
+            .collect();
+        assert_eq!(segments.len(), 1, "one segment holds the first block");
+
+        let frame = std::fs::read(&segments[0]).unwrap();
+        assert_eq!(&frame[..4], &[0x28, 0xB5, 0x2F, 0xFD], "a zstd frame");
+        assert!(
+            frame.len() < body.len(),
+            "the frame is compressed: {} bytes for a {} byte body",
+            frame.len(),
+            body.len()
+        );
+
+        stores.archive.shutdown().unwrap();
     }
 
     /// A freshly initialized node carries the stelae registry section the
