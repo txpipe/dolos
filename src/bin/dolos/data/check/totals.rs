@@ -22,8 +22,12 @@
 //!
 //! Rolling forward is only exact for the pots whose within-epoch movement
 //! `RollingStats` records in full, so the tip comparison stays narrow: the
-//! UTxO pot, the account count, the DRep deposits, and total supply
-//! conservation. Three pots have no honest figure at the tip at all:
+//! UTxO pot, the account count, and the DRep deposits. Total supply is exact
+//! only at an epoch boundary; mid-epoch, a newly registered pool's deposit has
+//! left the UTxO set while `pool_count` deliberately remains at its boundary
+//! value. At such a tip the check reports the exact in-flight pool deposits as
+//! not assertable, then still asserts that they account for the whole supply
+//! gap. Three pots have no honest figure at the tip at all:
 //!
 //! - **rewards, reserves, treasury.** Their within-epoch movement includes MIR
 //!   certificates, and `RollingStats` records the amounts the certificates *ask
@@ -124,7 +128,7 @@ use pallas::ledger::primitives::conway::DRep;
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::MultiEraOutput;
 
-use super::{CheckKind, Issue};
+use super::{CheckKind, CheckResult, Issue, NotAssertable};
 
 const CHECK: CheckKind = CheckKind::Totals;
 
@@ -480,12 +484,28 @@ fn note_pv10(snapshot: &EpochState, seen_pre_pv10: &mut bool, pv10_epoch: &mut O
 pub struct Recomputed {
     pub utxo_lovelace: u64,
     pub registered_accounts: u64,
+    pub registered_pools: u64,
     pub drep_deposits: u64,
 }
 
+/// How strongly total supply can be asserted at the current tip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupplyCheck {
+    /// The network genesis does not define a fixed maximum supply.
+    Unavailable,
+    /// Every pot has its boundary value, so the genesis total must match exactly.
+    Exact { max_supply: u64 },
+    /// `pool_count` is stale by design; account for the live pool-count delta.
+    MidEpoch {
+        max_supply: u64,
+        live_pool_count: u64,
+    },
+}
+
 /// Compare the recomputed figures against the pots the node claims.
-pub fn check_pots(claimed: &Pots, found: &Recomputed, max_supply: Option<u64>) -> Vec<Issue> {
+pub fn check_pots(claimed: &Pots, found: &Recomputed, supply: SupplyCheck) -> CheckResult {
     let mut issues = Vec::new();
+    let mut not_assertable = Vec::new();
 
     let mut compare = |what: &str, claimed: u64, found: u64, hint: &str| {
         if claimed != found {
@@ -521,22 +541,86 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, max_supply: Option<u64>) -
         "every registered DRep's deposit is held in the pot until it unregisters",
     );
 
-    // Total supply is fixed by genesis and only ever moves between pots.
-    if let Some(max_supply) = max_supply {
-        if !claimed.is_consistent(max_supply) {
-            issues.push(Issue::new(
-                CHECK,
-                format!(
-                    "the pots add up to {} lovelace but genesis fixes the supply at {max_supply} \
-                     (off by {}); value was created or destroyed",
-                    claimed.max_supply(),
-                    claimed.max_supply().abs_diff(max_supply),
-                ),
-            ));
+    match supply {
+        SupplyCheck::Unavailable => {}
+        // Total supply is fixed by genesis and only ever moves between pots.
+        SupplyCheck::Exact { max_supply } => {
+            if !claimed.is_consistent(max_supply) {
+                issues.push(Issue::new(
+                    CHECK,
+                    format!(
+                        "the pots add up to {} lovelace but genesis fixes the supply at \
+                         {max_supply} (off by {}); value was created or destroyed",
+                        claimed.max_supply(),
+                        claimed.max_supply().abs_diff(max_supply),
+                    ),
+                ));
+            }
+        }
+        SupplyCheck::MidEpoch {
+            max_supply,
+            live_pool_count,
+        } => {
+            let Some(in_flight_pool_count) = live_pool_count.checked_sub(claimed.pool_count) else {
+                issues.push(Issue::new(
+                    CHECK,
+                    format!(
+                        "the live state holds {live_pool_count} pools but the boundary pot claims \
+                         {}; the mid-epoch pool-deposit gap cannot be accounted for",
+                        claimed.pool_count,
+                    ),
+                ));
+                return CheckResult {
+                    issues,
+                    not_assertable,
+                };
+            };
+
+            let Some(in_flight_lovelace) =
+                in_flight_pool_count.checked_mul(claimed.deposit_per_pool)
+            else {
+                issues.push(Issue::new(
+                    CHECK,
+                    "the in-flight pool deposits overflow the lovelace total",
+                ));
+                return CheckResult {
+                    issues,
+                    not_assertable,
+                };
+            };
+
+            let accounted_supply = claimed.max_supply().checked_add(in_flight_lovelace);
+
+            if accounted_supply != Some(max_supply) {
+                let accounted_supply = accounted_supply.unwrap_or(u64::MAX);
+                issues.push(Issue::new(
+                    CHECK,
+                    format!(
+                        "the mid-epoch pots plus {in_flight_pool_count} in-flight pool deposit(s) \
+                         ({in_flight_lovelace} lovelace) account for {accounted_supply} lovelace, \
+                         but genesis fixes the supply at {max_supply} (off by {}); the pool \
+                         deposits do not explain the discrepancy",
+                        accounted_supply.abs_diff(max_supply),
+                    ),
+                ));
+            } else {
+                not_assertable.push(NotAssertable::new(
+                    CHECK,
+                    format!(
+                        "exact supply is not assertable at a mid-epoch tip: \
+                         {in_flight_pool_count} pool deposit(s), totaling {in_flight_lovelace} \
+                         lovelace, are absent from the boundary-valued pool pot; after accounting \
+                         for them the genesis supply matches",
+                    ),
+                ));
+            }
         }
     }
 
-    issues
+    CheckResult {
+        issues,
+        not_assertable,
+    }
 }
 
 /// What one DRep row says, reduced to what the referent rules ask of it.
@@ -954,6 +1038,7 @@ pub fn recompute<S: StateStore>(
     let found = Recomputed {
         utxo_lovelace: sum_utxo_lovelace(state, |seen| on_progress("utxos", seen))?,
         registered_accounts,
+        registered_pools: referents.pools.len() as u64,
         drep_deposits: sum_drep_deposits(state)?,
     };
 
@@ -964,7 +1049,7 @@ pub fn run(
     stores: &crate::common::Stores,
     genesis: &Genesis,
     progress: &ProgressBar,
-) -> miette::Result<Vec<Issue>> {
+) -> miette::Result<CheckResult> {
     let epoch = stores
         .state
         .read_entity_typed::<EpochState>(EpochState::NS, &EpochState::singleton_key())
@@ -974,7 +1059,7 @@ pub fn run(
     let Some(epoch) = epoch else {
         // Nothing to compare against; `cursors` reports a state store that
         // was never bootstrapped.
-        return Ok(Vec::new());
+        return Ok(CheckResult::default());
     };
 
     let snapshots = stores
@@ -1002,13 +1087,44 @@ pub fn run(
 
     issues.extend(referent_issues);
 
-    match live_pots(&epoch) {
-        Some(claimed) => issues.extend(check_pots(
-            &claimed,
-            &found,
-            genesis.shelley.max_lovelace_supply,
-        )),
-        None => issues.push(Issue::new(
+    let max_supply = genesis.shelley.max_lovelace_supply;
+    let supply = match (
+        stores
+            .state
+            .read_cursor()
+            .into_diagnostic()
+            .context("reading the state cursor for the supply check")?,
+        chain_summary(&stores.state)?,
+        max_supply,
+    ) {
+        (_, _, None) => Some(SupplyCheck::Unavailable),
+        (
+            Some(dolos_core::ChainPoint::Slot(slot) | dolos_core::ChainPoint::Specific(slot, _)),
+            Some(summary),
+            Some(max_supply),
+        ) => {
+            let (_, epoch_slot) = summary.slot_epoch(slot);
+            if epoch_slot == 0 {
+                Some(SupplyCheck::Exact { max_supply })
+            } else {
+                Some(SupplyCheck::MidEpoch {
+                    max_supply,
+                    live_pool_count: found.registered_pools,
+                })
+            }
+        }
+        _ => None,
+    };
+
+    let mut not_assertable = Vec::new();
+
+    match (live_pots(&epoch), supply) {
+        (Some(claimed), Some(supply)) => {
+            let checked = check_pots(&claimed, &found, supply);
+            issues.extend(checked.issues);
+            not_assertable.extend(checked.not_assertable);
+        }
+        (None, _) => issues.push(Issue::new(
             CHECK,
             format!(
                 "epoch {} has accumulated this epoch's deltas but carries no live protocol \
@@ -1017,9 +1133,17 @@ pub fn run(
                 epoch.number,
             ),
         )),
+        (Some(_), None) => issues.push(Issue::new(
+            CHECK,
+            "the state cursor or chain summary is missing, so the supply assertion cannot \
+             determine whether the tip is an epoch boundary",
+        )),
     }
 
-    Ok(issues)
+    Ok(CheckResult {
+        issues,
+        not_assertable,
+    })
 }
 
 #[cfg(test)]
@@ -1071,12 +1195,20 @@ mod tests {
         let found = Recomputed {
             utxo_lovelace: 500,
             registered_accounts: 3,
+            registered_pools: 0,
             drep_deposits: 0,
         };
 
-        let issues = check_pots(&pots(500, 3), &found, Some(MAX_SUPPLY));
+        let result = check_pots(
+            &pots(500, 3),
+            &found,
+            SupplyCheck::Exact {
+                max_supply: MAX_SUPPLY,
+            },
+        );
 
-        assert!(issues.is_empty(), "{issues:?}");
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert!(result.not_assertable.is_empty());
     }
 
     /// The corruption fixture: a doctored pot figure. The UTxO set is intact,
@@ -1086,13 +1218,22 @@ mod tests {
         let found = Recomputed {
             utxo_lovelace: 500,
             registered_accounts: 3,
+            registered_pools: 0,
             drep_deposits: 0,
         };
 
         let mut claimed = pots(500, 3);
         claimed.utxos += 42;
 
-        let issues = check_pots(&claimed, &found, None);
+        let expected = claimed.max_supply();
+        let issues = check_pots(
+            &claimed,
+            &found,
+            SupplyCheck::Exact {
+                max_supply: expected,
+            },
+        )
+        .issues;
 
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].check, CheckKind::Totals);
@@ -1107,16 +1248,83 @@ mod tests {
         let found = Recomputed {
             utxo_lovelace: 542,
             registered_accounts: 3,
+            registered_pools: 0,
             drep_deposits: 0,
         };
 
         let mut claimed = pots(500, 3);
         claimed.utxos += 42;
 
-        let issues = check_pots(&claimed, &found, Some(MAX_SUPPLY));
+        let issues = check_pots(
+            &claimed,
+            &found,
+            SupplyCheck::Exact {
+                max_supply: MAX_SUPPLY,
+            },
+        )
+        .issues;
 
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert!(issues[0].detail.contains("genesis fixes the supply"));
+    }
+
+    fn mid_epoch_pots(extra_gap: u64) -> (Pots, Recomputed) {
+        let mut claimed = pots(2_000_000_000, 3);
+        claimed.deposit_per_pool = 500_000_000;
+        claimed.pool_count = 2;
+        claimed.reserves -= 1_000_000_000;
+
+        // A third pool registered after the boundary. Its 500 ADA deposit has
+        // left the live UTxO set, while the boundary-valued count remains two.
+        claimed.utxos -= 500_000_000 + extra_gap;
+
+        let found = Recomputed {
+            utxo_lovelace: claimed.utxos,
+            registered_accounts: 3,
+            registered_pools: 3,
+            drep_deposits: 0,
+        };
+
+        (claimed, found)
+    }
+
+    #[test]
+    fn mid_epoch_pool_deposit_is_explained_without_an_issue() {
+        let (claimed, found) = mid_epoch_pots(0);
+
+        let result = check_pots(
+            &claimed,
+            &found,
+            SupplyCheck::MidEpoch {
+                max_supply: MAX_SUPPLY,
+                live_pool_count: found.registered_pools,
+            },
+        );
+
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert_eq!(result.not_assertable.len(), 1);
+        assert!(result.not_assertable[0].detail.contains("1 pool deposit"));
+        assert!(result.not_assertable[0]
+            .detail
+            .contains("500000000 lovelace"));
+    }
+
+    #[test]
+    fn mid_epoch_pool_deposit_does_not_hide_a_residual_discrepancy() {
+        let (claimed, found) = mid_epoch_pots(1);
+
+        let result = check_pots(
+            &claimed,
+            &found,
+            SupplyCheck::MidEpoch {
+                max_supply: MAX_SUPPLY,
+                live_pool_count: found.registered_pools,
+            },
+        );
+
+        assert_eq!(result.issues.len(), 1, "{:?}", result.issues);
+        assert!(result.issues[0].detail.contains("off by 1"));
+        assert!(result.not_assertable.is_empty());
     }
 
     #[test]
