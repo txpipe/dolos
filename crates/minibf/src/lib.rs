@@ -704,6 +704,14 @@ where
             "/governance/proposals/{gov_action_id}/parameters",
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/votes",
+            get(routes::governance::proposal_votes::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/votes",
+            get(routes::governance::proposal_votes_by_gov_action::<D>),
+        )
         .fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
