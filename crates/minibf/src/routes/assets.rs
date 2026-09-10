@@ -1,4 +1,4 @@
-use std::{collections::HashMap, ops::Deref, time::Duration};
+use std::{collections::HashMap, ops::Deref, sync::OnceLock, time::Duration};
 
 use indexmap::IndexSet;
 
@@ -53,8 +53,8 @@ struct OnchainMetadata {
     version: Option<OnchainMetadataStandard>,
     metadata: HashMap<String, serde_json::Value>,
     extra: Option<String>,
-    /// This field is set when the metadata comes from a CIP-68 reference
-    /// datum. Only this datum can declare decimal places.
+    /// This field holds the standard when the metadata comes from a CIP-68
+    /// reference datum. Only this datum can declare decimal places.
     cip68: Option<Cip68TokenStandard>,
 }
 impl OnchainMetadata {
@@ -83,9 +83,10 @@ impl OnchainMetadata {
             return Ok(None);
         };
 
-        // a datum whose version the standard does not define describes nothing.
-        // a datum that does not meet the scheme of its label describes nothing too.
-        // then the asset uses the CIP-25 metadata from its minting transaction
+        // a datum with a version that the standard does not define describes
+        // nothing. a datum that does not meet the scheme of its label also
+        // describes nothing. in both cases the asset uses the CIP-25 metadata
+        // from its minting transaction
         let version = match version {
             1 => OnchainMetadataStandard::Cip68v1,
             2 => OnchainMetadataStandard::Cip68v2,
@@ -330,11 +331,10 @@ async fn last_cip68_metadata_from_tx<D>(
     tx: &MultiEraTx<'_>,
     ref_asset_bytes: &[u8],
     standard: Cip68TokenStandard,
-) -> Result<(bool, Option<OnchainMetadata>), StatusCode>
+) -> Result<Option<OnchainMetadata>, StatusCode>
 where
     D: Domain + Clone + Send + Sync + 'static,
 {
-    let mut found_datum = false;
     let mut last_metadata = None;
 
     for output in tx.outputs().iter() {
@@ -343,14 +343,32 @@ where
         }
 
         if let Some(datum_option) = output.datum() {
-            found_datum = true;
             if let Some(out) = metadata_from_datum_option(domain, &datum_option, standard).await? {
                 last_metadata = Some(out);
             }
         }
     }
 
-    Ok((found_datum, last_metadata))
+    Ok(last_metadata)
+}
+
+/// The HTTP client that every token-registry request shares. `reqwest::Client`
+/// holds an internal connection pool, so one instance reuses DNS and TLS across
+/// the many concurrent lookups that `/addresses/{address}/extended` starts.
+fn token_registry_client() -> Result<&'static reqwest::Client, StatusCode> {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent("Dolos MiniBF")
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(CLIENT.get_or_init(|| client))
 }
 
 struct AssetModelBuilder {
@@ -379,8 +397,6 @@ impl AssetModelBuilder {
             None => None,
         };
 
-        let mut latest_cip68_datum_found = false;
-
         if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
             let entity_key = pallas::crypto::hash::Hasher::<256>::hash(ref_asset_bytes.as_slice());
             let ref_state = domain.read_cardano_entity::<AssetState>(entity_key.as_slice())?;
@@ -393,12 +409,10 @@ impl AssetModelBuilder {
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                 {
                     let tx = decode_era_tx(era, &cbor)?;
-                    let (found_datum, metadata) =
-                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard)
-                            .await?;
-                    latest_cip68_datum_found = found_datum;
 
-                    if let Some(metadata) = metadata {
+                    if let Some(metadata) =
+                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard).await?
+                    {
                         return Ok(Some(metadata));
                     }
                 }
@@ -422,18 +436,6 @@ impl AssetModelBuilder {
         if let Some(EraCbor(era, cbor)) = &cip25_tx {
             let tx = decode_era_tx(*era, cbor)?;
 
-            if !latest_cip68_datum_found {
-                if let Some((_, standard, ref_asset_bytes)) = &cip68_reference {
-                    let (_, metadata) =
-                        last_cip68_metadata_from_tx(domain, &tx, ref_asset_bytes, *standard)
-                            .await?;
-
-                    if let Some(metadata) = metadata {
-                        return Ok(Some(metadata));
-                    }
-                }
-            }
-
             let out = tx
                 .metadata()
                 .find(721)
@@ -455,13 +457,7 @@ impl AssetModelBuilder {
 
         let url = format!("{url}/metadata/{asset}");
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .user_agent("Dolos MiniBF")
-            .build()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let res = client
+        let res = token_registry_client()?
             .get(&url)
             .send()
             .await
