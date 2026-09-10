@@ -669,6 +669,7 @@ pub struct Anchors {
 #[derive(Debug, Default)]
 pub struct Referents {
     pub pools: HashSet<EntityKey>,
+    pub registered_pools: u64,
     pub dreps: HashMap<EntityKey, DRepFacts>,
     pub anchors: Anchors,
 }
@@ -890,13 +891,23 @@ pub fn scan_accounts<E: std::fmt::Display>(
 
 pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Result<Referents> {
     let mut pools = HashSet::new();
+    let mut registered_pools = 0;
 
     for record in state
         .iter_entities_typed::<PoolState>(PoolState::NS, None)
         .into_diagnostic()
         .context("iterating pools")?
     {
-        let (key, _) = record.into_diagnostic().context("decoding a pool")?;
+        let (key, pool) = record.into_diagnostic().context("decoding a pool")?;
+
+        if pool
+            .snapshot
+            .live()
+            .is_some_and(|snapshot| !snapshot.is_retired)
+        {
+            registered_pools += 1;
+        }
+
         pools.insert(key);
     }
 
@@ -925,6 +936,7 @@ pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Res
 
     Ok(Referents {
         pools,
+        registered_pools,
         dreps,
         anchors,
     })
@@ -1039,7 +1051,7 @@ pub fn recompute<S: StateStore>(
     let found = Recomputed {
         utxo_lovelace: sum_utxo_lovelace(state, |seen| on_progress("utxos", seen))?,
         registered_accounts,
-        registered_pools: referents.pools.len() as u64,
+        registered_pools: referents.registered_pools,
         drep_deposits: sum_drep_deposits(state)?,
     };
 

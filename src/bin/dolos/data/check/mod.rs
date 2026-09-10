@@ -248,13 +248,15 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_cardano::model::{AccountState, EpochState, PoolState, SingletonEntity as _};
+    use dolos_cardano::model::{
+        AccountState, EpochState, PoolParams, PoolSnapshot, PoolState, SingletonEntity as _,
+    };
     use dolos_cardano::FixedNamespace as _;
     use dolos_core::{ArchiveStore as _, Domain as _, StateStore as _, WalStore as _};
     use dolos_core::{ArchiveWriter as _, ChainPoint, EntityKey, StateWriter as _};
     use dolos_testing::blocks::make_conway_block_with_prev;
     use dolos_testing::toy_domain::ToyDomain;
-    use pallas::ledger::primitives::conway::DRep;
+    use pallas::ledger::primitives::conway::{DRep, RationalNumber};
     use pallas::ledger::primitives::StakeCredential;
 
     fn live_epoch(domain: &ToyDomain) -> EpochState {
@@ -498,13 +500,39 @@ mod tests {
 
         let operator = pallas::crypto::hash::Hash::<28>::from([0x77; 28]);
 
+        let snapshot = |is_retired| PoolSnapshot {
+            is_retired,
+            blocks_minted: 0,
+            params: PoolParams {
+                vrf_keyhash: pallas::crypto::hash::Hash::from([0; 32]),
+                pledge: 0,
+                cost: 0,
+                margin: RationalNumber {
+                    numerator: 0,
+                    denominator: 1,
+                },
+                reward_account: vec![0; 29],
+                pool_owners: Vec::new(),
+                relays: Vec::new(),
+                pool_metadata: None,
+            },
+            is_new: false,
+        };
+
         let pool = PoolState {
             operator,
-            snapshot: dolos_cardano::model::EpochValue::new(epoch.number),
+            snapshot: dolos_cardano::model::EpochValue::with_live(epoch.number, snapshot(false)),
             blocks_minted_total: 0,
             register_slot: 0,
             retiring_epoch: None,
             deposit: 500_000_000,
+        };
+
+        let retired_operator = pallas::crypto::hash::Hash::<28>::from([0x78; 28]);
+        let retired_pool = PoolState {
+            operator: retired_operator,
+            snapshot: dolos_cardano::model::EpochValue::with_live(epoch.number, snapshot(true)),
+            ..pool.clone()
         };
 
         let credential = StakeCredential::AddrKeyhash([0x43; 28].into());
@@ -520,12 +548,17 @@ mod tests {
         writer
             .write_entity_typed(&EntityKey::from(operator), &pool)
             .unwrap();
+        writer
+            .write_entity_typed(&EntityKey::from(retired_operator), &retired_pool)
+            .unwrap();
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (found, issues) =
+            totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
 
         assert!(issues.is_empty(), "{issues:#?}");
+        assert_eq!(found.registered_pools, 1);
     }
 
     /// The corruption fixture for the other side of the same check: the same
