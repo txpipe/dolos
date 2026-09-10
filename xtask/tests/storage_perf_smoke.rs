@@ -106,7 +106,10 @@ fn smoke_preset_runs_every_workload_and_verifies_bodies() {
         .find(|w| w["codec"]["codec"] == "zstd3-dict" && w["metrics"]["batch"] == 7)
         .unwrap();
     assert!(dict["metrics"]["ratio"].as_f64().unwrap() < 0.8);
-    assert!(dict["metrics"]["encode_cpu_ms"].as_f64().unwrap() > 0.0);
+    assert_eq!(
+        dict["metrics"]["encode_cpu_ms"].as_f64().unwrap() > 0.0,
+        xtask::perf::measure::thread_cpu_available()
+    );
     assert_eq!(dict["metrics"]["batch_latency"]["count"], 58);
     let store = writes
         .iter()
