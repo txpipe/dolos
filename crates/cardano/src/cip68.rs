@@ -79,12 +79,24 @@ pub enum PropertyKind {
     Bytestring,
     Number,
     Array,
+    /// A string, or an array of strings. The `src` property of a files item
+    /// uses this kind. The parser gives a single string for both forms. The
+    /// validator accepts both forms.
+    StringOrArray,
+}
+
+/// One key in a files item, its scheme, and whether the item must have it.
+#[derive(Debug, Clone, Copy)]
+pub struct ItemProperty {
+    pub key: &'static str,
+    pub scheme: PropertyScheme,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PropertyScheme {
     pub kind: PropertyKind,
-    pub items: Option<&'static [(&'static str, PropertyScheme)]>,
+    pub items: Option<&'static [ItemProperty]>,
 }
 
 const fn bytestring_scheme() -> PropertyScheme {
@@ -101,17 +113,35 @@ const fn number_scheme() -> PropertyScheme {
     }
 }
 
-const fn array_scheme(items: &'static [(&'static str, PropertyScheme)]) -> PropertyScheme {
+const fn string_or_array_scheme() -> PropertyScheme {
+    PropertyScheme {
+        kind: PropertyKind::StringOrArray,
+        items: None,
+    }
+}
+
+const fn array_scheme(items: &'static [ItemProperty]) -> PropertyScheme {
     PropertyScheme {
         kind: PropertyKind::Array,
         items: Some(items),
     }
 }
 
-const FILES_ITEM_SCHEMA: &[(&str, PropertyScheme)] = &[
-    ("name", bytestring_scheme()),
-    ("mediaType", bytestring_scheme()),
-    ("src", bytestring_scheme()),
+const fn item(key: &'static str, scheme: PropertyScheme, required: bool) -> ItemProperty {
+    ItemProperty {
+        key,
+        scheme,
+        required,
+    }
+}
+
+// A files item must have `mediaType` and `src`. The `name` property is
+// optional. The `src` property is a string, or an array of strings. Other
+// properties are permitted.
+const FILES_ITEM_SCHEMA: &[ItemProperty] = &[
+    item("name", bytestring_scheme(), false),
+    item("mediaType", bytestring_scheme(), true),
+    item("src", string_or_array_scheme(), true),
 ];
 
 pub fn property_scheme_for_key(standard: Cip68TokenStandard, key: &str) -> Option<PropertyScheme> {
@@ -143,6 +173,76 @@ pub fn property_scheme_for_key(standard: Cip68TokenStandard, key: &str) -> Optio
             _ => None,
         },
     }
+}
+
+/// These are the properties that a standard requires. A datum that does not
+/// have all of them describes no asset. As a result, it has no metadata.
+fn required_properties(standard: Cip68TokenStandard) -> &'static [&'static str] {
+    match standard {
+        // the 222 standard and the 444 standard both show the asset
+        Cip68TokenStandard::Nft | Cip68TokenStandard::Rft => &["name", "image"],
+        Cip68TokenStandard::Ft => &["name", "description"],
+    }
+}
+
+fn value_matches_kind(value: &JsonValue, scheme: PropertyScheme) -> bool {
+    match scheme.kind {
+        PropertyKind::Bytestring => value.is_string(),
+        PropertyKind::Number => value.is_number(),
+        PropertyKind::StringOrArray => {
+            value.is_string()
+                || value
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(JsonValue::is_string))
+        }
+        PropertyKind::Array => match (value.as_array(), scheme.items) {
+            (Some(items), Some(item_schema)) => items
+                .iter()
+                .all(|item| item_matches_schema(item, item_schema)),
+            (Some(_), None) => true,
+            (None, _) => false,
+        },
+    }
+}
+
+/// Whether one item of an array property meets its scheme. The item must be an
+/// object. It must have every required key with a value of the correct kind.
+/// A key that the scheme declares as optional must also have the correct kind
+/// when it is present. Other keys are permitted.
+fn item_matches_schema(item: &JsonValue, schema: &'static [ItemProperty]) -> bool {
+    let Some(object) = item.as_object() else {
+        return false;
+    };
+
+    schema
+        .iter()
+        .all(|property| match object.get(property.key) {
+            Some(value) => value_matches_kind(value, property.scheme),
+            None => !property.required,
+        })
+}
+
+/// Whether a parsed datum meets the scheme of its standard. The datum must
+/// have every required property. Each property that the scheme declares must
+/// have the kind of value that the scheme gives it. A property that the
+/// scheme does not declare can have any value.
+pub fn cip68_metadata_is_valid(
+    metadata: &HashMap<String, JsonValue>,
+    standard: Cip68TokenStandard,
+) -> bool {
+    if !required_properties(standard)
+        .iter()
+        .all(|key| metadata.contains_key(*key))
+    {
+        return false;
+    }
+
+    metadata.iter().all(
+        |(key, value)| match property_scheme_for_key(standard, key) {
+            Some(scheme) => value_matches_kind(value, scheme),
+            None => true,
+        },
+    )
 }
 
 pub fn cip_68_reference_asset(
@@ -209,21 +309,32 @@ fn to_utf8_or_hex(bytes: &[u8]) -> String {
     }
 }
 
-fn map_schema_lookup(
-    schema: &'static [(&'static str, PropertyScheme)],
-    key: &str,
-) -> Option<PropertyScheme> {
+fn map_schema_lookup(schema: &'static [ItemProperty], key: &str) -> Option<PropertyScheme> {
     schema
         .iter()
-        .find(|(name, _)| *name == key)
-        .map(|(_, scheme)| *scheme)
+        .find(|property| property.key == key)
+        .map(|property| property.scheme)
 }
 
+/// Converts a single bounded-bytes value to a string. CIP-68 defines a
+/// bytestring property, such as `mediaType`, as a single value. This
+/// converter does not accept an array.
 fn convert_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
     match value {
         PlutusData::BoundedBytes(bytes) => {
             Some(JsonValue::String(to_utf8_or_hex(bytes.as_slice())))
         }
+        _ => None,
+    }
+}
+
+/// Converts a bounded-bytes value, or an array of bounded-bytes parts, to a
+/// single string. CIP-68 defines the `src` property as a uri. Version 3
+/// splits a uri of more than 64 bytes into an array of parts. This converter
+/// joins the parts into one string.
+fn convert_split_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
+    match value {
+        PlutusData::BoundedBytes(_) => convert_bytestring_value(value),
         PlutusData::Array(items) => {
             let mut buffer = Vec::new();
             for item in items.iter() {
@@ -248,10 +359,7 @@ fn convert_number_value(value: &PlutusData) -> Option<JsonValue> {
     }
 }
 
-fn convert_map_value(
-    value: &PlutusData,
-    schema: &'static [(&'static str, PropertyScheme)],
-) -> Option<JsonValue> {
+fn convert_map_value(value: &PlutusData, schema: &'static [ItemProperty]) -> Option<JsonValue> {
     let PlutusData::Map(map) = value else {
         return None;
     };
@@ -263,8 +371,12 @@ fn convert_map_value(
             PlutusData::BigInt(BigInt::Int(int)) => int.deref().to_string(),
             _ => return None,
         };
-        let value_schema = map_schema_lookup(schema, &key_str)?;
-        let converted = convert_datum_value(value, value_schema)?;
+        // the scheme permits other properties. a key that the scheme does not
+        // declare keeps its hex form.
+        let converted = match map_schema_lookup(schema, &key_str) {
+            Some(value_schema) => convert_datum_value(value, value_schema)?,
+            None => JsonValue::String(encode_to_hex(value).ok()?),
+        };
         object.insert(key_str, converted);
     }
 
@@ -274,6 +386,10 @@ fn convert_map_value(
 fn convert_datum_value(value: &PlutusData, schema: PropertyScheme) -> Option<JsonValue> {
     match schema.kind {
         PropertyKind::Bytestring => convert_bytestring_value(value),
+        // a bytestring, or a split bytestring. a version 3 `src` uses the
+        // split form for a payload of more than 64 bytes. the converter joins
+        // the parts into one string.
+        PropertyKind::StringOrArray => convert_split_bytestring_value(value),
         PropertyKind::Number => convert_number_value(value),
         PropertyKind::Array => {
             let PlutusData::Array(items) = value else {
@@ -328,6 +444,7 @@ pub fn parse_cip67_label_from_asset_name(asset_name: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn label_hex(number: u32) -> String {
         let number_hex = format!("{:04x}", number);
@@ -361,6 +478,202 @@ mod tests {
         let hex = label_hex(222);
         let bytes = hex::decode(hex).expect("valid hex");
         assert_eq!(parse_cip67_label_from_asset_name(&bytes), Some(222));
+    }
+
+    fn metadata(pairs: &[(&str, JsonValue)]) -> HashMap<String, JsonValue> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.clone()))
+            .collect()
+    }
+
+    fn bytes(value: &str) -> PlutusData {
+        PlutusData::BoundedBytes(value.as_bytes().to_vec().into())
+    }
+
+    fn array(items: Vec<PlutusData>) -> PlutusData {
+        PlutusData::Array(pallas::ledger::primitives::MaybeIndefArray::Def(items))
+    }
+
+    fn plutus_map(pairs: Vec<(PlutusData, PlutusData)>) -> PlutusData {
+        PlutusData::Map(pairs.into())
+    }
+
+    #[test]
+    fn accepts_metadata_that_meets_the_scheme() {
+        let nft = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("image", JsonValue::String("ipfs://x".into())),
+        ]);
+        assert!(cip68_metadata_is_valid(&nft, Cip68TokenStandard::Nft));
+
+        let ft = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("description", JsonValue::String("a token".into())),
+            ("decimals", JsonValue::Number(6.into())),
+        ]);
+        assert!(cip68_metadata_is_valid(&ft, Cip68TokenStandard::Ft));
+    }
+
+    #[test]
+    fn rejects_metadata_missing_a_required_property() {
+        // fungible properties and no image: this datum does not meet a non-fungible
+        // standard
+        let value = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("description", JsonValue::String("a token".into())),
+        ]);
+
+        assert!(!cip68_metadata_is_valid(&value, Cip68TokenStandard::Nft));
+        assert!(!cip68_metadata_is_valid(&value, Cip68TokenStandard::Rft));
+        assert!(cip68_metadata_is_valid(&value, Cip68TokenStandard::Ft));
+    }
+
+    #[test]
+    fn rejects_declared_property_of_the_wrong_kind() {
+        let value = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("description", JsonValue::String("a token".into())),
+            ("decimals", JsonValue::String("02".into())),
+        ]);
+
+        assert!(!cip68_metadata_is_valid(&value, Cip68TokenStandard::Ft));
+    }
+
+    #[test]
+    fn ignores_properties_the_scheme_does_not_declare() {
+        let value = metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("image", JsonValue::String("ipfs://x".into())),
+            ("decimals", JsonValue::String("02".into())),
+        ]);
+
+        assert!(cip68_metadata_is_valid(&value, Cip68TokenStandard::Nft));
+    }
+
+    fn nft_with_files(files: JsonValue) -> HashMap<String, JsonValue> {
+        metadata(&[
+            ("name", JsonValue::String("token".into())),
+            ("image", JsonValue::String("ipfs://x".into())),
+            ("files", files),
+        ])
+    }
+
+    #[test]
+    fn rejects_files_item_without_the_required_keys() {
+        // an empty files item has no `mediaType` and no `src`. the scheme
+        // requires both, so this datum does not meet the scheme.
+        let empty = nft_with_files(json!([{}]));
+        assert!(!cip68_metadata_is_valid(&empty, Cip68TokenStandard::Nft));
+
+        // a files item that has no `src`.
+        let no_src = nft_with_files(json!([{ "mediaType": "image/png" }]));
+        assert!(!cip68_metadata_is_valid(&no_src, Cip68TokenStandard::Nft));
+
+        // a files item that has no `mediaType`.
+        let no_media_type = nft_with_files(json!([{ "src": "ipfs://y" }]));
+        assert!(!cip68_metadata_is_valid(
+            &no_media_type,
+            Cip68TokenStandard::Nft
+        ));
+    }
+
+    #[test]
+    fn accepts_a_files_item_that_meets_the_scheme() {
+        // `name` is optional. `src` is a string.
+        let string_src = nft_with_files(json!([{
+            "mediaType": "image/png",
+            "src": "ipfs://y",
+        }]));
+        assert!(cip68_metadata_is_valid(
+            &string_src,
+            Cip68TokenStandard::Nft
+        ));
+
+        // `src` is an array of strings. a version 3 payload uses this form.
+        let array_src = nft_with_files(json!([{
+            "mediaType": "image/png",
+            "src": ["ipfs://part-one", "part-two"],
+        }]));
+        assert!(cip68_metadata_is_valid(&array_src, Cip68TokenStandard::Nft));
+
+        // the scheme permits other keys in a files item.
+        let extra_key = nft_with_files(json!([{
+            "mediaType": "image/png",
+            "src": "ipfs://y",
+            "name": "picture",
+            "note": "extra",
+        }]));
+        assert!(cip68_metadata_is_valid(&extra_key, Cip68TokenStandard::Nft));
+    }
+
+    #[test]
+    fn rejects_files_item_of_the_wrong_kind() {
+        // `src` must be a string, or an array of strings. a number does not
+        // meet the scheme.
+        let number_src = nft_with_files(json!([{
+            "mediaType": "image/png",
+            "src": 7,
+        }]));
+        assert!(!cip68_metadata_is_valid(
+            &number_src,
+            Cip68TokenStandard::Nft
+        ));
+
+        // a files item that is not an object.
+        let not_object = nft_with_files(json!(["not-an-object"]));
+        assert!(!cip68_metadata_is_valid(
+            &not_object,
+            Cip68TokenStandard::Nft
+        ));
+    }
+
+    /// Builds a files item as a Plutus map, and returns the parsed metadata of
+    /// an NFT datum that holds it. The datum also has `name` and `image`, so
+    /// only the files item decides the result.
+    fn parse_nft_with_files_item(
+        item: Vec<(PlutusData, PlutusData)>,
+    ) -> HashMap<String, JsonValue> {
+        let map = vec![
+            (bytes("name"), bytes("token")),
+            (bytes("image"), bytes("ipfs://x")),
+            (bytes("files"), array(vec![plutus_map(item)])),
+        ];
+        parse_cip68_metadata_map(&map, Cip68TokenStandard::Nft).expect("parses")
+    }
+
+    #[test]
+    fn parses_a_split_src_but_not_a_split_media_type() {
+        // `src` is a uri. a version 3 datum splits a long uri into parts. the
+        // parser joins the parts, and the datum meets the scheme.
+        let split_src = parse_nft_with_files_item(vec![
+            (bytes("mediaType"), bytes("image/png")),
+            (
+                bytes("src"),
+                array(vec![bytes("ipfs://part-one"), bytes("-two")]),
+            ),
+        ]);
+        assert_eq!(
+            split_src.get("files"),
+            Some(&json!([{ "mediaType": "image/png", "src": "ipfs://part-one-two" }]))
+        );
+        assert!(cip68_metadata_is_valid(&split_src, Cip68TokenStandard::Nft));
+
+        // `mediaType` is a bounded-bytes value, not a uri. the parser does
+        // not accept an array for it, so it keeps the whole files value in its
+        // hex form. the hex string is not an array, so the datum does not meet
+        // the scheme, and the caller uses the CIP-25 metadata instead.
+        let split_media_type = parse_nft_with_files_item(vec![
+            (
+                bytes("mediaType"),
+                array(vec![bytes("image/"), bytes("png")]),
+            ),
+            (bytes("src"), bytes("ipfs://y")),
+        ]);
+        assert!(!cip68_metadata_is_valid(
+            &split_media_type,
+            Cip68TokenStandard::Nft
+        ));
     }
 
     #[test]
