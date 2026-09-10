@@ -117,8 +117,31 @@ impl TestApp {
     }
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::build(cfg, fault, minibf)
+    }
+
+    /// Validates the `base_path` the same way that startup does. Then builds
+    /// the app. If the `base_path` is malformed, this returns the validation
+    /// error and does not panic.
+    pub fn try_new_with_base_path(base_path: Option<String>) -> Result<Self, String> {
+        let mut minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        minibf.base_path = base_path;
+        minibf.validate()?;
+        Ok(Self::build(
+            SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            None,
+            minibf,
+        ))
+    }
+
+    fn build(cfg: SyntheticBlockConfig, fault: Option<TestFault>, minibf: MinibfConfig) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, fault, None)
+        Self::from_domain(domain, vectors, fault, minibf)
     }
 
     pub fn new_with_cfg_and_setup(
@@ -127,36 +150,33 @@ impl TestApp {
     ) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
-        Self::from_domain(domain, vectors, None, None)
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
+        Self::from_domain(domain, vectors, None, minibf)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
     /// can be exercised without building a chain of thousands of blocks.
     pub fn new_with_scan_limit(cfg: SyntheticBlockConfig, max_scan_items: u64) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
-        Self::from_domain(domain, vectors, None, Some(max_scan_items))
+        let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
+            .with_max_scan_items(max_scan_items);
+        Self::from_domain(domain, vectors, None, minibf)
     }
 
     fn from_domain(
         domain: ToyDomain,
         vectors: SyntheticVectors,
         fault: Option<TestFault>,
-        max_scan_items: Option<u64>,
+        minibf: MinibfConfig,
     ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
         };
 
-        let cfg = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        let cfg = match max_scan_items {
-            Some(max) => cfg.with_max_scan_items(max),
-            None => cfg,
-        };
-
         let facade = Facade {
             inner: domain.clone(),
-            config: cfg,
+            config: minibf,
             cache: crate::cache::CacheService::default(),
         };
 

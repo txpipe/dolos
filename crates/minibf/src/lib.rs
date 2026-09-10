@@ -18,6 +18,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, Range},
 };
+use tower::Layer;
 use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
@@ -371,6 +372,7 @@ where
     Option<ProposalState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
+    let base_path = facade.config.base_path();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -694,7 +696,23 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+
+    // `MinibfConfig::validate` runs at config-parse time. It rejects a
+    // malformed `base_path`. Thus the nest operation here cannot fail.
+    let router = match &base_path {
+        Some(base_path) => Router::new().nest(base_path, app),
+        None => app,
+    };
+
+    // NormalizePath must receive the request before the router matches a route.
+    // Then NormalizePath can remove a trailing slash from the path. A layer
+    // added with `Router::layer` runs after the route match. Thus, a request
+    // with a trailing slash does not match a route. The code sets the normalized
+    // router as the fallback service of an empty router. As a result, every request
+    // goes to this fallback service, and the public return type remains
+    // `Router`.
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
+    Router::new().fallback_service(normalized)
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -722,5 +740,83 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod base_path_tests {
+    use axum::http::StatusCode;
+
+    use crate::test_support::TestApp;
+
+    #[tokio::test]
+    async fn routes_resolve_under_configured_base_path() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
+            .expect("router should build with valid base_path");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK, "prefixed route should resolve");
+
+        let (status, _) = app.get_bytes("/network").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "root route should 404 when base_path is set"
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_base_path_config_is_trimmed() {
+        // The router removes a trailing slash from `base_path` before it nests the
+        // routes.
+        let app = TestApp::try_new_with_base_path(Some("/api/v0/".into()))
+            .expect("router should build with trailing-slash base_path");
+
+        let (status, _) = app.get_bytes("/api/v0/network").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_in_request_is_normalized() {
+        let app = TestApp::try_new_with_base_path(Some("/api/v0".into()))
+            .expect("the router did not accept a valid base_path");
+
+        // The router removes a trailing slash from the request path before route
+        // matching.
+        let (status, _) = app.get_bytes("/api/v0/network/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the router did not remove the trailing slash from the request path"
+        );
+
+        // The base path resolves to the root route of the nested router.
+        let (status, _) = app.get_bytes("/api/v0/").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "the base path with a trailing slash did not resolve to the root route"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_base_path_fails_config_validation() {
+        for invalid in [
+            "",
+            "/",
+            "no-leading-slash",
+            "/with*wildcard",
+            "/api/v0?x=y",
+            "/api/v0#fragment",
+            "/api/v0 with-space",
+        ] {
+            let err = TestApp::try_new_with_base_path(Some(invalid.into()))
+                .err()
+                .unwrap_or_else(|| panic!("expected a config error for base_path = {invalid:?}"));
+            assert!(
+                err.contains("base_path"),
+                "expected a base_path validation error for {invalid:?}, got {err:?}"
+            );
+        }
     }
 }
