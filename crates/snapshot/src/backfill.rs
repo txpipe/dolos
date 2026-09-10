@@ -69,8 +69,8 @@ use std::sync::Arc;
 
 use dolos_core::config::{MithrilConfig, RootConfig};
 use dolos_core::{
-    seed_wal_from_state, BlockSlot, Domain, DomainError, Genesis, ImportExt as _, StateStore as _,
-    WalSeedError,
+    recover_bulk_checkpoint, BlockSlot, BulkRecoveryError, Domain, DomainError, Genesis,
+    ImportExt as _, StateStore as _,
 };
 use dolos_mithril as mithril;
 use dolos_mithril::mithril_client::feedback::FeedbackReceiver;
@@ -125,8 +125,8 @@ pub enum Error {
     #[error("planning the publish")]
     Planning(#[source] crate::Error),
 
-    #[error("seeding the WAL from the state cursor")]
-    WalSeed(#[source] WalSeedError),
+    #[error("recovering the bulk-replay checkpoint: {0}")]
+    Recovery(#[source] BulkRecoveryError),
 
     #[error("pruning excess history")]
     Housekeeping(#[source] DomainError),
@@ -601,7 +601,7 @@ impl<D: Domain> Driver<'_, D> {
         // refuses the same state as an unanchored point, with the sentence
         // that names the command's own subject.
         if cursor.is_fully_defined() {
-            seed_wal_from_state(&stores.state, &stores.wal).map_err(Error::WalSeed)?;
+            recover_bulk_checkpoint(&stores.state, &stores.wal).map_err(Error::Recovery)?;
         }
 
         let summary = dolos_cardano::eras::load_chain_summary_from_state(&stores.state)
@@ -832,7 +832,7 @@ impl<D: Domain> Driver<'_, D> {
 
         // Whatever ended the replay, the chunks it committed are in the state
         // and the WAL must agree before the next domain open.
-        seed_wal_from_state(domain.state(), domain.wal()).map_err(Error::WalSeed)?;
+        recover_bulk_checkpoint(domain.state(), domain.wal()).map_err(Error::Recovery)?;
 
         self.replay.round_finished();
 

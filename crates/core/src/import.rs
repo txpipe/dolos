@@ -106,6 +106,118 @@ pub enum WalSeed {
     Seeded(ChainPoint),
 }
 
+/// The durable relationship between state and WAL after recovering a bulk
+/// replay checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BulkRecovery {
+    /// Neither store has a cursor yet.
+    Empty,
+    /// Both stores already name the same committed point.
+    Aligned { position: ChainPoint },
+    /// Bulk import committed state past the WAL, so the WAL was reseeded to
+    /// the state cursor.
+    WalSeeded {
+        previous: Option<ChainPoint>,
+        position: ChainPoint,
+    },
+    /// WAL is ahead of state. Normal domain bootstrap owns replaying it
+    /// forward; bulk recovery deliberately leaves both stores unchanged.
+    WalAhead {
+        wal: ChainPoint,
+        state: Option<ChainPoint>,
+    },
+}
+
+/// Why a bulk checkpoint cannot be recovered automatically.
+#[derive(Debug, thiserror::Error)]
+pub enum BulkRecoveryError {
+    #[error("reading state cursor during bulk checkpoint recovery")]
+    ReadState(#[source] StateError),
+
+    #[error("reading WAL tip during bulk checkpoint recovery")]
+    ReadWal(#[source] WalError),
+
+    #[error("state cursor at slot {slot} has no block hash; refusing to reseed the WAL")]
+    UnanchoredState { slot: BlockSlot },
+
+    #[error("WAL point {wal} and state point {state} disagree at slot {slot}")]
+    DivergedAtSlot {
+        slot: BlockSlot,
+        wal: ChainPoint,
+        state: ChainPoint,
+    },
+
+    #[error("WAL point {wal} exists but state has no cursor")]
+    MissingState { wal: ChainPoint },
+
+    #[error("seeding WAL from the bulk-import state cursor")]
+    ResetWal(#[source] WalError),
+}
+
+/// Reconcile the one expected bulk-import crash shape: state ahead of WAL.
+///
+/// [`ImportExt`] intentionally skips WAL writes, so every successfully
+/// committed import batch can leave state ahead until the replay session
+/// checkpoints. Reseeding the WAL to a fully-defined state cursor is safe in
+/// that one direction. Other shapes are either left to normal bootstrap (WAL
+/// ahead) or refused (an unanchored/divergent cursor), so corrupt state is not
+/// mistaken for ordinary replay recovery.
+///
+/// This function only reads state and writes WAL. It never drains chain work,
+/// advances state, touches the archive, or performs housekeeping. Callers may
+/// therefore run it before publishing a pending boundary and before building
+/// the next replay domain.
+pub fn recover_bulk_checkpoint<S, W>(state: &S, wal: &W) -> Result<BulkRecovery, BulkRecoveryError>
+where
+    S: StateStore,
+    W: WalStore,
+{
+    let state = state.read_cursor().map_err(BulkRecoveryError::ReadState)?;
+    let wal_tip = wal
+        .find_tip()
+        .map_err(BulkRecoveryError::ReadWal)?
+        .map(|(point, _)| point);
+
+    if let Some(state) = state.as_ref() {
+        if !state.is_fully_defined() {
+            return Err(BulkRecoveryError::UnanchoredState { slot: state.slot() });
+        }
+    }
+
+    match (wal_tip, state) {
+        (None, None) => Ok(BulkRecovery::Empty),
+        (None, Some(position)) => {
+            wal.reset_to(&position)
+                .map_err(BulkRecoveryError::ResetWal)?;
+            Ok(BulkRecovery::WalSeeded {
+                previous: None,
+                position,
+            })
+        }
+        (Some(wal), None) if wal == ChainPoint::Origin => {
+            Ok(BulkRecovery::WalAhead { wal, state: None })
+        }
+        (Some(wal), None) => Err(BulkRecoveryError::MissingState { wal }),
+        (Some(wal), Some(state)) if wal == state => Ok(BulkRecovery::Aligned { position: state }),
+        (Some(wal), Some(state)) if wal.slot() == state.slot() => {
+            Err(BulkRecoveryError::DivergedAtSlot {
+                slot: state.slot(),
+                wal,
+                state,
+            })
+        }
+        (Some(wal), Some(state)) if wal.slot() > state.slot() => Ok(BulkRecovery::WalAhead {
+            wal,
+            state: Some(state),
+        }),
+        (previous, Some(position)) => {
+            wal.reset_to(&position)
+                .map_err(BulkRecoveryError::ResetWal)?;
+            Ok(BulkRecovery::WalSeeded { previous, position })
+        }
+    }
+}
+
 /// Why the WAL could not be seeded from the state cursor.
 ///
 /// One variant per step, each carrying the message the bootstrap command has

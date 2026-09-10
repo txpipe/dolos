@@ -23,7 +23,8 @@ use miette::{bail, Context as _, IntoDiagnostic as _};
 use tokio_util::sync::CancellationToken;
 
 use crate::feedback::Feedback;
-use dolos::adapters::{ArchiveStoreBackend, DomainAdapter, StateStoreBackend};
+use dolos::adapters::{ArchiveStoreBackend, StateStoreBackend};
+use dolos::engine::BulkReplaySession;
 
 /// Where the mithril window lands when the operator names nowhere: beside the
 /// stores, so the bytes stay on the data mount.
@@ -169,7 +170,10 @@ impl RepositoryArm<'_> {
     }
 }
 
-impl backfill::Publish<DomainAdapter> for RepositoryArm<'_> {
+impl<D> backfill::Publish<D> for RepositoryArm<'_>
+where
+    D: dolos_core::Domain<Archive = ArchiveStoreBackend, State = StateStoreBackend>,
+{
     fn announce(&self, plan: &Plan) -> Result<(), backfill::Error> {
         super::report_plan(plan).map_err(backfill::Error::caller)
     }
@@ -231,7 +235,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         feedback,
     };
 
-    let driver = backfill::Driver::<DomainAdapter> {
+    let genesis = Arc::new(genesis);
+
+    let driver = backfill::Driver::<BulkReplaySession> {
         config,
         genesis: &genesis,
         mithril,
@@ -255,20 +261,18 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 .context("opening the data stores")
                 .map_err(backfill::Error::caller)?;
 
-            Ok(backfill::Stores::<DomainAdapter> {
+            Ok(backfill::Stores::<BulkReplaySession> {
                 wal: stores.wal,
                 state: stores.state,
                 archive: stores.archive,
             })
         },
         build_domain: &|target| {
-            crate::common::setup_domain_with_stop_epoch(config, Some(target))
+            BulkReplaySession::open(config, genesis.clone(), Some(target))
                 .map_err(backfill::Error::caller)
         },
-        shutdown_domain: &|domain: &DomainAdapter| {
-            domain
-                .shutdown()
-                .map_err(|e| backfill::Error::caller(format!("shutting down the domain: {e}")))
+        shutdown_domain: &|domain: &BulkReplaySession| {
+            domain.close().map(|_| ()).map_err(backfill::Error::caller)
         },
         publish: &publish,
     };

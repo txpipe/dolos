@@ -15,6 +15,7 @@ use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
 use crate::feedback::{Feedback, MithrilFeedback};
+use dolos::engine::BulkReplaySession;
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
@@ -150,17 +151,13 @@ fn import_hardano_into_domain(
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let session = BulkReplaySession::open(config, genesis, None)
+        .map_err(|error| miette::miette!("opening the bulk-replay session: {error}"))?;
 
-    let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
-
-    // Always shutdown the domain before it goes out of scope, regardless of
-    // whether import succeeded or failed.
-    if let Err(e) = domain.shutdown() {
-        tracing::error!("error during domain shutdown: {}", e);
-    }
-
-    result
+    session
+        .run(|session| do_import(session, args, immutable_path, feedback, chunk_size))
+        .map_err(|error| miette::miette!("{error}"))
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
