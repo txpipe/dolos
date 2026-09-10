@@ -639,6 +639,14 @@ where
             get(routes::governance::proposal_by_gov_action_id::<D>),
         )
         .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/metadata",
+            get(routes::governance::proposal_metadata::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/metadata",
+            get(routes::governance::proposal_metadata_by_gov_action::<D>),
+        )
+        .route(
             "/governance/proposals/{tx_hash}/{cert_index}/withdrawals",
             get(routes::governance::proposal_withdrawals::<D>),
         )
