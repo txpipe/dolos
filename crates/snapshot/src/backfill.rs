@@ -134,6 +134,12 @@ pub enum Error {
     #[error("importing an immutable block chunk")]
     Import(#[source] DomainError),
 
+    #[error("replay failed ({replay}) and shutting down also failed ({shutdown})")]
+    ReplayAndShutdown {
+        replay: Box<Error>,
+        shutdown: Box<Error>,
+    },
+
     #[error("iterating the local immutable db: {0}")]
     ImmutableDb(String),
 
@@ -507,10 +513,25 @@ pub struct Driver<'a, D: Domain> {
     /// Beside [`Driver::build_domain`] and for the same reason: a domain's
     /// teardown is not on the [`Domain`] trait either, so the half of its
     /// lifecycle that flushes is the caller's too.
-    pub shutdown_domain: &'a dyn Fn(&D) -> Result<(), Error>,
+    pub shutdown_domain: &'a dyn Fn(D) -> Result<(), Error>,
 
     /// Where the planned sequence goes.
     pub publish: &'a dyn Publish<D>,
+}
+
+fn finish_extend(
+    replay: Result<Advance, Error>,
+    shutdown: Result<(), Error>,
+) -> Result<Advance, Error> {
+    match (replay, shutdown) {
+        (Ok(advance), Ok(())) => Ok(advance),
+        (Err(replay), Ok(())) => Err(replay),
+        (Ok(_), Err(shutdown)) => Err(shutdown),
+        (Err(replay), Err(shutdown)) => Err(Error::ReplayAndShutdown {
+            replay: Box::new(replay),
+            shutdown: Box::new(shutdown),
+        }),
+    }
 }
 
 impl<D: Domain> Driver<'_, D> {
@@ -673,12 +694,9 @@ impl<D: Domain> Driver<'_, D> {
 
         // Shut down even when the replay failed: fjall in particular has
         // background work to flush before the handle drops.
-        let shutdown = (self.shutdown_domain)(&domain);
+        let shutdown = (self.shutdown_domain)(domain);
 
-        let advance = result?;
-        shutdown?;
-
-        Ok(advance)
+        finish_extend(result, shutdown)
     }
 
     /// Import what is on disk, fetching windows from mithril whenever the
@@ -1053,6 +1071,20 @@ mod tests {
         assert!(!fetch_advanced(Some(5), Some(5)));
         assert!(!fetch_advanced(Some(5), None));
         assert!(!fetch_advanced(None, None));
+    }
+
+    #[test]
+    fn replay_and_shutdown_failures_are_both_preserved() {
+        let Err(error) = finish_extend(Err(Error::Interrupted), Err(Error::EmptyWindow)) else {
+            panic!("simultaneous failures unexpectedly succeeded");
+        };
+
+        let Error::ReplayAndShutdown { replay, shutdown } = error else {
+            panic!("simultaneous failures lost their combined error");
+        };
+
+        assert!(matches!(*replay, Error::Interrupted));
+        assert!(matches!(*shutdown, Error::EmptyWindow));
     }
 
     #[test]

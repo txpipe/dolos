@@ -162,6 +162,9 @@ pub enum BulkReplayError {
     #[error("bulk replay completed without a state cursor")]
     MissingPosition,
 
+    #[error("cannot close bulk replay while {count} cloned session handle(s) remain")]
+    OutstandingHandles { count: usize },
+
     #[error("shutting down the bulk-replay domain: {0}")]
     Shutdown(#[source] DomainError),
 
@@ -183,6 +186,7 @@ pub enum BulkReplayError {
 pub struct BulkReplaySession {
     domain: DomainAdapter,
     initial_recovery: BulkRecovery,
+    close_lease: Arc<()>,
 }
 
 impl BulkReplaySession {
@@ -201,17 +205,13 @@ impl BulkReplaySession {
         Ok(Self {
             domain,
             initial_recovery,
+            close_lease: Arc::new(()),
         })
     }
 
     /// What opening the session found and, if necessary, repaired.
     pub fn initial_recovery(&self) -> &BulkRecovery {
         &self.initial_recovery
-    }
-
-    /// The underlying domain for read-only consumers and existing facades.
-    pub fn domain(&self) -> &DomainAdapter {
-        &self.domain
     }
 
     /// Read the last position committed across the state-store boundary.
@@ -247,8 +247,15 @@ impl BulkReplaySession {
     /// Shutdown is attempted even if checkpoint recovery fails, and a caller
     /// should call this on both operation success and failure.
     /// [`run`](Self::run) packages that rule for a complete replay
-    /// operation.
-    pub fn close(&self) -> Result<BulkRecovery, BulkReplayError> {
+    /// operation. Closing consumes the session and refuses while cloned
+    /// session handles remain, so no handle can keep importing after the final
+    /// checkpoint.
+    pub fn close(self) -> Result<BulkRecovery, BulkReplayError> {
+        let count = Arc::strong_count(&self.close_lease) - 1;
+        if count > 0 {
+            return Err(BulkReplayError::OutstandingHandles { count });
+        }
+
         let recovery = recover_bulk_checkpoint(self.domain.state(), self.domain.wal());
         let shutdown = self.domain.shutdown();
 

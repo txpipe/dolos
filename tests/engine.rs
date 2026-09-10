@@ -133,6 +133,22 @@ fn run_closes_and_checkpoints_after_success() {
 }
 
 #[test]
+fn close_refuses_while_a_cloned_session_handle_remains() {
+    let node = node::Node::new();
+    let genesis = Arc::new(dolos_cardano::include::preview::load());
+    let session = BulkReplaySession::open(&node.config, genesis, None).unwrap();
+    let remaining = session.clone();
+
+    let error = session.close().unwrap_err();
+
+    assert!(matches!(
+        error,
+        dolos::engine::BulkReplayError::OutstandingHandles { count: 1 }
+    ));
+    remaining.close().unwrap();
+}
+
+#[test]
 fn unanchored_state_is_not_silently_recovered() {
     let node = node::Node::new();
     let genesis = Arc::new(dolos_cardano::include::preview::load());

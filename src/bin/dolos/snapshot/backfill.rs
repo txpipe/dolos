@@ -271,7 +271,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
             BulkReplaySession::open(config, genesis.clone(), Some(target))
                 .map_err(backfill::Error::caller)
         },
-        shutdown_domain: &|domain: &BulkReplaySession| {
+        shutdown_domain: &|domain: BulkReplaySession| {
             domain.close().map(|_| ()).map_err(backfill::Error::caller)
         },
         publish: &publish,
