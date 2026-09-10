@@ -46,35 +46,3 @@ npm install @txpipe/dolos
 | [dolos-x86_64-pc-windows-msvc.tar.gz](https://github.com/txpipe/dolos/releases/latest/download/dolos-x86_64-pc-windows-msvc.tar.gz) | x64 Windows |
 | [dolos-x86_64-unknown-linux-gnu.tar.gz](https://github.com/txpipe/dolos/releases/latest/download/dolos-x86_64-unknown-linux-gnu.tar.gz) | x64 Linux |
 | [dolos-aarch64-unknown-linux-gnu.tar.gz](https://github.com/txpipe/dolos/releases/latest/download/dolos-aarch64-unknown-linux-gnu.tar.gz) | ARM64 Linux |
-
-## Opt in to v2.0.0-alpha.0
-
-The v2 alpha is a prerelease and must be selected explicitly. The
-`releases/latest` URLs above, `brew install txpipe/tap/dolos`, and
-`npm install @txpipe/dolos` continue to select stable releases; ordinary
-Homebrew and npm installs do not select this alpha.
-
-After the prerelease is published, use its exact release URLs:
-
-```sh
-# macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/txpipe/dolos/releases/download/v2.0.0-alpha.0/dolos-installer.sh | sh
-
-# Windows PowerShell
-powershell -ExecutionPolicy Bypass -c \
-  "irm https://github.com/txpipe/dolos/releases/download/v2.0.0-alpha.0/dolos-installer.ps1 | iex"
-```
-
-Direct downloads use the same versioned release directory:
-
-| File | Platform |
-| --- | --- |
-| [dolos-aarch64-apple-darwin.tar.gz](https://github.com/txpipe/dolos/releases/download/v2.0.0-alpha.0/dolos-aarch64-apple-darwin.tar.gz) | Apple Silicon macOS |
-| [dolos-x86_64-pc-windows-msvc.tar.gz](https://github.com/txpipe/dolos/releases/download/v2.0.0-alpha.0/dolos-x86_64-pc-windows-msvc.tar.gz) | x64 Windows |
-| [dolos-x86_64-unknown-linux-gnu.tar.gz](https://github.com/txpipe/dolos/releases/download/v2.0.0-alpha.0/dolos-x86_64-unknown-linux-gnu.tar.gz) | x64 Linux |
-| [dolos-aarch64-unknown-linux-gnu.tar.gz](https://github.com/txpipe/dolos/releases/download/v2.0.0-alpha.0/dolos-aarch64-unknown-linux-gnu.tar.gz) | ARM64 Linux |
-
-These links exist only after the founder publishes the GitHub prerelease. The
-release configuration keeps package-manager prerelease publication disabled,
-so there is intentionally no ordinary Homebrew or npm command for this alpha.

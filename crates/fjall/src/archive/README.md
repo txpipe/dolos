@@ -11,7 +11,9 @@ This module implements the `ArchiveStore` trait using [Fjall](https://github.com
 | 3 | `archive-tags` | Block tags, append-only | Prefix scans by dimension and key |
 | 4 | `index-exact` | Block hash / block number / tx hash → slot | Point lookups |
 
-The last two are projections of the blocks. They were a separate database until v2 (`<storage.path>/index`), and moving them here is what lets them be written in the same batch as the block locations they point at, so the history and its lookups commit together. They keep the compaction settings the standalone store gave them — `l0_threshold = 8`, `memtable_size_mb = 128` — so their behavior did not change with the move.
+The last two are projections of the blocks. Keeping them here lets the history
+and its lookups commit in the same batch. Both keyspaces use
+`l0_threshold = 8` and `memtable_size_mb = 128`.
 
 ## Key Schemas
 
@@ -75,7 +77,10 @@ Internal prefix constants:
 
 ## Stelae
 
-The `indexes` stele layer is the sorted output of `ArchiveStore::iter_archive_tags` followed by `iter_exact_records`, and the input of `ArchiveWriter::append_prehashed`. It is byte-identical to what the standalone index store produced, so the move required no media-type bump and no backfill. See `scan.rs` for the prefix walk both traversals share.
+The `indexes` stele layer is the sorted output of
+`ArchiveStore::iter_archive_tags` followed by `iter_exact_records`, and the
+input of `ArchiveWriter::append_prehashed`. See `scan.rs` for the prefix walk
+both traversals share.
 
 ## Pruning
 

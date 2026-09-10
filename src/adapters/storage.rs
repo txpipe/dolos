@@ -136,13 +136,12 @@ pub fn inspect_existing_data(
     ))
 }
 
-/// The storage version this binary reads. A store built by an older dolos is
-/// not migrated in place: the supported path off it is a fresh `dolos init`
-/// followed by a restore or a re-sync.
+/// The only storage version this binary reads. Data in another format must be
+/// cleared and bootstrapped again.
 pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
 
-/// The migration guide the refusal points an operator at.
-pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v2";
+/// The bootstrap guide the refusal points an operator at.
+pub const BOOTSTRAP_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/bootstrap";
 
 /// Refuse a configuration at any storage version but the current one.
 ///
@@ -156,7 +155,7 @@ fn check_storage_version(version: &StorageVersion) -> Result<(), Error> {
         return Err(Error::StorageError(format!(
             "unsupported storage version `{version}`, this dolos only supports \
              `{CURRENT_STORAGE_VERSION}`; run `dolos init` to upgrade the configuration and \
-             re-bootstrap the data — see the migration guide at {MIGRATION_GUIDE_URL}"
+              re-bootstrap the data — see the bootstrap guide at {BOOTSTRAP_GUIDE_URL}"
         )));
     }
     Ok(())
@@ -1400,8 +1399,8 @@ mod tests {
         toml::from_str(&toml).unwrap()
     }
 
-    /// A v1.6-era configuration is refused, and the refusal names both the
-    /// tool that performs the migration and the guide that describes it.
+    /// An unsupported configuration is refused, and the refusal names both
+    /// the tool that prepares it and the bootstrap guide.
     #[test]
     fn older_storage_versions_are_refused_with_the_remedy() {
         for stale in [
@@ -1425,8 +1424,8 @@ mod tests {
                 "refusal must name the remedy: {message}"
             );
             assert!(
-                message.contains(MIGRATION_GUIDE_URL),
-                "refusal must point at the migration guide: {message}"
+                message.contains(BOOTSTRAP_GUIDE_URL),
+                "refusal must point at the bootstrap guide: {message}"
             );
         }
 

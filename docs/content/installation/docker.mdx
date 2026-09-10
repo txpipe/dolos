@@ -44,20 +44,20 @@ To use a versioned image, replace the `latest` tag by the desired version with t
 ghcr.io/txpipe/dolos:v1
 ```
 
-The `v1` tag is a floating alias that tracks the latest stable `1.x` release. For production deployments, consider pinning to a specific version (e.g. `v1.0.0`). Prereleases do not update `stable`, major aliases such as `v2`, or minor aliases such as `v2.0`.
+The `v1` tag is a floating alias that tracks the latest stable `1.x` release. For production deployments, consider pinning to a specific version (e.g. `v1.0.0`).
 
-## Opt in to v2.0.0-alpha.0
+## Prerelease Images
 
-Pull the alpha by its exact tag after the prerelease is published:
+Prerelease images are published under their exact version tag and an immutable
+commit SHA tag. For example:
 
 ```sh
 docker pull ghcr.io/txpipe/dolos:v2.0.0-alpha.0
 docker run ghcr.io/txpipe/dolos:v2.0.0-alpha.0 --help
 ```
 
-This exact tag is immutable release identity. It does not move `stable`, `v2`
-or `v2.0`. It is also different from `latest`, which continues to follow
-`main` and may contain changes newer than the alpha.
+Prereleases do not update `stable`, major aliases such as `v2`, or minor
+aliases such as `v2.0`. The `latest` tag follows `main` independently.
 
 ## Multiple Architectures
 
