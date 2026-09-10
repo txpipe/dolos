@@ -71,7 +71,7 @@ Value: (empty)
 - `lookup_key`: the logical key, stored verbatim so a prefix scan can find it
 - `txo_ref`: `[tx_hash:32][index:4]`, the UTxO the tag points at
 
-They are a projection of the UTxO set, so they are written in the same batch as the set (`StateWriter::apply_utxo_tags` / `undo_utxo_tags`) and read through `StateStore::utxos_by_tag`. Before v1.7 they lived in a separate index database; nothing about the key encoding changed with the move, only which journal, cache and write batch they live under.
+They are a projection of the UTxO set, so they are written in the same batch as the set (`StateWriter::apply_utxo_tags` / `undo_utxo_tags`) and read through `StateStore::utxos_by_tag`. Before v2 they lived in a separate index database; nothing about the key encoding changed with the move, only which journal, cache and write batch they live under.
 
 Note the asymmetry with the archive's tags, which hash their key: here the lookup key is stored whole, because a live-UTxO query knows the key it is asking about and wants the exact refs back.
 

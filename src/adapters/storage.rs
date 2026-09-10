@@ -142,7 +142,7 @@ pub fn inspect_existing_data(
 pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
 
 /// The migration guide the refusal points an operator at.
-pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v1-7";
+pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v2";
 
 /// Refuse a configuration at any storage version but the current one.
 ///

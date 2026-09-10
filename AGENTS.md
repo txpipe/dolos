@@ -27,7 +27,7 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 - **Database**: `<storage.path>/wal`
 
 ### Where the indexes live
-There is no standalone index store — it was removed in v1.7. Every index is a
+There is no standalone index store — it was removed in v2. Every index is a
 projection, and lives in the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)

@@ -114,7 +114,7 @@ The `storage` section controls how Dolos stores data in the local file system. E
   bundled dictionary and folds the former index store into state and archive;
   there are no compression settings. Run `dolos init` to upgrade a readable
   older configuration, or follow the manual steps in the
-  [migration guide](https://docs.txpipe.io/dolos/migration/dolos-v1-7) when it
+  [migration guide](https://docs.txpipe.io/dolos/migration/dolos-v2) when it
   cannot be read. Relabelling an older data directory as `v4` is unsupported
   and is not detected.
 
@@ -155,7 +155,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb state directory has to be re-bootstrapped (a stelae restore is the shortest path).
+- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value was removed in v2: a configuration still naming it fails to load, and an existing redb state directory has to be re-bootstrapped (a Stelae restore is the shortest path when a verified snapshot is available).
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
 - `cache`: size (MB) of the state cache.
 - `max_history`: maximum number of slots to keep before pruning.
@@ -175,7 +175,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads   | integer | 4         |
 | memtable_size_mb | integer | 64        |
 
-- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole archive in process memory, block bodies included: ephemeral — everything is lost on restart — so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the archive entirely. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb archive has to be re-bootstrapped (a stelae restore is the shortest path).
+- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole archive in process memory, block bodies included: ephemeral — everything is lost on restart — so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the archive entirely. The `redb` value was removed in v2: a configuration still naming it fails to load, and an existing redb archive has to be re-bootstrapped (a Stelae restore is the shortest path when a verified snapshot is available).
 - `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
 - `blocks_path`: optional override for block segment files.
 - `cache`: size (MB) of the archive index cache.
@@ -187,9 +187,9 @@ The dictionary is part of the storage format, not a setting: every build carries
 
 A data directory written by an earlier layout is not readable and is not converted: bring a `v4` instance up by a fresh bootstrap (`dolos bootstrap mithril` or `relay`) or by importing a logical snapshot (`dolos bootstrap stelae`, the shortest path), both of which write the compressed layout from the first block. The version check is the only enforcement and it is at the configuration level: a `v3` or older `dolos.toml` is refused with the remedy named, and `dolos init` rewrites it. There is no check of the data itself, so a data directory from an older layout whose configuration was relabelled `v4` by hand is unsupported and is not detected — its blocks are not frames and reads of them fail.
 
-### `storage.index` section — removed in v1.7
+### `storage.index` section — removed in v2
 
-The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. Drop the table from the configuration; v1.7 bumps the storage version, so an existing data directory has to be re-bootstrapped (a stelae restore is the shortest path) and its configuration revisited anyway.
+The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. Drop the table from the configuration; v2 bumps the storage version, so an existing data directory has to be re-bootstrapped (a Stelae restore is the shortest path when a verified snapshot is available) and its configuration revisited anyway.
 
 Any tuning the table carried (`cache`, `worker_threads`, `max_journal_size`, and the rest) should be re-applied to `storage.state` and `storage.archive`, which now carry the keyspaces. `index.backend = "no_op"` had no replacement and needs none: `archive.backend = "no_op"` is the ledger-only switch and drops the historical lookups with the archive, while the live-UTxO tags stay with the UTxO set they project.
 

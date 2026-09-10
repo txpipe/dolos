@@ -11,7 +11,7 @@ This module implements the `ArchiveStore` trait using [Fjall](https://github.com
 | 3 | `archive-tags` | Block tags, append-only | Prefix scans by dimension and key |
 | 4 | `index-exact` | Block hash / block number / tx hash → slot | Point lookups |
 
-The last two are projections of the blocks. They were a separate database until v1.7 (`<storage.path>/index`), and moving them here is what lets them be written in the same batch as the block locations they point at, so the history and its lookups commit together. They keep the compaction settings the standalone store gave them — `l0_threshold = 8`, `memtable_size_mb = 128` — so their behavior did not change with the move.
+The last two are projections of the blocks. They were a separate database until v2 (`<storage.path>/index`), and moving them here is what lets them be written in the same batch as the block locations they point at, so the history and its lookups commit together. They keep the compaction settings the standalone store gave them — `l0_threshold = 8`, `memtable_size_mb = 128` — so their behavior did not change with the move.
 
 ## Key Schemas
 

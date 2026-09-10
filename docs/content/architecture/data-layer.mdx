@@ -24,7 +24,7 @@ Under the configured `storage.path`, a running node maintains three on-disk stor
 | **Archive** | Immutable history: full block bodies, time-indexed logs of entity changes, and the reverse lookups over them — slots by address, payment credential, stake credential, policy, asset, datum and more, plus slot by block hash, block number and tx hash. | History is append-only and read differently from current state, so it uses its own layout (see below). The lookups are a projection of the blocks, so they live beside them and commit with them. |
 | **Mempool** | Submitted-but-unconfirmed transactions and their lifecycle state. | Pending transactions are transient and overlaid on top of committed state during validation. |
 
-Before v1.7 the reverse lookups lived in a fourth store of their own, configured under `[storage.index]`. That store is gone, and so is the table.
+Before v2 the reverse lookups lived in a fourth store of their own, configured under `[storage.index]`. That store is gone, and so is the table.
 
 ## Storage traits and pluggable backends
 
@@ -32,7 +32,7 @@ Each store is defined as a trait in `dolos-core` — `WalStore`, `StateStore`, `
 
 Available backends:
 
-- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and the mempool; its state and archive config variants were removed in v1.7, so a configuration naming them fails to load.
+- **redb** (`dolos-redb3`) — an embedded ACID B+tree store. It backs the WAL (the only WAL implementation) and the mempool; its state and archive config variants were removed in v2, so a configuration naming them fails to load.
 - **fjall** (`dolos-fjall`) — an LSM-tree engine tuned for write-heavy workloads with many hot keys. The only persistent backend for the state and archive stores, and the default for both.
 - **no-op** — a store that silently discards writes, used to *disable* the archive.
 - **in-memory** — non-persistent stores for testing and ephemeral nodes. State and archive have builtin implementations in `dolos-core` backed by ordered maps, which serve their traits in full; the WAL and mempool use redb's memory backend instead.

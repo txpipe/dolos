@@ -1,0 +1,137 @@
+---
+title: Migrating to Dolos v2
+sidebar:
+  label: Dolos v2
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Dolos v2 changes the on-disk storage format from `v3` to `v4`. There is no
+in-place data conversion. Whether you are coming from v1.6, v1.7.0-alpha.0 or
+v1.7.0-alpha.1, the supported upgrade is to preserve what you need for
+rollback, initialize a v2 configuration, and bootstrap fresh data.
+
+<Aside type="caution">
+Changing `storage.version` to `"v4"` over files written by an older release is
+not a migration. The version gate checks the configuration, not the provenance
+of every file. Hand-edited old data may open and then return incorrect data or
+fail when its blocks are read.
+</Aside>
+
+## Before you start
+
+1. Stop Dolos and prevent supervisors from restarting it during the upgrade.
+2. Record the Dolos binary version, configuration, genesis files, service
+   settings and the chain point clients currently see.
+3. Copy or snapshot the complete v1 data directory and configuration if you
+   need a rollback path. Test that the copy can be restored before deleting the
+   working data.
+4. Provision enough free disk for the new stores and the selected bootstrap
+   method. Full history costs substantially more than ledger-only or a sliding
+   history window. Registry restores stage compressed layers under
+   `<storage.path>/scratch` unless `--scratch-dir` points elsewhere; Mithril
+   uses its download directory as well as the destination stores.
+5. Reserve a maintenance window for the bootstrap and tip catch-up. A Stelae
+   restore is dominated by transfer time, Mithril rebuilds state from verified
+   immutable history, and relay sync replays the chain from origin. Network,
+   history window, CPU and storage performance all affect the duration.
+
+Do not let a v1 binary write to the new v4 directory. A rollback restores the
+old binary, old configuration and old data together.
+
+## Initialize the v2 configuration
+
+Install the v2 binary you intend to run, then execute:
+
+```sh
+dolos init
+```
+
+If the existing configuration is readable and declares an older storage
+version, `dolos init` offers to delete the managed data and bootstrap again.
+Accepting that prompt clears the WAL, state, archive and other managed storage;
+it is irreversible unless you made a backup. Declining leaves both the data and
+configuration untouched, and v2 continues to refuse them.
+
+Some old configurations cannot be parsed because they name a removed backend
+or a retired option. In that case `dolos init` refuses to guess the storage
+path. Read the path from the old configuration, remove or move that data
+yourself, preserve the old configuration for rollback, then remove the working
+configuration and run `dolos init` again.
+
+Review the generated file instead of copying only the new version string:
+
+- `storage.state.backend` and `storage.archive.backend` no longer accept
+  `redb`. Persistent state and archive storage use `fjall`.
+- The standalone `[storage.index]` table is gone. A leftover table is ignored;
+  it does not migrate the old index database. Reapply relevant cache, worker,
+  journal, flush, L0 and memtable tuning to `storage.state` and
+  `storage.archive`.
+- Archive blocks are written as compressed frames with Dolos' bundled
+  dictionary. There are no operator compression or sealing settings.
+
+## Bootstrap fresh v4 data
+
+Choose a source appropriate to your trust and recovery requirements:
+
+- **Stelae** restores logical data without replaying every block and can resume
+  interrupted registry transfers. Follow the
+  [Stelae bootstrap guide](https://docs.txpipe.io/dolos/bootstrap/stelae) from
+  [PR #1217](https://github.com/txpipe/dolos/pull/1217). Use it only after that
+  guide is published and after the release process identifies a snapshot that
+  has been restored and checked for your network.
+- **Mithril** downloads certificate-verified Cardano immutable history and
+  rebuilds Dolos state. Run `dolos bootstrap mithril`; this requires space for
+  the download and the resulting stores and can take hours on mainnet.
+- **Relay or local node** syncs from origin with
+  `dolos bootstrap relay`, then `dolos daemon`. It avoids trusting derived
+  snapshot state but can take hours to days.
+- **Legacy Dolos snapshots** package storage-engine files. Only use a snapshot
+  explicitly produced for storage `v4`. Snapshot paths that interpolate
+  `${VERSION}` use the storage version (`v4`), not the product release
+  (`v2.0.0-alpha.0`).
+
+<Aside type="note">
+A digest proves that downloaded bytes match a registry object; it does not
+prove who published them. Stelae snapshots are unsigned in this release.
+Choose a registry and publisher you trust, verify the exact network and point,
+and prefer a source the release checklist has restored and audited. If no such
+snapshot is available, use Mithril or replay from a trusted relay rather than
+assuming availability.
+</Aside>
+
+## Update scripts and integrations
+
+The v2 storage reorganization also changes operator-facing commands and
+summaries:
+
+| Before v2 | In v2 |
+| --- | --- |
+| `data export --include-indexes` | Removed; indexes travel with state or archive data |
+| `data cardinality-stats` | Removed; update scripts that invoke it |
+| A separate `indexes` entry in data summaries | Removed; inspect state and archive summaries |
+| Index-store tuning under `[storage.index]` | Move the applicable tuning to state and archive |
+| `redb` state or archive backend | Use `fjall` for persistent data |
+
+Custom Rust integrations must also remove `Domain::Indexes`,
+`Domain::indexes()` and `WorkUnit::commit_indexes()` and adopt the state/archive
+writer contracts that now own their index updates.
+
+## Verify before cutover
+
+Start Dolos, let it reach the expected point, and run the read-only consistency
+audit against the new data:
+
+```sh
+dolos data check
+```
+
+The full audit scans substantial state and history and can take minutes on
+mainnet. Treat any reported inconsistency as a failed upgrade. Also compare the
+node tip with an independent source and exercise the API endpoints your clients
+depend on before directing production traffic to v2.
+
+Keep the v1 backup until the v2 node has completed its intended soak and your
+clients have passed their checks. To roll back, stop v2, move the entire v4
+directory aside, and restore the v1 binary, configuration and data as one set.
