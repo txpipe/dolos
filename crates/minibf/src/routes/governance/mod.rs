@@ -1,6 +1,6 @@
 mod mapping;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use self::mapping::description_json;
 
@@ -11,6 +11,7 @@ use axum::{
 };
 use blockfrost_openapi::models::{
     proposal::{self, Proposal},
+    proposal_votes_inner::{self, ProposalVotesInner},
     proposal_withdrawals_inner::ProposalWithdrawalsInner,
     proposals_inner::{GovernanceType, ProposalsInner},
 };
@@ -23,14 +24,20 @@ use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
-        primitives::{conway::GovAction, Coin, Epoch, StakeCredential},
+        primitives::{
+            conway::{DRep, GovAction, GovActionId, Vote, Voter},
+            Coin, Epoch, StakeCredential,
+        },
         traverse::{MultiEraBlock, MultiEraTx},
     },
 };
 
 use crate::{
     error::Error,
-    mapping::{bech32, bech32_gov_action, parse_gov_action_id, stake_cred_to_address, IntoModel},
+    mapping::{
+        bech32, bech32_cc_hot, bech32_drep, bech32_gov_action, bech32_pool, parse_gov_action_id,
+        stake_cred_to_address, IntoModel,
+    },
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
@@ -574,6 +581,271 @@ where
     Ok(Json(page))
 }
 
+struct VoteRow {
+    tx: Hash<32>,
+    cert_index: usize,
+    voter: Voter,
+    vote: Vote,
+}
+
+/// The CIP-129 spelling Blockfrost gives each voter: a hot-credential id for
+/// a committee member, a drep id for a DRep, the bare pool id for an SPO.
+fn voter_model(voter: &Voter) -> Result<(proposal_votes_inner::VoterRole, String), StatusCode> {
+    use proposal_votes_inner::VoterRole;
+
+    let out = match voter {
+        Voter::ConstitutionalCommitteeKey(hash) => (
+            VoterRole::ConstitutionalCommittee,
+            bech32_cc_hot(hash, false)?,
+        ),
+        Voter::ConstitutionalCommitteeScript(hash) => (
+            VoterRole::ConstitutionalCommittee,
+            bech32_cc_hot(hash, true)?,
+        ),
+        Voter::DRepKey(hash) => (VoterRole::Drep, bech32_drep(&DRep::Key(*hash))?),
+        Voter::DRepScript(hash) => (VoterRole::Drep, bech32_drep(&DRep::Script(*hash))?),
+        Voter::StakePoolKey(hash) => (VoterRole::Spo, bech32_pool(hash)?),
+    };
+
+    Ok(out)
+}
+
+fn vote_model(vote: &Vote) -> proposal_votes_inner::Vote {
+    match vote {
+        Vote::Yes => proposal_votes_inner::Vote::Yes,
+        Vote::No => proposal_votes_inner::Vote::No,
+        Vote::Abstain => proposal_votes_inner::Vote::Abstain,
+    }
+}
+
+impl IntoModel<ProposalVotesInner> for VoteRow {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<ProposalVotesInner, StatusCode> {
+        let (voter_role, voter) = voter_model(&self.voter)?;
+
+        Ok(ProposalVotesInner {
+            tx_hash: hex::encode(self.tx),
+            cert_index: self
+                .cert_index
+                .try_into()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+            voter_role,
+            voter,
+            vote: vote_model(&self.vote),
+        })
+    }
+}
+
+/// Scans one block body and returns its votes on `action`, ordered the way
+/// Blockfrost lists them.
+///
+/// Blockfrost returns rows in db-sync insertion order. Inside one block that
+/// order is: first the position of the voting tx, then each tx's voters map.
+/// The ledger sorts that map by voter kind — committee, then DRep, then
+/// pool — with script credentials before key credentials. Pallas declares
+/// the `Voter` enum variants in that same order, so iterating the `BTreeMap`
+/// here visits voters exactly as db-sync inserts them.
+///
+/// `cert_index` is db-sync's `voting_procedure.index`: the position of the
+/// action inside that voter's vote map, counted per voter rather than per tx.
+fn votes_in_block(body: &[u8], action: &GovActionId) -> Result<Vec<VoteRow>, StatusCode> {
+    let block = MultiEraBlock::decode(body).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut out = Vec::new();
+
+    for tx in block.txs() {
+        // Phase-2-invalid txs never run GOV, so their votes don't exist.
+        if !tx.is_valid() {
+            continue;
+        }
+
+        let tx_hash = tx.hash();
+
+        let MultiEraTx::Conway(conway_tx) = tx else {
+            continue;
+        };
+
+        let Some(procedures) = &conway_tx.transaction_body.voting_procedures else {
+            continue;
+        };
+
+        for (voter, votes) in procedures.iter() {
+            for (cert_index, (gov_action_id, procedure)) in votes.iter().enumerate() {
+                if gov_action_id != action {
+                    continue;
+                }
+
+                out.push(VoteRow {
+                    tx: tx_hash,
+                    cert_index,
+                    voter: voter.clone(),
+                    vote: procedure.vote.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// One page of a proposal's votes.
+///
+/// The listing is a vote history, not a tally: when a voter votes again,
+/// the new vote appears as an extra row and the old row stays. Blockfrost
+/// works this way because db-sync keeps every `voting_procedure` it sees,
+/// even ones the ledger no longer counts.
+///
+/// The state row carries each vote as a voter and a slot, so the number of
+/// rows per block is known upfront and only the blocks the page reaches are
+/// read from the archive — those resolve the voting tx hash and the index of
+/// the vote inside it.
+fn read_votes<D: Domain>(
+    domain: &D,
+    tx: Hash<32>,
+    idx: u32,
+    pagination: &Pagination,
+) -> Result<Vec<ProposalVotesInner>, Error> {
+    let key = ProposalState::build_entity_key(tx, idx);
+
+    let state = domain
+        .state()
+        .read_entity_typed::<ProposalState>(ProposalState::NS, &key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Blockfrost joins against db-sync and sends whatever rows come back, so
+    // an unknown proposal is an empty listing rather than a 404.
+    let Some(state) = state else {
+        return Ok(vec![]);
+    };
+
+    let mut row_counts: BTreeMap<BlockSlot, usize> = BTreeMap::new();
+
+    let histories = state
+        .cc_votes
+        .values()
+        .chain(state.drep_votes.values())
+        .chain(state.spo_votes.values());
+
+    for (slot, _) in histories.flatten() {
+        *row_counts.entry(*slot).or_default() += 1;
+    }
+
+    let mut groups: Vec<(BlockSlot, usize)> = row_counts.into_iter().collect();
+
+    let descending = matches!(pagination.order, Order::Desc);
+
+    // desc is the whole ascending listing read backwards
+    if descending {
+        groups.reverse();
+    }
+
+    let action = GovActionId {
+        transaction_id: tx,
+        action_index: idx,
+    };
+
+    let from = pagination.from();
+    let to = from + pagination.count;
+
+    let mut out = Vec::new();
+    let mut seen = 0;
+
+    for (slot, count) in groups {
+        let end = seen + count;
+
+        if end <= from {
+            seen = end;
+            continue;
+        }
+
+        if seen >= to {
+            break;
+        }
+
+        let Some(body) = domain
+            .archive()
+            .get_block_by_slot(&slot)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        else {
+            // A block the archive pruned leaves its votes nothing to resolve
+            // the voting tx from; the page just comes back short.
+            seen = end;
+            continue;
+        };
+
+        let mut rows = votes_in_block(&body, &action)?;
+
+        if descending {
+            rows.reverse();
+        }
+
+        for (offset, row) in rows.into_iter().enumerate() {
+            if (from..to).contains(&(seen + offset)) {
+                out.push(row.into_model()?);
+            }
+        }
+
+        seen = end;
+    }
+
+    Ok(out)
+}
+
+/// `GET /governance/proposals/{tx_hash}/{cert_index}/votes`: every vote cast
+/// on the proposal, oldest first.
+pub async fn proposal_votes<D>(
+    Path((tx_hash, cert_index)): Path<(String, String)>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<ProposalVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let cert_index = cert_index
+        .parse::<u32>()
+        .map_err(|_| Error::InvalidCertIndex)?;
+
+    // Blockfrost matches the hash as text against db-sync, so a malformed one
+    // is a listing that matches nothing rather than a bad request.
+    let Ok(tx) = tx_hash.parse::<Hash<32>>() else {
+        return Ok(Json(vec![]));
+    };
+
+    let page = domain
+        .query()
+        .run_blocking(move |domain| Ok(read_votes(&domain, tx, cert_index, &pagination)))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
+/// `GET /governance/proposals/{gov_action_id}/votes`: the same listing,
+/// addressed by CIP-129 id instead of by tx hash and action index.
+pub async fn proposal_votes_by_gov_action<D>(
+    Path(gov_action_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<ProposalVotesInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let pagination = Pagination::try_from(params)?;
+
+    let (tx, idx) = parse_gov_action_id(&gov_action_id).map_err(|_| Error::InvalidGovActionId)?;
+
+    let page = domain
+        .query()
+        .run_blocking(move |domain| Ok(read_votes(&domain, tx, idx, &pagination)))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+
+    Ok(Json(page))
+}
+
 // The helpers below reconstruct the `governance_description` JSON that
 // Blockfrost copies from db-sync. db-sync stores the cardano-ledger Aeson
 // encoding of the submitted `GovAction`, so field names follow the ledger
@@ -821,7 +1093,10 @@ mod tests {
     use bech32::{Bech32, Hrp};
     use dolos_cardano::model::GovPurpose;
     use dolos_core::StateWriter as _;
-    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use dolos_testing::{
+        synthetic::{SyntheticBlockConfig, SyntheticVote},
+        toy_domain::ToyDomain,
+    };
     use itertools::Itertools;
     use pallas::{
         codec::utils::Bytes,
@@ -1695,5 +1970,284 @@ mod tests {
         let id = bech32_gov_action(&proposal_tx(), 0).expect("failed to encode gov action id");
         let path = format!("/governance/proposals/{id}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn cc_script_voter() -> Voter {
+        Voter::ConstitutionalCommitteeScript([0xAAu8; 28].into())
+    }
+
+    fn cc_key_voter() -> Voter {
+        Voter::ConstitutionalCommitteeKey([0xBBu8; 28].into())
+    }
+
+    fn drep_voter() -> Voter {
+        Voter::DRepKey([0x66u8; 28].into())
+    }
+
+    fn spo_voter() -> Voter {
+        Voter::StakePoolKey([0x99u8; 28].into())
+    }
+
+    fn cast(voter: Voter, action_index: u32, vote: Vote) -> SyntheticVote {
+        SyntheticVote {
+            voter,
+            proposal_block: 0,
+            proposal_tx: 0,
+            action_index,
+            vote,
+        }
+    }
+
+    /// Block 0 proposes three actions in one tx. Block 1 votes on action 0
+    /// with all three voter roles — its drep votes on action 1 too, so the
+    /// per-voter cert index shows. Block 2 carries the same drep re-voting on
+    /// action 0. Action 2 collects no votes.
+    fn vote_app() -> TestApp {
+        TestApp::new_with_cfg(SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![
+                vec![vec![
+                    GovAction::Information,
+                    GovAction::NoConfidence(None),
+                    GovAction::Information,
+                ]],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![
+                    cast(drep_voter(), 0, Vote::Yes),
+                    cast(drep_voter(), 1, Vote::No),
+                    cast(cc_key_voter(), 0, Vote::Yes),
+                    cast(cc_script_voter(), 0, Vote::No),
+                    cast(spo_voter(), 0, Vote::Abstain),
+                ]],
+                vec![vec![cast(drep_voter(), 0, Vote::Abstain)]],
+            ],
+            ..Default::default()
+        })
+    }
+
+    async fn get_votes(app: &TestApp, path: &str) -> Vec<ProposalVotesInner> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} for {path} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        serde_json::from_slice(&bytes).expect("failed to parse votes")
+    }
+
+    fn voter_id(voter: &Voter) -> String {
+        voter_model(voter).expect("failed to encode voter").1
+    }
+
+    /// The action-0 listing in ascending order: block 1's rows sit in ledger
+    /// voter order — committee script, committee key, drep, pool — and block
+    /// 2's re-vote trails them.
+    fn expected_votes(app: &TestApp) -> Vec<ProposalVotesInner> {
+        let first_vote_tx = tx_hash_of_block(app, 1);
+        let second_vote_tx = tx_hash_of_block(app, 2);
+
+        let row = |tx: &str, voter: &Voter, vote: &Vote| ProposalVotesInner {
+            tx_hash: tx.to_string(),
+            cert_index: 0,
+            voter_role: voter_model(voter).expect("failed to encode voter").0,
+            voter: voter_id(voter),
+            vote: vote_model(vote),
+        };
+
+        vec![
+            row(&first_vote_tx, &cc_script_voter(), &Vote::No),
+            row(&first_vote_tx, &cc_key_voter(), &Vote::Yes),
+            row(&first_vote_tx, &drep_voter(), &Vote::Yes),
+            row(&first_vote_tx, &spo_voter(), &Vote::Abstain),
+            row(&second_vote_tx, &drep_voter(), &Vote::Abstain),
+        ]
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_votes_happy_path() {
+        let app = vote_app();
+        let proposal_tx = tx_hash_of_block(&app, 0);
+
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        assert_eq!(get_votes(&app, &path).await, expected_votes(&app));
+
+        // the drep's vote on action 1 is its second procedure in the voting
+        // tx: the cert index counts inside the voter's vote map
+        let path = format!("/governance/proposals/{proposal_tx}/1/votes");
+        let rows = get_votes(&app, &path).await;
+        assert_eq!(
+            rows,
+            vec![ProposalVotesInner {
+                tx_hash: tx_hash_of_block(&app, 1),
+                cert_index: 1,
+                voter_role: proposal_votes_inner::VoterRole::Drep,
+                voter: voter_id(&drep_voter()),
+                vote: proposal_votes_inner::Vote::No,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_votes_orders_and_paginates() {
+        let app = vote_app();
+        let proposal_tx = tx_hash_of_block(&app, 0);
+        let base = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let expected = expected_votes(&app);
+
+        let desc = get_votes(&app, &format!("{base}?order=desc")).await;
+        assert_eq!(
+            desc,
+            expected.iter().rev().cloned().collect_vec(),
+            "desc is the ascending listing read backwards"
+        );
+
+        let page = get_votes(&app, &format!("{base}?count=2&page=2")).await;
+        assert_eq!(page, expected[2..4].to_vec());
+
+        // a page crossing from block 1's rows into block 2's
+        let page = get_votes(&app, &format!("{base}?count=3&page=2")).await;
+        assert_eq!(page, expected[3..].to_vec());
+
+        let page = get_votes(&app, &format!("{base}?count=1&page=1&order=desc")).await;
+        assert_eq!(page, expected[4..].to_vec());
+
+        // a page past the end is empty, not an error
+        let page = get_votes(&app, &format!("{base}?page=7")).await;
+        assert!(page.is_empty());
+    }
+
+    /// Blockfrost joins the proposal against db-sync's voting table and sends
+    /// whatever comes back, so everything that names no vote — an unvoted
+    /// proposal, an unknown one, an unreadable hash — is the same empty
+    /// listing rather than a 404.
+    #[tokio::test]
+    async fn governance_proposal_votes_without_rows() {
+        let app = vote_app();
+        let proposal_tx = tx_hash_of_block(&app, 0);
+
+        // action 2 exists and nobody voted on it
+        let path = format!("/governance/proposals/{proposal_tx}/2/votes");
+        assert!(get_votes(&app, &path).await.is_empty());
+
+        // an index the tx never proposed at
+        let path = format!("/governance/proposals/{proposal_tx}/9/votes");
+        assert!(get_votes(&app, &path).await.is_empty());
+
+        let missing = hex::encode([0u8; 32]);
+        let path = format!("/governance/proposals/{missing}/0/votes");
+        assert!(get_votes(&app, &path).await.is_empty());
+
+        let path = "/governance/proposals/not-a-tx-hash/0/votes";
+        assert!(get_votes(&app, path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_votes_by_gov_action_id() {
+        let app = vote_app();
+        let tx: Hash<32> = tx_hash_of_block(&app, 0)
+            .parse()
+            .expect("failed to parse tx hash");
+        let expected = expected_votes(&app);
+
+        let id = bech32_gov_action(&tx, 0).unwrap();
+        let path = format!("/governance/proposals/{id}/votes");
+        assert_eq!(get_votes(&app, &path).await, expected);
+
+        // the same listing, paginated the same way
+        let page = get_votes(&app, &format!("{path}?order=desc&count=2")).await;
+        assert_eq!(page, expected[3..].iter().rev().cloned().collect_vec());
+
+        // the bare-hash form explorers write for index 0 names the same
+        // proposal as the one-byte form Blockfrost writes
+        let minimal = bech32(bech32::Hrp::parse("gov_action").unwrap(), tx.as_slice()).unwrap();
+        let path = format!("/governance/proposals/{minimal}/votes");
+        assert_eq!(get_votes(&app, &path).await, expected);
+
+        // a well-formed id for a proposal nobody made
+        let id = bech32_gov_action(&Hash::from([0u8; 32]), 0).unwrap();
+        let path = format!("/governance/proposals/{id}/votes");
+        assert!(get_votes(&app, &path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_votes_bad_request() {
+        let app = vote_app();
+        let tx = tx_hash_of_block(&app, 0);
+        let base = format!("/governance/proposals/{tx}/0/votes");
+
+        assert_status(&app, &format!("{base}?count=0"), StatusCode::BAD_REQUEST).await;
+        assert_status(
+            &app,
+            &format!("{base}?order=sideways"),
+            StatusCode::BAD_REQUEST,
+        )
+        .await;
+
+        // the cert index is the only path part that has to be a number
+        let path = format!("/governance/proposals/{tx}/x/votes");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+
+        for id in ["not-bech32", &missing_drep()] {
+            let path = format!("/governance/proposals/{id}/votes");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_proposal_votes_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = format!("/governance/proposals/{}/0/votes", hex::encode([1u8; 32]));
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+
+        let id = bech32_gov_action(&Hash::from([1u8; 32]), 0).unwrap();
+        let path = format!("/governance/proposals/{id}/votes");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// Every voter role in its CIP-129 spelling: one header byte — key type,
+    /// then key or script — before the credential hash, except the pool id,
+    /// which Blockfrost sends bare.
+    #[test]
+    fn voter_ids_follow_cip129() {
+        let cases = [
+            (
+                cc_script_voter(),
+                proposal_votes_inner::VoterRole::ConstitutionalCommittee,
+                "cc_hot1qw42424242424242424242424242424242424242424242slw89ck",
+            ),
+            (
+                cc_key_voter(),
+                proposal_votes_inner::VoterRole::ConstitutionalCommittee,
+                "cc_hot1q2amhwamhwamhwamhwamhwamhwamhwamhwamhwamhwamhwc56yc3q",
+            ),
+            (
+                drep_voter(),
+                proposal_votes_inner::VoterRole::Drep,
+                "drep1yfnxvenxvenxvenxvenxvenxvenxvenxvenxvenxvenxvesyutktf",
+            ),
+            (
+                spo_voter(),
+                proposal_votes_inner::VoterRole::Spo,
+                "pool1nxvenxvenxvenxvenxvenxvenxvenxvenxvenxvenxvejwc07h9",
+            ),
+        ];
+
+        let actual = cases
+            .iter()
+            .map(|(voter, _, _)| voter_model(voter).expect("failed to encode voter"))
+            .collect_vec();
+
+        let expected = cases
+            .iter()
+            .map(|(_, role, id)| (*role, id.to_string()))
+            .collect_vec();
+
+        assert_eq!(actual, expected);
     }
 }

@@ -23,9 +23,10 @@ use pallas::{
         primitives::{
             alonzo,
             conway::{
-                Anchor, Certificate, DatumOption, GovAction, PlutusData,
+                Anchor, Certificate, DatumOption, GovAction, GovActionId, PlutusData,
                 PostAlonzoTransactionOutput, ProposalProcedure, ScriptRef, TransactionBody,
-                TransactionOutput, Value, WitnessSet,
+                TransactionOutput, Value, Vote, Voter, VotingProcedure, VotingProcedures,
+                WitnessSet,
             },
             AddrKeyhash, Bytes, NonEmptySet, NonZeroInt, PositiveCoin, Relay, Set, StakeCredential,
             TransactionInput, VrfKeyhash,
@@ -58,6 +59,7 @@ pub struct SyntheticBlockConfig {
     pub drep_deposit: u64,
     pub gov_actions_by_block: Vec<BlockGovActions>,
     pub proposal_deposit: u64,
+    pub votes_by_block: Vec<BlockVotes>,
 }
 
 /// Build a testnet Shelley address with both payment and stake key parts.
@@ -116,11 +118,28 @@ impl Default for SyntheticBlockConfig {
             drep_deposit: 1000,
             gov_actions_by_block: vec![],
             proposal_deposit: 100_000_000,
+            votes_by_block: vec![],
         }
     }
 }
 
 pub type BlockGovActions = Vec<Vec<GovAction>>;
+
+/// A governance vote inside a synthetic tx. The vote names its proposal by
+/// the position of the proposing tx — block offset, tx offset, action index —
+/// because the proposing tx hash only exists once the blocks are built. The
+/// proposal must sit in an earlier block than the vote.
+#[derive(Clone, Debug)]
+pub struct SyntheticVote {
+    pub voter: Voter,
+    pub proposal_block: usize,
+    pub proposal_tx: usize,
+    pub action_index: u32,
+    pub vote: Vote,
+}
+
+/// Votes of one block, one entry per tx.
+pub type BlockVotes = Vec<Vec<SyntheticVote>>;
 
 #[derive(Clone, Debug)]
 pub struct SyntheticVectors {
@@ -254,6 +273,16 @@ pub fn build_synthetic_blocks(
         );
         cfg.gov_actions_by_block.clone()
     };
+    let votes_by_block = if cfg.votes_by_block.is_empty() {
+        vec![vec![]; block_count]
+    } else {
+        assert_eq!(
+            cfg.votes_by_block.len(),
+            block_count,
+            "votes_by_block must contain one entry per block"
+        );
+        cfg.votes_by_block.clone()
+    };
     let policy_id_hex = hex::encode(cfg.policy_id);
     let asset_name_hex = hex::encode(asset_names[0].as_bytes());
     let fixture_extras = Some(build_datum_and_script_fixture());
@@ -273,7 +302,7 @@ pub fn build_synthetic_blocks(
     };
 
     let mut raw_blocks = Vec::with_capacity(cfg.block_count.max(1));
-    let mut block_vectors = Vec::with_capacity(cfg.block_count.max(1));
+    let mut block_vectors: Vec<BlockVectors> = Vec::with_capacity(cfg.block_count.max(1));
     let mut first_block_hash = None;
     let mut first_tx_hash = None;
     let mut account_addresses = Vec::new();
@@ -362,6 +391,33 @@ pub fn build_synthetic_blocks(
                 .cloned()
                 .unwrap_or_default();
 
+            // Resolve each vote's symbolic proposal reference into the actual
+            // GovActionId, now that the proposing block exists.
+            let votes: Vec<(GovActionId, Voter, Vote)> = votes_by_block[offset]
+                .get(tx_offset)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|vote| {
+                    assert!(
+                        vote.proposal_block < offset,
+                        "a vote must target a proposal from an earlier block"
+                    );
+                    let proposing_tx: Hash<32> = block_vectors[vote.proposal_block].tx_hashes
+                        [vote.proposal_tx]
+                        .parse()
+                        .expect("failed to parse proposing tx hash");
+                    (
+                        GovActionId {
+                            transaction_id: proposing_tx,
+                            action_index: vote.action_index,
+                        },
+                        vote.voter,
+                        vote.vote,
+                    )
+                })
+                .collect();
+
             tx_specs.push(sample_transaction(
                 Bytes::from(output_address),
                 cfg.lovelace,
@@ -380,6 +436,7 @@ pub fn build_synthetic_blocks(
                 extras,
                 gov_actions,
                 cfg.proposal_deposit,
+                votes,
             ));
         }
 
@@ -669,6 +726,7 @@ fn sample_transaction(
     extras: Option<&SyntheticFixtureExtras>,
     gov_actions: Vec<GovAction>,
     proposal_deposit: u64,
+    votes: Vec<(GovActionId, Voter, Vote)>,
 ) -> SyntheticTxSpec {
     let input = TransactionInput {
         transaction_id: tx_hash,
@@ -729,6 +787,16 @@ fn sample_transaction(
             .collect::<Vec<_>>(),
     )
     .ok();
+
+    let mut voting_procedures: VotingProcedures = BTreeMap::new();
+    for (gov_action_id, voter, vote) in votes {
+        voting_procedures
+            .entry(voter)
+            .or_default()
+            .insert(gov_action_id, VotingProcedure { vote, anchor: None });
+    }
+    let voting_procedures = (!voting_procedures.is_empty()).then_some(voting_procedures);
+
     let pool_cert = Certificate::PoolRegistration {
         operator: pool_keyhash,
         vrf_keyhash,
@@ -773,7 +841,7 @@ fn sample_transaction(
         collateral_return: None,
         total_collateral: None,
         reference_inputs: None,
-        voting_procedures: None,
+        voting_procedures,
         proposal_procedures,
         treasury_value: None,
         donation: None,
