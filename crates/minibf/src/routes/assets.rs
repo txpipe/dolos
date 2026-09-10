@@ -342,10 +342,18 @@ where
             continue;
         }
 
+        // the last matching output that has a datum wins. one transaction can
+        // hold the reference token in more than one output. only the output
+        // that locks the token has a datum. an output that has no datum makes
+        // no claim about the metadata. as a result, it does not replace an
+        // earlier datum.
+        //
+        // a datum has an unknown version, or it does not meet the scheme of its
+        // label. in these cases the datum describes nothing, this code returns
+        // `None`, and it replaces any earlier CIP-68 metadata. the caller then
+        // uses the CIP-25 metadata of the minting transaction.
         if let Some(datum_option) = output.datum() {
-            if let Some(out) = metadata_from_datum_option(domain, &datum_option, standard).await? {
-                last_metadata = Some(out);
-            }
+            last_metadata = metadata_from_datum_option(domain, &datum_option, standard).await?;
         }
     }
 
