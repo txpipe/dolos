@@ -106,6 +106,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/accounts/{stake_address}`                                | Get account information for a stake address              |
 | `/accounts/{stake_address}/addresses`                      | Get addresses for a stake address                        |
 | `/accounts/{stake_address}/addresses/assets`               | Get assets held across a stake address's addresses       |
+| `/accounts/{stake_address}/addresses/total`                | Get lifetime received/sent totals for a stake address    |
 | `/accounts/{stake_address}/delegations`                    | Get delegations for a stake address                      |
 | `/accounts/{stake_address}/history`                        | Get the per-epoch stake history for a stake address      |
 | `/accounts/{stake_address}/registrations`                  | Get registrations for a stake address                    |
@@ -186,3 +187,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/stakes`                                    | Get stakes for a specific transaction                    |
 | `/txs/{tx_hash}/utxos`                                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
+
+## Lifetime totals and `sync.max_history`
+
+`/addresses/{address}/total` and `/accounts/{stake_address}/addresses/total` fold every transaction kept in the archive. When `sync.max_history` is set, blocks pruned by housekeeping are not counted, so the sums and `tx_count` only cover the retained window. Run with full history if you need true lifetime totals.
