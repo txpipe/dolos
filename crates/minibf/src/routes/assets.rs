@@ -352,6 +352,11 @@ where
     Ok(last_metadata)
 }
 
+/// The time limit for one token-registry request. The client applies this
+/// limit. Each request also applies it, so the limit holds even if the client
+/// falls back to the default and loses its own limit.
+const TOKEN_REGISTRY_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The HTTP client that every token-registry request shares. `reqwest::Client`
 /// holds an internal connection pool, so one instance reuses DNS and TLS across
 /// the many concurrent lookups that `/addresses/{address}/extended` starts.
@@ -359,13 +364,15 @@ where
 /// `get_or_init` builds the client one time. Two concurrent calls do not
 /// build two clients. The builder fails only when the TLS backend does not
 /// start. In that case, this function uses the default client. As a result,
-/// the caller gets a client and does not handle a `Result`.
+/// the caller gets a client and does not handle a `Result`. The default
+/// client has no time limit, so each request applies `TOKEN_REGISTRY_TIMEOUT`
+/// on its own.
 fn token_registry_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
+            .timeout(TOKEN_REGISTRY_TIMEOUT)
             .user_agent("Dolos MiniBF")
             .build()
             .unwrap_or_default()
@@ -461,7 +468,12 @@ impl AssetModelBuilder {
         // The off-chain metadata adds to the response. It is not necessary.
         // If the token registry does not answer, or sends data that does not
         // parse, the code reports no metadata. The request does not fail.
-        let Ok(res) = token_registry_client().get(&url).send().await else {
+        let Ok(res) = token_registry_client()
+            .get(&url)
+            .timeout(TOKEN_REGISTRY_TIMEOUT)
+            .send()
+            .await
+        else {
             return Ok(None);
         };
 
