@@ -316,11 +316,25 @@ fn map_schema_lookup(schema: &'static [ItemProperty], key: &str) -> Option<Prope
         .map(|property| property.scheme)
 }
 
+/// Converts a single bounded-bytes value to a string. CIP-68 defines a
+/// bytestring property, such as `mediaType`, as a single value. This
+/// converter does not accept an array.
 fn convert_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
     match value {
         PlutusData::BoundedBytes(bytes) => {
             Some(JsonValue::String(to_utf8_or_hex(bytes.as_slice())))
         }
+        _ => None,
+    }
+}
+
+/// Converts a bounded-bytes value, or an array of bounded-bytes parts, to a
+/// single string. CIP-68 defines the `src` property as a uri. Version 3
+/// splits a uri of more than 64 bytes into an array of parts. This converter
+/// joins the parts into one string.
+fn convert_split_bytestring_value(value: &PlutusData) -> Option<JsonValue> {
+    match value {
+        PlutusData::BoundedBytes(_) => convert_bytestring_value(value),
         PlutusData::Array(items) => {
             let mut buffer = Vec::new();
             for item in items.iter() {
@@ -371,10 +385,11 @@ fn convert_map_value(value: &PlutusData, schema: &'static [ItemProperty]) -> Opt
 
 fn convert_datum_value(value: &PlutusData, schema: PropertyScheme) -> Option<JsonValue> {
     match schema.kind {
-        // the bytestring converter joins an array of byte parts into one
-        // string. a version 3 `src` uses this form for a payload of more than
-        // 64 bytes, so this converter gives a single string for it.
-        PropertyKind::Bytestring | PropertyKind::StringOrArray => convert_bytestring_value(value),
+        PropertyKind::Bytestring => convert_bytestring_value(value),
+        // a bytestring, or a split bytestring. a version 3 `src` uses the
+        // split form for a payload of more than 64 bytes. the converter joins
+        // the parts into one string.
+        PropertyKind::StringOrArray => convert_split_bytestring_value(value),
         PropertyKind::Number => convert_number_value(value),
         PropertyKind::Array => {
             let PlutusData::Array(items) = value else {
@@ -470,6 +485,18 @@ mod tests {
             .iter()
             .map(|(key, value)| (key.to_string(), value.clone()))
             .collect()
+    }
+
+    fn bytes(value: &str) -> PlutusData {
+        PlutusData::BoundedBytes(value.as_bytes().to_vec().into())
+    }
+
+    fn array(items: Vec<PlutusData>) -> PlutusData {
+        PlutusData::Array(pallas::ledger::primitives::MaybeIndefArray::Def(items))
+    }
+
+    fn plutus_map(pairs: Vec<(PlutusData, PlutusData)>) -> PlutusData {
+        PlutusData::Map(pairs.into())
     }
 
     #[test]
@@ -597,6 +624,54 @@ mod tests {
         let not_object = nft_with_files(json!(["not-an-object"]));
         assert!(!cip68_metadata_is_valid(
             &not_object,
+            Cip68TokenStandard::Nft
+        ));
+    }
+
+    /// Builds a files item as a Plutus map, and returns the parsed metadata of
+    /// an NFT datum that holds it. The datum also has `name` and `image`, so
+    /// only the files item decides the result.
+    fn parse_nft_with_files_item(
+        item: Vec<(PlutusData, PlutusData)>,
+    ) -> HashMap<String, JsonValue> {
+        let map = vec![
+            (bytes("name"), bytes("token")),
+            (bytes("image"), bytes("ipfs://x")),
+            (bytes("files"), array(vec![plutus_map(item)])),
+        ];
+        parse_cip68_metadata_map(&map, Cip68TokenStandard::Nft).expect("parses")
+    }
+
+    #[test]
+    fn parses_a_split_src_but_not_a_split_media_type() {
+        // `src` is a uri. a version 3 datum splits a long uri into parts. the
+        // parser joins the parts, and the datum meets the scheme.
+        let split_src = parse_nft_with_files_item(vec![
+            (bytes("mediaType"), bytes("image/png")),
+            (
+                bytes("src"),
+                array(vec![bytes("ipfs://part-one"), bytes("-two")]),
+            ),
+        ]);
+        assert_eq!(
+            split_src.get("files"),
+            Some(&json!([{ "mediaType": "image/png", "src": "ipfs://part-one-two" }]))
+        );
+        assert!(cip68_metadata_is_valid(&split_src, Cip68TokenStandard::Nft));
+
+        // `mediaType` is a bounded-bytes value, not a uri. the parser does
+        // not accept an array for it, so it keeps the whole files value in its
+        // hex form. the hex string is not an array, so the datum does not meet
+        // the scheme, and the caller uses the CIP-25 metadata instead.
+        let split_media_type = parse_nft_with_files_item(vec![
+            (
+                bytes("mediaType"),
+                array(vec![bytes("image/"), bytes("png")]),
+            ),
+            (bytes("src"), bytes("ipfs://y")),
+        ]);
+        assert!(!cip68_metadata_is_valid(
+            &split_media_type,
             Cip68TokenStandard::Nft
         ));
     }
