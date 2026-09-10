@@ -839,10 +839,11 @@ impl MinibfConfig {
     /// at config-parse time. As a result, a malformed value stops startup and
     /// does not stop a running `serve` process.
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(base_path) = self.base_path() {
+        if let Some(configured_base_path) = self.base_path.as_deref() {
+            let base_path = configured_base_path.trim_end_matches('/');
             if base_path.is_empty() || !base_path.starts_with('/') || base_path.contains('*') {
                 return Err(format!(
-                    "base_path \"{base_path}\" is not valid. Use a base_path that starts with '/' and has no '*' wildcard."
+                    "base_path \"{configured_base_path}\" is not valid. Use a base_path that starts with '/' and has no '*' wildcard."
                 ));
             }
         }
@@ -1342,5 +1343,15 @@ mod tests {
             panic!("expected the fjall backend");
         };
         assert_eq!(cfg.cache, Some(16));
+    }
+
+    #[test]
+    fn minibf_validation_error_uses_configured_base_path() {
+        let mut config = MinibfConfig::new("[::]:0".parse().unwrap());
+        config.base_path = Some("/".into());
+
+        let error = config.validate().unwrap_err();
+
+        assert!(error.contains("base_path \"/\""), "{error}");
     }
 }

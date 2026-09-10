@@ -88,14 +88,17 @@ fn main() -> Result<()> {
 
     let config = crate::common::load_config(&args.config)
         .into_diagnostic()
-        .context("parsing configuration")
-        .and_then(|config| {
-            config
-                .validate()
-                .map_err(|e| miette::miette!("{e}"))
-                .context("validating configuration")?;
-            Ok(config)
-        });
+        .context("parsing configuration");
+
+    #[cfg(feature = "utils")]
+    let config = if matches!(&args.command, Command::Init(_)) {
+        config
+    } else {
+        config.and_then(validate_config)
+    };
+
+    #[cfg(not(feature = "utils"))]
+    let config = config.and_then(validate_config);
 
     let feedback = crate::feedback::Feedback::default();
 
@@ -127,4 +130,15 @@ fn main() -> Result<()> {
 
         (Err(x), _) => Err(x),
     }
+}
+
+fn validate_config(
+    config: dolos_core::config::RootConfig,
+) -> Result<dolos_core::config::RootConfig> {
+    config
+        .validate()
+        .map_err(|e| miette::miette!("{e}"))
+        .context("validating configuration")?;
+
+    Ok(config)
 }
