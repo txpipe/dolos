@@ -19,7 +19,7 @@ use dolos_cardano::{
     model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
     pallas_extras, ChainSummary, PParamsSet,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _, TxOrder};
 use pallas::{
     crypto::hash::Hash,
     ledger::{
@@ -583,9 +583,33 @@ where
 
 struct VoteRow {
     tx: Hash<32>,
+    tx_order: TxOrder,
     cert_index: usize,
     voter: Voter,
     vote: Vote,
+    counted: bool,
+}
+
+/// The vote-map identity of a voter: which of the proposal's three vote maps
+/// it lives in, and its key bytes there.
+fn voter_map_key(voter: &Voter) -> (u8, Vec<u8>) {
+    let cred_key =
+        |is_script: bool, hash: &Hash<28>| [&[is_script as u8][..], hash.as_slice()].concat();
+
+    match voter {
+        Voter::ConstitutionalCommitteeKey(hash) => (0, cred_key(false, hash)),
+        Voter::ConstitutionalCommitteeScript(hash) => (0, cred_key(true, hash)),
+        Voter::DRepKey(hash) => (1, cred_key(false, hash)),
+        Voter::DRepScript(hash) => (1, cred_key(true, hash)),
+        Voter::StakePoolKey(hash) => (2, hash.to_vec()),
+    }
+}
+
+fn cred_map_key(cred: &StakeCredential) -> Vec<u8> {
+    match cred {
+        StakeCredential::AddrKeyhash(hash) => [&[0u8][..], hash.as_slice()].concat(),
+        StakeCredential::ScriptHash(hash) => [&[1u8][..], hash.as_slice()].concat(),
+    }
 }
 
 /// The CIP-129 spelling Blockfrost gives each voter: a hot-credential id for
@@ -633,7 +657,54 @@ impl IntoModel<ProposalVotesInner> for VoteRow {
             voter_role,
             voter,
             vote: vote_model(&self.vote),
+            counted: self.counted,
         })
+    }
+}
+
+/// Whether a DRep's newest vote still counts toward the tally.
+///
+/// The vote stops counting when the DRep deregisters after casting it while
+/// the proposal is still live; re-registering does not restore it. Once the
+/// proposal closes the tally freezes, so only a deregistration before the
+/// close matters.
+///
+/// `DRepState` keeps only the newest deregistration. A vote killed by an
+/// earlier one reads as counted again if the DRep deregistered once more
+/// after the proposal closed — that takes two full cycles around the close.
+fn drep_vote_counts<D: Domain>(
+    domain: &D,
+    drep: &DRep,
+    vote_at: (BlockSlot, TxOrder),
+    closed_epoch: Option<Epoch>,
+    chain: &ChainSummary,
+) -> Result<bool, StatusCode> {
+    let key = dolos_cardano::model::drep_to_entity_key(drep);
+
+    let drep = domain
+        .state()
+        .read_entity_typed::<DRepState>(DRepState::NS, &key)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some(drep) = drep else {
+        return Ok(true);
+    };
+
+    let Some(deregistered_at) = drep.unregistered_at else {
+        return Ok(true);
+    };
+
+    // only a deregistration strictly after the voting tx can drop the vote
+    if deregistered_at <= vote_at {
+        return Ok(true);
+    }
+
+    match closed_epoch {
+        None => Ok(false),
+        Some(closed) => {
+            let (dereg_epoch, _) = chain.slot_epoch(deregistered_at.0);
+            Ok(dereg_epoch >= closed)
+        }
     }
 }
 
@@ -654,7 +725,7 @@ fn votes_in_block(body: &[u8], action: &GovActionId) -> Result<Vec<VoteRow>, Sta
 
     let mut out = Vec::new();
 
-    for tx in block.txs() {
+    for (tx_order, tx) in block.txs().into_iter().enumerate() {
         // Phase-2-invalid txs never run GOV, so their votes don't exist.
         if !tx.is_valid() {
             continue;
@@ -678,9 +749,11 @@ fn votes_in_block(body: &[u8], action: &GovActionId) -> Result<Vec<VoteRow>, Sta
 
                 out.push(VoteRow {
                     tx: tx_hash,
+                    tx_order: tx_order as TxOrder,
                     cert_index,
                     voter: voter.clone(),
                     vote: procedure.vote.clone(),
+                    counted: false,
                 });
             }
         }
@@ -721,15 +794,50 @@ fn read_votes<D: Domain>(
 
     let mut row_counts: BTreeMap<BlockSlot, usize> = BTreeMap::new();
 
-    let histories = state
-        .cc_votes
-        .values()
-        .chain(state.drep_votes.values())
-        .chain(state.spo_votes.values());
+    // Each voter's newest vote is the last entry of its history, and it is
+    // the only one that can count toward the tally.
+    let mut newest_slots: HashMap<(u8, Vec<u8>), BlockSlot> = HashMap::new();
 
-    for (slot, _) in histories.flatten() {
-        *row_counts.entry(*slot).or_default() += 1;
+    let keyed_histories = state
+        .cc_votes
+        .iter()
+        .map(|(cred, history)| ((0, cred_map_key(cred)), history))
+        .chain(
+            state
+                .drep_votes
+                .iter()
+                .map(|(cred, history)| ((1, cred_map_key(cred)), history)),
+        )
+        .chain(
+            state
+                .spo_votes
+                .iter()
+                .map(|(pool, history)| ((2, pool.to_vec()), history)),
+        );
+
+    for (voter, history) in keyed_histories {
+        for (slot, _) in history {
+            *row_counts.entry(*slot).or_default() += 1;
+        }
+
+        if let Some((slot, _)) = history.last() {
+            newest_slots.insert(voter, *slot);
+        }
     }
+
+    let chain = dolos_cardano::eras::load_era_summary::<D>(domain.state())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let tip = domain
+        .state()
+        .read_cursor()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        .slot();
+
+    let (current_epoch, _) = chain.slot_epoch(tip);
+
+    let closed_epoch = proposal_closed_epoch(&state, current_epoch);
 
     let mut groups: Vec<(BlockSlot, usize)> = row_counts.into_iter().collect();
 
@@ -776,6 +884,35 @@ fn read_votes<D: Domain>(
         };
 
         let mut rows = votes_in_block(&body, &action)?;
+
+        // Mark each voter's newest vote. A voter's history entries at one
+        // slot map onto its rows in that block in the same order, so the
+        // newest vote is the voter's last row in the block holding its last
+        // history entry.
+        let mut last_in_block: HashMap<(u8, Vec<u8>), usize> = HashMap::new();
+        for (index, row) in rows.iter().enumerate() {
+            last_in_block.insert(voter_map_key(&row.voter), index);
+        }
+
+        for (index, row) in rows.iter_mut().enumerate() {
+            let voter = voter_map_key(&row.voter);
+
+            let newest = newest_slots.get(&voter) == Some(&slot) && last_in_block[&voter] == index;
+
+            let drep = match &row.voter {
+                Voter::DRepKey(hash) => Some(DRep::Key(*hash)),
+                Voter::DRepScript(hash) => Some(DRep::Script(*hash)),
+                _ => None,
+            };
+
+            row.counted = newest
+                && match drep {
+                    Some(drep) => {
+                        drep_vote_counts(domain, &drep, (slot, row.tx_order), closed_epoch, &chain)?
+                    }
+                    None => true,
+                };
+        }
 
         if descending {
             rows.reverse();
@@ -891,46 +1028,73 @@ impl ProposalModelBuilder {
         }
     }
 
-    /// Dolos stamps `ratified_epoch` with the epoch the ratifying boundary
-    /// closes. db-sync reports that same epoch as `ratified_epoch` and the
-    /// enactment lands one boundary later, so `enacted_epoch` is one more.
     fn enactment_epoch(&self) -> Option<Epoch> {
-        let boundary = self.state.ratified_epoch? + 1;
-
-        (self.current_epoch >= boundary).then_some(boundary)
+        enactment_epoch(&self.state, self.current_epoch)
     }
 
-    /// An unratified proposal counts as expired from its `expires_at` epoch
-    /// on, before any boundary stamp. The expiry drop later stamps
-    /// `canceled_epoch`, one epoch past `expires_at`. A `canceled_epoch` at
-    /// or before `expires_at` is a sibling pruned by a competing enactment
-    /// instead: db-sync reports that as dropped, never as expired.
     fn expired_epoch(&self) -> Option<Epoch> {
-        if self.state.ratified_epoch.is_some() {
-            return None;
-        }
-
-        let expires = self.state.expires_at()?;
-
-        if self.state.canceled_epoch.is_some_and(|x| x <= expires) {
-            return None;
-        }
-
-        (self.current_epoch >= expires).then_some(expires)
+        expired_epoch(&self.state, self.current_epoch)
     }
 
-    /// db-sync marks a proposal as dropped when a competing action gets
-    /// enacted (canceled in dolos terms) or one epoch after it marks the
-    /// proposal as expired.
     fn dropped_epoch(&self) -> Option<Epoch> {
-        if let Some(canceled) = self.state.canceled_epoch {
-            return (self.current_epoch >= canceled).then_some(canceled);
-        }
-
-        let dropped = self.expired_epoch()? + 1;
-
-        (self.current_epoch >= dropped).then_some(dropped)
+        dropped_epoch(&self.state, self.current_epoch)
     }
+}
+
+/// Dolos stamps `ratified_epoch` with the epoch the ratifying boundary
+/// closes. db-sync reports that same epoch as `ratified_epoch` and the
+/// enactment lands one boundary later, so `enacted_epoch` is one more.
+fn enactment_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
+    let boundary = state.ratified_epoch? + 1;
+
+    (current_epoch >= boundary).then_some(boundary)
+}
+
+/// An unratified proposal counts as expired from its `expires_at` epoch
+/// on, before any boundary stamp. The expiry drop later stamps
+/// `canceled_epoch`, one epoch past `expires_at`. A `canceled_epoch` at
+/// or before `expires_at` is a sibling pruned by a competing enactment
+/// instead: db-sync reports that as dropped, never as expired.
+fn expired_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
+    if state.ratified_epoch.is_some() {
+        return None;
+    }
+
+    let expires = state.expires_at()?;
+
+    if state.canceled_epoch.is_some_and(|x| x <= expires) {
+        return None;
+    }
+
+    (current_epoch >= expires).then_some(expires)
+}
+
+/// db-sync marks a proposal as dropped when a competing action gets
+/// enacted (canceled in dolos terms) or one epoch after it marks the
+/// proposal as expired.
+fn dropped_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
+    if let Some(canceled) = state.canceled_epoch {
+        return (current_epoch >= canceled).then_some(canceled);
+    }
+
+    let dropped = expired_epoch(state, current_epoch)? + 1;
+
+    (current_epoch >= dropped).then_some(dropped)
+}
+
+/// The epoch the proposal left the active set and its tally froze — the
+/// earliest boundary outcome Blockfrost reports. `None` while the proposal
+/// is still live.
+fn proposal_closed_epoch(state: &ProposalState, current_epoch: Epoch) -> Option<Epoch> {
+    [
+        state.ratified_epoch,
+        enactment_epoch(state, current_epoch),
+        dropped_epoch(state, current_epoch),
+        expired_epoch(state, current_epoch),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
 }
 
 impl IntoModel<Proposal> for ProposalModelBuilder {
@@ -2048,25 +2212,27 @@ mod tests {
 
     /// The action-0 listing in ascending order: block 1's rows sit in ledger
     /// voter order — committee script, committee key, drep, pool — and block
-    /// 2's re-vote trails them.
+    /// 2's re-vote trails them. Only the drep's block-1 vote is superseded,
+    /// so it alone reads as not counted.
     fn expected_votes(app: &TestApp) -> Vec<ProposalVotesInner> {
         let first_vote_tx = tx_hash_of_block(app, 1);
         let second_vote_tx = tx_hash_of_block(app, 2);
 
-        let row = |tx: &str, voter: &Voter, vote: &Vote| ProposalVotesInner {
+        let row = |tx: &str, voter: &Voter, vote: &Vote, counted: bool| ProposalVotesInner {
             tx_hash: tx.to_string(),
             cert_index: 0,
             voter_role: voter_model(voter).expect("failed to encode voter").0,
             voter: voter_id(voter),
             vote: vote_model(vote),
+            counted,
         };
 
         vec![
-            row(&first_vote_tx, &cc_script_voter(), &Vote::No),
-            row(&first_vote_tx, &cc_key_voter(), &Vote::Yes),
-            row(&first_vote_tx, &drep_voter(), &Vote::Yes),
-            row(&first_vote_tx, &spo_voter(), &Vote::Abstain),
-            row(&second_vote_tx, &drep_voter(), &Vote::Abstain),
+            row(&first_vote_tx, &cc_script_voter(), &Vote::No, true),
+            row(&first_vote_tx, &cc_key_voter(), &Vote::Yes, true),
+            row(&first_vote_tx, &drep_voter(), &Vote::Yes, false),
+            row(&first_vote_tx, &spo_voter(), &Vote::Abstain, true),
+            row(&second_vote_tx, &drep_voter(), &Vote::Abstain, true),
         ]
     }
 
@@ -2090,6 +2256,7 @@ mod tests {
                 voter_role: proposal_votes_inner::VoterRole::Drep,
                 voter: voter_id(&drep_voter()),
                 vote: proposal_votes_inner::Vote::No,
+                counted: true,
             }]
         );
     }
@@ -2245,6 +2412,84 @@ mod tests {
             hex::encode(proposal_tx())
         );
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// Seed a `DRepState` for the voting drep whose newest deregistration
+    /// sits at `unregistered_at`.
+    fn vote_app_with_drep_dereg(unregistered_at: (BlockSlot, dolos_core::TxOrder)) -> TestApp {
+        use dolos_cardano::model::drep_to_entity_key;
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            gov_actions_by_block: vec![
+                vec![vec![
+                    GovAction::Information,
+                    GovAction::NoConfidence(None),
+                    GovAction::Information,
+                ]],
+                vec![],
+                vec![],
+            ],
+            votes_by_block: vec![
+                vec![],
+                vec![vec![
+                    cast(drep_voter(), 0, Vote::Yes),
+                    cast(drep_voter(), 1, Vote::No),
+                    cast(cc_key_voter(), 0, Vote::Yes),
+                    cast(cc_script_voter(), 0, Vote::No),
+                    cast(spo_voter(), 0, Vote::Abstain),
+                ]],
+                vec![vec![cast(drep_voter(), 0, Vote::Abstain)]],
+            ],
+            ..Default::default()
+        };
+
+        TestApp::new_with_cfg_and_setup(cfg, move |domain, _| {
+            let identifier = pallas::ledger::primitives::conway::DRep::Key([0x66u8; 28].into());
+
+            let mut state = dolos_cardano::model::DRepState::new(identifier.clone());
+            state.registered_at = Some((1, 0));
+            state.unregistered_at = Some(unregistered_at);
+
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .write_entity_typed(&drep_to_entity_key(&identifier), &state)
+                .expect("failed to write drep");
+            writer.commit().expect("failed to commit drep");
+        })
+    }
+
+    /// A deregistration after the newest vote drops it from the tally while
+    /// the proposal is live; one before the vote changes nothing.
+    #[tokio::test]
+    async fn governance_proposal_votes_drep_deregistration() {
+        // deregistered after every vote: the drep's newest votes stop
+        // counting on both proposals; the superseded one already did not
+        let app = vote_app_with_drep_dereg((1_000_000, 0));
+        let proposal_tx = tx_hash_of_block(&app, 0);
+
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let rows = get_votes(&app, &path).await;
+        let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
+        assert_eq!(counted, [true, true, false, true, false]);
+
+        let path = format!("/governance/proposals/{proposal_tx}/1/votes");
+        let rows = get_votes(&app, &path).await;
+        assert!(!rows[0].counted);
+
+        // deregistered before the votes (and re-registered since): the
+        // newest votes still count
+        let app = vote_app_with_drep_dereg((1, 0));
+        let proposal_tx = tx_hash_of_block(&app, 0);
+
+        let path = format!("/governance/proposals/{proposal_tx}/0/votes");
+        let rows = get_votes(&app, &path).await;
+        let counted: Vec<bool> = rows.iter().map(|row| row.counted).collect();
+        assert_eq!(counted, [true, true, false, true, true]);
     }
 
     /// Every voter role in its CIP-129 spelling: one header byte — key type,
