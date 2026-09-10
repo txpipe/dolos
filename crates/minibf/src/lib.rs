@@ -797,7 +797,15 @@ mod base_path_tests {
 
     #[tokio::test]
     async fn invalid_base_path_fails_config_validation() {
-        for invalid in ["", "/", "no-leading-slash", "/with*wildcard"] {
+        for invalid in [
+            "",
+            "/",
+            "no-leading-slash",
+            "/with*wildcard",
+            "/api/v0?x=y",
+            "/api/v0#fragment",
+            "/api/v0 with-space",
+        ] {
             let err = TestApp::try_new_with_base_path(Some(invalid.into()))
                 .err()
                 .unwrap_or_else(|| panic!("expected a config error for base_path = {invalid:?}"));
