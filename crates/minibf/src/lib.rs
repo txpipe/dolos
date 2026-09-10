@@ -344,7 +344,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Result<Router, ServeError>
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -361,7 +361,7 @@ where
     })
 }
 
-pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Result<Router, ServeError>
+pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -372,7 +372,7 @@ where
     Option<ProposalState>: From<D::Entity>,
 {
     let permissive_cors = facade.config.permissive_cors();
-    let base_path = facade.config.base_path.clone();
+    let base_path = facade.config.base_path();
     let app = Router::new()
         .route("/", get(routes::root::<D>))
         .route("/health", get(routes::health::naked))
@@ -693,16 +693,11 @@ where
             CorsLayer::new()
         });
 
-    let router = if let Some(base_path) = &base_path {
-        let base_path = base_path.trim_end_matches('/');
-        if base_path.is_empty() || !base_path.starts_with('/') || base_path.contains('*') {
-            return Err(ServeError::ConfigError(format!(
-                "base_path \"{base_path}\" is not valid. Use a base_path that starts with '/' and has no '*' wildcard."
-            )));
-        }
-        Router::new().nest(base_path, app)
-    } else {
-        app
+    // `MinibfConfig::validate` runs at config-parse time. It rejects a
+    // malformed `base_path`. Thus the nest operation here cannot fail.
+    let router = match &base_path {
+        Some(base_path) => Router::new().nest(base_path, app),
+        None => app,
     };
 
     // NormalizePath must receive the request before the router matches a route.
@@ -713,7 +708,7 @@ where
     // goes to this fallback service, and the public return type remains
     // `Router`.
     let normalized = NormalizePathLayer::trim_trailing_slash().layer(router);
-    Ok(Router::new().fallback_service(normalized))
+    Router::new().fallback_service(normalized)
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -729,7 +724,7 @@ where
     type Config = MinibfConfig;
 
     async fn run(cfg: Self::Config, domain: D, cancel: C) -> Result<(), ServeError> {
-        let app = build_router(cfg.clone(), domain)?;
+        let app = build_router(cfg.clone(), domain);
 
         let listener = tokio::net::TcpListener::bind(cfg.listen_address)
             .await
@@ -747,7 +742,6 @@ where
 #[cfg(test)]
 mod base_path_tests {
     use axum::http::StatusCode;
-    use dolos_core::ServeError;
 
     use crate::test_support::TestApp;
 
@@ -802,14 +796,14 @@ mod base_path_tests {
     }
 
     #[tokio::test]
-    async fn invalid_base_path_returns_config_error() {
+    async fn invalid_base_path_fails_config_validation() {
         for invalid in ["", "/", "no-leading-slash", "/with*wildcard"] {
             let err = TestApp::try_new_with_base_path(Some(invalid.into()))
                 .err()
-                .unwrap_or_else(|| panic!("expected ConfigError for base_path = {invalid:?}"));
+                .unwrap_or_else(|| panic!("expected a config error for base_path = {invalid:?}"));
             assert!(
-                matches!(err, ServeError::ConfigError(_)),
-                "expected ServeError::ConfigError for {invalid:?}, got {err:?}"
+                err.contains("base_path"),
+                "expected a base_path validation error for {invalid:?}, got {err:?}"
             );
         }
     }

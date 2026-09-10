@@ -118,15 +118,17 @@ impl TestApp {
 
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        Self::build(cfg, fault, minibf).expect("build_router_with_facade")
+        Self::build(cfg, fault, minibf)
     }
 
-    pub fn try_new_with_base_path(
-        base_path: Option<String>,
-    ) -> Result<Self, dolos_core::ServeError> {
+    /// Validates the `base_path` the same way that startup does. Then builds
+    /// the app. If the `base_path` is malformed, this returns the validation
+    /// error and does not panic.
+    pub fn try_new_with_base_path(base_path: Option<String>) -> Result<Self, String> {
         let mut minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
         minibf.base_path = base_path;
-        Self::build(
+        minibf.validate()?;
+        Ok(Self::build(
             SyntheticBlockConfig {
                 block_count: 5,
                 txs_per_block: 3,
@@ -134,14 +136,10 @@ impl TestApp {
             },
             None,
             minibf,
-        )
+        ))
     }
 
-    fn build(
-        cfg: SyntheticBlockConfig,
-        fault: Option<TestFault>,
-        minibf: MinibfConfig,
-    ) -> Result<Self, dolos_core::ServeError> {
+    fn build(cfg: SyntheticBlockConfig, fault: Option<TestFault>, minibf: MinibfConfig) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         Self::from_domain(domain, vectors, fault, minibf)
     }
@@ -153,7 +151,7 @@ impl TestApp {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         setup(&domain, &vectors);
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"));
-        Self::from_domain(domain, vectors, None, minibf).expect("build_router_with_facade")
+        Self::from_domain(domain, vectors, None, minibf)
     }
 
     /// App whose minibf config caps scans at `max_scan_items`, so scan budgets
@@ -162,7 +160,7 @@ impl TestApp {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         let minibf = MinibfConfig::new("[::]:0".parse().expect("invalid listen address"))
             .with_max_scan_items(max_scan_items);
-        Self::from_domain(domain, vectors, None, minibf).expect("build_router_with_facade")
+        Self::from_domain(domain, vectors, None, minibf)
     }
 
     fn from_domain(
@@ -170,7 +168,7 @@ impl TestApp {
         vectors: SyntheticVectors,
         fault: Option<TestFault>,
         minibf: MinibfConfig,
-    ) -> Result<Self, dolos_core::ServeError> {
+    ) -> Self {
         let domain = match fault {
             Some(fault) => dolos_testing::faults::FaultyToyDomain::new(domain, fault),
             None => dolos_testing::faults::FaultyToyDomain::new(domain, TestFault::None),
@@ -182,13 +180,13 @@ impl TestApp {
             cache: crate::cache::CacheService::default(),
         };
 
-        let router = build_router_with_facade(facade)?;
+        let router = build_router_with_facade(facade);
 
-        Ok(Self {
+        Self {
             router,
             _domain: domain,
             vectors,
-        })
+        }
     }
 
     pub async fn get_bytes(&self, path: &str) -> (StatusCode, Vec<u8>) {

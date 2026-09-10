@@ -825,6 +825,30 @@ impl MinibfConfig {
         self.max_scan_items.unwrap_or(default_max_scan_items())
     }
 
+    /// The base path with any trailing slash removed. Returns `None` when no
+    /// base path is set. [`MinibfConfig::validate`] makes sure that the value
+    /// is correct. Then the router can nest under the value with no more checks.
+    pub fn base_path(&self) -> Option<String> {
+        self.base_path
+            .as_deref()
+            .map(|base_path| base_path.trim_end_matches('/').to_string())
+    }
+
+    /// Rejects a `base_path` that the router cannot nest under. This check runs
+    /// at config-parse time. As a result, a malformed value stops startup and
+    /// does not stop a running `serve` process.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(base_path) = self.base_path() {
+            if base_path.is_empty() || !base_path.starts_with('/') || base_path.contains('*') {
+                return Err(format!(
+                    "base_path \"{base_path}\" is not valid. Use a base_path that starts with '/' and has no '*' wildcard."
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// These are the base URLs of the HTTP gateways, in order. The gateways
     /// resolve `ipfs://` governance-anchor URLs. Dolos sends a request to each
     /// gateway in order. Dolos stops at the first gateway that serves the
@@ -1201,6 +1225,20 @@ pub struct RootConfig {
 
     #[serde(default, skip_serializing_if = "TelemetryConfig::is_default")]
     pub telemetry: TelemetryConfig,
+}
+
+impl RootConfig {
+    /// Makes sure that the config values are correct when a plain
+    /// deserialization cannot check them. Callers run this check one time,
+    /// directly after the config loads. As a result, a malformed value stops
+    /// startup and does not stop a running service.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(minibf) = &self.serve.minibf {
+            minibf.validate()?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

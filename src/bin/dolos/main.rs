@@ -88,7 +88,14 @@ fn main() -> Result<()> {
 
     let config = crate::common::load_config(&args.config)
         .into_diagnostic()
-        .context("parsing configuration");
+        .context("parsing configuration")
+        .and_then(|config| {
+            config
+                .validate()
+                .map_err(|e| miette::miette!("{e}"))
+                .context("validating configuration")?;
+            Ok(config)
+        });
 
     let feedback = crate::feedback::Feedback::default();
 

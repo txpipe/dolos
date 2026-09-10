@@ -32,9 +32,8 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // When `base_path` has a value, the router serves each route with that prefix.
     // This code adds the same prefix to the CLI path. If the path already has
     // the prefix, this code does not add the prefix again.
-    let path = match minibf.base_path.as_deref() {
+    let path = match minibf.base_path() {
         Some(base_path) => {
-            let base_path = base_path.trim_end_matches('/');
             if path == base_path || path.starts_with(&format!("{base_path}/")) {
                 path
             } else {
@@ -49,9 +48,7 @@ pub async fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         .into_diagnostic()
         .context("invalid minibf path")?;
 
-    let app = dolos_minibf::build_router(minibf.clone(), domain)
-        .into_diagnostic()
-        .context("building minibf router")?;
+    let app = dolos_minibf::build_router(minibf.clone(), domain);
 
     let request = Request::builder()
         .method("GET")
