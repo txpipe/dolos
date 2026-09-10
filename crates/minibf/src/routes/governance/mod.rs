@@ -768,10 +768,11 @@ fn read_votes<D: Domain>(
             .get_block_by_slot(&slot)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         else {
-            // A block the archive pruned leaves its votes nothing to resolve
-            // the voting tx from; the page just comes back short.
-            seen = end;
-            continue;
+            // The state row proves these votes exist, so a missing block
+            // means the archive was pruned below the proposal's vote
+            // history. A short page would misreport the votes; fail loudly
+            // instead.
+            return Err(StatusCode::INTERNAL_SERVER_ERROR.into());
         };
 
         let mut rows = votes_in_block(&body, &action)?;
@@ -2207,6 +2208,42 @@ mod tests {
 
         let id = bech32_gov_action(&Hash::from([1u8; 32]), 0).unwrap();
         let path = format!("/governance/proposals/{id}/votes");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    /// A state row that records a vote at a slot the archive does not hold —
+    /// the shape a pruned archive leaves behind. The listing must fail
+    /// loudly rather than misreport the votes with a short page.
+    #[tokio::test]
+    async fn governance_proposal_votes_pruned_block() {
+        let seed = |domain: &ToyDomain| {
+            let mut state = lifecycle_state(None, None);
+            state.drep_votes.insert(
+                StakeCredential::AddrKeyhash([6u8; 28].into()),
+                vec![(999_999, Vote::Yes)],
+            );
+
+            let writer = domain
+                .state()
+                .start_writer()
+                .expect("failed to start writer");
+            writer
+                .write_entity_typed(&state.key(), &state)
+                .expect("failed to write proposal");
+            writer.commit().expect("failed to commit proposal");
+        };
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 3,
+            txs_per_block: 1,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| seed(domain));
+
+        let path = format!(
+            "/governance/proposals/{}/0/votes",
+            hex::encode(proposal_tx())
+        );
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
