@@ -379,6 +379,57 @@ where
     Ok(Json(model))
 }
 
+/// `GET /blocks/epoch/{epoch_number}/slot/{slot_number}`: the block at an
+/// epoch-relative slot.
+///
+/// Blockfrost matches the pair against the epoch and epoch-slot columns it
+/// stores per block. Dolos stores blocks by absolute slot, so the handler
+/// turns the pair into an absolute slot with the chain summary and looks
+/// that up.
+pub async fn by_epoch_slot<D>(
+    Path((epoch_number, slot_number)): Path<(String, String)>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<BlockContent>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    // Blockfrost bounds both numbers to a positive signed 32-bit range and
+    // rejects anything else as a bad request.
+    let in_range =
+        |raw: &str| -> Option<u64> { raw.parse::<u64>().ok().filter(|x| *x <= i32::MAX as u64) };
+
+    let epoch = in_range(&epoch_number).ok_or(StatusCode::BAD_REQUEST)?;
+    let slot = in_range(&slot_number).ok_or(StatusCode::BAD_REQUEST)?;
+
+    let chain = domain.get_chain_summary()?;
+
+    // A slot past the end of the epoch names no block; without this guard
+    // the absolute slot would land in a later epoch.
+    let epoch_length = chain.epoch_start(epoch + 1) - chain.epoch_start(epoch);
+    if slot >= epoch_length {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let absolute_slot = chain.epoch_start(epoch) + slot;
+
+    let block = domain
+        .archive()
+        .get_block_by_slot(&absolute_slot)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let (_, tip) = domain
+        .archive()
+        .get_tip()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let mut model = build_block_model(&domain, &block, &tip, &chain).await?;
+    hacks::maybe_set_genesis_previous_block(&domain, &mut model);
+
+    Ok(Json(model))
+}
+
 pub async fn by_hash_or_number_txs<D>(
     Path(hash_or_number): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -1032,6 +1083,78 @@ mod tests {
         assert_status(
             &app,
             "/blocks/1/addresses",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .await;
+    }
+
+    /// The block behind `/blocks/{hash}`, which carries its own epoch and
+    /// epoch-slot fields — the pair the endpoint under test resolves.
+    async fn block_by_hash(app: &TestApp, hash: &str) -> BlockContent {
+        let (status, bytes) = app.get_bytes(&format!("/blocks/{hash}")).await;
+        assert_eq!(status, StatusCode::OK);
+        serde_json::from_slice(&bytes).expect("failed to parse block")
+    }
+
+    #[tokio::test]
+    async fn blocks_by_epoch_slot_happy_path() {
+        let app = TestApp::new();
+        let expected = block_by_hash(&app, &app.vectors().block_hash).await;
+
+        let epoch = expected.epoch.expect("block has no epoch");
+        let epoch_slot = expected.epoch_slot.expect("block has no epoch slot");
+
+        let path = format!("/blocks/epoch/{epoch}/slot/{epoch_slot}");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: BlockContent = serde_json::from_slice(&bytes).expect("failed to parse block");
+        assert_eq!(model, expected);
+    }
+
+    #[tokio::test]
+    async fn blocks_by_epoch_slot_not_found() {
+        let app = TestApp::new();
+        let block = block_by_hash(&app, &app.vectors().block_hash).await;
+        let epoch = block.epoch.expect("block has no epoch");
+
+        // an empty slot inside the epoch
+        let path = format!("/blocks/epoch/{epoch}/slot/80000");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        // a slot past the end of the epoch must not roll into the next one
+        let path = format!("/blocks/epoch/{epoch}/slot/2000000000");
+        assert_status(&app, &path, StatusCode::NOT_FOUND).await;
+
+        // an epoch with no blocks
+        let path = "/blocks/epoch/500/slot/0";
+        assert_status(&app, path, StatusCode::NOT_FOUND).await;
+    }
+
+    #[tokio::test]
+    async fn blocks_by_epoch_slot_bad_request() {
+        let app = TestApp::new();
+
+        for (epoch, slot) in [
+            ("x", "0"),
+            ("2", "x"),
+            ("-1", "0"),
+            ("2", "-5"),
+            // past the positive signed 32-bit range Blockfrost accepts
+            ("2147483648", "0"),
+            ("2", "2147483648"),
+        ] {
+            let path = format!("/blocks/epoch/{epoch}/slot/{slot}");
+            assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn blocks_by_epoch_slot_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
+        assert_status(
+            &app,
+            "/blocks/epoch/2/slot/0",
             StatusCode::INTERNAL_SERVER_ERROR,
         )
         .await;
