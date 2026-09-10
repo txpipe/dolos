@@ -827,7 +827,8 @@ impl MinibfConfig {
 
     /// The base path with any trailing slash removed. Returns `None` when no
     /// base path is set. [`MinibfConfig::validate`] makes sure that the value
-    /// is correct. Then the router can nest under the value with no more checks.
+    /// is correct. Then the router can nest under the value with no more
+    /// checks.
     pub fn base_path(&self) -> Option<String> {
         self.base_path
             .as_deref()
