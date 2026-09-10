@@ -90,6 +90,47 @@ impl std::fmt::Display for Issue {
     }
 }
 
+/// One invariant that cannot be asserted at this particular store position.
+///
+/// This is deliberately not an [`Issue`]: a known structural limit must stay
+/// visible to the operator without making a consistent store fail the check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotAssertable {
+    pub check: CheckKind,
+    pub detail: String,
+}
+
+impl NotAssertable {
+    pub fn new(check: CheckKind, detail: impl Into<String>) -> Self {
+        Self {
+            check,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for NotAssertable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.check, self.detail)
+    }
+}
+
+/// Findings from one check, separating inconsistencies from structural skips.
+#[derive(Debug, Default)]
+pub struct CheckResult {
+    pub issues: Vec<Issue>,
+    pub not_assertable: Vec<NotAssertable>,
+}
+
+impl From<Vec<Issue>> for CheckResult {
+    fn from(issues: Vec<Issue>) -> Self {
+        Self {
+            issues,
+            not_assertable: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// check to run; repeatable, runs all of them when omitted
@@ -121,6 +162,7 @@ struct Timing {
     check: CheckKind,
     elapsed: Duration,
     issues: usize,
+    not_assertable: usize,
 }
 
 pub fn run(
@@ -141,10 +183,10 @@ pub fn run(
         let started = Instant::now();
 
         let found = match check {
-            CheckKind::Cursors => cursors::run(&stores),
-            CheckKind::ArchiveContinuity => archive::run(&stores, &progress),
-            CheckKind::AccountEpochs => accounts::run(&stores, &progress),
-            CheckKind::EpochLog => epoch_log::run(&stores),
+            CheckKind::Cursors => cursors::run(&stores).map(CheckResult::from),
+            CheckKind::ArchiveContinuity => archive::run(&stores, &progress).map(CheckResult::from),
+            CheckKind::AccountEpochs => accounts::run(&stores, &progress).map(CheckResult::from),
+            CheckKind::EpochLog => epoch_log::run(&stores).map(CheckResult::from),
             CheckKind::Totals => totals::run(&stores, &genesis, &progress),
         };
 
@@ -156,27 +198,38 @@ pub fn run(
 
         let found = found?;
 
-        for issue in &found {
+        for issue in &found.issues {
             eprintln!("{issue}");
+        }
+
+        for skipped in &found.not_assertable {
+            println!("{skipped}");
         }
 
         timings.push(Timing {
             check,
             elapsed,
-            issues: found.len(),
+            issues: found.issues.len(),
+            not_assertable: found.not_assertable.len(),
         });
 
-        issues.extend(found);
+        issues.extend(found.issues);
     }
 
     println!();
 
     for timing in &timings {
+        let skipped = match timing.not_assertable {
+            0 => String::new(),
+            count => format!(", {count} not assertable at this tip"),
+        };
+
         println!(
-            "{:<20} {:>10.2?}  {} issue(s)",
+            "{:<20} {:>10.2?}  {} issue(s){}",
             timing.check.name(),
             timing.elapsed,
-            timing.issues
+            timing.issues,
+            skipped,
         );
     }
 
@@ -278,11 +331,20 @@ mod tests {
         let (found, referent_issues) =
             totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
         issues.extend(referent_issues);
-        issues.extend(totals::check_pots(
-            &totals::live_pots(&epoch).expect("harness epoch can be placed at the tip"),
-            &found,
-            domain.genesis().shelley.max_lovelace_supply,
-        ));
+        issues.extend(
+            totals::check_pots(
+                &totals::live_pots(&epoch).expect("harness epoch can be placed at the tip"),
+                &found,
+                totals::SupplyCheck::Exact {
+                    max_supply: domain
+                        .genesis()
+                        .shelley
+                        .max_lovelace_supply
+                        .expect("the test genesis fixes a maximum supply"),
+                },
+            )
+            .issues,
+        );
 
         issues
     }
