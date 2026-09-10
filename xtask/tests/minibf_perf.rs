@@ -48,7 +48,8 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
     let router = dolos_minibf::build_router(
         MinibfConfig::new("127.0.0.1:0".parse().unwrap()),
         fixture.domain.clone(),
-    );
+    )
+    .unwrap();
     for case in cases::cases(&fixture) {
         fixture.domain.archive().counters.reset();
         cases::request(router.clone(), &case).await.unwrap();

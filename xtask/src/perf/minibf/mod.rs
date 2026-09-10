@@ -233,7 +233,8 @@ async fn measure_case(args: &Args, name: &str, rate: u64) -> anyhow::Result<(Val
         "{name} changes its expected response during live sync"
     );
     let config = MinibfConfig::new("127.0.0.1:0".parse()?).with_max_scan_items(args.max_scan_items);
-    let router = dolos_minibf::build_router(config, fixture.domain.clone());
+    let router =
+        dolos_minibf::build_router(config, fixture.domain.clone()).map_err(anyhow::Error::msg)?;
     let (_, expected_response) = cases::response(router.clone(), &case)
         .await
         .context("fixture validation / warmup")?;
