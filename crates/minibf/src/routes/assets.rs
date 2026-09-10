@@ -355,20 +355,21 @@ where
 /// The HTTP client that every token-registry request shares. `reqwest::Client`
 /// holds an internal connection pool, so one instance reuses DNS and TLS across
 /// the many concurrent lookups that `/addresses/{address}/extended` starts.
-fn token_registry_client() -> Result<&'static reqwest::Client, StatusCode> {
+///
+/// `get_or_init` builds the client one time. Two concurrent calls do not
+/// build two clients. The builder fails only when the TLS backend does not
+/// start. In that case, this function uses the default client. As a result,
+/// the caller gets a client and does not handle a `Result`.
+fn token_registry_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
-    if let Some(client) = CLIENT.get() {
-        return Ok(client);
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent("Dolos MiniBF")
-        .build()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(CLIENT.get_or_init(|| client))
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .user_agent("Dolos MiniBF")
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 struct AssetModelBuilder {
@@ -457,20 +458,20 @@ impl AssetModelBuilder {
 
         let url = format!("{url}/metadata/{asset}");
 
-        let res = token_registry_client()?
-            .get(&url)
-            .send()
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        // The off-chain metadata adds to the response. It is not necessary.
+        // If the token registry does not answer, or sends data that does not
+        // parse, the code reports no metadata. The request does not fail.
+        let Ok(res) = token_registry_client().get(&url).send().await else {
+            return Ok(None);
+        };
 
         if res.status() != StatusCode::OK {
             return Ok(None);
         }
 
-        let metadata: TokenRegistryMetadata = res
-            .json()
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let Ok(metadata) = res.json::<TokenRegistryMetadata>().await else {
+            return Ok(None);
+        };
 
         if metadata.name.is_none() || metadata.description.is_none() {
             return Ok(None);
