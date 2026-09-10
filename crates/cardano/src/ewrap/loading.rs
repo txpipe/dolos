@@ -1806,6 +1806,9 @@ mod tests {
             identifier,
             anchor: None,
             expiry: None,
+            unregistrations: unregistered_at
+                .map(|slot| vec![(slot, 0)])
+                .unwrap_or_default(),
         }
     }
 
@@ -2859,6 +2862,7 @@ mod ratification_tests {
             identifier: drep(),
             anchor: None,
             expiry: None,
+            unregistrations: vec![],
         };
 
         writer

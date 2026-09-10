@@ -212,6 +212,7 @@ pub fn drep_state() -> DRepState {
             updated_in: 409,
             prev: Some(400),
         }),
+        unregistrations: vec![(70_000, 5), (77_777, 11)],
     }
 }
 

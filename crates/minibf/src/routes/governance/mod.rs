@@ -668,10 +668,6 @@ impl IntoModel<ProposalVotesInner> for VoteRow {
 /// the proposal is still live; re-registering does not restore it. Once the
 /// proposal closes the tally freezes, so only a deregistration before the
 /// close matters.
-///
-/// `DRepState` keeps only the newest deregistration. A vote killed by an
-/// earlier one reads as counted again if the DRep deregistered once more
-/// after the proposal closed — that takes two full cycles around the close.
 fn drep_vote_counts<D: Domain>(
     domain: &D,
     drep: &DRep,
@@ -690,22 +686,34 @@ fn drep_vote_counts<D: Domain>(
         return Ok(true);
     };
 
-    let Some(deregistered_at) = drep.unregistered_at else {
-        return Ok(true);
-    };
+    // Rows written before the deregistration history keep only the newest
+    // one; chaining it keeps those stores at least as good as before their
+    // rebuild.
+    let deregistrations = drep
+        .unregistrations
+        .iter()
+        .chain(drep.unregistered_at.as_ref());
 
-    // only a deregistration strictly after the voting tx can drop the vote
-    if deregistered_at <= vote_at {
-        return Ok(true);
-    }
+    for deregistered_at in deregistrations {
+        // only a deregistration strictly after the voting tx can drop it
+        if *deregistered_at <= vote_at {
+            continue;
+        }
 
-    match closed_epoch {
-        None => Ok(false),
-        Some(closed) => {
-            let (dereg_epoch, _) = chain.slot_epoch(deregistered_at.0);
-            Ok(dereg_epoch >= closed)
+        match closed_epoch {
+            // the proposal is still live: the deregistration drops the vote
+            None => return Ok(false),
+            // frozen tally: only a deregistration before the close matters
+            Some(closed) => {
+                let (dereg_epoch, _) = chain.slot_epoch(deregistered_at.0);
+                if dereg_epoch < closed {
+                    return Ok(false);
+                }
+            }
         }
     }
+
+    Ok(true)
 }
 
 /// Scans one block body and returns its votes on `action`, ordered the way
@@ -2451,6 +2459,7 @@ mod tests {
             let mut state = dolos_cardano::model::DRepState::new(identifier.clone());
             state.registered_at = Some((1, 0));
             state.unregistered_at = Some(unregistered_at);
+            state.unregistrations = vec![unregistered_at];
 
             let writer = domain
                 .state()

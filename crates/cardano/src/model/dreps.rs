@@ -116,6 +116,16 @@ pub struct DRepState {
     // anything else.
     #[n(8)]
     pub expiry: Option<DRepExpiry>,
+
+    // Backward-compatible addition: absent in pre-existing rows, decodes as
+    // empty. Every deregistration in order, where `unregistered_at` keeps
+    // only the newest one: Blockfrost's vote `counted` flag needs the ones a
+    // re-registration cycle would otherwise erase. Rows written before this
+    // field backfill through `doctor rebuild-state` or a resync. Index 9
+    // must not be reused for anything else.
+    #[n(9)]
+    #[cbor(default)]
+    pub unregistrations: Vec<(BlockSlot, TxOrder)>,
 }
 
 impl DRepState {
@@ -130,6 +140,7 @@ impl DRepState {
             identifier,
             anchor: None,
             expiry: None,
+            unregistrations: vec![],
         }
     }
 
@@ -188,6 +199,7 @@ pub(crate) mod testing {
                 expired,
                 deposit,
                 anchor,
+                unregistrations: unregistered_at.map(|at| vec![at]).unwrap_or_default(),
                 expiry,
             }
         }
@@ -311,6 +323,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
         // apply changes
         entity.voting_power = 0;
         entity.unregistered_at = Some((self.slot, self.txorder));
+        entity.unregistrations.push((self.slot, self.txorder));
         entity.deposit = 0;
     }
 
@@ -320,6 +333,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
             .expect("can't undo unregister on missing drep");
         state.voting_power = self.prev_voting_power.unwrap_or(0);
         state.unregistered_at = self.prev_unregistered_at;
+        state.unregistrations.pop();
         state.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
