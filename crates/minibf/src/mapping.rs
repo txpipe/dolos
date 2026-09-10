@@ -76,14 +76,65 @@ macro_rules! try_into_or_500 {
     };
 }
 
+/// The `i32` a Blockfrost model types a parameter as, or a 500 when the value
+/// does not fit: the chain lets a proposal set fees, sizes and counts anywhere
+/// in `u64`, and a wrapped number would read as a valid, negative parameter.
+pub fn i32_or_500<T>(value: T) -> Result<i32, StatusCode>
+where
+    T: TryInto<i32> + Copy + std::fmt::Debug,
+{
+    value.try_into().map_err(|_| {
+        tracing::error!(value = ?value, "parameter does not fit the i32 the model types it as");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
 pub fn round_f64<const DECIMALS: u8>(val: f64) -> f64 {
     let multiplier = 10_f64.powi(DECIMALS as i32);
     (val * multiplier).round() / multiplier
 }
 
+/// A ratio as the plain quotient, at the precision `f64` gives it.
+pub fn rational_to_f64_unrounded(val: &alonzo::RationalNumber) -> f64 {
+    val.numerator as f64 / val.denominator as f64
+}
+
+/// A ratio rounded to `DECIMALS` places.
 pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 {
-    let res = val.numerator as f64 / val.denominator as f64;
-    round_f64::<DECIMALS>(res)
+    round_f64::<DECIMALS>(rational_to_f64_unrounded(val))
+}
+
+/// How a protocol parameter model writes its ratios out.
+///
+/// Blockfrost rounds the parameters in force to the places it shows them
+/// with, but serves the change a proposal asks for straight from db-sync's
+/// `param_proposal` columns at full `double precision`: a proposal setting
+/// tau to 1/6 comes back as 0.16666666666666666 where
+/// `/epochs/{n}/parameters` says 0.167. The models that share their field
+/// mapping through `protocol_params_model!` name the format as a type, so
+/// the places stay written at the field and only whether they apply varies.
+pub trait RatioFormat {
+    /// `value` as served, `DECIMALS` being the places the field is shown
+    /// with whenever it is rounded at all.
+    fn to_f64<const DECIMALS: u8>(value: &alonzo::RationalNumber) -> f64;
+}
+
+/// Rounded to the places written at the field.
+pub struct Rounded;
+
+impl RatioFormat for Rounded {
+    fn to_f64<const DECIMALS: u8>(value: &alonzo::RationalNumber) -> f64 {
+        rational_to_f64::<DECIMALS>(value)
+    }
+}
+
+/// The quotient as is, whatever places the field writes.
+pub struct Unrounded;
+
+impl RatioFormat for Unrounded {
+    fn to_f64<const DECIMALS: u8>(value: &alonzo::RationalNumber) -> f64 {
+        rational_to_f64_unrounded(value)
+    }
 }
 
 const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
