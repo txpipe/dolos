@@ -1,10 +1,10 @@
 //! Fjall-based archive store implementation for Dolos.
 //!
 //! The archive keeps block bodies in flat segment files ([`dolos_flatfiles`],
-//! raw or compressed per segment, addressed by the same packed locations
-//! either way) and holds the rows that point
-//! into the history — a blocks location table, the derived-log namespaces,
-//! and the two index projections of the blocks — in an LSM tree. Behavior is
+//! one zstd frame per body, named by the frame's physical location) and
+//! holds the rows that point into the history — a blocks location table,
+//! the derived-log namespaces, and the two index projections of the blocks
+//! — in an LSM tree. Behavior is
 //! pinned by the shared conformance suite (`tests/archive_conformance.rs`),
 //! with the builtin memory archive as the oracle.
 //!
@@ -69,11 +69,7 @@ use fjall::{
 };
 use pallas::ledger::traverse::MultiEraBlock;
 
-use dolos_flatfiles::{
-    compressed::{CacheLimits, WriteSummary, WriterOptions},
-    decode_locations, encode_locations, Access, BlockLocation, FlatFileOptions, FlatFileStore,
-    SegmentInfo, SLOTS_PER_SEGMENT,
-};
+use dolos_flatfiles::{decode_locations, encode_locations, BlockLocation, FlatFileStore};
 
 use crate::keys::{dim_prefix, hash_dimension, DIM_HASH_SIZE};
 use crate::Error;
@@ -121,32 +117,6 @@ mod keyspace_names {
     pub const EXACT: &str = "index-exact";
 }
 
-/// The compressed-segment reader's bounds from the archive configuration:
-/// each field the operator set, the reader's own default for the rest.
-fn compressed_cache_limits(config: &FjallArchiveConfig) -> CacheLimits {
-    let defaults = CacheLimits::default();
-    let Some(cache) = config
-        .block_compression
-        .as_ref()
-        .and_then(|c| c.cache.as_ref())
-    else {
-        return defaults;
-    };
-    let mb = |value: Option<usize>, default: usize| value.map_or(default, |mb| mb << 20);
-    CacheLimits {
-        frame_bytes: mb(cache.frame_mb, defaults.frame_bytes),
-        frame_entries: cache.frame_entries.unwrap_or(defaults.frame_entries),
-        index_bytes: mb(cache.index_mb, defaults.index_bytes),
-        index_entries: cache.index_entries.unwrap_or(defaults.index_entries),
-        dictionary_bytes: mb(cache.dictionary_mb, defaults.dictionary_bytes),
-        dictionary_entries: cache
-            .dictionary_entries
-            .unwrap_or(defaults.dictionary_entries),
-        handles: cache.handles.unwrap_or(defaults.handles),
-        inflight_reads: cache.inflight_reads.unwrap_or(defaults.inflight_reads),
-    }
-}
-
 fn io_err(e: std::io::Error) -> ArchiveError {
     ArchiveError::InternalError(e.to_string())
 }
@@ -157,9 +127,8 @@ fn fjall_err(e: fjall::Error) -> ArchiveError {
 
 /// Fjall-based archive store.
 ///
-/// Block bodies live in flat segment files (shared, byte-identical layout
-/// with the redb backend); the location table, the log namespaces and the
-/// two index keyspaces live in the LSM tree.
+/// Block bodies live in flat segment files; the location table, the log
+/// namespaces and the two index keyspaces live in the LSM tree.
 #[derive(Clone)]
 pub struct ArchiveStore {
     db: Database,
@@ -187,36 +156,8 @@ impl ArchiveStore {
         path: impl AsRef<Path>,
         config: &FjallArchiveConfig,
     ) -> Result<Self, Error> {
-        Self::open_with_access(schema, path, config, Access::Shared)
-    }
-
-    /// Open the store holding its segments directory exclusively, for
-    /// offline maintenance that rewrites segment files. Refuses, without
-    /// waiting, while any other store — a running node, another maintenance
-    /// command — holds the directory, and keeps every later shared open out
-    /// until this store is dropped.
-    pub fn open_exclusive(
-        schema: StateSchema,
-        path: impl AsRef<Path>,
-        config: &FjallArchiveConfig,
-    ) -> Result<Self, Error> {
-        Self::open_with_access(schema, path, config, Access::Exclusive)
-    }
-
-    fn open_with_access(
-        schema: StateSchema,
-        path: impl AsRef<Path>,
-        config: &FjallArchiveConfig,
-        access: Access,
-    ) -> Result<Self, Error> {
         let path = path.as_ref();
         std::fs::create_dir_all(path).map_err(|e| Error::Io(e.to_string()))?;
-
-        // A compression table no command could act on fails here, before
-        // anything is opened, rather than when a segment is about to move.
-        if let Some(compression) = &config.block_compression {
-            compression.validate().map_err(Error::Config)?;
-        }
 
         let cache_size = config.cache.unwrap_or(DEFAULT_CACHE_SIZE_MB);
         let cache_bytes = (cache_size * 1024 * 1024) as u64;
@@ -238,16 +179,7 @@ impl ArchiveStore {
             .clone()
             .unwrap_or_else(|| path.to_path_buf());
 
-        // Opening recovers any interrupted representation transition and
-        // validates every compressed segment's metadata and dictionary, so a
-        // segment this build cannot read fails the open, naming the segment.
-        let options = FlatFileOptions {
-            dictionaries: None,
-            cache: Some(compressed_cache_limits(config)),
-            access,
-        };
-        let flatfiles = FlatFileStore::with_options(segments_dir, options)
-            .map_err(|e| Error::Io(e.to_string()))?;
+        let flatfiles = FlatFileStore::new(segments_dir).map_err(|e| Error::Io(e.to_string()))?;
 
         Self::from_database(
             db,
@@ -329,93 +261,14 @@ impl ArchiveStore {
         })
     }
 
+    /// Automatic encoding decisions and peak per-batch encoding resources.
+    pub fn append_stats(&self) -> dolos_flatfiles::AppendStats {
+        self.flatfiles.append_stats()
+    }
+
     /// Get a reference to the underlying database
     pub fn database(&self) -> &Database {
         &self.db
-    }
-
-    /// The block segment files and their representations, ascending.
-    pub fn segments(&self) -> Result<Vec<SegmentInfo>, Error> {
-        self.flatfiles
-            .segments()
-            .map_err(|e| Error::Io(e.to_string()))
-    }
-
-    /// The directory the block segment files live in.
-    pub fn segments_dir(&self) -> &Path {
-        self.flatfiles.segments_dir()
-    }
-
-    /// The bounds the compressed-segment reader was opened with.
-    pub fn compressed_cache_limits(&self) -> CacheLimits {
-        self.flatfiles.cache_limits()
-    }
-
-    /// Read the bytes one packed location addresses, from whichever
-    /// representation its segment has.
-    pub fn read_location(&self, location: &BlockLocation) -> Result<Vec<u8>, Error> {
-        self.flatfiles
-            .read(location)
-            .map_err(|e| Error::Io(e.to_string()))
-    }
-
-    /// Every location the blocks table holds inside `segment_id`, in slot
-    /// order, newest first within a slot.
-    pub fn segment_locations(&self, segment_id: u32) -> Result<Vec<BlockLocation>, Error> {
-        let first = segment_id as u64 * SLOTS_PER_SEGMENT;
-        let end = first + SLOTS_PER_SEGMENT;
-        let snapshot = self.db.snapshot();
-        let range = snapshot.range(
-            &self.blocks,
-            first.to_be_bytes().to_vec()..end.to_be_bytes().to_vec(),
-        );
-
-        let mut locations = Vec::new();
-        for guard in range {
-            let (_, value) = guard.into_inner()?;
-            locations.extend(decode_locations(&value).filter(|loc| loc.segment_id == segment_id));
-        }
-
-        Ok(locations)
-    }
-
-    /// Compress the block segment `segment_id` in place, cutting frames at
-    /// the block boundaries the blocks table records for it.
-    ///
-    /// The index is not rewritten: every packed location keeps addressing
-    /// the same logical bytes. A later append to or truncation of the
-    /// segment converts it back to raw on its own. This is the primitive an
-    /// offline sealing tool calls; nothing here schedules it.
-    pub fn seal_segment(
-        &self,
-        segment_id: u32,
-        options: &WriterOptions,
-    ) -> Result<WriteSummary, Error> {
-        let locations = self.segment_locations(segment_id)?;
-        self.seal_segment_at(segment_id, &locations, options)
-    }
-
-    /// Compress the block segment `segment_id` in place, cutting frames at
-    /// the boundaries the caller supplies — every body in the segment's
-    /// stream, including the ones the blocks table no longer points at, when
-    /// the caller has walked the stream itself. The boundaries must cover
-    /// the file without overlap; bytes they leave out become filler frames.
-    pub fn seal_segment_at(
-        &self,
-        segment_id: u32,
-        boundaries: &[BlockLocation],
-        options: &WriterOptions,
-    ) -> Result<WriteSummary, Error> {
-        self.flatfiles
-            .seal(segment_id, boundaries, options)
-            .map_err(|e| Error::Io(e.to_string()))
-    }
-
-    /// Restore the block segment `segment_id` to its raw representation.
-    pub fn thaw_segment(&self, segment_id: u32) -> Result<(), Error> {
-        self.flatfiles
-            .thaw(segment_id)
-            .map_err(|e| Error::Io(e.to_string()))
     }
 
     /// Per-keyspace disk footprint: `(name, bytes, path)`.
@@ -610,9 +463,22 @@ pub struct ArchiveWriter {
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
+    #[cfg(test)]
+    fail_index_commit: bool,
 }
 
 impl ArchiveWriter {
+    fn new(store: &ArchiveStore) -> Self {
+        Self {
+            batch: Mutex::new(store.db.batch()),
+            store: store.clone(),
+            pending_blocks: Mutex::new(Vec::new()),
+            overlay: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            fail_index_commit: false,
+        }
+    }
+
     fn resolve_locations(
         &self,
         overlay: &HashMap<BlockSlot, Vec<BlockLocation>>,
@@ -656,8 +522,8 @@ impl CoreArchiveWriter for ArchiveWriter {
     ///
     /// A rollback walks the chain backwards, so at a slot holding more than
     /// one block the one to remove is the newest — position 0 — and the slot
-    /// survives until its last block is gone. The segment file is truncated
-    /// at the removed block's offset immediately, mirroring the redb writer.
+    /// survives until its last block is gone. The segment file is cut at the
+    /// removed block's frame immediately.
     fn undo(&self, point: &ChainPoint) -> Result<(), ArchiveError> {
         let slot = point.slot();
 
@@ -796,6 +662,12 @@ impl CoreArchiveWriter for ArchiveWriter {
             }
         }
 
+        #[cfg(test)]
+        if self.fail_index_commit {
+            return Err(io_err(std::io::Error::other(
+                "injected index commit failure",
+            )));
+        }
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
 
@@ -814,11 +686,12 @@ impl CoreArchiveWriter for ArchiveWriter {
 ///
 /// An identical body means this block is being written again (a resumed
 /// restore rewriting the layer it was in the middle of): the entry that
-/// points at the original stays exactly where it is, and the copy just
+/// points at the original stays exactly where it is, and the frame just
 /// appended is the one nothing points at — dead space, not corruption.
 /// Repointing would move an index entry forward in the segment past a block
 /// it precedes in the chain, and `undo` truncates at the offset it removes,
-/// so that block's bytes would go with the cut.
+/// so that block's bytes would go with the cut. A location names a frame,
+/// not a body length, so the comparison decodes each candidate.
 ///
 /// Anything else is a second block at the same slot, and it takes position
 /// 0: blocks arrive in chain order, so the newcomer is the one the slot
@@ -834,10 +707,6 @@ fn merge_location(
     }
 
     for loc in existing.iter() {
-        if loc.length as usize != body.len() {
-            continue;
-        }
-
         let stored = flatfiles.read(loc).map_err(io_err)?;
 
         if stored == **body {
@@ -1020,12 +889,7 @@ impl CoreArchiveStore for ArchiveStore {
     type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        Ok(ArchiveWriter {
-            batch: Mutex::new(self.db.batch()),
-            store: self.clone(),
-            pending_blocks: Mutex::new(Vec::new()),
-            overlay: Mutex::new(HashMap::new()),
-        })
+        Ok(ArchiveWriter::new(self))
     }
 
     fn read_logs(
@@ -1364,5 +1228,115 @@ impl CoreArchiveStore for ArchiveStore {
         let snapshot = self.db.snapshot();
 
         Ok(ExactIter::new(snapshot, &self.exact, slots))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(slot: u64) -> ChainPoint {
+        ChainPoint::Specific(slot, pallas::crypto::hash::Hash::new([0u8; 32]))
+    }
+
+    fn body(slot: BlockSlot, tag: u8) -> RawBlock {
+        Arc::new(
+            format!("block at slot {slot} tag {tag} ")
+                .repeat(12)
+                .into_bytes(),
+        )
+    }
+
+    fn write(store: &ArchiveStore, blocks: &[(BlockSlot, RawBlock)]) {
+        let writer = store.start_writer().unwrap();
+        for (slot, body) in blocks {
+            writer.apply(&point(*slot), body).unwrap();
+        }
+        writer.commit().unwrap();
+    }
+
+    fn locations(store: &ArchiveStore, slot: BlockSlot) -> Vec<BlockLocation> {
+        store.stored_locations(&store.db.snapshot(), slot).unwrap()
+    }
+
+    fn segment_bytes(store: &ArchiveStore, segment: u32) -> Vec<u8> {
+        std::fs::read(store.flatfiles.segment_path(segment)).unwrap()
+    }
+
+    #[test]
+    fn automatic_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(1, body(1, 0))]);
+        let original = locations(&store, 1);
+        let second = Arc::new(vec![2; 128 << 10]);
+        let third = Arc::new(vec![3; 128 << 10]);
+        let mut writer = store.start_writer().unwrap();
+        writer.apply(&point(2), &second).unwrap();
+        writer.apply(&point(3), &third).unwrap();
+        writer.fail_index_commit = true;
+        assert!(writer.commit().is_err());
+        assert!(locations(&store, 2).is_empty());
+        assert!(locations(&store, 3).is_empty());
+        let dead_end = segment_bytes(&store, 0).len() as u64;
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(1), &body(1, 0)).unwrap();
+        writer.apply(&point(2), &second).unwrap();
+        writer.apply(&point(3), &third).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(locations(&store, 1), original);
+        assert!(locations(&store, 2)[0].offset >= dead_end);
+        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *second);
+        assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *third);
+    }
+
+    #[test]
+    fn a_repeated_import_keeps_the_original_frame_and_leaves_the_copy_unnamed() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(5, body(5, 0)), (9, body(9, 0))]);
+        let original = locations(&store, 5);
+        let len_before = segment_bytes(&store, 0).len();
+
+        write(&store, &[(5, body(5, 0))]);
+
+        assert_eq!(locations(&store, 5), original);
+        assert!(
+            segment_bytes(&store, 0).len() > len_before,
+            "the copy is appended"
+        );
+        assert_eq!(store.get_block_by_slot(&5).unwrap().unwrap(), *body(5, 0));
+
+        // A different body at the same slot is a second block, newest first.
+        write(&store, &[(5, body(5, 1))]);
+        let both = locations(&store, 5);
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[1], original[0]);
+        assert_eq!(
+            store.get_blocks_by_slot(&5).unwrap(),
+            vec![(*body(5, 0)).clone(), (*body(5, 1)).clone()]
+        );
+    }
+
+    #[test]
+    fn a_rollback_cuts_at_the_frame_and_retained_frames_are_not_rewritten() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(1, body(1, 0)), (2, body(2, 0)), (3, body(3, 0))]);
+        let before = segment_bytes(&store, 0);
+        let cut = locations(&store, 3)[0].offset;
+        let retained = locations(&store, 2);
+
+        let writer = store.start_writer().unwrap();
+        writer.undo(&point(3)).unwrap();
+        writer.commit().unwrap();
+
+        assert_eq!(segment_bytes(&store, 0), before[..cut as usize]);
+        assert!(locations(&store, 3).is_empty());
+
+        write(&store, &[(3, body(3, 1))]);
+        let after = segment_bytes(&store, 0);
+        assert_eq!(after[..cut as usize], before[..cut as usize]);
+        assert_eq!(locations(&store, 3)[0].offset, cut);
+        assert_eq!(locations(&store, 2), retained);
+        assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *body(3, 1));
+        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *body(2, 0));
     }
 }

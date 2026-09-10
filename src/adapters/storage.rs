@@ -112,6 +112,8 @@ pub fn inspect_existing_data(
     config: &RootConfig,
     policy: ExistingDataPolicy,
 ) -> Result<Existing, Error> {
+    check_storage_version(&config.storage.version)?;
+
     if policy.r#continue {
         return Ok(Existing::Proceed);
     }
@@ -134,11 +136,27 @@ pub fn inspect_existing_data(
     ))
 }
 
-fn check_storage_version(config: &RootConfig) -> Result<(), Error> {
-    if config.storage.version != StorageVersion::V3 {
+/// The storage version this binary reads. A store built by an older dolos is
+/// not migrated in place: the supported path off it is a fresh `dolos init`
+/// followed by a restore or a re-sync.
+pub const CURRENT_STORAGE_VERSION: StorageVersion = StorageVersion::V4;
+
+/// The migration guide the refusal points an operator at.
+pub const MIGRATION_GUIDE_URL: &str = "https://docs.txpipe.io/dolos/migration/dolos-v1-7";
+
+/// Refuse a configuration at any storage version but the current one.
+///
+/// The comparison is the whole compatibility policy: the version the config
+/// declares against the one the binary carries, and nothing on disk. Every
+/// store opener runs it before touching its path, so a refused configuration
+/// has had no directory created and no store opened on its behalf — which is
+/// what lets `dolos init` remain the one deliberate way past it.
+fn check_storage_version(version: &StorageVersion) -> Result<(), Error> {
+    if *version != CURRENT_STORAGE_VERSION {
         return Err(Error::StorageError(format!(
-            "unsupported storage version {:?}, only V3 is supported",
-            config.storage.version
+            "unsupported storage version `{version}`, this dolos only supports \
+             `{CURRENT_STORAGE_VERSION}`; run `dolos init` to upgrade the configuration and \
+             re-bootstrap the data — see the migration guide at {MIGRATION_GUIDE_URL}"
         )));
     }
     Ok(())
@@ -156,12 +174,16 @@ pub fn open_wal_store<D>(config: &RootConfig) -> Result<WalStoreBackend<D>, Erro
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    check_storage_version(&config.storage.version)?;
+
     let path = config.storage.wal_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(WalStoreBackend::open(&path, &config.storage.wal)?)
 }
 
 pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Error> {
+    check_storage_version(&config.storage.version)?;
+
     let path = config.storage.archive_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(ArchiveStoreBackend::open(
@@ -172,6 +194,8 @@ pub fn open_archive_store(config: &RootConfig) -> Result<ArchiveStoreBackend, Er
 }
 
 pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error> {
+    check_storage_version(&config.storage.version)?;
+
     let path = config.storage.state_path().unwrap_or_default();
     ensure_store_path(&path)?;
     Ok(StateStoreBackend::open(
@@ -182,6 +206,8 @@ pub fn open_state_store(config: &RootConfig) -> Result<StateStoreBackend, Error>
 }
 
 pub fn open_mempool_store(config: &RootConfig) -> Result<MempoolBackend, Error> {
+    check_storage_version(&config.storage.version)?;
+
     match &config.storage.mempool {
         MempoolStoreConfig::InMemory => Ok(MempoolBackend::Ephemeral(
             dolos_core::builtin::EphemeralMempool::new(),
@@ -200,7 +226,7 @@ pub fn open_data_stores<D>(config: &RootConfig) -> Result<Stores<D>, Error>
 where
     D: EntityDelta + Serialize + DeserializeOwned + Send + Sync + 'static,
 {
-    check_storage_version(config)?;
+    check_storage_version(&config.storage.version)?;
 
     Ok(Stores {
         wal: open_wal_store(config)?,
@@ -1337,6 +1363,128 @@ impl MempoolStore for MempoolBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn refusal<T>(result: Result<T, Error>) -> String {
+        result.err().expect("expected a refusal").to_string()
+    }
+
+    /// A node configuration over `root`, with every store on its disk backend
+    /// at its default path so that the root is all the data there is.
+    fn config_over(root: &Path, version: &str) -> RootConfig {
+        let toml = format!(
+            r#"
+            [upstream]
+            peer_address = "unused.example:3001"
+
+            [storage]
+            version = "{version}"
+            path = {path}
+
+            [storage.mempool]
+            backend = "redb"
+
+            [genesis]
+            byron_path = "byron.json"
+            shelley_path = "shelley.json"
+            alonzo_path = "alonzo.json"
+            conway_path = "conway.json"
+
+            [chain]
+            type = "cardano"
+            magic = 2
+            is_testnet = true
+            "#,
+            path = toml::Value::String(root.display().to_string()),
+        );
+
+        toml::from_str(&toml).unwrap()
+    }
+
+    /// A v1.6-era configuration is refused, and the refusal names both the
+    /// tool that performs the migration and the guide that describes it.
+    #[test]
+    fn older_storage_versions_are_refused_with_the_remedy() {
+        for stale in [
+            StorageVersion::V0,
+            StorageVersion::V1,
+            StorageVersion::V2,
+            StorageVersion::V3,
+        ] {
+            let message = refusal(check_storage_version(&stale));
+
+            assert!(
+                message.contains(&stale.to_string()),
+                "refusal must name the version found: {message}"
+            );
+            assert!(
+                message.contains("v4"),
+                "refusal must name the supported version: {message}"
+            );
+            assert!(
+                message.contains("dolos init"),
+                "refusal must name the remedy: {message}"
+            );
+            assert!(
+                message.contains(MIGRATION_GUIDE_URL),
+                "refusal must point at the migration guide: {message}"
+            );
+        }
+
+        check_storage_version(&CURRENT_STORAGE_VERSION).unwrap();
+    }
+
+    /// Every path that opens a store on its own — the per-store openers the
+    /// dump, doctor and bootstrap commands use, and bootstrap's look at
+    /// existing data — refuses a stale configuration before it creates or
+    /// opens anything, the same way the daemon's `open_data_stores` does.
+    #[test]
+    fn a_stale_config_is_refused_before_any_store_is_opened() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let stale = config_over(&root, "v3");
+
+        let refusals = [
+            refusal(open_data_stores::<dolos_cardano::CardanoDelta>(&stale)),
+            refusal(open_wal_store::<dolos_cardano::CardanoDelta>(&stale)),
+            refusal(open_state_store(&stale)),
+            refusal(open_archive_store(&stale)),
+            refusal(open_mempool_store(&stale)),
+            refusal(has_existing_data(&stale)),
+            refusal(inspect_existing_data(
+                &stale,
+                ExistingDataPolicy {
+                    force: true,
+                    ..Default::default()
+                },
+            )),
+            refusal(inspect_existing_data(
+                &stale,
+                ExistingDataPolicy {
+                    r#continue: true,
+                    ..Default::default()
+                },
+            )),
+        ];
+
+        for message in refusals {
+            assert!(
+                message.contains("dolos init"),
+                "every entry point refuses with the same remedy: {message}"
+            );
+        }
+
+        assert!(
+            !root.exists(),
+            "a refused configuration must not have had its storage created"
+        );
+
+        let current = config_over(&root, "v4");
+
+        open_data_stores::<dolos_cardano::CardanoDelta>(&current)
+            .expect("the current version opens");
+
+        assert!(root.is_dir());
+    }
 
     /// `in_memory` has to reach the builtin stores, not a memory-mode disk
     /// backend: that was the old wiring, and it was the reason the variant

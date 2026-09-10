@@ -1,0 +1,1404 @@
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1544,6 +1544,7 @@
+ name = "dolos-flatfiles"
+ version = "1.7.0-alpha.1"
+ dependencies = [
++ "rayon",
+  "sha2 0.10.9",
+  "tempfile",
+  "zstd",
+--- a/crates/fjall/src/archive/mod.rs
++++ b/crates/fjall/src/archive/mod.rs
+@@ -261,6 +261,11 @@
+         })
+     }
+ 
++    /// Automatic encoding decisions and peak per-batch encoding resources.
++    pub fn append_stats(&self) -> dolos_flatfiles::AppendStats {
++        self.flatfiles.append_stats()
++    }
++
+     /// Get a reference to the underlying database
+     pub fn database(&self) -> &Database {
+         &self.db
+@@ -458,9 +463,22 @@
+     batch: Mutex<OwnedWriteBatch>,
+     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
+     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
++    #[cfg(test)]
++    fail_index_commit: bool,
+ }
+ 
+ impl ArchiveWriter {
++    fn new(store: &ArchiveStore) -> Self {
++        Self {
++            batch: Mutex::new(store.db.batch()),
++            store: store.clone(),
++            pending_blocks: Mutex::new(Vec::new()),
++            overlay: Mutex::new(HashMap::new()),
++            #[cfg(test)]
++            fail_index_commit: false,
++        }
++    }
++
+     fn resolve_locations(
+         &self,
+         overlay: &HashMap<BlockSlot, Vec<BlockLocation>>,
+@@ -644,6 +662,12 @@
+             }
+         }
+ 
++        #[cfg(test)]
++        if self.fail_index_commit {
++            return Err(io_err(std::io::Error::other(
++                "injected index commit failure",
++            )));
++        }
+         let batch = batch.durability(Some(PersistMode::Buffer));
+         batch.commit().map_err(fjall_err)?;
+ 
+@@ -865,12 +889,7 @@
+     type ExactIter = ExactIter;
+ 
+     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
+-        Ok(ArchiveWriter {
+-            batch: Mutex::new(self.db.batch()),
+-            store: self.clone(),
+-            pending_blocks: Mutex::new(Vec::new()),
+-            overlay: Mutex::new(HashMap::new()),
+-        })
++        Ok(ArchiveWriter::new(self))
+     }
+ 
+     fn read_logs(
+@@ -1245,6 +1264,32 @@
+     }
+ 
+     #[test]
++    fn automatic_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
++        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
++        write(&store, &[(1, body(1, 0))]);
++        let original = locations(&store, 1);
++        let second = Arc::new(vec![2; 128 << 10]);
++        let third = Arc::new(vec![3; 128 << 10]);
++        let mut writer = store.start_writer().unwrap();
++        writer.apply(&point(2), &second).unwrap();
++        writer.apply(&point(3), &third).unwrap();
++        writer.fail_index_commit = true;
++        assert!(writer.commit().is_err());
++        assert!(locations(&store, 2).is_empty());
++        assert!(locations(&store, 3).is_empty());
++        let dead_end = segment_bytes(&store, 0).len() as u64;
++        let writer = store.start_writer().unwrap();
++        writer.apply(&point(1), &body(1, 0)).unwrap();
++        writer.apply(&point(2), &second).unwrap();
++        writer.apply(&point(3), &third).unwrap();
++        writer.commit().unwrap();
++        assert_eq!(locations(&store, 1), original);
++        assert!(locations(&store, 2)[0].offset >= dead_end);
++        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *second);
++        assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *third);
++    }
++
++    #[test]
+     fn a_repeated_import_keeps_the_original_frame_and_leaves_the_copy_unnamed() {
+         let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+         write(&store, &[(5, body(5, 0)), (9, body(9, 0))]);
+--- a/crates/flatfiles/Cargo.toml
++++ b/crates/flatfiles/Cargo.toml
+@@ -4,6 +4,7 @@
+ edition.workspace = true
+ 
+ [dependencies]
++rayon.workspace = true
+ tempfile = "3"
+ zstd = "0.13"
+ 
+--- a/crates/flatfiles/src/codec.rs
++++ b/crates/flatfiles/src/codec.rs
+@@ -27,6 +27,20 @@
+ /// back before the decoder is pooled.
+ const POOLED_BUFFER_BYTES: usize = 1 << 20;
+ 
++/// The most bytes the frame for a `len`-byte body can take: what an
++/// encoder reserves before compressing it, and what an import window
++/// budgets for it before it is encoded.
++pub fn frame_bound(len: usize) -> usize {
++    zstd::zstd_safe::compress_bound(len)
++}
++
++pub(crate) fn oversized(len: usize) -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidInput,
++        format!("a {len}-byte body exceeds the {MAX_BODY_BYTES}-byte frame limit"),
++    )
++}
++
+ fn encoder_dictionary() -> &'static EncoderDictionary<'static> {
+     static DICTIONARY: OnceLock<EncoderDictionary<'static>> = OnceLock::new();
+     DICTIONARY.get_or_init(|| EncoderDictionary::copy(BUNDLED_DICTIONARY, COMPRESSION_LEVEL))
+@@ -41,6 +55,7 @@
+ pub struct Encoder {
+     compressor: Compressor<'static>,
+     frame: Vec<u8>,
++    bounded: bool,
+ }
+ 
+ impl Encoder {
+@@ -52,6 +67,14 @@
+         Ok(Self {
+             compressor,
+             frame: Vec::new(),
++            bounded: false,
++        })
++    }
++
++    pub(crate) fn for_parallel() -> io::Result<Self> {
++        Ok(Self {
++            bounded: true,
++            ..Self::new()?
+         })
+     }
+ 
+@@ -59,21 +82,23 @@
+     /// until the next call.
+     pub fn encode(&mut self, body: &[u8]) -> io::Result<&[u8]> {
+         if body.len() > MAX_BODY_BYTES {
+-            return Err(io::Error::new(
+-                io::ErrorKind::InvalidInput,
+-                format!(
+-                    "a {}-byte body exceeds the {MAX_BODY_BYTES}-byte frame limit",
+-                    body.len()
+-                ),
+-            ));
++            return Err(oversized(body.len()));
+         }
+         self.frame.clear();
+-        let bound = zstd::zstd_safe::compress_bound(body.len());
++        let bound = frame_bound(body.len());
+         if self.frame.capacity() < bound {
+-            self.frame.reserve(bound);
++            if self.bounded {
++                self.frame.reserve_exact(bound);
++            } else {
++                self.frame.reserve(bound);
++            }
+         }
+         let n = self.compressor.compress_to_buffer(body, &mut self.frame)?;
+         Ok(&self.frame[..n])
++    }
++
++    pub(crate) fn capacity(&self) -> usize {
++        self.frame.capacity()
+     }
+ }
+ 
+--- a/crates/flatfiles/src/lib.rs
++++ b/crates/flatfiles/src/lib.rs
+@@ -6,14 +6,16 @@
+ //! by its physical offset and length inside its segment; the archive index
+ //! holds those locations and this crate decodes the frame they name. The
+ //! crate knows nothing about Cardano and depends on little beyond the
+-//! standard library: `zstd` for the frames and `tempfile` for throwaway
+-//! stores.
++//! standard library: `zstd` for the frames, `rayon` for eligible batches'
++//! parallel encoding and `tempfile` for throwaway stores.
+ 
+ mod codec;
+ mod store;
+ 
+-pub use codec::{BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
+-pub use store::{parse_segment_filename, FlatFileStore, ResourceStats};
++pub use codec::{frame_bound, BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
++pub use store::{
++    parse_segment_filename, AppendStats, FlatFileStore, ResourceStats, ENCODE_WINDOW_BYTES,
++};
+ 
+ /// Number of slots per segment file (one Cardano epoch).
+ pub const SLOTS_PER_SEGMENT: u64 = 432_000;
+--- a/crates/flatfiles/src/store.rs
++++ b/crates/flatfiles/src/store.rs
+@@ -1,29 +1,44 @@
+ //! The segment store: frames appended to per-segment files, read back by
+ //! physical location, and cut at frame boundaries by rollback.
+ //!
+-//! Appends are serialized under the writer table; a batch encodes each body
+-//! and writes its frame before encoding the next, then syncs every segment
+-//! it touched and, when one of them is new, the directory that names it.
+-//! Between batches the store keeps one append handle, for the newest
+-//! segment the last batch touched; every other segment is reopened at its
+-//! true end when a batch next names it. Reads open the segment file by
+-//! path, so they never wait on a writer, and the store keeps no table of
+-//! segments: a segment exists when its file does. What the store holds is
+-//! therefore bounded by the operations in flight, not by the history it
+-//! stores: one encoder, one append handle, a small pool of decoders.
++//! Appends use one physical writer and sync touched segments and new directory
++//! entries before returning locations. Eligible multi-body windows encode on
++//! the shared Rayon pool; small windows and Rayon callers encode serially.
++//! Both strategies produce the same ordered frames and commit boundary.
++//! Completed frames and encoder scratch are bounded independently of batch
++//! length. Between batches, one append handle and the serial encoder remain.
+ 
+ use std::collections::{BTreeSet, HashMap};
+ use std::fs::{self, File, OpenOptions};
+ use std::io::{self, Write};
+ use std::path::{Path, PathBuf};
+-use std::sync::Mutex;
+-
+-use crate::codec::{Decoder, Encoder};
++use std::sync::{Mutex, MutexGuard, TryLockError};
++
++use rayon::prelude::*;
++
++use crate::codec::{frame_bound, oversized, Decoder, Encoder, MAX_BODY_BYTES};
+ use crate::BlockLocation;
+ 
+ /// Decoders kept idle for the next read. Each holds one zstd context and
+ /// at most a megabyte of buffers.
+ const MAX_IDLE_DECODERS: usize = 8;
++
++/// Encoded output a parallel window may hold before its frames are written,
++/// as the sum of its bodies' frame bounds. A window always admits its first
++/// body, so what a parallel batch holds encoded at once is at most the larger
++/// of this and one maximal body's frame bound, however long the batch.
++pub const ENCODE_WINDOW_BYTES: usize = 8 << 20;
++
++const PARALLEL_MIN_BYTES: usize = 256 << 10;
++
++fn parallel_eligible(items: &[(u32, &[u8])], workers: usize) -> bool {
++    workers > 1
++        && items.len() > 1
++        && items
++            .iter()
++            .fold(0usize, |total, (_, body)| total.saturating_add(body.len()))
++            >= PARALLEL_MIN_BYTES
++}
+ 
+ const SEGMENT_EXTENSION: &str = "segment";
+ 
+@@ -37,6 +52,24 @@
+     pub idle_decoders: usize,
+ }
+ 
++/// What the store's appends have done since it was opened: which path
++/// each batch took, and its peak encoding resources.
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
++pub struct AppendStats {
++    /// Batches [`FlatFileStore::append_batch`] encoded on the calling thread.
++    pub serial_batches: u64,
++    /// Batches with at least one parallel encoding window.
++    pub parallel_batches: u64,
++    /// Scheduling windows in batches using the parallel path.
++    pub parallel_windows: u64,
++    /// Most additional encoder contexts one batch had alive at once.
++    pub parallel_encoders_peak: usize,
++    /// Most encoded bytes one parallel window held before writing them.
++    pub parallel_window_bytes_peak: usize,
++    /// Peak allocated output and retained encoder scratch bytes together.
++    pub encoded_buffer_bytes_peak: usize,
++}
++
+ struct Writer {
+     file: File,
+     len: u64,
+@@ -48,6 +81,47 @@
+     writers: Mutex<HashMap<u32, Writer>>,
+     encoder: Mutex<Encoder>,
+     decoders: Mutex<Vec<Decoder>>,
++    appends: Mutex<AppendStats>,
++    #[cfg(test)]
++    hook: Mutex<Option<TestHook>>,
++}
++
++#[cfg(test)]
++type TestHook = std::sync::Arc<dyn Fn(TestEvent) -> io::Result<()> + Send + Sync>;
++
++#[cfg(test)]
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum TestEvent {
++    Encode(usize),
++    Encoded(usize),
++    Write,
++    Sync,
++    DirectorySync,
++}
++
++/// Cut a batch into runs whose frame bounds sum to at most
++/// [`ENCODE_WINDOW_BYTES`]. A run always holds at least one body, so a body
++/// whose bound alone exceeds the budget is a run of its own.
++fn windows_of<'a>(items: &'a [(u32, &'a [u8])]) -> impl Iterator<Item = &'a [(u32, &'a [u8])]> {
++    let mut rest = items;
++    std::iter::from_fn(move || {
++        if rest.is_empty() {
++            return None;
++        }
++        let mut held = 0usize;
++        let mut count = 0usize;
++        for (_, body) in rest {
++            let bound = frame_bound(body.len());
++            if count > 0 && held + bound > ENCODE_WINDOW_BYTES {
++                break;
++            }
++            held += bound;
++            count += 1;
++        }
++        let (window, tail) = rest.split_at(count);
++        rest = tail;
++        Some(window)
++    })
+ }
+ 
+ impl FlatFileStore {
+@@ -60,6 +134,9 @@
+             writers: Mutex::new(HashMap::new()),
+             encoder: Mutex::new(Encoder::new()?),
+             decoders: Mutex::new(Vec::new()),
++            appends: Mutex::new(AppendStats::default()),
++            #[cfg(test)]
++            hook: Mutex::new(None),
+         })
+     }
+ 
+@@ -83,9 +160,13 @@
+ 
+     pub fn resource_stats(&self) -> ResourceStats {
+         ResourceStats {
+-            writers: self.writers.lock().unwrap().len(),
++            writers: self.lock_writers().len(),
+             idle_decoders: self.decoders.lock().unwrap().len(),
+         }
++    }
++
++    pub fn append_stats(&self) -> AppendStats {
++        *self.appends.lock().unwrap()
+     }
+ 
+     /// Append a batch of block bodies to their segment files.
+@@ -97,31 +178,98 @@
+     /// names a segment a crash could unlink. Returns each body's physical
+     /// location, in input order.
+     ///
++    /// Multi-body windows totaling at least 256 KiB may encode on Rayon.
++    /// Small windows, single-worker hosts and callers already on Rayon stay
++    /// serial. Selection never depends on the caller's lifecycle.
++    ///
+     /// On an error nothing is returned and the touched segments' handles are
+     /// dropped, so the next append reopens them at their true end: frames
+     /// the failed batch left behind, whole or torn, are dead space that no
+     /// location will ever name.
+     pub fn append_batch(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
++        if let Some((_, body)) = items.iter().find(|(_, body)| body.len() > MAX_BODY_BYTES) {
++            return Err(oversized(body.len()));
++        }
++        if rayon::current_thread_index().is_none()
++            && windows_of(items)
++                .any(|window| parallel_eligible(window, 2) && rayon::current_num_threads() > 1)
++        {
++            return self.append_parallel(items);
++        }
+         let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
+-        let mut writers = self.writers.lock().unwrap();
++        let mut writers = self.lock_writers();
+         let result = self.append_locked(&mut writers, &touched, items);
+-        match (&result, touched.iter().next_back()) {
+-            (Ok(_), Some(newest)) => writers.retain(|id, _| id == newest),
+-            _ => {
+-                for id in &touched {
+-                    writers.remove(id);
++        self.settle(&mut writers, &touched, result.is_ok());
++        if result.is_ok() {
++            let capacity = self.encoder.lock().unwrap().capacity();
++            let mut stats = self.appends.lock().unwrap();
++            stats.serial_batches += 1;
++            stats.encoded_buffer_bytes_peak = stats.encoded_buffer_bytes_peak.max(capacity);
++        }
++        result
++    }
++
++    /// Append a batch containing eligible parallel windows.
++    ///
++    /// The contract is [`Self::append_batch`]'s — the same frames at the
++    /// same locations in input order, the same syncs before it returns, the
++    /// same dead space and reopened handles after a failure — with the
++    /// encoding spread over the shared Rayon pool instead of running on the
++    /// calling thread. Bodies are scheduled in windows of at most
++    /// [`ENCODE_WINDOW_BYTES`] of frame bound: a window's frames are encoded
++    /// in parallel, each on its own context, and written in order before the
++    /// next window is encoded, so what the batch holds encoded at once is one
++    /// window however long the batch is. The contexts belong to the call —
++    /// at most one per pool thread, each keeping a scratch buffer no larger
++    /// than the bound of the largest body it encoded — and are dropped with
++    /// it: no thread is created and nothing keeps encoding after the call
++    /// returns. Small windows are encoded on the calling thread.
++    ///
++    /// The public entry point validates every body's size before this call.
++    fn append_parallel(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
++        let touched: BTreeSet<u32> = items.iter().map(|(id, _)| *id).collect();
++        let mut writers = self.lock_writers();
++        let result = self.parallel_locked(&mut writers, &touched, items);
++        self.settle(&mut writers, &touched, result.is_ok());
++        result.map(|(locations, run)| {
++            let mut stats = self.appends.lock().unwrap();
++            stats.parallel_batches += 1;
++            stats.parallel_windows += run.windows;
++            stats.parallel_encoders_peak = stats.parallel_encoders_peak.max(run.encoders);
++            stats.parallel_window_bytes_peak =
++                stats.parallel_window_bytes_peak.max(run.window_bytes);
++            stats.encoded_buffer_bytes_peak = stats.encoded_buffer_bytes_peak.max(run.buffer_bytes);
++            locations
++        })
++    }
++
++    /// Rayon callers never encode in parallel while holding this lock.
++    /// Waiters help queued jobs so an external appender can finish encoding
++    /// even when all workers also want this store.
++    fn lock_writers(&self) -> MutexGuard<'_, HashMap<u32, Writer>> {
++        if rayon::current_thread_index().is_none() {
++            return self.writers.lock().unwrap();
++        }
++        loop {
++            match self.writers.try_lock() {
++                Ok(writers) => return writers,
++                Err(TryLockError::Poisoned(error)) => panic!("{error}"),
++                Err(TryLockError::WouldBlock) => {
++                    if rayon::yield_now() != Some(rayon::Yield::Executed) {
++                        std::thread::yield_now();
++                    }
+                 }
+             }
+         }
+-        result
+-    }
+-
+-    fn append_locked(
++    }
++
++    /// Open a handle for every touched segment that has none, at the file's
++    /// true end. Reports whether one of them was created by this batch.
++    fn open_handles(
+         &self,
+         writers: &mut HashMap<u32, Writer>,
+         touched: &BTreeSet<u32>,
+-        items: &[(u32, &[u8])],
+-    ) -> io::Result<Vec<BlockLocation>> {
++    ) -> io::Result<bool> {
+         let mut created = false;
+         for &segment_id in touched {
+             if let std::collections::hash_map::Entry::Vacant(entry) = writers.entry(segment_id) {
+@@ -134,30 +282,174 @@
+                 entry.insert(Writer { file, len });
+             }
+         }
++        Ok(created)
++    }
++
++    fn write_frame(
++        &self,
++        writers: &mut HashMap<u32, Writer>,
++        segment_id: u32,
++        frame: &[u8],
++    ) -> io::Result<BlockLocation> {
++        let writer = writers.get_mut(&segment_id).unwrap();
++        #[cfg(test)]
++        if let Err(error) = self.test_event(TestEvent::Write) {
++            writer.file.write_all(&frame[..frame.len() / 2])?;
++            return Err(error);
++        }
++        writer.file.write_all(frame)?;
++        let location = BlockLocation {
++            segment_id,
++            offset: writer.len,
++            length: frame.len() as u32,
++        };
++        writer.len += frame.len() as u64;
++        Ok(location)
++    }
++
++    fn sync_touched(
++        &self,
++        writers: &HashMap<u32, Writer>,
++        touched: &BTreeSet<u32>,
++        created: bool,
++    ) -> io::Result<()> {
++        for segment_id in touched {
++            #[cfg(test)]
++            self.test_event(TestEvent::Sync)?;
++            writers[segment_id].file.sync_data()?;
++        }
++        if created {
++            #[cfg(test)]
++            self.test_event(TestEvent::DirectorySync)?;
++            sync_dir(&self.segments_dir)?;
++        }
++        Ok(())
++    }
++
++    /// Keep one handle after a batch, for the newest segment it touched;
++    /// after a failure drop every handle it touched, so the next batch
++    /// reopens them at their true end.
++    fn settle(&self, writers: &mut HashMap<u32, Writer>, touched: &BTreeSet<u32>, ok: bool) {
++        match (ok, touched.iter().next_back()) {
++            (true, Some(newest)) => writers.retain(|id, _| id == newest),
++            _ => {
++                for id in touched {
++                    writers.remove(id);
++                }
++            }
++        }
++    }
++
++    fn append_locked(
++        &self,
++        writers: &mut HashMap<u32, Writer>,
++        touched: &BTreeSet<u32>,
++        items: &[(u32, &[u8])],
++    ) -> io::Result<Vec<BlockLocation>> {
++        let created = self.open_handles(writers, touched)?;
+ 
+         let mut encoder = self.encoder.lock().unwrap();
+         let mut locations = Vec::with_capacity(items.len());
+         for &(segment_id, body) in items {
+             let frame = encoder.encode(body)?;
+-            let writer = writers.get_mut(&segment_id).unwrap();
+-            writer.file.write_all(frame)?;
+-            locations.push(BlockLocation {
+-                segment_id,
+-                offset: writer.len,
+-                length: frame.len() as u32,
+-            });
+-            writer.len += frame.len() as u64;
++            locations.push(self.write_frame(writers, segment_id, frame)?);
+         }
+         drop(encoder);
+ 
+-        for segment_id in touched {
+-            writers[segment_id].file.sync_data()?;
+-        }
+-        if created {
+-            sync_dir(&self.segments_dir)?;
+-        }
++        self.sync_touched(writers, touched, created)?;
+ 
+         Ok(locations)
++    }
++
++    fn parallel_locked(
++        &self,
++        writers: &mut HashMap<u32, Writer>,
++        touched: &BTreeSet<u32>,
++        items: &[(u32, &[u8])],
++    ) -> io::Result<(Vec<BlockLocation>, EncodeRun)> {
++        let created = self.open_handles(writers, touched)?;
++
++        let mut encoders: Vec<Option<Encoder>> = (0..rayon::current_num_threads().min(items.len()))
++            .map(|_| None)
++            .collect();
++        let mut locations = Vec::with_capacity(items.len());
++        let mut run = EncodeRun::default();
++        for window in windows_of(items) {
++            run.windows += 1;
++            if !parallel_eligible(window, encoders.len()) {
++                let mut encoder = self.encoder.lock().unwrap();
++                for &(segment_id, body) in window {
++                    let frame = encoder.encode(body)?;
++                    locations.push(self.write_frame(writers, segment_id, frame)?);
++                }
++                run.buffer_bytes = run.buffer_bytes.max(
++                    encoder.capacity()
++                        + encoders
++                            .iter()
++                            .flatten()
++                            .map(Encoder::capacity)
++                            .sum::<usize>(),
++                );
++                continue;
++            }
++            let frames: Vec<Vec<Vec<u8>>> = {
++                let chunk_size = window.len().div_ceil(encoders.len());
++                window
++                    .par_chunks(chunk_size)
++                    .zip(encoders.par_iter_mut())
++                    .enumerate()
++                    .map(|(_chunk_index, (chunk, encoder))| {
++                        if encoder.is_none() {
++                            *encoder = Some(Encoder::for_parallel()?);
++                        }
++                        let encoder = encoder.as_mut().unwrap();
++                        #[cfg(test)]
++                        let mut index = _chunk_index * chunk_size;
++                        chunk
++                            .iter()
++                            .map(|&(_, body)| {
++                                #[cfg(test)]
++                                self.test_event(TestEvent::Encode(index))?;
++                                let frame = encoder.encode(body)?.to_vec();
++                                #[cfg(test)]
++                                {
++                                    self.test_event(TestEvent::Encoded(index))?;
++                                    index += 1;
++                                }
++                                Ok(frame)
++                            })
++                            .collect::<io::Result<Vec<_>>>()
++                    })
++                    .collect::<io::Result<_>>()?
++            };
++            run.window_bytes = run
++                .window_bytes
++                .max(frames.iter().flatten().map(Vec::len).sum());
++            run.buffer_bytes = run.buffer_bytes.max(
++                self.encoder.lock().unwrap().capacity()
++                    + encoders
++                        .iter()
++                        .flatten()
++                        .map(Encoder::capacity)
++                        .sum::<usize>()
++                    + frames.iter().flatten().map(Vec::capacity).sum::<usize>(),
++            );
++            for (&(segment_id, _), frame) in window.iter().zip(frames.iter().flatten()) {
++                locations.push(self.write_frame(writers, segment_id, frame)?);
++            }
++        }
++        run.encoders = encoders.iter().flatten().count();
++        drop(encoders);
++
++        self.sync_touched(writers, touched, created)?;
++
++        Ok((locations, run))
++    }
++
++    #[cfg(test)]
++    fn test_event(&self, event: TestEvent) -> io::Result<()> {
++        let hook = self.hook.lock().unwrap().clone();
++        hook.map_or(Ok(()), |hook| hook(event))
+     }
+ 
+     /// Read and decode the body at `loc`.
+@@ -196,7 +488,7 @@
+     /// Everything from `offset` on is discarded; an offset at or past the
+     /// end changes nothing, and zero removes the segment file.
+     pub fn truncate(&self, segment_id: u32, offset: u64) -> io::Result<()> {
+-        let mut writers = self.writers.lock().unwrap();
++        let mut writers = self.lock_writers();
+         writers.remove(&segment_id);
+         let path = self.segment_path(segment_id);
+ 
+@@ -220,7 +512,7 @@
+     /// Delete every segment numbered below `segment_id`, releasing the
+     /// handles the store holds on them.
+     pub fn delete_segments_before(&self, segment_id: u32) -> io::Result<()> {
+-        let mut writers = self.writers.lock().unwrap();
++        let mut writers = self.lock_writers();
+         let mut removed = false;
+         for entry in fs::read_dir(&self.segments_dir)? {
+             let entry = entry?;
+@@ -241,6 +533,15 @@
+     }
+ }
+ 
++/// What one parallel batch used.
++#[derive(Default)]
++struct EncodeRun {
++    windows: u64,
++    encoders: usize,
++    window_bytes: usize,
++    buffer_bytes: usize,
++}
++
+ impl std::fmt::Debug for FlatFileStore {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         f.debug_struct("FlatFileStore")
+@@ -314,6 +615,196 @@
+     use super::*;
+ 
+     #[test]
++    fn ordered_writes_after_deterministically_reversed_encoding() {
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(2)
++            .build()
++            .unwrap();
++        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++        let progress = std::sync::Arc::new((Mutex::new(Vec::new()), std::sync::Condvar::new()));
++        let observed = progress.clone();
++        *store.hook.lock().unwrap() = Some(std::sync::Arc::new(move |event| {
++            let (completed, ready) = &*observed;
++            if event == TestEvent::Encode(0) {
++                let (completed, timeout) = ready
++                    .wait_timeout_while(
++                        completed.lock().unwrap(),
++                        std::time::Duration::from_secs(10),
++                        |completed| completed.is_empty(),
++                    )
++                    .unwrap();
++                assert!(!timeout.timed_out());
++                assert_eq!(*completed, vec![1]);
++            }
++            if let TestEvent::Encoded(index) = event {
++                completed.lock().unwrap().push(index);
++                ready.notify_all();
++            }
++            Ok(())
++        }));
++        let first = vec![1; PARALLEL_MIN_BYTES / 2];
++        let second = vec![2; PARALLEL_MIN_BYTES / 2];
++        let locations = pool
++            .install(|| store.append_parallel(&[(0, &first), (0, &second)]))
++            .unwrap();
++        assert_eq!(*progress.0.lock().unwrap(), vec![1, 0]);
++        assert_eq!(locations[0].offset, 0);
++        assert_eq!(locations[1].offset, locations[0].length as u64);
++        assert_eq!(store.read(&locations[0]).unwrap(), first);
++        assert_eq!(store.read(&locations[1]).unwrap(), second);
++    }
++
++    #[test]
++    fn import_failures_drop_handles_and_retry_after_the_true_end() {
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(2)
++            .build()
++            .unwrap();
++        let first = vec![1; PARALLEL_MIN_BYTES / 2];
++        let second = vec![2; PARALLEL_MIN_BYTES / 2];
++        for failure in [
++            TestEvent::Encode(1),
++            TestEvent::Write,
++            TestEvent::Sync,
++            TestEvent::DirectorySync,
++        ] {
++            let (dir, store) = FlatFileStore::for_tempdir().unwrap();
++            *store.hook.lock().unwrap() = Some(std::sync::Arc::new(move |event| {
++                if event == failure {
++                    Err(io::Error::other("injected"))
++                } else {
++                    Ok(())
++                }
++            }));
++            assert!(pool
++                .install(|| store.append_parallel(&[(0, &first), (0, &second)]))
++                .is_err());
++            assert_eq!(store.resource_stats().writers, 0);
++            let end = fs::metadata(store.segment_path(0)).unwrap().len();
++            if failure == TestEvent::Encode(1) {
++                assert_eq!(end, 0);
++            }
++            drop(store);
++            let store = FlatFileStore::new(dir.path()).unwrap();
++            let locations = store.append_batch(&[(0, &first), (0, &second)]).unwrap();
++            assert_eq!(locations[0].offset, end);
++            assert_eq!(store.read(&locations[0]).unwrap(), first);
++            assert_eq!(store.read(&locations[1]).unwrap(), second);
++        }
++    }
++
++    #[test]
++    fn selection_depends_on_parallel_work_not_the_number_of_blocks_alone() {
++        let body = vec![0; PARALLEL_MIN_BYTES];
++        assert!(!parallel_eligible(&[], 8));
++        assert!(!parallel_eligible(&[(0, &body)], 8));
++        assert!(!parallel_eligible(&vec![(0, b"x".as_slice()); 5000], 8));
++        assert!(!parallel_eligible(
++            &[
++                (0, &body[..body.len() / 2]),
++                (0, &body[..body.len() / 2 - 1])
++            ],
++            8
++        ));
++        assert!(parallel_eligible(&[(0, &body[..body.len() / 2]); 2], 8));
++        assert!(!parallel_eligible(&[(0, body.as_slice()); 2], 1));
++    }
++
++    #[test]
++    fn rayon_waiters_execute_queued_work_instead_of_blocking_every_worker() {
++        let pool = rayon::ThreadPoolBuilder::new()
++            .num_threads(2)
++            .build()
++            .unwrap();
++        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++        let store = std::sync::Arc::new(store);
++        let writers = store.lock_writers();
++        let (started, arrivals) = std::sync::mpsc::channel();
++        let (finished, completions) = std::sync::mpsc::channel();
++        for _worker in 0..2 {
++            let store = store.clone();
++            let started = started.clone();
++            let finished = finished.clone();
++            pool.spawn(move || {
++                started.send(()).unwrap();
++                store.append_batch(&[(0, b"body")]).unwrap();
++                finished.send(()).unwrap();
++            });
++        }
++        for _worker in 0..2 {
++            arrivals
++                .recv_timeout(std::time::Duration::from_secs(10))
++                .unwrap();
++        }
++        let (helped, signal) = std::sync::mpsc::channel();
++        pool.spawn(move || helped.send(()).unwrap());
++        let progress = signal.recv_timeout(std::time::Duration::from_secs(10));
++        drop(writers);
++        assert!(progress.is_ok());
++        for _worker in 0..2 {
++            completions
++                .recv_timeout(std::time::Duration::from_secs(10))
++                .unwrap();
++        }
++    }
++
++    #[test]
++    fn concurrent_rayon_callers_and_external_writes_finish_without_pool_starvation() {
++        let (completed, result) = std::sync::mpsc::channel();
++        std::thread::spawn(move || {
++            let pool = rayon::ThreadPoolBuilder::new()
++                .num_threads(2)
++                .build()
++                .unwrap();
++            let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++            let store = std::sync::Arc::new(store);
++            std::thread::scope(|scope| {
++                let external = store.clone();
++                scope.spawn(move || {
++                    let body = vec![7; PARALLEL_MIN_BYTES / 2];
++                    for _repeat in 0..8 {
++                        external.append_batch(&[(0, body.as_slice()); 8]).unwrap();
++                    }
++                });
++                pool.install(|| {
++                    (0..8usize).into_par_iter().for_each(|_| {
++                        let body = vec![9; PARALLEL_MIN_BYTES / 2];
++                        let locations = store.append_batch(&[(0, body.as_slice()); 8]).unwrap();
++                        assert_eq!(store.read(&locations[0]).unwrap(), body);
++                    });
++                });
++            });
++            assert!(store.append_stats().serial_batches >= 8);
++            completed.send(()).unwrap();
++        });
++        result
++            .recv_timeout(std::time::Duration::from_secs(30))
++            .unwrap();
++    }
++
++    #[test]
++    fn windows_admit_a_first_body_of_any_size_and_close_at_the_budget() {
++        let small = vec![0u8; 1000];
++        let half = vec![0u8; ENCODE_WINDOW_BYTES / 2];
++        let huge = vec![0u8; MAX_BODY_BYTES];
++        let items: Vec<(u32, &[u8])> = vec![
++            (0, &half),
++            (0, &small),
++            (0, &half), // over the budget with the two before it: a new window
++            (1, &huge), // over the budget alone: its own window
++            (1, &small),
++            (1, &small),
++        ];
++        let windows: Vec<usize> = windows_of(&items).map(<[_]>::len).collect();
++        assert_eq!(windows, vec![2, 1, 1, 2]);
++        assert!(windows_of(&[]).next().is_none());
++        for window in windows_of(&items) {
++            let held: usize = window.iter().map(|(_, b)| frame_bound(b.len())).sum();
++            assert!(held <= ENCODE_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)));
++        }
++    }
++
++    #[test]
+     fn segment_filenames_parse_only_in_canonical_form() {
+         assert_eq!(parse_segment_filename("000012.segment"), Some(12));
+         assert_eq!(parse_segment_filename("12.segment"), None);
+--- a/crates/flatfiles/tests/store.rs
++++ b/crates/flatfiles/tests/store.rs
+@@ -5,7 +5,10 @@
+ use std::io::{self, Write};
+ use std::sync::Arc;
+ 
+-use dolos_flatfiles::{BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, MAX_BODY_BYTES};
++use dolos_flatfiles::{
++    frame_bound, BlockLocation, FlatFileStore, BUNDLED_DICTIONARY, ENCODE_WINDOW_BYTES,
++    MAX_BODY_BYTES,
++};
+ 
+ struct Rng(u64);
+ 
+@@ -259,14 +262,12 @@
+ }
+ 
+ #[test]
+-fn a_failed_batch_leaves_dead_space_and_the_retry_continues_at_the_true_end() {
++fn oversized_refusal_leaves_the_entire_batch_unwritten_and_retry_continues() {
+     let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
+     let first = bodies(8, 2, 500, 500);
+     let before = store.append_batch(&items(0, &first)).unwrap();
+     let len_before = file_len(&store, 0);
+ 
+-    // The first body of the batch is written before the second is refused:
+-    // the batch fails as a whole and names nothing.
+     let good = bodies(9, 1, 400, 400).remove(0);
+     let oversized = vec![1u8; MAX_BODY_BYTES + 1];
+     let err = store
+@@ -274,8 +275,12 @@
+         .unwrap_err();
+     assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+     let dead = file_len(&store, 0) - len_before;
+-    assert!(dead > 0, "the written frame stays as dead space");
+-    assert_eq!(store.resource_stats().writers, 0, "the handle is dropped");
++    assert_eq!(dead, 0, "size validation precedes all writes");
++    assert_eq!(
++        store.resource_stats().writers,
++        1,
++        "the untouched handle is retained"
++    );
+ 
+     let retry = store.append_batch(&[(0, good.as_slice())]).unwrap()[0];
+     assert_eq!(retry.offset, len_before + dead);
+@@ -283,7 +288,7 @@
+     assert_eq!(store.read(&before[1]).unwrap(), first[1]);
+     assert_eq!(
+         walk_frames(&fs::read(store.segment_path(0)).unwrap()).len(),
+-        4
++        3
+     );
+ }
+ 
+@@ -475,3 +480,252 @@
+     assert!(stats.idle_decoders <= 8, "{stats:?}");
+     assert_eq!(stats.writers, 1);
+ }
++
++/// The two stores hold the same bytes in every one of `segments`.
++fn assert_same_segments(a: &FlatFileStore, b: &FlatFileStore, segments: &[u32]) {
++    for &segment in segments {
++        assert_eq!(
++            fs::read(a.segment_path(segment)).unwrap(),
++            fs::read(b.segment_path(segment)).unwrap(),
++            "segment {segment} differs"
++        );
++    }
++}
++
++#[test]
++fn an_import_batch_leaves_the_segments_and_locations_a_serial_batch_would() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(1)
++        .build()
++        .unwrap();
++    let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
++    let (_b, import) = FlatFileStore::for_tempdir().unwrap();
++
++    // Three batches of varied bodies over three segments, one of them
++    // crossing a segment inside the batch.
++    let batches: Vec<Vec<(u32, Vec<u8>)>> = vec![
++        bodies(20, 120, 100, 6_000)
++            .into_iter()
++            .map(|b| (0, b))
++            .collect(),
++        bodies(21, 90, 100, 20_000)
++            .into_iter()
++            .enumerate()
++            .map(|(i, b)| (if i < 40 { 0 } else { 1 }, b))
++            .collect(),
++        bodies(22, 60, 1, 3_000)
++            .into_iter()
++            .map(|b| (2, b))
++            .collect(),
++    ];
++    let mut all = Vec::new();
++    for batch in &batches {
++        let items: Vec<(u32, &[u8])> = batch.iter().map(|(s, b)| (*s, b.as_slice())).collect();
++        let from_serial = pool.install(|| serial.append_batch(&items)).unwrap();
++        let from_import = import.append_batch(&items).unwrap();
++        assert_eq!(from_serial, from_import);
++        assert_eq!(import.resource_stats().writers, 1);
++        all.extend(
++            from_import
++                .into_iter()
++                .zip(batch.iter().map(|(_, b)| b.clone())),
++        );
++    }
++    assert_same_segments(&serial, &import, &[0, 1, 2]);
++    for (loc, body) in &all {
++        assert_eq!(&import.read(loc).unwrap(), body);
++    }
++
++    let stats = import.append_stats();
++    assert_eq!(stats.serial_batches + stats.parallel_batches, 3);
++    assert!(stats.serial_batches > 0, "{stats:?}");
++    assert_eq!(stats.parallel_batches > 0, rayon::current_num_threads() > 1);
++    assert!(
++        stats.parallel_encoders_peak <= rayon::current_num_threads(),
++        "{stats:?}"
++    );
++    let stats = serial.append_stats();
++    assert_eq!((stats.serial_batches, stats.parallel_batches), (3, 0));
++    assert_eq!(stats.parallel_encoders_peak, 0);
++}
++
++#[test]
++fn an_import_batch_keeps_input_order_when_frames_finish_out_of_order() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(4)
++        .build()
++        .unwrap();
++    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++
++    // A first body that takes longest to encode, then two hundred tiny ones
++    // whose frames are ready long before it: they must still land after it.
++    let mut bodies = bodies(23, 1, 2 << 20, 2 << 20);
++    bodies.extend(self::bodies(24, 200, 50, 400));
++    let locations = pool
++        .install(|| store.append_batch(&items(0, &bodies)))
++        .unwrap();
++
++    for pair in locations.windows(2) {
++        assert_eq!(pair[1].offset, pair[0].offset + pair[0].length as u64);
++    }
++    let bytes = fs::read(store.segment_path(0)).unwrap();
++    let frames = walk_frames(&bytes);
++    assert_eq!(frames.len(), bodies.len());
++    for ((offset, length), (loc, body)) in frames.iter().zip(locations.iter().zip(&bodies)) {
++        assert_eq!((loc.offset, loc.length), (*offset, *length));
++        let frame = &bytes[*offset as usize..(*offset + *length as u64) as usize];
++        assert_eq!(&decode_independently(frame), body);
++    }
++    let stats = store.append_stats();
++    assert!(stats.parallel_encoders_peak <= 4, "{stats:?}");
++}
++
++#[test]
++fn parallel_windows_bound_what_is_held_encoded_without_moving_a_frame() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(1)
++        .build()
++        .unwrap();
++    let (_a, serial) = FlatFileStore::for_tempdir().unwrap();
++    let (_b, import) = FlatFileStore::for_tempdir().unwrap();
++
++    // Bodies of a quarter window each: the batch spans several windows, and
++    // a segment boundary falls inside one of them.
++    let bodies = bodies(25, 12, ENCODE_WINDOW_BYTES / 4, ENCODE_WINDOW_BYTES / 4);
++    let items: Vec<(u32, &[u8])> = bodies
++        .iter()
++        .enumerate()
++        .map(|(i, b)| (if i < 7 { 0 } else { 1 }, b.as_slice()))
++        .collect();
++    let from_serial = pool.install(|| serial.append_batch(&items)).unwrap();
++    let from_import = import.append_batch(&items).unwrap();
++    assert_eq!(from_serial, from_import);
++    assert_same_segments(&serial, &import, &[0, 1]);
++
++    let stats = import.append_stats();
++    assert_eq!(
++        stats.parallel_batches,
++        u64::from(rayon::current_num_threads() > 1)
++    );
++    if rayon::current_num_threads() > 1 {
++        assert!(stats.parallel_windows >= 3, "{stats:?}");
++    }
++    assert!(
++        stats.parallel_window_bytes_peak <= ENCODE_WINDOW_BYTES,
++        "{stats:?}"
++    );
++}
++
++#[test]
++fn retained_encoding_buffers_are_bounded_as_the_callers_batch_grows() {
++    let body = vec![42u8; 128 << 10];
++    for count in [100, 10_000] {
++        let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++        let items = vec![(0, body.as_slice()); count];
++        store.append_batch(&items).unwrap();
++        let stats = store.append_stats();
++        assert!(stats.parallel_encoders_peak <= rayon::current_num_threads());
++        assert!(stats.parallel_window_bytes_peak <= ENCODE_WINDOW_BYTES);
++        assert!(
++            stats.encoded_buffer_bytes_peak
++                <= ENCODE_WINDOW_BYTES
++                    + (rayon::current_num_threads() + 2) * frame_bound(body.len())
++        );
++    }
++}
++
++#[test]
++fn a_maximal_body_is_a_window_of_its_own_and_a_larger_one_is_refused_unwritten() {
++    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++    let small = bodies(26, 2, 300, 300);
++    let maximal = vec![7u8; MAX_BODY_BYTES];
++    let locations = store
++        .append_batch(&[
++            (0, small[0].as_slice()),
++            (0, maximal.as_slice()),
++            (0, small[1].as_slice()),
++        ])
++        .unwrap();
++    assert_eq!(store.read(&locations[1]).unwrap(), maximal);
++    assert_eq!(store.read(&locations[2]).unwrap(), small[1]);
++    let stats = store.append_stats();
++    assert_eq!(stats.parallel_windows, 0, "{stats:?}");
++    assert_eq!(stats.serial_batches, 1, "{stats:?}");
++    assert!(
++        stats.parallel_window_bytes_peak <= ENCODE_WINDOW_BYTES.max(frame_bound(MAX_BODY_BYTES)),
++        "{stats:?}"
++    );
++
++    // One byte more is refused before the batch touches a file: the first
++    // body is not written and the new segment is not created.
++    let len_before = file_len(&store, 0);
++    let oversized = vec![1u8; MAX_BODY_BYTES + 1];
++    let err = store
++        .append_batch(&[(0, small[0].as_slice()), (1, oversized.as_slice())])
++        .unwrap_err();
++    assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
++    assert_eq!(file_len(&store, 0), len_before);
++    assert!(!store.segment_path(1).exists());
++    assert_eq!(store.append_stats().parallel_batches, 0);
++}
++
++#[test]
++fn an_import_batch_works_on_one_worker_with_one_body_and_with_none() {
++    let pool = rayon::ThreadPoolBuilder::new()
++        .num_threads(1)
++        .build()
++        .unwrap();
++    let (_dir, store) = FlatFileStore::for_tempdir().unwrap();
++
++    assert!(store.append_batch(&[]).unwrap().is_empty());
++    assert_eq!(store.resource_stats().writers, 0);
++
++    let one = bodies(27, 1, 500, 500);
++    let loc = pool
++        .install(|| store.append_batch(&items(0, &one)))
++        .unwrap();
++    assert_eq!(store.read(&loc[0]).unwrap(), one[0]);
++
++    let many = bodies(28, 300, 100, 5_000);
++    let locations = pool
++        .install(|| store.append_batch(&items(0, &many)))
++        .unwrap();
++    for (loc, body) in locations.iter().zip(&many) {
++        assert_eq!(&store.read(loc).unwrap(), body);
++    }
++
++    let stats = store.append_stats();
++    assert_eq!(stats.serial_batches, 3);
++    assert_eq!(stats.parallel_batches, 0);
++    assert_eq!(stats.parallel_encoders_peak, 0, "{stats:?}");
++}
++
++#[test]
++fn an_import_batch_fails_like_a_serial_one_and_the_retry_continues_at_the_true_end() {
++    let (dir, store) = FlatFileStore::for_tempdir().unwrap();
++    let first = bodies(29, 3, 500, 500);
++    let before = store.append_batch(&items(0, &first)).unwrap();
++    fs::create_dir(dir.path().join("000001.segment")).unwrap();
++
++    let err = store
++        .append_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
++        .unwrap_err();
++    assert_ne!(err.kind(), io::ErrorKind::InvalidInput);
++    assert_eq!(
++        file_len(&store, 0),
++        before[2].offset + before[2].length as u64
++    );
++    assert_eq!(store.resource_stats().writers, 0, "the handles are dropped");
++
++    fs::remove_dir(dir.path().join("000001.segment")).unwrap();
++    let retry = store
++        .append_batch(&[(0, first[0].as_slice()), (1, first[0].as_slice())])
++        .unwrap();
++    assert_eq!(retry[0].offset, before[2].offset + before[2].length as u64);
++    assert_eq!(retry[1].offset, 0);
++    assert_eq!(store.read(&retry[1]).unwrap(), first[0]);
++    assert_eq!(store.resource_stats().writers, 1, "only the newest handle");
++    for (loc, body) in before.iter().zip(&first) {
++        assert_eq!(&store.read(loc).unwrap(), body);
++    }
++}
+--- a/crates/snapshot/tests/restore.rs
++++ b/crates/snapshot/tests/restore.rs
+@@ -612,6 +612,11 @@
+ 
+     let (domain, blank, _) = round_trip::<FjallStores>(default_budget());
+     let archive_dir = blank.stores.path().join("archive");
++
++    let appends = blank.archive.append_stats();
++    assert!(appends.serial_batches > 0, "{appends:?}");
++    assert_eq!(appends.parallel_batches, 0, "{appends:?}");
++
+     let restored = blocks_of(&blank.archive);
+     assert_eq!(restored, blocks_of(domain.archive()), "order and bodies");
+     let hashes = |blocks: &[(u64, Vec<u8>)]| -> Vec<String> {
+@@ -633,6 +638,12 @@
+     assert_eq!(
+         blank.archive.get_tip().unwrap().map(|(s, _)| s),
+         Some(tip_slot + 20)
++    );
++    let after = blank.archive.append_stats();
++    assert_eq!(
++        (after.serial_batches, after.parallel_batches),
++        (appends.serial_batches + 1, appends.parallel_batches),
++        "an ordinary append after the restore is serial"
+     );
+     assert_eq!(
+         blank
+@@ -701,6 +712,35 @@
+     assert!(!pruned.is_empty());
+     assert!(restored.ends_with(&pruned), "pruning keeps a suffix");
+     assert_segments_are_frames(&archive_dir, &blank.archive);
++}
++
++#[test]
++fn large_snapshot_block_chunks_use_automatic_parallel_encoding() {
++    use dolos_core::ImportExt;
++    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
++    let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
++        block_count: 8,
++        slot: 100,
++        metadata_value: "payload".repeat(32 << 10),
++        ..Default::default()
++    });
++    let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
++        std::sync::Arc::new(dolos_cardano::include::preview::load()),
++        config,
++        None,
++        None,
++    );
++    domain.import_blocks(blocks).unwrap();
++    let temp = tempfile::tempdir().unwrap();
++    export_to(temp.path(), &domain);
++    let blank = Blank::<FjallStores>::open();
++    restore_into(temp.path(), magic_of(&domain), &blank, default_budget()).unwrap();
++    assert_eq!(blocks_of(&blank.archive), blocks_of(domain.archive()));
++    let stats = blank.archive.append_stats();
++    assert_eq!(
++        stats.parallel_batches > 0,
++        domain.archive().append_stats().parallel_batches > 0
++    );
+ }
+ 
+ // --------------------------------------------------------------------------
+--- a/crates/testing/src/blocks.rs
++++ b/crates/testing/src/blocks.rs
+@@ -14,6 +14,24 @@
+     },
+ };
+ use std::collections::BTreeMap;
++
++/// Write one deterministic immutable chunk and an excluded volatile tail.
++pub fn write_immutable_fixture(dir: &std::path::Path, blocks: &[RawBlock]) {
++    let mut primary = vec![1u8];
++    let mut secondary = Vec::new();
++    let mut chunk = Vec::new();
++    for (index, body) in blocks.iter().enumerate() {
++        primary.extend_from_slice(&((index * 56) as u32).to_be_bytes());
++        secondary.extend_from_slice(&(chunk.len() as u64).to_be_bytes());
++        secondary.extend_from_slice(&[0u8; 48]);
++        chunk.extend_from_slice(body);
++    }
++    primary.extend_from_slice(&((blocks.len() * 56) as u32).to_be_bytes());
++    std::fs::write(dir.join("00000.primary"), primary).unwrap();
++    std::fs::write(dir.join("00000.secondary"), secondary).unwrap();
++    std::fs::write(dir.join("00000.chunk"), chunk).unwrap();
++    std::fs::write(dir.join("00001.chunk"), []).unwrap();
++}
+ 
+ pub fn slot_to_hash(slot: u64) -> BlockHash {
+     let mut hasher = pallas::crypto::hash::Hasher::<256>::new();
+--- a/src/bin/dolos/bootstrap/mithril.rs
++++ b/src/bin/dolos/bootstrap/mithril.rs
+@@ -66,12 +66,10 @@
+     }
+ }
+ 
+-fn define_starting_point(
++fn define_starting_point<S: dolos_core::StateStore>(
+     args: &Args,
+-    state: &dolos::storage::StateStoreBackend,
++    state: &S,
+ ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
+-    use dolos_core::StateStore;
+-
+     if let Some(point) = &args.start_from {
+         Ok(point.clone().try_into().unwrap())
+     } else {
+@@ -90,8 +88,8 @@
+ 
+ /// Inner import function that can return errors.
+ /// The outer function ensures shutdown is called regardless of success/failure.
+-fn do_import(
+-    domain: &dolos::adapters::DomainAdapter,
++fn do_import<D: dolos_core::Domain>(
++    domain: &D,
+     args: &Args,
+     immutable_path: &Path,
+     feedback: &Feedback,
+@@ -221,3 +219,70 @@
+ 
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use dolos_core::{ArchiveStore, Domain};
++    use dolos_testing::{
++        blocks::write_immutable_fixture,
++        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
++        toy_domain::{FjallStores, ToyDomain},
++    };
++    use pallas::ledger::traverse::MultiEraBlock;
++
++    #[test]
++    fn mithril_import_resumes_through_the_automatic_writer() {
++        let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
++            block_count: 8,
++            metadata_value: "payload".repeat(32 << 10),
++            slot: 100,
++            ..Default::default()
++        });
++        let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
++            Arc::new(dolos_cardano::include::preview::load()),
++            config,
++            None,
++            None,
++        );
++        domain.import_blocks(vec![blocks[0].clone()]).unwrap();
++        let first = MultiEraBlock::decode(&blocks[0]).unwrap();
++        let args = Args {
++            start_from: Some(ChainPoint::Specific(first.slot(), first.hash())),
++            ..Default::default()
++        };
++        let dir = tempfile::tempdir().unwrap();
++        write_immutable_fixture(dir.path(), &blocks);
++        do_import(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
++        let stats = domain.archive().append_stats();
++        assert!(stats.serial_batches >= 1, "{stats:?}");
++        assert_eq!(
++            stats.parallel_batches > 0,
++            rayon::current_num_threads() > 1,
++            "{stats:?}"
++        );
++        let restored: Vec<_> = domain
++            .archive()
++            .get_range(None, None)
++            .unwrap()
++            .map(|(_, body)| body)
++            .collect();
++        assert_eq!(
++            restored,
++            blocks
++                .iter()
++                .map(|body| body.as_ref().clone())
++                .collect::<Vec<_>>()
++        );
++        let before = domain.archive().append_stats();
++        do_import(
++            &domain,
++            &Args::default(),
++            dir.path(),
++            &Feedback::hidden(),
++            3,
++        )
++        .unwrap();
++        assert_eq!(domain.archive().append_stats(), before);
++    }
++}

@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 tracing.workspace = true
 serde.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 pallas.workspace = true
 tower = { workspace = true, features = ["util"] }

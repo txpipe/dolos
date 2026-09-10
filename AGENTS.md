@@ -16,7 +16,7 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 
 ### ArchiveStore
 - **Purpose**: Historical block storage with temporal indexing
-- **Contents**: Raw blocks indexed by slot, entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
+- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
 - **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
@@ -106,7 +106,7 @@ The project follows a modular workspace architecture with clear separation of co
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
   - `archive`: `ArchiveStore` implementation with four-keyspace design:
-    - **`archive-blocks`**: Slot -> packed block locations in the flat segment files
+    - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][log_key:40]` keys
     - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
@@ -146,7 +146,7 @@ The project follows a modular workspace architecture with clear separation of co
 
 #### `xtask` (Development Automation)
 - **Purpose**: Development task automation following cargo-xtask pattern
-- **Role**: Build scripts and development utilities
+- **Role**: Build scripts and development utilities, including `cargo xtask perf` — storage and minibf performance experiments with shared measurement and reporting; see `xtask/perf/README.md`
 
 ## Dependency Flow
 

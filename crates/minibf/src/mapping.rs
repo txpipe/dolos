@@ -23,8 +23,10 @@ use pallas::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    io,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 
@@ -35,6 +37,7 @@ use blockfrost_openapi::models::{
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
     block_content_txs_cbor_inner::BlockContentTxsCborInner,
+    dreps_inner_metadata_error::{Code, DrepsInnerMetadataError},
     script_utxos_inner::ScriptUtxosInner,
     tx_content::TxContent,
     tx_content_cbor::TxContentCbor,
@@ -200,12 +203,18 @@ pub fn bech32_gov_action(tx: &Hash<32>, idx: u32) -> Result<String, StatusCode> 
 /// `00 01` and the bare 32-byte form are both aliases it serves. An index
 /// past `u32` can never name a proposal; it saturates so the lookup misses
 /// instead of failing the parse.
+///
+/// CIP-129 identifiers carry the Bech32 checksum, so this decodes with Bech32
+/// and rejects the Bech32m checksum that `bech32::decode` would also accept.
 pub fn parse_gov_action_id(id: &str) -> Result<(Hash<32>, u32), StatusCode> {
-    let (hrp, payload) = bech32::decode(id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let parsed = bech32::primitives::decode::CheckedHrpstring::new::<bech32::Bech32>(id)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    if hrp != GOV_ACTION_HRP {
+    if parsed.hrp() != GOV_ACTION_HRP {
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    let payload: Vec<u8> = parsed.byte_iter().collect();
 
     let Some((tx, idx)) = payload.split_at_checked(32) else {
         return Err(StatusCode::BAD_REQUEST);
@@ -284,6 +293,666 @@ pub async fn pool_offchain_metadata(
     let body = res.bytes().await.ok()?;
 
     parse_pool_offchain_metadata(body.as_ref(), expected_hash)
+}
+
+/// This structure contains governance metadata from an anchor.
+pub struct AnchorMetadata {
+    /// This field contains the JSON body for `json_metadata`.
+    pub json: serde_json::Value,
+
+    /// This field contains the raw body in the PostgreSQL `bytea` format.
+    /// The value starts with `\x` and then contains lowercase hexadecimal
+    /// bytes.
+    pub bytes: String,
+}
+
+const MAX_ANCHOR_METADATA_BYTES: usize = 3_000_000;
+const MAX_ANCHOR_REDIRECTS: usize = 3;
+
+/// This is the total timeout for one governance-anchor request. It is more than
+/// a plain HTTP metadata request needs. An `ipfs://` anchor resolves through a
+/// public gateway. A cold content lookup on that gateway can take several
+/// seconds.
+const ANCHOR_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+
+struct PublicDnsResolver;
+
+impl reqwest::dns::Resolve for PublicDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+
+        Box::pin(async move {
+            let addresses = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?
+                .filter(|address| is_public_ip(address.ip()))
+                .collect::<Vec<_>>();
+
+            if addresses.is_empty() {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "the host has no public IP address",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+
+    !(a == 0
+        || a == 10
+        || (a == 100 && (64..=127).contains(&b))
+        || a == 127
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && b == 0 && (c == 0 || c == 2))
+        || (a == 192 && b == 88 && c == 99)
+        || (a == 192 && b == 168)
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 198 && b == 51 && c == 100)
+        || (a == 203 && b == 0 && c == 113)
+        || a >= 224)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(ip) = ip.to_ipv4() {
+        return is_public_ipv4(ip);
+    }
+
+    let [a, b, ..] = ip.segments();
+
+    (a & 0xe000) == 0x2000
+        && !(a == 0x2001 && b < 0x0200)
+        && !(a == 0x2001 && b == 0x0db8)
+        && a != 0x2002
+        && !(a == 0x3fff && (b & 0xf000) == 0)
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_http_url(url: &reqwest::Url) -> bool {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+
+    let host = host.trim_end_matches('.');
+
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return false;
+    }
+
+    // `host_str` keeps the brackets around an IPv6 literal, so the client never
+    // resolves it through the DNS filter. Strip them to classify the literal.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+
+    literal.parse::<IpAddr>().map(is_public_ip).unwrap_or(true)
+}
+
+/// This function returns the shared HTTP client for governance-anchor fetches.
+///
+/// This function creates the client one time and stores the result. All
+/// metadata requests use this client and its connection pool. If the builder
+/// returns an error, this function stores and returns the same error.
+fn anchor_http_client() -> Result<&'static reqwest::Client, &'static reqwest::Error> {
+    static CLIENT: LazyLock<Result<reqwest::Client, reqwest::Error>> = LazyLock::new(|| {
+        reqwest::Client::builder()
+            .timeout(ANCHOR_FETCH_TIMEOUT)
+            .no_proxy()
+            .dns_resolver(Arc::new(PublicDnsResolver))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= MAX_ANCHOR_REDIRECTS {
+                    attempt.error("too many redirects")
+                } else if is_public_http_url(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("the redirect target is not public")
+                }
+            }))
+            .user_agent("Dolos MiniBF")
+            .build()
+    });
+
+    CLIENT.as_ref()
+}
+
+fn offchain_hash_mismatch_error(
+    url: &str,
+    expected_hash: &[u8],
+    actual_hash: &[u8],
+) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::HashMismatch,
+        format!(
+            "Hash mismatch when fetching metadata from {url}. Expected \"{}\" but got \"{}\".",
+            hex::encode(expected_hash),
+            hex::encode(actual_hash),
+        ),
+    )
+}
+
+fn offchain_http_response_error(url: &str, status: StatusCode) -> DrepsInnerMetadataError {
+    let reason = status.canonical_reason().unwrap_or("Unknown");
+
+    DrepsInnerMetadataError::new(
+        Code::HttpResponseError,
+        format!(
+            "The server at {url} returned HTTP status {} \"{reason}\".",
+            status.as_u16(),
+        ),
+    )
+}
+
+fn offchain_connection_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::ConnectionError,
+        format!("The client cannot connect to {url}."),
+    )
+}
+
+fn offchain_decode_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::DecodeError,
+        format!("The client cannot parse JSON from {url}."),
+    )
+}
+
+fn offchain_size_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::SizeExceeded,
+        format!("The response from {url} is larger than {MAX_ANCHOR_METADATA_BYTES} bytes."),
+    )
+}
+
+fn offchain_unknown_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::UnknownError,
+        format!("The API cannot create an HTTP client for {url}."),
+    )
+}
+
+fn offchain_no_gateway_error(url: &str) -> DrepsInnerMetadataError {
+    DrepsInnerMetadataError::new(
+        Code::UnknownError,
+        format!("The API cannot resolve {url} without an IPFS gateway."),
+    )
+}
+
+async fn read_anchor_body(
+    mut response: reqwest::Response,
+    url: &str,
+) -> Result<Vec<u8>, DrepsInnerMetadataError> {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_ANCHOR_METADATA_BYTES as u64)
+    {
+        return Err(offchain_size_error(url));
+    }
+
+    let capacity = response
+        .content_length()
+        .unwrap_or_default()
+        .min(MAX_ANCHOR_METADATA_BYTES as u64) as usize;
+    let mut body = Vec::with_capacity(capacity);
+
+    loop {
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|_| offchain_connection_error(url))?;
+
+        let Some(chunk) = chunk else {
+            break;
+        };
+
+        if chunk.len() > MAX_ANCHOR_METADATA_BYTES - body.len() {
+            return Err(offchain_size_error(url));
+        }
+
+        body.extend_from_slice(&chunk);
+    }
+
+    Ok(body)
+}
+
+/// This function resolves a governance-anchor URL to an ordered list of HTTP(S)
+/// URLs.
+///
+/// An `ipfs://<cid>[/<path>]` URL expands to one
+/// `<gateway>/ipfs/<cid>[/<path>]` candidate for each gateway, in gateway
+/// order. The caller sends a request to each candidate in order until one
+/// serves the content. The function also accepts a redundant `ipfs/` after the
+/// scheme.
+///
+/// The CID keeps its original case. The CID stays in the path, so it does not
+/// pass through URL host normalization. That normalization lowercases a base58
+/// CIDv0.
+///
+/// Every other URL gives a single candidate, unchanged. An `ipfs://` URL with
+/// no gateways gives no candidates.
+fn resolve_anchor_urls(url: &str, ipfs_gateways: &[String]) -> Vec<String> {
+    let Some(rest) = url.strip_prefix("ipfs://") else {
+        return vec![url.to_string()];
+    };
+
+    let rest = rest.strip_prefix("ipfs/").unwrap_or(rest);
+
+    ipfs_gateways
+        .iter()
+        .map(|gateway| format!("{}/ipfs/{rest}", gateway.trim_end_matches('/')))
+        .collect()
+}
+
+/// This function fetches metadata from a governance-anchor URL.
+///
+/// The function resolves an `ipfs://` URL through `ipfs_gateways`. It sends a
+/// request to each gateway in order. It stops at the first gateway that serves
+/// content with a hash equal to `expected_hash`. The function fetches every
+/// other URL directly.
+///
+/// The function returns the JSON body and the raw bytes. If every candidate
+/// fails, the function returns a typed error from the last candidate. Every
+/// error keeps the original on-chain URL.
+pub async fn anchor_offchain_metadata(
+    url: &str,
+    expected_hash: &[u8],
+    ipfs_gateways: &[String],
+) -> (Option<AnchorMetadata>, Option<DrepsInnerMetadataError>) {
+    let candidates = resolve_anchor_urls(url, ipfs_gateways);
+
+    // The candidate list is empty only for an `ipfs://` URL with no gateway. A
+    // direct HTTP(S) URL always gives one candidate.
+    if candidates.is_empty() {
+        return (None, Some(offchain_no_gateway_error(url)));
+    }
+
+    let client = match anchor_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(%error, "cannot create the HTTP client for governance metadata");
+            return (None, Some(offchain_unknown_error(url)));
+        }
+    };
+
+    let mut last_error = None;
+
+    for candidate in candidates {
+        match fetch_anchor_candidate(client, &candidate, url, expected_hash).await {
+            Ok(metadata) => return (Some(metadata), None),
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    (None, last_error)
+}
+
+/// This function fetches one resolved candidate URL for
+/// [`anchor_offchain_metadata`]. The function makes sure that the body hash
+/// matches `expected_hash`.
+///
+/// `request_url` is the URL that the function fetches. For an `ipfs://` anchor,
+/// `request_url` is a gateway URL. `original_url` is the on-chain URL. Every
+/// error keeps `original_url`, so the caller reports what the chain recorded.
+async fn fetch_anchor_candidate(
+    client: &reqwest::Client,
+    request_url: &str,
+    original_url: &str,
+    expected_hash: &[u8],
+) -> Result<AnchorMetadata, DrepsInnerMetadataError> {
+    let request_url = match reqwest::Url::parse(request_url) {
+        Ok(url) if is_public_http_url(&url) => url,
+        _ => return Err(offchain_connection_error(original_url)),
+    };
+
+    let response = client
+        .get(request_url)
+        .send()
+        .await
+        .map_err(|_| offchain_connection_error(original_url))?;
+
+    if response.status() != StatusCode::OK {
+        return Err(offchain_http_response_error(
+            original_url,
+            response.status(),
+        ));
+    }
+
+    let body = read_anchor_body(response, original_url).await?;
+
+    let actual_hash = Hasher::<256>::hash(body.as_ref());
+
+    if actual_hash.as_ref() != expected_hash {
+        return Err(offchain_hash_mismatch_error(
+            original_url,
+            expected_hash,
+            actual_hash.as_ref(),
+        ));
+    }
+
+    serde_json::from_slice(body.as_ref())
+        .map(|json| AnchorMetadata {
+            json,
+            bytes: format!("\\x{}", hex::encode(body.as_slice())),
+        })
+        .map_err(|_| offchain_decode_error(original_url))
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::{SocketAddr, TcpListener},
+        thread::{self, JoinHandle},
+    };
+
+    struct FixedDnsResolver(SocketAddr);
+
+    impl reqwest::dns::Resolve for FixedDnsResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            let address = self.0;
+            let addresses = Box::new(std::iter::once(address)) as reqwest::dns::Addrs;
+
+            Box::pin(async move { Ok(addresses) })
+        }
+    }
+
+    fn serve_body(body: Vec<u8>, content_length: Option<usize>) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Cannot bind the test server.");
+        let address = listener
+            .local_addr()
+            .expect("Cannot read the test server address.");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("Cannot accept the test request.");
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+
+            let content_length = content_length
+                .map(|size| format!("Content-Length: {size}\r\n"))
+                .unwrap_or_default();
+            let headers = format!("HTTP/1.1 200 OK\r\n{content_length}Connection: close\r\n\r\n");
+
+            stream
+                .write_all(headers.as_bytes())
+                .expect("Cannot write the test response headers.");
+            let _ = stream.write_all(&body);
+        });
+
+        (format!("http://{address}/metadata"), server)
+    }
+
+    async fn get_local_response(url: &str) -> reqwest::Response {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("Cannot create the test HTTP client.")
+            .get(url)
+            .send()
+            .await
+            .expect("Cannot get the test response.")
+    }
+
+    fn local_candidate_client(url: &str) -> (reqwest::Client, String) {
+        let port = reqwest::Url::parse(url)
+            .expect("Cannot parse the test URL.")
+            .port()
+            .expect("The test URL has no port.");
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FixedDnsResolver(address)))
+            .build()
+            .expect("Cannot create the test HTTP client.");
+
+        (client, format!("http://anchor.test:{port}/metadata"))
+    }
+
+    #[tokio::test]
+    async fn anchor_fetch_rejects_loopback_before_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("Cannot bind the test server.");
+        listener
+            .set_nonblocking(true)
+            .expect("Cannot configure the test server.");
+        let url = format!(
+            "http://{}/metadata",
+            listener
+                .local_addr()
+                .expect("Cannot read the test server address.")
+        );
+
+        let (metadata, error) = anchor_offchain_metadata(&url, &[0; 32], &[]).await;
+
+        assert!(metadata.is_none());
+        assert_eq!(
+            error.expect("The connection error is absent.").code,
+            Code::ConnectionError
+        );
+        assert_eq!(
+            listener
+                .accept()
+                .expect_err("The client made a connection.")
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    async fn anchor_body_rejects_oversized_content_length() {
+        let (url, server) = serve_body(Vec::new(), Some(MAX_ANCHOR_METADATA_BYTES + 1));
+        let response = get_local_response(&url).await;
+
+        let error = read_anchor_body(response, &url)
+            .await
+            .expect_err("The oversized response was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::SizeExceeded);
+    }
+
+    #[tokio::test]
+    async fn anchor_body_rejects_oversized_stream() {
+        let body = vec![b'x'; MAX_ANCHOR_METADATA_BYTES + 1];
+        let (url, server) = serve_body(body, None);
+        let response = get_local_response(&url).await;
+
+        let error = read_anchor_body(response, &url)
+            .await
+            .expect_err("The oversized response was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::SizeExceeded);
+    }
+
+    #[tokio::test]
+    async fn anchor_body_accepts_size_limit() {
+        let mut body = Vec::with_capacity(MAX_ANCHOR_METADATA_BYTES);
+        body.push(b'"');
+        body.resize(MAX_ANCHOR_METADATA_BYTES - 1, b'x');
+        body.push(b'"');
+        let (url, server) = serve_body(body, Some(MAX_ANCHOR_METADATA_BYTES));
+        let response = get_local_response(&url).await;
+
+        let body = read_anchor_body(response, &url)
+            .await
+            .expect("The response at the size limit was rejected.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(body.len(), MAX_ANCHOR_METADATA_BYTES);
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_rejects_hash_mismatch() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let (url, server) = serve_body(body, None);
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "ipfs://bafy-mismatched";
+
+        let error = fetch_anchor_candidate(&client, &request_url, original_url, &[0; 32])
+            .await
+            .err()
+            .expect("The hash mismatch was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::HashMismatch);
+        assert!(error.message.contains(original_url));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_accepts_valid_json_and_hash() {
+        let body = br#"{"name":"Dolos"}"#.to_vec();
+        let expected_hex = hex::encode(body.as_slice());
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_body(body, None);
+        let (client, request_url) = local_candidate_client(&url);
+
+        let metadata = fetch_anchor_candidate(
+            &client,
+            &request_url,
+            "ipfs://bafy-valid-json",
+            expected_hash.as_ref(),
+        )
+        .await
+        .expect("The valid metadata was rejected.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(metadata.json["name"], "Dolos");
+        assert_eq!(metadata.bytes, format!("\\x{expected_hex}"));
+    }
+
+    #[tokio::test]
+    async fn anchor_candidate_rejects_invalid_json() {
+        let body = b"not JSON".to_vec();
+        let expected_hash = Hasher::<256>::hash(body.as_ref());
+        let (url, server) = serve_body(body, None);
+        let (client, request_url) = local_candidate_client(&url);
+        let original_url = "ipfs://bafy-invalid-json";
+
+        let error =
+            fetch_anchor_candidate(&client, &request_url, original_url, expected_hash.as_ref())
+                .await
+                .err()
+                .expect("The invalid JSON was accepted.");
+
+        server.join().expect("The test server did not stop.");
+        assert_eq!(error.code, Code::DecodeError);
+        assert!(error.message.contains(original_url));
+    }
+
+    #[test]
+    fn public_url_predicate_blocks_non_public_targets() {
+        let public = [
+            "https://example.com/metadata",
+            "http://1.1.1.1/metadata",
+            "https://[2606:4700:4700::1111]/metadata",
+        ];
+        for url in public {
+            let url = reqwest::Url::parse(url).expect("Cannot parse the URL.");
+            assert!(is_public_http_url(&url), "{url} is not public");
+        }
+
+        let blocked = [
+            "ftp://example.com/metadata",
+            "https://localhost/metadata",
+            "https://service.localhost/metadata",
+            "http://127.0.0.1/metadata",
+            "http://10.0.0.1/metadata",
+            "http://169.254.169.254/metadata",
+            "http://[::1]/metadata",
+            "http://[::ffff:127.0.0.1]/metadata",
+            "http://[fd00::1]/metadata",
+        ];
+        for url in blocked {
+            let url = reqwest::Url::parse(url).expect("Cannot parse the URL.");
+            assert!(!is_public_http_url(&url), "{url} is public");
+        }
+    }
+
+    #[test]
+    fn resolve_anchor_urls_expands_ipfs_across_gateways_in_order() {
+        assert_eq!(
+            resolve_anchor_urls(
+                "ipfs://bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m",
+                &[
+                    "https://ipfs.io".to_string(),
+                    "https://gateway.pinata.cloud".to_string(),
+                ],
+            ),
+            vec![
+                "https://ipfs.io/ipfs/bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m"
+                    .to_string(),
+                "https://gateway.pinata.cloud/ipfs/bafkreigmd7xasljkmisbal5pu2xcqolr2fkre4jnlllgqrof4wctadxa7m"
+                    .to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_keeps_cid_path_and_trims_gateway_slash() {
+        assert_eq!(
+            resolve_anchor_urls(
+                "ipfs://bafyfoo/dir/doc.json",
+                &["https://gateway.example/".to_string()]
+            ),
+            vec!["https://gateway.example/ipfs/bafyfoo/dir/doc.json".to_string()],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_tolerates_redundant_ipfs_prefix() {
+        assert_eq!(
+            resolve_anchor_urls("ipfs://ipfs/bafyfoo", &["https://ipfs.io".to_string()]),
+            vec!["https://ipfs.io/ipfs/bafyfoo".to_string()],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_preserves_cidv0_case() {
+        // A base58 CIDv0 is case-sensitive. The CID stays in the path, so it
+        // does not pass through host normalization. That normalization
+        // lowercases the CID and corrupts it.
+        assert_eq!(
+            resolve_anchor_urls(
+                "ipfs://QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+                &["https://ipfs.io".to_string()],
+            ),
+            vec!["https://ipfs.io/ipfs/QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG".to_string()],
+        );
+    }
+
+    #[test]
+    fn resolve_anchor_urls_passes_http_through_as_single_candidate() {
+        for url in [
+            "https://example.com/metadata.json",
+            "http://example.com/a?b=c",
+        ] {
+            assert_eq!(
+                resolve_anchor_urls(url, &["https://ipfs.io".to_string()]),
+                vec![url.to_string()],
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_anchor_urls_without_gateways_yields_no_candidates() {
+        assert!(resolve_anchor_urls("ipfs://bafyfoo", &[]).is_empty());
+    }
 }
 
 pub trait IntoModel<T>
