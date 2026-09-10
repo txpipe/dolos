@@ -621,13 +621,19 @@ impl AssetAmountExtras {
         };
 
         let onchain = builder.onchain_metadata(domain).await?;
-        let registry = builder.offchain_metadata(unit).await?;
+
+        // the registry request reaches an external service. the on-chain datum
+        // already declares the decimal places of every CIP-68 fungible asset,
+        // so a known value makes the request unnecessary
+        let onchain_decimals = onchain.as_ref().and_then(OnchainMetadata::decimals);
+        let registry = if onchain_decimals.is_some() {
+            None
+        } else {
+            builder.offchain_metadata(unit).await?
+        };
 
         Ok(Self {
-            decimals: onchain
-                .as_ref()
-                .and_then(OnchainMetadata::decimals)
-                .or_else(|| registry.and_then(|metadata| metadata.decimals)),
+            decimals: onchain_decimals.or_else(|| registry.and_then(|metadata| metadata.decimals)),
             has_nft_onchain_metadata: onchain.is_some_and(|x| x.is_present()),
         })
     }
