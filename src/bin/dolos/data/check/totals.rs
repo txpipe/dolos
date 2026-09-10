@@ -493,7 +493,8 @@ pub struct Recomputed {
 pub enum SupplyCheck {
     /// The network genesis does not define a fixed maximum supply.
     Unavailable,
-    /// Every pot has its boundary value, so the genesis total must match exactly.
+    /// Every pot has its boundary value, so the genesis total must match
+    /// exactly.
     Exact { max_supply: u64 },
     /// `pool_count` is stale by design; account for the live pool-count delta.
     MidEpoch {
