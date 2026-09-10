@@ -84,6 +84,7 @@ pub fn rational_to_f64<const DECIMALS: u8>(val: &alonzo::RationalNumber) -> f64 
 }
 
 const DREP_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("drep");
+const CC_HOT_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("cc_hot");
 const POOL_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("pool");
 const ASSET_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("asset");
 const CALIDUS_HRP: bech32::Hrp = bech32::Hrp::parse_unchecked("calidus");
@@ -119,6 +120,13 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
 
 pub fn bech32_pool(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
     bech32(POOL_HRP, key)
+}
+
+/// CIP-129 id of a constitutional-committee hot credential: one header byte
+/// — hot-credential key type, key or script hash — before the hash itself.
+pub fn bech32_cc_hot(hash: impl AsRef<[u8]>, is_script: bool) -> Result<String, StatusCode> {
+    let header: u8 = if is_script { 0x03 } else { 0x02 };
+    bech32(CC_HOT_HRP, [&[header], hash.as_ref()].concat())
 }
 
 pub fn bech32_calidus(key: impl AsRef<[u8]>) -> Result<String, StatusCode> {
