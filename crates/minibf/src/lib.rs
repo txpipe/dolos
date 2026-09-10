@@ -479,6 +479,10 @@ where
             get(routes::blocks::by_hash_or_number_addresses::<D>),
         )
         .route(
+            "/blocks/epoch/{epoch_number}/slot/{slot_number}",
+            get(routes::blocks::by_epoch_slot::<D>),
+        )
+        .route(
             "/blocks/slot/{slot_number}",
             get(routes::blocks::by_slot::<D>),
         )

@@ -129,6 +129,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/blocks/latest`                                           | Get latest block information                             |
 | `/blocks/latest/txs`                                       | Get transactions for the latest block                    |
 | `/blocks/latest/txs/cbor`                                  | Get transactions with CBOR data for the latest block     |
+| `/blocks/epoch/{epoch_number}/slot/{slot_number}`          | Get block by epoch and epoch-relative slot               |
 | `/blocks/slot/{slot_number}`                               | Get block by slot number                                 |
 | `/blocks/{hash_or_number}`                                 | Get block information                                    |
 | `/blocks/{hash_or_number}/addresses`                       | Get addresses in a specific block                        |
