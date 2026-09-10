@@ -2,14 +2,16 @@
 //!
 //! Exercises the full Cardano pipeline: feeds blocks through the sync
 //! lifecycle with partial commits (WAL + state only), then verifies that
-//! `bootstrap()` recovers archive and index stores from WAL replay.
+//! `bootstrap()` recovers the archive store from WAL replay.
 
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr as _;
 use std::sync::Arc;
 
+use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    sync::SyncExt as _, BootstrapExt, ChainLogic, ChainPoint, Domain, IndexStore, StateStore,
-    StateWriter, TxoRef, WalStore, WorkUnit,
+    sync::SyncExt as _, ArchiveStore as _, BootstrapExt, ChainLogic, ChainPoint, Domain,
+    StateStore, StateWriter, TagDimension, TxoRef, UtxoSetDelta, WalStore, WorkUnit,
 };
 use dolos_testing::{
     synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
@@ -18,8 +20,8 @@ use dolos_testing::{
 
 /// Which commit phases to run when feeding blocks, simulating a crash at
 /// each inter-store boundary of the work-unit lifecycle
-/// (commit_wal → commit_state → commit_archive → commit_indexes).
-/// `commit_wal` always runs; commit_indexes and finalize never do.
+/// (commit_wal → commit_state → commit_archive).
+/// `commit_wal` always runs; finalize never does.
 ///
 /// Out of scope here: crashes *inside* a phase (mid-shard) and crashes
 /// during epoch-boundary work units (RUPD/EWRAP/ESTART), which don't write
@@ -32,9 +34,106 @@ enum CrashAfter {
     /// Run commit_wal + commit_state — models a crash between the state
     /// commit and the archive commit.
     State,
-    /// Run commit_wal + commit_state + commit_archive — models a crash
-    /// between the archive commit and the index commit.
+    /// Run every commit phase — models a crash after the last store commit
+    /// and before `finalize`.
     Archive,
+}
+
+/// The live-UTxO tags are a projection of the UTxO set: every live ref answers
+/// under every tag its output carries, and no tag answers with a ref that is
+/// not live. Both directions, so a stale tag (a ref the set no longer holds)
+/// fails as surely as a missing one.
+fn assert_tags_match_utxo_set(domain: &ToyDomain) {
+    let live: Vec<_> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .map(|(txo, value)| (txo, Arc::new(value)))
+        .collect();
+    let live_refs: HashSet<TxoRef> = live.iter().map(|(txo, _)| txo.clone()).collect();
+
+    let expected = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
+        produced_utxo: live.into_iter().collect(),
+        ..Default::default()
+    });
+
+    let mut asked = 0usize;
+
+    for (txo, tags) in &expected.produced {
+        for tag in tags {
+            let found = domain
+                .state()
+                .utxos_by_tag(tag.dimension, &tag.key)
+                .unwrap();
+
+            assert!(
+                found.contains(txo),
+                "live ref {txo:?} is missing under {} tag",
+                tag.dimension
+            );
+
+            let stale: Vec<_> = found.difference(&live_refs).collect();
+            assert!(
+                stale.is_empty(),
+                "{} tag answers with {stale:?}, which the UTxO set no longer holds",
+                tag.dimension
+            );
+
+            asked += 1;
+        }
+    }
+
+    assert!(
+        asked > 0,
+        "the UTxO set carries no tags, so this proves nothing"
+    );
+}
+
+/// Every `(dimension, key)` the live UTxO set carries right now.
+fn live_tag_keys(domain: &ToyDomain) -> BTreeSet<(TagDimension, Vec<u8>)> {
+    let live: Vec<_> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .map(|(txo, value)| (txo, Arc::new(value)))
+        .collect();
+
+    let delta = utxo_index_delta_from_utxo_delta(&UtxoSetDelta {
+        produced_utxo: live.into_iter().collect(),
+        ..Default::default()
+    });
+
+    delta
+        .produced
+        .into_iter()
+        .flat_map(|(_, tags)| tags)
+        .map(|tag| (tag.dimension, tag.key))
+        .collect()
+}
+
+/// Keys the set carried at an earlier point answer with live refs only. This
+/// is what `assert_tags_match_utxo_set` cannot see: a key that only undone
+/// outputs carried is no longer among the live tags, so it is never asked
+/// there, and a rollback that left it behind would pass.
+fn assert_no_stale_tags(domain: &ToyDomain, keys: &BTreeSet<(TagDimension, Vec<u8>)>) {
+    let live_refs: HashSet<TxoRef> = domain
+        .state()
+        .iter_utxos()
+        .unwrap()
+        .map(|entry| entry.unwrap().0)
+        .collect();
+
+    for (dimension, key) in keys {
+        let found = domain.state().utxos_by_tag(dimension, key).unwrap();
+
+        let stale: Vec<_> = found.difference(&live_refs).collect();
+        assert!(
+            stale.is_empty(),
+            "{dimension} tag answers with {stale:?}, which the UTxO set no longer holds"
+        );
+    }
 }
 
 /// Helper: feed blocks into a domain with partial work-unit execution.
@@ -76,15 +175,14 @@ fn drain_partial(
             if matches!(crash_after, CrashAfter::Archive) {
                 WorkUnit::<ToyDomain>::commit_archive(&mut work, domain, shard).unwrap();
             }
-            // Intentionally skip commit_indexes — and intentionally skip
-            // finalize() to model a crash mid-lifecycle, which is what the
-            // recovery tests below exercise.
+            // Intentionally skip finalize() to model a crash mid-lifecycle,
+            // which is what the recovery tests below exercise.
         }
     }
 }
 
 #[test]
-fn test_catchup_recovers_archive_and_indexes() {
+fn test_catchup_recovers_the_archive() {
     let cfg = SyntheticBlockConfig::default();
     let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
 
@@ -94,9 +192,8 @@ fn test_catchup_recovers_archive_and_indexes() {
     // Record baseline cursors — all stores are in sync after initial bootstrap.
     let baseline_state = domain.state().read_cursor().unwrap();
     let baseline_archive = domain.archive().get_tip().unwrap().map(|(s, _)| s);
-    let baseline_index = domain.indexes().cursor().unwrap();
 
-    // Feed synthetic blocks with partial execution (skip archive + indexes).
+    // Feed synthetic blocks with partial execution (skip the archive commit).
     feed_blocks_partial(&domain, &blocks, CrashAfter::State);
 
     // State should have advanced.
@@ -107,16 +204,11 @@ fn test_catchup_recovers_archive_and_indexes() {
         "state should have advanced after feeding blocks"
     );
 
-    // Archive and indexes should still be at the baseline.
+    // The archive should still be at the baseline.
     let archive_tip = domain.archive().get_tip().unwrap().map(|(s, _)| s);
-    let index_cursor = domain.indexes().cursor().unwrap();
     assert_eq!(
         archive_tip, baseline_archive,
         "archive should not have advanced"
-    );
-    assert_eq!(
-        index_cursor, baseline_index,
-        "indexes should not have advanced"
     );
 
     // --- Run bootstrap (which calls catch_up_stores internally) ---
@@ -130,29 +222,25 @@ fn test_catchup_recovers_archive_and_indexes() {
         "archive tip should match state cursor after catch-up"
     );
 
-    // Index cursor should now match state cursor.
-    let index_cursor_after = domain.indexes().cursor().unwrap();
-    assert_eq!(
-        index_cursor_after.as_ref(),
-        Some(&state_cursor),
-        "index cursor should match state cursor after catch-up"
-    );
-
     // Verify index content: look up a synthetic tx hash to confirm
-    // compute_catchup produced the correct index delta.
+    // compute_catchup produced the correct index delta, and that it landed in
+    // the archive beside the block.
     let tx_hash_hex = &vectors.blocks[0].tx_hashes[0];
     let tx_hash_bytes = hex::decode(tx_hash_hex).unwrap();
-    let slot = domain.indexes().slot_by_tx_hash(&tx_hash_bytes).unwrap();
+    let slot = domain.archive().slot_by_tx_hash(&tx_hash_bytes).unwrap();
     assert!(
         slot.is_some(),
-        "tx hash {} should be found in index after catch-up",
+        "tx hash {} should be found in the archive after catch-up",
         tx_hash_hex
     );
+
+    // The live-UTxO tags rode the state commit, so they were never behind.
+    assert_tags_match_utxo_set(&domain);
 }
 
 /// A crash between `commit_wal` and `commit_state` leaves the WAL ahead of
 /// every other store. Bootstrap must replay the WAL entries into state (and
-/// then archive/indexes) instead of leaving state behind — otherwise the
+/// then the archive) instead of leaving state behind — otherwise the
 /// upstream intersection resumes from the WAL tip and the skipped blocks'
 /// effects are silently lost.
 #[test]
@@ -199,13 +287,6 @@ fn test_catchup_recovers_state_from_wal() {
         "archive tip should be at the WAL tip after catch-up"
     );
 
-    let index_cursor_after = domain.indexes().cursor().unwrap();
-    assert_eq!(
-        index_cursor_after.as_ref(),
-        Some(&wal_tip),
-        "index cursor should be at the WAL tip after catch-up"
-    );
-
     // The replayed blocks' UTxO effects must be visible in state. Use the
     // last tx of the last block — nothing after it can consume its output.
     let last_tx = vectors.blocks.last().unwrap().tx_hashes.last().unwrap();
@@ -216,11 +297,14 @@ fn test_catchup_recovers_state_from_wal() {
         1,
         "utxo produced by replayed block should be queryable from state"
     );
+
+    // ... tags included: `catch_up_state` re-derives them from the same WAL
+    // entries and commits them with the set.
+    assert_tags_match_utxo_set(&domain);
 }
 
-/// Crash-recovery matrix: state, archive and indexes each at a different
-/// point behind the WAL tip. Bootstrap must converge all of them to the
-/// WAL tip.
+/// Crash-recovery matrix: state and archive each at a different point behind
+/// the WAL tip. Bootstrap must converge both of them to the WAL tip.
 #[test]
 fn test_catchup_converges_all_stores_to_wal_tip() {
     let cfg = SyntheticBlockConfig::default();
@@ -233,7 +317,7 @@ fn test_catchup_converges_all_stores_to_wal_tip() {
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
     let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
 
-    // First batch: WAL + state commit (archive/index stay at baseline).
+    // First batch: WAL + state commit (the archive stays at baseline).
     feed_blocks_partial(&domain, &blocks[..1], CrashAfter::State);
 
     // Second batch: WAL only (state stays at the first batch).
@@ -259,27 +343,20 @@ fn test_catchup_converges_all_stores_to_wal_tip() {
         Some(wal_tip.slot()),
         "archive tip should be at the WAL tip after catch-up"
     );
-    assert_eq!(
-        domain.indexes().cursor().unwrap().as_ref(),
-        Some(&wal_tip),
-        "index cursor should be at the WAL tip after catch-up"
-    );
 }
 
-/// Crash between `commit_archive` and `commit_indexes`: WAL, state and
-/// archive are all at the tip, only indexes lag. Bootstrap must catch
-/// indexes up while leaving the already-current stores untouched.
+/// A crash after the last store commit and before `finalize`: every store is
+/// already at the WAL tip, so catch-up has nothing to replay and must leave
+/// them exactly where they are — index entries included.
 #[test]
-fn test_catchup_recovers_indexes_when_archive_ahead() {
+fn test_catchup_leaves_a_fully_committed_batch_alone() {
     let cfg = SyntheticBlockConfig::default();
     let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
 
     let genesis = Arc::new(dolos_cardano::include::devnet::load());
     let domain = ToyDomain::new_with_genesis_and_config(genesis, cardano_config, None, None);
 
-    let baseline_index = domain.indexes().cursor().unwrap();
-
-    // Feed blocks committing everything except indexes.
+    // Feed blocks running every commit phase.
     feed_blocks_partial(&domain, &blocks, CrashAfter::Archive);
 
     let (wal_tip, _) = domain.wal().find_tip().unwrap().unwrap();
@@ -293,27 +370,27 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
         Some(wal_tip.slot()),
         "archive should be at the WAL tip"
     );
-    assert_eq!(
-        domain.indexes().cursor().unwrap(),
-        baseline_index,
-        "indexes should not have advanced"
-    );
 
     domain.bootstrap().unwrap();
 
     assert_eq!(
-        domain.indexes().cursor().unwrap().as_ref(),
+        domain.state().read_cursor().unwrap().as_ref(),
         Some(&wal_tip),
-        "index cursor should be at the WAL tip after catch-up"
+        "state should still be at the WAL tip"
+    );
+    assert_eq!(
+        domain.archive().get_tip().unwrap().map(|(s, _)| s),
+        Some(wal_tip.slot()),
+        "archive should still be at the WAL tip"
     );
 
-    // Verify index content came through the replay.
+    // The index entries rode the archive commit, so they were never behind.
     let tx_hash_hex = &vectors.blocks[0].tx_hashes[0];
     let tx_hash_bytes = hex::decode(tx_hash_hex).unwrap();
-    let slot = domain.indexes().slot_by_tx_hash(&tx_hash_bytes).unwrap();
+    let slot = domain.archive().slot_by_tx_hash(&tx_hash_bytes).unwrap();
     assert!(
         slot.is_some(),
-        "tx hash {} should be found in index after catch-up",
+        "tx hash {} should be found in the archive",
         tx_hash_hex
     );
 }
@@ -330,7 +407,7 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
 /// (typically `ControlledAmountInc`).
 ///
 /// This test feeds blocks through the *full* sync lifecycle (every phase,
-/// including `commit_archive` and `commit_indexes`) and then rolls back to a
+/// including `commit_archive`) and then rolls back to a
 /// prior point. With the lifecycle correctly ordered, the WAL rows carry their
 /// `prev_*` data, undo executes cleanly, and the cursor lands on the rollback
 /// target.
@@ -339,10 +416,14 @@ fn test_catchup_recovers_indexes_when_archive_ahead() {
 /// byte-identical to its snapshot at the rollback target. Before the fix,
 /// rollback undid entities in memory but never saved them, leaving entity
 /// state reflecting the undone blocks.
+///
+/// And it verifies that the archive's index entries go with the blocks: a
+/// rolled-back block's transaction hash no longer resolves, while the
+/// target's still does.
 #[test]
 fn test_rollback_after_full_sync_lifecycle() {
     let cfg = SyntheticBlockConfig::default();
-    let (blocks, _vectors, cardano_config) = build_synthetic_blocks(cfg);
+    let (blocks, vectors, cardano_config) = build_synthetic_blocks(cfg);
     assert!(
         blocks.len() >= 2,
         "synthetic config must produce at least 2 blocks for the rollback target to differ from the tip",
@@ -371,6 +452,19 @@ fn test_rollback_after_full_sync_lifecycle() {
     for block in &blocks[1..] {
         domain.roll_forward(block.clone()).unwrap();
     }
+
+    let tags_at_tip = live_tag_keys(&domain);
+
+    let kept_tx = hex::decode(&vectors.blocks[0].tx_hashes[0]).unwrap();
+    let undone_tx = hex::decode(&vectors.blocks[1].tx_hashes[0]).unwrap();
+    assert!(
+        domain
+            .archive()
+            .slot_by_tx_hash(&undone_tx)
+            .unwrap()
+            .is_some(),
+        "the block about to be undone should resolve before the rollback"
+    );
 
     let tip_before_rollback = domain.state().read_cursor().unwrap();
     assert_ne!(
@@ -404,6 +498,34 @@ fn test_rollback_after_full_sync_lifecycle() {
         snapshot_namespace(&domain, "accounts"),
         accounts_at_target,
         "account entities should be restored to their state at the rollback target",
+    );
+
+    // The live-UTxO tags followed the set back: the inputs the undone blocks
+    // spent answer again, and their outputs answer under no tag, keys that
+    // only they carried included.
+    assert_tags_match_utxo_set(&domain);
+
+    let gone = tags_at_tip.difference(&live_tag_keys(&domain)).count();
+    assert!(
+        gone > 0,
+        "no tag key was unique to the undone blocks, so the stale-key probe proves nothing"
+    );
+    assert_no_stale_tags(&domain, &tags_at_tip);
+
+    // The archive's index entries followed the blocks back: the undone
+    // block's transaction is gone, the target's is still there.
+    assert_eq!(
+        domain.archive().slot_by_tx_hash(&undone_tx).unwrap(),
+        None,
+        "a rolled-back block's tx hash should no longer resolve"
+    );
+    assert!(
+        domain
+            .archive()
+            .slot_by_tx_hash(&kept_tx)
+            .unwrap()
+            .is_some(),
+        "the rollback target's tx hash should still resolve"
     );
 }
 

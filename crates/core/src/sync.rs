@@ -13,9 +13,8 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    ArchiveStore as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError, EntityMap,
-    IndexStore as _, IndexWriter as _, MempoolStore, RawBlock, StateStore, StateWriter as _,
-    TipEvent, WalStore, WorkUnit,
+    ArchiveStore as _, ArchiveWriter as _, BlockSlot, ChainLogic, ChainPoint, Domain, DomainError,
+    EntityMap, MempoolStore, RawBlock, StateStore, StateWriter as _, TipEvent, WalStore, WorkUnit,
 };
 
 const MEMPOOL_FINALIZE_THRESHOLD: u32 = 6;
@@ -44,7 +43,9 @@ pub trait SyncExt: Domain {
     /// Roll back the chain to a previous point.
     ///
     /// Iterates WAL entries after the target point in reverse order,
-    /// undoing each block's effects on state, UTxOs, and indexes.
+    /// undoing each block's effects on state, UTxOs (tags included), and the
+    /// archive's index entries; the archive's blocks and logs are then cut
+    /// with `truncate_front`.
     fn rollback(&self, to: &ChainPoint) -> Result<(), DomainError>;
 }
 
@@ -69,7 +70,7 @@ impl<D: Domain> SyncExt for D {
         let undo_blocks = self.wal().iter_logs(Some(to.clone()), None)?;
 
         let writer = self.state().start_writer()?;
-        let index_writer = self.indexes().start_writer()?;
+        let archive_writer = self.archive().start_writer()?;
 
         // Entities accumulate across all undone entries so consecutive blocks
         // touching the same entity unwind from the in-memory value instead of
@@ -78,12 +79,7 @@ impl<D: Domain> SyncExt for D {
 
         for (point, log) in undo_blocks.rev() {
             if point == *to {
-                // Final cursor update - build an empty delta with just the cursor
-                let empty_delta = crate::IndexDelta {
-                    cursor: point.clone(),
-                    ..Default::default()
-                };
-                index_writer.apply(&empty_delta)?;
+                // Final cursor update
                 writer.set_cursor(point.clone())?;
                 break;
             }
@@ -94,11 +90,13 @@ impl<D: Domain> SyncExt for D {
 
             let undo_data = D::Chain::compute_undo(&block, &log.inputs, point.clone())?;
 
-            // Apply UTxO undo to state
             writer.apply_utxoset(&undo_data.utxo_delta)?;
+            writer.undo_utxo_tags(&undo_data.utxo_index_delta)?;
 
-            // Apply index delta for the undo
-            index_writer.undo(&undo_data.index_delta)?;
+            // The block's index entries go with the block: `truncate_front`
+            // below takes the block bodies and the logs, this takes the tags
+            // and the exact lookups that pointed at them.
+            archive_writer.undo_index(&undo_data.archive_index_deltas)?;
 
             // TODO: we should differ notifications until we commit the writers
             self.notify_tip(TipEvent::Undo(point.clone(), block));
@@ -121,7 +119,7 @@ impl<D: Domain> SyncExt for D {
         crate::state::save_entities::<Self>(&writer, &entities)?;
 
         writer.commit()?;
-        index_writer.commit()?;
+        archive_writer.commit()?;
 
         self.archive().truncate_front(to)?;
 
@@ -151,7 +149,7 @@ pub(crate) fn drain_pending_work<D: Domain>(
 ///    storage b. `compute()` - Execute computation over loaded data c.
 ///    `commit_wal()` - Persist to write-ahead log d. `commit_state()` - Apply
 ///    changes to state store e. `commit_archive()` - Apply changes to archive
-///    store f. `commit_indexes()` - Apply changes to index stores
+///    store
 /// 3. `finalize()` - Shard-agnostic teardown
 /// 4. `notify_tip()` - Notify tip subscribers
 ///
@@ -213,8 +211,6 @@ pub(crate) fn run_lifecycle<D: Domain>(
         work.commit_state(domain, shard)?;
         debug!(phase = "commit_archive", "running phase");
         work.commit_archive(domain, shard)?;
-        debug!(phase = "commit_indexes", "running phase");
-        work.commit_indexes(domain, shard)?;
     }
 
     debug!(phase = "finalize", "running phase");

@@ -73,8 +73,7 @@ fn drain_pending_work<D: Domain>(chain: &mut D::Chain, domain: &D) -> Result<(),
 /// 2. For each shard `0..total_shards()`: a. `load()` - Load required data from
 ///    storage b. `compute()` - Execute computation over loaded data c.
 ///    `commit_state()` - Apply changes to state store d. `commit_archive()` -
-///    Apply changes to archive store e. `commit_indexes()` - Apply changes to
-///    index stores
+///    Apply changes to archive store
 /// 3. `finalize()` - Shard-agnostic teardown
 ///
 /// Skipped phases:

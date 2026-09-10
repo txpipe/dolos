@@ -12,7 +12,7 @@ peer_address = "preprod-node.world.dev.cardano.org:30000"
 # block_production_interval = 5
 
 [storage]
-version = "v3"
+version = "v4"
 path = "data"
 
 [genesis]
@@ -101,15 +101,22 @@ The `upstream` section defines how to connect to the Ouroboros network to synchr
 
 ## `storage` section
 
-The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, index, mempool) can be configured independently with its own backend and options.
+The `storage` section controls how Dolos stores data in the local file system. Each store (wal, state, archive, mempool) can be configured independently with its own backend and options.
 
 | property | type   | example |
 | -------- | ------ | ------- |
 | path     | string | "data" |
-| version  | string | "v3"   |
+| version  | string | "v4"   |
 
 - `path`: root directory where all data will be stored.
-- `version`: storage schema version (`v0` - `v3`).
+- `version`: storage schema version (`v0` - `v4`). This release only reads
+  `v4`, which stores independently compressed zstd-3 block frames using the
+  bundled dictionary and folds the former index store into state and archive;
+  there are no compression settings. Run `dolos init` to upgrade a readable
+  older configuration, or follow the manual steps in the
+  [migration guide](https://docs.txpipe.io/dolos/migration/dolos-v1-7) when it
+  cannot be read. Relabelling an older data directory as `v4` is unsupported
+  and is not detected.
 
 Besides the stores, this directory holds `scratch/`: where `dolos snapshot
 publish`, `dolos snapshot backfill`, `dolos bootstrap stelae` and `dolos
@@ -148,7 +155,7 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads    | integer | 4       |
 | memtable_size_mb  | integer | 64      |
 
-- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
+- `backend`: `fjall` or `in_memory` (defaults to `fjall`). `in_memory` keeps the whole state in process memory: it is ephemeral — everything is lost on restart — and it holds the UTxO set and all entities in RAM, so it suits devnets, tooling and tests rather than a node following a public network. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb state directory has to be re-bootstrapped (a stelae restore is the shortest path).
 - `path`: optional override for the state path (defaults to `<storage.path>/state`).
 - `cache`: size (MB) of the state cache.
 - `max_history`: maximum number of slots to keep before pruning.
@@ -168,29 +175,23 @@ deletes the files it has consumed as it goes. `--download-dir` moves it.
 | worker_threads   | integer | 4         |
 | memtable_size_mb | integer | 64        |
 
-- `backend`: `fjall`, `redb`, `in_memory`, or `no_op` (defaults to `fjall`). Unlike the state and index stores, `redb` remains a supported archive backend when selected explicitly. Both persistent backends share the same block segment file layout; only the index format differs, so an archive written by one cannot be opened by the other without re-bootstrapping.
+- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole archive in process memory, block bodies included: ephemeral — everything is lost on restart — so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the archive entirely. The `redb` value was removed in v1.7: a configuration still naming it fails to load, and an existing redb archive has to be re-bootstrapped (a stelae restore is the shortest path).
 - `path`: optional override for the archive path (defaults to `<storage.path>/archive`).
-- `blocks_path`: optional override for block segment files (both persistent backends).
-- `cache`: size (MB) of the archive index cache (both persistent backends).
+- `blocks_path`: optional override for block segment files.
+- `cache`: size (MB) of the archive index cache.
 - `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
 
-### `storage.index` section
+Block segment files are always compressed: every block body is written as one zstd frame (level 3, checksummed) with the dictionary bundled in the binary and addressed by its physical location, from the first block of a fresh instance on. Nothing about this is configurable — there is no profile, dictionary path, cache bound, training, sealing or maintenance command — and the layout is part of storage `v4`. A key the archive table does not know, such as the `block_compression` table of an earlier build, fails the configuration load rather than being ignored.
 
-| property         | type    | example |
-| ---------------- | ------- | ------- |
-| backend          | string  | "fjall" |
-| path             | string  | "index" |
-| cache            | integer | 500     |
-| max_journal_size | integer | 1024    |
-| flush_on_commit  | boolean | false   |
-| l0_threshold     | integer | 8       |
-| worker_threads   | integer | 8       |
-| memtable_size_mb | integer | 128     |
+The dictionary is part of the storage format, not a setting: every build carries the same 112,640-byte asset (SHA-256 `c47b2eb1f69a997bf01a720f26bcc1b668e0fddb95431e91c90cebf4f9b87139`, zstd dictionary id `1075630411`), every frame names it in its header, and a frame written for any other dictionary is refused on read. Its provenance and the evaluation behind it are in the repository under `crates/flatfiles/dictionary/`.
 
-- `backend`: `fjall`, `in_memory`, or `no_op` (defaults to `fjall`). `in_memory` keeps the whole index in process memory: ephemeral — everything is lost on restart — and RAM-resident, so it suits devnets, tooling and tests rather than a node following a public network. `no_op` disables the index layer entirely. The `redb` value is deprecated in favor of `fjall`: it still parses but is refused at startup.
-- `path`: optional override for the index path (defaults to `<storage.path>/index`).
-- `cache`: size (MB) of the index cache.
-- `max_journal_size`, `flush_on_commit`, `l0_threshold`, `worker_threads`, `memtable_size_mb`: Fjall tuning options.
+A data directory written by an earlier layout is not readable and is not converted: bring a `v4` instance up by a fresh bootstrap (`dolos bootstrap mithril` or `relay`) or by importing a logical snapshot (`dolos bootstrap stelae`, the shortest path), both of which write the compressed layout from the first block. The version check is the only enforcement and it is at the configuration level: a `v3` or older `dolos.toml` is refused with the remedy named, and `dolos init` rewrites it. There is no check of the data itself, so a data directory from an older layout whose configuration was relabelled `v4` by hand is unsupported and is not detected — its blocks are not frames and reads of them fail.
+
+### `storage.index` section — removed in v1.7
+
+The standalone index store is gone. Its lookups moved into the stores that hold what they project: the live-UTxO tags into `storage.state`, and the historical tags and exact lookups into `storage.archive`. Drop the table from the configuration; v1.7 bumps the storage version, so an existing data directory has to be re-bootstrapped (a stelae restore is the shortest path) and its configuration revisited anyway.
+
+Any tuning the table carried (`cache`, `worker_threads`, `max_journal_size`, and the rest) should be re-applied to `storage.state` and `storage.archive`, which now carry the keyspaces. `index.backend = "no_op"` had no replacement and needs none: `archive.backend = "no_op"` is the ledger-only switch and drops the historical lookups with the archive, while the live-UTxO tags stay with the UTxO set they project.
 
 ### `storage.mempool` section
 

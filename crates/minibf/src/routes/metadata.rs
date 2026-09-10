@@ -357,7 +357,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_json_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -473,7 +473,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_label_cbor_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let label = app.vectors().metadata_label.as_str();
         let path = format!("/metadata/txs/labels/{label}/cbor");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

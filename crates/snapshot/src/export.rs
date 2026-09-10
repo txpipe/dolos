@@ -66,8 +66,8 @@ use dolos_cardano::{
     eras::ChainSummary, indexes::archive_dimensions, pallas::ledger::traverse::MultiEraBlock,
 };
 use dolos_core::{
-    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexRecord, IndexStore, LogKey, Namespace,
-    StateStore, TemporalKey,
+    ArchiveStore, BlockSlot, ChainPoint, EntityKey, IndexRecord, LogKey, Namespace, StateStore,
+    TemporalKey,
 };
 use stelae::{
     inscription::{HistoryEntry, Inscription, LayerDescriptor},
@@ -112,7 +112,7 @@ impl EpochWindow {
     }
 }
 
-/// How many `indexes` layers one traversal of the index store fills.
+/// How many `indexes` layers one traversal of the archive store fills.
 ///
 /// ## Why a publish needs a band at all
 ///
@@ -148,11 +148,11 @@ impl IndexBand {
     ///
     /// A zstd compression context at level 9 and the framing around it.
     /// Measured at **10.3 MiB** by `measure_layer_sink_residency` in the root
-    /// package's `tests/index_roundtrip.rs` — thirty-two sinks opened against a
-    /// real stele and each given records to compress, since a context that has
-    /// never compressed anything has not yet allocated its window. Pinned above
-    /// the measurement rather than at it, so a zstd whose level-9 parameters
-    /// grow does not silently overrun the ceiling.
+    /// package's `tests/archive_index_roundtrip.rs` — thirty-two sinks opened
+    /// against a real stele and each given records to compress, since a
+    /// context that has never compressed anything has not yet allocated its
+    /// window. Pinned above the measurement rather than at it, so a zstd
+    /// whose level-9 parameters grow does not silently overrun the ceiling.
     ///
     /// A constant because [`DEFAULT`](IndexBand::DEFAULT) is arithmetic over it
     /// rather than a number someone liked.
@@ -278,11 +278,11 @@ pub struct Plan {
     /// derived from `summary` — which epochs are worth a dump is operational
     /// (decision 0026).
     pub retained: RetainedEpochs,
-    /// How many `indexes` layers one traversal of the index store fills.
+    /// How many `indexes` layers one traversal of the archive store fills.
     ///
     /// Execution rather than geometry: it changes neither which layers this
     /// publish writes nor a byte of what is in them, only how many passes over
-    /// the index store it takes to fill them. It rides on the plan because
+    /// the archive store it takes to fill them. It rides on the plan because
     /// every driver that walks these stores — [`export`], [`reproduce`],
     /// [`verify_reproduction`] — pays the same cost and should take the same
     /// band without each call site spelling it. See [`IndexBand`].
@@ -701,13 +701,11 @@ pub use stelae_driver::Standing;
 /// through here, because the two halves of what an operator wants to see live
 /// in two places — this loop knows which layer of how many, and only the
 /// transport knows how much of it has moved.
-#[allow(clippy::too_many_arguments)]
-pub fn export<W, A, S, I>(
+pub fn export<W, A, S>(
     stele: &W,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
     observer: &Observer,
@@ -716,7 +714,6 @@ where
     W: SteleWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     stele.observe(observer.clone());
 
@@ -759,7 +756,7 @@ where
     // the jobs around it.
     for band in plan.epochs.chunks(plan.band.epochs()) {
         jobs.push(Job::band(move || {
-            write_indexes(stele, plan, indexes, band, previous, cursor)
+            write_indexes(stele, plan, archive, band, previous, cursor)
         }));
     }
 
@@ -829,19 +826,17 @@ where
 /// crate. Refuses a directory that already holds an inscription: republishing
 /// over a stele in place would leave its old blobs behind, indistinguishable
 /// from the new ones.
-pub fn publish<A, S, I>(
+pub fn publish<A, S>(
     root: impl Into<std::path::PathBuf>,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = stelae::dir::SteleDir::create(root)?;
 
@@ -850,7 +845,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         &First,
         observer,
@@ -873,18 +867,16 @@ where
 /// the same stores chained differently are different digests. Pass
 /// [`First`] for a stele that starts a chain and [`Following`] for one that
 /// extends a predecessor's.
-pub fn reproduce<A, S, I>(
+pub fn reproduce<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     previous: &dyn Predecessor,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     // Silent, and not for want of a caller to thread one through: a
     // reproduction stores nothing and moves nothing, so the only thing it could
@@ -896,7 +888,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         previous,
         &Observer::silent(),
@@ -928,19 +919,17 @@ pub struct Document {
 /// `previous` is the chain this reproduction is told to follow. It is an input
 /// and not an inference — `history` rides inside the canonical document, so the
 /// same stores chained differently are two different digests, deliberately.
-pub fn digest_document<A, S, I>(
+pub fn digest_document<A, S>(
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     previous: &dyn Predecessor,
 ) -> Result<Document, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
-    let inscription = reproduce(plan, archive, state, indexes, None, previous)?;
+    let inscription = reproduce(plan, archive, state, None, previous)?;
 
     Ok(Document {
         canonical: inscription.canonicalize()?,
@@ -974,18 +963,16 @@ where
 /// [`Attested`] takes the published history verbatim and so — unlike
 /// [`Following::new`] — checks nothing about it; this is where that check
 /// lands.
-pub fn verify_reproduction<A, S, I>(
+pub fn verify_reproduction<A, S>(
     published: &Inscription,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
 ) -> Result<Inscription, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     if plan.sequence != published.sequence {
         return Err(Error::ReproductionMismatch {
@@ -1008,7 +995,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         &Attested::of(published),
         &Observer::silent(),
@@ -1590,9 +1576,9 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// ## This is a scan, not a seek, which is why it is banded
 ///
 /// Neither traversal can seek to a slot, so a pass here costs a walk of the
-/// whole index store however few epochs it fills, and one epoch per pass makes
-/// a first publish O(N²). [`IndexBand`] states why the store cannot seek, what
-/// turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
+/// whole archive store however few epochs it fills, and one epoch per pass
+/// makes a first publish O(N²). [`IndexBand`] states why the store cannot seek,
+/// what turns that into ⌈N/K⌉ passes, and the measurement K is sized on.
 ///
 /// ## Positions are handed out before anything is written
 ///
@@ -1623,10 +1609,10 @@ fn log_key_range(slots: &Range<BlockSlot>) -> Range<LogKey> {
 /// index layers rather than the ones before the dying epoch. There is nothing
 /// to save there — resuming into the middle of a band would have to re-traverse
 /// the store for the rest of it anyway.
-fn write_indexes<W: SteleWriter, I: IndexStore>(
+fn write_indexes<W: SteleWriter, A: ArchiveStore>(
     stele: &W,
     plan: &Plan,
-    store: &I,
+    store: &A,
     band: &[EpochWindow],
     previous: &dyn Predecessor,
     cursor: &Cursor<'_>,
@@ -1726,7 +1712,7 @@ struct Building<K> {
 /// Send one index record to the layer whose epoch its slot falls in.
 ///
 /// A binary search rather than a walk of the band: this runs once per record,
-/// and a mainnet index store holds hundreds of millions of them.
+/// and a mainnet archive store holds hundreds of millions of them.
 ///
 /// A record that lands in no layer is **dropped on purpose** — see
 /// [`write_indexes`] for the two ways the band's span can cover a slot no layer

@@ -833,7 +833,6 @@ fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
         &following,
     )
@@ -860,7 +859,6 @@ fn a_stele_published_with_reuse_is_reproduced_from_the_stores() {
         &node.second,
         node.domain.archive(),
         node.domain.state(),
-        node.domain.indexes(),
         None,
         &export::First,
     )

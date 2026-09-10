@@ -4,10 +4,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dolos_cardano::{indexes::CardanoIndexExt, network_from_genesis, pallas_extras};
-use dolos_core::{
-    async_query::BlockRefMeta, Domain, EraCbor, IndexStore as _, StateStore as _, TxoRef, UtxoSet,
-};
+use dolos_cardano::{indexes::CardanoStateIndexExt, network_from_genesis, pallas_extras};
+use dolos_core::async_query::BlockMetaResolver;
+use dolos_core::{ArchiveStore as _, Domain, EraCbor, StateStore as _, TxoRef, UtxoSet};
 use pallas::codec::minicbor;
 use pallas::ledger::{
     addresses::{Address, StakeAddress},
@@ -241,7 +240,7 @@ fn refs_for_address_pattern<D: Domain>(
                 Address::Stake(stake) => {
                     let stake_bytes = stake.to_vec();
                     let refs = facade
-                        .indexes()
+                        .state()
                         .utxos_by_stake(&stake_bytes)
                         .map_err(|_| MatchError::Internal)?;
                     let delegation = stake_credential_pattern(&stake);
@@ -253,7 +252,7 @@ fn refs_for_address_pattern<D: Domain>(
                 }
                 _ => {
                     let refs = facade
-                        .indexes()
+                        .state()
                         .utxos_by_address(bytes)
                         .map_err(|_| MatchError::Internal)?;
                     Ok((refs, OutputFilter::None))
@@ -275,7 +274,7 @@ fn refs_for_address_pattern<D: Domain>(
 
             let mut refs = payment_key
                 .as_ref()
-                .map(|key| facade.indexes().utxos_by_payment(key))
+                .map(|key| facade.state().utxos_by_payment(key))
                 .transpose()
                 .map_err(|_| MatchError::Internal)?
                 .unwrap_or_default();
@@ -284,7 +283,7 @@ fn refs_for_address_pattern<D: Domain>(
                 let mut stake_refs = UtxoSet::new();
                 for key in stake_keys {
                     let next = facade
-                        .indexes()
+                        .state()
                         .utxos_by_stake(&key)
                         .map_err(|_| MatchError::Internal)?;
                     stake_refs.extend(next);
@@ -319,14 +318,14 @@ fn refs_for_asset_pattern<D: Domain>(
 
     let refs = match pattern.name() {
         patterns::AssetNamePattern::Any => facade
-            .indexes()
+            .state()
             .utxos_by_policy(pattern.policy())
             .map_err(|_| MatchError::Internal)?,
         patterns::AssetNamePattern::Exact(name) => {
             let mut subject = pattern.policy().to_vec();
             subject.extend_from_slice(name);
             facade
-                .indexes()
+                .state()
                 .utxos_by_asset(&subject)
                 .map_err(|_| MatchError::Internal)?
         }
@@ -425,35 +424,27 @@ async fn build_matches<D: Domain>(
         .get_utxos(refs.into_iter().collect())
         .map_err(|_| MatchError::Internal)?;
 
-    let mut block_cache: HashMap<pallas::crypto::hash::Hash<32>, BlockRefMeta> = HashMap::new();
-    let mut out = Vec::new();
-
-    for (txo_ref, cbor) in utxos {
+    let mut matched = Vec::new();
+    for (txo_ref, cbor) in &utxos {
         let cbor: &dolos_core::EraCbor = cbor.as_ref();
         let output = MultiEraOutput::try_from(cbor).map_err(|_| MatchError::Internal)?;
         let address = output.address().map_err(|_| MatchError::Internal)?;
 
-        if !matches_output_filter(&output, &address, &filter) {
-            continue;
+        if matches_output_filter(&output, &address, &filter) {
+            matched.push((txo_ref, output, address));
         }
+    }
 
+    let mut block_meta = BlockMetaResolver::new(facade.query());
+    let block_deps = block_meta
+        .resolve_batch(matched.iter().map(|(txo_ref, _, _)| txo_ref.0))
+        .await
+        .map_err(|_| MatchError::Internal)?;
+    let mut out = Vec::new();
+
+    for (txo_ref, output, address) in matched {
         let tx_hash = txo_ref.0;
-        let block_info = match block_cache.get(&tx_hash) {
-            Some(info) => info.clone(),
-            None => {
-                let Some(info) = facade
-                    .query()
-                    .block_meta_by_tx_hash(tx_hash.to_vec())
-                    .await
-                    .map_err(|_| MatchError::Internal)?
-                else {
-                    return Err(MatchError::Internal);
-                };
-
-                block_cache.insert(tx_hash, info.clone());
-                info
-            }
-        };
+        let block_info = block_deps.get(&tx_hash).ok_or(MatchError::Internal)?;
 
         let (datum_hash, datum_type) = output_datum_info(&output);
         let script_hash = output_script_hash(&output);
@@ -682,7 +673,7 @@ fn parse_slot_or_point<D: Domain>(value: &str, facade: &Facade<D>) -> Result<u64
             return Err(MatchError::BadRequest(slot_range_hint()));
         }
         let found_slot = facade
-            .indexes()
+            .archive()
             .slot_by_block_hash(&bytes)
             .map_err(|_| MatchError::Internal)?
             .ok_or_else(|| MatchError::BadRequest(slot_range_hint()))?;
@@ -1050,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn matches_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let path = format!("/matches/{}", app.vectors().address);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }

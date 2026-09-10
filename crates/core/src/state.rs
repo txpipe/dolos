@@ -3,7 +3,10 @@ use std::{collections::HashMap, marker::PhantomData, ops::Range};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::{ChainError, ChainPoint, Domain, EraCbor, TxoRef, UtxoMap, UtxoSetDelta};
+use crate::{
+    ChainError, ChainPoint, Domain, EraCbor, TagDimension, TxoRef, UtxoIndexDelta, UtxoMap,
+    UtxoSet, UtxoSetDelta,
+};
 
 pub const KEY_SIZE: usize = 32;
 
@@ -300,6 +303,18 @@ pub trait StateWriter: Sized + Send + Sync {
 
     fn apply_utxoset(&self, delta: &UtxoSetDelta) -> Result<(), StateError>;
 
+    /// Apply the live-UTxO tag changes that go with a `UtxoSetDelta`.
+    ///
+    /// The tags are a projection of the UTxO set: `produced` refs gain their
+    /// tags, `consumed` refs lose them. They ride the same batch as
+    /// `apply_utxoset` and commit with it, so a reader never sees a tag whose
+    /// UTxO is not there, or a UTxO without its tags.
+    fn apply_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError>;
+
+    /// Reverse `apply_utxo_tags`: `produced` refs lose their tags, `consumed`
+    /// refs regain them.
+    fn undo_utxo_tags(&self, delta: &UtxoIndexDelta) -> Result<(), StateError>;
+
     #[allow(clippy::double_must_use)]
     #[must_use]
     fn commit(self) -> Result<(), StateError>;
@@ -421,6 +436,13 @@ pub trait StateStore: Sized + Send + Sync + Clone {
     // TODO: generalize UTxO Set into generic entity system (#1042)
 
     fn get_utxos(&self, refs: Vec<TxoRef>) -> Result<UtxoMap, StateError>;
+
+    /// Query live UTxOs by tag dimension and key.
+    ///
+    /// Returns every ref tagged with the given dimension and key that has not
+    /// been consumed. Chain-specific code names the dimensions and wraps this
+    /// in typed lookups (address, payment credential, asset, …).
+    fn utxos_by_tag(&self, dimension: TagDimension, key: &[u8]) -> Result<UtxoSet, StateError>;
 
     /// Iterate the whole UTxO set.
     ///

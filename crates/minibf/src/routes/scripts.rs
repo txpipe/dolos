@@ -10,7 +10,7 @@ use blockfrost_openapi::models::{
     script_json::ScriptJson,
     script_utxos_inner::ScriptUtxosInner,
 };
-use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoIndexExt, ScriptLanguage};
+use dolos_cardano::indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, ScriptLanguage};
 use dolos_core::Domain;
 use pallas::crypto::hash::Hash;
 use pallas::ledger::primitives::alonzo::NativeScript;
@@ -137,7 +137,7 @@ where
     let pagination = Pagination::try_from(params)?;
 
     let refs = domain
-        .indexes()
+        .state()
         .utxos_by_script_ref(hash.as_slice())
         .map_err(log_and_500("failed to query script_ref index"))?;
 

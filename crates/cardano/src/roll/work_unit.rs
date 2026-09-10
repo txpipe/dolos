@@ -123,14 +123,6 @@ where
         Ok(())
     }
 
-    fn commit_indexes(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
-        debug!("committing roll batch to indexes");
-
-        self.batch.commit_indexes(domain)?;
-
-        Ok(())
-    }
-
     fn tip_events(&self) -> Vec<TipEvent> {
         if !self.live_mode {
             return Vec::new();

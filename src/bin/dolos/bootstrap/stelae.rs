@@ -70,6 +70,11 @@ pub struct Args {
     /// stages nothing
     #[arg(long, value_name = "DIR")]
     pub scratch_dir: Option<PathBuf>,
+
+    /// skip the restore disk-space preflight and continue even when the
+    /// stele's declared sizes exceed the available space
+    #[arg(long, action)]
+    pub skip_space_check: bool,
 }
 
 impl Args {
@@ -88,6 +93,7 @@ impl Args {
             point: Point::default(),
             insecure: false,
             scratch_dir: None,
+            skip_space_check: false,
         })
     }
 }
@@ -98,6 +104,13 @@ struct Node {
     stores: crate::common::Stores,
     magic: u64,
     max_history: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct RestoreOptions<'a> {
+    feedback: &'a Feedback,
+    resume: bool,
+    skip_space_check: bool,
 }
 
 impl Node {
@@ -121,12 +134,17 @@ impl Node {
     }
 
     /// What this node knows about itself, as the restore driver takes it.
-    fn restoring(&self, resume: bool) -> dolos_snapshot::restore::Restoring<'_> {
+    fn restoring(
+        &self,
+        resume: bool,
+        skip_space_check: bool,
+    ) -> dolos_snapshot::restore::Restoring<'_> {
         dolos_snapshot::restore::Restoring {
             network_magic: self.magic,
             max_history: self.max_history,
             storage_path: &self.root,
             resume,
+            skip_space_check,
         }
     }
 
@@ -137,28 +155,22 @@ impl Node {
         '_,
         impl dolos_core::ArchiveStore,
         impl dolos_core::StateStore,
-        impl dolos_core::IndexStore,
     > {
-        dolos_snapshot::restore::Target::new(
-            &self.stores.archive,
-            &self.stores.state,
-            &self.stores.indexes,
-        )
+        dolos_snapshot::restore::Target::new(&self.stores.archive, &self.stores.state)
     }
 }
 
 fn restore_dir(
     config: &RootConfig,
     dir: &std::path::Path,
-    feedback: &Feedback,
-    resume: bool,
+    options: RestoreOptions<'_>,
 ) -> miette::Result<()> {
     let node = Node::open(config)?;
-    let progress = SteleProgress::restoring(feedback);
+    let progress = SteleProgress::restoring(options.feedback);
 
     let (plan, outlook, summary) = dolos_snapshot::restore::restore_dir(
         dir,
-        node.restoring(resume),
+        node.restoring(options.resume, options.skip_space_check),
         node.target(),
         &progress.observer(),
     )
@@ -178,8 +190,7 @@ fn restore_repo(
     point: Point,
     insecure: bool,
     scratch_dir: Option<&std::path::Path>,
-    feedback: &Feedback,
-    resume: bool,
+    options: RestoreOptions<'_>,
 ) -> miette::Result<()> {
     // First: `Node::open` runs `ensure_storage_path`, so the default of
     // `<storage.path>/scratch` needs no special case on a host where the
@@ -199,12 +210,12 @@ fn restore_repo(
 
     println!("source:   {repo} ({point})");
 
-    let progress = SteleProgress::restoring(feedback);
+    let progress = SteleProgress::restoring(options.feedback);
 
     let (plan, outlook, summary) = registry::restore_registry(
         &registry,
         point,
-        node.restoring(resume),
+        node.restoring(options.resume, options.skip_space_check),
         node.target(),
         &progress.observer(),
     )
@@ -319,16 +330,21 @@ pub fn run(
     feedback: &Feedback,
     resume: bool,
 ) -> miette::Result<()> {
+    let options = RestoreOptions {
+        feedback,
+        resume,
+        skip_space_check: args.skip_space_check,
+    };
+
     match &args.source {
-        Source::Dir(dir) => restore_dir(config, dir, feedback, resume),
+        Source::Dir(dir) => restore_dir(config, dir, options),
         Source::Repo(repo) => restore_repo(
             config,
             repo,
             args.point,
             args.insecure,
             args.scratch_dir.as_deref(),
-            feedback,
-            resume,
+            options,
         ),
     }
 }

@@ -3,8 +3,10 @@ use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
 use crate::{
-    state::KEY_SIZE, BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityKey,
-    EntityValue, Namespace, RawBlock,
+    indexes::{ArchiveIndexDelta, ExactRecord, IndexRecord, TagDimension, TagRecord},
+    state::KEY_SIZE,
+    BlockBody, BlockSlot, BrokenInvariant, ChainPoint, Entity, EntityKey, EntityValue, Namespace,
+    RawBlock,
 };
 
 const TEMPORAL_KEY_SIZE: usize = 8;
@@ -169,10 +171,77 @@ pub enum ArchiveError {
 
     #[error("namespace {0} not found")]
     NamespaceNotFound(Namespace),
+
+    /// The operation is part of the trait but the concrete backend does not
+    /// implement it.
+    ///
+    /// The no-op archive answers the index record traversals and the
+    /// pre-hashed append with this, so a restore into a store that discards
+    /// records fails instead of reporting success.
+    #[error("{0} is not supported on this storage backend")]
+    Unsupported(&'static str),
 }
+
+/// Iterator used by backends that do not implement
+/// [`ArchiveStore::iter_archive_tags`].
+///
+/// Never constructed — those backends return [`ArchiveError::Unsupported`],
+/// so the alias only exists to satisfy the associated type.
+pub type EmptyTagIter = std::iter::Empty<Result<TagRecord, ArchiveError>>;
+
+/// Iterator used by backends that do not implement
+/// [`ArchiveStore::iter_exact_records`].
+///
+/// Never constructed — those backends return [`ArchiveError::Unsupported`],
+/// so the alias only exists to satisfy the associated type.
+pub type EmptyExactIter = std::iter::Empty<Result<ExactRecord, ArchiveError>>;
 
 pub trait ArchiveWriter: Send + Sync + 'static {
     fn apply(&self, point: &ChainPoint, block: &RawBlock) -> Result<(), ArchiveError>;
+
+    /// Write the index entries the blocks of this batch project: their tags
+    /// and their exact lookups.
+    ///
+    /// Separate from [`ArchiveWriter::apply`] on purpose. A restore writes
+    /// the `blocks` layer without deltas (the entries arrive pre-hashed in
+    /// the `indexes` layer, see [`ArchiveWriter::append_prehashed`]), while
+    /// the sync pipeline and the WAL catch-up derive the deltas from the
+    /// blocks they are about to write and land both in the same commit.
+    fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError>;
+
+    /// Remove the index entries [`ArchiveWriter::apply_index`] wrote for
+    /// these blocks (rollback).
+    fn undo_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError>;
+
+    /// Append archive records that already carry their stored key form.
+    ///
+    /// This is the write mirror of [`ArchiveStore::iter_archive_tags`] and
+    /// [`ArchiveStore::iter_exact_records`]: records that came out of one
+    /// store go into another byte-for-byte, with no logical key in between
+    /// (there is none to recover — see [`crate::indexes::KeyHash`]).
+    ///
+    /// Records must arrive sorted, since the backing stores are append
+    /// oriented.
+    ///
+    /// ## Chunking
+    ///
+    /// The argument is an iterator so a restore can pipe its wire decoder
+    /// straight in, rather than materializing a slice beside the write
+    /// batch's own encoded copy. It is consumed lazily and fully; a backend
+    /// never collects it.
+    ///
+    /// This call is *not* the batch boundary — the writer accumulates until
+    /// [`ArchiveWriter::commit`], so an unbounded iterator builds an
+    /// unbounded batch. Chunking is the caller's: feed one writer a run of
+    /// records, commit it, start the next. The sort order has to hold across
+    /// the whole restore, not merely within a chunk.
+    ///
+    /// Backends that do not implement this return
+    /// [`ArchiveError::Unsupported`].
+    fn append_prehashed(
+        &self,
+        records: impl IntoIterator<Item = IndexRecord>,
+    ) -> Result<(), ArchiveError>;
 
     fn write_log(
         &self,
@@ -212,6 +281,15 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     type Writer: ArchiveWriter;
     type LogIter: Iterator<Item = Result<(LogKey, EntityValue), ArchiveError>>;
     type EntityValueIter: Iterator<Item = Result<EntityValue, ArchiveError>>;
+
+    /// Iterator type for sparse slot queries.
+    type SlotIter: Iterator<Item = Result<BlockSlot, ArchiveError>> + DoubleEndedIterator;
+
+    /// Iterator type for archive tag record traversal.
+    type TagIter: Iterator<Item = Result<TagRecord, ArchiveError>>;
+
+    /// Iterator type for exact-match record traversal.
+    type ExactIter: Iterator<Item = Result<ExactRecord, ArchiveError>>;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError>;
 
@@ -295,4 +373,86 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     fn prune_history(&self, max_slots: u64, max_prune: Option<u64>) -> Result<bool, ArchiveError>;
 
     fn truncate_front(&self, after: &ChainPoint) -> Result<(), ArchiveError>;
+
+    /// Get the slot for a block by its hash (exact lookup).
+    fn slot_by_block_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
+
+    /// Get the slot for a block by its number/height (exact lookup).
+    fn slot_by_block_number(&self, number: u64) -> Result<Option<BlockSlot>, ArchiveError>;
+
+    /// Get the slot containing a transaction by its hash (exact lookup).
+    fn slot_by_tx_hash(&self, hash: &[u8]) -> Result<Option<BlockSlot>, ArchiveError>;
+
+    /// Query slots by tag dimension and key within a slot range.
+    ///
+    /// This method returns a lazy iterator over the slots that contain data
+    /// with the given dimension and key. Forward iteration gives the slots
+    /// in ascending order. Reverse iteration gives the slots in descending
+    /// order.
+    ///
+    /// Both `start` and `end` are **inclusive** — unlike the record traversal
+    /// methods below, which take a half-open [`Range`]. Reusing one `(start,
+    /// end)` pair across both conventions drops or double-counts the record at
+    /// `end`.
+    fn slots_by_tag(
+        &self,
+        dimension: TagDimension,
+        key: &[u8],
+        start: BlockSlot,
+        end: BlockSlot,
+    ) -> Result<Self::SlotIter, ArchiveError>;
+
+    /// Iterate every archive tag record whose slot falls in `slots`.
+    ///
+    /// `slots` is **half-open** (`start..end`), unlike
+    /// [`ArchiveStore::slots_by_tag`], whose bounds are both inclusive.
+    ///
+    /// `dimensions` is the closed list of dimensions to traverse. It has to be
+    /// supplied by the caller: stores keep a hash of the dimension name, not
+    /// the name, so the set of dimensions is not discoverable from disk.
+    /// Duplicates are ignored.
+    ///
+    /// **Order is part of the contract.** Records come out sorted by
+    /// `(dimension, key_hash, slot)` — `dimension` compared as a string,
+    /// independently of the order `dimensions` was given in. Consumers of this
+    /// iteration (snapshot layers) make that order their content, so an
+    /// unordered iterator is a wrong one.
+    ///
+    /// **Errors are terminal.** A malformed on-disk entry or a read failure is
+    /// yielded as `Err` and the iterator is fused from then on: it never
+    /// resumes past a fault, so a consumer that collects into
+    /// `Result<Vec<_>, _>` cannot receive a silently truncated record set.
+    ///
+    /// The iterator must be lazy in the size of the store. Each call opens its
+    /// own point-in-time view: records from separate calls (or from
+    /// [`ArchiveStore::iter_exact_records`]) are only mutually consistent if
+    /// the store is quiescent across the calls.
+    ///
+    /// Backends that do not implement this return
+    /// [`ArchiveError::Unsupported`].
+    fn iter_archive_tags(
+        &self,
+        dimensions: &[TagDimension],
+        slots: Range<BlockSlot>,
+    ) -> Result<Self::TagIter, ArchiveError>;
+
+    /// Iterate every exact-match record whose slot falls in `slots`.
+    ///
+    /// `slots` is **half-open** (`start..end`), unlike
+    /// [`ArchiveStore::slots_by_tag`], whose bounds are both inclusive.
+    ///
+    /// **Order is part of the contract**: records come out sorted by
+    /// `(kind, key)`, kinds in ascending [`crate::indexes::ExactKind::as_str`]
+    /// order.
+    ///
+    /// **Errors are terminal** — same policy as
+    /// [`ArchiveStore::iter_archive_tags`].
+    ///
+    /// Note that the slot is the stored *value* of an exact entry, not part of
+    /// its key, so a slot-bounded traversal is a scan of every exact entry in
+    /// the store rather than a seek. The iterator is still lazy in memory.
+    ///
+    /// Backends that do not implement this return
+    /// [`ArchiveError::Unsupported`].
+    fn iter_exact_records(&self, slots: Range<BlockSlot>) -> Result<Self::ExactIter, ArchiveError>;
 }

@@ -4,7 +4,7 @@ This module implements the `StateStore` trait using [Fjall](https://github.com/f
 
 ## Design Philosophy
 
-The state store is organized into **3 keyspaces** based on access patterns, rather than one keyspace per entity type. This design:
+The state store is organized into **4 keyspaces** based on access patterns, rather than one keyspace per entity type. This design:
 
 1. **Reduces file descriptor usage** - LSM-trees create many segment files during compaction. Having 13+ separate keyspaces (one per entity namespace) caused "too many open files" errors during heavy imports.
 
@@ -19,6 +19,7 @@ The state store is organized into **3 keyspaces** based on access patterns, rath
 | 1 | `state-cursor` | Chain position tracking | Single key read/write |
 | 2 | `state-utxos` | UTxO set storage | Point lookups by TxoRef |
 | 3 | `state-entities` | All entity types | Point lookups and range scans |
+| 4 | `state-tags` | Live-UTxO tags | Prefix scans by dimension and lookup key |
 
 ## Key Schemas
 
@@ -56,6 +57,23 @@ Value: CBOR-encoded entity data
 
 - `ns_hash`: 8-byte xxh3 hash of namespace string (e.g., "accounts", "pools")
 - `entity_key`: 32-byte entity key (typically a hash or structured identifier)
+
+### Tags Keyspace (`state-tags`)
+
+The live-UTxO tags: which UTxOs answer under an address, payment credential, stake credential, policy id, asset id or reference script.
+
+```
+Key:   [dim_hash:8][lookup_key:var][txo_ref:36]
+Value: (empty)
+```
+
+- `dim_hash`: `xxh3("utxo:" + dimension)` — see `keys.rs`, `hash_dimension`
+- `lookup_key`: the logical key, stored verbatim so a prefix scan can find it
+- `txo_ref`: `[tx_hash:32][index:4]`, the UTxO the tag points at
+
+They are a projection of the UTxO set, so they are written in the same batch as the set (`StateWriter::apply_utxo_tags` / `undo_utxo_tags`) and read through `StateStore::utxos_by_tag`. Before v1.7 they lived in a separate index database; nothing about the key encoding changed with the move, only which journal, cache and write batch they live under.
+
+Note the asymmetry with the archive's tags, which hash their key: here the lookup key is stored whole, because a live-UTxO query knows the key it is asking about and wants the exact refs back.
 
 #### Namespace Hashing
 
@@ -98,6 +116,7 @@ state/
 ├── entity_keys.rs  # Namespace hashing and entity key encoding
 ├── entities.rs     # Entity read/write operations
 ├── utxos.rs        # UTxO set operations
+├── tags.rs         # Live-UTxO tag operations
 └── README.md       # This file
 ```
 
@@ -153,6 +172,7 @@ let writer = store.start_writer()?;
 writer.write_entity("accounts", &key, &value)?;
 writer.delete_entity("pools", &key)?;
 writer.apply_utxoset(&delta)?;
+writer.apply_utxo_tags(&utxo_index_delta)?;
 writer.set_cursor(chain_point)?;
 writer.commit()?;
 ```
@@ -177,6 +197,6 @@ writer.commit()?;
 
 ## Migration Notes
 
-This 3-keyspace design is **not backward compatible** with previous versions that used separate keyspaces per entity type. Users must recreate their state databases when upgrading.
+This 4-keyspace design is **not backward compatible** with previous versions that used separate keyspaces per entity type. Users must recreate their state databases when upgrading.
 
 The removal of the schema parameter from `StateStore::open()` is also a breaking API change.

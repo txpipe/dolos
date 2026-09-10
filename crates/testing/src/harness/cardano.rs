@@ -131,7 +131,6 @@ pub struct HarnessDomain {
     chain: Arc<RwLock<CardanoLogic>>,
     state: dolos_fjall::StateStore,
     archive: dolos_core::builtin::NoOpArchiveStore,
-    indexes: dolos_core::builtin::NoOpIndexStore,
     mempool: Mempool,
     storage_config: StorageConfig,
     sync_config: SyncConfig,
@@ -147,7 +146,6 @@ impl Domain for HarnessDomain {
     type Chain = CardanoLogic;
     type WorkUnit = CardanoWorkUnit;
     type TipSubscription = StubTipSubscription;
-    type Indexes = dolos_core::builtin::NoOpIndexStore;
     type Mempool = Mempool;
 
     fn storage_config(&self) -> &StorageConfig {
@@ -180,10 +178,6 @@ impl Domain for HarnessDomain {
 
     fn archive(&self) -> &Self::Archive {
         &self.archive
-    }
-
-    fn indexes(&self) -> &Self::Indexes {
-        &self.indexes
     }
 
     fn mempool(&self) -> &Self::Mempool {
@@ -223,7 +217,6 @@ impl LedgerHarness {
             chain: Arc::new(RwLock::new(chain)),
             state,
             archive: dolos_core::builtin::NoOpArchiveStore,
-            indexes: dolos_core::builtin::NoOpIndexStore,
             mempool: Mempool {},
             storage_config: StorageConfig::default(),
             sync_config: SyncConfig::default(),
@@ -326,7 +319,6 @@ impl LedgerHarness {
                 }
 
                 WorkUnit::<HarnessDomain>::commit_archive(&mut work, &self.domain, shard)?;
-                WorkUnit::<HarnessDomain>::commit_indexes(&mut work, &self.domain, shard)?;
 
                 on_work(&self.domain, &work, shard);
             }

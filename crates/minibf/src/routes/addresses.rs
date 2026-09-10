@@ -19,7 +19,7 @@ use pallas::ledger::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     pallas_extras, ChainSummary,
 };
 use dolos_core::{BlockBody, BlockSlot, Domain, StateStore as _, TxoRef};
@@ -137,13 +137,13 @@ fn refs_for_parsed_address<D: Domain>(
 ) -> Result<HashSet<TxoRef>, Error> {
     match parsed {
         ParsedAddress::Payment { key, .. } => {
-            Ok(domain.indexes().utxos_by_payment(key).map_err(|err| {
+            Ok(domain.state().utxos_by_payment(key).map_err(|err| {
                 tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?)
         }
         ParsedAddress::Shelley { key, .. } | ParsedAddress::Byron { key } => {
-            Ok(domain.indexes().utxos_by_address(key).map_err(|err| {
+            Ok(domain.state().utxos_by_address(key).map_err(|err| {
                 tracing::error!(?err);
                 StatusCode::INTERNAL_SERVER_ERROR
             })?)
@@ -335,7 +335,7 @@ where
         let refs = refs_for_address(&domain, &address)?;
         let asset = super::assets::decode_asset_subject(&asset)?;
         let asset_refs = domain
-            .indexes()
+            .state()
             .utxos_by_asset(&asset)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -776,7 +776,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_by_address_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -883,7 +883,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_total_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/total");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_transactions_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/transactions");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
@@ -1121,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn addresses_utxos_internal_error() {
-        let app = TestApp::new_with_fault(Some(TestFault::IndexStoreError));
+        let app = TestApp::new_with_fault(Some(TestFault::ArchiveStoreError));
         let address = app.vectors().address.as_str();
         let path = format!("/addresses/{address}/utxos");
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;

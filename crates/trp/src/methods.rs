@@ -29,11 +29,7 @@ pub async fn trp_resolve<D: Domain>(
 
     let mut compiler = load_compiler::<D>(&context.domain, &context.config)?;
 
-    let store = MempoolAwareUtxoStore::<D>::new(
-        context.domain.state(),
-        context.domain.indexes(),
-        context.domain.mempool(),
-    );
+    let store = MempoolAwareUtxoStore::<D>::new(context.domain.state(), context.domain.mempool());
 
     let utxos = UtxoStoreAdapter::<D>::new(store);
 

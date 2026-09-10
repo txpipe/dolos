@@ -9,8 +9,8 @@
 //!
 //! What it does and does not touch is the whole of its correctness:
 //!
-//! - It deletes the still-unspent AVVM refs from the state store and drops them
-//!   from the UTxO filter indexes.
+//! - It deletes the still-unspent AVVM refs from the state store, UTxO filter
+//!   tags included.
 //! - It leaves the **pots alone**. They already had the reclamation applied;
 //!   adjusting them here would break the half that is currently right and turn
 //!   a one-sided overcount into an inconsistency nothing checks.
@@ -28,7 +28,7 @@ use dolos_core::config::RootConfig;
 use miette::Context as _;
 use pallas::ledger::traverse::MultiEraOutput;
 
-use dolos::adapters::{storage, DomainAdapter};
+use dolos::adapters::DomainAdapter;
 
 #[derive(Debug, clap::Args)]
 pub struct Args {
@@ -48,14 +48,11 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let genesis = crate::common::open_genesis_files(&config.genesis)?;
 
-    // State and indexes only: the repair touches neither the WAL nor the
-    // archive, and on a mainnet instance those are the expensive opens.
+    // State only: the repair touches neither the WAL, the archive nor the
+    // index store, and on a mainnet instance those are the expensive opens.
     let state = crate::common::open_state_store(config)
         .map_err(|e| miette::miette!("{e}"))
         .context("opening the state store")?;
-    let indexes = storage::open_index_store(config)
-        .map_err(|e| miette::miette!("{e}"))
-        .context("opening the index store")?;
 
     let derived = AvvmReclamation::genesis_refs(&genesis).len();
 
@@ -115,7 +112,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     }
 
     reclamation
-        .apply_deletion::<DomainAdapter>(&state, &indexes)
+        .apply_deletion::<DomainAdapter>(&state)
         .map_err(|e| miette::miette!("{e}"))
         .context("deleting the AVVM utxos")?;
 

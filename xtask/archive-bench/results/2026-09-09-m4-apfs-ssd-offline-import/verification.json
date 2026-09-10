@@ -1,0 +1,113 @@
+{
+  "checks": [
+    {
+      "check": "final-evidence",
+      "command": ["cargo", "test", "-p", "xtask"],
+      "exit_status": 0,
+      "tests": {"passed": 20, "failed": 0, "ignored": 0}
+    },
+    {
+      "check": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features"
+      ],
+      "exit_status": 0,
+      "preexisting_warnings": 7,
+      "new_warnings": 0
+    },
+    {
+      "check": "build",
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--all-targets",
+        "--all-features"
+      ],
+      "exit_status": 0
+    },
+    {
+      "check": "default",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets"
+      ],
+      "exit_status": 0,
+      "tests": {
+        "passed": 1452,
+        "failed": 0,
+        "ignored": 48
+      }
+    },
+    {
+      "check": "all-features",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-features",
+        "--exclude",
+        "dolos-minibf",
+        "--exclude",
+        "dolos-minikupo",
+        "--exclude",
+        "dolos-trp"
+      ],
+      "exit_status": 0,
+      "tests": {
+        "passed": 990,
+        "failed": 0,
+        "ignored": 53
+      }
+    },
+    {
+      "check": "registry-publish",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "dolos-snapshot",
+        "--test",
+        "publish",
+        "--",
+        "--ignored",
+        "--test-threads=1"
+      ],
+      "exit_status": 124,
+      "reason": "Docker daemon unresponsive; terminated the process group after 45 seconds"
+    },
+    {
+      "check": "registry-restore",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "dolos-snapshot",
+        "--test",
+        "restore_registry",
+        "--",
+        "--ignored",
+        "--test-threads=1"
+      ],
+      "exit_status": 124,
+      "reason": "Docker daemon unresponsive; terminated the process group after 45 seconds"
+    }
+  ],
+  "test_build_settings": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "release_build_settings": {
+    "profile": "release",
+    "features": "default",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "baseline": "9165dbd862f55baa64d9c693a26519f6bfe3c00a",
+  "serial": "b21c8d554f8cdabcdfdb6b5f00421ba77edfa0dc"
+}

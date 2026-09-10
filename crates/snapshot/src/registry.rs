@@ -135,7 +135,7 @@
 
 use std::path::{Path, PathBuf};
 
-use dolos_core::{ArchiveStore, IndexStore, StateStore};
+use dolos_core::{ArchiveStore, StateStore};
 use stelae::{
     digest::LayerDigests,
     frame::Limits,
@@ -251,17 +251,16 @@ impl std::str::FromStr for Point {
 /// remaining-download figure in [`Outlook`] exact rather than an extrapolation.
 ///
 /// **Never call this from inside an async context.** See [`open`].
-pub fn restore_registry<A, S, I>(
+pub fn restore_registry<A, S>(
     registry: &Registry,
     point: Point,
     node: Restoring<'_>,
-    target: Target<'_, A, S, I>,
+    target: Target<'_, A, S>,
     observer: &Observer,
 ) -> Result<(crate::restore::Plan, Outlook, Summary), Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let stele = point.pull(registry)?;
 
@@ -560,19 +559,17 @@ pub use stelae_driver::publish::{preflight, staging_peak, StagingPeak};
 ///
 /// `observer` is who hears about it while it runs, and [`Observer::silent`] is
 /// what a caller with nothing to render passes.
-pub fn publish<A, S, I>(
+pub fn publish<A, S>(
     publishing: Publishing<'_>,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Published, Error>
 where
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     publish_into(
         publishing.registry,
@@ -580,7 +577,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         observer,
     )
@@ -598,14 +594,12 @@ where
 /// from what that transport is carrying, so a writer that puts the layers
 /// somewhere else would seal a manifest with holes in it. A decorator over the
 /// registry is the shape this takes; anything else is a caller misusing it.
-#[allow(clippy::too_many_arguments)]
-pub fn publish_into<W, A, S, I>(
+pub fn publish_into<W, A, S>(
     stele: &W,
     publishing: Publishing<'_>,
     plan: &Plan,
     archive: &A,
     state: &S,
-    indexes: &I,
     digest_records: Option<&[digests::ImmutableDigests]>,
     observer: &Observer,
 ) -> Result<Published, Error>
@@ -613,7 +607,6 @@ where
     W: SteleWriter + Sync,
     A: ArchiveStore,
     S: StateStore,
-    I: IndexStore,
 {
     let registry = publishing.registry;
     let latest = registry.latest(&DolosProfile)?;
@@ -628,7 +621,6 @@ where
         plan,
         archive,
         state,
-        indexes,
         digest_records,
         &previous,
         observer,

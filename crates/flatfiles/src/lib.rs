@@ -1,22 +1,27 @@
 //! Flat segment files for archived block bodies.
 //!
 //! Bodies are appended to numbered segment files (one Cardano epoch per
-//! segment) and addressed by packed [`BlockLocation`]s stored in whichever
-//! archive index backend is in use. The layout is backend-independent: the
-//! redb and fjall archive stores share these files byte for byte, which is
-//! why this crate depends on nothing but the standard library (plus
-//! `tempfile` for throwaway stores).
+//! segment) as independent zstd frames, one per body, compressed with the
+//! dictionary bundled in this crate. A packed [`BlockLocation`] names a frame
+//! by its physical offset and length inside its segment; the archive index
+//! holds those locations and this crate decodes the frame they name. The
+//! crate knows nothing about Cardano and depends on little beyond the
+//! standard library: `zstd` for the frames, `rayon` for eligible batches'
+//! parallel encoding and `tempfile` for throwaway stores.
 
-use std::collections::{hash_map::Entry, HashMap};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
-use std::sync::Mutex;
+mod codec;
+mod store;
+
+pub use codec::{frame_bound, BUNDLED_DICTIONARY, COMPRESSION_LEVEL, MAX_BODY_BYTES};
+pub use store::{
+    parse_segment_filename, AppendStats, FlatFileStore, ResourceStats, ENCODE_WINDOW_BYTES,
+};
 
 /// Number of slots per segment file (one Cardano epoch).
 pub const SLOTS_PER_SEGMENT: u64 = 432_000;
 
-/// Location of a block within the flat file store.
+/// Location of a block's frame within the flat file store: the segment, the
+/// frame's byte offset in the segment file, and the frame's length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockLocation {
     pub segment_id: u32,
@@ -82,159 +87,6 @@ pub fn encode_locations(locations: &[BlockLocation]) -> Vec<u8> {
     buf
 }
 
-/// Segment file name for a given segment ID.
-fn segment_filename(segment_id: u32) -> String {
-    format!("{:06}.segment", segment_id)
-}
-
-/// Manages append-only segment files for block storage.
-pub struct FlatFileStore {
-    segments_dir: PathBuf,
-    writers: Mutex<HashMap<u32, File>>,
-}
-
-impl FlatFileStore {
-    /// Create a new FlatFileStore at the given directory.
-    /// Creates the directory if it does not exist.
-    pub fn new(segments_dir: impl Into<PathBuf>) -> io::Result<Self> {
-        let segments_dir = segments_dir.into();
-        fs::create_dir_all(&segments_dir)?;
-        Ok(Self {
-            segments_dir,
-            writers: Mutex::new(HashMap::new()),
-        })
-    }
-
-    fn segment_path(&self, segment_id: u32) -> PathBuf {
-        self.segments_dir.join(segment_filename(segment_id))
-    }
-
-    /// Get or create an append-mode file handle for a segment.
-    fn get_writer(&self, segment_id: u32) -> io::Result<()> {
-        let mut writers = self.writers.lock().unwrap();
-        if let Entry::Vacant(entry) = writers.entry(segment_id) {
-            let file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(self.segment_path(segment_id))?;
-            entry.insert(file);
-        }
-        Ok(())
-    }
-
-    /// Append a batch of blocks to their respective segment files.
-    ///
-    /// Each item is `(segment_id, block_data)`. Blocks are appended in order.
-    /// A single fsync is performed per segment file after all blocks for that
-    /// segment have been written.
-    ///
-    /// Returns a `BlockLocation` for each input item, in the same order.
-    pub fn append_batch(&self, items: &[(u32, &[u8])]) -> io::Result<Vec<BlockLocation>> {
-        let mut locations = Vec::with_capacity(items.len());
-        let mut touched_segments: HashMap<u32, ()> = HashMap::new();
-
-        // Ensure all writers exist.
-        for &(segment_id, _) in items {
-            self.get_writer(segment_id)?;
-            touched_segments.insert(segment_id, ());
-        }
-
-        let mut writers = self.writers.lock().unwrap();
-
-        for &(segment_id, data) in items {
-            let file = writers.get_mut(&segment_id).unwrap();
-            // Current position is the offset (file is in append mode).
-            let offset = file.seek(SeekFrom::End(0))?;
-            file.write_all(data)?;
-            locations.push(BlockLocation {
-                segment_id,
-                offset,
-                length: data.len() as u32,
-            });
-        }
-
-        // Fsync all touched segments.
-        for &segment_id in touched_segments.keys() {
-            if let Some(file) = writers.get(&segment_id) {
-                file.sync_data()?;
-            }
-        }
-
-        Ok(locations)
-    }
-
-    /// Read block data at the given location.
-    pub fn read(&self, loc: &BlockLocation) -> io::Result<Vec<u8>> {
-        let mut file = File::open(self.segment_path(loc.segment_id))?;
-        file.seek(SeekFrom::Start(loc.offset))?;
-        let mut buf = vec![0u8; loc.length as usize];
-        file.read_exact(&mut buf)?;
-        Ok(buf)
-    }
-
-    /// Truncate a segment file at the given offset.
-    /// Used for undo: removes everything from `offset` onwards.
-    pub fn truncate(&self, segment_id: u32, offset: u64) -> io::Result<()> {
-        // Drop the cached writer so we reopen fresh next time.
-        {
-            let mut writers = self.writers.lock().unwrap();
-            writers.remove(&segment_id);
-        }
-
-        let path = self.segment_path(segment_id);
-        if !path.exists() {
-            return Ok(());
-        }
-
-        if offset == 0 {
-            // Remove the file entirely if truncating to zero.
-            fs::remove_file(&path)?;
-        } else {
-            let file = OpenOptions::new().write(true).open(&path)?;
-            file.set_len(offset)?;
-            file.sync_data()?;
-        }
-
-        Ok(())
-    }
-
-    /// Delete all segment files with IDs strictly less than `segment_id`.
-    pub fn delete_segments_before(&self, segment_id: u32) -> io::Result<()> {
-        let mut writers = self.writers.lock().unwrap();
-
-        // Remove cached writers for deleted segments.
-        writers.retain(|&id, _| id >= segment_id);
-
-        // Scan directory for segment files to delete.
-        for entry in fs::read_dir(&self.segments_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let Some(name_str) = name.to_str() else {
-                continue;
-            };
-            if !name_str.ends_with(".segment") {
-                continue;
-            }
-            let prefix = &name_str[..6];
-            if let Ok(id) = prefix.parse::<u32>() {
-                if id < segment_id {
-                    fs::remove_file(entry.path())?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Create a FlatFileStore backed by a temporary directory.
-    /// Returns the TempDir (caller must keep it alive) and the store.
-    pub fn for_tempdir() -> io::Result<(tempfile::TempDir, Self)> {
-        let dir = tempfile::tempdir()?;
-        let store = Self::new(dir.path())?;
-        Ok((dir, store))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,8 +124,11 @@ mod tests {
         assert_eq!(locs.len(), 2);
         assert_eq!(locs[0].segment_id, 0);
         assert_eq!(locs[0].offset, 0);
-        assert_eq!(locs[0].length, data1.len() as u32);
-        assert_eq!(locs[1].offset, data1.len() as u64);
+        assert_eq!(locs[1].offset, locs[0].length as u64);
+        assert_eq!(
+            locs[1].offset + locs[1].length as u64,
+            std::fs::metadata(store.segment_path(0)).unwrap().len()
+        );
 
         let read1 = store.read(&locs[0]).unwrap();
         assert_eq!(read1, data1);

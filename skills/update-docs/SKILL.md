@@ -43,7 +43,7 @@ The schema doc must reflect:
 - Every field of `RootConfig` (top-level TOML sections).
 - For each top-level section struct (e.g. `MinibfConfig`, `StorageConfig`, `SyncConfig`, `LoggingConfig`, `TelemetryConfig`, etc.), every public field plus its type and any default returned by an accessor like `fn permissive_cors(&self) -> bool { self.permissive_cors.unwrap_or(true) }`.
 - `Option<T>` fields are documented as optional. Fields with `#[serde(default)]` use the `Default` impl.
-- Nested structs under `storage.*` (`storage.wal`, `storage.state`, `storage.archive`, `storage.index`, `storage.mempool`) each have their own subsection.
+- Nested structs under `storage.*` (`storage.wal`, `storage.state`, `storage.archive`, `storage.mempool`) each have their own subsection.
 - The example TOML at the top of `schema.mdx` should remain a valid, representative sample — if you add a section, add it here too in alphabetical-ish order matching the rest of the doc.
 
 Common drift patterns to look for:

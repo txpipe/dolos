@@ -181,7 +181,7 @@ impl Error {
     }
 }
 
-/// The four stores a publish reads, opened without a domain.
+/// The three stores a publish reads, opened without a domain.
 ///
 /// [`Driver::publish_pending`] runs *before* anything opens a domain and
 /// cannot use one: the WAL reseed it performs is the very thing that makes
@@ -191,7 +191,6 @@ pub struct Stores<D: Domain> {
     pub wal: D::Wal,
     pub state: D::State,
     pub archive: D::Archive,
-    pub indexes: D::Indexes,
 }
 
 /// Where the replay's own progress goes.
@@ -230,13 +229,7 @@ pub trait Publish<D: Domain> {
 
     /// Publish the plan. Retried in place by the daemon, so it must be safe to
     /// simply run again.
-    fn publish(
-        &self,
-        plan: &Plan,
-        archive: &D::Archive,
-        state: &D::State,
-        indexes: &D::Indexes,
-    ) -> Result<(), Error>;
+    fn publish(&self, plan: &Plan, archive: &D::Archive, state: &D::State) -> Result<(), Error>;
 }
 
 /// How a run ended, for a caller that has something to say about it.
@@ -499,7 +492,7 @@ pub struct Driver<'a, D: Domain> {
     /// Where the replay's progress goes.
     pub replay: &'a dyn Replay,
 
-    /// Open the four stores a publish reads, without assembling a domain.
+    /// Open the three stores a publish reads, without assembling a domain.
     pub open_stores: &'a dyn Fn() -> Result<Stores<D>, Error>,
 
     /// Build a domain whose `stop_epoch` is the given epoch.
@@ -652,10 +645,7 @@ impl<D: Domain> Driver<'_, D> {
         retry::transient(
             "publishing the pending sequence",
             &|| self.aborted(),
-            || {
-                self.publish
-                    .publish(&plan, &stores.archive, &stores.state, &stores.indexes)
-            },
+            || self.publish.publish(&plan, &stores.archive, &stores.state),
         )?;
 
         if self.until_epoch.is_some_and(|until| plan.sequence >= until) {
