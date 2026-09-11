@@ -31,7 +31,7 @@ There is no standalone index store. Every index is a projection and lives in
 the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
-- the stake address log (each `(stake, address)` pair once, at its first on-chain appearance) projects the block history too and lives in the `ArchiveStore` (`ArchiveStore::addresses_by_stake_log`, written through the same `ArchiveWriter::apply_index`); it is authoritative only on stores synced from genesis, which is what `mark_stake_log_ready` records
+- the stake address log (each `(stake, address)` pair once, at its first on-chain appearance) projects the block history too and lives in the `ArchiveStore` (`ArchiveStore::addresses_by_stake_log`, written through the same `ArchiveWriter::apply_index`)
 
 ### Database File Organization
 
