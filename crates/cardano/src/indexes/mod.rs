@@ -12,7 +12,9 @@ mod dimensions;
 mod ext;
 mod query;
 
-pub use delta::{utxo_index_delta_from_utxo_delta, CardanoIndexDeltaBuilder};
+pub use delta::{
+    stake_appearance_order, utxo_index_delta_from_utxo_delta, CardanoIndexDeltaBuilder,
+};
 pub use dimensions::{archive as archive_dimensions, utxo as utxo_dimensions};
 pub use ext::{CardanoArchiveIndexExt, CardanoStateIndexExt};
 pub use query::{AsyncCardanoQueryExt, ScriptData, ScriptLanguage, SlotOrder};

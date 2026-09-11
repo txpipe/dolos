@@ -319,6 +319,34 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
+    // The stake address log answers both orders with one page read. It is
+    // authoritative only on stores synced from genesis with the log in place;
+    // `None` falls through to the archive scan below.
+    let page = domain
+        .archive()
+        .addresses_by_stake_log(
+            &account_key.address.to_vec(),
+            pagination.skip(),
+            pagination.count,
+            matches!(pagination.order, Order::Desc),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(addresses) = page {
+        let items = addresses
+            .into_iter()
+            .map(|bytes| {
+                Address::from_bytes(&bytes)
+                    .map(|address| AccountAddressesContentInner {
+                        address: address.to_string(),
+                    })
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        return Ok(Json(items));
+    }
+
     // `from`/`to` are ignored, so the scan always covers the whole history.
     let end_slot = domain.get_tip_slot()?;
 
@@ -2071,6 +2099,82 @@ mod tests {
         let desc_blocks: Vec<_> = desc.iter().map(|x| address_bounds(&x.address).0).collect();
 
         assert!(desc_blocks.windows(2).all(|w| w[0] >= w[1]));
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_log_matches_archive_scan() {
+        // Two identical synthetic chains: one serves from the stake address
+        // log, the other from the archive-scan fallback. Every query shape
+        // must produce identical responses on both.
+        let logged = TestApp::new();
+        let scanned = TestApp::new_scan_fallback();
+
+        let stake_address = logged.vectors().stake_address.clone();
+        assert_eq!(stake_address, scanned.vectors().stake_address);
+
+        let queries = [
+            "order=asc&count=100",
+            "order=desc&count=100",
+            "order=asc&count=2&page=2",
+            "order=desc&count=2&page=2",
+            "count=1&page=3",
+        ];
+
+        for query in queries {
+            let path = format!("/accounts/{stake_address}/addresses?{query}");
+
+            let (status, bytes) = logged.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "log path failed for {query}");
+            let from_log: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse log response");
+
+            let (status, bytes) = scanned.get_bytes(&path).await;
+            assert_eq!(status, StatusCode::OK, "scan path failed for {query}");
+            let from_scan: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse scan response");
+
+            let log_addresses: Vec<_> = from_log.iter().map(|x| x.address.clone()).collect();
+            let scan_addresses: Vec<_> = from_scan.iter().map(|x| x.address.clone()).collect();
+
+            assert!(!log_addresses.is_empty(), "empty response for {query}");
+            assert_eq!(
+                log_addresses, scan_addresses,
+                "log and scan disagree for {query}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_scan_fallback_orders_desc_by_first_appearance() {
+        // The fallback keeps Blockfrost's ordering on its own: `desc` is the
+        // reverse of `asc`, not a latest-appearance ordering.
+        let app = TestApp::new_scan_fallback();
+        let stake_address = app.vectors().stake_address.as_str();
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=asc&count=100"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let asc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses asc");
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?order=desc&count=100"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let desc: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
+
+        assert!(!asc.is_empty());
+
+        let mut reversed: Vec<_> = asc.iter().map(|x| x.address.clone()).collect();
+        reversed.reverse();
+        let desc_addresses: Vec<_> = desc.iter().map(|x| x.address.clone()).collect();
+        assert_eq!(desc_addresses, reversed);
     }
 
     #[tokio::test]

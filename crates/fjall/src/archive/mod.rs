@@ -3,12 +3,12 @@
 //! The archive keeps block bodies in flat segment files ([`dolos_flatfiles`],
 //! one zstd frame per body, named by the frame's physical location) and
 //! holds the rows that point into the history — a blocks location table,
-//! the derived-log namespaces, and the two index projections of the blocks
+//! the derived-log namespaces, and the three index projections of the blocks
 //! — in an LSM tree. Behavior is
 //! pinned by the shared conformance suite (`tests/archive_conformance.rs`),
 //! with the builtin memory archive as the oracle.
 //!
-//! ## Four Keyspace Design
+//! ## Five Keyspace Design
 //!
 //! 1. **`archive-blocks`**: slot → packed 16-byte [`BlockLocation`]s, newest
 //!    first. Key is the 8-byte big-endian slot; the value encoding is
@@ -28,10 +28,14 @@
 //! 4. **`index-exact`**: exact-match lookups (block hash, block number, tx hash
 //!    → slot). Key: `[dim_hash:8][key_data:var]` → `[slot:8]`. See [`exact`].
 //!
-//! The two index keyspaces are projections of the blocks and are written in
+//! 5. **`archive-stake-log`**: the stake address log, each `(stake, address)`
+//!    pair once at its first on-chain appearance, plus the ready marker genesis
+//!    writes. See [`stake_log`].
+//!
+//! The three index keyspaces are projections of the blocks and are written in
 //! the same batch as the block locations, so the history and its lookups
 //! commit together. They keep the compaction settings the standalone index
-//! store gave them. A rollback removes its entries through
+//! store gave them. A rollback removes their entries through
 //! [`CoreArchiveWriter::undo_index`]; `truncate_front` does not touch them.
 //!
 //! ## Pruning the index keyspaces
@@ -46,12 +50,16 @@
 //! a sixteenth of the window since the last one. A node restored from a
 //! full-history stele pays one whole-keyspace scan on its first sweep.
 //!
+//! The stake address log is not swept: its entries are first appearances,
+//! so removing one below the cutoff would drop an address the account may
+//! still use.
+//!
 //! Unlike the redb writer, log batches are not reordered before insertion:
 //! shuffling exists to work around redb's half-split of ascending B-tree
 //! leaves, and an LSM memtable sorts its batch regardless of arrival order.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Bound, Range};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -77,6 +85,7 @@ use crate::Error;
 pub mod exact;
 pub mod log_keys;
 pub mod scan;
+pub mod stake_log;
 pub mod tags;
 
 use log_keys::{
@@ -115,6 +124,8 @@ mod keyspace_names {
     pub const TAGS: &str = "archive-tags";
     /// Exact-match keyspace (block hash, tx hash, block number -> slot)
     pub const EXACT: &str = "index-exact";
+    /// Stake address log keyspace (insert-once pairs, removed on rollback)
+    pub const STAKE_LOG: &str = "archive-stake-log";
 }
 
 fn io_err(e: std::io::Error) -> ArchiveError {
@@ -128,7 +139,7 @@ fn fjall_err(e: fjall::Error) -> ArchiveError {
 /// Fjall-based archive store.
 ///
 /// Block bodies live in flat segment files; the location table, the log
-/// namespaces and the two index keyspaces live in the LSM tree.
+/// namespaces and the three index keyspaces live in the LSM tree.
 #[derive(Clone)]
 pub struct ArchiveStore {
     db: Database,
@@ -136,6 +147,7 @@ pub struct ArchiveStore {
     logs: Keyspace,
     tags: Keyspace,
     exact: Keyspace,
+    stake_log: Keyspace,
     flatfiles: Arc<FlatFileStore>,
     schema: Arc<StateSchema>,
     flush_on_commit: bool,
@@ -246,6 +258,7 @@ impl ArchiveStore {
         };
         let tags = db.keyspace(keyspace_names::TAGS, index_opts)?;
         let exact = db.keyspace(keyspace_names::EXACT, index_opts)?;
+        let stake_log = db.keyspace(keyspace_names::STAKE_LOG, index_opts)?;
 
         Ok(Self {
             db,
@@ -253,6 +266,7 @@ impl ArchiveStore {
             logs,
             tags,
             exact,
+            stake_log,
             flatfiles: Arc::new(flatfiles),
             schema: Arc::new(schema),
             flush_on_commit,
@@ -278,6 +292,7 @@ impl ArchiveStore {
             (keyspace_names::LOGS, &self.logs),
             (keyspace_names::TAGS, &self.tags),
             (keyspace_names::EXACT, &self.exact),
+            (keyspace_names::STAKE_LOG, &self.stake_log),
         ]
         .map(|(name, ks)| (name, ks.disk_space(), ks.path().to_path_buf()))
         .to_vec()
@@ -293,6 +308,7 @@ impl ArchiveStore {
         self.logs.major_compact()?;
         self.tags.major_compact()?;
         self.exact.major_compact()?;
+        self.stake_log.major_compact()?;
         self.db.persist(PersistMode::SyncAll)?;
 
         Ok(())
@@ -352,8 +368,9 @@ impl ArchiveStore {
         }
     }
 
-    /// Remove every index entry below `prune_before` if the cutoff has moved
-    /// far enough since the last sweep to be worth a walk of both keyspaces.
+    /// Remove every tag and exact entry below `prune_before` if the cutoff
+    /// has moved far enough since the last sweep to be worth a walk of both
+    /// keyspaces. The stake address log is not swept (see the module docs).
     ///
     /// The threshold is a sixteenth of the retained window (at least one
     /// slot), so a sliding node walks its window-sized index about sixteen
@@ -458,11 +475,16 @@ impl ArchiveStore {
 /// boundary) and consecutive `undo`s at one slot resolve against the
 /// overlay first and the committed state second — the reads redb gets for
 /// free from its transaction seeing its own writes.
+///
+/// `stake_pairs_seen` plays the same role for the stake address log: the
+/// pairs this writer has already inserted, since the batch cannot read its
+/// own pending inserts and one batch spans many blocks.
 pub struct ArchiveWriter {
     store: ArchiveStore,
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
+    stake_pairs_seen: Mutex<HashSet<Vec<u8>>>,
     #[cfg(test)]
     fail_index_commit: bool,
 }
@@ -474,6 +496,7 @@ impl ArchiveWriter {
             store: store.clone(),
             pending_blocks: Mutex::new(Vec::new()),
             overlay: Mutex::new(HashMap::new()),
+            stake_pairs_seen: Mutex::new(HashSet::new()),
             #[cfg(test)]
             fail_index_commit: false,
         }
@@ -564,6 +587,20 @@ impl CoreArchiveWriter for ArchiveWriter {
         exact::apply(&mut batch, &self.store.exact, deltas)?;
         tags::apply(&mut batch, &self.store.tags, deltas)?;
 
+        let snapshot = self.store.db.snapshot();
+        let mut seen = self.stake_pairs_seen.lock().unwrap();
+
+        for block in deltas {
+            stake_log::apply(
+                &mut batch,
+                &self.store.stake_log,
+                &snapshot,
+                &mut seen,
+                block.slot,
+                &block.stake_addresses,
+            )?;
+        }
+
         Ok(())
     }
 
@@ -572,6 +609,18 @@ impl CoreArchiveWriter for ArchiveWriter {
 
         exact::undo(&mut batch, &self.store.exact, deltas)?;
         tags::undo(&mut batch, &self.store.tags, deltas)?;
+
+        let snapshot = self.store.db.snapshot();
+
+        for block in deltas.iter().rev() {
+            stake_log::undo(
+                &mut batch,
+                &self.store.stake_log,
+                &snapshot,
+                block.slot,
+                &block.stake_addresses,
+            )?;
+        }
 
         Ok(())
     }
@@ -1209,6 +1258,38 @@ impl CoreArchiveStore for ArchiveStore {
 
         SlotIter::new(&snapshot, &self.tags, dimension, hash, start, end)
             .map_err(ArchiveError::from)
+    }
+
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+        let snapshot = self.db.snapshot();
+
+        // Without the ready marker the log is not authoritative: the store
+        // was not synced from genesis with the log in place.
+        if !stake_log::is_ready(&snapshot, &self.stake_log)? {
+            return Ok(None);
+        }
+
+        let page = stake_log::page(&snapshot, &self.stake_log, stake, offset, limit, reverse)?;
+
+        Ok(Some(page))
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
+        let mut batch = self.db.batch();
+        stake_log::mark_ready(&mut batch, &self.stake_log);
+
+        batch
+            .durability(Some(PersistMode::Buffer))
+            .commit()
+            .map_err(fjall_err)?;
+
+        Ok(())
     }
 
     fn iter_archive_tags(

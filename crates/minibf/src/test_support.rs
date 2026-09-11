@@ -116,6 +116,24 @@ impl TestApp {
         Self::new_with_cfg_and_fault(cfg, None)
     }
 
+    /// Like [`TestApp::new`], but with the stake address log marked not
+    /// authoritative, so account-address requests take the archive-scan
+    /// fallback.
+    pub fn new_scan_fallback() -> Self {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        Self::new_with_cfg_and_setup(cfg, |domain, _| {
+            domain
+                .archive()
+                .clear_stake_log_ready()
+                .expect("failed to clear the stake log marker");
+        })
+    }
+
     pub fn new_with_cfg_and_fault(cfg: SyntheticBlockConfig, fault: Option<TestFault>) -> Self {
         let (domain, vectors) = TestDomainBuilder::new_with_synthetic(cfg).finish();
         Self::from_domain(domain, vectors, fault, None)

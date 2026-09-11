@@ -7,7 +7,8 @@
 //! store).
 
 use dolos_core::{
-    ArchiveIndexDelta, BlockSlot, EraCbor, Tag, TxoRef, UtxoIndexDelta, UtxoMap, UtxoSetDelta,
+    ArchiveIndexDelta, BlockSlot, EraCbor, StakeAddressAppearance, Tag, TxoRef, UtxoIndexDelta,
+    UtxoMap, UtxoSetDelta,
 };
 use pallas::{
     codec::minicbor,
@@ -133,6 +134,7 @@ impl CardanoIndexDeltaBuilder {
             block_number: number,
             tx_hashes: Vec::new(),
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         });
     }
 
@@ -169,6 +171,34 @@ impl CardanoIndexDeltaBuilder {
                 block.tags.push(Tag::new(archive::ADDRESS, x.to_vec()));
             }
         }
+    }
+
+    /// Record an address appearing under its stake credential in the current
+    /// block, for the stake address log. Addresses without a stake credential
+    /// (Byron, enterprise) are not logged.
+    ///
+    /// `order` places the appearance inside the block; see
+    /// [`stake_appearance_order`].
+    pub fn add_stake_appearance(&mut self, order: u32, addr: &Address) {
+        let stake = match addr {
+            Address::Shelley(x) => {
+                pallas_extras::shelley_address_to_stake_address(x).map(|s| s.to_vec())
+            }
+            Address::Stake(x) => Some(x.to_vec()),
+            Address::Byron(_) => None,
+        };
+
+        let Some(stake) = stake else {
+            return;
+        };
+
+        self.current_block()
+            .stake_addresses
+            .push(StakeAddressAppearance {
+                order,
+                stake,
+                address: addr.to_vec(),
+            });
     }
 
     /// Add asset tags to the current block.
@@ -291,7 +321,7 @@ impl CardanoIndexDeltaBuilder {
 
         self.start_block(block.slot(), block.hash().to_vec(), Some(block.number()));
 
-        for tx in block.txs() {
+        for (tx_order, tx) in block.txs().iter().enumerate() {
             self.add_tx_hash(tx.hash().to_vec());
 
             for (label, _) in tx.metadata().collect::<Vec<_>>() {
@@ -315,9 +345,13 @@ impl CardanoIndexDeltaBuilder {
                 }
             }
 
-            for (_, output) in tx.produces() {
+            for (output_order, output) in tx.produces() {
                 if let Ok(addr) = output.address() {
                     self.add_address(&addr);
+                    self.add_stake_appearance(
+                        stake_appearance_order(tx_order, output_order),
+                        &addr,
+                    );
                 }
                 self.add_assets(&output.value());
                 if let Some(datum) = output.datum() {
@@ -437,6 +471,13 @@ impl CardanoIndexDeltaBuilder {
     }
 }
 
+/// The position of a produced output inside its block, as the stake address
+/// log orders appearances within one slot: transaction index in the high 16
+/// bits, output index in the low 16.
+pub fn stake_appearance_order(tx_order: usize, output_order: usize) -> u32 {
+    ((tx_order as u32) << 16) | (output_order as u32 & 0xffff)
+}
+
 /// The live-UTxO tag changes a `UtxoSetDelta` implies.
 ///
 /// Pairs with `StateWriter::apply_utxoset`: every ref that delta puts into the
@@ -483,6 +524,48 @@ mod tests {
         assert_eq!(archive[0].tx_hashes.len(), 1);
         // Shelley address produces 3 tags: full, payment, stake
         assert_eq!(archive[0].tags.len(), 3);
+    }
+
+    /// Only addresses with a stake credential feed the stake address log, and
+    /// the appearance carries the credential the endpoint queries by.
+    #[test]
+    fn stake_appearances_carry_the_stake_credential() {
+        use pallas::ledger::addresses::ByronAddress;
+
+        let mut builder = CardanoIndexDeltaBuilder::new();
+        builder.start_block(100, vec![0; 32], Some(50));
+
+        let shelley = test_shelley_address();
+        builder.add_stake_appearance(stake_appearance_order(1, 2), &shelley);
+
+        let enterprise = Address::Shelley(ShelleyAddress::new(
+            Network::Testnet,
+            ShelleyPaymentPart::Key([1; 28].as_slice().into()),
+            ShelleyDelegationPart::Null,
+        ));
+        builder.add_stake_appearance(stake_appearance_order(1, 3), &enterprise);
+
+        let byron = Address::Byron(ByronAddress::new(&[0x82; 20], 0));
+        builder.add_stake_appearance(stake_appearance_order(2, 0), &byron);
+
+        let archive = builder.build();
+        let appearances = &archive[0].stake_addresses;
+
+        let Address::Shelley(shelley_inner) = &shelley else {
+            unreachable!()
+        };
+        let stake = pallas_extras::shelley_address_to_stake_address(shelley_inner)
+            .expect("test address delegates to a key")
+            .to_vec();
+
+        assert_eq!(
+            appearances,
+            &[StakeAddressAppearance {
+                order: (1 << 16) | 2,
+                stake,
+                address: shelley.to_vec(),
+            }]
+        );
     }
 
     /// An output that carries a reference script gets a `script_ref` tag whose

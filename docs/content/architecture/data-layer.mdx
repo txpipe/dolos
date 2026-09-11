@@ -47,7 +47,7 @@ The three storage modes exposed in configuration are really combinations of back
 
 `archive.backend = "no_op"` is the ledger-only switch, and it drops the historical lookups with the archive that hosts them. The live-UTxO tags are not affected: they project the UTxO set, so they stay in the state store in every mode (about 3.5 GB on mainnet).
 
-Pruning is driven by `prune_history()` on the WAL and archive stores. In the archive it covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
+Pruning is driven by `prune_history()` on the WAL and archive stores. In the archive it covers the block bodies, the logs, and the `archive-tags` and `index-exact` keyspaces, so a sliding-history node's index footprint is window-sized too. The `archive-stake-log` keyspace is not pruned: it records each account address once, at its first appearance, and that appearance may lie before the window while the address is still in use. See the [configuration schema](../configuration/schema#storage-section) for the exact keys.
 
 ## Data model primitives
 
@@ -58,12 +58,13 @@ A few concepts recur across the stores:
 - **`EpochValue` snapshot window.** Cardano staking reads state as it was several epochs ago. State entities that participate in staking are stored as a rotating window of snapshots (live / mark / set / go / next). The details are covered in the [Ledger Model](./ledger-model).
 - **Archive dual storage.** Block bodies are written to append-only flatfile segments (one segment per Cardano epoch) as one zstd frame per block, compressed with the dictionary bundled in `dolos-flatfiles`, while a compact index maps each slot to its `(segment, offset, length)` frame location. Every frame is written and synced before the location that names it is committed, so a crash leaves at most dead space at a segment's end and never a location pointing at bytes that are not there. Historical entity changes are stored as `(slot, entity-key) → value` logs, enabling range queries over time.
 - **Index dimensions.** Tag multimaps keyed by address, payment credential, stake credential, policy id, and asset id. The live ones point at the matching UTxOs and live in the state store's `state-tags` keyspace, written in the same batch as the UTxO set; the historical ones point at slots and live in the archive store's `archive-tags` keyspace, beside the `index-exact` keyspace that resolves a block hash, block number or transaction hash to its slot — both written in the same batch as the blocks they project.
+- **Stake address log.** Each `(stake credential, address)` pair once, at its first on-chain appearance, in the archive store's `archive-stake-log` keyspace and written in the same batch as the blocks. It serves an account's address list in either order as one page read. The log is authoritative only on a node synced from genesis with it in place; a node restored from a stele answers from a scan of the archive instead until it is resynced.
 
-Two fjall databases, eight keyspaces:
+Two fjall databases, nine keyspaces:
 
 | Store | Keyspaces | One batch commits |
 |---|---|---|
 | state | `state-cursor`, `state-utxos`, `state-entities`, `state-tags` | entities + UTxO set + live-UTxO tags + cursor |
-| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact` | block locations + logs + archive tags + exact lookups |
+| archive | `archive-blocks`, `archive-logs`, `archive-tags`, `index-exact`, `archive-stake-log` | block locations + logs + archive tags + exact lookups + stake address log |
 
 Source: `crates/core/src/{state,archive,wal,indexes,mempool}.rs`, `crates/redb3/src/*`, `crates/fjall/src/*`, and storage configuration in `crates/core/src/config.rs`.
