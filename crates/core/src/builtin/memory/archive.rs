@@ -107,9 +107,6 @@ struct Tables {
     /// Membership map for the log: each pair's first appearance, which is
     /// also what an undo has to match before it may remove the pair.
     stake_log_pairs: BTreeMap<StakeLogPair, (BlockSlot, u32)>,
-    /// Set once the log is complete from genesis; queries answer `None`
-    /// until then.
-    stake_log_ready: bool,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -168,18 +165,6 @@ impl MemoryArchiveStore {
     /// background work before the process exits. There is nothing to drain
     /// here.
     pub fn shutdown(&self) -> Result<(), ArchiveError> {
-        Ok(())
-    }
-
-    /// Forget the stake address log's ready marker, so queries answer `None`
-    /// and callers take their archive-scan fallback.
-    ///
-    /// For tests only: the toy domain runs genesis, which marks the log, and
-    /// a test of the fallback path needs a store where it is not marked. The
-    /// disk backend has no such switch — there the marker is genesis's alone.
-    pub fn clear_stake_log_ready(&self) -> Result<(), ArchiveError> {
-        let mut tables = self.tables.write().map_err(|_| poisoned())?;
-        tables.stake_log_ready = false;
         Ok(())
     }
 
@@ -810,15 +795,11 @@ impl ArchiveStore for MemoryArchiveStore {
         offset: usize,
         limit: usize,
         reverse: bool,
-    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
         let tables = self.tables.read().map_err(|_| poisoned())?;
 
-        if !tables.stake_log_ready {
-            return Ok(None);
-        }
-
         let Some(set) = tables.stake_log.get(stake) else {
-            return Ok(Some(Vec::new()));
+            return Ok(Vec::new());
         };
 
         let pick = |entry: &StakeLogEntry| entry.2.clone();
@@ -834,13 +815,7 @@ impl ArchiveStore for MemoryArchiveStore {
             set.iter().skip(offset).take(limit).map(pick).collect()
         };
 
-        Ok(Some(page))
-    }
-
-    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
-        let mut tables = self.tables.write().map_err(|_| poisoned())?;
-        tables.stake_log_ready = true;
-        Ok(())
+        Ok(page)
     }
 
     fn iter_archive_tags(

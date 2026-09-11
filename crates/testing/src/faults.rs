@@ -361,19 +361,12 @@ impl ArchiveStore for FaultyArchiveStore {
         offset: usize,
         limit: usize,
         reverse: bool,
-    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
         if self.should_fault() {
             return Err(self.fault_err());
         }
         self.inner
             .addresses_by_stake_log(stake, offset, limit, reverse)
-    }
-
-    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
-        if self.should_fault() {
-            return Err(self.fault_err());
-        }
-        self.inner.mark_stake_log_ready()
     }
 
     fn iter_archive_tags(

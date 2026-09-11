@@ -5,8 +5,7 @@
 use std::sync::Arc;
 
 use dolos_core::{
-    config::CardanoConfig, ArchiveStore as _, ChainPoint, Domain, DomainError, Genesis,
-    WalStore as _, WorkUnit,
+    config::CardanoConfig, ChainPoint, Domain, DomainError, Genesis, WalStore as _, WorkUnit,
 };
 use tracing::{debug, info};
 
@@ -53,13 +52,6 @@ where
 
     fn commit_state(&mut self, domain: &D, _shard_index: u32) -> Result<(), DomainError> {
         info!("bootstrapping chain from genesis");
-
-        // A store that starts here sees every block it will ever hold flow
-        // through the apply path, so its stake address log is complete by
-        // construction. Marked before the state cursor — the flag that says
-        // genesis is done — so a crash in between re-runs genesis instead of
-        // leaving a store that never marks.
-        domain.archive().mark_stake_log_ready()?;
 
         // Execute the genesis bootstrap
         super::execute::<D>(domain.state(), &self.genesis, &self.config)?;

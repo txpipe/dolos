@@ -1437,9 +1437,9 @@ fn seeded_block() -> (Vec<u8>, u64, BlockSlot) {
         .clone()
 }
 
-/// The stake address log conformance check: gated by the ready marker,
-/// first-appearance dedup (also inside one writer spanning blocks), ordered
-/// paging in both directions, and undo of only the first appearance.
+/// The stake address log conformance check: first-appearance dedup (also
+/// inside one writer spanning blocks), ordered paging in both directions,
+/// and undo of only the first appearance.
 fn stake_log_round_trips_and_pages<B: Backend>() {
     let (store, _guard) = B::open();
 
@@ -1467,13 +1467,8 @@ fn stake_log_round_trips_and_pages<B: Backend>() {
             .expect("addresses_by_stake_log failed")
     };
 
-    // before the marker the log is not authoritative, but writes still land
     apply(&store, &[delta(1, vec![appearance(0, &stake_a, 0x01)])]);
-    assert_eq!(page(&stake_a, 0, 10, false), None);
-
-    store
-        .mark_stake_log_ready()
-        .expect("mark_stake_log_ready failed");
+    assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x01)]);
 
     // one writer spanning two blocks dedups the pair the later block repeats
     apply(
@@ -1490,23 +1485,20 @@ fn stake_log_round_trips_and_pages<B: Backend>() {
     // a repeat in a later writer is deduped against the committed store
     apply(&store, &[delta(4, vec![appearance(0, &stake_a, 0x01)])]);
 
-    let asc = page(&stake_a, 0, 10, false).expect("log should be ready");
+    let asc = page(&stake_a, 0, 10, false);
     assert_eq!(asc, vec![addr(0x01), addr(0x02)]);
 
     // desc is the exact reverse of asc
-    let desc = page(&stake_a, 0, 10, true).expect("log should be ready");
+    let desc = page(&stake_a, 0, 10, true);
     assert_eq!(desc, vec![addr(0x02), addr(0x01)]);
 
     // offset windows work from both ends
-    assert_eq!(page(&stake_a, 1, 1, false).unwrap(), vec![addr(0x02)]);
-    assert_eq!(page(&stake_a, 1, 1, true).unwrap(), vec![addr(0x01)]);
+    assert_eq!(page(&stake_a, 1, 1, false), vec![addr(0x02)]);
+    assert_eq!(page(&stake_a, 1, 1, true), vec![addr(0x01)]);
 
-    // stakes are isolated, and an unknown stake is an empty page, not None
-    assert_eq!(page(&stake_b, 0, 10, false).unwrap(), vec![addr(0x03)]);
-    assert_eq!(
-        page(&[0xCC; 29], 0, 10, false).unwrap(),
-        Vec::<Vec<u8>>::new()
-    );
+    // stakes are isolated, and an unknown stake is an empty page
+    assert_eq!(page(&stake_b, 0, 10, false), vec![addr(0x03)]);
+    assert_eq!(page(&[0xCC; 29], 0, 10, false), Vec::<Vec<u8>>::new());
 
     // within one block, `order` decides: output 3 before output 7
     apply(
@@ -1517,7 +1509,7 @@ fn stake_log_round_trips_and_pages<B: Backend>() {
         )],
     );
     assert_eq!(
-        page(&stake_b, 0, 10, false).unwrap(),
+        page(&stake_b, 0, 10, false),
         vec![addr(0x03), addr(0x04), addr(0x05)]
     );
 
@@ -1531,12 +1523,9 @@ fn stake_log_round_trips_and_pages<B: Backend>() {
 
     // undoing the repeat leaves the pair in place
     undo_one(delta(4, vec![appearance(0, &stake_a, 0x01)]));
-    assert_eq!(
-        page(&stake_a, 0, 10, false).unwrap(),
-        vec![addr(0x01), addr(0x02)]
-    );
+    assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x01), addr(0x02)]);
 
     // undoing the first appearance removes it
     undo_one(delta(1, vec![appearance(0, &stake_a, 0x01)]));
-    assert_eq!(page(&stake_a, 0, 10, false).unwrap(), vec![addr(0x02)]);
+    assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x02)]);
 }

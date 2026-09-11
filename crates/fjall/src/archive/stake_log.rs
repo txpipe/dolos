@@ -2,7 +2,7 @@
 //! archive store.
 //!
 //! The log answers one query: the addresses seen under a stake credential,
-//! ordered by first on-chain appearance. Three entry shapes share the
+//! ordered by first on-chain appearance. Two entry shapes share the
 //! keyspace, discriminated by a tag byte:
 //!
 //! - Pair entry: `[0x00][stake_len:1][stake][address]` -> `[slot:8][order:4]`.
@@ -11,9 +11,6 @@
 //! - Ordered entry: `[0x01][stake_len:1][stake][slot:8][order:4][address]` ->
 //!   empty. Lexicographic key order is chronological order, so a page read is a
 //!   prefix scan windowed from either end.
-//! - Ready marker: `[0xff]` -> `[1]`. Written once by genesis bootstrap. Reads
-//!   answer `None` until it exists, because a store that was not synced from
-//!   genesis with the log in place holds an incomplete log.
 //!
 //! Only the first appearance of a pair is stored. The write batch cannot read
 //! its own pending inserts, so the writer threads a `seen` set through
@@ -36,10 +33,6 @@ const PAIR_TAG: u8 = 0x00;
 
 /// Tag byte for ordered (page-read) entries.
 const ORDERED_TAG: u8 = 0x01;
-
-/// Key of the ready marker: a tag byte no pair or ordered entry can start
-/// with, so it never lands inside a prefix scan.
-const READY_KEY: &[u8] = &[0xff];
 
 /// Width of the `[slot:8][order:4]` sort key.
 const SORT_KEY_SIZE: usize = 12;
@@ -213,16 +206,6 @@ pub fn page<R: Readable>(
     Ok(page)
 }
 
-/// Whether genesis has declared the log complete.
-pub fn is_ready<R: Readable>(readable: &R, keyspace: &Keyspace) -> Result<bool, Error> {
-    Ok(readable.get(keyspace, READY_KEY)?.is_some())
-}
-
-/// Write the ready marker.
-pub fn mark_ready(batch: &mut OwnedWriteBatch, keyspace: &Keyspace) {
-    batch.insert(keyspace, READY_KEY, [1u8]);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +237,6 @@ mod tests {
         let pair = build_pair_key(&stake, &[1; 57]);
 
         assert!(!pair.starts_with(&build_ordered_prefix(&stake)));
-        assert_ne!(pair.as_slice(), READY_KEY);
     }
 
     #[test]

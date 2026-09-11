@@ -406,29 +406,20 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
     /// stake credential, ordered by first on-chain appearance.
     ///
     /// `offset` and `limit` window the ordered list; `reverse` reads the
-    /// exact reverse of it. Returns `None` when the log is not authoritative
-    /// on this store: the backend does not maintain it, or the store was not
-    /// synced from genesis with the log in place (a stele restore, or a store
-    /// that predates the log). Callers fall back to an archive scan then.
+    /// exact reverse of it. An unknown credential is an empty page.
     ///
     /// Entries come from `ArchiveIndexDelta::stake_addresses` through
-    /// [`ArchiveWriter::apply_index`]. [`ArchiveWriter::undo_index`] removes a
-    /// pair only when the undone block is its stored first appearance.
+    /// [`ArchiveWriter::apply_index`], in the same batch as the blocks they
+    /// project. [`ArchiveWriter::undo_index`] removes a pair only when the
+    /// undone block is its stored first appearance. The log is as complete
+    /// as the history that was applied through that path.
     fn addresses_by_stake_log(
         &self,
         stake: &[u8],
         offset: usize,
         limit: usize,
         reverse: bool,
-    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError>;
-
-    /// Declare the stake address log complete from genesis.
-    ///
-    /// Genesis bootstrap calls this once on a fresh store, before it writes
-    /// the state cursor that marks genesis as done. Until it runs,
-    /// [`ArchiveStore::addresses_by_stake_log`] answers `None`. Backends that
-    /// do not maintain the log treat this as a no-op.
-    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError>;
+    ) -> Result<Vec<Vec<u8>>, ArchiveError>;
 
     /// Iterate every archive tag record whose slot falls in `slots`.
     ///

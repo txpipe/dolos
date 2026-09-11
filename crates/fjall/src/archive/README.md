@@ -57,24 +57,18 @@ Exact keys are stored verbatim and fixed-width per kind, so these records are lo
 
 ### Stake address log (`archive-stake-log`)
 
-Three entry shapes, discriminated by a tag byte:
+Two entry shapes, discriminated by a tag byte:
 
 | Entry | Key | Value |
 |-------|-----|-------|
 | Pair | `[0x00][stake_len:1][stake][address]` | `[slot:8][order:4]` |
 | Ordered | `[0x01][stake_len:1][stake][slot:8][order:4][address]` | (empty) |
-| Ready marker | `[0xff]` | `[1]` |
 
 Each `(stake, address)` pair is stored once, at its first on-chain appearance;
 `order` is the transaction index in the high 16 bits and the output index in
 the low 16. The pair entry is the write-path probe and the undo key; the
 ordered entry is what a page read walks, from either end. Full address bytes
 are stored so pointer addresses round-trip.
-
-Genesis bootstrap writes the ready marker. Until it exists
-`addresses_by_stake_log` answers `None`, because a store restored from a stele
-or synced before the log existed holds an incomplete log, and callers fall back
-to an archive scan.
 
 ## Dimension Hashing
 

@@ -230,12 +230,8 @@ impl ArchiveStore for NoOpArchiveStore {
         _offset: usize,
         _limit: usize,
         _reverse: bool,
-    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
-        Ok(None)
-    }
-
-    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
-        Ok(())
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
+        Ok(Vec::new())
     }
 
     /// Errors rather than yielding an empty iteration: this seam's callers

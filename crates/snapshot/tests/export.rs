@@ -1598,13 +1598,9 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         offset: usize,
         limit: usize,
         reverse: bool,
-    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
         self.inner
             .addresses_by_stake_log(stake, offset, limit, reverse)
-    }
-
-    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
-        self.inner.mark_stake_log_ready()
     }
 
     fn iter_exact_records(
