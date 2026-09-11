@@ -893,6 +893,93 @@ fn sample_block(
     (block, body_hashes)
 }
 
+/// A minimal Alonzo block holding one tx that carries the given
+/// certificates.
+///
+/// MIR certificates exist only in pre-Conway eras, so a test that needs one
+/// appends this block to a synthetic chain. `input` must name a live UTxO of
+/// that chain — the roll pipeline resolves every input it applies. Returns
+/// the raw block, its hash and the tx hash.
+pub fn sample_alonzo_cert_block(
+    block_number: u64,
+    slot: u64,
+    prev_hash: Option<Hash<32>>,
+    input: TransactionInput,
+    certificates: Vec<alonzo::Certificate>,
+) -> (RawBlock, Hash<32>, Hash<32>) {
+    let body = alonzo::TransactionBody {
+        inputs: vec![input],
+        outputs: vec![],
+        fee: 7,
+        ttl: None,
+        certificates: Some(certificates),
+        withdrawals: None,
+        update: None,
+        auxiliary_data_hash: None,
+        validity_interval_start: None,
+        mint: None,
+        script_data_hash: None,
+        collateral: None,
+        required_signers: None,
+        network_id: None,
+    };
+
+    let tx_hash = body.compute_hash();
+
+    let header = alonzo::Header {
+        header_body: alonzo::HeaderBody {
+            block_number,
+            slot,
+            prev_hash,
+            issuer_vkey: Bytes::from(vec![0x10, 0x11]),
+            vrf_vkey: Bytes::from(vec![0x12, 0x13]),
+            // the nonce evolution reads the eta VRF output, which has to be
+            // 32 or 64 bytes
+            nonce_vrf: pallas::ledger::primitives::VrfCert(
+                Bytes::from(vec![0x14; 32]),
+                Bytes::from(vec![0x15]),
+            ),
+            leader_vrf: pallas::ledger::primitives::VrfCert(
+                Bytes::from(vec![0x14; 32]),
+                Bytes::from(vec![0x15]),
+            ),
+            block_body_size: 0,
+            block_body_hash: Hash::from([0u8; 32]),
+            operational_cert_hot_vkey: Bytes::from(vec![0x16]),
+            operational_cert_sequence_number: 1,
+            operational_cert_kes_period: 0,
+            operational_cert_sigma: Bytes::from(vec![0x17]),
+            protocol_major: 6,
+            protocol_minor: 0,
+        },
+        body_signature: Bytes::from(vec![0x18]),
+    };
+
+    let block_hash = header.compute_hash();
+
+    let witness_set = alonzo::WitnessSet {
+        vkeywitness: None,
+        native_script: None,
+        bootstrap_witness: None,
+        plutus_script: None,
+        plutus_data: None,
+        redeemer: None,
+    };
+
+    let block = alonzo::Block {
+        header: KeepRaw::from(header),
+        transaction_bodies: vec![KeepRaw::from(body)],
+        transaction_witness_sets: vec![KeepRaw::from(witness_set)],
+        auxiliary_data_set: BTreeMap::new(),
+        invalid_transactions: None,
+    };
+
+    let wrapper = (5, block);
+    let raw = Arc::new(minicbor::to_vec(wrapper).expect("failed to encode alonzo block"));
+
+    (raw, block_hash, tx_hash)
+}
+
 fn pool_keyhash_from_bech32(pool_id: &str) -> Result<Hash<28>, bech32::Error> {
     let (_hrp, data, _variant) = bech32::decode(pool_id)?;
     let raw = Vec::<u8>::from_base32(&data).map_err(|_| bech32::Error::InvalidData(0))?;

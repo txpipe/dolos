@@ -416,6 +416,10 @@ where
             get(routes::accounts::by_stake_rewards::<D>),
         )
         .route(
+            "/accounts/{stake_address}/mirs",
+            get(routes::accounts::by_stake_mirs::<D>),
+        )
+        .route(
             "/accounts/{stake_address}/withdrawals",
             get(routes::accounts::by_stake_withdrawals::<D>),
         )
