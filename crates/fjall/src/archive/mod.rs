@@ -29,8 +29,7 @@
 //!    → slot). Key: `[dim_hash:8][key_data:var]` → `[slot:8]`. See [`exact`].
 //!
 //! 5. **`archive-stake-log`**: the stake address log, each `(stake, address)`
-//!    pair once at its first on-chain appearance, plus the ready marker genesis
-//!    writes. See [`stake_log`].
+//!    pair once at its first on-chain appearance. See [`stake_log`].
 //!
 //! The three index keyspaces are projections of the blocks and are written in
 //! the same batch as the block locations, so the history and its lookups
@@ -1266,30 +1265,12 @@ impl CoreArchiveStore for ArchiveStore {
         offset: usize,
         limit: usize,
         reverse: bool,
-    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
         let snapshot = self.db.snapshot();
-
-        // Without the ready marker the log is not authoritative: the store
-        // was not synced from genesis with the log in place.
-        if !stake_log::is_ready(&snapshot, &self.stake_log)? {
-            return Ok(None);
-        }
 
         let page = stake_log::page(&snapshot, &self.stake_log, stake, offset, limit, reverse)?;
 
-        Ok(Some(page))
-    }
-
-    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
-        let mut batch = self.db.batch();
-        stake_log::mark_ready(&mut batch, &self.stake_log);
-
-        batch
-            .durability(Some(PersistMode::Buffer))
-            .commit()
-            .map_err(fjall_err)?;
-
-        Ok(())
+        Ok(page)
     }
 
     fn iter_archive_tags(

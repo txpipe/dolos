@@ -1,7 +1,4 @@
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    ops::Deref,
-};
+use std::{collections::BTreeSet, ops::Deref};
 
 use axum::{
     extract::{Path, Query, State},
@@ -24,14 +21,12 @@ use blockfrost_openapi::models::{
 };
 
 use dolos_cardano::{
-    indexes::{AsyncCardanoQueryExt, CardanoArchiveIndexExt, CardanoStateIndexExt, SlotOrder},
+    indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
     model::{AccountState, DRepState, PoolState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
-use dolos_core::{
-    ArchiveStore as _, BlockSlot, Domain, EntityKey, LogKey, StateStore as _, TemporalKey,
-};
+use dolos_core::{ArchiveStore as _, Domain, EntityKey, LogKey, StateStore as _, TemporalKey};
 use futures_util::StreamExt;
 use pallas::{
     codec::minicbor,
@@ -311,10 +306,10 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    // The stake address log answers both orders with one page read. It is
-    // authoritative only on stores synced from genesis with the log in place;
-    // `None` falls through to the archive scan below.
-    let page = domain
+    // Every page is one read of the stake address log, in either order. The
+    // log is written in the same batch as the blocks it projects, by every
+    // path that applies blocks from genesis.
+    let addresses = domain
         .archive()
         .addresses_by_stake_log(
             &account_key.address.to_vec(),
@@ -324,208 +319,18 @@ where
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if let Some(addresses) = page {
-        let items = addresses
-            .into_iter()
-            .map(|bytes| {
-                Address::from_bytes(&bytes)
-                    .map(|address| AccountAddressesContentInner {
-                        address: address.to_string(),
-                    })
-                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        return Ok(Json(items));
-    }
-
-    let end_slot = domain.get_tip_slot()?;
-    let account = account_key.address.to_vec();
-
-    // Blockfrost orders addresses by first on-chain appearance, and `desc`
-    // is the exact reverse of the `asc` list. Either scan stops once it
-    // holds the page window; `enforce_max_scan_limit` bounds that window.
-    let ordered = match pagination.order {
-        Order::Asc => first_appearances_asc(&domain, &account, end_slot, pagination.to()).await?,
-        Order::Desc => first_appearances_desc(&domain, &account, end_slot, pagination.to()).await?,
-    };
-
-    let items = ordered
+    let items = addresses
         .into_iter()
-        .skip(pagination.skip())
-        .take(pagination.count)
-        .map(|address| AccountAddressesContentInner { address })
-        .collect();
+        .map(|bytes| {
+            Address::from_bytes(&bytes)
+                .map(|address| AccountAddressesContentInner {
+                    address: address.to_string(),
+                })
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(Json(items))
-}
-
-/// The account's addresses by first appearance, oldest first, at most
-/// `target` of them.
-///
-/// An ascending scan meets every address at its first appearance, so the
-/// first time it sees one is the answer.
-async fn first_appearances_asc<D>(
-    domain: &Facade<D>,
-    account: &[u8],
-    end_slot: BlockSlot,
-    target: usize,
-) -> Result<Vec<String>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let stream = domain
-        .query()
-        .blocks_by_stake_stream(account, 0, end_slot, SlotOrder::Asc);
-    let mut stream = Box::pin(stream);
-
-    let mut ordered = vec![];
-    let mut seen = BTreeSet::new();
-
-    'scan: while let Some(res) = stream.next().await {
-        let (_slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let Some(block) = block else {
-            continue;
-        };
-
-        let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        for (_, utxo) in block.txs().iter().flat_map(|tx| tx.produces()) {
-            let address = utxo
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if !address_belongs_to_account(&address, account) {
-                continue;
-            }
-
-            let address = address.to_string();
-
-            if seen.insert(address.clone()) {
-                ordered.push(address);
-
-                if ordered.len() >= target {
-                    break 'scan;
-                }
-            }
-        }
-    }
-
-    Ok(ordered)
-}
-
-/// The account's addresses by first appearance, newest first, at most
-/// `target` of them.
-///
-/// A descending scan meets a reused address at its latest appearance first.
-/// The archive `address` tag tells where the address really belongs: its
-/// earliest tagged block is its first production, because an address can
-/// only be spent after it was produced. Each address is looked up once, when
-/// the scan first meets it, and emitted when the scan reaches that block.
-///
-/// The tag index keys on a 64-bit hash of the address, so a colliding hash
-/// could hide an address. The odds per address are the number of tagged
-/// addresses over 2^64.
-async fn first_appearances_desc<D>(
-    domain: &Facade<D>,
-    account: &[u8],
-    end_slot: BlockSlot,
-    target: usize,
-) -> Result<Vec<String>, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let stream = domain
-        .query()
-        .blocks_by_stake_stream(account, 0, end_slot, SlotOrder::Desc);
-    let mut stream = Box::pin(stream);
-
-    let mut ordered = vec![];
-
-    // Every address the scan has met so far, with the slot of its first
-    // appearance: looked up once, then answered from here.
-    let mut first_seen: HashMap<Vec<u8>, BlockSlot> = HashMap::new();
-
-    'scan: while let Some(res) = stream.next().await {
-        let (slot, block) = res.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let Some(block) = block else {
-            continue;
-        };
-
-        let block = MultiEraBlock::decode(&block).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        let mut fresh = vec![];
-        let mut in_block: HashSet<Vec<u8>> = HashSet::new();
-
-        for (_, utxo) in block.txs().iter().flat_map(|tx| tx.produces()) {
-            let address = utxo
-                .address()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if !address_belongs_to_account(&address, account) {
-                continue;
-            }
-
-            let bytes = address.to_vec();
-
-            if !in_block.insert(bytes.clone()) {
-                continue;
-            }
-
-            let first = match first_seen.get(&bytes) {
-                Some(first) => *first,
-                None => {
-                    let first = first_appearance(domain, &bytes, slot)?;
-                    first_seen.insert(bytes, first);
-                    first
-                }
-            };
-
-            if first == slot {
-                fresh.push(address.to_string());
-            }
-        }
-
-        // Within one block the ascending order is output order; `desc`
-        // reverses it like everything else.
-        for address in fresh.into_iter().rev() {
-            ordered.push(address);
-
-            if ordered.len() >= target {
-                break 'scan;
-            }
-        }
-    }
-
-    Ok(ordered)
-}
-
-/// The slot of the earliest block that carries the archive `address` tag for
-/// `address`, given that the block at `slot` does.
-fn first_appearance<D>(
-    domain: &Facade<D>,
-    address: &[u8],
-    slot: BlockSlot,
-) -> Result<BlockSlot, StatusCode>
-where
-    D: Domain + Clone + Send + Sync + 'static,
-{
-    let Some(before) = slot.checked_sub(1) else {
-        return Ok(slot);
-    };
-
-    let mut slots = domain
-        .archive()
-        .slots_by_address(address, 0, before)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    match slots.next() {
-        Some(Ok(first)) => Ok(first),
-        Some(Err(_)) => Err(StatusCode::INTERNAL_SERVER_ERROR),
-        None => Ok(slot),
-    }
 }
 
 /// Fold one block's txs into an account's lifetime totals.
@@ -2068,55 +1873,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accounts_by_stake_addresses_log_matches_archive_scan() {
-        // Two identical synthetic chains: one serves from the stake address
-        // log, the other from the archive-scan fallback. Every query shape
-        // must produce identical responses on both.
-        let logged = TestApp::new();
-        let scanned = TestApp::new_scan_fallback();
-
-        let stake_address = logged.vectors().stake_address.clone();
-        assert_eq!(stake_address, scanned.vectors().stake_address);
-
-        let queries = [
-            "order=asc&count=100",
-            "order=desc&count=100",
-            "order=asc&count=2&page=2",
-            "order=desc&count=2&page=2",
-            "count=1&page=3",
-        ];
-
-        for query in queries {
-            let path = format!("/accounts/{stake_address}/addresses?{query}");
-
-            let (status, bytes) = logged.get_bytes(&path).await;
-            assert_eq!(status, StatusCode::OK, "log path failed for {query}");
-            let from_log: Vec<AccountAddressesContentInner> =
-                serde_json::from_slice(&bytes).expect("failed to parse log response");
-
-            let (status, bytes) = scanned.get_bytes(&path).await;
-            assert_eq!(status, StatusCode::OK, "scan path failed for {query}");
-            let from_scan: Vec<AccountAddressesContentInner> =
-                serde_json::from_slice(&bytes).expect("failed to parse scan response");
-
-            let log_addresses: Vec<_> = from_log.iter().map(|x| x.address.clone()).collect();
-            let scan_addresses: Vec<_> = from_scan.iter().map(|x| x.address.clone()).collect();
-
-            assert!(!log_addresses.is_empty(), "empty response for {query}");
-            assert_eq!(
-                log_addresses, scan_addresses,
-                "log and scan disagree for {query}"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn accounts_by_stake_addresses_ignores_from_and_to() {
         // Blockfrost declares no `from`/`to` for this endpoint and its query
         // binds neither, so a windowed request answers the full list. The
         // window below starts at the newest first appearance: honoring it
         // would drop every older address.
-        for app in [TestApp::new(), TestApp::new_scan_fallback()] {
+        {
+            let app = TestApp::new();
             let stake_address = app.vectors().stake_address.as_str();
 
             let newest_first_appearance = app
@@ -2153,39 +1916,6 @@ mod tests {
 
             assert_eq!(windowed, full);
         }
-    }
-
-    #[tokio::test]
-    async fn accounts_by_stake_addresses_scan_fallback_orders_desc_by_first_appearance() {
-        // The fallback keeps Blockfrost's ordering on its own: `desc` is the
-        // reverse of `asc`, not a latest-appearance ordering.
-        let app = TestApp::new_scan_fallback();
-        let stake_address = app.vectors().stake_address.as_str();
-
-        let (status, bytes) = app
-            .get_bytes(&format!(
-                "/accounts/{stake_address}/addresses?order=asc&count=100"
-            ))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        let asc: Vec<AccountAddressesContentInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse addresses asc");
-
-        let (status, bytes) = app
-            .get_bytes(&format!(
-                "/accounts/{stake_address}/addresses?order=desc&count=100"
-            ))
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        let desc: Vec<AccountAddressesContentInner> =
-            serde_json::from_slice(&bytes).expect("failed to parse addresses desc");
-
-        assert!(!asc.is_empty());
-
-        let mut reversed: Vec<_> = asc.iter().map(|x| x.address.clone()).collect();
-        reversed.reverse();
-        let desc_addresses: Vec<_> = desc.iter().map(|x| x.address.clone()).collect();
-        assert_eq!(desc_addresses, reversed);
     }
 
     #[tokio::test]

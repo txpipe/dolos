@@ -16,8 +16,7 @@
 //!   where the `indexes` stele layer is produced from and restored into;
 //! - the stake address log projects the block history too and lives beside them
 //!   (`ArchiveStore::addresses_by_stake_log`, written through the same
-//!   `ArchiveWriter::apply_index`). It is not part of the `indexes` stele
-//!   layer: a restored store answers `None` until it is synced from genesis.
+//!   `ArchiveWriter::apply_index`).
 
 use std::borrow::Cow;
 
