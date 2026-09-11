@@ -1,0 +1,170 @@
+---
+title: Bootstrap from a Stele
+sidebar:
+  label: Stele
+  order: 4
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A _stele_ is a snapshot of a Dolos node published as a set of deterministic
+layers, one group per epoch, plus the state at the boundary the snapshot was cut
+at. Restoring one writes those layers straight into this node's stores, so there
+is no block replay and no ledger rebuild: what the publisher computed is what
+this node ends up with.
+
+Unlike the [Dolos snapshot](./snapshot) method, which unpacks a single archive of
+the storage engines' own files, a stele is read layer by layer through Dolos'
+store traits. That is what makes it resumable, and what lets a restore fetch only
+the epochs this node is configured to keep.
+
+## Execution
+
+```sh
+dolos bootstrap stelae --source <SOURCE>
+```
+
+`--source` is the only required flag, and it is a URL in one of two spellings:
+
+| spelling | means |
+| -------- | ----- |
+| `file://DIR` | a stele directory on this filesystem |
+| `oci://HOST/PATH` | a stele repository in an OCI registry |
+
+`file:///var/lib/dolos/stele` is the spelled-out absolute form;
+`file://./stele` and `file://stele` are relative to the working directory. Both
+work — what follows the scheme is the path, and it is never guessed at. A
+directory source is one written by `dolos snapshot publish --output-dir`.
+
+An `oci://` URL names a **repository**, never a tag: the registry host followed
+by the repository path — of the shape
+`oci://registry.example.com/dolos-snapshots/mainnet`. Which stele inside that
+repository gets read is `--point`'s job, below.
+
+<Aside type="note">
+The source is parsed before anything touches your data, so an unusable URL is
+refused while you still have the node you had. A path with no scheme, an
+`https://` URL, or an `oci://` URL that names a tag are all rejected at the
+command line.
+</Aside>
+
+## Flags
+
+In addition to the [global bootstrap flags](../bootstrap), the `stelae`
+subcommand accepts:
+
+| flag | description | default |
+| ---- | ----------- | ------- |
+| `--source <SOURCE>` | `file://DIR` or `oci://HOST/PATH` — required | none |
+| `--point <POINT>` | which stele in the repository to restore: `latest`, or `epoch-N`. Registry sources only | `latest` |
+| `--insecure` | talk to the repository over plaintext HTTP rather than HTTPS. Registry sources only | `false` |
+| `--scratch-dir <DIR>` | directory to stage pulled layers in. Registry sources only | `<storage.path>/scratch` |
+
+### `--point`
+
+A repository holds more than one stele. `--point latest` reads the most recent
+one published; `--point epoch-N` reads the stele published at the end of epoch
+`N`, which is how you pin a restore to a known boundary rather than to whatever
+the publisher pushed most recently.
+
+`--point` is meaningless for a `file://` source — a directory _is_ one stele —
+and is ignored there rather than being an error. The same goes for `--insecure`
+and `--scratch-dir`: a `file://` restore contacts no registry and stages nothing.
+
+### `--continue` is the resume
+
+There is no `--resume` flag. The global `--continue` flag is the resume:
+
+```sh
+dolos bootstrap stelae --source oci://HOST/PATH --continue
+```
+
+`--continue` already meant "go ahead even though there is data here, the
+subcommand knows how to resume". For a stele restore that is literally true — it
+is what makes the run consult the progress file an interrupted attempt left in
+the storage directory, so the layers that attempt already committed are neither
+fetched again nor written again.
+
+A run **without** `--continue` starts over, and it starts over properly: a
+progress file it did not ask to honour is overwritten rather than obeyed. That is
+deliberate. A progress file that outlived the stores it described would otherwise
+skip layers onto nothing, leaving a node that looks restored and is not.
+
+<Aside type="caution">
+Interrupting a restore is safe, but only `--continue` picks up where it left off.
+Re-running the same command without it discards the interrupted attempt's
+progress and starts from the beginning.
+</Aside>
+
+### `--insecure`
+
+`--insecure` drops the registry connection to plaintext HTTP. It is for a
+registry on a loopback address, or a mirror inside your own cluster — and for
+nothing reachable from outside one. Never point it at a registry across the
+public internet.
+
+### `--scratch-dir`
+
+A registry restore stages pulled layers on disk before committing them. By
+default that is `<storage.path>/scratch`, because the storage volume is already
+sized for this data — a mainnet transfer stages gigabytes. `--scratch-dir` moves
+it somewhere else. A `file://` restore stages nothing and ignores the flag.
+
+## What gets fetched: `sync.max_history`
+
+A stele carries every epoch the publisher had. This node does not necessarily
+want them all, and `sync.max_history` is what decides: it is a window in slots
+measured back from the snapshot's tip, and epochs whose layers fall entirely
+below that floor are dropped from the restore plan — so they are never fetched at
+all, not fetched and then pruned.
+
+Leaving `sync.max_history` unset restores the full history the stele carries. See
+the [`sync` section](../configuration/schema#sync-section) of the configuration
+schema.
+
+When the window drops anything, the run's summary says so on its `epochs:` line,
+so you can check it against what you expected.
+
+## Registry credentials
+
+A registry may charge nothing for reads and still refuse an unidentified one.
+The identity this node reads a registry as comes from the `[stelae.registry]`
+section of `dolos.toml`; `dolos init` seeds it for you. See the
+[`stelae.registry` section](../configuration/schema#stelaeregistry-section) of
+the configuration schema for the properties and for how the official registry's
+read-only credential is supplied.
+
+## What it costs
+
+The transfer is the cost. There is no block replay and no ledger rebuild, so the
+run is bounded by how much data it moves and how fast the source serves it —
+minutes on a small testnet, longer on mainnet, where the state at the boundary is
+on the order of several GB before history is counted at all. `sync.max_history`
+is the lever that shortens it; the `fetched:` line of the summary reports the
+compressed bytes the run planned to move.
+
+Progress bars are drawn while the restore runs. When it finishes, the command
+prints what the run actually did — these are the lines it reports, with the
+values elided:
+
+```
+source:   <repository> (<point>)          # registry sources only
+network:  <name> (<magic>)
+cursor:   <the chain point the stele stands at>
+sequence: <the epoch that cursor has just entered>
+epochs:   <n> restored, <n> skipped by sync.max_history
+resumed:  <n> layer(s) an earlier attempt had already committed
+fetched:  <n> layers (<n> skipped), <n> compressed bytes planned
+restored: <n> blocks, <n> logs, <n> index records, <n> entities, <n> utxos
+```
+
+The `epochs:` line names `sync.max_history` only when the window actually
+dropped something, and the `resumed:` line appears only when a `--continue` run
+inherited work from an earlier attempt.
+
+<Aside type="note">
+Steles are cut at epoch boundaries, so a restored node is at the end of an epoch
+and not at the chain tip. Starting `dolos daemon` afterwards chain-syncs the
+remaining partial epoch from your configured upstream peer — up to a few days of
+blocks on mainnet.
+</Aside>
