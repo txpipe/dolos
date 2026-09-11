@@ -48,7 +48,6 @@ use crate::{
     Facade,
 };
 
-#[derive(Clone)]
 struct AccountKeyParam {
     address: StakeAddress,
     entity_key: Vec<u8>,
@@ -665,26 +664,6 @@ where
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    scan_stake_actions(account_key, pagination, domain, mapper).await
-}
-
-/// The scan behind [`by_stake_actions`], without its account-existence
-/// guard.
-async fn scan_stake_actions<D, F, T>(
-    account_key: AccountKeyParam,
-    pagination: Pagination,
-    domain: Facade<D>,
-    mapper: F,
-) -> Result<Vec<T>, Error>
-where
-    F: Fn(
-        &AccountActionContext<'_, D>,
-        &StakeAddress,
-        &MultiEraTx,
-        &MultiEraCert,
-    ) -> Result<Option<T>, StatusCode>,
-    D: Domain + Clone + Send + Sync + 'static,
-{
     let chain = domain
         .get_chain_summary()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -818,12 +797,6 @@ fn build_mir<D: Domain>(
 
 /// `GET /accounts/{stake_address}/mirs`: the MIR payments the account ever
 /// received, oldest first.
-///
-/// A MIR can pay a credential that never registers as an account — the
-/// ledger discards the payment at the boundary, but the certificate is
-/// on-chain and Blockfrost lists it. So a missing account is not a 404 by
-/// itself here: one MIR row is proof enough of existence, and only a
-/// credential with neither stays a 404.
 pub async fn by_stake_mirs<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -836,30 +809,8 @@ where
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
 
-    let network = domain.get_network_id()?;
-    let account_key = parse_account_key_param(&stake_address, network)?;
-
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
-        let probe = Pagination {
-            count: 1,
-            ..Default::default()
-        };
-
-        let any_mir = scan_stake_actions::<D, _, AccountMirContentInner>(
-            account_key.clone(),
-            probe,
-            domain.clone(),
-            build_mir,
-        )
-        .await?;
-
-        if any_mir.is_empty() {
-            return Err(StatusCode::NOT_FOUND.into());
-        }
-    }
-
-    let items = scan_stake_actions::<D, _, AccountMirContentInner>(
-        account_key,
+    let items = by_stake_actions::<D, _, AccountMirContentInner>(
+        &stake_address,
         pagination,
         domain,
         build_mir,
@@ -2588,19 +2539,7 @@ mod tests {
             .expect("failed to encode stake address")
     }
 
-    /// A credential that receives a MIR and never registers as an account.
-    fn unregistered_mir_cred() -> pallas::ledger::primitives::StakeCredential {
-        pallas::ledger::primitives::StakeCredential::AddrKeyhash(Hash::from([0x5e; 28]))
-    }
-
-    fn unregistered_mir_stake_address() -> String {
-        mapping::stake_cred_to_address(&unregistered_mir_cred(), Network::Testnet)
-            .to_bech32()
-            .expect("failed to encode stake address")
-    }
-
-    fn mir_pay_to(
-        cred: pallas::ledger::primitives::StakeCredential,
+    fn mir_pay(
         source: pallas::ledger::primitives::alonzo::InstantaneousRewardSource,
         amount: i64,
     ) -> AlonzoCert {
@@ -2608,15 +2547,11 @@ mod tests {
 
         AlonzoCert::MoveInstantaneousRewardsCert(MoveInstantaneousReward {
             source,
-            target: InstantaneousRewardTarget::StakeCredentials(BTreeMap::from([(cred, amount)])),
+            target: InstantaneousRewardTarget::StakeCredentials(BTreeMap::from([(
+                mir_cred(),
+                amount,
+            )])),
         })
-    }
-
-    fn mir_pay(
-        source: pallas::ledger::primitives::alonzo::InstantaneousRewardSource,
-        amount: i64,
-    ) -> AlonzoCert {
-        mir_pay_to(mir_cred(), source, amount)
     }
 
     struct MirBlockVector {
@@ -2644,12 +2579,7 @@ mod tests {
                 AlonzoCert::StakeRegistration(mir_cred()),
                 mir_pay(Reserves, 19_296_735),
             ],
-            vec![
-                mir_pay(Treasury, 42),
-                // paid but never registered: the ledger discards the funds,
-                // Blockfrost lists the row
-                mir_pay_to(unregistered_mir_cred(), Reserves, 7_777),
-            ],
+            vec![mir_pay(Treasury, 42)],
         ];
 
         let mut raws = Vec::new();
@@ -2792,24 +2722,6 @@ mod tests {
         let app = mir_app();
         let path = format!("/accounts/{}/mirs", missing_stake_address());
         assert_status(&app, &path, StatusCode::NOT_FOUND).await;
-    }
-
-    /// A credential that only ever received a MIR has no account state, but
-    /// Blockfrost lists its rows; a credential with neither stays a 404.
-    #[tokio::test]
-    async fn account_mirs_unregistered_target() {
-        let app = mir_app();
-        let (_, blocks) = alonzo_mir_blocks(app.vectors());
-        let stake = unregistered_mir_stake_address();
-
-        let rows = get_mirs(&app, &format!("/accounts/{stake}/mirs")).await;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].amount, "7777");
-        assert_eq!(rows[0].tx_hash, blocks[1].tx_hash.to_string());
-
-        // a page past the end of an existing listing is empty, not a 404
-        let rows = get_mirs(&app, &format!("/accounts/{stake}/mirs?page=5")).await;
-        assert!(rows.is_empty());
     }
 
     #[tokio::test]
