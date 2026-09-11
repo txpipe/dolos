@@ -279,6 +279,12 @@ where
     Ok(false)
 }
 
+/// `GET /accounts/{stake_address}/addresses`.
+///
+/// Blockfrost declares only `count`, `page` and `order` for this endpoint.
+/// The shared query struct also accepts `from` and `to`; they are ignored
+/// here, as Blockfrost ignores them, so the list always covers the account's
+/// whole history.
 pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -302,37 +308,33 @@ where
 
     // The stake address log answers both orders with one page read. It is
     // authoritative only on stores synced from genesis with the log in place;
-    // `None` falls through to the archive scan below. The scan honors the
-    // from/to filters, the log does not, so range-filtered requests always
-    // scan.
-    if pagination.from.is_none() && pagination.to.is_none() {
-        let page = domain
-            .archive()
-            .addresses_by_stake_log(
-                &account_key.address.to_vec(),
-                pagination.skip(),
-                pagination.count,
-                matches!(pagination.order, Order::Desc),
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // `None` falls through to the archive scan below.
+    let page = domain
+        .archive()
+        .addresses_by_stake_log(
+            &account_key.address.to_vec(),
+            pagination.skip(),
+            pagination.count,
+            matches!(pagination.order, Order::Desc),
+        )
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        if let Some(addresses) = page {
-            let items = addresses
-                .into_iter()
-                .map(|bytes| {
-                    Address::from_bytes(&bytes)
-                        .map(|address| AccountAddressesContentInner {
-                            address: address.to_string(),
-                        })
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+    if let Some(addresses) = page {
+        let items = addresses
+            .into_iter()
+            .map(|bytes| {
+                Address::from_bytes(&bytes)
+                    .map(|address| AccountAddressesContentInner {
+                        address: address.to_string(),
+                    })
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-            return Ok(Json(items));
-        }
+        return Ok(Json(items));
     }
 
-    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+    let end_slot = domain.get_tip_slot()?;
 
     // Blockfrost orders addresses by first on-chain appearance, and `desc`
     // is the exact reverse of the `asc` list. Scan ascending in both cases;
@@ -340,7 +342,7 @@ where
     // appearance instead of their first one.
     let stream = domain.query().blocks_by_stake_stream(
         &account_key.address.to_vec(),
-        start_slot,
+        0,
         end_slot,
         SlotOrder::Asc,
     );
@@ -1982,6 +1984,51 @@ mod tests {
                 log_addresses, scan_addresses,
                 "log and scan disagree for {query}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_ignores_from_and_to() {
+        // Blockfrost declares no `from`/`to` for this endpoint and its query
+        // binds neither, so a windowed request answers the full list. The
+        // window below starts at the newest first appearance: honoring it
+        // would drop every older address.
+        for app in [TestApp::new(), TestApp::new_scan_fallback()] {
+            let stake_address = app.vectors().stake_address.as_str();
+
+            let newest_first_appearance = app
+                .vectors()
+                .account_address_bounds
+                .iter()
+                .map(|(_, min, _)| *min)
+                .max()
+                .expect("vectors carry account addresses");
+            let last_block = app
+                .vectors()
+                .account_address_bounds
+                .iter()
+                .map(|(_, _, max)| *max)
+                .max()
+                .expect("vectors carry account addresses");
+
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{stake_address}/addresses"))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let full: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse addresses");
+            assert!(full.len() > 1, "the window must have something to drop");
+
+            let (status, bytes) = app
+                .get_bytes(&format!(
+                    "/accounts/{stake_address}/addresses?from={newest_first_appearance}&to={last_block}"
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            let windowed: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse windowed addresses");
+
+            assert_eq!(windowed, full);
         }
     }
 
