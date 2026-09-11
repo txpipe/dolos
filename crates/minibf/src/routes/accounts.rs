@@ -1878,44 +1878,42 @@ mod tests {
         // binds neither, so a windowed request answers the full list. The
         // window below starts at the newest first appearance: honoring it
         // would drop every older address.
-        {
-            let app = TestApp::new();
-            let stake_address = app.vectors().stake_address.as_str();
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
 
-            let newest_first_appearance = app
-                .vectors()
-                .account_address_bounds
-                .iter()
-                .map(|(_, min, _)| *min)
-                .max()
-                .expect("vectors carry account addresses");
-            let last_block = app
-                .vectors()
-                .account_address_bounds
-                .iter()
-                .map(|(_, _, max)| *max)
-                .max()
-                .expect("vectors carry account addresses");
+        let newest_first_appearance = app
+            .vectors()
+            .account_address_bounds
+            .iter()
+            .map(|(_, min, _)| *min)
+            .max()
+            .expect("vectors carry account addresses");
+        let last_block = app
+            .vectors()
+            .account_address_bounds
+            .iter()
+            .map(|(_, _, max)| *max)
+            .max()
+            .expect("vectors carry account addresses");
 
-            let (status, bytes) = app
-                .get_bytes(&format!("/accounts/{stake_address}/addresses"))
-                .await;
-            assert_eq!(status, StatusCode::OK);
-            let full: Vec<AccountAddressesContentInner> =
-                serde_json::from_slice(&bytes).expect("failed to parse addresses");
-            assert!(full.len() > 1, "the window must have something to drop");
+        let (status, bytes) = app
+            .get_bytes(&format!("/accounts/{stake_address}/addresses"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let full: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses");
+        assert!(full.len() > 1, "the window must have something to drop");
 
-            let (status, bytes) = app
-                .get_bytes(&format!(
-                    "/accounts/{stake_address}/addresses?from={newest_first_appearance}&to={last_block}"
-                ))
-                .await;
-            assert_eq!(status, StatusCode::OK);
-            let windowed: Vec<AccountAddressesContentInner> =
-                serde_json::from_slice(&bytes).expect("failed to parse windowed addresses");
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?from={newest_first_appearance}&to={last_block}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let windowed: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse windowed addresses");
 
-            assert_eq!(windowed, full);
-        }
+        assert_eq!(windowed, full);
     }
 
     #[tokio::test]
