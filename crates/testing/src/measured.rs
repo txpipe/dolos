@@ -248,6 +248,32 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
         })
     }
 
+    /// One tag candidate per address the page yields: the log stands in for
+    /// the tag scan the caller would otherwise run.
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+        let page = self
+            .inner
+            .addresses_by_stake_log(stake, offset, limit, reverse)?;
+
+        if let Some(page) = &page {
+            self.counters
+                .tag_candidates
+                .fetch_add(page.len() as u64, Ordering::Relaxed);
+        }
+
+        Ok(page)
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
+        self.inner.mark_stake_log_ready()
+    }
+
     fn iter_archive_tags(
         &self,
         dimensions: &[TagDimension],

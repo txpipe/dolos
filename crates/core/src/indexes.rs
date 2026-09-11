@@ -13,7 +13,11 @@
 //! - the archive tags and the exact lookups project the block history and live
 //!   in the archive store (`ArchiveStore::slots_by_tag`,
 //!   `ArchiveStore::slot_by_*`, written through `ArchiveWriter::apply_index`),
-//!   where the `indexes` stele layer is produced from and restored into.
+//!   where the `indexes` stele layer is produced from and restored into;
+//! - the stake address log projects the block history too and lives beside them
+//!   (`ArchiveStore::addresses_by_stake_log`, written through the same
+//!   `ArchiveWriter::apply_index`). It is not part of the `indexes` stele
+//!   layer: a restored store answers `None` until it is synced from genesis.
 
 use std::borrow::Cow;
 
@@ -75,6 +79,23 @@ pub struct ArchiveIndexDelta {
     pub block_number: Option<u64>,
     pub tx_hashes: Vec<Vec<u8>>,
     pub tags: Vec<Tag>,
+    /// First-appearance candidates for the stake address log, one per
+    /// produced output that carries a stake credential, in block order.
+    pub stake_addresses: Vec<StakeAddressAppearance>,
+}
+
+/// One address appearing under a stake credential inside a block.
+///
+/// These records feed the stake address log: the per-account list of
+/// addresses ordered by first on-chain appearance. The slot is the block's
+/// (`ArchiveIndexDelta::slot`); `order` breaks ties inside one block
+/// (transaction index, then output index). Stores keep only the first
+/// appearance of each `(stake, address)` pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StakeAddressAppearance {
+    pub order: u32,
+    pub stake: Vec<u8>,
+    pub address: Vec<u8>,
 }
 
 /// What can go wrong building an index record.
