@@ -1195,6 +1195,42 @@ impl CoreArchiveStore for ArchiveStoreBackend {
         }
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, ArchiveError> {
+        match self {
+            Self::Memory(s) => {
+                CoreArchiveStore::addresses_by_stake_log(s, stake, offset, limit, reverse)
+            }
+            Self::LogsOnly(inner) => CoreArchiveStore::addresses_by_stake_log(
+                inner.as_ref(),
+                stake,
+                offset,
+                limit,
+                reverse,
+            ),
+            Self::Fjall(s) => {
+                CoreArchiveStore::addresses_by_stake_log(s, stake, offset, limit, reverse)
+            }
+            Self::NoOp(s) => {
+                CoreArchiveStore::addresses_by_stake_log(s, stake, offset, limit, reverse)
+            }
+        }
+    }
+
+    fn mark_stake_log_ready(&self) -> Result<(), ArchiveError> {
+        match self {
+            Self::Memory(s) => CoreArchiveStore::mark_stake_log_ready(s),
+            Self::LogsOnly(inner) => CoreArchiveStore::mark_stake_log_ready(inner.as_ref()),
+            Self::Fjall(s) => CoreArchiveStore::mark_stake_log_ready(s),
+            Self::NoOp(s) => CoreArchiveStore::mark_stake_log_ready(s),
+        }
+    }
+
     fn iter_archive_tags(
         &self,
         dimensions: &[TagDimension],
