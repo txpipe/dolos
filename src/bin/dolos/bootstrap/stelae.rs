@@ -40,8 +40,9 @@ use dolos_core::config::RootConfig;
 use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::{
+    facade::{self as snapshot, RestoreInput, SnapshotRepository},
     node,
-    registry::{self, Point, Repository},
+    registry::{self, Point},
     restore::Source,
 };
 
@@ -160,71 +161,54 @@ impl Node {
     }
 }
 
-fn restore_dir(
-    config: &RootConfig,
-    dir: &std::path::Path,
-    options: RestoreOptions<'_>,
-) -> miette::Result<()> {
+fn restore(config: &RootConfig, args: &Args, options: RestoreOptions<'_>) -> miette::Result<()> {
     let node = Node::open(config)?;
     let progress = SteleProgress::restoring(options.feedback);
+    let observer = progress.observer();
+    let restoring = node.restoring(options.resume, options.skip_space_check);
 
-    let (plan, outlook, summary) = dolos_snapshot::restore::restore_dir(
-        dir,
-        node.restoring(options.resume, options.skip_space_check),
-        node.target(),
-        &progress.observer(),
-    )
+    let outcome = match &args.source {
+        Source::Dir(dir) => snapshot::restore(
+            RestoreInput::Directory(dir),
+            restoring,
+            node.target(),
+            Some(&observer),
+        ),
+        Source::Repo(repo) => {
+            // Credential and staging resolution remain node policy. The
+            // profile facade receives the resolved inputs and never reads
+            // configuration or environment on its own.
+            let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
+            let scratch = node::scratch_dir(&config.storage, args.scratch_dir.as_deref());
+            let repository = SnapshotRepository::open(
+                repo,
+                args.insecure,
+                auth,
+                scratch,
+                registry::Tuning::default(),
+            )
+            .into_diagnostic()
+            .context("opening the repository")?;
+
+            println!("source:   {repo} ({})", args.point);
+
+            snapshot::restore(
+                RestoreInput::Repository {
+                    repository: &repository,
+                    point: args.point,
+                },
+                restoring,
+                node.target(),
+                Some(&observer),
+            )
+        }
+    }
     .into_diagnostic()
     .context("restoring the stele")?;
 
     progress.finish();
 
-    report(&plan, &outlook, &summary);
-
-    Ok(())
-}
-
-fn restore_repo(
-    config: &RootConfig,
-    repo: &Repository,
-    point: Point,
-    insecure: bool,
-    scratch_dir: Option<&std::path::Path>,
-    options: RestoreOptions<'_>,
-) -> miette::Result<()> {
-    // First: `Node::open` runs `ensure_storage_path`, so the default of
-    // `<storage.path>/scratch` needs no special case on a host where the
-    // storage directory does not exist yet.
-    let node = Node::open(config)?;
-
-    // Resolved here rather than inside the transport: which identity this node
-    // reads a registry as is the node's policy, and `dolos_snapshot::node` is
-    // where that policy lives. Where it stages comes from the same place.
-    let auth = node::registry_auth(&config.stelae).into_diagnostic()?;
-
-    let scratch = node::scratch_dir(&config.storage, scratch_dir);
-
-    let registry = registry::open(repo, insecure, auth, scratch, registry::Tuning::default())
-        .into_diagnostic()
-        .context("opening the repository")?;
-
-    println!("source:   {repo} ({point})");
-
-    let progress = SteleProgress::restoring(options.feedback);
-
-    let (plan, outlook, summary) = registry::restore_registry(
-        &registry,
-        point,
-        node.restoring(options.resume, options.skip_space_check),
-        node.target(),
-        &progress.observer(),
-    )
-    .into_diagnostic()
-    .context("restoring the stele")?;
-
-    progress.finish();
-
-    report(&plan, &outlook, &summary);
+    report(&outcome.plan, &outcome.outlook, &outcome.summary);
 
     Ok(())
 }
@@ -336,17 +320,7 @@ pub fn run(
         skip_space_check: args.skip_space_check,
     };
 
-    match &args.source {
-        Source::Dir(dir) => restore_dir(config, dir, options),
-        Source::Repo(repo) => restore_repo(
-            config,
-            repo,
-            args.point,
-            args.insecure,
-            args.scratch_dir.as_deref(),
-            options,
-        ),
-    }
+    restore(config, args, options)
 }
 
 #[cfg(test)]

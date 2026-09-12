@@ -117,6 +117,16 @@
 //! and any earlier chunk that was already committed is harmless for the same
 //! reason `set_cursor` is last: a restore that fails leaves no cursor, so what
 //! it wrote is not a node.
+//!
+//! ## External-host initialization
+//!
+//! Restoration is deliberately not node initialization. An embedding
+//! application should open isolated scratch stores, call [`execute`], close
+//! those stores, recover the replay checkpoint/WAL through its engine facade,
+//! and only then open a replay session. A failed restore never selects genesis,
+//! writes an application initialization marker or removes a directory. Genesis
+//! fallback, marker ownership and destructive cleanup are host policy and must
+//! remain explicit at that boundary.
 
 use std::{
     collections::BTreeMap,
@@ -1134,6 +1144,59 @@ where
     let stele = stelae::dir::SteleDir::open(root)?;
 
     restore_stele(&stele, node, None, target, observer)
+}
+
+/// A fully resolved restore input.
+///
+/// The repository arm holds an already-opened client, so credentials, TLS
+/// policy, staging and transport tuning have been decided before destination
+/// stores are touched.
+pub enum Input<'a> {
+    Directory(&'a Path),
+    Repository {
+        repository: &'a crate::registry::SnapshotRepository,
+        point: crate::registry::Point,
+    },
+}
+
+/// The structured result of a completed restore.
+#[derive(Debug)]
+pub struct RestoreOutcome {
+    pub plan: Plan,
+    pub outlook: Outlook,
+    pub summary: Summary,
+}
+
+/// Restore from either supported transport through one headless entry point.
+///
+/// `node` contains the explicit resume and space-check policy. Passing no
+/// observer selects the protocol's silent observer and never constructs a
+/// terminal renderer.
+pub fn execute<A, S>(
+    input: Input<'_>,
+    node: Restoring<'_>,
+    target: Target<'_, A, S>,
+    observer: Option<&Observer>,
+) -> Result<RestoreOutcome, Error>
+where
+    A: ArchiveStore,
+    S: StateStore,
+{
+    let silent = Observer::silent();
+    let observer = observer.unwrap_or(&silent);
+
+    let (plan, outlook, summary) = match input {
+        Input::Directory(path) => restore_dir(path, node, target, observer)?,
+        Input::Repository { repository, point } => {
+            repository.restore(point, node, target, observer)?
+        }
+    };
+
+    Ok(RestoreOutcome {
+        plan,
+        outlook,
+        summary,
+    })
 }
 
 /// The stele a restore is reading, and the terms it reads under.

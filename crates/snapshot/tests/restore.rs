@@ -141,6 +141,45 @@ fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveSto
     restore::Target::new(&blank.archive, blank.state())
 }
 
+/// The public assembly path accepts an explicit directory source and target
+/// and can run without constructing a terminal observer.
+#[test]
+fn the_headless_facade_restores_a_directory_without_an_observer() {
+    let domain: ToyDomain = harness();
+    let source = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    let blank = Blank::<MemoryStores>::open();
+    let outcome = restore::execute(
+        restore::Input::Directory(source.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.plan.position.point,
+        domain.state().read_cursor().unwrap().unwrap()
+    );
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
+    assert_eq!(outcome.summary.layers_skipped, 0);
+    assert_eq!(
+        outcome.summary.layers_fetched,
+        outcome.plan.layers().count()
+    );
+}
+
 // --------------------------------------------------------------------------
 // 1. Refusals
 // --------------------------------------------------------------------------
@@ -1207,6 +1246,50 @@ fn restore_watched<B: ToyStores>(
             observer,
         ),
     }
+}
+
+/// An interrupted low-level read can be resumed through the public assembly
+/// facade, proving the facade honors the same checkpoint contract.
+#[test]
+fn the_headless_facade_resumes_an_interrupted_directory_restore() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+    let stele = tempfile::tempdir().unwrap();
+    export_to(stele.path(), &domain);
+
+    let (epoch_layers, _) = layers_in_driver_order(stele.path(), magic);
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    restore_checkpointed(
+        stele.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(epoch_layers[1]),
+    )
+    .unwrap_err();
+
+    let resumed = restore::execute(
+        restore::Input::Directory(stele.path()),
+        restore::Restoring {
+            network_magic: magic,
+            max_history: None,
+            storage_path: storage.path(),
+            resume: true,
+            skip_space_check: false,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(resumed.summary.layers_skipped, 1);
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
 }
 
 /// Done criterion 2: killed mid-way, resumed, and the same node — having

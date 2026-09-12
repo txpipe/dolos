@@ -14,8 +14,9 @@ cargo run --no-default-features --example headless_replay -- \
 - `ReplayWorkspace::open(config, genesis)` opens a dataset without running
   ledger initialization, replaying pending work, or pruning history.
 - `workspace.snapshot()` lends read-only Dolos profile operations:
-  committed position, epoch, publication planning, preview and publication.
-  No domain or writable storage handle escapes the view.
+  committed position, selected planning, directory or registry publication,
+  digest reproduction and verification. No domain or writable storage handle
+  escapes the view. See `docs/headless-snapshots.md` for the restore boundary.
 - `workspace.start(stop_epoch)` consumes the inspection workspace and explicitly
   permits initialization and processing. Publish any pending boundary first.
 - `session.import_blocks(blocks)` processes a nonempty batch of trusted immutable

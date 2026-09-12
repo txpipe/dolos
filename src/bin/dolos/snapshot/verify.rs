@@ -34,6 +34,7 @@
 use clap::Parser;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
+    facade::{SnapshotRepository, SnapshotSource as _, StoreSnapshot},
     node,
     registry::{self, Point, Repository},
 };
@@ -95,7 +96,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // than moving a node's own data.
     let scratch = node::scratch_dir(&config.storage, None);
 
-    let registry = registry::open(
+    let repository = SnapshotRepository::open(
         &args.repo,
         args.insecure,
         auth,
@@ -105,7 +106,8 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("opening the repository")?;
 
-    let verified = registry::verify(&registry, args.point)
+    let verified = repository
+        .verify(args.point)
         .into_diagnostic()
         .context("verifying the stele")?;
 
@@ -151,15 +153,10 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     super::report_plan(&plan)?;
 
-    let reproduced = dolos_snapshot::export::verify_reproduction(
-        &verified.inscription,
-        &plan,
-        &stores.archive,
-        &stores.state,
-        None,
-    )
-    .into_diagnostic()
-    .context("reproducing the published stele from the local stores")?;
+    let reproduced = StoreSnapshot::new(&stores.archive, &stores.state)
+        .verify_reproduction(&verified.inscription, &plan)
+        .into_diagnostic()
+        .context("reproducing the published stele from the local stores")?;
 
     println!(
         "reproduced: {} layers rebuilt from the local stores; the documents are byte-identical \

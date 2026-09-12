@@ -24,7 +24,10 @@ use stelae_driver::Standing;
 use crate::{
     export::Plan,
     node,
-    registry::{self, Auth, Preview, Published, Publishing, Registry, Repository, Tuning},
+    registry::{
+        self, Auth, Preview, Published, Publishing, Registry, Repository, SnapshotRepository,
+        Tuning,
+    },
     DolosProfile, Error,
 };
 
@@ -140,22 +143,40 @@ impl Publisher {
     ) -> Result<Self, Error> {
         let scratch = node::scratch_dir(&config.storage, publish.scratch_dir);
 
-        let registry = registry::open(
+        Self::open_explicit(
             publish.repo,
             publish.insecure,
             auth,
             scratch,
+            registry::record_path_in(&config.storage.path),
+            publish.rebuild,
             publish.tuning,
-        )?;
+        )
+    }
+
+    /// Open a publisher from resolved host policy without a Dolos root
+    /// configuration.
+    ///
+    /// The journal path is explicit because it is application state: an
+    /// external publisher may place it beside its own stores without adopting
+    /// the Dolos command's directory layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_explicit(
+        repository: &Repository,
+        insecure: bool,
+        auth: Auth,
+        scratch_dir: PathBuf,
+        record_path: PathBuf,
+        rebuild: bool,
+        tuning: Tuning,
+    ) -> Result<Self, Error> {
+        let registry =
+            SnapshotRepository::open(repository, insecure, auth, scratch_dir, tuning)?.into_inner();
 
         Ok(Self {
             registry,
-            // The resumption record sits beside the stores, so an interrupted
-            // publish restarted against this repository carries forward the
-            // epoch layers it already uploaded instead of rebuilding them.
-            // `--rebuild` starts it over along with everything else.
-            record_path: registry::record_path_in(&config.storage.path),
-            rebuild: publish.rebuild,
+            record_path,
+            rebuild,
         })
     }
 

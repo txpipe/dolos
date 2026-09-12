@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
-use dolos_snapshot::source::{SnapshotSource, StoreSnapshot};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use dolos_snapshot::{
-    export, node,
+    export,
+    facade::{SnapshotSource, StoreSnapshot},
+    node,
     publisher::{Next, Publisher, RepositoryPublish},
     registry::{self, Repository},
 };
@@ -112,6 +113,7 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     let plan = super::planned(config, &stores, &selection, "planning the publish")?;
 
     super::report_plan(&plan)?;
+    let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
     match (&args.repo, &args.output_dir) {
         (Some(repo), _) => {
@@ -128,15 +130,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 },
             };
 
-            to_repository(
-                config,
-                &publish,
-                &plan,
-                &StoreSnapshot::new(&stores.archive, &stores.state),
-                feedback,
-            )
+            to_repository(config, &publish, &plan, &snapshot, feedback)
         }
-        (None, Some(dir)) => to_directory(args, dir, &plan, &stores, feedback),
+        (None, Some(dir)) => to_directory(args, dir, &plan, &snapshot, feedback),
         // The required `destination` group already refuses this.
         (None, None) => unreachable!("one of --output-dir and --repo is required"),
     }
@@ -146,7 +142,7 @@ fn to_directory(
     args: &Args,
     dir: &std::path::Path,
     plan: &export::Plan,
-    stores: &crate::common::Stores,
+    source: &dyn SnapshotSource,
     feedback: &Feedback,
 ) -> miette::Result<()> {
     if args.dry_run {
@@ -159,16 +155,10 @@ fn to_directory(
     // walking a repository publish pays, and they are what this reports.
     let progress = SteleProgress::publishing(feedback);
 
-    let inscription = export::publish(
-        dir,
-        plan,
-        &stores.archive,
-        &stores.state,
-        None,
-        &progress.observer(),
-    )
-    .into_diagnostic()
-    .context("exporting the stele")?;
+    let inscription = source
+        .publish_directory(dir, plan, &progress.observer())
+        .into_diagnostic()
+        .context("exporting the stele")?;
 
     progress.finish();
 
