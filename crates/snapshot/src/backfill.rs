@@ -56,29 +56,23 @@
 //!
 //! This module is orchestration only: it composes the mithril fetch, the
 //! import lifecycle, and the publish path `snapshot publish --repo` uses, and
-//! changes none of them. Everything a *process* owns stays outside it, on
-//! [`Driver`]'s seams — the tokio runtime the mithril calls are driven on, the
-//! shutdown token the signal handler cancels, the renderers, and the steps a
-//! [`Domain`] does not expose: opening the stores without a domain, building
-//! and tearing down one that stops at a chosen epoch, and publishing a plan.
-//! That split is what keeps the shutdown semantics the binary's, where the
-//! signals arrive.
+//! changes none of them. Process setup and signal handling stay in the host.
+//! The driver owns source acquisition, publication order and cancellation.
+//! A workspace supplies non-advancing profile inspection and an exclusive
+//! replay session. Engine initialization and persistence are not host policy.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dolos_core::config::{MithrilConfig, RootConfig};
-use dolos_core::{
-    seed_wal_from_state, BlockSlot, Domain, DomainError, Genesis, ImportExt as _, StateStore as _,
-    WalSeedError,
-};
+use dolos_core::{BlockSlot, ChainPoint, Genesis, RawBlock, ReplayProgress};
 use dolos_mithril as mithril;
 use dolos_mithril::mithril_client::feedback::FeedbackReceiver;
 use itertools::Itertools as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::{export::Plan, planning, retry};
+use crate::{export::Plan, planning, retry, source::SnapshotSource};
 
 /// Blocks handed to `import_blocks` per batch.
 const IMPORT_CHUNK: usize = 100;
@@ -107,17 +101,11 @@ const INTERRUPTED: &str =
 /// What the daemon refused, or what refused it.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A seam the caller supplied failed: opening the stores, building a
-    /// domain, or publishing. Its rendering is the caller's — the daemon only
+    /// A seam the caller supplied failed: opening a workspace, replaying,
+    /// or publishing. Its rendering is the caller's — the daemon only
     /// says which step it was in.
     #[error("{0}")]
     Caller(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
-
-    #[error("reading the state cursor")]
-    Cursor(#[source] dolos_core::StateError),
-
-    #[error("loading the chain summary")]
-    ChainSummary(#[source] dolos_core::ChainError),
 
     #[error("reading snapshot.state_epochs")]
     RetainedEpochs(#[source] crate::Error),
@@ -125,14 +113,11 @@ pub enum Error {
     #[error("planning the publish")]
     Planning(#[source] crate::Error),
 
-    #[error("seeding the WAL from the state cursor")]
-    WalSeed(#[source] WalSeedError),
-
-    #[error("pruning excess history")]
-    Housekeeping(#[source] DomainError),
-
-    #[error("importing an immutable block chunk")]
-    Import(#[source] DomainError),
+    #[error("replay failed ({replay}) and shutting down also failed ({shutdown})")]
+    ReplayAndShutdown {
+        replay: Box<Error>,
+        shutdown: Box<Error>,
+    },
 
     #[error("iterating the local immutable db: {0}")]
     ImmutableDb(String),
@@ -181,16 +166,21 @@ impl Error {
     }
 }
 
-/// The three stores a publish reads, opened without a domain.
-///
-/// [`Driver::publish_pending`] runs *before* anything opens a domain and
-/// cannot use one: the WAL reseed it performs is the very thing that makes
-/// the next domain open legal, and a domain assembled first would refuse with
-/// `InconsistentState` instead.
-pub struct Stores<D: Domain> {
-    pub wal: D::Wal,
-    pub state: D::State,
-    pub archive: D::Archive,
+/// A dataset that can be inspected without advancing its logical state.
+pub trait Workspace {
+    type Session: Session;
+
+    fn snapshot(&self) -> impl SnapshotSource + '_;
+    fn start(self, target_epoch: u64) -> Result<Self::Session, Error>;
+    fn finish(self) -> Result<(), Error>;
+}
+
+/// The operations backfill needs from an exclusive replay engine.
+pub trait Session {
+    fn committed_position(&self) -> Result<Option<ChainPoint>, Error>;
+    fn import_blocks(&mut self, blocks: Vec<RawBlock>) -> Result<ReplayProgress, Error>;
+    fn prune_history(&mut self) -> Result<u64, Error>;
+    fn finish(self) -> Result<(), Error>;
 }
 
 /// Where the replay's own progress goes.
@@ -219,7 +209,7 @@ impl Replay for () {}
 /// A seam rather than a call into [`publisher`](crate::publisher), because
 /// `snapshot publish --repo` renders the same publish and one telling of that
 /// order is what [`publisher::Publisher`](crate::publisher::Publisher) is for.
-pub trait Publish<D: Domain> {
+pub trait Publish {
     /// Say what is about to be published. Once per iteration, outside the
     /// retry, so a transient failure does not repeat the report.
     fn announce(&self, plan: &Plan) -> Result<(), Error> {
@@ -229,7 +219,7 @@ pub trait Publish<D: Domain> {
 
     /// Publish the plan. Retried in place by the daemon, so it must be safe to
     /// simply run again.
-    fn publish(&self, plan: &Plan, archive: &D::Archive, state: &D::State) -> Result<(), Error>;
+    fn publish(&self, plan: &Plan, source: &dyn SnapshotSource) -> Result<(), Error>;
 }
 
 /// How a run ended, for a caller that has something to say about it.
@@ -446,7 +436,7 @@ fn cleanup_consumed(
 /// The seams are `&dyn` rather than generic parameters because there is one
 /// caller and the daemon is not on any hot path: a monomorphized copy per
 /// closure would buy nothing and cost a signature nobody can read.
-pub struct Driver<'a, D: Domain> {
+pub struct Driver<'a, W: Workspace> {
     /// The node's configuration, for the retained-epoch parameters a plan
     /// carries.
     pub config: &'a RootConfig,
@@ -492,28 +482,26 @@ pub struct Driver<'a, D: Domain> {
     /// Where the replay's progress goes.
     pub replay: &'a dyn Replay,
 
-    /// Open the three stores a publish reads, without assembling a domain.
-    pub open_stores: &'a dyn Fn() -> Result<Stores<D>, Error>,
-
-    /// Build a domain whose `stop_epoch` is the given epoch.
-    ///
-    /// The seam a [`Domain`] does not cover: the stop epoch is baked in at
-    /// build time and the daemon rebuilds the domain per boundary, so
-    /// construction is the caller's.
-    pub build_domain: &'a dyn Fn(u64) -> Result<D, Error>,
-
-    /// Drain a domain's background work before its handle drops.
-    ///
-    /// Beside [`Driver::build_domain`] and for the same reason: a domain's
-    /// teardown is not on the [`Domain`] trait either, so the half of its
-    /// lifecycle that flushes is the caller's too.
-    pub shutdown_domain: &'a dyn Fn(&D) -> Result<(), Error>,
+    /// Open a dataset for inspection without advancing it.
+    pub open_workspace: &'a dyn Fn() -> Result<W, Error>,
 
     /// Where the planned sequence goes.
-    pub publish: &'a dyn Publish<D>,
+    pub publish: &'a dyn Publish,
 }
 
-impl<D: Domain> Driver<'_, D> {
+fn finish_extend<T>(replay: Result<T, Error>, shutdown: Result<(), Error>) -> Result<T, Error> {
+    match (replay, shutdown) {
+        (Ok(advance), Ok(())) => Ok(advance),
+        (Err(replay), Ok(())) => Err(replay),
+        (Ok(_), Err(shutdown)) => Err(shutdown),
+        (Err(replay), Err(shutdown)) => Err(Error::ReplayAndShutdown {
+            replay: Box::new(replay),
+            shutdown: Box::new(shutdown),
+        }),
+    }
+}
+
+impl<W: Workspace> Driver<'_, W> {
     /// Where the replay reads from.
     fn immutable_dir(&self) -> PathBuf {
         self.download_dir.join("immutable")
@@ -563,18 +551,8 @@ impl<D: Domain> Driver<'_, D> {
 
     /// Publish the sequence the cursor stands at, and name the next target.
     ///
-    /// Also reseeds the WAL from the state cursor before anything else opens
-    /// the domain: `import_blocks` skips the WAL by design, so a run that
-    /// died mid-import left the state ahead of it, and the next domain open
-    /// would refuse with `InconsistentState`.
-    ///
-    /// These stores are dropped rather than shut down, where [`Self::extend`]
-    /// takes the trouble — and the asymmetry is the write, not an oversight.
-    /// The one write here is the WAL reseed, whose only backend is redb, whose
-    /// `shutdown` is a no-op because a redb commit is already durable and its
-    /// drop cleans up without blocking. Everything the publish touches after
-    /// that it only reads, so fjall has no flush of ours to drain — which is
-    /// the whole reason `extend` shuts its domain down after a bulk import.
+    /// Inspection and publication do not advance the dataset. The workspace
+    /// is finalized on both successful and failed publication attempts.
     ///
     /// Nothing *inside* the publish observes [`Driver::cancel`]: a stele goes
     /// out over minutes of store walking and uploading with no seam to check a
@@ -586,9 +564,13 @@ impl<D: Domain> Driver<'_, D> {
     /// below polls it: a shutdown during a backoff ends the run on the failure
     /// in hand rather than after the remaining patience.
     fn publish_pending(&self) -> Result<Step, Error> {
-        let stores = (self.open_stores)()?;
+        let workspace = (self.open_workspace)()?;
+        let result = self.plan_pending(&workspace.snapshot());
+        finish_extend(result, workspace.finish())
+    }
 
-        let cursor = stores.state.read_cursor().map_err(Error::Cursor)?;
+    fn plan_pending(&self, source: &dyn SnapshotSource) -> Result<Step, Error> {
+        let cursor = source.committed_position().map_err(Error::Planning)?;
 
         let Some(cursor) = cursor else {
             return Ok(Step::Extend {
@@ -597,17 +579,12 @@ impl<D: Domain> Driver<'_, D> {
             });
         };
 
-        // An undefined cursor is deliberately not a refusal here: `plan` below
-        // refuses the same state as an unanchored point, with the sentence
-        // that names the command's own subject.
-        if cursor.is_fully_defined() {
-            seed_wal_from_state(&stores.state, &stores.wal).map_err(Error::WalSeed)?;
-        }
-
-        let summary = dolos_cardano::eras::load_chain_summary_from_state(&stores.state)
-            .map_err(Error::ChainSummary)?;
-
-        let (epoch, _) = summary.slot_epoch(cursor.slot());
+        let epoch = source
+            .epoch()
+            .map_err(Error::Planning)?
+            .ok_or(Error::UnanchoredCursor {
+                slot: cursor.slot(),
+            })?;
 
         // Nothing publishable yet: a sequence-0 stele would be epoch 0's
         // mid-epoch sliver, which no consumer chains from.
@@ -620,12 +597,9 @@ impl<D: Domain> Driver<'_, D> {
 
         let retained = planning::retained_epochs(self.config).map_err(Error::RetainedEpochs)?;
 
-        let plan = crate::export::plan(
-            &stores.state,
-            u64::from(self.genesis.network_magic()),
-            retained,
-        )
-        .map_err(Error::Planning)?;
+        let plan = source
+            .plan(u64::from(self.genesis.network_magic()), retained)
+            .map_err(Error::Planning)?;
 
         // Retried here rather than allowed to end the process, because the
         // process ending is the most expensive recovery this driver has and a
@@ -645,7 +619,7 @@ impl<D: Domain> Driver<'_, D> {
         retry::transient(
             "publishing the pending sequence",
             &|| self.aborted(),
-            || self.publish.publish(&plan, &stores.archive, &stores.state),
+            || self.publish.publish(&plan, source),
         )?;
 
         if self.until_epoch.is_some_and(|until| plan.sequence >= until) {
@@ -660,32 +634,29 @@ impl<D: Domain> Driver<'_, D> {
         })
     }
 
-    /// Replay toward `target`'s boundary inside a domain that stops there.
+    /// Replay toward the requested boundary inside an exclusive session.
     fn extend(
         &self,
         target: u64,
         prune: bool,
         slots_per_immutable_file: u64,
     ) -> Result<Advance, Error> {
-        let domain = (self.build_domain)(target)?;
-
-        let result = self.advance_domain(&domain, prune, slots_per_immutable_file);
+        let workspace = (self.open_workspace)()?;
+        let mut session = workspace.start(target)?;
+        let result = self.advance_session(&mut session, prune, slots_per_immutable_file);
 
         // Shut down even when the replay failed: fjall in particular has
         // background work to flush before the handle drops.
-        let shutdown = (self.shutdown_domain)(&domain);
+        let shutdown = session.finish();
 
-        let advance = result?;
-        shutdown?;
-
-        Ok(advance)
+        finish_extend(result, shutdown)
     }
 
     /// Import what is on disk, fetching windows from mithril whenever the
     /// files run out, until the boundary, the aggregator's tip, or a signal.
-    fn advance_domain(
+    fn advance_session(
         &self,
-        domain: &D,
+        session: &mut W::Session,
         prune: bool,
         slots_per_immutable_file: u64,
     ) -> Result<Advance, Error> {
@@ -694,9 +665,7 @@ impl<D: Domain> Driver<'_, D> {
         // After the publish and before the next epoch goes in, never between
         // a boundary and its publish.
         if prune {
-            let rounds = domain
-                .drain_housekeeping(None)
-                .map_err(Error::Housekeeping)?;
+            let rounds = session.prune_history()?;
 
             info!(rounds, "housekeeping drained");
         }
@@ -708,12 +677,10 @@ impl<D: Domain> Driver<'_, D> {
                 break Advance::Cancelled;
             }
 
-            match self.import_available(domain, &immutable_dir)? {
+            match self.import_available(session, &immutable_dir)? {
                 Import::Boundary => {
-                    let cursor_slot = domain
-                        .state()
-                        .read_cursor()
-                        .map_err(Error::Cursor)?
+                    let cursor_slot = session
+                        .committed_position()?
                         .map(|cursor| cursor.slot())
                         .unwrap_or_default();
 
@@ -748,11 +715,7 @@ impl<D: Domain> Driver<'_, D> {
 
             let highest = mithril::highest_existing_immutable(&immutable_dir);
 
-            let cursor_slot = domain
-                .state()
-                .read_cursor()
-                .map_err(Error::Cursor)?
-                .map(|cursor| cursor.slot());
+            let cursor_slot = session.committed_position()?.map(|cursor| cursor.slot());
 
             let resume = resume_file(highest, cursor_slot, slots_per_immutable_file);
 
@@ -830,17 +793,17 @@ impl<D: Domain> Driver<'_, D> {
             }
         };
 
-        // Whatever ended the replay, the chunks it committed are in the state
-        // and the WAL must agree before the next domain open.
-        seed_wal_from_state(domain.state(), domain.wal()).map_err(Error::WalSeed)?;
-
         self.replay.round_finished();
 
         Ok(outcome)
     }
 
     /// Import everything on disk past the cursor, in chunks.
-    fn import_available(&self, domain: &D, immutable_dir: &Path) -> Result<Import, Error> {
+    fn import_available(
+        &self,
+        session: &mut W::Session,
+        immutable_dir: &Path,
+    ) -> Result<Import, Error> {
         use pallas::network::miniprotocols::Point;
 
         // Before the first download the immutable dir does not exist at all;
@@ -858,7 +821,7 @@ impl<D: Domain> Driver<'_, D> {
             return Ok(Import::Exhausted);
         }
 
-        let cursor = domain.state().read_cursor().map_err(Error::Cursor)?;
+        let cursor = session.committed_position()?;
 
         // A cursor with no hash is `ChainPoint::Slot`, which the pallas
         // conversion refuses — and it refuses with `()`, so an `unwrap` here
@@ -867,8 +830,7 @@ impl<D: Domain> Driver<'_, D> {
         // to the boundary slot alone, and the boundary block's own commit right
         // after it. `export::plan` refuses the same state first, as an
         // unanchored point, so the driver ordinarily fails there rather than
-        // here; this says the same thing the WAL seed says, for the path that
-        // reaches it anyway.
+        // here.
         let point: Point = match cursor {
             None => Point::Origin,
             Some(cursor) => {
@@ -900,10 +862,10 @@ impl<D: Domain> Driver<'_, D> {
 
             let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-            match domain.import_blocks(batch) {
-                Ok(last) => self.replay.reached(last),
-                Err(DomainError::StopEpochReached) => return Ok(Import::Boundary),
-                Err(e) => return Err(Error::Import(e)),
+            let progress = session.import_blocks(batch)?;
+            self.replay.reached(progress.position().slot());
+            if progress.is_boundary() {
+                return Ok(Import::Boundary);
             }
 
             if self.aborted() {
@@ -1053,6 +1015,21 @@ mod tests {
         assert!(!fetch_advanced(Some(5), Some(5)));
         assert!(!fetch_advanced(Some(5), None));
         assert!(!fetch_advanced(None, None));
+    }
+
+    #[test]
+    fn replay_and_shutdown_failures_are_both_preserved() {
+        let Err(error) = finish_extend::<Advance>(Err(Error::Interrupted), Err(Error::EmptyWindow))
+        else {
+            panic!("simultaneous failures unexpectedly succeeded");
+        };
+
+        let Error::ReplayAndShutdown { replay, shutdown } = error else {
+            panic!("simultaneous failures lost their combined error");
+        };
+
+        assert!(matches!(*replay, Error::Interrupted));
+        assert!(matches!(*shutdown, Error::EmptyWindow));
     }
 
     #[test]

@@ -73,6 +73,7 @@ pub mod planning;
 pub mod publisher;
 pub mod registry;
 pub mod restore;
+pub mod source;
 
 /// The free-space policy, which is [`stelae_driver`]'s: it is one rule over
 /// paths and byte counts and knows nothing about what fills them. Re-exported

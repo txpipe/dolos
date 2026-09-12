@@ -7,7 +7,6 @@
 //! root library assembles.
 
 use dolos_core::config::RootConfig;
-use dolos_core::ImportExt;
 use dolos_mithril::{fetch_snapshot, Fetch};
 use itertools::Itertools;
 use miette::{Context, IntoDiagnostic};
@@ -15,6 +14,7 @@ use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
 
 use crate::feedback::{Feedback, MithrilFeedback};
+use dolos::engine::BulkReplaySession;
 use dolos::prelude::*;
 
 #[derive(Debug, clap::Args, Clone)]
@@ -66,18 +66,13 @@ impl Default for Args {
     }
 }
 
-fn define_starting_point<S: dolos_core::StateStore>(
+fn define_starting_point(
     args: &Args,
-    state: &S,
+    cursor: Option<ChainPoint>,
 ) -> Result<pallas::network::miniprotocols::Point, miette::Error> {
     if let Some(point) = &args.start_from {
         Ok(point.clone().try_into().unwrap())
     } else {
-        let cursor = state
-            .read_cursor()
-            .into_diagnostic()
-            .context("reading state cursor")?;
-
         let point = cursor
             .map(|c| c.try_into().unwrap())
             .unwrap_or(pallas::network::miniprotocols::Point::Origin);
@@ -88,8 +83,9 @@ fn define_starting_point<S: dolos_core::StateStore>(
 
 /// Inner import function that can return errors.
 /// The outer function ensures shutdown is called regardless of success/failure.
-fn do_import<D: dolos_core::Domain>(
-    domain: &D,
+fn do_import(
+    cursor: Option<ChainPoint>,
+    mut import: impl FnMut(Vec<RawBlock>) -> miette::Result<BlockSlot>,
     args: &Args,
     immutable_path: &Path,
     feedback: &Feedback,
@@ -100,7 +96,7 @@ fn do_import<D: dolos_core::Domain>(
         .context("reading immutable db tip")?
         .ok_or(miette::miette!("immutable db has no tip"))?;
 
-    let cursor = define_starting_point(args, domain.state())?;
+    let cursor = define_starting_point(args, cursor)?;
 
     let mut iter = pallas::interop::hardano::storage::immutable::read_blocks_from_point(
         immutable_path,
@@ -131,9 +127,7 @@ fn do_import<D: dolos_core::Domain>(
         // around throughout the pipeline
         let batch: Vec<_> = batch.into_iter().map(Arc::new).collect();
 
-        let last = domain
-            .import_blocks(batch)
-            .map_err(|e| miette::miette!(e.to_string()))?;
+        let last = import(batch)?;
 
         progress.set_position(last);
     }
@@ -150,17 +144,29 @@ fn import_hardano_into_domain(
     feedback: &Feedback,
     chunk_size: usize,
 ) -> Result<(), miette::Error> {
-    let domain = crate::common::setup_domain(config)?;
+    let genesis = Arc::new(crate::common::open_genesis_files(&config.genesis)?);
+    let session = BulkReplaySession::open(config, genesis, None)
+        .map_err(|error| miette::miette!("opening the bulk-replay session: {error}"))?;
 
-    let result = do_import(&domain, args, immutable_path, feedback, chunk_size);
-
-    // Always shutdown the domain before it goes out of scope, regardless of
-    // whether import succeeded or failed.
-    if let Err(e) = domain.shutdown() {
-        tracing::error!("error during domain shutdown: {}", e);
-    }
-
-    result
+    session
+        .run(|session| {
+            let cursor = session.committed_position().into_diagnostic()?;
+            do_import(
+                cursor,
+                |blocks| {
+                    let progress = session.import_blocks(blocks).into_diagnostic()?;
+                    if progress.is_boundary() {
+                        return Err(miette::miette!("{}", DomainError::StopEpochReached));
+                    }
+                    Ok(progress.position().slot())
+                },
+                args,
+                immutable_path,
+                feedback,
+                chunk_size,
+            )
+        })
+        .map_err(|error| miette::miette!("{error}"))
 }
 
 pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
@@ -223,13 +229,30 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_core::{ArchiveStore, Domain};
+    use dolos_core::{ArchiveStore, Domain, ImportExt};
     use dolos_testing::{
         blocks::write_immutable_fixture,
         synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
         toy_domain::{FjallStores, ToyDomain},
     };
     use pallas::ledger::traverse::MultiEraBlock;
+
+    fn import_fixture<D: Domain>(
+        domain: &D,
+        args: &Args,
+        path: &Path,
+        feedback: &Feedback,
+        chunk_size: usize,
+    ) -> miette::Result<()> {
+        do_import(
+            domain.state().read_cursor().into_diagnostic()?,
+            |blocks| domain.import_blocks(blocks).into_diagnostic(),
+            args,
+            path,
+            feedback,
+            chunk_size,
+        )
+    }
 
     #[test]
     fn mithril_import_resumes_through_the_automatic_writer() {
@@ -253,7 +276,7 @@ mod tests {
         };
         let dir = tempfile::tempdir().unwrap();
         write_immutable_fixture(dir.path(), &blocks);
-        do_import(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
+        import_fixture(&domain, &args, dir.path(), &Feedback::hidden(), 3).unwrap();
         let stats = domain.archive().append_stats();
         assert!(stats.serial_batches >= 1, "{stats:?}");
         assert_eq!(
@@ -275,7 +298,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let before = domain.archive().append_stats();
-        do_import(
+        import_fixture(
             &domain,
             &Args::default(),
             dir.path(),

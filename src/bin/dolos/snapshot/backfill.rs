@@ -23,7 +23,8 @@ use miette::{bail, Context as _, IntoDiagnostic as _};
 use tokio_util::sync::CancellationToken;
 
 use crate::feedback::Feedback;
-use dolos::adapters::{ArchiveStoreBackend, DomainAdapter, StateStoreBackend};
+use dolos::engine::ReplayWorkspace;
+use dolos_snapshot::source::SnapshotSource;
 
 /// Where the mithril window lands when the operator names nowhere: beside the
 /// stores, so the bytes stay on the data mount.
@@ -169,26 +170,14 @@ impl RepositoryArm<'_> {
     }
 }
 
-impl backfill::Publish<DomainAdapter> for RepositoryArm<'_> {
+impl backfill::Publish for RepositoryArm<'_> {
     fn announce(&self, plan: &Plan) -> Result<(), backfill::Error> {
         super::report_plan(plan).map_err(backfill::Error::caller)
     }
 
-    fn publish(
-        &self,
-        plan: &Plan,
-        archive: &ArchiveStoreBackend,
-        state: &StateStoreBackend,
-    ) -> Result<(), backfill::Error> {
-        super::publish::to_repository(
-            self.config,
-            &self.settings(),
-            plan,
-            archive,
-            state,
-            self.feedback,
-        )
-        .map_err(backfill::Error::caller)
+    fn publish(&self, plan: &Plan, source: &dyn SnapshotSource) -> Result<(), backfill::Error> {
+        super::publish::to_repository(self.config, &self.settings(), plan, source, self.feedback)
+            .map_err(backfill::Error::caller)
     }
 }
 
@@ -231,7 +220,9 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
         feedback,
     };
 
-    let driver = backfill::Driver::<DomainAdapter> {
+    let genesis = Arc::new(genesis);
+
+    let driver = backfill::Driver::<ReplayWorkspace> {
         config,
         genesis: &genesis,
         mithril,
@@ -249,26 +240,8 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
                 >)
         },
         replay: &replay,
-        open_stores: &|| {
-            let stores = crate::common::open_data_stores(config)
-                .into_diagnostic()
-                .context("opening the data stores")
-                .map_err(backfill::Error::caller)?;
-
-            Ok(backfill::Stores::<DomainAdapter> {
-                wal: stores.wal,
-                state: stores.state,
-                archive: stores.archive,
-            })
-        },
-        build_domain: &|target| {
-            crate::common::setup_domain_with_stop_epoch(config, Some(target))
-                .map_err(backfill::Error::caller)
-        },
-        shutdown_domain: &|domain: &DomainAdapter| {
-            domain
-                .shutdown()
-                .map_err(|e| backfill::Error::caller(format!("shutting down the domain: {e}")))
+        open_workspace: &|| {
+            ReplayWorkspace::open(config, genesis.clone()).map_err(backfill::Error::caller)
         },
         publish: &publish,
     };
