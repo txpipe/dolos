@@ -19,11 +19,10 @@
 //!    the protocol, so nothing but this crate can read an epoch out of one.
 //! 3. Per epoch: `blocks`, then the `log-{ns}` layers the epoch carries, then
 //!    `indexes` — all three into the archive store.
-//! 4. The state tip — every shard of every `state-{ns}` kind.
-//! 5. Rebuild the live-UTxO tags from the restored UTxO set, into the state
-//!    store beside it. They are never shipped — ADR-004's Amendment 2 — so this
-//!    is where they come back, and `set_cursor` lands after them, as the last
-//!    write of the restore.
+//! 4. The state tip — every shard of every `state-{ns}` kind. Derive the
+//!    live-UTxO tags from each incoming UTxO chunk and commit them with the
+//!    set. They are never shipped — ADR-004's Amendment 2.
+//! 5. Set the cursor as the last write, after all state and tags have landed.
 //!
 //! Nothing is added for the WAL: `bootstrap::run` already reseeds it from the
 //! state cursor after any bootstrap method.
@@ -31,20 +30,15 @@
 //! ## Why `set_cursor` is the last write
 //!
 //! `has_existing_data()` reads the state cursor and nothing else, so a node
-//! reads as restored exactly when that cursor is there. Writing it after step 6
+//! reads as restored exactly when that cursor is there. Writing it after step 4
 //! makes it the completion marker for the whole restore rather than for the
 //! state tip alone: a node whose ledger is complete and whose live-UTxO
 //! dimensions are not has no cursor, and the next `bootstrap` treats it as
 //! empty — which is what it is.
 //!
-//! PROFILE.md §"Restore pipeline" moves the cursor rather than marking
-//! completeness a second time in the progress file, and the implementation is
-//! why it can: [`rebuild_utxo_tags`] never reads the cursor off the state
-//! store, so nothing between the tip and the rebuild consumes the cursor and
-//! the write moves on its own. It also
-//! costs nothing on resume — the tip is never checkpointed and the rebuild is
-//! unconditional, so a resumed restore already redoes precisely the work that
-//! now follows the cursor.
+//! No state or tag write needs the cursor. The tip is never checkpointed, so
+//! every resume rewrites its UTxOs and their tags together, including when an
+//! older restore stopped after writing UTxOs without their tags.
 //!
 //! What it leaves is worth stating rather than discovering: an interruption
 //! anywhere in a restore leaves a node `has_existing_data()` reports as empty.
@@ -68,8 +62,8 @@
 //! publish, and — independently of that — a tip layer's descriptor scope is
 //! `{"shard": n}` and names no epoch, so nothing in a shard's identity could
 //! distinguish one publish's tip from another's even if a caller wanted it to.
-//! So the tip's layers are never asked about and never recorded, and they plus
-//! the live-UTxO rebuild are what every resumed restore pays.
+//! So the tip's layers are never asked about and never recorded; every resumed
+//! restore writes them and derives their live-UTxO tags again.
 //!
 //! A **retained state dump** is the other side of that argument rather than an
 //! exception to it (decision 0026). Its scope is `{"epoch": E, "shard": n}`,
@@ -109,6 +103,11 @@
 //! runs past a gigabyte, so [`stelae::dir::SteleDir::read_layer`] is never on
 //! this path.
 //!
+//! Tags are derived from the incoming UTxO chunks, without scanning the state
+//! store. Holding `iter_utxos()` open while writing tags to the same Fjall
+//! database pins its snapshot GC watermark for the entire rebuild, retaining
+//! historical memtables even after they have been flushed to disk.
+//!
 //! ## A layer is only proven by `finish`
 //!
 //! A layer's `diffId` covers its whole byte string, so it cannot be confirmed
@@ -127,8 +126,8 @@ use std::{
 
 use dolos_cardano::indexes::utxo_index_delta_from_utxo_delta;
 use dolos_core::{
-    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, EraCbor, IndexRecord, Namespace,
-    StateStore, StateWriter, TxoRef, UtxoSetDelta,
+    ArchiveStore, ArchiveWriter, BlockSlot, ChainPoint, IndexRecord, Namespace, StateStore,
+    StateWriter, UtxoSetDelta,
 };
 use stelae::{
     frame::Limits,
@@ -1017,10 +1016,6 @@ where
         }
     }
 
-    info!(utxos = summary.utxos, "rebuilding the live-utxo tags");
-
-    rebuild_utxo_tags(state, budget)?;
-
     // The last write of the restore, the live-utxo dimensions above included:
     // until this commit lands `has_existing_data()` reports an empty node
     // rather than a half-restored one.
@@ -1342,9 +1337,8 @@ fn restore_indexes<R: SteleReader, A: ArchiveStore>(
 ///
 /// `ns` comes from the layer's kind, not from its records — the split moved it
 /// there — so the dispatch is per layer rather than per record: the
-/// `state-utxos` kind goes through `apply_utxoset` in chunks (the UTxO set has
-/// its own writer method rather than a per-record one), and every other kind
-/// through `write_entity`.
+/// `state-utxos` kind goes through `apply_utxoset` and `apply_utxo_tags` in the
+/// same chunked writer, and every other kind through `write_entity`.
 ///
 /// Returns the entities and the UTxOs it wrote, separately, because they are
 /// the two halves the cross-check compares and a layer that restored one and
@@ -1371,6 +1365,7 @@ fn restore_state<R: SteleReader, S: StateStore>(
             }
 
             writer.apply_utxoset(&produced)?;
+            writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&produced))?;
             writer.commit()?;
 
             Ok(())
@@ -1394,47 +1389,6 @@ fn restore_state<R: SteleReader, S: StateStore>(
     })?;
 
     Ok((entities, 0))
-}
-
-/// Rebuild the live-UTxO tags from the restored UTxO set.
-///
-/// `utxo::{address,payment,stake,policy,asset}` track the current UTxO set, so
-/// ADR-004's Amendment 2 leaves them out of the epoch layers and rebuilds them
-/// here: linear over a set that has just been written anyway, and cheaper than
-/// shipping them. The tags land in the state store beside the set, in chunks
-/// of `budget.commit_records`.
-fn rebuild_utxo_tags<S: StateStore>(state: &S, budget: Budget) -> Result<(), Error> {
-    let mut chunk: Vec<(TxoRef, Arc<EraCbor>)> = Vec::new();
-
-    let apply = |chunk: Vec<(TxoRef, Arc<EraCbor>)>| -> Result<(), Error> {
-        let delta = UtxoSetDelta {
-            produced_utxo: chunk.into_iter().collect(),
-            ..Default::default()
-        };
-
-        let writer = state.start_writer()?;
-
-        writer.apply_utxo_tags(&utxo_index_delta_from_utxo_delta(&delta))?;
-        writer.commit()?;
-
-        Ok(())
-    };
-
-    for entry in state.iter_utxos()? {
-        let (txo, value) = entry?;
-
-        chunk.push((txo, Arc::new(value)));
-
-        if chunk.len() >= budget.commit_records {
-            apply(std::mem::take(&mut chunk))?;
-        }
-    }
-
-    if chunk.is_empty() {
-        return Ok(());
-    }
-
-    apply(chunk)
 }
 
 /// The kinds a restore reads nothing from, for a caller reporting what it
