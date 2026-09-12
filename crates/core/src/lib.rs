@@ -45,10 +45,7 @@ pub mod wal;
 pub mod work_unit;
 
 pub use bootstrap::BootstrapExt;
-pub use import::{
-    recover_bulk_checkpoint, seed_wal_from_state, BulkRecovery, BulkRecoveryError, ImportExt,
-    WalSeed, WalSeedError,
-};
+pub use import::{seed_wal_from_state, ImportExt, ReplayProgress, WalSeed, WalSeedError};
 pub use submit::SubmitExt;
 pub use sync::SyncExt;
 pub use work_unit::{MempoolUpdate, WorkUnit};

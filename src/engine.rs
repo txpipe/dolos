@@ -1,24 +1,28 @@
-//! Supported headless construction and bulk-replay lifecycle.
+//! Headless node construction and exclusive bulk replay.
 //!
-//! Applications embedding Dolos should use this module instead of copying the
-//! executable's domain assembly. Configuration-file precedence, progress UI,
-//! signal handling, source acquisition, publication, and housekeeping remain
-//! application policy; this module owns the stable engine seams beneath them.
+//! Hosts provide resolved configuration, trusted blocks and stopping policy.
+//! Opening a replay workspace does not advance the ledger. Inspect or export
+//! its snapshot before explicitly starting replay. Finalization persists the
+//! committed position and releases resources without pruning history.
+
+mod checkpoint;
 
 use std::fmt;
 use std::sync::Arc;
 
 use dolos_core::config::{ChainConfig, RootConfig};
+pub use dolos_core::ReplayProgress;
 use dolos_core::{
-    recover_bulk_checkpoint, BootstrapExt as _, BulkRecovery, BulkRecoveryError, ChainLogic as _,
-    ChainPoint, Domain, DomainError, Genesis, ImportExt as _, RawBlock, StateStore as _, TipEvent,
+    BootstrapExt as _, ChainLogic as _, ChainPoint, Domain as _, DomainError, Genesis,
+    ImportExt as _, RawBlock, StateStore as _,
 };
+use dolos_snapshot::source::{SnapshotSource, StoreSnapshot};
 
-use crate::adapters::{DomainAdapter, TipSubscription};
+use crate::adapters::{ArchiveStoreBackend, DomainAdapter, StateStoreBackend, WalAdapter};
 use crate::storage;
 
-/// The concrete store set used by a Cardano [`DomainAdapter`].
-pub type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
+type Stores = storage::Stores<dolos_cardano::CardanoDelta>;
+type Cause = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 /// A failure while assembling and bootstrapping a Dolos domain.
 #[derive(Debug, thiserror::Error)]
@@ -62,32 +66,14 @@ impl<'a> DomainBuilder<'a> {
         self
     }
 
-    /// Open the configured stores without constructing or bootstrapping a
-    /// domain.
-    ///
-    /// Publishers use this phase to recover and publish a boundary already on
-    /// disk before building a domain that can advance beyond it.
-    pub fn open_stores(&self) -> Result<Stores, DomainBuildError> {
-        storage::open_data_stores(self.config).map_err(DomainBuildError::Storage)
-    }
-
-    /// Open stores and construct the domain.
-    ///
-    /// This is the normal node path. It performs the existing bootstrap and
-    /// consistency checks but does not apply bulk-replay recovery first; use
-    /// [`BulkReplaySession::open`] for an importer whose state may be ahead of
-    /// WAL by design.
+    /// Construct a normal node domain, including initialization and integrity
+    /// checks.
     pub fn build(&self) -> Result<DomainAdapter, DomainBuildError> {
-        let stores = self.open_stores()?;
-        self.build_with_stores(stores)
+        let stores = storage::open_data_stores(self.config).map_err(DomainBuildError::Storage)?;
+        self.build_with_stores(&stores)
     }
 
-    /// Construct a domain from stores the caller opened explicitly.
-    ///
-    /// No checkpoint recovery is hidden here. In particular, construction
-    /// never treats a pending publish boundary as permission to import or
-    /// prune past it.
-    pub fn build_with_stores(&self, stores: Stores) -> Result<DomainAdapter, DomainBuildError> {
+    fn build_with_stores(&self, stores: &Stores) -> Result<DomainAdapter, DomainBuildError> {
         let ChainConfig::Cardano(mut chain_config) = self.config.chain.clone();
 
         if let Some(stop_epoch) = self.stop_epoch {
@@ -108,10 +94,10 @@ impl<'a> DomainBuilder<'a> {
             sync_config: Arc::new(self.config.sync.clone()),
             genesis: self.genesis.clone(),
             chain: Arc::new(std::sync::RwLock::new(chain)),
-            wal: stores.wal,
-            state: stores.state,
-            archive: stores.archive,
-            mempool: stores.mempool,
+            wal: stores.wal.clone(),
+            state: stores.state.clone(),
+            archive: stores.archive.clone(),
+            mempool: stores.mempool.clone(),
             tip_broadcast,
         };
 
@@ -121,181 +107,309 @@ impl<'a> DomainBuilder<'a> {
     }
 }
 
-/// The durable result of importing one batch.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplayProgress {
-    /// The batch committed normally at this state-store position.
-    Committed { position: ChainPoint },
-    /// The configured stopping epoch fired after its anchoring block committed.
-    Boundary { position: ChainPoint },
+/// An operation failed. Storage-specific details remain in the error source
+/// chain rather than becoming part of the replay protocol.
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}: {source}")]
+pub struct BulkReplayError {
+    operation: &'static str,
+    #[source]
+    source: Cause,
 }
 
-impl ReplayProgress {
-    /// The committed state cursor reported by this import.
-    pub fn position(&self) -> &ChainPoint {
-        match self {
-            Self::Committed { position } | Self::Boundary { position } => position,
+impl BulkReplayError {
+    fn new(operation: &'static str, source: impl Into<Cause>) -> Self {
+        Self {
+            operation,
+            source: source.into(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{primary}; finalization also failed: {cleanup}")]
+struct WithCleanup {
+    #[source]
+    primary: Cause,
+    cleanup: Cause,
+}
+
+fn complete<T>(
+    result: Result<T, BulkReplayError>,
+    cleanup: Result<(), BulkReplayError>,
+) -> Result<T, BulkReplayError> {
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(primary), Err(cleanup)) => Err(BulkReplayError::new(
+            "finalizing replay",
+            WithCleanup {
+                primary: Box::new(primary),
+                cleanup: Box::new(cleanup),
+            },
+        )),
+    }
+}
+
+fn flush(
+    wal: &WalAdapter,
+    state: &StateStoreBackend,
+    archive: &ArchiveStoreBackend,
+) -> Result<(), BulkReplayError> {
+    let wal = wal
+        .shutdown()
+        .map_err(|error| BulkReplayError::new("finishing replay", error));
+    let state = state
+        .shutdown()
+        .map_err(|error| BulkReplayError::new("finishing replay", error));
+    let archive = archive
+        .shutdown()
+        .map_err(|error| BulkReplayError::new("finishing replay", error));
+    complete(complete(wal, state), archive)
+}
+
+/// An exclusively owned replay dataset, opened without advancing chain state.
+///
+/// Use the borrowed profile view to inspect or publish pending data, then
+/// consume the workspace with `start` to advance it or `finish` to release it.
+/// Neither this handle nor its profile view exposes writable stores.
+#[must_use = "finish the workspace or consume it by starting replay"]
+pub struct ReplayWorkspace<'a> {
+    config: &'a RootConfig,
+    genesis: Arc<Genesis>,
+    stores: Stores,
+}
+
+impl<'a> ReplayWorkspace<'a> {
+    /// Open the configured dataset without running ledger initialization,
+    /// replaying blocks, or pruning history.
+    pub fn open(config: &'a RootConfig, genesis: Arc<Genesis>) -> Result<Self, BulkReplayError> {
+        let stores = storage::open_data_stores(config)
+            .map_err(|error| BulkReplayError::new("opening replay workspace", error))?;
+        Ok(Self {
+            config,
+            genesis,
+            stores,
+        })
+    }
+
+    /// Borrow read-only Dolos profile operations, not storage handles.
+    pub fn snapshot(&self) -> impl SnapshotSource + '_ {
+        StoreSnapshot::new(&self.stores.archive, &self.stores.state)
+    }
+
+    /// Begin processing, including any pending ledger initialization.
+    ///
+    /// Call only after publishing any pending boundary. The optional stopping
+    /// epoch overrides the configured value; `None` retains that configuration.
+    pub fn start(self, stop_epoch: Option<u64>) -> Result<BulkReplaySession, BulkReplayError> {
+        let result = checkpoint::reconcile(&self.stores.state, &self.stores.wal)
+            .map_err(|error| BulkReplayError::new("preparing replay", error))
+            .and_then(|()| {
+                DomainBuilder::new(self.config, self.genesis.clone())
+                    .stop_epoch(stop_epoch)
+                    .build_with_stores(&self.stores)
+                    .map_err(|error| BulkReplayError::new("starting replay", error))
+            });
+        match result {
+            Ok(domain) => Ok(BulkReplaySession {
+                domain,
+                boundary: None,
+                failed: false,
+            }),
+            Err(error) => complete(Err(error), self.finish()),
         }
     }
 
-    /// Whether the configured stopping boundary was reached.
-    pub fn is_boundary(&self) -> bool {
-        matches!(self, Self::Boundary { .. })
+    /// Release the inspection workspace without advancing or pruning it.
+    pub fn finish(self) -> Result<(), BulkReplayError> {
+        flush(&self.stores.wal, &self.stores.state, &self.stores.archive)
     }
 }
 
-/// A failure in the bulk-replay lifecycle.
-#[derive(Debug, thiserror::Error)]
-pub enum BulkReplayError {
-    #[error(transparent)]
-    Build(#[from] DomainBuildError),
-
-    #[error("recovering the bulk-replay checkpoint: {0}")]
-    Recovery(#[source] BulkRecoveryError),
-
-    #[error("importing a bulk-replay batch: {0}")]
-    Import(#[source] DomainError),
-
-    #[error("reading the committed bulk-replay position: {0}")]
-    Position(#[source] dolos_core::StateError),
-
-    #[error("bulk replay completed without a state cursor")]
-    MissingPosition,
-
-    #[error("cannot close bulk replay while {count} cloned session handle(s) remain")]
-    OutstandingHandles { count: usize },
-
-    #[error("shutting down the bulk-replay domain: {0}")]
-    Shutdown(#[source] DomainError),
-
-    #[error("checkpoint recovery failed ({recovery}) and shutdown also failed ({shutdown})")]
-    RecoveryAndShutdown {
-        recovery: BulkRecoveryError,
-        shutdown: DomainError,
-    },
-}
-
-/// A bulk-import domain with explicit recovery, progress, and close semantics.
+/// An exclusive session for trusted immutable blocks.
 ///
-/// Opening first reconciles only the expected import shape (state ahead of
-/// WAL), then bootstraps a domain with the requested stopping epoch. Importing
-/// uses [`dolos_core::ImportExt`], so it does not enter the live sync/WAL-tip
-/// notification pipeline. [`close`](Self::close) checkpoints WAL and drains
-/// the configured stores; it never runs housekeeping.
-#[derive(Clone)]
+/// Session ownership cannot be duplicated:
+/// ```compile_fail
+/// fn duplicate(session: dolos::engine::BulkReplaySession) {
+///     let other = session.clone();
+/// }
+/// ```
+///
+/// A replay session does not expose the live-node domain interface:
+/// ```compile_fail
+/// fn live_domain<D: dolos::core::Domain>() {}
+/// live_domain::<dolos::engine::BulkReplaySession>();
+/// ```
+///
+/// A profile view prevents advancement while it is in use:
+/// ```compile_fail
+/// use dolos_snapshot::source::SnapshotSource;
+/// fn inspect(session: &mut dolos::engine::BulkReplaySession) {
+///     let snapshot = session.snapshot();
+///     session.import_blocks(vec![]).unwrap();
+///     snapshot.committed_position().unwrap();
+/// }
+/// ```
+///
+/// Finishing consumes the handle:
+/// ```compile_fail
+/// fn finish(mut session: dolos::engine::BulkReplaySession) {
+///     session.finish().unwrap();
+///     session.import_blocks(vec![]).unwrap();
+/// }
+/// ```
+///
+/// The session is neither cloneable nor a `Domain`: processing requires a
+/// mutable borrow, and finishing consumes it. After a boundary, further import
+/// calls report that same boundary without accepting more input. After an
+/// execution failure, finish and reopen rather than continuing a damaged
+/// session. An empty batch is rejected before execution and does not invalidate
+/// the session.
+///
+/// `run` finalizes on ordinary success and error returns. Dropping a session,
+/// panicking or killing the process is not a substitute for successful
+/// finalization; interrupted ledger transitions may require explicit repair.
+#[must_use = "finish the session or use run to finalize an operation"]
 pub struct BulkReplaySession {
     domain: DomainAdapter,
-    initial_recovery: BulkRecovery,
-    close_lease: Arc<()>,
+    boundary: Option<ChainPoint>,
+    failed: bool,
 }
 
 impl BulkReplaySession {
-    /// Recover an importer checkpoint and construct a replay domain.
+    /// Open and immediately start replay when no pending export needs
+    /// inspection.
     pub fn open(
         config: &RootConfig,
         genesis: Arc<Genesis>,
         stop_epoch: Option<u64>,
     ) -> Result<Self, BulkReplayError> {
-        let builder = DomainBuilder::new(config, genesis).stop_epoch(stop_epoch);
-        let stores = builder.open_stores()?;
-        let initial_recovery = recover_bulk_checkpoint(&stores.state, &stores.wal)
-            .map_err(BulkReplayError::Recovery)?;
-        let domain = builder.build_with_stores(stores)?;
-
-        Ok(Self {
-            domain,
-            initial_recovery,
-            close_lease: Arc::new(()),
-        })
+        ReplayWorkspace::open(config, genesis)?.start(stop_epoch)
     }
 
-    /// What opening the session found and, if necessary, repaired.
-    pub fn initial_recovery(&self) -> &BulkRecovery {
-        &self.initial_recovery
-    }
-
-    /// Read the last position committed across the state-store boundary.
+    /// Read the last committed input position.
     pub fn committed_position(&self) -> Result<Option<ChainPoint>, BulkReplayError> {
         self.domain
             .state()
             .read_cursor()
-            .map_err(BulkReplayError::Position)
+            .map_err(|error| BulkReplayError::new("reading committed position", error))
     }
 
-    /// Import one trusted immutable batch and report the committed position or
-    /// configured epoch boundary.
-    pub fn import_blocks(&self, blocks: Vec<RawBlock>) -> Result<ReplayProgress, BulkReplayError> {
+    /// Borrow profile operations over the currently committed dataset.
+    pub fn snapshot(&self) -> impl SnapshotSource + '_ {
+        StoreSnapshot::new(self.domain.archive(), self.domain.state())
+    }
+
+    /// Process a nonempty batch and report its committed position or boundary.
+    ///
+    /// A boundary can stop partway through a batch. Resume the source from the
+    /// returned position, not from the last block submitted.
+    pub fn import_blocks(
+        &mut self,
+        blocks: Vec<RawBlock>,
+    ) -> Result<ReplayProgress, BulkReplayError> {
+        if self.failed {
+            return Err(BulkReplayError::new(
+                "importing blocks",
+                "session failed; finish and reopen it",
+            ));
+        }
+        if let Some(position) = &self.boundary {
+            return Ok(ReplayProgress::Boundary {
+                position: position.clone(),
+            });
+        }
+        if blocks.is_empty() {
+            return Err(BulkReplayError::new(
+                "importing blocks",
+                "batch must not be empty",
+            ));
+        }
         let boundary = match self.domain.import_blocks(blocks) {
-            Ok(_last_received) => false,
+            Ok(_) => false,
             Err(DomainError::StopEpochReached) => true,
-            Err(error) => return Err(BulkReplayError::Import(error)),
+            Err(error) => {
+                self.failed = true;
+                return Err(BulkReplayError::new("importing blocks", error));
+            }
         };
-
-        let position = self
-            .committed_position()?
-            .ok_or(BulkReplayError::MissingPosition)?;
-
+        let position = match self.committed_position() {
+            Ok(Some(position)) => position,
+            result => {
+                self.failed = true;
+                return Err(result.err().unwrap_or_else(|| {
+                    BulkReplayError::new("importing blocks", "no committed position")
+                }));
+            }
+        };
         if boundary {
+            self.boundary = Some(position.clone());
             Ok(ReplayProgress::Boundary { position })
         } else {
             Ok(ReplayProgress::Committed { position })
         }
     }
 
-    /// Checkpoint WAL and explicitly flush/shut down every store.
+    /// Explicitly apply the configured history retention policy.
     ///
-    /// Shutdown is attempted even if checkpoint recovery fails, and a caller
-    /// should call this on both operation success and failure.
-    /// [`run`](Self::run) packages that rule for a complete replay
-    /// operation. Closing consumes the session and refuses while cloned
-    /// session handles remain, so no handle can keep importing after the final
-    /// checkpoint.
-    pub fn close(self) -> Result<BulkRecovery, BulkReplayError> {
-        let count = Arc::strong_count(&self.close_lease) - 1;
-        if count > 0 {
-            return Err(BulkReplayError::OutstandingHandles { count });
+    /// The host must first publish any data it intends to preserve. Import and
+    /// finalization never call this operation automatically.
+    pub fn prune_history(&mut self) -> Result<u64, BulkReplayError> {
+        if self.failed || self.boundary.is_some() {
+            return Err(BulkReplayError::new(
+                "pruning history",
+                "finish the session before starting the next replay round",
+            ));
         }
-
-        let recovery = recover_bulk_checkpoint(self.domain.state(), self.domain.wal());
-        let shutdown = self.domain.shutdown();
-
-        match (recovery, shutdown) {
-            (Ok(recovery), Ok(())) => Ok(recovery),
-            (Err(recovery), Ok(())) => Err(BulkReplayError::Recovery(recovery)),
-            (Ok(_), Err(shutdown)) => Err(BulkReplayError::Shutdown(shutdown)),
-            (Err(recovery), Err(shutdown)) => {
-                Err(BulkReplayError::RecoveryAndShutdown { recovery, shutdown })
-            }
-        }
+        self.domain
+            .drain_housekeeping(None)
+            .map_err(|error| BulkReplayError::new("pruning history", error))
     }
 
-    /// Run an operation and close the session whether it succeeds or fails.
-    pub fn run<T, E>(
-        self,
-        operation: impl FnOnce(&Self) -> Result<T, E>,
-    ) -> Result<T, BulkReplayRunError<E>> {
-        let result = operation(&self);
-        let close = self.close();
+    /// Persist completed work and release resources without advancing or
+    /// pruning.
+    ///
+    /// Successful finalization makes the committed position usable by a later
+    /// replay session or normal node startup. Resource finalization is
+    /// attempted even when the dataset cannot be made resumable.
+    pub fn finish(self) -> Result<(), BulkReplayError> {
+        let result = checkpoint::reconcile(self.domain.state(), self.domain.wal())
+            .map_err(|error| BulkReplayError::new("finishing replay", error));
+        let cleanup = flush(
+            self.domain.wal(),
+            self.domain.state(),
+            self.domain.archive(),
+        );
+        complete(result, cleanup)
+    }
 
-        match (result, close) {
-            (Ok(value), Ok(_)) => Ok(value),
-            (Err(operation), Ok(_)) => Err(BulkReplayRunError::Operation(operation)),
-            (Ok(_), Err(close)) => Err(BulkReplayRunError::Close(close)),
-            (Err(operation), Err(close)) => {
-                Err(BulkReplayRunError::OperationAndClose { operation, close })
+    /// Run an operation and finalize on both successful and failed returns.
+    pub fn run<T, E>(
+        mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, BulkReplayRunError<E>> {
+        let result = operation(&mut self);
+        let finish = self.finish();
+        match (result, finish) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(operation), Ok(())) => Err(BulkReplayRunError::Operation(operation)),
+            (Ok(_), Err(finish)) => Err(BulkReplayRunError::Finish(finish)),
+            (Err(operation), Err(finish)) => {
+                Err(BulkReplayRunError::OperationAndFinish { operation, finish })
             }
         }
     }
 }
 
-/// A replay operation's error, preserving a close failure if both happened.
+/// Preserve both failures when an operation and its finalization fail.
 #[derive(Debug)]
 pub enum BulkReplayRunError<E> {
     Operation(E),
-    Close(BulkReplayError),
-    OperationAndClose {
+    Finish(BulkReplayError),
+    OperationAndFinish {
         operation: E,
-        close: BulkReplayError,
+        finish: BulkReplayError,
     },
 }
 
@@ -303,82 +417,84 @@ impl<E: fmt::Display> fmt::Display for BulkReplayRunError<E> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Operation(error) => write!(formatter, "bulk replay failed: {error}"),
-            Self::Close(error) => write!(formatter, "closing bulk replay failed: {error}"),
-            Self::OperationAndClose { operation, close } => write!(
+            Self::Finish(error) => write!(formatter, "finishing bulk replay failed: {error}"),
+            Self::OperationAndFinish { operation, finish } => write!(
                 formatter,
-                "bulk replay failed ({operation}) and closing it also failed ({close})"
+                "bulk replay failed ({operation}) and finalization also failed ({finish})"
             ),
         }
     }
 }
 
-impl<E> std::error::Error for BulkReplayRunError<E>
-where
-    E: std::error::Error + 'static,
-{
+impl<E: std::error::Error + 'static> std::error::Error for BulkReplayRunError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Operation(error)
-            | Self::OperationAndClose {
+            | Self::OperationAndFinish {
                 operation: error, ..
             } => Some(error),
-            Self::Close(error) => Some(error),
+            Self::Finish(error) => Some(error),
         }
     }
 }
 
-impl Domain for BulkReplaySession {
-    type Entity = dolos_cardano::CardanoEntity;
-    type EntityDelta = dolos_cardano::CardanoDelta;
-    type Chain = dolos_cardano::CardanoLogic;
-    type WorkUnit = dolos_cardano::CardanoWorkUnit;
-    type Wal = crate::adapters::WalAdapter;
-    type State = crate::adapters::StateStoreBackend;
-    type Archive = crate::adapters::ArchiveStoreBackend;
-    type Mempool = crate::adapters::MempoolBackend;
-    type TipSubscription = TipSubscription;
+#[cfg(feature = "mithril")]
+impl dolos_snapshot::backfill::Workspace for ReplayWorkspace<'_> {
+    type Session = BulkReplaySession;
 
-    fn storage_config(&self) -> &dolos_core::config::StorageConfig {
-        self.domain.storage_config()
+    fn snapshot(&self) -> impl SnapshotSource + '_ {
+        self.snapshot()
     }
 
-    fn sync_config(&self) -> &dolos_core::config::SyncConfig {
-        self.domain.sync_config()
+    fn start(self, target: u64) -> Result<Self::Session, dolos_snapshot::backfill::Error> {
+        self.start(Some(target))
+            .map_err(dolos_snapshot::backfill::Error::caller)
     }
 
-    fn genesis(&self) -> Arc<Genesis> {
-        self.domain.genesis()
+    fn finish(self) -> Result<(), dolos_snapshot::backfill::Error> {
+        self.finish()
+            .map_err(dolos_snapshot::backfill::Error::caller)
+    }
+}
+
+#[cfg(feature = "mithril")]
+impl dolos_snapshot::backfill::Session for BulkReplaySession {
+    fn committed_position(&self) -> Result<Option<ChainPoint>, dolos_snapshot::backfill::Error> {
+        self.committed_position()
+            .map_err(dolos_snapshot::backfill::Error::caller)
     }
 
-    fn read_chain(&self) -> std::sync::RwLockReadGuard<'_, Self::Chain> {
-        self.domain.read_chain()
+    fn import_blocks(
+        &mut self,
+        blocks: Vec<RawBlock>,
+    ) -> Result<ReplayProgress, dolos_snapshot::backfill::Error> {
+        self.import_blocks(blocks)
+            .map_err(dolos_snapshot::backfill::Error::caller)
     }
 
-    fn write_chain(&self) -> std::sync::RwLockWriteGuard<'_, Self::Chain> {
-        self.domain.write_chain()
+    fn prune_history(&mut self) -> Result<u64, dolos_snapshot::backfill::Error> {
+        self.prune_history()
+            .map_err(dolos_snapshot::backfill::Error::caller)
     }
 
-    fn wal(&self) -> &Self::Wal {
-        self.domain.wal()
+    fn finish(self) -> Result<(), dolos_snapshot::backfill::Error> {
+        self.finish()
+            .map_err(dolos_snapshot::backfill::Error::caller)
     }
+}
 
-    fn state(&self) -> &Self::State {
-        self.domain.state()
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    fn archive(&self) -> &Self::Archive {
-        self.domain.archive()
-    }
-
-    fn mempool(&self) -> &Self::Mempool {
-        self.domain.mempool()
-    }
-
-    fn watch_tip(&self, from: Option<ChainPoint>) -> Result<Self::TipSubscription, DomainError> {
-        self.domain.watch_tip(from)
-    }
-
-    fn notify_tip(&self, tip: TipEvent) {
-        self.domain.notify_tip(tip)
+    #[test]
+    fn finalization_preserves_both_errors() {
+        let result = complete::<()>(
+            Err(BulkReplayError::new("operation", "first failure")),
+            Err(BulkReplayError::new("finish", "second failure")),
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("first failure"));
+        assert!(error.contains("second failure"));
     }
 }

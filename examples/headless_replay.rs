@@ -87,7 +87,10 @@ fn main() -> Result<(), AnyError> {
     Ok(())
 }
 
-fn import_batch(session: &BulkReplaySession, batch: &mut Vec<RawBlock>) -> Result<bool, AnyError> {
+fn import_batch(
+    session: &mut BulkReplaySession,
+    batch: &mut Vec<RawBlock>,
+) -> Result<bool, AnyError> {
     let progress = session.import_blocks(std::mem::take(batch))?;
 
     match progress {
