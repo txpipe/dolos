@@ -227,6 +227,22 @@ impl Fixture {
         .unwrap()
     }
 
+    /// Open the same repository through the supported headless read facade.
+    pub fn snapshot_repository(&self, name: &str) -> registry::SnapshotRepository {
+        let repository = format!("oci://127.0.0.1:{}/{name}", self.port)
+            .parse()
+            .expect("the fixture named a usable repository");
+
+        registry::SnapshotRepository::open(
+            &repository,
+            true,
+            credentials(),
+            self.scratch.path().to_path_buf(),
+            registry::Tuning::default(),
+        )
+        .unwrap()
+    }
+
     /// Where the transports this fixture opens stage their layers.
     ///
     /// Exposed so a suite can hold a transport's own answer against what the

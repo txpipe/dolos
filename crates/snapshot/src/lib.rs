@@ -48,6 +48,8 @@
 //!   to the protocol in the order above.
 //! - [`restore`] — its inverse: the driver that reads a stele back into an
 //!   empty store set, in the order ADR-004 specifies.
+//! - [`facade`] — supported headless assembly for planning, encoding,
+//!   inspection, verification and directory/OCI restoration.
 //! - [`preflight`] — the free-space policy both drivers refuse under, so a run
 //!   that cannot fit its volume says so at minute zero.
 //! - `registry` (feature `oci`) — publishing into an OCI repository: the
@@ -66,6 +68,7 @@
 #[cfg(feature = "backfill")]
 pub mod backfill;
 pub mod export;
+pub mod facade;
 pub mod layers;
 pub mod namespaces;
 pub mod node;

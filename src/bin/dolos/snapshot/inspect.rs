@@ -22,6 +22,7 @@
 use clap::Parser;
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
+    facade::SnapshotRepository,
     node,
     registry::{self, Point, Repository},
 };
@@ -60,7 +61,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     // and this directory is never created here.
     let scratch = node::scratch_dir(&config.storage, None);
 
-    let registry = registry::open(
+    let repository = SnapshotRepository::open(
         &args.repo,
         args.insecure,
         auth,
@@ -70,7 +71,8 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     .into_diagnostic()
     .context("opening the repository")?;
 
-    let inspected = registry::inspect(&registry, args.point)
+    let inspected = repository
+        .inspect(args.point)
         .into_diagnostic()
         .context("reading the stele")?;
 
