@@ -24,7 +24,8 @@
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
-    export::{self, Plan},
+    export::Plan,
+    facade::{Selection, SnapshotSource as _, StoreSnapshot},
     planning::{self, PlanReport},
 };
 use miette::{Context as _, IntoDiagnostic as _};
@@ -82,18 +83,6 @@ pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Res
     }
 }
 
-/// The three knobs every command that walks these stores takes.
-///
-/// Spelled per command rather than flattened into one clap group, because the
-/// help text is not the same everywhere: `verify` takes all three only under
-/// `--reproduce`, and says so. What is shared is what they mean, which is
-/// [`dolos_snapshot::planning`]'s.
-pub struct Selection {
-    pub epochs: Option<EpochRange>,
-    pub index_band: Option<std::num::NonZeroUsize>,
-    pub producers: Option<std::num::NonZeroUsize>,
-}
-
 /// This node's plan, narrowed by the operator's selection.
 ///
 /// One sequence for `publish`, `digest` and `verify --reproduce`, because a
@@ -112,14 +101,10 @@ pub fn planned(
         .into_diagnostic()
         .context("reading snapshot.state_epochs")?;
 
-    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()), retained)
+    StoreSnapshot::new(&stores.archive, &stores.state)
+        .selected_plan(u64::from(genesis.network_magic()), retained, *selection)
         .into_diagnostic()
-        .context(what)?;
-
-    let plan = planning::restrict(plan, selection.epochs);
-    let plan = planning::banded(plan, selection.index_band);
-
-    Ok(planning::produced(plan, selection.producers))
+        .context(what)
 }
 
 /// The report every command opens with: where the node stands and what the

@@ -67,7 +67,8 @@ const EPOCH_0: usize = 4;
 fn a_freshly_published_stele_verifies_clean() {
     let fixture = Fixture::spawn();
     let node = Node::build();
-    let repository = fixture.repository("dolos/verify-clean");
+    let repository_name = "dolos/verify-clean";
+    let repository = fixture.repository(repository_name);
 
     let first = node.publish(&repository, &node.first, false);
     let second = node.publish(&repository, &node.second, false);
@@ -77,7 +78,8 @@ fn a_freshly_published_stele_verifies_clean() {
         "the interesting stele is one with inherited layers"
     );
 
-    let verified = registry::verify(&repository, Point::Latest).unwrap();
+    let reader = fixture.snapshot_repository(repository_name);
+    let verified = reader.verify(Point::Latest).unwrap();
 
     assert_eq!(verified.identity, second.identity);
     assert_eq!(
@@ -87,7 +89,7 @@ fn a_freshly_published_stele_verifies_clean() {
     assert!(verified.compressed_bytes > 0);
 
     // The immutable tag reads the predecessor back just as clean.
-    let predecessor = registry::verify(&repository, Point::Epoch(0)).unwrap();
+    let predecessor = reader.verify(Point::Epoch(0)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
@@ -307,12 +309,14 @@ fn a_reproduction_passes_at_the_published_epoch_and_fails_at_another() {
 fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     let fixture = Fixture::spawn();
     let node = Node::build();
-    let repository = fixture.repository("dolos/inspect");
+    let repository_name = "dolos/inspect";
+    let repository = fixture.repository(repository_name);
 
     let first = node.publish(&repository, &node.first, false);
     let second = node.publish(&repository, &node.second, false);
 
-    let inspected = registry::inspect(&repository, Point::Latest).unwrap();
+    let reader = fixture.snapshot_repository(repository_name);
+    let inspected = reader.inspect(Point::Latest).unwrap();
 
     assert_eq!(inspected.identity, second.identity);
     assert_eq!(
@@ -335,7 +339,7 @@ fn an_inspection_reports_the_manifest_and_its_json_chains_a_digest() {
     assert_eq!(total, inspected.total_compressed);
 
     // The `--json` output is the canonical document, verbatim.
-    let predecessor = registry::inspect(&repository, Point::Epoch(0)).unwrap();
+    let predecessor = reader.inspect(Point::Epoch(0)).unwrap();
 
     assert_eq!(predecessor.identity, first.identity);
 
