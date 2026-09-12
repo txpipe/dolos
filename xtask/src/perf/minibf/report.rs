@@ -17,6 +17,8 @@ pub struct Budgets {
     pub min_repeats: usize,
     #[arg(long, default_value_t = 1000)]
     pub min_samples: u64,
+    #[arg(long, default_value_t = 1.0)]
+    pub min_elapsed_seconds: f64,
     #[arg(long)]
     pub p95_budget_ms: Option<f64>,
     #[arg(long)]
@@ -31,6 +33,7 @@ impl Default for Budgets {
             min_throughput_ratio: 0.90,
             min_repeats: 3,
             min_samples: 1000,
+            min_elapsed_seconds: 1.0,
             p95_budget_ms: None,
             p99_budget_ms: None,
         }
@@ -49,6 +52,10 @@ impl Budgets {
         anyhow::ensure!(
             self.min_repeats > 0 && self.min_samples > 0,
             "minimum repeats and samples must be positive"
+        );
+        anyhow::ensure!(
+            positive(self.min_elapsed_seconds),
+            "minimum elapsed duration must be finite and positive"
         );
         anyhow::ensure!(
             self.p95_budget_ms
@@ -111,6 +118,8 @@ fn valid(record: &Value) -> bool {
         && ["errors", "timeouts", "rejected"]
             .iter()
             .all(|field| metrics[*field].as_u64() == Some(0))
+        && (metrics["writer"]["required_parallel_coverage"] != true
+            || metrics["writer"]["parallel_coverage_met"] == true)
         && metric(record, "/metrics/latency/p95_us").is_some()
         && metric(record, "/metrics/latency/p99_us").is_some()
         && metric(record, "/metrics/completed_per_second").is_some()
@@ -156,7 +165,7 @@ pub fn assess(records: &[Value], budgets: &Budgets) -> (String, bool) {
         return ("No minibf records.\n".into(), false);
     }
     let mut output = String::from("## Minibf paired gates\n\n");
-    writeln!(output, "Budgets: p95 ratio ≤ {:.3}; p99 ratio ≤ {:.3}; completed throughput ratio ≥ {:.3}; at least {} paired repeats and {} successful requests per repeat.\n", budgets.max_p95_ratio, budgets.max_p99_ratio, budgets.min_throughput_ratio, budgets.min_repeats, budgets.min_samples).unwrap();
+    writeln!(output, "Budgets: p95 ratio ≤ {:.3}; p99 ratio ≤ {:.3}; completed throughput ratio ≥ {:.3}; at least {} paired repeats, {} successful requests and {:.3} measured seconds per arm/repeat.\n", budgets.max_p95_ratio, budgets.max_p99_ratio, budgets.min_throughput_ratio, budgets.min_repeats, budgets.min_samples, budgets.min_elapsed_seconds).unwrap();
     output.push_str("| run / workload | candidate | pairs | p95/p99 ratios (p95 min–max) | throughput ratio | baseline p95/p99 ms | candidate p95/p99 ms | verdict |\n|---|---|---:|---:|---:|---:|---:|---|\n");
     let mut passed = true;
     let mut suites: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
@@ -231,7 +240,7 @@ pub fn assess(records: &[Value], budgets: &Budgets) -> (String, bool) {
                 .chain(candidate.values())
                 .all(|record| valid(record))
             {
-                writeln!(output, "| {title} | {label} | {} | — | — | — | — | INVALID: failed requests or incomplete metrics |", baseline.len()).unwrap();
+                writeln!(output, "| {title} | {label} | {} | — | — | — | — | INVALID: failed requests, coverage or incomplete metrics |", baseline.len()).unwrap();
                 passed = false;
                 continue;
             }
@@ -269,12 +278,18 @@ pub fn assess(records: &[Value], budgets: &Budgets) -> (String, bool) {
             let latency_ratio = median(&mut latency);
             let tail_ratio = median(&mut tail_latency);
             let throughput_ratio = median(&mut throughput);
-            let enough = baseline.len() >= budgets.min_repeats
+            let enough_samples = baseline.len() >= budgets.min_repeats
                 && baseline.values().chain(candidate.values()).all(|record| {
                     record["metrics"]["completed"].as_u64().unwrap() >= budgets.min_samples
                 });
-            let verdict = if !enough {
-                "INSUFFICIENT"
+            let enough_duration = baseline.values().chain(candidate.values()).all(|record| {
+                metric(record, "/metrics/elapsed_seconds")
+                    .is_some_and(|elapsed| elapsed >= budgets.min_elapsed_seconds)
+            });
+            let verdict = if !enough_samples {
+                "INSUFFICIENT: samples/repeats"
+            } else if !enough_duration {
+                "INSUFFICIENT: duration"
             } else if !absolute_pass {
                 "FAIL: absolute budget"
             } else if latency_ratio > budgets.max_p95_ratio
@@ -292,7 +307,7 @@ pub fn assess(records: &[Value], budgets: &Budgets) -> (String, bool) {
         }
     }
     output.push_str("\nLatency includes scheduling delay; rejected arrivals and invalid/late responses prevent a pass. Small-fixture passes do not establish mainnet capacity.\n");
-    output.push_str("\n## Minibf work and resources\n\n| label / repeat / workload | scope | log rows | tag candidates | block reads | CPU ms | peak RSS bytes | sync blocks |\n|---|---|---:|---:|---:|---:|---:|---:|\n");
+    output.push_str("\n## Minibf work and resources\n\n| label / repeat / workload | scope | log rows | tag candidates | block reads | CPU ms | peak RSS bytes | sync blocks/batches/bytes | parallel/overlap batches |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n");
     for record in records
         .iter()
         .filter(|record| record["metrics"]["kind"] == "minibf")
@@ -300,7 +315,7 @@ pub fn assess(records: &[Value], budgets: &Budgets) -> (String, bool) {
         let metrics = &record["metrics"];
         writeln!(
             output,
-            "| {} / {} / {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} / {} / {} | {} | {} | {} | {} | {} | {} | {}/{}/{} | {}/{} |",
             record["label"].as_str().unwrap_or("?"),
             record["repeat"],
             metrics["workload"].as_str().unwrap_or("?"),
@@ -311,6 +326,10 @@ pub fn assess(records: &[Value], budgets: &Budgets) -> (String, bool) {
             metrics["resources"]["cpu_ms"],
             metrics["resources"]["max_rss_bytes"],
             metrics["writer"]["blocks"],
+            metrics["writer"]["batches"],
+            metrics["writer"]["body_bytes"],
+            metrics["writer"]["append"]["parallel_batches"],
+            metrics["writer"]["overlap_parallel_batches"],
         )
         .unwrap();
     }

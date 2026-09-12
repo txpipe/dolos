@@ -64,11 +64,18 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
             }
             "address-transactions-page" => assert!(work.tag_candidates > 0),
             "account-utxos-wide" => {
+                let selected_rows = case.expected.as_array().unwrap().len() as u64;
                 assert_eq!(
                     work.utxo_refs,
                     (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
                 assert_eq!(work.exact_lookups, work.utxo_refs);
+                assert_eq!(work.tip_reads, selected_rows);
+                assert_eq!(
+                    work.block_reads - work.tip_reads,
+                    fixture.shape.blocks as u64
+                );
+                assert!(work.decoded_bytes > 0);
             }
             _ => {}
         }
@@ -149,6 +156,7 @@ fn record(label: &str, repeat: u64, p95: f64) -> Value {
         "metrics": {
             "kind": "minibf", "workload": "test", "requests": 1000,
             "completed": 1000, "errors": 0, "timeouts": 0, "rejected": 0,
+            "elapsed_seconds": 2.0,
             "latency": {"count": 1000, "p95_us": p95, "p99_us": p95 * 2.0},
             "completed_per_second": 100.0,
         }
@@ -187,6 +195,12 @@ fn pairing_refuses_missing_duplicate_incompatible_or_failed_evidence() {
     let mut absent_metric = records.clone();
     absent_metric[1]["metrics"]["latency"]["p95_us"] = Value::Null;
     assert!(!assess(&absent_metric, &Budgets::default()).1);
+    let mut missed_coverage = records.clone();
+    missed_coverage[1]["metrics"]["writer"] = json!({
+        "required_parallel_coverage": true,
+        "parallel_coverage_met": false,
+    });
+    assert!(!assess(&missed_coverage, &Budgets::default()).1);
 }
 
 #[test]
@@ -216,6 +230,28 @@ fn gates_detect_regression_and_baseline_absolute_budget_failure() {
 }
 
 #[test]
+fn gates_reject_short_or_missing_measured_duration() {
+    let mut short = paired();
+    short[1]["metrics"]["elapsed_seconds"] = json!(0.999);
+    let (report, passed) = assess(&short, &Budgets::default());
+    assert!(!passed);
+    assert!(report.contains("INSUFFICIENT: duration"));
+
+    let mut missing = paired();
+    missing[0]["metrics"]
+        .as_object_mut()
+        .unwrap()
+        .remove("elapsed_seconds");
+    assert!(!assess(&missing, &Budgets::default()).1);
+
+    let budgets = Budgets {
+        min_elapsed_seconds: 0.5,
+        ..Default::default()
+    };
+    assert!(assess(&short, &budgets).1);
+}
+
+#[test]
 fn live_replay_cli_records_writer_progress() {
     let temp = tempfile::tempdir().unwrap();
     let output = temp.path().join("live.jsonl");
@@ -237,6 +273,8 @@ fn live_replay_cli_records_writer_progress() {
             "--live",
             "--write-interval-ms",
             "500",
+            "--live-batch-size",
+            "2",
             "--cases",
             "epoch-blocks-pool-no-match",
         ])
@@ -255,7 +293,53 @@ fn live_replay_cli_records_writer_progress() {
         serde_json::from_str(std::fs::read_to_string(output).unwrap().trim()).unwrap();
     assert_eq!(record["metrics"]["completed"], 3);
     assert!(record["metrics"]["writer"]["blocks"].as_u64().unwrap() > 0);
+    assert_eq!(record["metrics"]["writer"]["configured_batch_size"], 2);
+    assert!(record["metrics"]["writer"]["batches"].as_u64().unwrap() > 0);
+    assert!(record["metrics"]["writer"]["body_bytes"].as_u64().unwrap() > 0);
     assert_eq!(record["metrics"]["work_scope"], "api-and-writer");
+}
+
+#[test]
+fn live_replay_rejects_invalid_batch_coverage_and_short_tails() {
+    let temp = tempfile::tempdir().unwrap();
+    let invalid_output = temp.path().join("invalid.jsonl");
+    let base = [
+        "perf",
+        "minibf",
+        "run",
+        "--run",
+        "invalid",
+        "--work",
+        temp.path().to_str().unwrap(),
+        "--out",
+        invalid_output.to_str().unwrap(),
+    ];
+    for extra in [
+        vec!["--live-batch-size", "0"],
+        vec!["--require-parallel-coverage"],
+        vec![
+            "--live",
+            "--blocks",
+            "4",
+            "--requests",
+            "100",
+            "--rates",
+            "1",
+            "--timeout-ms",
+            "1000",
+            "--write-interval-ms",
+            "1",
+            "--live-batch-size",
+            "2",
+        ],
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_cargo-xtask"))
+            .args(base)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

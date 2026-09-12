@@ -36,6 +36,39 @@ fn domain_with_block() -> (ToyDomain, TxHash) {
     (domain, known)
 }
 
+fn domain_with_shared_blocks(
+    block_count: usize,
+    txs_per_block: usize,
+) -> (ToyDomain, Vec<Vec<TxHash>>) {
+    let domain = ToyDomain::new(None, None);
+    let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count,
+        txs_per_block,
+        ..Default::default()
+    });
+    let writer = domain.archive().start_writer().unwrap();
+    let mut hashes = Vec::new();
+    let mut indexes = Vec::new();
+    for raw in &blocks {
+        let block = MultiEraBlock::decode(raw).unwrap();
+        let tx_hashes: Vec<_> = block.txs().iter().map(|tx| tx.hash()).collect();
+        writer
+            .apply(&ChainPoint::Specific(block.slot(), block.hash()), raw)
+            .unwrap();
+        indexes.push(ArchiveIndexDelta {
+            slot: block.slot(),
+            block_hash: block.hash().to_vec(),
+            block_number: Some(block.number()),
+            tx_hashes: tx_hashes.iter().map(|hash| hash.to_vec()).collect(),
+            tags: Vec::new(),
+        });
+        hashes.push(tx_hashes);
+    }
+    writer.apply_index(&indexes).unwrap();
+    writer.commit().unwrap();
+    (domain, hashes)
+}
+
 #[tokio::test]
 async fn deduplicates_hits_and_misses_across_batches() {
     let (domain, known) = domain_with_block();
@@ -60,9 +93,89 @@ async fn deduplicates_hits_and_misses_across_batches() {
         assert_eq!(actual.tx_hash, expected.tx_hash);
         assert_eq!(actual.tx_index, expected.tx_index);
         assert_eq!(resolver.fetches(), 2);
+        assert_eq!(resolver.body_fetches(), 1);
     }
     assert!(resolver.resolve_batch([]).await.unwrap().is_empty());
     assert_eq!(resolver.fetches(), 2);
+}
+
+#[tokio::test]
+async fn shared_block_hashes_read_and_decode_once_per_slot() {
+    let (domain, hashes) = domain_with_shared_blocks(3, 4);
+    let all: Vec<_> = hashes.iter().flatten().copied().collect();
+    let mut resolver = BlockMetaResolver::new(AsyncQueryFacade::new(domain));
+
+    let resolved = resolver.resolve_batch(all.clone()).await.unwrap();
+    assert_eq!(resolved.len(), all.len());
+    assert_eq!(resolver.fetches(), 12);
+    assert_eq!(resolver.body_fetches(), 3);
+    for (expected_block, block_hashes) in hashes.iter().enumerate() {
+        for (expected_index, hash) in block_hashes.iter().enumerate() {
+            let meta = &resolved[hash];
+            assert_eq!(meta.height as usize, expected_block + 1);
+            assert_eq!(meta.tx_index, expected_index);
+        }
+    }
+
+    let cached = resolver.resolve_batch(all).await.unwrap();
+    assert_eq!(cached.len(), resolved.len());
+    assert_eq!(resolver.body_fetches(), 3);
+}
+
+#[tokio::test]
+async fn one_transaction_per_block_remains_one_body_fetch_per_slot() {
+    let (domain, hashes) = domain_with_shared_blocks(3, 1);
+    let requested: Vec<_> = hashes.iter().map(|hashes| hashes[0]).collect();
+    let mut resolver = BlockMetaResolver::new(AsyncQueryFacade::new(domain));
+
+    assert_eq!(resolver.resolve_batch(requested).await.unwrap().len(), 3);
+    assert_eq!(resolver.fetches(), 3);
+    assert_eq!(resolver.body_fetches(), 3);
+}
+
+#[tokio::test]
+async fn hashes_indexed_to_one_slot_search_each_candidate_body_once() {
+    let domain = ToyDomain::new(None, None);
+    let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 2,
+        txs_per_block: 1,
+        ..Default::default()
+    });
+    let decoded: Vec<_> = blocks
+        .iter()
+        .map(|raw| MultiEraBlock::decode(raw).unwrap())
+        .collect();
+    let shared_slot = decoded[0].slot();
+    let hashes: Vec<_> = decoded.iter().map(|block| block.txs()[0].hash()).collect();
+    let writer = domain.archive().start_writer().unwrap();
+    for (raw, block) in blocks.iter().zip(&decoded) {
+        writer
+            .apply(&ChainPoint::Specific(shared_slot, block.hash()), raw)
+            .unwrap();
+    }
+    writer
+        .apply_index(
+            &decoded
+                .iter()
+                .map(|block| ArchiveIndexDelta {
+                    slot: shared_slot,
+                    block_hash: block.hash().to_vec(),
+                    block_number: Some(block.number()),
+                    tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
+                    tags: Vec::new(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    writer.commit().unwrap();
+
+    let mut resolver = BlockMetaResolver::new(AsyncQueryFacade::new(domain));
+    let resolved = resolver.resolve_batch(hashes.clone()).await.unwrap();
+    assert_eq!(resolved.len(), 2);
+    assert_eq!(resolver.body_fetches(), 2);
+    for hash in hashes {
+        assert_eq!(resolved[&hash].tx_hash, hash);
+    }
 }
 
 #[tokio::test]
