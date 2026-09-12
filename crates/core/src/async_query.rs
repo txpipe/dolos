@@ -1,6 +1,9 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
-use futures_util::future::join_all;
+use futures_util::{stream, StreamExt as _};
 use itertools::Itertools as _;
 
 use tokio::sync::Semaphore;
@@ -41,6 +44,7 @@ pub struct BlockMetaResolver<D: Domain> {
     memo: HashMap<TxHash, Option<BlockRefMeta>>,
     cap: usize,
     fetches: usize,
+    body_fetches: usize,
 }
 
 impl<D: Domain> BlockMetaResolver<D> {
@@ -54,6 +58,7 @@ impl<D: Domain> BlockMetaResolver<D> {
             memo: HashMap::new(),
             cap: cap.max(1),
             fetches: 0,
+            body_fetches: 0,
         }
     }
 
@@ -61,6 +66,11 @@ impl<D: Domain> BlockMetaResolver<D> {
     /// misses.
     pub fn fetches(&self) -> usize {
         self.fetches
+    }
+
+    /// Number of archive bodies read and decoded for metadata resolution.
+    pub fn body_fetches(&self) -> usize {
+        self.body_fetches
     }
 
     /// Return owned metadata for the requested hashes, omitting archive misses.
@@ -87,16 +97,8 @@ impl<D: Domain> BlockMetaResolver<D> {
         }
 
         self.fetches += missing.len();
-        let query = &self.query;
-        let fetched = join_all(missing.into_iter().map(|hash| async move {
-            query
-                .block_meta_by_tx_hash(hash.to_vec())
-                .await
-                .map(|meta| (hash, meta))
-        }))
-        .await
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+        let (fetched, body_fetches) = self.query.block_meta_by_tx_hashes(missing).await?;
+        self.body_fetches += body_fetches;
 
         for (hash, meta) in fetched {
             if let Some(meta) = &meta {
@@ -112,6 +114,7 @@ impl<D: Domain> BlockMetaResolver<D> {
             deps = required.len(),
             held = self.memo.len(),
             fetches = self.fetches(),
+            body_fetches = self.body_fetches(),
             "resolved block metadata"
         );
 
@@ -166,6 +169,9 @@ where
     }
 
     pub fn with_options(inner: D, options: AsyncQueryOptions) -> Self {
+        let options = AsyncQueryOptions {
+            max_blocking: options.max_blocking.max(1),
+        };
         let limiter = Arc::new(Semaphore::new(options.max_blocking));
         Self {
             inner,
@@ -302,6 +308,105 @@ where
             }))
         })
         .await
+    }
+
+    /// Resolve transaction metadata while reading and decoding each selected
+    /// archive body at most once.
+    ///
+    /// Exact index lookups are retained for every distinct transaction hash.
+    /// Their slots are grouped before body work starts, then each group uses
+    /// one blocking task under the facade's shared limiter. Results are owned;
+    /// decoded blocks and body buffers are dropped inside those bounded tasks.
+    async fn block_meta_by_tx_hashes(
+        &self,
+        tx_hashes: Vec<TxHash>,
+    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
+        let requested = tx_hashes.clone();
+        let located = self
+            .run_blocking(move |domain| {
+                tx_hashes
+                    .into_iter()
+                    .map(|tx_hash| {
+                        let slot = domain.archive().slot_by_tx_hash(tx_hash.as_slice())?;
+                        Ok((tx_hash, slot))
+                    })
+                    .collect::<Result<Vec<_>, DomainError>>()
+            })
+            .await?;
+
+        let mut fetched = HashMap::new();
+        let mut groups: HashMap<BlockSlot, Vec<TxHash>> = HashMap::new();
+        for (tx_hash, slot) in located {
+            if let Some(slot) = slot {
+                groups.entry(slot).or_default().push(tx_hash);
+            } else {
+                fetched.insert(tx_hash, None);
+            }
+        }
+
+        let mut body_fetches = 0;
+        let query = self.clone();
+        let tasks = stream::iter(groups.into_iter().map(move |(slot, tx_hashes)| {
+            let query = query.clone();
+            async move {
+                query
+                    .run_blocking(move |domain| {
+                        let raws = domain.archive().get_blocks_by_slot(&slot)?;
+                        let body_count = raws.len();
+                        let mut positions = HashMap::new();
+                        let requested: HashSet<_> = tx_hashes.iter().copied().collect();
+                        for raw in raws {
+                            let block = MultiEraBlock::decode(raw.as_slice()).map_err(|error| {
+                                DomainError::ChainError(ChainError::DecodingError(error))
+                            })?;
+                            for (tx_index, tx) in block.txs().iter().enumerate() {
+                                let tx_hash = tx.hash();
+                                if requested.contains(&tx_hash) {
+                                    positions.entry(tx_hash).or_insert_with(|| BlockRefMeta {
+                                        slot: block.slot(),
+                                        hash: block.hash(),
+                                        height: block.number(),
+                                        tx_hash,
+                                        tx_index,
+                                    });
+                                }
+                            }
+                        }
+
+                        Ok((
+                            tx_hashes
+                                .into_iter()
+                                .map(|tx_hash| {
+                                    let meta = positions.get(&tx_hash).cloned();
+                                    (tx_hash, meta)
+                                })
+                                .collect::<Vec<_>>(),
+                            body_count,
+                        ))
+                    })
+                    .await
+            }
+        }))
+        .buffer_unordered(self.options.max_blocking)
+        .collect::<Vec<_>>()
+        .await;
+
+        // Await every started blocking task before propagating an error. A
+        // dropped spawn_blocking handle does not cancel its underlying work.
+        for task in tasks {
+            let (entries, bodies) = task?;
+            fetched.extend(entries);
+            body_fetches += bodies;
+        }
+
+        let fetched = requested
+            .into_iter()
+            .map(|tx_hash| {
+                let meta = fetched.remove(&tx_hash).unwrap_or(None);
+                (tx_hash, meta)
+            })
+            .collect();
+        Ok((fetched, body_fetches))
     }
 
     pub async fn tx_cbor(&self, tx_hash: Vec<u8>) -> Result<Option<EraCbor>, DomainError> {

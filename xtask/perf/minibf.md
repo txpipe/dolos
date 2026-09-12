@@ -63,10 +63,18 @@ Process resources include the harness; lifetime peak RSS is not per-request RSS.
 ```
 
 The writer uses normal `roll_forward`, including WAL/state/archive commits.
+`--live-batch-size` (default `1`) groups replay bodies into the chain logic's
+normal `WorkBatch` and executes the same full lifecycle. The writer interval is
+per batch. Multi-body mode is diagnostic: the production tip-sync caller still
+submits one body at a time. `--require-parallel-coverage` makes a run fail unless
+an automatically selected parallel archive append overlaps timed API traffic;
+the batch-size flag alone is not evidence. Writer records include committed
+bodies/bytes, work-unit latency, setup-versus-live append counters and overlap.
 Bootstrap anchors the WAL at the imported tip; replay can roll back to that
 anchor, not into the pre-import history.
-The tail must span arrival duration plus timeout; the interval is a minimum
-delay, not guaranteed ingestion throughput. Latest/reverse-tip cases are excluded.
+The tail's batch count must span arrival duration plus timeout; the interval is
+a minimum delay, not guaranteed ingestion throughput. `--max-fixture-mib` bounds
+the initial and replay bodies retained by setup. Latest/reverse-tip cases are excluded.
 Counters include API and writer work; writer latency covers the whole roll-forward.
 
 ## Compare revisions
@@ -84,8 +92,10 @@ build settings; the runner does not build or patch historical revisions.
 ```
 
 Arm order alternates per repeat. Default gates require three paired repeats,
-1,000 successful requests each, p95 ratio ≤1.10, p99 ratio ≤1.20 and throughput
-ratio ≥0.90. These are provisional experiment budgets, not a production SLO;
-use more samples for p99. Optional `--p95-budget-ms`/`--p99-budget-ms` apply to
+1,000 successful requests and one measured second per arm/repeat, p95 ratio
+≤1.10, p99 ratio ≤1.20 and throughput ratio ≥0.90. Adjust the duration floor with
+`--min-elapsed-seconds`; it is a timing noise floor, not proof of p99 precision.
+These are provisional experiment budgets, not a production SLO; use more samples
+for p99. Optional `--p95-budget-ms`/`--p99-budget-ms` apply to
 both arms. Missing, duplicate, incompatible, failed or undersampled evidence cannot
 pass. Confirm synthetic findings with [real-node calibration](http.md).

@@ -40,6 +40,15 @@ pub trait SyncExt: Domain {
     /// The slot of the processed block.
     fn roll_forward(&self, block: RawBlock) -> Result<BlockSlot, DomainError>;
 
+    /// Process several live blocks as bounded work units.
+    ///
+    /// Unlike repeated [`Self::roll_forward`] calls, this keeps ordinary
+    /// blocks in the chain logic's open batch until the input is exhausted or
+    /// a chain boundary requires pending work to drain. Every resulting work
+    /// unit still runs the complete WAL/state/archive/notification lifecycle.
+    /// Empty input performs no work and returns `None`.
+    fn roll_forward_batch(&self, blocks: Vec<RawBlock>) -> Result<Option<BlockSlot>, DomainError>;
+
     /// Roll back the chain to a previous point.
     ///
     /// Iterates WAL entries after the target point in reverse order,
@@ -62,6 +71,35 @@ impl<D: Domain> SyncExt for D {
 
         drain_pending_work::<D>(&mut *chain, self)?;
 
+        Ok(last)
+    }
+
+    #[instrument(skip_all, fields(blocks = blocks.len()))]
+    fn roll_forward_batch(&self, blocks: Vec<RawBlock>) -> Result<Option<BlockSlot>, DomainError> {
+        if blocks.is_empty() {
+            return Ok(None);
+        }
+
+        let mut chain = self.write_chain();
+        drain_pending_work::<D>(&mut *chain, self)?;
+
+        let mut last = None;
+        for block in blocks {
+            if !chain.can_receive_block() {
+                drain_pending_work::<D>(&mut *chain, self)?;
+            }
+            match chain.receive_block(block) {
+                Ok(slot) => last = Some(slot),
+                Err(error) => {
+                    // Do not strand successfully received predecessors in the
+                    // chain buffer when a later body is invalid.
+                    drain_pending_work::<D>(&mut *chain, self)?;
+                    return Err(error.into());
+                }
+            }
+        }
+
+        drain_pending_work::<D>(&mut *chain, self)?;
         Ok(last)
     }
 

@@ -138,6 +138,14 @@ pub struct MeasuredArchive<Inner> {
     pub counters: WorkCounters,
 }
 
+impl<Inner> MeasuredArchive<Inner> {
+    /// Access the wrapped store for benchmark-only backend diagnostics that
+    /// are intentionally not part of the generic archive contract.
+    pub fn inner(&self) -> &Inner {
+        &self.inner
+    }
+}
+
 impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
     type BlockIter<'a> = CountedBlocks<Inner::BlockIter<'a>>;
     type Writer = Inner::Writer;
