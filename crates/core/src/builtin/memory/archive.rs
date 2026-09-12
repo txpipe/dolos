@@ -18,7 +18,11 @@
 //!   keyed `(kind, key)`. The disk backend encodes `[dim_hash][key][slot]`
 //!   triples into a flat keyspace and can only reach the contract's order by
 //!   walking a caller-supplied dimension list in name order; keyed on the
-//!   triple, that order is the map's own and holds by construction.
+//!   triple, that order is the map's own and holds by construction;
+//! - the stake address log lives in two maps: the ordered entries per stake
+//!   credential, keyed `(slot, order, address)` so a page read is a walk from
+//!   either end, and a membership map from `(stake, address)` to the pair's
+//!   first appearance, which is the write-path probe and the undo check.
 //!
 //! ## Stored key form
 //!
@@ -46,8 +50,8 @@ use pallas::ledger::traverse::MultiEraBlock;
 
 use crate::archive::{ArchiveError, ArchiveStore, ArchiveWriter, LogKey, Skippable};
 use crate::indexes::{
-    key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash, TagDimension,
-    TagRecord, MAX_EXACT_KEY_LEN,
+    key_hash, ArchiveIndexDelta, ExactKind, ExactRecord, IndexRecord, KeyHash,
+    StakeAddressAppearance, TagDimension, TagRecord, MAX_EXACT_KEY_LEN,
 };
 use crate::{
     BlockBody, BlockSlot, ChainPoint, EntityValue, Namespace, RawBlock, StateSchema, TemporalKey,
@@ -60,6 +64,12 @@ type ArchiveTag = (Cow<'static, str>, KeyHash, BlockSlot);
 /// [`ExactRecord`] carries, so a record goes in and comes back out without a
 /// heap allocation on either side.
 type ExactKey = [u8; MAX_EXACT_KEY_LEN];
+
+/// One ordered entry of the stake address log: `(slot, order, address)`.
+type StakeLogEntry = (BlockSlot, u32, Vec<u8>);
+
+/// A `(stake, address)` pair, the membership key of the stake address log.
+type StakeLogPair = (Vec<u8>, Vec<u8>);
 
 /// A key's stored form, or `None` unless it is exactly the width its kind
 /// requires.
@@ -91,6 +101,12 @@ struct Tables {
     /// Keyed on the record's own inline key rather than a `Vec`, so
     /// `iter_exact_records` copies rather than allocates per record.
     exact: BTreeMap<(ExactKind, ExactKey), BlockSlot>,
+    /// Stake address log: first appearances ordered `(slot, order, address)`
+    /// per stake credential.
+    stake_log: BTreeMap<Vec<u8>, BTreeSet<StakeLogEntry>>,
+    /// Membership map for the log: each pair's first appearance, which is
+    /// also what an undo has to match before it may remove the pair.
+    stake_log_pairs: BTreeMap<StakeLogPair, (BlockSlot, u32)>,
 }
 
 /// A single mutation, recorded by a writer and replayed at commit.
@@ -106,6 +122,8 @@ enum Op {
     RemoveArchiveTag(ArchiveTag),
     InsertExact(ExactKind, ExactKey, BlockSlot),
     RemoveExact(ExactKind, ExactKey),
+    InsertStakeAddress(BlockSlot, StakeAddressAppearance),
+    RemoveStakeAddress(BlockSlot, StakeAddressAppearance),
 }
 
 fn poisoned() -> ArchiveError {
@@ -244,6 +262,10 @@ impl ArchiveWriter for MemoryArchiveWriter {
             for tag in Self::archive_tags_of(block) {
                 ops.push(Op::InsertArchiveTag(tag));
             }
+
+            for appearance in &block.stake_addresses {
+                ops.push(Op::InsertStakeAddress(block.slot, appearance.clone()));
+            }
         }
 
         Ok(())
@@ -262,6 +284,10 @@ impl ArchiveWriter for MemoryArchiveWriter {
 
             for tag in Self::archive_tags_of(block) {
                 ops.push(Op::RemoveArchiveTag(tag));
+            }
+
+            for appearance in block.stake_addresses.iter().rev() {
+                ops.push(Op::RemoveStakeAddress(block.slot, appearance.clone()));
             }
         }
 
@@ -316,6 +342,9 @@ impl ArchiveWriter for MemoryArchiveWriter {
 
         let mut tables = self.store.tables.write().map_err(|_| poisoned())?;
 
+        // Reborrow so the match arms can hold disjoint field borrows.
+        let tables = &mut *tables;
+
         for op in ops {
             match op {
                 // An identical body means this block is being written again
@@ -358,6 +387,45 @@ impl ArchiveWriter for MemoryArchiveWriter {
                 }
                 Op::RemoveExact(kind, key) => {
                     tables.exact.remove(&(kind, key));
+                }
+                // Only the first appearance of a pair is kept; the membership
+                // map is the probe, and it sees this batch's earlier inserts.
+                Op::InsertStakeAddress(slot, app) => {
+                    let pair = (app.stake.clone(), app.address.clone());
+
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        tables.stake_log_pairs.entry(pair)
+                    {
+                        entry.insert((slot, app.order));
+                        tables.stake_log.entry(app.stake).or_default().insert((
+                            slot,
+                            app.order,
+                            app.address,
+                        ));
+                    }
+                }
+                // Removed only when the undone block is the pair's stored
+                // first appearance; a pair seen earlier stays untouched.
+                Op::RemoveStakeAddress(slot, app) => {
+                    let pair = (app.stake.clone(), app.address.clone());
+
+                    let Some(&(first_slot, order)) = tables.stake_log_pairs.get(&pair) else {
+                        continue;
+                    };
+
+                    if first_slot != slot {
+                        continue;
+                    }
+
+                    tables.stake_log_pairs.remove(&pair);
+
+                    if let Some(set) = tables.stake_log.get_mut(&app.stake) {
+                        set.remove(&(slot, order, app.address));
+
+                        if set.is_empty() {
+                            tables.stake_log.remove(&app.stake);
+                        }
+                    }
                 }
             }
         }
@@ -633,6 +701,10 @@ impl ArchiveStore for MemoryArchiveStore {
             .retain(|(_, _, slot)| *slot >= prune_before);
         tables.exact.retain(|_, slot| *slot >= prune_before);
 
+        // The stake address log is left alone, as on the disk backend: its
+        // entries are first appearances, so removing one below the cutoff
+        // would drop an address the account may still use.
+
         Ok(done)
     }
 
@@ -715,6 +787,35 @@ impl ArchiveStore for MemoryArchiveStore {
             .collect();
 
         Ok(MemorySlotIter(slots.into_iter()))
+    }
+
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
+        let tables = self.tables.read().map_err(|_| poisoned())?;
+
+        let Some(set) = tables.stake_log.get(stake) else {
+            return Ok(Vec::new());
+        };
+
+        let pick = |entry: &StakeLogEntry| entry.2.clone();
+
+        let page = if reverse {
+            set.iter()
+                .rev()
+                .skip(offset)
+                .take(limit)
+                .map(pick)
+                .collect()
+        } else {
+            set.iter().skip(offset).take(limit).map(pick).collect()
+        };
+
+        Ok(page)
     }
 
     fn iter_archive_tags(

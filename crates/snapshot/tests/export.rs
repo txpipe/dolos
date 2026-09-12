@@ -1592,6 +1592,17 @@ impl<S: ArchiveStore> ArchiveStore for Counted<S> {
         self.inner.iter_archive_tags(dimensions, slots)
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
+        self.inner
+            .addresses_by_stake_log(stake, offset, limit, reverse)
+    }
+
     fn iter_exact_records(
         &self,
         slots: std::ops::Range<BlockSlot>,
@@ -1627,6 +1638,7 @@ fn index_across_the_skeleton() -> MemoryArchiveStore {
                     .into_iter()
                     .map(|dimension| dolos_core::Tag::new(dimension, vec![slot as u8; 28]))
                     .collect(),
+                stake_addresses: Vec::new(),
             });
         }
     }

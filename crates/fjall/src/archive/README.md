@@ -10,9 +10,10 @@ This module implements the `ArchiveStore` trait using [Fjall](https://github.com
 | 2 | `archive-logs` | All log namespaces | Range scans within a namespace |
 | 3 | `archive-tags` | Block tags, append-only | Prefix scans by dimension and key |
 | 4 | `index-exact` | Block hash / block number / tx hash → slot | Point lookups |
+| 5 | `archive-stake-log` | Stake credential → addresses by first appearance | Prefix scans by stake, from either end |
 
-The last two are projections of the blocks. Keeping them here lets the history
-and its lookups commit in the same batch. Both keyspaces use
+The last three are projections of the blocks. Keeping them here lets the history
+and its lookups commit in the same batch. All three keyspaces use
 `l0_threshold = 8` and `memtable_size_mb = 128`.
 
 ## Key Schemas
@@ -54,6 +55,21 @@ Value: (empty)
 
 Exact keys are stored verbatim and fixed-width per kind, so these records are lossless — `ExactRecord::new` is the single width-validation site.
 
+### Stake address log (`archive-stake-log`)
+
+Two entry shapes, discriminated by a tag byte:
+
+| Entry | Key | Value |
+|-------|-----|-------|
+| Pair | `[0x00][stake_len:1][stake][address]` | `[slot:8][order:4]` |
+| Ordered | `[0x01][stake_len:1][stake][slot:8][order:4][address]` | (empty) |
+
+Each `(stake, address)` pair is stored once, at its first on-chain appearance;
+`order` is the transaction index in the high 16 bits and the output index in
+the low 16. The pair entry is the write-path probe and the undo key; the
+ordered entry is what a page read walks, from either end. Full address bytes
+are stored so pointer addresses round-trip.
+
 ## Dimension Hashing
 
 `hash_dimension()` in `keys.rs` computes the dimension hashes every index keyspace uses:
@@ -84,4 +100,4 @@ both traversals share.
 
 ## Pruning
 
-Neither `prune_history` nor `truncate_front` touches the two index keyspaces today: a rollback removes their entries through `ArchiveWriter::undo_index`, and pruning them under a sliding history window is not done yet.
+`prune_history` sweeps `archive-tags` and `index-exact` (see `mod.rs`). It does not touch `archive-stake-log`: its entries are first appearances, so removing one below the cutoff would drop an address the account may still use. `truncate_front` touches none of the three; a rollback removes their entries through `ArchiveWriter::undo_index`.

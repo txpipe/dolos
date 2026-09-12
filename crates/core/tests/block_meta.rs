@@ -30,6 +30,7 @@ fn domain_with_block() -> (ToyDomain, TxHash) {
             block_number: Some(block.number()),
             tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         }])
         .unwrap();
     writer.commit().unwrap();

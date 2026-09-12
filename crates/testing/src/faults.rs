@@ -354,6 +354,20 @@ impl ArchiveStore for FaultyArchiveStore {
         self.inner.slots_by_tag(dimension, key, start, end)
     }
 
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<Vec<u8>>, ArchiveError> {
+        if self.should_fault() {
+            return Err(self.fault_err());
+        }
+        self.inner
+            .addresses_by_stake_log(stake, offset, limit, reverse)
+    }
+
     fn iter_archive_tags(
         &self,
         dimensions: &[TagDimension],

@@ -402,6 +402,25 @@ pub trait ArchiveStore: Clone + Send + Sync + 'static {
         end: BlockSlot,
     ) -> Result<Self::SlotIter, ArchiveError>;
 
+    /// Read one page of the stake address log: the addresses seen under the
+    /// stake credential, ordered by first on-chain appearance.
+    ///
+    /// `offset` and `limit` window the ordered list; `reverse` reads the
+    /// exact reverse of it. An unknown credential is an empty page.
+    ///
+    /// Entries come from `ArchiveIndexDelta::stake_addresses` through
+    /// [`ArchiveWriter::apply_index`], in the same batch as the blocks they
+    /// project. [`ArchiveWriter::undo_index`] removes a pair only when the
+    /// undone block is its stored first appearance. The log is as complete
+    /// as the history that was applied through that path.
+    fn addresses_by_stake_log(
+        &self,
+        stake: &[u8],
+        offset: usize,
+        limit: usize,
+        reverse: bool,
+    ) -> Result<Vec<Vec<u8>>, ArchiveError>;
+
     /// Iterate every archive tag record whose slot falls in `slots`.
     ///
     /// `slots` is **half-open** (`start..end`), unlike

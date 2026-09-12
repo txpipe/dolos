@@ -16,7 +16,7 @@ Dolos uses three distinct storage backends, each serving a specific purpose:
 
 ### ArchiveStore
 - **Purpose**: Historical block storage with temporal indexing
-- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …) and exact lookups (by block hash, block number, tx hash), written in the same batch as the blocks they project
+- **Contents**: Block bodies indexed by slot (one zstd frame per body in flat segment files, compressed with the dictionary bundled in `dolos-flatfiles`), entity logs keyed by `LogKey` (slot + entity key), and the lookups over them: archive tags (by address, payment, stake, policy, asset, datum, …), exact lookups (by block hash, block number, tx hash) and the stake address log (each account's addresses by first appearance), written in the same batch as the blocks they project
 - **Traits**: `ArchiveStore` (reads) + `ArchiveWriter` (batched writes)
 - **Database**: `<storage.path>/archive` (index plus flat block segment files)
 
@@ -31,6 +31,7 @@ There is no standalone index store. Every index is a projection and lives in
 the store that holds what it projects:
 - the live-UTxO tags (by address, payment, stake, policy, asset, script ref) project the UTxO set and live in the `StateStore` (`StateStore::utxos_by_tag`, written through `StateWriter::apply_utxo_tags` in the same batch as the set)
 - the archive tags and the exact lookups (by block hash, block number, tx hash) project the block history and live in the `ArchiveStore` (`ArchiveStore::slots_by_tag` / `slot_by_*`, written through `ArchiveWriter::apply_index` in the same batch as the blocks)
+- the stake address log (each `(stake, address)` pair once, at its first on-chain appearance) projects the block history too and lives in the `ArchiveStore` (`ArchiveStore::addresses_by_stake_log`, written through the same `ArchiveWriter::apply_index`)
 
 ### Database File Organization
 
@@ -105,11 +106,12 @@ The project follows a modular workspace architecture with clear separation of co
     - **`state-utxos`**: UTxO set storage with `[tx_hash:32][index:4]` keys
     - **`state-entities`**: All entity types with `[ns_hash:8][entity_key:32]` keys
     - **`state-tags`**: Live-UTxO tags with `[dim_hash:8][lookup_key:var][txo_ref:36]` keys
-  - `archive`: `ArchiveStore` implementation with four-keyspace design:
+  - `archive`: `ArchiveStore` implementation with five-keyspace design:
     - **`archive-blocks`**: Slot -> packed physical frame locations in the flat segment files
     - **`archive-logs`**: All log namespaces with `[ns_hash:8][log_key:40]` keys
     - **`archive-tags`**: Tag-based prefix scans for block tags with `[dim_hash:8][key_hash:8][slot:8]` keys
     - **`index-exact`**: Exact-match lookups with `[dim_hash:8][key_data:var]` -> `[slot:8]`
+    - **`archive-stake-log`**: Stake address log, `(stake, address)` pairs at first appearance, page reads by stake prefix from either end
   - `keys`: Shared key encoding utilities
 - **Key Advantages**:
   - Reduced segment files compared to per-entity keyspaces
