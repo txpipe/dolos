@@ -45,7 +45,7 @@ fn main() -> Result<(), AnyError> {
     // the host an exclusive read-only snapshot view over the committed stores.
     let workspace = ReplayWorkspace::open(&config, genesis.clone())?;
 
-    {
+    let snapshot_result = (|| -> Result<(), AnyError> {
         let snapshot = workspace.snapshot();
         let retained = dolos_snapshot::planning::retained_epochs(&config)?;
         let plan = snapshot.selected_plan(
@@ -64,8 +64,13 @@ fn main() -> Result<(), AnyError> {
         eprintln!("sequence: {}", plan.sequence);
         eprintln!("layers:   {}", document.layers);
         eprintln!("identity: {}", document.identity);
-    }
+        Ok(())
+    })();
 
-    workspace.finish()?;
+    let finish_result = workspace.finish();
+
+    snapshot_result?;
+    finish_result?;
+
     Ok(())
 }
