@@ -19,6 +19,7 @@ pub struct WorkCounters {
     pub log_rows: Arc<AtomicU64>,
     pub log_reads: Arc<AtomicU64>,
     pub block_reads: Arc<AtomicU64>,
+    pub tip_reads: Arc<AtomicU64>,
     pub decoded_bytes: Arc<AtomicU64>,
     pub exact_lookups: Arc<AtomicU64>,
     pub tag_candidates: Arc<AtomicU64>,
@@ -32,6 +33,7 @@ pub struct WorkSnapshot {
     pub log_rows: u64,
     pub log_reads: u64,
     pub block_reads: u64,
+    pub tip_reads: u64,
     pub decoded_bytes: u64,
     pub exact_lookups: u64,
     pub tag_candidates: u64,
@@ -46,6 +48,7 @@ impl WorkCounters {
             log_rows: self.log_rows.load(Ordering::Relaxed),
             log_reads: self.log_reads.load(Ordering::Relaxed),
             block_reads: self.block_reads.load(Ordering::Relaxed),
+            tip_reads: self.tip_reads.load(Ordering::Relaxed),
             decoded_bytes: self.decoded_bytes.load(Ordering::Relaxed),
             exact_lookups: self.exact_lookups.load(Ordering::Relaxed),
             tag_candidates: self.tag_candidates.load(Ordering::Relaxed),
@@ -59,6 +62,7 @@ impl WorkCounters {
         self.log_rows.store(0, Ordering::Relaxed);
         self.log_reads.store(0, Ordering::Relaxed);
         self.block_reads.store(0, Ordering::Relaxed);
+        self.tip_reads.store(0, Ordering::Relaxed);
         self.decoded_bytes.store(0, Ordering::Relaxed);
         self.exact_lookups.store(0, Ordering::Relaxed);
         self.tag_candidates.store(0, Ordering::Relaxed);
@@ -215,6 +219,7 @@ impl<Inner: ArchiveStore> ArchiveStore for MeasuredArchive<Inner> {
     fn get_tip(&self) -> Result<Option<(BlockSlot, BlockBody)>, ArchiveError> {
         let tip = self.inner.get_tip()?;
         if let Some((_, body)) = &tip {
+            self.counters.tip_reads.fetch_add(1, Ordering::Relaxed);
             self.counters.body(body);
         }
         Ok(tip)

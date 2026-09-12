@@ -50,8 +50,9 @@ checks the complete normalized response hash. Warmup primes the route: this is
 `route-primed`, not cold. Latency includes scheduling, response collection,
 validation and hashing; service latency excludes scheduling delay.
 
-Counters track yielded rows, decoded bodies, lookups and state reads—not internal
-LSM visits, physical frame bytes, separate codec CPU or semaphore queue depth.
+Counters track yielded rows, decoded bodies, tip-body reads, lookups and state
+reads—not internal LSM visits, physical frame bytes, separate codec CPU or
+semaphore queue depth.
 Process resources include the harness; lifetime peak RSS is not per-request RSS.
 
 ## Live replay

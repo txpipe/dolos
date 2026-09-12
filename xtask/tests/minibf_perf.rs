@@ -64,12 +64,17 @@ async fn verify_fixture<Stores: ToyStores>(stores: Stores) {
             }
             "address-transactions-page" => assert!(work.tag_candidates > 0),
             "account-utxos-wide" => {
+                let selected_rows = case.expected.as_array().unwrap().len() as u64;
                 assert_eq!(
                     work.utxo_refs,
                     (fixture.shape.blocks * fixture.shape.transactions_per_block) as u64
                 );
                 assert_eq!(work.exact_lookups, work.utxo_refs);
-                assert_eq!(work.block_reads, fixture.shape.blocks as u64);
+                assert_eq!(work.tip_reads, selected_rows);
+                assert_eq!(
+                    work.block_reads - work.tip_reads,
+                    fixture.shape.blocks as u64
+                );
                 assert!(work.decoded_bytes > 0);
             }
             _ => {}
