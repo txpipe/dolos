@@ -619,7 +619,7 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, supply: SupplyCheck) -> Ch
                         accounted_supply.abs_diff(max_supply),
                     ),
                 ));
-            } else if in_flight_pool_count > 0 {
+            } else if in_flight_lovelace > 0 {
                 not_assertable.push(NotAssertable::new(
                     CHECK,
                     format!(
@@ -1359,6 +1359,31 @@ mod tests {
         claimed.utxos += claimed.deposit_per_pool;
         found.utxo_lovelace = claimed.utxos;
         found.registered_pools = claimed.pool_count;
+        let supply = SupplyCheck::MidEpoch {
+            max_supply: MAX_SUPPLY,
+            live_pool_count: found.registered_pools,
+        };
+
+        let result = check_pots(&claimed, &found, supply);
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert!(result.not_assertable.is_empty());
+
+        claimed.reserves -= 1;
+        let result = check_pots(&claimed, &found, supply);
+        assert_eq!(result.issues.len(), 1, "{:?}", result.issues);
+        assert!(result.issues[0].detail.contains("off by 1"));
+        assert!(result.not_assertable.is_empty());
+    }
+
+    #[test]
+    fn zero_cost_pool_registration_does_not_skip_exact_supply() {
+        let mut claimed = pots(500, 3);
+        let found = Recomputed {
+            utxo_lovelace: 500,
+            registered_accounts: 3,
+            registered_pools: 1,
+            drep_deposits: 0,
+        };
         let supply = SupplyCheck::MidEpoch {
             max_supply: MAX_SUPPLY,
             live_pool_count: found.registered_pools,
