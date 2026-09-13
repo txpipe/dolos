@@ -438,51 +438,6 @@ impl<E: std::error::Error + 'static> std::error::Error for BulkReplayRunError<E>
     }
 }
 
-#[cfg(feature = "mithril")]
-impl dolos_snapshot::backfill::Workspace for ReplayWorkspace<'_> {
-    type Session = BulkReplaySession;
-
-    fn snapshot(&self) -> impl SnapshotSource + '_ {
-        self.snapshot()
-    }
-
-    fn start(self, target: u64) -> Result<Self::Session, dolos_snapshot::backfill::Error> {
-        self.start(Some(target))
-            .map_err(dolos_snapshot::backfill::Error::caller)
-    }
-
-    fn finish(self) -> Result<(), dolos_snapshot::backfill::Error> {
-        self.finish()
-            .map_err(dolos_snapshot::backfill::Error::caller)
-    }
-}
-
-#[cfg(feature = "mithril")]
-impl dolos_snapshot::backfill::Session for BulkReplaySession {
-    fn committed_position(&self) -> Result<Option<ChainPoint>, dolos_snapshot::backfill::Error> {
-        self.committed_position()
-            .map_err(dolos_snapshot::backfill::Error::caller)
-    }
-
-    fn import_blocks(
-        &mut self,
-        blocks: Vec<RawBlock>,
-    ) -> Result<ReplayProgress, dolos_snapshot::backfill::Error> {
-        self.import_blocks(blocks)
-            .map_err(dolos_snapshot::backfill::Error::caller)
-    }
-
-    fn prune_history(&mut self) -> Result<u64, dolos_snapshot::backfill::Error> {
-        self.prune_history()
-            .map_err(dolos_snapshot::backfill::Error::caller)
-    }
-
-    fn finish(self) -> Result<(), dolos_snapshot::backfill::Error> {
-        self.finish()
-            .map_err(dolos_snapshot::backfill::Error::caller)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -24,7 +24,8 @@ same order for publication, digest and verification. The resulting plan can
 be passed to:
 
 - `publish_directory` with an explicit destination and progress observer;
-- `preview` or `publish` with an opened `publisher::Publisher`;
+- `preview_repository` or `publish_repository` with explicit
+  `SnapshotRepository::publishing()` policy;
 - `digest_document` with an explicit predecessor; or
 - `verify_reproduction` with the published inscription.
 
@@ -41,10 +42,11 @@ single restore entry point for both `RestoreInput::Directory` and
 resume/space policy, and an optional observer. `None`
 selects a silent observer.
 
-The library deliberately does not infer credentials or a scratch directory.
-An application may use Dolos's `node` helpers to resolve its existing config,
-or provide its own policy. `publisher::Publisher::open_explicit` similarly
-accepts the resolved repository, credentials, scratch and journal paths.
+The library deliberately does not infer credentials, a scratch directory,
+publication journal, or rebuild policy. An application may use Dolos's `node`
+helpers to resolve its existing config, or provide its own policy. Publisher
+cadence, acquisition, retries and shutdown behavior belong to the Stelae host;
+see [the command migration](publisher-migration.md).
 
 ## Safe cold-start sequence
 

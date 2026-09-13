@@ -14,9 +14,10 @@ cargo run --no-default-features --example headless_replay -- \
 - `ReplayWorkspace::open(config, genesis)` opens a dataset without running
   ledger initialization, replaying pending work, or pruning history.
 - `workspace.snapshot()` lends read-only Dolos profile operations:
-  committed position, selected planning, directory or registry publication,
-  digest reproduction and verification. No domain or writable storage handle
-  escapes the view. See `docs/headless-snapshots.md` for the restore boundary.
+  committed position, selected planning, profile encoding, repository
+  publication, digest reproduction and verification. No domain or writable
+  storage handle escapes the view. See `docs/headless-snapshots.md` for the
+  snapshot boundary.
 - `workspace.start(stop_epoch)` consumes the inspection workspace and explicitly
   permits initialization and processing. Publish any pending boundary first.
 - `session.import_blocks(blocks)` processes a nonempty batch of trusted immutable
@@ -39,7 +40,7 @@ Sessions are not cloneable and do not implement `Domain`. Import requires
 exclusive mutable access. Borrowing a profile view prevents advancing or
 finishing the session while the view remains in use.
 
-## Publisher ordering
+## Embedding-host ordering
 
 ```text
 open workspace
@@ -53,9 +54,9 @@ open workspace
 repeat
 ```
 
-The current backfill driver follows this order through its narrow `Workspace`,
-`Session` and `Publish` interfaces. Source acquisition, retries, signals and OCI
-publication policy remain the host's responsibilities.
+The Stelae publisher follows this order through its own state machine. Source
+acquisition, retries, signals and OCI publication policy remain the host's
+responsibilities; Dolos no longer ships a second loop.
 
 ## Internal implementation and limits
 

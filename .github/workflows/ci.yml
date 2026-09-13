@@ -148,16 +148,11 @@ jobs:
           save-if: false
       - run: cargo test --workspace --all-targets --all-features --exclude dolos-minibf --exclude dolos-minikupo --exclude dolos-trp
 
-  # `dolos-snapshot` carries one default-off half — the backfill daemon
-  # (`backfill`) — and every job above builds it the one way the `dolos`
-  # binary does, with it on (the default `mithril` feature forwards to it).
-  # Feature unification means no workspace job ever constructs the
-  # backfill-off build, so a `cfg` mistake there passes everything and breaks
-  # only a consumer. This checks that one configuration, at `cargo check`
-  # depth: the guard is that it compiles, not that it passes a suite the jobs
-  # above already run.
+  # Keep the snapshot profile independently embeddable. The workspace build
+  # can unify features through the Dolos binary, while an external consumer
+  # compiles this package on its own. This check guards that headless shape.
   snapshot-features:
-    name: Check (dolos-snapshot default features)
+    name: Check (headless dolos-snapshot)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

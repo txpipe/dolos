@@ -177,7 +177,7 @@ and it counts layers rather than epochs.)
 
 1. Restore the publisher node from the previous stele (self-hosting delta pull; first run via Mithril).
 2. Sync with `chain.stop_epoch = E` until `StopEpochReached` — the state crosses the boundary and lands on the **first block of epoch E**, the block that gives `position.point` a hash.
-3. `dolos snapshot publish` — only the newly closed epoch's layers and epoch E's boundary sliver upload; fresh state layers + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
+3. The Stelae Cardano publisher uploads only the newly closed epoch's layers and epoch E's boundary sliver; fresh state layers + inscription; tag `epoch-E`, move `latest`. On networks with a Mithril aggregator, fetch the immutable-file digest list from the aggregator's digest route, verify it against a certificate, and write the `digests` layer for the files within the boundary.
 4. Determinism job: an independent runner that synced by any means runs `dolos snapshot digest` and alerts on inscription mismatch.
 5. Matching verifiers sign and push referrer signatures; clients enforce k-of-n.
 

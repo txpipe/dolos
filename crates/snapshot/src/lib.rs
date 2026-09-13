@@ -21,8 +21,8 @@
 //!
 //! [`export`] and [`restore`] are the exceptions, and they are deliberately the
 //! whole of it: the two drivers that move records between a live store set and
-//! the protocol. Neither carries a CLI — the commands live in the `dolos`
-//! binary and are thin calls into [`export::export`] and [`restore::restore`].
+//! the protocol. Neither carries a CLI. The Dolos binary uses them for
+//! digest/reproduction and restore, while publisher commands live in Stelae.
 //!
 //! ## The rules this crate keeps
 //!
@@ -52,28 +52,23 @@
 //!   inspection, verification and directory/OCI restoration.
 //! - [`preflight`] — the free-space policy both drivers refuse under, so a run
 //!   that cannot fit its volume says so at minute zero.
-//! - `registry` (feature `oci`) — publishing into an OCI repository: the
-//!   history chain, and the layers a publish inherits instead of rebuilding.
+//! - [`registry`] — publishing into an OCI repository: the history chain, and
+//!   the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
 //!   which identity, and where it stages.
-//! - `publisher` (feature `oci`) — the order a repository publish's steps go
-//!   in, and what each reading of the repository means for one.
-//! - `backfill` (feature `backfill`) — the publisher daemon that replays
-//!   mithril immutable data one epoch at a time and publishes a stele at each
-//!   boundary. The fetch itself is `dolos-mithril`'s, which knows nothing of
-//!   steles.
+//!
+//! Publisher application policy and replay/acquisition orchestration live in
+//! the Stelae repository. This crate retains the profile-specific encoding,
+//! repository lifecycle and consumer operations that host uses.
 
-#[cfg(feature = "backfill")]
-pub mod backfill;
 pub mod export;
 pub mod facade;
 pub mod layers;
 pub mod namespaces;
 pub mod node;
 pub mod planning;
-pub mod publisher;
 pub mod registry;
 pub mod restore;
 pub mod source;
@@ -727,25 +722,6 @@ pub enum Error {
         "[stelae.registry] sets `password` with no `user`; basic registry credentials are a pair"
     )]
     OrphanRegistryPassword,
-
-    /// The repository has already reached this node, and `--require-new` said
-    /// that is a failure. The ordinary reading of the same standing is
-    /// [`publisher::Next::Nothing`], which carries this exact sentence.
-    #[error("{0}")]
-    NothingToPublish(String),
-
-    /// A publish further ahead than one sequence, which would leave a gap no
-    /// later stele could close.
-    #[error(
-        "this repository's latest stele is sequence {latest} and this node is at sequence \
-         {sequence}, {distance} sequences ahead: a publish must follow the repository's latest \
-         stele, and this one would leave a gap no later stele could close"
-    )]
-    PublishWouldGap {
-        latest: u64,
-        sequence: u64,
-        distance: u64,
-    },
 }
 
 impl Error {

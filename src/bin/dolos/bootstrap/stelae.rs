@@ -82,8 +82,7 @@ impl Args {
     pub fn inquire() -> miette::Result<Self> {
         let source = inquire::Text::new("where is the stele?")
             .with_help_message(
-                "a directory written by `dolos snapshot publish --output-dir`, or an OCI \
-                 repository",
+                "a directory stele written by the profile encoder, or an OCI repository",
             )
             .with_placeholder("oci://ghcr.io/txpipe/dolos-snapshots/mainnet")
             .prompt()
@@ -216,10 +215,9 @@ fn restore(config: &RootConfig, args: &Args, options: RestoreOptions<'_>) -> mie
 /// What the run did, in the numbers an operator checks.
 ///
 /// Still printed after the restore, and now that is a choice rather than a gap:
-/// the run itself is drawn while it happens, through the observer seam this
-/// command shares with `snapshot publish`, so what is left for the end is the
-/// arithmetic a bar cannot carry — what a resumed run cost rather than what an
-/// unresumed one would have.
+/// the run itself is drawn while it happens through the profile observer seam,
+/// so what is left for the end is the arithmetic a bar cannot carry — what a
+/// resumed run cost rather than what an unresumed one would have.
 fn report(
     plan: &dolos_snapshot::restore::Plan,
     outlook: &dolos_snapshot::restore::Outlook,
