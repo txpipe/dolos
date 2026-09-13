@@ -22,12 +22,14 @@
 //!
 //! Rolling forward is only exact for the pots whose within-epoch movement
 //! `RollingStats` records in full, so the tip comparison stays narrow: the
-//! UTxO pot, the account count, and the DRep deposits. Total supply is exact
-//! only at an epoch boundary; mid-epoch, a newly registered pool's deposit has
-//! left the UTxO set while `pool_count` deliberately remains at its boundary
-//! value. At such a tip the check reports the exact in-flight pool deposits as
-//! not assertable, then still asserts that they account for the whole supply
-//! gap. Three pots have no honest figure at the tip at all:
+//! UTxO pot, the account count, and the DRep deposits. Boundary pots conserve
+//! total supply exactly. Once blocks roll, including at epoch slot zero, a
+//! newly registered pool's deposit leaves the UTxO set while `pool_count`
+//! deliberately remains at its boundary value. When such deposits exist the
+//! check reports exact supply as not assertable, then still asserts that they
+//! account for the whole supply gap. With no in-flight deposits, supply must
+//! match exactly and no assertion is skipped. Three pots have no honest
+//! figure at the tip at all:
 //!
 //! - **rewards, reserves, treasury.** Their within-epoch movement includes MIR
 //!   certificates, and `RollingStats` records the amounts the certificates *ask
@@ -503,6 +505,20 @@ pub enum SupplyCheck {
     },
 }
 
+impl SupplyCheck {
+    /// A slot-zero block may already have moved value out of the boundary pots.
+    fn for_tip(epoch: &EpochState, epoch_slot: u32, max_supply: u64, live_pool_count: u64) -> Self {
+        if epoch_slot == 0 && epoch.rolling.live().is_none() {
+            Self::Exact { max_supply }
+        } else {
+            Self::MidEpoch {
+                max_supply,
+                live_pool_count,
+            }
+        }
+    }
+}
+
 /// Compare the recomputed figures against the pots the node claims.
 pub fn check_pots(claimed: &Pots, found: &Recomputed, supply: SupplyCheck) -> CheckResult {
     let mut issues = Vec::new();
@@ -544,7 +560,6 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, supply: SupplyCheck) -> Ch
 
     match supply {
         SupplyCheck::Unavailable => {}
-        // Total supply is fixed by genesis and only ever moves between pots.
         SupplyCheck::Exact { max_supply } => {
             if !claimed.is_consistent(max_supply) {
                 issues.push(Issue::new(
@@ -604,7 +619,7 @@ pub fn check_pots(claimed: &Pots, found: &Recomputed, supply: SupplyCheck) -> Ch
                         accounted_supply.abs_diff(max_supply),
                     ),
                 ));
-            } else {
+            } else if in_flight_pool_count > 0 {
                 not_assertable.push(NotAssertable::new(
                     CHECK,
                     format!(
@@ -1117,14 +1132,12 @@ pub fn run(
             Some(max_supply),
         ) => {
             let (_, epoch_slot) = summary.slot_epoch(slot);
-            if epoch_slot == 0 {
-                Some(SupplyCheck::Exact { max_supply })
-            } else {
-                Some(SupplyCheck::MidEpoch {
-                    max_supply,
-                    live_pool_count: found.registered_pools,
-                })
-            }
+            Some(SupplyCheck::for_tip(
+                &epoch,
+                epoch_slot,
+                max_supply,
+                found.registered_pools,
+            ))
         }
         _ => None,
     };
@@ -1337,6 +1350,103 @@ mod tests {
 
         assert_eq!(result.issues.len(), 1, "{:?}", result.issues);
         assert!(result.issues[0].detail.contains("off by 1"));
+        assert!(result.not_assertable.is_empty());
+    }
+
+    #[test]
+    fn mid_epoch_without_in_flight_deposits_asserts_supply_without_a_skip() {
+        let (mut claimed, mut found) = mid_epoch_pots(0);
+        claimed.utxos += claimed.deposit_per_pool;
+        found.utxo_lovelace = claimed.utxos;
+        found.registered_pools = claimed.pool_count;
+        let supply = SupplyCheck::MidEpoch {
+            max_supply: MAX_SUPPLY,
+            live_pool_count: found.registered_pools,
+        };
+
+        let result = check_pots(&claimed, &found, supply);
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert!(result.not_assertable.is_empty());
+
+        claimed.reserves -= 1;
+        let result = check_pots(&claimed, &found, supply);
+        assert_eq!(result.issues.len(), 1, "{:?}", result.issues);
+        assert!(result.issues[0].detail.contains("off by 1"));
+        assert!(result.not_assertable.is_empty());
+    }
+
+    #[test]
+    fn slot_zero_pool_registration_is_accounted_for_after_rolling() {
+        let (claimed, found) = mid_epoch_pots(0);
+        let mut initial_pots = claimed.clone();
+        initial_pots.utxos += initial_pots.deposit_per_pool;
+        let epoch = EpochState {
+            number: 42,
+            initial_pots,
+            pparams: EpochValue::with_live(
+                42,
+                shelley_pparams().with(PParamValue::PoolDeposit(claimed.deposit_per_pool)),
+            ),
+            rolling: EpochValue::with_live(
+                42,
+                RollingStats {
+                    blocks_minted: 1,
+                    consumed_utxos: claimed.deposit_per_pool,
+                    registered_pools: [pool_hash(7)].into(),
+                    ..Default::default()
+                },
+            ),
+            ..EpochState::default()
+        };
+        let supply = SupplyCheck::for_tip(&epoch, 0, MAX_SUPPLY, found.registered_pools);
+        let rolled = live_pots(&epoch).unwrap();
+        assert_eq!(rolled, claimed);
+
+        let result = check_pots(&rolled, &found, supply);
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert_eq!(result.not_assertable.len(), 1);
+        assert!(result.not_assertable[0]
+            .detail
+            .contains("500000000 lovelace"));
+
+        let mut corrupted = rolled;
+        corrupted.reserves -= 1;
+        let result = check_pots(&corrupted, &found, supply);
+        assert_eq!(result.issues.len(), 1, "{:?}", result.issues);
+        assert!(result.issues[0].detail.contains("off by 1"));
+        assert!(result.not_assertable.is_empty());
+    }
+
+    #[test]
+    fn slot_zero_without_rolling_keeps_the_boundary_assertion_exact() {
+        let epoch = EpochState {
+            initial_pots: pots(500, 3),
+            ..EpochState::default()
+        };
+        let found = Recomputed {
+            utxo_lovelace: 500,
+            registered_accounts: 3,
+            registered_pools: 0,
+            drep_deposits: 0,
+        };
+        let supply = SupplyCheck::for_tip(&epoch, 0, MAX_SUPPLY, 0);
+        assert_eq!(
+            supply,
+            SupplyCheck::Exact {
+                max_supply: MAX_SUPPLY
+            }
+        );
+        let mut claimed = live_pots(&epoch).unwrap();
+        let result = check_pots(&claimed, &found, supply);
+        assert!(result.issues.is_empty(), "{:?}", result.issues);
+        assert!(result.not_assertable.is_empty());
+
+        claimed.reserves -= 1;
+        let result = check_pots(&claimed, &found, supply);
+        assert_eq!(result.issues.len(), 1, "{:?}", result.issues);
+        assert!(result.issues[0]
+            .detail
+            .contains("value was created or destroyed"));
         assert!(result.not_assertable.is_empty());
     }
 
