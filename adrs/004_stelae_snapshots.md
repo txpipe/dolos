@@ -226,7 +226,7 @@ The resolution is `dolos::common::stele_registry_auth`, a pure function of `[ste
 
 **1b. Dolos profile core** — `crates/snapshot`: `DolosProfile`, layer readers/writers, and the three trait additions with backend impls and adapter enums. Verified by per-layer roundtrip unit tests and golden-digest tests (fixed input → asserted sha256, catching encoding drift).
 
-**2. Local export/restore e2e** — `export.rs`/`restore.rs` (including the `digests` layer writer), `publish --output-dir`, `bootstrap snapshot --source file://`. Verified by an e2e cloned from `tests/e2e/snapshot.rs`; cross-check restored stores against an `import_blocks`-built node; determinism test (two independently synced nodes → identical inscription digests), which is where any entity-encoding nondeterminism surfaces; audit `crates/cardano/src/model/*` as needed.
+**2. Local export/restore e2e** — `export.rs`/`restore.rs` (including the `digests` layer writer), `SnapshotSource::publish_directory`, `dolos bootstrap stelae --source file://`. Verified by an e2e cloned from `tests/e2e/snapshot.rs`; cross-check restored stores against an `import_blocks`-built node; determinism test (two independently synced nodes → identical inscription digests), which is where any entity-encoding nondeterminism surfaces; audit `crates/cardano/src/model/*` as needed.
 
 **3. OCI transport** — push with blob-skip, pull missing-only, tags. Verified against a local registry (`zot`/`registry:2`) spawned by the test; delta assertions (publish E then E+1 → only new blobs upload; pre-seeded restore fetches only missing); kill-and-`--continue` resume.
 

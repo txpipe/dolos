@@ -52,8 +52,8 @@
 //!   inspection, verification and directory/OCI restoration.
 //! - [`preflight`] — the free-space policy both drivers refuse under, so a run
 //!   that cannot fit its volume says so at minute zero.
-//! - [`registry`] — publishing into an OCI repository: the
-//!   history chain, and the layers a publish inherits instead of rebuilding.
+//! - [`registry`] — publishing into an OCI repository: the history chain, and
+//!   the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
 //! - [`node`] — what a node's own configuration says about reaching a registry:
