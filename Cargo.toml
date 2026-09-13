@@ -156,12 +156,9 @@ path = "tests/bootstrap.rs"
 
 [features]
 strict = ["dolos-cardano/strict"]
-# The aggregator fetch lives in `dolos-mithril` — a plain dolos capability
-# that knows nothing of steles — and `dolos-snapshot`'s backfill daemon is
-# what composes it with the publish lifecycle. The CLI reaches the client (for
-# the feedback receiver a download draws through) via
-# `dolos_mithril::mithril_client`.
-mithril = ["dep:dolos-mithril", "dolos-snapshot/backfill"]
+# Mithril bootstrap is a Dolos capability. Publisher acquisition and backfill
+# orchestration live in the Stelae publisher application.
+mithril = ["dep:dolos-mithril"]
 
 utils = ["comfy-table", "inquire", "toml"]
 debug = ["console-subscriber", "tokio/tracing"]

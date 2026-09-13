@@ -1225,9 +1225,9 @@ const CANONICAL_SKELETON: &str = concat!(
 /// The check that the discarding writer is *faithful* rather than merely fast,
 /// and no other check stands in for it.
 ///
-/// Two exports over one store set: one into a directory, which is
-/// `snapshot publish --output-dir`, and one into nothing, which is
-/// `snapshot digest`. The comparison is on the canonical bytes rather than on
+/// Two exports over one store set: one into a directory through the retained
+/// profile encoder, and one into nothing, as `snapshot digest` does. The
+/// comparison is on the canonical bytes rather than on
 /// the digest — the digest is a function of them, so an equal digest is
 /// implied, while an unequal document says *where* in a two-kilobyte JSON the
 /// two disagreed.

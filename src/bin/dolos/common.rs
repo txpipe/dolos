@@ -69,10 +69,10 @@ pub fn setup_domain(config: &RootConfig) -> miette::Result<DomainAdapter> {
 
 /// The same domain [`setup_domain`] assembles, with `chain.stop_epoch` forced.
 ///
-/// For callers that replay to a chosen epoch boundary over the live stores —
-/// `snapshot backfill` — the way `doctor rebuild-state` forces it on the
-/// domain it hand-builds. A `Some` here overrides whatever the configuration
-/// says; `None` leaves it alone.
+/// For embedding callers that replay to a chosen epoch boundary over the live
+/// stores, the way `doctor rebuild-state` forces it on the domain it
+/// hand-builds. A `Some` here overrides whatever the configuration says;
+/// `None` leaves it alone.
 pub fn setup_domain_with_stop_epoch(
     config: &RootConfig,
     stop_epoch: Option<u64>,

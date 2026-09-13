@@ -290,7 +290,8 @@ pub fn open(
     )?)
 }
 
-/// An opened snapshot repository for inspection, verification and restore.
+/// An opened snapshot repository for inspection, verification, restore and
+/// explicit host-driven publication.
 ///
 /// The host supplies transport policy explicitly: repository, plaintext opt-in,
 /// credentials, staging directory and tuning. No configuration files,
@@ -342,8 +343,23 @@ impl SnapshotRepository {
         restore_registry(&self.registry, point, node, target, observer)
     }
 
-    pub(crate) fn into_inner(self) -> Registry {
-        self.registry
+    /// Read where `plan` stands against this repository without touching a
+    /// local store.
+    pub fn standing(&self, plan: &Plan) -> Result<Standing, Error> {
+        standing(&self.registry, plan)
+    }
+
+    /// Refuse a publication whose peak staging volume does not fit.
+    pub fn preflight(&self) -> Result<(), Error> {
+        Ok(preflight(&self.registry, &DolosProfile)?)
+    }
+
+    /// Begin a profile publication with no application policy inferred.
+    ///
+    /// A publisher host owns the journal location and rebuild choice through
+    /// [`Publishing::recording_in`] and [`Publishing::rebuilding`].
+    pub fn publishing(&self) -> Publishing<'_> {
+        Publishing::new(&self.registry)
     }
 }
 

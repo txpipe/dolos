@@ -116,16 +116,11 @@ The `storage` section controls how Dolos stores data in the local file system. E
   [bootstrap](../bootstrap) to replace data in another format. Relabelling a
   data directory as `v4` is unsupported and is not detected.
 
-Besides the stores, this directory holds `scratch/`: where `dolos snapshot
-publish`, `dolos snapshot backfill`, `dolos bootstrap stelae` and `dolos
-snapshot verify` stage the layers they move over an OCI registry. It defaults
-here because this volume is already sized for the data; a mainnet transfer
-stages gigabytes. All but `verify` take `--scratch-dir` to point somewhere
-else.
-
-`dolos snapshot backfill` adds `mithril/`, the immutable window it replays
-from, for the same reason — the download is data-volume sized, and the command
-deletes the files it has consumed as it goes. `--download-dir` moves it.
+Besides the stores, this directory holds `scratch/`, where `dolos bootstrap
+stelae` and `dolos snapshot verify` stage layers moved over an OCI registry.
+It defaults here because this volume is already sized for the data; a mainnet
+transfer stages gigabytes. Publisher scratch and Mithril download directories
+are owned by the Stelae publisher application.
 
 ### `storage.wal` section
 
@@ -412,11 +407,11 @@ The `snapshot` section controls bootstrap from a snapshot archive.
 
 ## `stelae` section
 
-The `stelae` section controls how this node reaches a **stele registry** — the OCI
-repositories `dolos bootstrap stelae --source oci://…` restores from and
-`dolos snapshot publish --repo oci://…` publishes into. `dolos snapshot
-backfill --repo oci://…` reads the same section: it is `publish` run in a loop,
-replaying mithril history one epoch at a time and publishing at each boundary.
+The `stelae` section controls how this node reaches a **stele registry** — the
+OCI repositories `dolos bootstrap stelae --source oci://…`, `dolos snapshot
+inspect` and `dolos snapshot verify` read. Publisher configuration belongs to
+the Stelae publisher application; see [publisher command
+migration](../../publisher-migration.md).
 
 ### `stelae.registry` section
 
@@ -445,21 +440,9 @@ Setting `token` and `user` at the same time is an error rather than a precedence
 puzzle — Dolos refuses to open the registry and names both — and so is setting
 `password` with no `user`.
 
-#### A publisher's credentials
-
-Those are real secrets and never belong in this file. Export them instead, using
-the same `DOLOS_` environment overrides that apply to [every other
-setting](./introduction#environmental-variables):
-
-```sh
-export DOLOS_STELAE_REGISTRY_USER=publisher
-export DOLOS_STELAE_REGISTRY_PASSWORD=…
-dolos snapshot publish --repo oci://…
-```
-
-There is nothing registry-specific about that: the environment layer overrides
-the file for every field, so a node that carries the read-only `user` in
-`dolos.toml` can publish with nothing to remove first.
+Publisher write credentials are real secrets and never belong in this file.
+Configure them through the Stelae publisher's documented secret interface.
+Dolos uses this section only for registry reads.
 
 ## `logging` section
 

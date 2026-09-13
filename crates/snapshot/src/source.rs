@@ -13,8 +13,7 @@ use crate::{
     export::{self, Document, Plan, Predecessor},
     inscription::Inscription,
     planning::{self, EpochRange},
-    publisher::Publisher,
-    registry::{Preview, Published},
+    registry::{self, Preview, Published, Publishing},
     Error, RetainedEpochs,
 };
 
@@ -74,10 +73,14 @@ pub trait SnapshotSource {
         plan: &Plan,
     ) -> Result<Inscription, Error>;
 
-    fn preview(&self, publisher: &Publisher, plan: &Plan) -> Result<Preview, Error>;
-    fn publish(
+    /// Preview a repository publication through explicit host policy.
+    fn preview_repository(&self, publishing: Publishing<'_>, plan: &Plan)
+        -> Result<Preview, Error>;
+
+    /// Publish into a repository through explicit host policy.
+    fn publish_repository(
         &self,
-        publisher: &Publisher,
+        publishing: Publishing<'_>,
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Published, Error>;
@@ -139,16 +142,20 @@ impl<A: ArchiveStore, S: StateStore> SnapshotSource for StoreSnapshot<'_, A, S> 
         export::verify_reproduction(published, plan, self.archive, self.state, None)
     }
 
-    fn preview(&self, publisher: &Publisher, plan: &Plan) -> Result<Preview, Error> {
-        publisher.preview(plan, self.archive)
+    fn preview_repository(
+        &self,
+        publishing: Publishing<'_>,
+        plan: &Plan,
+    ) -> Result<Preview, Error> {
+        registry::preview(publishing, plan, self.archive, None)
     }
 
-    fn publish(
+    fn publish_repository(
         &self,
-        publisher: &Publisher,
+        publishing: Publishing<'_>,
         plan: &Plan,
         observer: &Observer,
     ) -> Result<Published, Error> {
-        publisher.publish(plan, self.archive, self.state, observer)
+        registry::publish(publishing, plan, self.archive, self.state, None, observer)
     }
 }
