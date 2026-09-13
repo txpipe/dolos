@@ -102,7 +102,7 @@ impl Default for Feedback {
 /// Three bars rather than one because the three move on entirely different
 /// clocks: a layer boundary can be a minute apart on mainnet, a blob's bytes
 /// tick continuously, and the record counter is the only thing that moves at
-/// all during the epoch scan that dominates a publish.
+/// all during a layer's record scan.
 pub struct SteleProgress {
     verb: &'static str,
     layers: ProgressBar,

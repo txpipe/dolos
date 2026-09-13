@@ -21,8 +21,8 @@
 //!
 //! [`export`] and [`restore`] are the exceptions, and they are deliberately the
 //! whole of it: the two drivers that move records between a live store set and
-//! the protocol. Neither carries a CLI — the commands live in the `dolos`
-//! binary and are thin calls into [`export::export`] and [`restore::restore`].
+//! the protocol. Neither carries a CLI. The Dolos binary uses them for
+//! digest/reproduction and restore, while publisher commands live in Stelae.
 //!
 //! ## The rules this crate keeps
 //!
@@ -52,7 +52,7 @@
 //!   inspection, verification and directory/OCI restoration.
 //! - [`preflight`] — the free-space policy both drivers refuse under, so a run
 //!   that cannot fit its volume says so at minute zero.
-//! - `registry` (feature `oci`) — publishing into an OCI repository: the
+//! - [`registry`] — publishing into an OCI repository: the
 //!   history chain, and the layers a publish inherits instead of rebuilding.
 //! - [`planning`] — the epoch selection every command that walks these stores
 //!   takes, and the arithmetic each of them reports.
