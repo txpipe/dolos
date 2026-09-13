@@ -354,11 +354,18 @@ where
                         let raws = domain.archive().get_blocks_by_slot(&slot)?;
                         let body_count = raws.len();
                         let mut positions = HashMap::new();
+                        let mut decode_error = None;
                         let requested: HashSet<_> = tx_hashes.iter().copied().collect();
                         for raw in raws {
-                            let block = MultiEraBlock::decode(raw.as_slice()).map_err(|error| {
-                                DomainError::ChainError(ChainError::DecodingError(error))
-                            })?;
+                            let block = match MultiEraBlock::decode(raw.as_slice()) {
+                                Ok(block) => block,
+                                Err(error) => {
+                                    decode_error.get_or_insert_with(|| {
+                                        DomainError::ChainError(ChainError::DecodingError(error))
+                                    });
+                                    continue;
+                                }
+                            };
                             for (tx_index, tx) in block.txs().iter().enumerate() {
                                 let tx_hash = tx.hash();
                                 if requested.contains(&tx_hash) {
@@ -370,6 +377,15 @@ where
                                         tx_index,
                                     });
                                 }
+                            }
+                        }
+
+                        // A corrupt sibling cannot hide metadata found in a
+                        // valid body, but an unresolved hash must not turn
+                        // that corruption into a cached miss.
+                        if positions.len() != requested.len() {
+                            if let Some(error) = decode_error {
+                                return Err(error);
                             }
                         }
 

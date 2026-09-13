@@ -63,7 +63,7 @@ Process resources include the harness; lifetime peak RSS is not per-request RSS.
   --write-interval-ms 250 --cases account-utxos-wide
 ```
 
-The writer uses normal `roll_forward`, including WAL/state/archive commits.
+The writer uses the normal live-sync lifecycle, including WAL/state/archive commits.
 `--live-batch-size` (default `1`) groups replay bodies into the chain logic's
 normal `WorkBatch` and executes the same full lifecycle. The writer interval is
 per batch. Multi-body mode is diagnostic: the production tip-sync caller still

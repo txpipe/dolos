@@ -179,6 +179,69 @@ async fn hashes_indexed_to_one_slot_search_each_candidate_body_once() {
 }
 
 #[tokio::test]
+async fn undecodable_sibling_does_not_hide_requested_transaction() {
+    let domain = ToyDomain::new(None, None);
+    let (blocks, _, _) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let raw = &blocks[0];
+    let block = MultiEraBlock::decode(raw).unwrap();
+    let known = block.txs()[0].hash();
+    let corrupt = std::sync::Arc::new(b"not a block".to_vec());
+    let writer = domain.archive().start_writer().unwrap();
+    writer
+        .apply(
+            &ChainPoint::Specific(block.slot(), [0xff; 32].into()),
+            &corrupt,
+        )
+        .unwrap();
+    writer
+        .apply(&ChainPoint::Specific(block.slot(), block.hash()), raw)
+        .unwrap();
+    writer
+        .apply_index(&[ArchiveIndexDelta {
+            slot: block.slot(),
+            block_hash: block.hash().to_vec(),
+            block_number: Some(block.number()),
+            tx_hashes: vec![known.to_vec()],
+            tags: Vec::new(),
+        }])
+        .unwrap();
+    writer.commit().unwrap();
+
+    let mut resolver = BlockMetaResolver::new(AsyncQueryFacade::new(domain));
+    let resolved = resolver.resolve_batch([known]).await.unwrap();
+    assert_eq!(resolved[&known].tx_hash, known);
+    assert_eq!(resolver.body_fetches(), 2);
+}
+
+#[tokio::test]
+async fn undecodable_requested_body_remains_an_error() {
+    let domain = ToyDomain::new(None, None);
+    let hash = TxHash::from([0xff; 32]);
+    let slot = 1;
+    let corrupt = std::sync::Arc::new(b"not a block".to_vec());
+    let writer = domain.archive().start_writer().unwrap();
+    writer
+        .apply(&ChainPoint::Specific(slot, [0xff; 32].into()), &corrupt)
+        .unwrap();
+    writer
+        .apply_index(&[ArchiveIndexDelta {
+            slot,
+            block_hash: vec![0xff; 32],
+            block_number: Some(1),
+            tx_hashes: vec![hash.to_vec()],
+            tags: Vec::new(),
+        }])
+        .unwrap();
+    writer.commit().unwrap();
+
+    let mut resolver = BlockMetaResolver::new(AsyncQueryFacade::new(domain));
+    for expected_fetches in 1..=2 {
+        assert!(resolver.resolve_batch([hash]).await.is_err());
+        assert_eq!(resolver.fetches(), expected_fetches);
+    }
+}
+
+#[tokio::test]
 async fn oversized_batch_fetches_each_hash_once_and_bounds_memo() {
     let (domain, known) = domain_with_block();
     let absent = TxHash::from([0xff; 32]);
