@@ -224,14 +224,23 @@ where
     Ok(Json(model))
 }
 
-/// Whether the credential appears in any pool registration, as reward account
-/// or owner.
+/// Whether a pool registration the pool state still holds names the
+/// credential, as reward account or owner.
 ///
 /// db-sync registers a credential the moment a certificate names it, so
 /// Blockfrost answers `200 []` for a credential seen only as a pool reward
 /// account or owner. Dolos writes no `AccountState` for those, so the bare
 /// existence guard would 404. This scan runs only on the would-be-404 path,
 /// so the hot path pays nothing.
+///
+/// Known gap: `PoolState` keeps only the `next`, `live`, `mark`, `set` and
+/// `go` parameter versions. A second registration in the same epoch
+/// overwrites `next`, and each epoch transition rotates the oldest version
+/// out of `go`. A credential named only by such a replaced registration is
+/// gone from every version, so it still 404s. db-sync remembers it forever.
+/// Closing the gap needs the state layer to record the credential when the
+/// certificate names it. That is the same fix #1325 needs for proposal return
+/// addresses.
 fn account_appears_in_pool_registrations<D>(
     domain: &Facade<D>,
     account: &StakeAddress,
