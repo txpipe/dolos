@@ -62,6 +62,7 @@ fn domain_with_shared_blocks(
             block_number: Some(block.number()),
             tx_hashes: tx_hashes.iter().map(|hash| hash.to_vec()).collect(),
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         });
         hashes.push(tx_hashes);
     }
@@ -164,6 +165,7 @@ async fn hashes_indexed_to_one_slot_search_each_candidate_body_once() {
                     block_number: Some(block.number()),
                     tx_hashes: block.txs().iter().map(|tx| tx.hash().to_vec()).collect(),
                     tags: Vec::new(),
+                    stake_addresses: Vec::new(),
                 })
                 .collect::<Vec<_>>(),
         )
@@ -204,6 +206,7 @@ async fn undecodable_sibling_does_not_hide_requested_transaction() {
             block_number: Some(block.number()),
             tx_hashes: vec![known.to_vec()],
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         }])
         .unwrap();
     writer.commit().unwrap();
@@ -231,6 +234,7 @@ async fn undecodable_requested_body_remains_an_error() {
             block_number: Some(1),
             tx_hashes: vec![hash.to_vec()],
             tags: Vec::new(),
+            stake_addresses: Vec::new(),
         }])
         .unwrap();
     writer.commit().unwrap();
