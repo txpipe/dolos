@@ -152,7 +152,9 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/governance/proposals`                                    | Get list of governance proposals                         |
 | `/governance/proposals/{tx_hash}/{cert_index}`             | Get governance proposal information                      |
 | `/governance/proposals/{gov_action_id}`                    | Get governance proposal by CIP-129 action id             |
+| `/governance/proposals/{gov_action_id}/metadata`           | Get metadata of a proposal by CIP-129 id                 |
 | `/governance/proposals/{gov_action_id}/withdrawals`        | Get withdrawals of a proposal by CIP-129 id              |
+| `/governance/proposals/{tx_hash}/{cert_index}/metadata`    | Get metadata of a specific proposal                      |
 | `/governance/proposals/{tx_hash}/{cert_index}/withdrawals` | Get withdrawals of a specific proposal                   |
 | `/metadata/txs/labels/{label}`                             | Get metadata for transactions with a specific label      |
 | `/metadata/txs/labels/{label}/cbor`                        | Get CBOR metadata for transactions with a specific label |
@@ -188,6 +190,7 @@ Dolos provides many, but not all of the Blockfrost endpoints. The following list
 | `/txs/{tx_hash}/stakes`                                    | Get stakes for a specific transaction                    |
 | `/txs/{tx_hash}/utxos`                                     | Get UTXOs for a specific transaction                     |
 | `/txs/{tx_hash}/withdrawals`                               | Get withdrawals for a specific transaction               |
+| `/utils/addresses/xpub/{xpub}/{role}/{index}`              | Derive an address from an xpub                           |
 
 ## Lifetime totals and `sync.max_history`
 
