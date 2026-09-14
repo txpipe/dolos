@@ -847,7 +847,26 @@ impl CoreArchiveWriter for ArchiveWriterBackend {
     fn apply_index(&self, deltas: &[ArchiveIndexDelta]) -> Result<(), ArchiveError> {
         match self {
             Self::Memory(w) => w.apply_index(deltas),
-            Self::LogsOnly(_) => Ok(()),
+            // The stake address log is a replay-derived record like the
+            // entity logs, so the gate lets it through. Everything else the
+            // deltas carry stays read-only: the projection empties the tag
+            // and exact inputs, which the backend skips without writing.
+            Self::LogsOnly(w) => {
+                let stake_only: Vec<ArchiveIndexDelta> = deltas
+                    .iter()
+                    .filter(|delta| !delta.stake_addresses.is_empty())
+                    .map(|delta| ArchiveIndexDelta {
+                        slot: delta.slot,
+                        block_hash: Vec::new(),
+                        block_number: None,
+                        tx_hashes: Vec::new(),
+                        tags: Vec::new(),
+                        stake_addresses: delta.stake_addresses.clone(),
+                    })
+                    .collect();
+
+                w.apply_index(&stake_only)
+            }
             Self::Fjall(w) => w.apply_index(deltas),
             Self::NoOp(w) => w.apply_index(deltas),
         }
@@ -1605,5 +1624,53 @@ mod lifecycle_tests {
         let storage = std::path::Path::new("/var/lib/dolos/data");
 
         assert!(progress_path_in(storage).starts_with(storage));
+    }
+
+    /// The rebuild gate lets the stake address log through and leaves the
+    /// rest of the index untouched: after an `apply_index` on the gated
+    /// view, the log answers while the same delta's tag and exact entries
+    /// stay unwritten.
+    #[test]
+    fn logs_only_gate_writes_the_stake_log_and_nothing_else() {
+        use crate::storage::ArchiveStoreBackend;
+        use dolos_core::{
+            ArchiveIndexDelta, ArchiveStore as _, ArchiveWriter as _, StakeAddressAppearance,
+            StateSchema, Tag,
+        };
+
+        let store = ArchiveStoreBackend::in_memory(StateSchema::default()).unwrap();
+        let gated = store.logs_only().unwrap();
+
+        let stake = vec![0x5Au8; 29];
+        let address = vec![0x00u8; 57];
+
+        let delta = ArchiveIndexDelta {
+            slot: 100,
+            block_hash: vec![0xAB; 32],
+            block_number: Some(7),
+            tx_hashes: vec![vec![0xCD; 32]],
+            tags: vec![Tag::new("account_certs", vec![1, 2, 3])],
+            stake_addresses: vec![StakeAddressAppearance {
+                order: 0,
+                stake: stake.clone(),
+                address: address.clone(),
+            }],
+        };
+
+        let writer = gated.start_writer().unwrap();
+        writer.apply_index(&[delta]).unwrap();
+        writer.commit().unwrap();
+
+        // the log answers through the shared handle
+        let page = store.addresses_by_stake_log(&stake, 0, 10, false).unwrap();
+        assert_eq!(page, vec![address]);
+
+        // the tag and exact entries the delta carried were not written
+        let slots: Vec<u64> = store
+            .slots_by_tag("account_certs", &[1, 2, 3], 0, u64::MAX)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(slots.is_empty());
     }
 }
