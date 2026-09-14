@@ -22,7 +22,7 @@ use blockfrost_openapi::models::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
-    model::{AccountState, DRepState},
+    model::{AccountState, DRepState, PoolState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
@@ -224,6 +224,66 @@ where
     Ok(Json(model))
 }
 
+/// Whether the credential appears in any pool registration, as reward account
+/// or owner.
+///
+/// db-sync registers a credential the moment a certificate names it, so
+/// Blockfrost answers `200 []` for a credential seen only as a pool reward
+/// account or owner. Dolos writes no `AccountState` for those, so the bare
+/// existence guard would 404. This scan runs only on the would-be-404 path,
+/// so the hot path pays nothing.
+fn account_appears_in_pool_registrations<D>(
+    domain: &Facade<D>,
+    account: &StakeAddress,
+) -> Result<bool, StatusCode>
+where
+    Option<PoolState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let reward_account = account.to_vec();
+
+    // Pool owners are always key hashes, so a script account can only match
+    // through the reward account.
+    let owner_hash = match account.payload() {
+        StakePayload::Stake(hash) => Some(*hash),
+        StakePayload::Script(_) => None,
+    };
+
+    for item in domain.iter_cardano_entities::<PoolState>(None)? {
+        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Check every snapshot slot the entity still holds, so a credential a
+        // recent re-registration replaced is still found: `live` for a new
+        // pool, `next` for a mid-epoch re-registration, `mark`/`set`/`go` for
+        // the older values.
+        let snapshots = [
+            pool.snapshot.live(),
+            pool.snapshot.next(),
+            pool.snapshot.mark(),
+            pool.snapshot.set(),
+            pool.snapshot.go(),
+        ];
+
+        for snapshot in snapshots.into_iter().flatten() {
+            if snapshot.params.reward_account == reward_account {
+                return Ok(true);
+            }
+
+            if owner_hash.is_some_and(|hash| snapshot.params.pool_owners.contains(&hash)) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// `GET /accounts/{stake_address}/addresses`.
+///
+/// Blockfrost declares only `count`, `page` and `order` for this endpoint.
+/// The shared query struct also accepts `from` and `to`; they are ignored
+/// here, as Blockfrost ignores them, so the list always covers the account's
+/// whole history.
 pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -231,20 +291,24 @@ pub async fn by_stake_addresses<D>(
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())?
+        && !account_appears_in_pool_registrations(&domain, &account_key.address)?
+    {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+    // `from`/`to` are ignored, so the scan always covers the whole history.
+    let end_slot = domain.get_tip_slot()?;
     let stream = domain.query().blocks_by_stake_stream(
         &account_key.address.to_vec(),
-        start_slot,
+        0,
         end_slot,
         SlotOrder::from(pagination.order),
     );
@@ -1523,6 +1587,75 @@ mod tests {
         );
         let _: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_pool_only_account_returns_empty_list() {
+        let app = TestApp::new();
+
+        // The synthetic chain registers a pool owned by key hash [2u8; 28].
+        // That credential never appears in an address or certificate, so no
+        // account state exists for it. Blockfrost still answers with an empty
+        // list because the credential is known through the pool.
+        let owner = StakeAddress::new(Network::Testnet, StakePayload::Stake(Hash::from([2u8; 28])));
+        let owner = owner.to_bech32().expect("failed to encode owner address");
+
+        let path = format!("/accounts/{owner}/addresses");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let addresses: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+        assert!(addresses.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_ignores_from_and_to() {
+        // Blockfrost declares no `from`/`to` for this endpoint and its query
+        // binds neither, so a windowed request answers the full list. The
+        // window below starts at the newest first appearance: honoring it
+        // would drop every older address.
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+
+        let newest_first_appearance = app
+            .vectors()
+            .account_address_bounds
+            .iter()
+            .map(|(_, min, _)| *min)
+            .max()
+            .expect("vectors carry account addresses");
+        let last_block = app
+            .vectors()
+            .account_address_bounds
+            .iter()
+            .map(|(_, _, max)| *max)
+            .max()
+            .expect("vectors carry account addresses");
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/accounts/{stake_address}/addresses"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let full: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses");
+        assert!(full.len() > 1, "the window must have something to drop");
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?from={newest_first_appearance}&to={last_block}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let windowed: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse windowed addresses");
+
+        assert_eq!(windowed, full);
     }
 
     #[tokio::test]
