@@ -286,7 +286,7 @@ where
 /// whole history.
 pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
@@ -294,6 +294,11 @@ where
     Option<PoolState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let network = domain.get_network_id()?;
@@ -1656,6 +1661,18 @@ mod tests {
             serde_json::from_slice(&bytes).expect("failed to parse windowed addresses");
 
         assert_eq!(windowed, full);
+
+        // Blockfrost answers 200 for a malformed or reversed window too,
+        // because it never parses these parameters on this endpoint.
+        for query in ["from=garbage", "from=100&to=50"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{stake_address}/addresses?{query}"))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            let ignored: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse addresses");
+            assert_eq!(ignored, full, "{query}");
+        }
     }
 
     #[tokio::test]
