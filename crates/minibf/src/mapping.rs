@@ -33,6 +33,7 @@ use std::{
 use blockfrost_openapi::models::{
     address_content::{AddressContent, Type as AddressType},
     address_utxo_content_inner::AddressUtxoContentInner,
+    asset_utxo_content_inner::AssetUtxoContentInner,
     block_content::BlockContent,
     block_content_addresses_inner::BlockContentAddressesInner,
     block_content_addresses_inner_transactions_inner::BlockContentAddressesInnerTransactionsInner,
@@ -1210,6 +1211,7 @@ pub struct UtxoOutputModelBuilder<'a> {
     output: MultiEraOutput<'a>,
     is_collateral: bool,
     block_data: Option<BlockRefMeta>,
+    block_time: Option<u64>,
     consumed_by_tx: Option<TxHash>,
 }
 
@@ -1224,6 +1226,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             output,
             is_collateral: false,
             block_data: None,
+            block_time: None,
             consumed_by_tx: None,
         }
     }
@@ -1239,6 +1242,7 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             output,
             is_collateral: true,
             block_data: None,
+            block_time: None,
             consumed_by_tx: None,
         }
     }
@@ -1248,6 +1252,21 @@ impl<'a> UtxoOutputModelBuilder<'a> {
             block_data: Some(block_data),
             ..self
         }
+    }
+
+    /// The wall-clock time of the block that created the output; only models
+    /// that expose `block_time` read it.
+    pub fn with_block_time(self, block_time: u64) -> Self {
+        Self {
+            block_time: Some(block_time),
+            ..self
+        }
+    }
+
+    /// The height of the block that created the output, when the archive
+    /// still holds that block.
+    pub fn block_height(&self) -> Option<u64> {
+        self.block_data.as_ref().map(|b| b.height)
     }
 
     pub fn with_consumed_by(self, tx: TxHash) -> Self {
@@ -1346,6 +1365,63 @@ impl<'a> IntoModel<AddressUtxoContentInner> for UtxoOutputModelBuilder<'a> {
     }
 }
 
+impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
+    type SortKey = (u64, usize, u32);
+
+    fn sort_key(&self) -> Option<Self::SortKey> {
+        self.block_data
+            .as_ref()
+            .map(|data| (data.slot, data.tx_index, self.txo_ref.1))
+    }
+
+    fn into_model(self) -> Result<AssetUtxoContentInner, StatusCode> {
+        let inline_datum = self.output.datum().and_then(|x| match x {
+            DatumOption::Hash(_) => None,
+            DatumOption::Data(x) => Some(x),
+        });
+
+        let inline_datum_json = inline_datum
+            .as_ref()
+            .map(|x| PlutusDataWrapper(x.0.deref().clone()).as_value())
+            .transpose()?;
+
+        let out = AssetUtxoContentInner {
+            address: self.output.address().into_model()?,
+            // source the tx_hash from the UTxO's own TxoRef (always present),
+            // not the archive block_data lookup which is None for blocks older
+            // than `max_history` and would yield an empty hash.
+            tx_hash: self.txo_ref.0.to_string(),
+            output_index: try_into_or_500!(self.txo_ref.1),
+            amount: self.output.value().into_model()?,
+            block: self
+                .block_data
+                .as_ref()
+                .map(|b| b.hash.to_string())
+                .unwrap_or_default(),
+            block_height: try_into_or_500!(self.block_height().unwrap_or_default()),
+            block_time: try_into_or_500!(self.block_time.unwrap_or_default()),
+            data_hash: self.output.datum().map(|x| match x {
+                DatumOption::Hash(x) => x.to_string(),
+                DatumOption::Data(x) => x.original_hash().to_string(),
+            }),
+            // re-encode the raw datum so the hex matches the on-chain bytes
+            inline_datum: inline_datum
+                .map(|x| minicbor::to_vec(&x.0))
+                .transpose()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map(hex::encode),
+            inline_datum_json,
+            reference_script_hash: self
+                .output
+                .script_ref()
+                .map(|h| h.into_model())
+                .transpose()?,
+        };
+
+        Ok(out)
+    }
+}
+
 impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
     type SortKey = (u64, usize, u32);
 
@@ -1392,6 +1468,93 @@ impl<'a> IntoModel<ScriptUtxosInner> for UtxoOutputModelBuilder<'a> {
         };
 
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod utxo_output_tests {
+    use super::*;
+    use dolos_core::async_query::BlockRefMeta;
+    use pallas::codec::utils::{CborWrap, KeepRaw};
+    use pallas::ledger::primitives::conway::{PostAlonzoTransactionOutput, Value};
+    use pallas::ledger::traverse::Era;
+
+    fn output_bytes() -> Vec<u8> {
+        let output = PostAlonzoTransactionOutput {
+            address: vec![0x60; 29].into(),
+            value: Value::Coin(1_000_000),
+            datum_option: None,
+            script_ref: None,
+        };
+
+        minicbor::to_vec(&output).unwrap()
+    }
+
+    fn output_with_inline_datum_bytes() -> Vec<u8> {
+        let datum = PlutusData::BigInt(pallas::ledger::primitives::BigInt::Int(42.into()));
+        let output = PostAlonzoTransactionOutput {
+            address: vec![0x60; 29].into(),
+            value: Value::Coin(1_000_000),
+            datum_option: Some(KeepRaw::from(DatumOption::Data(CborWrap(KeepRaw::from(
+                datum,
+            ))))),
+            script_ref: None,
+        };
+
+        minicbor::to_vec(&output).unwrap()
+    }
+
+    /// The asset UTxO model carries the block height and time and decodes the
+    /// inline datum into JSON next to its CBOR.
+    #[test]
+    fn asset_utxo_model_exposes_block_position_and_datum_json() {
+        let bytes = output_with_inline_datum_bytes();
+        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
+
+        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 3, output)
+            .with_block_data(BlockRefMeta {
+                slot: 100,
+                hash: Hash::from([0x11; 32]),
+                height: 7,
+                tx_hash: Hash::from([0xaa; 32]),
+                tx_index: 2,
+            })
+            .with_block_time(1_700_000_000);
+
+        assert_eq!(builder.block_height(), Some(7));
+
+        let model: AssetUtxoContentInner = builder.into_model().unwrap();
+
+        assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
+        assert_eq!(model.output_index, 3);
+        assert_eq!(model.block, Hash::from([0x11; 32]).to_string());
+        assert_eq!(model.block_height, 7);
+        assert_eq!(model.block_time, 1_700_000_000);
+        assert_eq!(model.inline_datum.as_deref(), Some("182a"));
+        assert_eq!(
+            model.inline_datum_json,
+            Some(serde_json::json!({ "int": 42 }))
+        );
+        assert!(model.data_hash.is_some());
+        assert_eq!(model.reference_script_hash, None);
+    }
+
+    /// An output whose creation block was pruned still maps, with the block
+    /// fields zeroed the same way the address UTxO model leaves them empty.
+    #[test]
+    fn asset_utxo_model_without_block_data() {
+        let bytes = output_bytes();
+        let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
+        let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 0, output);
+
+        assert_eq!(builder.block_height(), None);
+
+        let model: AssetUtxoContentInner = builder.into_model().unwrap();
+        assert_eq!(model.block, "");
+        assert_eq!(model.block_height, 0);
+        assert_eq!(model.block_time, 0);
+        assert_eq!(model.inline_datum, None);
+        assert_eq!(model.inline_datum_json, None);
     }
 }
 
