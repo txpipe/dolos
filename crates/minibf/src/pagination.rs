@@ -214,24 +214,8 @@ impl Pagination {
         ((self.page - 1) * self.count as u64) as usize
     }
 
-    pub fn to(&self) -> usize {
-        (self.count as u64 * self.page) as usize
-    }
-
-    pub fn includes(&self, i: usize) -> bool {
-        i >= self.from() && i < self.to()
-    }
-
     pub fn skip(&self) -> usize {
         self.from()
-    }
-
-    pub fn as_included_item<T>(&self, i: usize, item: T) -> Option<T> {
-        if self.includes(i) {
-            Some(item)
-        } else {
-            None
-        }
     }
 
     pub fn should_skip(&self, number: u64, index: usize) -> bool {
