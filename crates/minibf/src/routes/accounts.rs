@@ -1433,6 +1433,7 @@ mod tests {
         account_transactions_content_inner::AccountTransactionsContentInner,
         account_withdrawal_content_inner::AccountWithdrawalContentInner,
     };
+    use dolos_cardano::model::{EpochValue, PoolParams, PoolSnapshot};
     use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta};
     use dolos_testing::{
         synthetic::SyntheticBlockConfig, toy_domain::ToyDomain, utxo_with_value, MIN_UTXO_AMOUNT,
@@ -1626,6 +1627,92 @@ mod tests {
         let addresses: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses");
         assert!(addresses.is_empty());
+    }
+
+    /// A pool state whose only link to an account is its reward account.
+    fn reward_only_pool(operator: [u8; 28], reward_account: Vec<u8>) -> PoolState {
+        let params = PoolParams {
+            vrf_keyhash: Hash::from([0u8; 32]),
+            pledge: 0,
+            cost: 0,
+            margin: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account,
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let snapshot = PoolSnapshot {
+            is_retired: false,
+            blocks_minted: 0,
+            params,
+            is_new: false,
+        };
+        PoolState {
+            operator: Hash::from(operator),
+            snapshot: EpochValue::with_live(3, snapshot),
+            blocks_minted_total: 0,
+            register_slot: 0,
+            retiring_epoch: None,
+            deposit: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_pool_reward_account_returns_empty_list() {
+        // The synthetic pool pays rewards to the registered fixture account,
+        // so the chain only exercises the owner path of the fallback. Two
+        // extra pools cover the reward account path: one pays a key hash and
+        // one pays a script hash. Neither credential has an account state.
+        let key_hash_account =
+            StakeAddress::new(Network::Testnet, StakePayload::Stake(Hash::from([7u8; 28])));
+        let script_account = StakeAddress::new(
+            Network::Testnet,
+            StakePayload::Script(Hash::from([8u8; 28])),
+        );
+        let pools = [
+            ([70u8; 28], key_hash_account.to_vec()),
+            ([80u8; 28], script_account.to_vec()),
+        ];
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            let writer = domain.state().start_writer().expect("state writer");
+            for (operator, reward_account) in &pools {
+                let pool = reward_only_pool(*operator, reward_account.clone());
+                writer
+                    .write_entity_typed(&EntityKey::from(operator.as_slice()), &pool)
+                    .expect("failed to write pool state");
+            }
+            writer.commit().expect("failed to commit pool state");
+        });
+
+        for account in [key_hash_account, script_account] {
+            let account = account.to_bech32().expect("failed to encode stake address");
+
+            // No account state exists: the bare account endpoint has no
+            // fallback, so it must still answer 404.
+            assert_status(&app, &format!("/accounts/{account}"), StatusCode::NOT_FOUND).await;
+
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{account}/addresses"))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{account}: unexpected status {status} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let addresses: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+            assert!(addresses.is_empty(), "{account}");
+        }
     }
 
     #[tokio::test]
