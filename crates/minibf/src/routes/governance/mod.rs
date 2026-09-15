@@ -1050,11 +1050,11 @@ mod tests {
     }
 
     /// This function gives the synthetic DRep an anchor that Dolos can never
-    /// fetch. `example.invalid` does not resolve (RFC 6761), so the fetch always
-    /// stops with a connection error. The endpoint still returns the anchor
-    /// fields. This function uses the same entity key that the endpoint reads.
-    /// The synthetic chain imported a registration with no anchor, and this
-    /// function replaces it.
+    /// fetch. `example.invalid` does not resolve (RFC 6761), so the fetch
+    /// always stops with a connection error. The endpoint still returns the
+    /// anchor fields. This function uses the same entity key that the
+    /// endpoint reads. The synthetic chain imported a registration with no
+    /// anchor, and this function replaces it.
     fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
         use pallas::ledger::primitives::conway::{Anchor, DRep};
 
@@ -1096,7 +1096,8 @@ mod tests {
             serde_json::from_slice(&body).expect("failed to parse drep metadata");
 
         assert_eq!(&model.drep_id, drep);
-        // the drep id in the vectors is the 29-byte CIP-129 form, so the hex keeps the header
+        // the drep id in the vectors is the 29-byte CIP-129 form, so the hex keeps the
+        // header
         assert_eq!(model.hex, hex::encode([vec![0x22], vec![7u8; 28]].concat()));
         assert_eq!(model.url, "https://example.invalid/drep");
         assert_eq!(model.hash, hex::encode([9u8; 32]));
