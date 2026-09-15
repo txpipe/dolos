@@ -1,0 +1,31 @@
+--- a/src/bin/dolos/data/import_archive.rs
++++ b/src/bin/dolos/data/import_archive.rs
+@@ -105,6 +105,7 @@
+     progress.set_position(cursor.slot_or_default());
+ 
+     let mut reached_end = false;
++    let mut benchmark_commits = Vec::new();
+ 
+     for chunk in iter.chunks(args.chunk_size).into_iter() {
+         if reached_end {
+@@ -158,13 +159,20 @@
+             progress.set_position(block.slot);
+         }
+ 
++        let benchmark_started = std::time::Instant::now();
+         writer
+             .commit()
+             .into_diagnostic()
+             .context("committing archive batch")?;
++        benchmark_commits.push(benchmark_started.elapsed().as_nanos() as u64);
+     }
+ 
+     progress.finish_with_message("archive import complete");
++    if let Some(path) = std::env::var_os("DOLOS_ARCHIVE_BENCH_METRICS") {
++        let buffers = serde_json::Value::Null;
++        let metrics = serde_json::json!({"commit_ns": benchmark_commits, "buffers": buffers});
++        std::fs::write(path, serde_json::to_vec(&metrics).unwrap()).unwrap();
++    }
+ 
+     Ok(())
+ }

@@ -132,25 +132,12 @@ Output fields per entity:
 - **accounts** — `stake,pool,lovelace`
 - **rewards** — `stake,pool,amount,type,earned_epoch`
 
-### `archive-bench`
+### `perf`
 
-Benchmarks for the archive's compressed block segments: store-level
-workloads over the production `dolos-flatfiles` store beside a modelled
-sink, node-level workloads that drive `dolos` binaries through their import
-and API paths so two revisions can be paired, dictionary training and
-evaluation, and a report renderer with gate verdicts.
-
-```
-cargo xtask archive-bench bench --preset all --corpus <DIR> --segments 448..451 --work <DIR> --out results.jsonl
-cargo xtask archive-bench node --bin baseline=<PATH>:v3 --bin candidate=<PATH> --run <NAME> --immutable <DIR> --genesis <DIR> --work <DIR> --out node.jsonl
-cargo xtask archive-bench report results.jsonl node.jsonl
-cargo xtask archive-bench train --corpus <DIR> --sample 440..447=1500 --out cardano.dict
-cargo xtask archive-bench evaluate --fixture label=<DIR>:448..455 --dictionary bundled
-```
-
-Every option, the gates, the corpus requirements and the committed results
-are described in [`archive-bench/README.md`](archive-bench/README.md). The
-`smoke` preset runs under `cargo test -p xtask`.
+Performance experiments for storage and minibf, with shared load generation,
+version comparison and reporting. Start with the [perf overview](perf/README.md),
+then choose [storage](perf/storage.md), [minibf](perf/minibf.md) or
+[HTTP calibration](perf/http.md). Rust microbenchmarks remain under `cargo bench`.
 
 ### `e2e-test`
 

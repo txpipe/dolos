@@ -50,6 +50,7 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     export::{self, EpochWindow, Plan},
+    facade::{Selection, SnapshotSource as _, StoreSnapshot},
     layers::{blocks, indexes, logs, state},
     state_layer_count, state_ns_for, DolosProfile, Network, RetainedEpochs, BLOCKS, INDEXES,
     LOG_KINDS, LOG_NAMESPACES, NAMESPACES, STATE_KINDS, UTXOS,
@@ -1224,9 +1225,9 @@ const CANONICAL_SKELETON: &str = concat!(
 /// The check that the discarding writer is *faithful* rather than merely fast,
 /// and no other check stands in for it.
 ///
-/// Two exports over one store set: one into a directory, which is
-/// `snapshot publish --output-dir`, and one into nothing, which is
-/// `snapshot digest`. The comparison is on the canonical bytes rather than on
+/// Two exports over one store set: one into a directory through the retained
+/// profile encoder, and one into nothing, as `snapshot digest` does. The
+/// comparison is on the canonical bytes rather than on
 /// the digest — the digest is a function of them, so an equal digest is
 /// implied, while an unequal document says *where* in a two-kilobyte JSON the
 /// two disagreed.
@@ -1728,4 +1729,30 @@ fn banding_moves_no_bytes() {
             "a band of {band} produced a different document",
         );
     }
+}
+
+/// The supported facade keeps planning, directory encoding, digest and
+/// reproduction on one store view and one plan.
+#[test]
+fn the_headless_facade_plans_encodes_and_reproduces_one_document() {
+    let domain: ToyDomain = harness();
+    let source = StoreSnapshot::new(domain.archive(), domain.state());
+    let plan = source
+        .selected_plan(
+            u64::from(domain.genesis().network_magic()),
+            RetainedEpochs::default(),
+            Selection::default(),
+        )
+        .unwrap();
+
+    let destination = tempfile::tempdir().unwrap();
+    let stele = destination.path().join("stele");
+    let inscription = source
+        .publish_directory(&stele, &plan, &Observer::silent())
+        .unwrap();
+    let reproduced = source.verify_reproduction(&inscription, &plan).unwrap();
+    let document = source.digest_document(&plan, &export::First).unwrap();
+
+    assert_eq!(reproduced.canonicalize().unwrap(), document.canonical);
+    assert_eq!(inscription.digest().unwrap(), document.identity);
 }

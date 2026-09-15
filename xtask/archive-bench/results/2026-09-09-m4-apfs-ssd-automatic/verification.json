@@ -1,0 +1,78 @@
+{
+  "verified_source_commit": "ef72cf3e4ce95eaf6ec625eec9fbc7198903fa44",
+  "measured_runtime_commit": "5d13f2dae7037697b42cb8e394f74cfe371f6dd7",
+  "post_measurement_change": "Only crates/flatfiles/tests/store.rs changes; production sources are identical to the measured candidate.",
+  "ordering_test_sha256": "739e23018572dd3fcabda8c9bc4e06d2460d8c94fdcc04fddffc1eff6ad26451",
+  "final_harness_privacy_check": {
+    "command": ["cargo", "test", "-p", "xtask"],
+    "exit_status": 0,
+    "tests": {"passed": 21, "failed": 0, "ignored": 0}
+  },
+  "checks": [
+    {
+      "check": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--all-features"
+      ],
+      "exit_status": 0,
+      "preexisting_warnings": 7,
+      "new_warnings": 0
+    },
+    {
+      "check": "build",
+      "command": [
+        "cargo",
+        "build",
+        "--workspace",
+        "--all-targets",
+        "--all-features"
+      ],
+      "exit_status": 0
+    },
+    {
+      "check": "default",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets"
+      ],
+      "exit_status": 0,
+      "tests": {
+        "passed": 1457,
+        "failed": 0,
+        "ignored": 48
+      }
+    },
+    {
+      "check": "all-features",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-features",
+        "--exclude",
+        "dolos-minibf",
+        "--exclude",
+        "dolos-minikupo",
+        "--exclude",
+        "dolos-trp"
+      ],
+      "exit_status": 0,
+      "tests": {
+        "passed": 995,
+        "failed": 0,
+        "ignored": 53
+      }
+    }
+  ],
+  "settings": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0"
+  },
+  "registry_suites": "Not rerun: production snapshot restore and registry paths now match the merged baseline; prior Docker timeout remains in historical evidence."
+}

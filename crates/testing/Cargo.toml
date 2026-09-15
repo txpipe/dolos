@@ -18,3 +18,4 @@ tokio-stream = { workspace = true }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
 itertools = { workspace = true }
+serde = { workspace = true, features = ["derive"] }

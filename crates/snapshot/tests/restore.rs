@@ -8,8 +8,7 @@
 //!    ledger under a preprod configuration is not a state a node recovers from.
 //! 2. **A failed restore leaves no cursor**, so `has_existing_data()` reports
 //!    an empty node rather than a half-restored one — including a restore that
-//!    stopped in the live-UTxO rebuild, the one step that runs after the ledger
-//!    is whole.
+//!    failed while writing the tags of an incoming UTxO batch.
 //! 3. **Roundtrip.** A node built by the harness, exported, and restored into
 //!    an empty store set is the node it came from: same cursor, same entities,
 //!    same UTxO set, same archive, same index records, same tag queries. And it
@@ -45,7 +44,7 @@ mod watcher;
 use dolos_cardano::indexes::{archive_dimensions, utxo_index_delta_from_utxo_delta};
 use dolos_core::{
     ArchiveStore, ChainPoint, Domain as _, EntityKey, EraCbor, ExactRecord, LogKey, StateStore,
-    TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
+    StateWriter as _, TagRecord, TxoRef, UtxoSet, UtxoSetDelta,
 };
 use dolos_snapshot::{
     is_state_kind,
@@ -64,7 +63,7 @@ use stelae::{
     frame::{encode, Limits},
     inscription::{Inscription, LayerDescriptor},
     plan::RestoreProgress,
-    progress::{Observer, Outcome},
+    progress::{Event, Observer, Outcome, Progress},
     transport::BlobIndex,
     Digest, LayerReader, Profile, SteleReader, SteleWriter,
 };
@@ -140,6 +139,45 @@ fn restore_into<B: ToyStores>(
 /// Where a restore writes, for a blank store set.
 fn target<B: ToyStores>(blank: &Blank<B>) -> restore::Target<'_, impl ArchiveStore, B::State> {
     restore::Target::new(&blank.archive, blank.state())
+}
+
+/// The public assembly path accepts an explicit directory source and target
+/// and can run without constructing a terminal observer.
+#[test]
+fn the_headless_facade_restores_a_directory_without_an_observer() {
+    let domain: ToyDomain = harness();
+    let source = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    export_to(source.path(), &domain);
+
+    let blank = Blank::<MemoryStores>::open();
+    let outcome = restore::execute(
+        restore::Input::Directory(source.path()),
+        restore::Restoring {
+            network_magic: magic_of(&domain),
+            max_history: None,
+            storage_path: storage.path(),
+            resume: false,
+            skip_space_check: false,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        outcome.plan.position.point,
+        domain.state().read_cursor().unwrap().unwrap()
+    );
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
+    assert_eq!(outcome.summary.layers_skipped, 0);
+    assert_eq!(
+        outcome.summary.layers_fetched,
+        outcome.plan.layers().count()
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -409,14 +447,10 @@ fn a_restore_that_fails_partway_leaves_no_cursor() {
 
 /// Done criterion 1: the state cursor is the last write of the restore.
 ///
-/// The failure is injected into `StateWriter::apply_utxo_tags`, which the
-/// restore calls in exactly one place — the live-UTxO rebuild of step 6, after
-/// every layer including the state tip has committed. So this is the
-/// interruption the profile's old step order could not survive: the ledger is
-/// whole, the `utxo::*` dimensions are not, and what says so is that there is
-/// no cursor.
+/// A tag-write failure must commit neither the UTxO batch nor the completion
+/// cursor. Resuming replays the state tip and restores the same tags as replay.
 #[test]
-fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
+fn a_restore_interrupted_in_utxo_tags_commits_neither_utxos_nor_cursor_and_resumes() {
     let domain: ToyDomain = harness();
 
     let temp = tempfile::tempdir().unwrap();
@@ -428,6 +462,13 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
     let stele = SteleDir::open(temp.path()).unwrap();
     let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
     let index = stele.blob_index().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let mut checkpoint = Checkpoint::open(
+        progress_path_in(storage.path()),
+        stele.read_inscription().unwrap().digest().unwrap(),
+        false,
+    )
+    .unwrap();
 
     let err = restore::restore(
         &stele,
@@ -435,7 +476,7 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
         &plan,
         restore::Target::new(&blank.archive, &state),
         default_budget(),
-        &mut Checkpoint::none(),
+        &mut checkpoint,
         &Observer::silent(),
     )
     .unwrap_err();
@@ -450,12 +491,153 @@ fn a_restore_interrupted_in_the_live_utxo_rebuild_leaves_no_cursor() {
         "a restore that never finished rebuilding the live-utxo indexes left a cursor behind"
     );
 
-    // The tip did land, or the assertion above would hold of a restore that
-    // failed long before the rebuild and would prove nothing about its order.
     assert!(
-        blank.state().iter_utxos().unwrap().next().is_some(),
-        "the state tip was never restored, so the missing cursor proves nothing"
+        blank.state().iter_utxos().unwrap().next().is_none(),
+        "the UTxO batch committed despite its tag-write failure"
     );
+
+    drop(checkpoint);
+    let resumed = restore_checkpointed(
+        temp.path(),
+        storage.path(),
+        magic_of(&domain),
+        &blank,
+        true,
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        resumed.layers_skipped,
+        plan.layers()
+            .filter(|layer| !is_state_kind(&layer.kind))
+            .count()
+    );
+    assert_stores_match(&blank, &domain);
+}
+
+/// Check the projection after every commit, before the completion cursor. A
+/// deferred rebuild leaves each committed UTxO temporarily missing its tags.
+struct UtxoBatchObserver<S> {
+    state: S,
+    checked: std::sync::atomic::AtomicUsize,
+}
+
+impl<S: StateStore> Progress for UtxoBatchObserver<S> {
+    fn on(&self, event: Event<'_>) {
+        if !matches!(event, Event::Records(_)) {
+            return;
+        }
+
+        assert!(self.state.read_cursor().unwrap().is_none());
+        // Fully drain the test's small fixture before querying its tags.
+        let delta = UtxoSetDelta {
+            produced_utxo: utxos_of(&self.state)
+                .into_iter()
+                .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
+                .collect(),
+            ..Default::default()
+        };
+        for (txo, tags) in utxo_index_delta_from_utxo_delta(&delta).produced {
+            for tag in tags {
+                assert!(
+                    self.state
+                        .utxos_by_tag(tag.dimension, &tag.key)
+                        .unwrap()
+                        .contains(&txo),
+                    "committed UTxO {txo:?} is missing its {} tag",
+                    tag.dimension,
+                );
+                self.checked
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+fn utxo_tags_commit_with_each_batch<B: ToyStores>() {
+    let domain: ToyDomain<B> = harness();
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+    let blank = Blank::<B>::open();
+    let watcher = std::sync::Arc::new(UtxoBatchObserver {
+        state: blank.state().clone(),
+        checked: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let stele = SteleDir::open(temp.path()).unwrap();
+    let plan = restore::plan(&stele, magic_of(&domain), None).unwrap();
+
+    let summary = restore::restore(
+        &stele,
+        &stele.blob_index().unwrap(),
+        &plan,
+        target(&blank),
+        shredded(),
+        &mut Checkpoint::none(),
+        &Observer::new(watcher.clone()),
+    )
+    .unwrap();
+
+    assert!(
+        summary.utxos > 1,
+        "the fixture must span multiple UTxO batches"
+    );
+    assert!(watcher.checked.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert_stores_match(&blank, &domain);
+}
+
+#[test]
+fn utxo_tags_are_queryable_after_each_batch_on_memory() {
+    utxo_tags_commit_with_each_batch::<MemoryStores>();
+}
+
+#[test]
+fn utxo_tags_are_queryable_after_each_batch_on_fjall() {
+    utxo_tags_commit_with_each_batch::<FjallStores>();
+}
+
+/// An older restore could have committed the UTxO set without starting its
+/// final tag rebuild. The unconditional state-tip replay must repair it.
+#[test]
+fn resume_repairs_utxos_written_without_tags_by_an_older_restore() {
+    let domain: ToyDomain<FjallStores> = harness();
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+    let blank = Blank::<FjallStores>::open();
+    let delta = UtxoSetDelta {
+        produced_utxo: utxos_of(domain.state())
+            .into_iter()
+            .map(|(txo, value)| (txo, std::sync::Arc::new(value)))
+            .collect(),
+        ..Default::default()
+    };
+    let writer = blank.state().start_writer().unwrap();
+    writer.apply_utxoset(&delta).unwrap();
+    writer.commit().unwrap();
+
+    let tags = utxo_index_delta_from_utxo_delta(&delta);
+    assert!(!tags.produced.is_empty());
+    for (_, tags) in &tags.produced {
+        for tag in tags {
+            assert!(blank
+                .state()
+                .utxos_by_tag(tag.dimension, &tag.key)
+                .unwrap()
+                .is_empty());
+        }
+    }
+    assert!(blank.state().read_cursor().unwrap().is_none());
+
+    let storage = tempfile::tempdir().unwrap();
+    restore_checkpointed(
+        temp.path(),
+        storage.path(),
+        magic_of(&domain),
+        &blank,
+        true,
+        None,
+    )
+    .unwrap();
+    assert_stores_match(&blank, &domain);
 }
 
 fn assert_untouched<B: ToyStores>(blank: &Blank<B>) {
@@ -612,6 +794,11 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
 
     let (domain, blank, _) = round_trip::<FjallStores>(default_budget());
     let archive_dir = blank.stores.path().join("archive");
+
+    let appends = blank.archive.append_stats();
+    assert!(appends.serial_batches > 0, "{appends:?}");
+    assert_eq!(appends.parallel_batches, 0, "{appends:?}");
+
     let restored = blocks_of(&blank.archive);
     assert_eq!(restored, blocks_of(domain.archive()), "order and bodies");
     let hashes = |blocks: &[(u64, Vec<u8>)]| -> Vec<String> {
@@ -633,6 +820,12 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
     assert_eq!(
         blank.archive.get_tip().unwrap().map(|(s, _)| s),
         Some(tip_slot + 20)
+    );
+    let after = blank.archive.append_stats();
+    assert_eq!(
+        (after.serial_batches, after.parallel_batches),
+        (appends.serial_batches + 1, appends.parallel_batches),
+        "an ordinary append after the restore is serial"
     );
     assert_eq!(
         blank
@@ -701,6 +894,35 @@ fn a_restored_fjall_archive_is_frames_and_keeps_working() {
     assert!(!pruned.is_empty());
     assert!(restored.ends_with(&pruned), "pruning keeps a suffix");
     assert_segments_are_frames(&archive_dir, &blank.archive);
+}
+
+#[test]
+fn large_snapshot_block_chunks_use_automatic_parallel_encoding() {
+    use dolos_core::ImportExt;
+    use dolos_testing::synthetic::{build_synthetic_blocks, SyntheticBlockConfig};
+    let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig {
+        block_count: 8,
+        slot: 100,
+        metadata_value: "payload".repeat(32 << 10),
+        ..Default::default()
+    });
+    let domain: ToyDomain<FjallStores> = ToyDomain::with_backend(
+        std::sync::Arc::new(dolos_cardano::include::preview::load()),
+        config,
+        None,
+        None,
+    );
+    domain.import_blocks(blocks).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    export_to(temp.path(), &domain);
+    let blank = Blank::<FjallStores>::open();
+    restore_into(temp.path(), magic_of(&domain), &blank, default_budget()).unwrap();
+    assert_eq!(blocks_of(&blank.archive), blocks_of(domain.archive()));
+    let stats = blank.archive.append_stats();
+    assert_eq!(
+        stats.parallel_batches > 0,
+        domain.archive().append_stats().parallel_batches > 0
+    );
 }
 
 // --------------------------------------------------------------------------
@@ -1024,6 +1246,50 @@ fn restore_watched<B: ToyStores>(
             observer,
         ),
     }
+}
+
+/// An interrupted low-level read can be resumed through the public assembly
+/// facade, proving the facade honors the same checkpoint contract.
+#[test]
+fn the_headless_facade_resumes_an_interrupted_directory_restore() {
+    let domain: ToyDomain = harness();
+    let magic = magic_of(&domain);
+    let stele = tempfile::tempdir().unwrap();
+    export_to(stele.path(), &domain);
+
+    let (epoch_layers, _) = layers_in_driver_order(stele.path(), magic);
+    let storage = tempfile::tempdir().unwrap();
+    let blank = Blank::<MemoryStores>::open();
+
+    restore_checkpointed(
+        stele.path(),
+        storage.path(),
+        magic,
+        &blank,
+        false,
+        Some(epoch_layers[1]),
+    )
+    .unwrap_err();
+
+    let resumed = restore::execute(
+        restore::Input::Directory(stele.path()),
+        restore::Restoring {
+            network_magic: magic,
+            max_history: None,
+            storage_path: storage.path(),
+            resume: true,
+            skip_space_check: false,
+        },
+        target(&blank),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(resumed.summary.layers_skipped, 1);
+    assert_eq!(
+        blank.state().read_cursor().unwrap(),
+        domain.state().read_cursor().unwrap()
+    );
 }
 
 /// Done criterion 2: killed mid-way, resumed, and the same node — having

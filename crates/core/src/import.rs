@@ -155,3 +155,26 @@ where
 
     Ok(WalSeed::Seeded(cursor))
 }
+
+/// The durable result of importing one batch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplayProgress {
+    /// The batch committed normally at this state-store position.
+    Committed { position: ChainPoint },
+    /// The configured stopping epoch fired after its anchoring block committed.
+    Boundary { position: ChainPoint },
+}
+
+impl ReplayProgress {
+    /// The committed state cursor reported by this import.
+    pub fn position(&self) -> &ChainPoint {
+        match self {
+            Self::Committed { position } | Self::Boundary { position } => position,
+        }
+    }
+
+    /// Whether the configured stopping boundary was reached.
+    pub fn is_boundary(&self) -> bool {
+        matches!(self, Self::Boundary { .. })
+    }
+}

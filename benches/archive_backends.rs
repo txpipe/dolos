@@ -1,10 +1,12 @@
-//! Regression guards for the archive backend's three read-shape families.
+//! Regression guards for logs, store-local indexes and compressed bodies.
 //!
 //! The store is populated with the synthetic content from
 //! `dolos_testing::archive` and measured against a fixed key sample: block
 //! location resolution and full block reads (`get_block_by_slot`), the
 //! per-account reward point reads (`read_logs` per epoch), and the per-epoch
 //! temporal-prefix scan (`iter_logs`).
+//! The queries module adds populated-domain index lookups, valid compressed
+//! bodies, a real Alonzo block and logs-only scale cases.
 //!
 //! These are *relative* regression guards on small tempdir populations.
 //! Absolute numbers say nothing about production behavior — the
@@ -15,6 +17,9 @@ use dolos_core::{
     archive::Skippable as _, ArchiveStore as CoreArchiveStore, NamespaceType, StateSchema,
 };
 use dolos_testing::archive::{populate_archive, ArchiveShape};
+
+#[path = "archive_backends/queries.rs"]
+mod queries;
 
 /// The one namespace the log shapes exercise; the name is the real bulk
 /// namespace so the bench reads like the node.

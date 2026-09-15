@@ -786,6 +786,8 @@ pub struct MinibfConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_scan_items: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    ipfs_gateways: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max_offchain_cache_mb: Option<u64>,
 }
 
@@ -797,6 +799,7 @@ impl MinibfConfig {
             token_registry_url: None,
             url: None,
             max_scan_items: None,
+            ipfs_gateways: None,
             max_offchain_cache_mb: None,
         }
     }
@@ -830,6 +833,19 @@ impl MinibfConfig {
         self.max_offchain_cache_mb
             .unwrap_or(default_max_offchain_cache_mb())
             .saturating_mul(1024 * 1024)
+    }
+
+    /// These are the base URLs of the HTTP gateways, in order. The gateways
+    /// resolve `ipfs://` governance-anchor URLs. Dolos sends a request to each
+    /// gateway in order. Dolos stops at the first gateway that serves the
+    /// content. cardano-db-sync resolves `ipfs://` anchors the same way.
+    ///
+    /// An absent setting gives the default list. An empty list stops IPFS
+    /// resolution, so `ipfs://` anchors do not resolve.
+    pub fn ipfs_gateways(&self) -> Vec<String> {
+        self.ipfs_gateways
+            .clone()
+            .unwrap_or_else(default_ipfs_gateways)
     }
 }
 
@@ -911,6 +927,18 @@ fn default_max_offchain_cache_mb() -> u64 {
 
 fn default_max_scan_items() -> u64 {
     3000
+}
+
+fn default_ipfs_gateways() -> Vec<String> {
+    // The main public gateway is first. A fallback gateway is second. If the
+    // first gateway returns HTTP 429, the resolver uses the fallback.
+    // cardano-db-sync uses the same two-entry shape. There the second entry is
+    // a private gateway of Blockfrost that pins the content. Dolos has no
+    // private infrastructure, so Dolos names a second public gateway.
+    vec![
+        "https://ipfs.io".to_string(),
+        "https://gateway.pinata.cloud".to_string(),
+    ]
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]

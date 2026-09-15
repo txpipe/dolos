@@ -53,7 +53,7 @@ impl ArchiveShape {
     /// [`Self::block_slots`] and [`populate_archive`] so the slots callers
     /// sample are exactly the slots the population wrote.
     pub fn stride(&self) -> u64 {
-        (self.slots_per_epoch / self.blocks_per_epoch).max(1)
+        (self.slots_per_epoch / self.blocks_per_epoch.max(1)).max(1)
     }
 
     /// Every block slot the population writes, in ascending order. Callers
@@ -97,33 +97,64 @@ fn filler(rng: &mut SplitMix64, len: usize) -> Vec<u8> {
     out
 }
 
-/// Write `shape` into `store`: one committed writer per epoch carrying that
-/// epoch's blocks (~1-2 KiB bodies) and its log rows (~30-60 B values) under
-/// `ns`, which must exist in the store's schema.
+/// Write `shape` into `store` in batches of at most 1,000 records. Blocks
+/// contain filler (~1-2 KiB) and log values contain filler (~30-60 B).
+/// Zero blocks per epoch produces a logs-only population.
 pub fn populate_archive<S: ArchiveStore>(
     store: &S,
     ns: Namespace,
     shape: &ArchiveShape,
 ) -> Result<(), ArchiveError> {
+    populate_archive_batched(store, ns, shape, 1000)
+}
+
+pub fn populate_archive_batched<S: ArchiveStore>(
+    store: &S,
+    ns: Namespace,
+    shape: &ArchiveShape,
+    batch_size: usize,
+) -> Result<(), ArchiveError> {
+    if batch_size == 0
+        || shape.slots_per_epoch == 0
+        || shape.blocks_per_epoch > shape.slots_per_epoch
+        || shape.epochs.checked_mul(shape.slots_per_epoch).is_none()
+    {
+        return Err(ArchiveError::InternalError(
+            "invalid archive population shape or batch size".into(),
+        ));
+    }
     let mut rng = SplitMix64(shape.seed);
     let stride = shape.stride();
 
     for epoch in 0..shape.epochs {
-        let writer = store.start_writer()?;
         let epoch_start = shape.epoch_start(epoch);
 
-        for i in 0..shape.blocks_per_epoch {
-            let slot = epoch_start + i * stride;
-            let len = 1024 + (rng.next_u64() % 1024) as usize;
-            writer.apply(&block_point(slot), &Arc::new(filler(&mut rng, len)))?;
+        for start in (0..shape.blocks_per_epoch).step_by(batch_size) {
+            let writer = store.start_writer()?;
+            for block in start
+                ..start
+                    .saturating_add(batch_size as u64)
+                    .min(shape.blocks_per_epoch)
+            {
+                let slot = epoch_start + block * stride;
+                let len = 1024 + (rng.next_u64() % 1024) as usize;
+                writer.apply(&block_point(slot), &Arc::new(filler(&mut rng, len)))?;
+            }
+            writer.commit()?;
         }
 
-        for i in 0..shape.log_rows_per_epoch {
-            let len = 30 + (rng.next_u64() % 31) as usize;
-            writer.write_log(ns, &shape.log_key(epoch, i), &filler(&mut rng, len))?;
+        for start in (0..shape.log_rows_per_epoch).step_by(batch_size) {
+            let writer = store.start_writer()?;
+            for row in start
+                ..start
+                    .saturating_add(batch_size as u64)
+                    .min(shape.log_rows_per_epoch)
+            {
+                let len = 30 + (rng.next_u64() % 31) as usize;
+                writer.write_log(ns, &shape.log_key(epoch, row), &filler(&mut rng, len))?;
+            }
+            writer.commit()?;
         }
-
-        writer.commit()?;
     }
 
     Ok(())

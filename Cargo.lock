@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "dolos"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-cardano"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-core"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "dolos-testing",
  "futures-core",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-fjall"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
@@ -1542,8 +1542,9 @@ dependencies = [
 
 [[package]]
 name = "dolos-flatfiles"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
+ "rayon",
  "sha2 0.10.9",
  "tempfile",
  "zstd",
@@ -1551,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minibf"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1587,7 +1588,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-minikupo"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "axum 0.8.4",
  "base58",
@@ -1608,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-mithril"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "dolos-core",
  "mithril-client",
@@ -1619,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-redb3"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "bincode 1.3.3",
  "dolos-core",
@@ -1642,15 +1643,13 @@ dependencies = [
 
 [[package]]
 name = "dolos-snapshot"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "dolos-cardano",
  "dolos-core",
  "dolos-fjall",
- "dolos-mithril",
  "dolos-testing",
  "hex",
- "itertools 0.14.0",
  "minicbor 0.26.4",
  "pallas",
  "rustls",
@@ -1660,8 +1659,6 @@ dependencies = [
  "stelae-driver",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
- "tokio-util",
  "toml 0.8.20",
  "tracing",
  "zstd",
@@ -1669,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-testing"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "bech32 0.9.1",
  "dolos-cardano",
@@ -1682,6 +1679,7 @@ dependencies = [
  "itertools 0.14.0",
  "pallas",
  "rand 0.9.3",
+ "serde",
  "tempfile",
  "tokio",
  "tokio-stream",
@@ -1689,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "dolos-trp"
-version = "1.7.0-alpha.1"
+version = "2.0.0-alpha.0"
 dependencies = [
  "base64 0.22.1",
  "bincode 1.3.3",
@@ -7110,6 +7108,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum 0.8.4",
  "bech32 0.11.1",
  "chrono",
  "clap",
@@ -7117,12 +7116,15 @@ dependencies = [
  "dolos-cardano",
  "dolos-core",
  "dolos-flatfiles",
+ "dolos-minibf",
+ "dolos-testing",
  "hdrhistogram",
  "hex",
  "libc",
  "pallas",
  "postgres",
  "postgres-native-tls",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -7130,6 +7132,8 @@ dependencies = [
  "tokio",
  "toml 0.8.20",
  "tonic 0.12.3",
+ "tower 0.4.13",
+ "vergen-gitcl",
  "xshell",
  "zstd",
 ]

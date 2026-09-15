@@ -261,6 +261,11 @@ impl ArchiveStore {
         })
     }
 
+    /// Automatic encoding decisions and peak per-batch encoding resources.
+    pub fn append_stats(&self) -> dolos_flatfiles::AppendStats {
+        self.flatfiles.append_stats()
+    }
+
     /// Get a reference to the underlying database
     pub fn database(&self) -> &Database {
         &self.db
@@ -458,9 +463,22 @@ pub struct ArchiveWriter {
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
+    #[cfg(test)]
+    fail_index_commit: bool,
 }
 
 impl ArchiveWriter {
+    fn new(store: &ArchiveStore) -> Self {
+        Self {
+            batch: Mutex::new(store.db.batch()),
+            store: store.clone(),
+            pending_blocks: Mutex::new(Vec::new()),
+            overlay: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            fail_index_commit: false,
+        }
+    }
+
     fn resolve_locations(
         &self,
         overlay: &HashMap<BlockSlot, Vec<BlockLocation>>,
@@ -644,6 +662,12 @@ impl CoreArchiveWriter for ArchiveWriter {
             }
         }
 
+        #[cfg(test)]
+        if self.fail_index_commit {
+            return Err(io_err(std::io::Error::other(
+                "injected index commit failure",
+            )));
+        }
         let batch = batch.durability(Some(PersistMode::Buffer));
         batch.commit().map_err(fjall_err)?;
 
@@ -865,12 +889,7 @@ impl CoreArchiveStore for ArchiveStore {
     type ExactIter = ExactIter;
 
     fn start_writer(&self) -> Result<Self::Writer, ArchiveError> {
-        Ok(ArchiveWriter {
-            batch: Mutex::new(self.db.batch()),
-            store: self.clone(),
-            pending_blocks: Mutex::new(Vec::new()),
-            overlay: Mutex::new(HashMap::new()),
-        })
+        Ok(ArchiveWriter::new(self))
     }
 
     fn read_logs(
@@ -1242,6 +1261,32 @@ mod tests {
 
     fn segment_bytes(store: &ArchiveStore, segment: u32) -> Vec<u8> {
         std::fs::read(store.flatfiles.segment_path(segment)).unwrap()
+    }
+
+    #[test]
+    fn automatic_index_failure_leaves_only_unindexed_frames_and_retry_keeps_original_locations() {
+        let store = ArchiveStore::for_tempdir(StateSchema::default()).unwrap();
+        write(&store, &[(1, body(1, 0))]);
+        let original = locations(&store, 1);
+        let second = Arc::new(vec![2; 128 << 10]);
+        let third = Arc::new(vec![3; 128 << 10]);
+        let mut writer = store.start_writer().unwrap();
+        writer.apply(&point(2), &second).unwrap();
+        writer.apply(&point(3), &third).unwrap();
+        writer.fail_index_commit = true;
+        assert!(writer.commit().is_err());
+        assert!(locations(&store, 2).is_empty());
+        assert!(locations(&store, 3).is_empty());
+        let dead_end = segment_bytes(&store, 0).len() as u64;
+        let writer = store.start_writer().unwrap();
+        writer.apply(&point(1), &body(1, 0)).unwrap();
+        writer.apply(&point(2), &second).unwrap();
+        writer.apply(&point(3), &third).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(locations(&store, 1), original);
+        assert!(locations(&store, 2)[0].offset >= dead_end);
+        assert_eq!(store.get_block_by_slot(&2).unwrap().unwrap(), *second);
+        assert_eq!(store.get_block_by_slot(&3).unwrap().unwrap(), *third);
     }
 
     #[test]

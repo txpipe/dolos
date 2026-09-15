@@ -20,8 +20,7 @@ pub enum TestFault {
     ///
     /// The narrow one, for a caller that has to reach a specific write and
     /// would never get there if opening the store failed too — a stele restore
-    /// above all, whose only tag write is the live-UTxO rebuild that runs
-    /// after every layer has landed.
+    /// above all, which writes tags alongside each incoming UTxO batch.
     StateTagsApplyError,
     WalStoreError,
     GenesisError,

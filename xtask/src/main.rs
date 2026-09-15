@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use xshell::{cmd, Shell};
-use xtask::archive_bench;
-use xtask::archive_bench::measure::PeakAlloc;
+use xtask::perf;
+use xtask::perf::measure::PeakAlloc;
 
 mod bootstrap;
 mod config;
@@ -27,9 +27,14 @@ enum Commands {
     /// Run e2e tests
     E2eTest,
 
-    /// Archive segment benchmarks (bench, node, train, evaluate, report)
+    /// Storage and minibf performance experiments with shared measurement and
+    /// reporting
     #[command(subcommand)]
-    ArchiveBench(archive_bench::Cmd),
+    Perf(perf::Cmd),
+
+    /// Compatibility entry point for storage benchmarks; prefer perf storage
+    #[command(subcommand)]
+    ArchiveBench(perf::storage::Cmd),
 
     /// Bootstrap a local Mithril snapshot into an instance
     BootstrapMithrilLocal(bootstrap::BootstrapArgs),
@@ -55,7 +60,8 @@ fn main() -> Result<()> {
             println!("Running sync tests...");
             cmd!(sh, "cargo test --test sync -- --ignored --nocapture").run()?;
         }
-        Commands::ArchiveBench(cmd) => archive_bench::run(cmd)?,
+        Commands::Perf(cmd) => perf::run(cmd)?,
+        Commands::ArchiveBench(cmd) => perf::storage::run(cmd)?,
         Commands::BootstrapMithrilLocal(args) => bootstrap::run(&sh, &args)?,
         Commands::GroundTruth(cmd) => ground_truth::run(cmd)?,
         Commands::TestInstance(cmd) => test_instance::run(&sh, cmd)?,

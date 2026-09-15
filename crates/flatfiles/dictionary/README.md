@@ -24,7 +24,7 @@ command over the same files yields the same bytes.
 
 Three candidates were trained from the same corpus with the same seed and
 evaluated with the harness's `evaluate` command (then
-`dolos-archive-bench evaluate`, now `cargo xtask archive-bench evaluate`)
+`dolos-archive-bench evaluate`, now `cargo xtask perf storage evaluate`)
 on data disjoint from every
 training segment: mainnet segments 448–455 (156,621 Conway blocks, 877 MiB,
 the held-out window), one 20,000-block fixture per mainnet era, preprod

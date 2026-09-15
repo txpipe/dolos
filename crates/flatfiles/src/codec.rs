@@ -27,6 +27,20 @@ pub const MAX_BODY_BYTES: usize = 16 << 20;
 /// back before the decoder is pooled.
 const POOLED_BUFFER_BYTES: usize = 1 << 20;
 
+/// The most bytes the frame for a `len`-byte body can take: what an
+/// encoder reserves before compressing it, and what an import window
+/// budgets for it before it is encoded.
+pub fn frame_bound(len: usize) -> usize {
+    zstd::zstd_safe::compress_bound(len)
+}
+
+pub(crate) fn oversized(len: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("a {len}-byte body exceeds the {MAX_BODY_BYTES}-byte frame limit"),
+    )
+}
+
 fn encoder_dictionary() -> &'static EncoderDictionary<'static> {
     static DICTIONARY: OnceLock<EncoderDictionary<'static>> = OnceLock::new();
     DICTIONARY.get_or_init(|| EncoderDictionary::copy(BUNDLED_DICTIONARY, COMPRESSION_LEVEL))
@@ -41,6 +55,7 @@ fn decoder_dictionary() -> &'static DecoderDictionary<'static> {
 pub struct Encoder {
     compressor: Compressor<'static>,
     frame: Vec<u8>,
+    bounded: bool,
 }
 
 impl Encoder {
@@ -52,6 +67,14 @@ impl Encoder {
         Ok(Self {
             compressor,
             frame: Vec::new(),
+            bounded: false,
+        })
+    }
+
+    pub(crate) fn for_parallel() -> io::Result<Self> {
+        Ok(Self {
+            bounded: true,
+            ..Self::new()?
         })
     }
 
@@ -59,21 +82,23 @@ impl Encoder {
     /// until the next call.
     pub fn encode(&mut self, body: &[u8]) -> io::Result<&[u8]> {
         if body.len() > MAX_BODY_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "a {}-byte body exceeds the {MAX_BODY_BYTES}-byte frame limit",
-                    body.len()
-                ),
-            ));
+            return Err(oversized(body.len()));
         }
         self.frame.clear();
-        let bound = zstd::zstd_safe::compress_bound(body.len());
+        let bound = frame_bound(body.len());
         if self.frame.capacity() < bound {
-            self.frame.reserve(bound);
+            if self.bounded {
+                self.frame.reserve_exact(bound);
+            } else {
+                self.frame.reserve(bound);
+            }
         }
         let n = self.compressor.compress_to_buffer(body, &mut self.frame)?;
         Ok(&self.frame[..n])
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.frame.capacity()
     }
 }
 

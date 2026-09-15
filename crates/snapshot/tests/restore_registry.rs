@@ -52,6 +52,7 @@ use dolos_core::{
 };
 use dolos_snapshot::{
     export::Plan,
+    facade::RestoreInput,
     registry::{self, Point},
     restore::{self, default_budget, progress_path_in, Checkpoint},
     state_layer_count, Error, Network, NAMESPACES, UTXOS,
@@ -225,7 +226,8 @@ fn a_registry_restore_is_a_directory_restore() {
     let fixture = Fixture::spawn();
     let node = Node::build();
 
-    let repository = fixture.repository("dolos/restore");
+    let repository_name = "dolos/restore";
+    let repository = fixture.repository(repository_name);
     node.publish(&repository, &node.first);
 
     // The same stele, written to a directory.
@@ -261,15 +263,18 @@ fn a_registry_restore_is_a_directory_restore() {
     let from_registry = Blank::<MemoryStores>::open();
     let registry_storage = tempfile::tempdir().unwrap();
 
-    let by_registry = restore_from(
-        &repository,
-        Point::Latest,
-        registry_storage.path(),
-        node.magic,
-        &from_registry,
-        false,
+    let source = fixture.snapshot_repository(repository_name);
+    let by_registry = restore::execute(
+        RestoreInput::Repository {
+            repository: &source,
+            point: Point::Latest,
+        },
+        restoring(registry_storage.path(), node.magic, false),
+        target(&from_registry),
+        None,
     )
-    .unwrap();
+    .unwrap()
+    .summary;
 
     assert_eq!(
         by_registry, by_dir,

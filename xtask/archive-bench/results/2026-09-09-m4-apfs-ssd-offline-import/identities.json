@@ -1,0 +1,74 @@
+{
+  "binaries": {
+    "raw": {
+      "sha256": "c596269b21d79d3d1266fba796ddf6d39c1b5fcba1f3102396cacc8c13102e19",
+      "bytes": 57146608
+    },
+    "serial": {
+      "sha256": "577f18f6b998f16837e4908738f3526c2d634d19c0a92fbd354260c9dd6534c4",
+      "bytes": 56805904
+    },
+    "optimized": {
+      "sha256": "9ae5d5e3cf4866688b86edb8ff6093cd5839c51abb630111cb72c2e4553c4fed",
+      "bytes": 56867744
+    },
+    "exploratory-mutex": {
+      "sha256": "c11692330834ececdaacfa54c8e6c19de4c6ee579224aec7f71233a40e18be35",
+      "bytes": 56866640
+    },
+    "superseded-shared-reservation": {
+      "sha256": "0f5fd2b359780576eefb4ed9de958586e6fb1d51117324b93a64206ae319b379",
+      "bytes": 56867744
+    }
+  },
+  "sources": {
+    "raw": {
+      "base": "9165dbd8",
+      "patch": "measured-raw.patch",
+      "patch_sha256": "0c46684c4fdc040461f26e7f7487ce7b88842cbfca8cf3ca3d09178f8b00e40c"
+    },
+    "serial": {
+      "base": "b21c8d554f8cdabcdfdb6b5f00421ba77edfa0dc",
+      "patch": "measured-serial.patch",
+      "patch_sha256": "0c46684c4fdc040461f26e7f7487ce7b88842cbfca8cf3ca3d09178f8b00e40c"
+    },
+    "optimized": {
+      "base": "b21c8d554f8cdabcdfdb6b5f00421ba77edfa0dc",
+      "patch": "measured-optimized.patch",
+      "patch_sha256": "d9c6701fb4e491fa0220ed34fa623173705053d786dd578c5aeb55bb6fe324bd"
+    }
+  },
+  "optimized_commit": "08f02d9bab9bd4d573e369a345a110e68c47567a",
+  "instrumenter_sha256": "6838fd34dd6db33373f15ff30a6270f7a6038c4f95a5844d37dd077467f95c40",
+  "rust": "1.93.0",
+  "profile": "release",
+  "features": "default",
+  "incremental": false,
+  "harness_profile": "dev with debug information disabled",
+  "measurement_commands_exit_status": [
+    {
+      "workload": "node-500",
+      "exit_status": 0
+    },
+    {
+      "workload": "node-5000",
+      "exit_status": 0
+    },
+    {
+      "workload": "node-byron-1",
+      "exit_status": 0
+    },
+    {
+      "workload": "node-modern-1",
+      "exit_status": 0
+    },
+    {
+      "workload": "store-modern",
+      "exit_status": 0
+    },
+    {
+      "workload": "store-limits",
+      "exit_status": 0
+    }
+  ]
+}

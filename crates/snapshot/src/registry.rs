@@ -290,6 +290,79 @@ pub fn open(
     )?)
 }
 
+/// An opened snapshot repository for inspection, verification, restore and
+/// explicit host-driven publication.
+///
+/// The host supplies transport policy explicitly: repository, plaintext opt-in,
+/// credentials, staging directory and tuning. No configuration files,
+/// environment variables or terminal components are consulted here.
+pub struct SnapshotRepository {
+    registry: Registry,
+}
+
+impl SnapshotRepository {
+    /// Open a repository with fully resolved host inputs.
+    ///
+    /// **Never call this from inside an async context.** The OCI transport owns
+    /// its runtime; see [`open`].
+    pub fn open(
+        repository: &Repository,
+        insecure: bool,
+        auth: Auth,
+        scratch_dir: PathBuf,
+        tuning: Tuning,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            registry: open(repository, insecure, auth, scratch_dir, tuning)?,
+        })
+    }
+
+    /// Read the canonical document and manifest metadata without pulling
+    /// layers.
+    pub fn inspect(&self, point: Point) -> Result<Inspected, Error> {
+        inspect(&self.registry, point)
+    }
+
+    /// Stream and verify every layer named by the published document.
+    pub fn verify(&self, point: Point) -> Result<Verified, Error> {
+        verify(&self.registry, point)
+    }
+
+    /// Restore one published stele into the explicit target stores.
+    pub fn restore<A, S>(
+        &self,
+        point: Point,
+        node: Restoring<'_>,
+        target: Target<'_, A, S>,
+        observer: &Observer,
+    ) -> Result<(crate::restore::Plan, Outlook, Summary), Error>
+    where
+        A: ArchiveStore,
+        S: StateStore,
+    {
+        restore_registry(&self.registry, point, node, target, observer)
+    }
+
+    /// Read where `plan` stands against this repository without touching a
+    /// local store.
+    pub fn standing(&self, plan: &Plan) -> Result<Standing, Error> {
+        standing(&self.registry, plan)
+    }
+
+    /// Refuse a publication whose peak staging volume does not fit.
+    pub fn preflight(&self) -> Result<(), Error> {
+        Ok(preflight(&self.registry, &DolosProfile)?)
+    }
+
+    /// Begin a profile publication with no application policy inferred.
+    ///
+    /// A publisher host owns the journal location and rebuild choice through
+    /// [`Publishing::recording_in`] and [`Publishing::rebuilding`].
+    pub fn publishing(&self) -> Publishing<'_> {
+        Publishing::new(&self.registry)
+    }
+}
+
 pub use stelae_driver::publish::Tuning;
 
 /// Where a publish is going and what the host running it knows about itself,
