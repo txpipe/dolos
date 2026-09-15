@@ -270,6 +270,13 @@ impl AccountState {
             _ => None,
         })
     }
+
+    pub fn delegated_drep_live(&self) -> Option<&DRep> {
+        match self.drep.live() {
+            Some(DRepDelegation::Delegated(drep)) => Some(drep),
+            _ => None,
+        }
+    }
 }
 
 // --- Deltas ---

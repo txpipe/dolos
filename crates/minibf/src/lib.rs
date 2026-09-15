@@ -639,6 +639,10 @@ where
             get(routes::governance::drep_metadata::<D>),
         )
         .route(
+            "/governance/dreps/{drep_id}/delegators",
+            get(routes::governance::drep_delegators::<D>),
+        )
+        .route(
             "/governance/proposals",
             get(routes::governance::proposals::<D>),
         )
