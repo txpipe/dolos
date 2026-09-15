@@ -701,7 +701,8 @@ where
 /// Live UTxOs that carry the asset, in chain order. `from` / `to` bound the
 /// creation block height, inclusive. A valid but unknown asset is a 404; a
 /// known asset that no live UTxO holds any more (fully burned) is an empty
-/// page.
+/// page. UTxOs whose creation block was pruned by `sync.max_history` are not
+/// listed: the row requires block data the node no longer has.
 pub async fn by_subject_utxos<D>(
     Path(subject): Path<String>,
     Query(params): Query<PaginationParameters>,
@@ -718,6 +719,13 @@ where
         .state()
         .utxos_by_asset(&asset)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // there is no ordered index over an asset's live UTxOs, so every page has
+    // to position the whole set first. cap that work with the same budget the
+    // other scan endpoints use.
+    if refs.len() as u64 > domain.config.max_scan_items() {
+        return Err(Error::LiveUtxoSetTooLarge);
+    }
 
     let utxos = super::utxos::load_utxo_models_in_height_range(&domain, refs, pagination).await?;
 
@@ -1273,6 +1281,19 @@ mod tests {
             let path = format!("/assets/{asset}/utxos?{query}");
             assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
         }
+    }
+
+    #[tokio::test]
+    async fn assets_by_subject_utxos_over_scan_budget() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_scan_limit(cfg, 1);
+        let asset = app.vectors().asset_unit.as_str();
+        let path = format!("/assets/{asset}/utxos?count=1");
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
     }
 
     #[tokio::test]

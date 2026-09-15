@@ -1293,12 +1293,6 @@ impl<'a> UtxoOutputModelBuilder<'a> {
         }
     }
 
-    /// The height of the block that created the output, when the archive
-    /// still holds that block.
-    pub fn block_height(&self) -> Option<u64> {
-        self.block_data.as_ref().map(|b| b.height)
-    }
-
     pub fn with_consumed_by(self, tx: TxHash) -> Self {
         Self {
             consumed_by_tx: Some(tx),
@@ -1415,21 +1409,22 @@ impl<'a> IntoModel<AssetUtxoContentInner> for UtxoOutputModelBuilder<'a> {
             .map(|x| PlutusDataWrapper(x.0.deref().clone()).as_value())
             .transpose()?;
 
+        // the model requires the creating block; callers only build it for
+        // outputs whose block the archive still holds.
+        let block = self
+            .block_data
+            .as_ref()
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let block_time = self.block_time.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
         let out = AssetUtxoContentInner {
             address: self.output.address().into_model()?,
-            // source the tx_hash from the UTxO's own TxoRef (always present),
-            // not the archive block_data lookup which is None for blocks older
-            // than `max_history` and would yield an empty hash.
             tx_hash: self.txo_ref.0.to_string(),
             output_index: try_into_or_500!(self.txo_ref.1),
             amount: self.output.value().into_model()?,
-            block: self
-                .block_data
-                .as_ref()
-                .map(|b| b.hash.to_string())
-                .unwrap_or_default(),
-            block_height: try_into_or_500!(self.block_height().unwrap_or_default()),
-            block_time: try_into_or_500!(self.block_time.unwrap_or_default()),
+            block: block.hash.to_string(),
+            block_height: try_into_or_500!(block.height),
+            block_time: try_into_or_500!(block_time),
             data_hash: self.output.datum().map(|x| match x {
                 DatumOption::Hash(x) => x.to_string(),
                 DatumOption::Data(x) => x.original_hash().to_string(),
@@ -1551,8 +1546,6 @@ mod utxo_output_tests {
             })
             .with_block_time(1_700_000_000);
 
-        assert_eq!(builder.block_height(), Some(7));
-
         let model: AssetUtxoContentInner = builder.into_model().unwrap();
 
         assert_eq!(model.tx_hash, Hash::from([0xaa; 32]).to_string());
@@ -1569,22 +1562,16 @@ mod utxo_output_tests {
         assert_eq!(model.reference_script_hash, None);
     }
 
-    /// An output whose creation block was pruned still maps, with the block
-    /// fields zeroed the same way the address UTxO model leaves them empty.
+    /// The model never reports made-up block data: an output whose creation
+    /// block was pruned is a caller bug here, not a row with zeroed fields.
     #[test]
-    fn asset_utxo_model_without_block_data() {
+    fn asset_utxo_model_refuses_missing_block_data() {
         let bytes = output_bytes();
         let output = MultiEraOutput::decode(Era::Conway, &bytes).unwrap();
         let builder = UtxoOutputModelBuilder::from_output(Hash::from([0xaa; 32]), 0, output);
 
-        assert_eq!(builder.block_height(), None);
-
-        let model: AssetUtxoContentInner = builder.into_model().unwrap();
-        assert_eq!(model.block, "");
-        assert_eq!(model.block_height, 0);
-        assert_eq!(model.block_time, 0);
-        assert_eq!(model.inline_datum, None);
-        assert_eq!(model.inline_datum_json, None);
+        let model: Result<AssetUtxoContentInner, _> = builder.into_model();
+        assert_eq!(model, Err(StatusCode::INTERNAL_SERVER_ERROR));
     }
 }
 
