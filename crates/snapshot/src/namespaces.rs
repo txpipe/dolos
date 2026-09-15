@@ -64,17 +64,14 @@ pub const NAMESPACES: [Namespace; 14] = [
 ///
 /// `epochs` is at 2: `RollingStats::registered_pools` was a `HashSet`, whose
 /// per-instance iteration order made the namespace's bytes irreproducible
-/// across publishers of identical state. `accounts` and `dreps` are at 2:
-/// certificate indexes were appended (`vote_delegated_cert`,
-/// `registered_cert`, `unregistered_cert`) so same-transaction certificates
-/// order the way the ledger applies them. Kept beside [`NAMESPACES`], in the
+/// across publishers of identical state. Kept beside [`NAMESPACES`], in the
 /// same order, and held to it by `every_namespace_has_a_schema_rev` below.
 pub const SCHEMA_REVS: [(Namespace, u64); 14] = [
     (AccountEpochLog::NS, 1),
-    (AccountState::NS, 2),
+    (AccountState::NS, 1),
     (AssetState::NS, 1),
     (DatumState::NS, 1),
-    (DRepState::NS, 2),
+    (DRepState::NS, 1),
     (EpochState::NS, 2),
     (EraSummary::NS, 1),
     (GovState::NS, 1),

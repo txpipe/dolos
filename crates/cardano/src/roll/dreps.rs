@@ -1,7 +1,6 @@
 use std::{collections::HashMap, ops::Deref as _, sync::Arc};
 
-use crate::model::CertPosition;
-use dolos_core::{CertIndex, ChainError, EntityKey, Genesis, TxOrder, TxoRef};
+use dolos_core::{ChainError, EntityKey, Genesis, TxOrder, TxoRef};
 use pallas::ledger::{
     primitives::{
         conway::{self, DRep, Voter},
@@ -212,7 +211,6 @@ impl BlockVisitor for DRepStateVisitor {
         block: &MultiEraBlock,
         _: &MultiEraTx,
         order: &TxOrder,
-        cert_index: CertIndex,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         // Committee certificates target the governance singleton. The crawl
@@ -239,7 +237,8 @@ impl BlockVisitor for DRepStateVisitor {
                 conway::Certificate::RegDRepCert(_, deposit, anchor) => {
                     deltas.add_for_entity(DRepRegistration::new(
                         drep.clone(),
-                        CertPosition::new(block.slot(), *order, cert_index),
+                        block.slot(),
+                        *order,
                         *deposit,
                         anchor.clone(),
                     ));
@@ -269,7 +268,8 @@ impl BlockVisitor for DRepStateVisitor {
                 conway::Certificate::UnRegDRepCert(_, _) => {
                     deltas.add_for_entity(DRepUnRegistration::new(
                         drep.clone(),
-                        CertPosition::new(block.slot(), *order, cert_index),
+                        block.slot(),
+                        *order,
                     ));
                 }
                 conway::Certificate::UpdateDRepCert(_, anchor) => {

@@ -104,7 +104,6 @@ fn parse_delegation(account: &str, pool: &str, genesis: &Genesis) -> AccountStat
         drep: EpochValue::with_live(0, DRepDelegation::NotDelegated),
         registered_at: Some(0),
         vote_delegated_at: None,
-        vote_delegated_cert: 0,
         deregistered_at: None,
         retired_pool: None,
 

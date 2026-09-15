@@ -174,7 +174,6 @@ pub fn account_state() -> AccountState {
             ],
         ),
         vote_delegated_at: Some((22_222, 7)),
-        vote_delegated_cert: 5,
         deregistered_at: Some(33_333),
         credential: StakeCredential::AddrKeyhash(hash28(0x70)),
         retired_pool: Some(hash28(0x71)),
@@ -213,8 +212,6 @@ pub fn drep_state() -> DRepState {
             updated_in: 409,
             prev: Some(400),
         }),
-        registered_cert: 2,
-        unregistered_cert: 4,
     }
 }
 

@@ -58,9 +58,6 @@ pub type TxoIdx = u32;
 /// The order of a tx in a block
 pub type TxOrder = usize;
 
-/// Position of a certificate inside its transaction.
-pub type CertIndex = usize;
-
 /// The slot of a block (a.k.a. block index)
 pub type BlockSlot = u64;
 

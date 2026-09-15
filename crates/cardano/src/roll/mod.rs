@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use dolos_core::{
-    CertIndex, ChainError, Domain, EntityKey, Genesis, InvariantViolation, StateError,
-    StateStore as _, TxOrder, TxoRef,
+    ChainError, Domain, EntityKey, Genesis, InvariantViolation, StateError, StateStore as _,
+    TxOrder, TxoRef,
 };
 use pallas::{
     codec::utils::KeepRaw,
@@ -121,8 +121,7 @@ pub trait BlockVisitor {
     }
 
     /// Visit a certificate. The crawl calls this only for valid transactions:
-    /// CERTS runs only under `IsValid True`. `cert_index` is the position of
-    /// the certificate inside the transaction.
+    /// CERTS runs only under `IsValid True`.
     #[allow(unused_variables)]
     fn visit_cert(
         &mut self,
@@ -130,7 +129,6 @@ pub trait BlockVisitor {
         block: &MultiEraBlock,
         tx: &MultiEraTx,
         order: &TxOrder,
-        cert_index: CertIndex,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         Ok(())
@@ -431,65 +429,23 @@ impl<'a> DeltaBuilder<'a> {
                         .visit_mint(&mut deltas, block, tx, &mint)?;
                 }
 
-                for (cert_index, cert) in tx.certs().into_iter().enumerate() {
-                    self.account_state.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
-                    self.asset_state.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
-                    self.datum_state.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
-                    self.drep_state.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
-                    self.epoch_state.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
-                    self.pool_state.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
+                for cert in tx.certs() {
+                    self.account_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.asset_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.datum_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.drep_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.epoch_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.pool_state
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                     self.tx_logs
-                        .visit_cert(&mut deltas, block, tx, &order, cert_index, &cert)?;
-                    self.proposal_logs.visit_cert(
-                        &mut deltas,
-                        block,
-                        tx,
-                        &order,
-                        cert_index,
-                        &cert,
-                    )?;
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
+                    self.proposal_logs
+                        .visit_cert(&mut deltas, block, tx, &order, &cert)?;
                 }
 
                 for (account, amount) in tx.withdrawals().collect::<Vec<_>>() {

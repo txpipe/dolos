@@ -150,16 +150,10 @@ pub fn registry() -> Vec<Entry> {
             enc_accounts,
             AccountState,
             canaries::account_state,
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/accounts.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/accounts.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/accounts.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_assets,
@@ -183,16 +177,10 @@ pub fn registry() -> Vec<Entry> {
             enc_dreps,
             DRepState,
             canaries::drep_state,
-            &[
-                Pinned {
-                    rev: 1,
-                    hex: include_str!("goldens/dreps.rev1.hex"),
-                },
-                Pinned {
-                    rev: 2,
-                    hex: include_str!("goldens/dreps.rev2.hex"),
-                },
-            ]
+            &[Pinned {
+                rev: 1,
+                hex: include_str!("goldens/dreps.rev1.hex"),
+            }]
         ),
         entity_entry!(
             enc_epochs,

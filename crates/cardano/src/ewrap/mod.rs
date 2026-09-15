@@ -16,8 +16,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::model::CertPosition;
-use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis};
+use dolos_core::{BlockSlot, ChainError, EntityKey, Genesis, TxOrder};
 use pallas::ledger::primitives::{conway::DRep, Epoch, StakeCredential};
 
 use crate::{
@@ -187,7 +186,7 @@ pub struct BoundaryWork {
     /// certificate's position to reconstruct the delegator set the ledger
     /// would have seen at cert time — see
     /// [`BoundaryWork::clears_drep_delegation`].
-    pub retiring_dreps: Vec<(DRep, CertPosition)>,
+    pub retiring_dreps: Vec<(DRep, (BlockSlot, TxOrder))>,
 
     /// The stake snapshot this boundary's rewards were computed against, and
     /// the protocol its stake totals are read under: RUPD's `snapshot_epoch`
@@ -447,7 +446,7 @@ impl BoundaryWork {
         };
 
         account
-            .vote_delegation_position()
+            .vote_delegated_at
             .is_some_and(|delegated_at| delegated_at < *unregistered_at)
     }
 }

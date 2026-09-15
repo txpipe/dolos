@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use dolos_core::{CertIndex, ChainError, Genesis, TxOrder, TxoRef};
+use dolos_core::{ChainError, Genesis, TxOrder, TxoRef};
 use pallas::{
     codec::utils::KeepRaw,
     ledger::{
@@ -92,7 +92,6 @@ impl BlockVisitor for TxLogVisitor {
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: &TxOrder,
-        _: CertIndex,
         _cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         // Index tag extraction moved to CardanoIndexDeltaBuilder
