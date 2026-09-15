@@ -674,6 +674,7 @@ where
             "/governance/proposals/{gov_action_id}/parameters",
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
+        .fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -734,5 +735,59 @@ where
             .map_err(ServeError::ShutdownError)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::{json, Value};
+
+    use crate::test_support::TestApp;
+
+    /// The paths measured against Blockfrost on the issue: unknown
+    /// endpoints, missing segments and an empty trailing segment.
+    const UNMATCHED_PATHS: &[&str] = &[
+        "/nonexistent",
+        "/foo/bar/baz",
+        "/txs",
+        "/blocks/latest/nope",
+        "/blocks/epoch/2/slot",
+        "/blocks/slot/",
+    ];
+
+    #[tokio::test]
+    async fn unmatched_paths_answer_with_blockfrost_invalid_path() {
+        let app = TestApp::new();
+
+        for path in UNMATCHED_PATHS {
+            let (status, bytes) = app.get_bytes(path).await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "unexpected status {status} for {path} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+
+            let body: Value = serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| panic!("no json body for {path}"));
+            assert_eq!(
+                body,
+                json!({
+                    "status_code": 400,
+                    "error": "Bad Request",
+                    "message": "Invalid path. Please check https://docs.blockfrost.io/",
+                }),
+                "unexpected body for {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn matched_route_still_reports_a_missing_component_as_not_found() {
+        let app = TestApp::new();
+        let missing = "f".repeat(64);
+        let (status, _) = app.get_bytes(&format!("/blocks/{missing}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
