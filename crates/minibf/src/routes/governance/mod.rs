@@ -47,36 +47,56 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
         "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
         "drep_always_no_confidence" => Ok((drep_id.to_string(), vec![1], false, true)),
         drep_id => {
-            let (hrp, payload) = bech32::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+            if let Ok((hrp, payload)) = bech32::decode(drep_id) {
+                return match (hrp.as_str(), payload.len()) {
+                    ("drep", 29) => {
+                        let header_byte = payload.first().ok_or(StatusCode::BAD_REQUEST)?;
 
-            match (hrp.as_str(), payload.len()) {
-                ("drep", 29) => {
-                    let header_byte = payload.first().ok_or(StatusCode::BAD_REQUEST)?;
+                        // A DRep header has 0010 in the first four bits.
+                        if header_byte & 0b11110000 != 0b00100000 {
+                            return Err(StatusCode::BAD_REQUEST);
+                        }
 
-                    // first 4 bits need to be equal to 0010
-                    if header_byte & 0b11110000 != 0b00100000 {
-                        return Err(StatusCode::BAD_REQUEST);
+                        Ok((drep_id.to_string(), payload, false, false))
                     }
+                    ("drep", 28) => Ok((
+                        drep_id.to_string(),
+                        [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
+                        true,
+                        false,
+                    )),
+                    ("drep_vkh", 28) => Ok((
+                        bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+                            .map_err(|_| StatusCode::BAD_REQUEST)?,
+                        [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
+                        true,
+                        false,
+                    )),
+                    ("drep_script", 28) => Ok((
+                        bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+                            .map_err(|_| StatusCode::BAD_REQUEST)?,
+                        [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
+                        true,
+                        false,
+                    )),
+                    _ => Err(StatusCode::BAD_REQUEST),
+                };
+            }
 
-                    Ok((drep_id.to_string(), payload, false, false))
-                }
-                ("drep", 28) => Ok((
-                    drep_id.to_string(),
-                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
+            let payload = hex::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+            match payload.len() {
+                29 if payload[0] & 0b11110000 == 0b00100000 => Ok((
+                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+                        .map_err(|_| StatusCode::BAD_REQUEST)?,
+                    payload,
+                    false,
                     false,
                 )),
-                ("drep_vkh", 28) => Ok((
+                28 => Ok((
                     bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
                         .map_err(|_| StatusCode::BAD_REQUEST)?,
                     [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                    true,
-                    false,
-                )),
-                ("drep_script", 28) => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
                     true,
                     false,
                 )),
@@ -1107,6 +1127,51 @@ mod tests {
             model.error.expect("the fetch error is absent").code,
             blockfrost_openapi::models::dreps_inner_metadata_error::Code::ConnectionError
         );
+    }
+
+    #[tokio::test]
+    async fn governance_drep_metadata_accepts_hex_id() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (_, drep_bytes, _, _) =
+                parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
+            seed_drep_anchor(domain, drep_bytes);
+        });
+
+        let expected_drep_id = &app.vectors().drep_id;
+        let (_, drep_bytes, _, _) =
+            parse_drep_id(expected_drep_id).expect("failed to parse drep id");
+        let hex_id = hex::encode(drep_bytes);
+        let path = format!("/governance/dreps/{hex_id}/metadata");
+        let (status, body) = app.get_bytes(&path).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let model: DrepMetadata =
+            serde_json::from_slice(&body).expect("failed to parse drep metadata");
+        assert_eq!(&model.drep_id, expected_drep_id);
+        assert_eq!(model.hex, hex_id);
+    }
+
+    #[test]
+    fn parse_drep_id_accepts_legacy_hex_id() {
+        let raw = vec![7u8; 28];
+        let expected_drep_id =
+            bech32(bech32::Hrp::parse("drep").unwrap(), &raw).expect("failed to encode drep id");
+
+        let (drep_id, drep_bytes, is_legacy, is_special_case) =
+            parse_drep_id(&hex::encode(&raw)).expect("failed to parse drep id");
+
+        assert_eq!(drep_id, expected_drep_id);
+        assert_eq!(
+            drep_bytes,
+            [vec![pallas_extras::DREP_KEY_PREFIX], raw].concat()
+        );
+        assert!(is_legacy);
+        assert!(!is_special_case);
     }
 
     #[tokio::test]
