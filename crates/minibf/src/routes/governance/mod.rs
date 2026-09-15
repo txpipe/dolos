@@ -50,62 +50,41 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
         "drep_always_abstain" => Ok((drep_id.to_string(), vec![0], false, true)),
         "drep_always_no_confidence" => Ok((drep_id.to_string(), vec![1], false, true)),
         drep_id => {
-            if let Ok((hrp, payload)) = bech32::decode(drep_id) {
-                return match (hrp.as_str(), payload.len()) {
-                    ("drep", 29) => {
-                        let header_byte = *payload.first().ok_or(StatusCode::BAD_REQUEST)?;
+            // Blockfrost decodes a DRep id as bech32 and does no other check.
+            // As a result, a hex id is a 400, not a lookup. This rule keeps
+            // the same behavior as Blockfrost.
+            let (hrp, payload) = bech32::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-                        // A CIP-129 DRep header is the key prefix or the script prefix.
-                        if header_byte != pallas_extras::DREP_KEY_PREFIX
-                            && header_byte != pallas_extras::DREP_SCRIPT_PREFIX
-                        {
-                            return Err(StatusCode::BAD_REQUEST);
-                        }
+            match (hrp.as_str(), payload.len()) {
+                ("drep", 29) => {
+                    let header_byte = *payload.first().ok_or(StatusCode::BAD_REQUEST)?;
 
-                        Ok((drep_id.to_string(), payload, false, false))
+                    // A CIP-129 DRep header is the key prefix or the script prefix.
+                    if header_byte != pallas_extras::DREP_KEY_PREFIX
+                        && header_byte != pallas_extras::DREP_SCRIPT_PREFIX
+                    {
+                        return Err(StatusCode::BAD_REQUEST);
                     }
-                    ("drep", 28) => Ok((
-                        drep_id.to_string(),
-                        [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                        true,
-                        false,
-                    )),
-                    ("drep_vkh", 28) => Ok((
-                        bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                            .map_err(|_| StatusCode::BAD_REQUEST)?,
-                        [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
-                        true,
-                        false,
-                    )),
-                    ("drep_script", 28) => Ok((
-                        bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                            .map_err(|_| StatusCode::BAD_REQUEST)?,
-                        [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
-                        true,
-                        false,
-                    )),
-                    _ => Err(StatusCode::BAD_REQUEST),
-                };
-            }
 
-            let payload = hex::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
-
-            match payload.len() {
-                29 if payload[0] == pallas_extras::DREP_KEY_PREFIX
-                    || payload[0] == pallas_extras::DREP_SCRIPT_PREFIX =>
-                {
-                    Ok((
-                        bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                            .map_err(|_| StatusCode::BAD_REQUEST)?,
-                        payload,
-                        false,
-                        false,
-                    ))
+                    Ok((drep_id.to_string(), payload, false, false))
                 }
-                28 => Ok((
+                ("drep", 28) => Ok((
+                    drep_id.to_string(),
+                    [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
+                    true,
+                    false,
+                )),
+                ("drep_vkh", 28) => Ok((
                     bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
                         .map_err(|_| StatusCode::BAD_REQUEST)?,
                     [vec![pallas_extras::DREP_KEY_PREFIX], payload].concat(),
+                    true,
+                    false,
+                )),
+                ("drep_script", 28) => Ok((
+                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+                        .map_err(|_| StatusCode::BAD_REQUEST)?,
+                    [vec![pallas_extras::DREP_SCRIPT_PREFIX], payload].concat(),
                     true,
                     false,
                 )),
@@ -284,12 +263,18 @@ where
 /// `GET /governance/dreps/{drep_id}/metadata`: the registered anchor of the
 /// DRep, and the off-chain metadata for that anchor.
 ///
-/// db-sync joins the most recent registration of the DRep with its voting
-/// anchor. A DRep with no anchor is a 404, not an empty body. The two special
-/// DReps have no registration, so they are also a 404. If the fetch fails,
-/// Dolos keeps the anchor and puts the cause in `error`, as the proposal
-/// metadata endpoints do. The hex and the DRep id use the same CIP-129 or
-/// legacy form as `drep_by_id`.
+/// db-sync returns the latest registration or update that still has an
+/// anchor. Its query uses an inner join to `voting_anchor`. Then it takes
+/// the newest row. Dolos obeys the ledger rules and clears the anchor on a
+/// registration or update that has no anchor. As a result, Blockfrost keeps
+/// the older anchor, but Dolos answers 404.
+///
+/// A DRep with no current anchor is a 404, not an empty body. The two
+/// special DReps have no registration, so they are also a 404.
+///
+/// If the fetch fails, Dolos keeps the anchor and puts the cause in `error`,
+/// like the proposal metadata endpoints. The hex and the DRep id use the
+/// same CIP-129 or legacy form as `drep_by_id`.
 pub async fn drep_metadata<D: Domain>(
     Path(drep): Path<String>,
     State(domain): State<Facade<D>>,
@@ -1239,7 +1224,14 @@ mod tests {
     fn seed_drep_anchor(domain: &ToyDomain, drep_bytes: Vec<u8>) {
         use pallas::ledger::primitives::conway::{Anchor, DRep};
 
-        let mut state = DRepState::new(DRep::Key(Hash::from([7u8; 28])));
+        // This code builds the identifier from the same bytes as the entity
+        // key. If the keyhash of the synthetic vector changes, the identifier
+        // and the key still agree.
+        let keyhash: [u8; 28] = drep_bytes[1..]
+            .try_into()
+            .expect("drep bytes carry a 28-byte hash");
+
+        let mut state = DRepState::new(DRep::Key(Hash::from(keyhash)));
         state.anchor = Some(Anchor {
             url: "https://example.invalid/drep".to_string(),
             content_hash: Hash::from([9u8; 32]),
@@ -1290,49 +1282,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn governance_drep_metadata_accepts_hex_id() {
-        let cfg = SyntheticBlockConfig {
-            block_count: 5,
-            txs_per_block: 3,
-            ..Default::default()
-        };
-        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let (_, drep_bytes, _, _) =
-                parse_drep_id(&vectors.drep_id).expect("failed to parse drep id");
-            seed_drep_anchor(domain, drep_bytes);
-        });
-
-        let expected_drep_id = &app.vectors().drep_id;
-        let (_, drep_bytes, _, _) =
-            parse_drep_id(expected_drep_id).expect("failed to parse drep id");
-        let hex_id = hex::encode(drep_bytes);
-        let path = format!("/governance/dreps/{hex_id}/metadata");
-        let (status, body) = app.get_bytes(&path).await;
-        assert_eq!(status, StatusCode::OK);
-
-        let model: DrepMetadata =
-            serde_json::from_slice(&body).expect("failed to parse drep metadata");
-        assert_eq!(&model.drep_id, expected_drep_id);
-        assert_eq!(model.hex, hex_id);
-    }
-
     #[test]
-    fn parse_drep_id_accepts_legacy_hex_id() {
-        let raw = vec![7u8; 28];
-        let expected_drep_id =
-            bech32(bech32::Hrp::parse("drep").unwrap(), &raw).expect("failed to encode drep id");
-
-        let (drep_id, drep_bytes, is_legacy, is_special_case) =
-            parse_drep_id(&hex::encode(&raw)).expect("failed to parse drep id");
-
-        assert_eq!(drep_id, expected_drep_id);
+    fn parse_drep_id_rejects_hex_id() {
+        // Blockfrost decodes a DRep id as bech32 and does no other check.
+        // As a result, both the CIP-129 and the legacy hex forms are a 400,
+        // never a lookup.
+        let cip129 = [vec![pallas_extras::DREP_KEY_PREFIX], vec![7u8; 28]].concat();
         assert_eq!(
-            drep_bytes,
-            [vec![pallas_extras::DREP_KEY_PREFIX], raw].concat()
+            parse_drep_id(&hex::encode(&cip129)),
+            Err(StatusCode::BAD_REQUEST)
         );
-        assert!(is_legacy);
-        assert!(!is_special_case);
+        assert_eq!(
+            parse_drep_id(&hex::encode([7u8; 28])),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[test]
@@ -1345,10 +1308,6 @@ mod tests {
             .expect("failed to encode drep id");
 
         assert_eq!(parse_drep_id(&bech32_id), Err(StatusCode::BAD_REQUEST));
-        assert_eq!(
-            parse_drep_id(&hex::encode(&payload)),
-            Err(StatusCode::BAD_REQUEST)
-        );
     }
 
     #[tokio::test]
