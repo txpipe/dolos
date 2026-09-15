@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use blockfrost_openapi::models::{
+    drep_delegators_inner::DrepDelegatorsInner,
     drep_metadata::DrepMetadata,
     proposal::{self, Proposal},
     proposal_metadata::ProposalMetadata,
@@ -21,21 +22,29 @@ use blockfrost_openapi::models::{
     DrepsInnerMetadataError,
 };
 use dolos_cardano::{
-    model::{DRepState, FixedNamespace as _, ProposalAction, ProposalState},
+    model::{
+        drep_from_entity_key, AccountState, DRepState, FixedNamespace as _, ProposalAction,
+        ProposalState,
+    },
     pallas_extras, ChainSummary, PParamsSet,
 };
-use dolos_core::{ArchiveStore as _, BlockSlot, Domain, StateStore as _};
+use dolos_core::{ArchiveStore as _, BlockSlot, Domain, EntityKey, StateStore as _, TxOrder};
+use itertools::Itertools;
 use pallas::{
     crypto::hash::Hash,
     ledger::{
         addresses::Network,
-        primitives::{conway::GovAction, Coin, Epoch, StakeCredential},
+        primitives::{
+            conway::{DRep, GovAction},
+            Coin, Epoch, StakeCredential,
+        },
         traverse::{MultiEraBlock, MultiEraTx},
     },
 };
 
 use crate::{
     error::Error,
+    log_and_500,
     mapping::{
         anchor_offchain_metadata, bech32, bech32_gov_action, i32_or_500, parse_gov_action_id,
         rational_to_f64_unrounded, stake_cred_to_address, AnchorMetadata, IntoModel, Unrounded,
@@ -321,6 +330,132 @@ where
         bytes,
         error: error.map(Box::new),
     }))
+}
+
+struct DrepDelegatorModelBuilder {
+    delegator: StakeCredential,
+    live_stake: u64,
+    network: Network,
+}
+
+impl IntoModel<DrepDelegatorsInner> for DrepDelegatorModelBuilder {
+    type SortKey = ();
+
+    fn into_model(self) -> Result<DrepDelegatorsInner, StatusCode> {
+        let address = stake_cred_to_address(&self.delegator, self.network)
+            .to_bech32()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(DrepDelegatorsInner {
+            address,
+            amount: self.live_stake.to_string(),
+        })
+    }
+}
+
+/// One account that delegates its vote to the requested DRep.
+struct DrepDelegatorRow {
+    delegated_at: Option<(BlockSlot, TxOrder)>,
+    key: EntityKey,
+    delegator: StakeCredential,
+    live_stake: u64,
+}
+
+impl DrepDelegatorRow {
+    fn new(key: EntityKey, account: AccountState) -> Self {
+        Self {
+            delegated_at: account.vote_delegated_at,
+            key,
+            live_stake: account.live_stake(),
+            delegator: account.credential,
+        }
+    }
+
+    /// Blockfrost orders delegators by their latest vote delegation.
+    fn sort_key(&self) -> (Option<(BlockSlot, TxOrder)>, &EntityKey) {
+        (self.delegated_at, &self.key)
+    }
+}
+
+/// Whether Blockfrost counts `account` as a delegator of `drep`.
+///
+/// A delegation made before the DRep's latest registration does not count.
+fn delegates_to(
+    account: &AccountState,
+    drep: &DRep,
+    registered_at: Option<(BlockSlot, TxOrder)>,
+) -> bool {
+    if account.delegated_drep_live() != Some(drep) {
+        return false;
+    }
+
+    match registered_at {
+        Some(cutoff) => account.vote_delegated_at.is_some_and(|at| at >= cutoff),
+        None => true,
+    }
+}
+
+pub async fn drep_delegators<D>(
+    Path(drep_id): Path<String>,
+    Query(params): Query<PaginationParameters>,
+    State(domain): State<Facade<D>>,
+) -> Result<Json<Vec<DrepDelegatorsInner>>, Error>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    Option<AccountState>: From<D::Entity>,
+    Option<DRepState>: From<D::Entity>,
+{
+    let (_, drep_key, _, is_special_case) = parse_drep_id(&drep_id)?;
+    let pagination = Pagination::try_from(params)?;
+
+    let drep_key = EntityKey::from(drep_key);
+    let drep = drep_from_entity_key(&drep_key).ok_or(StatusCode::BAD_REQUEST)?;
+
+    let registered_at = if is_special_case {
+        None
+    } else {
+        match domain.read_cardano_entity::<DRepState>(drep_key)? {
+            Some(state) if !state.is_unregistered() => state.registered_at,
+            // Blockfrost returns an empty list for an unknown or retired DRep.
+            _ => return Ok(Json(vec![])),
+        }
+    };
+
+    let network = domain.get_network_id()?;
+
+    let scan = domain.clone();
+    let mut rows =
+        tokio::task::spawn_blocking(move || -> Result<Vec<DrepDelegatorRow>, StatusCode> {
+            scan.iter_cardano_entities::<AccountState>(None)?
+                .filter_ok(|(_, account)| delegates_to(account, &drep, registered_at))
+                .map_ok(|(key, account)| DrepDelegatorRow::new(key, account))
+                .collect::<Result<_, _>>()
+                .map_err(log_and_500("failed to scan drep delegators"))
+        })
+        .await
+        .map_err(log_and_500("drep delegators scan task failed"))??;
+
+    rows.sort_unstable_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+
+    if matches!(pagination.order, Order::Desc) {
+        rows.reverse();
+    }
+
+    let page = rows
+        .into_iter()
+        .skip(pagination.skip())
+        .take(pagination.count)
+        .map(|row| {
+            DrepDelegatorModelBuilder {
+                delegator: row.delegator,
+                live_stake: row.live_stake,
+                network,
+            }
+            .into_model()
+        })
+        .collect::<Result<Vec<_>, StatusCode>>()?;
+
+    Ok(Json(page))
 }
 
 struct ProposalRow {
@@ -1146,14 +1281,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::bech32_drep;
     use crate::test_support::{TestApp, TestFault};
     use bech32::{Bech32, Hrp};
-    use dolos_cardano::model::GovPurpose;
+    use dolos_cardano::model::{drep_to_entity_key, DRepDelegation, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
     use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
     use itertools::Itertools;
     use pallas::{
-        codec::utils::Bytes,
+        codec::{minicbor, utils::Bytes},
         ledger::primitives::{
             conway::{
                 CostModels, DRepVotingThresholds, ExUnitPrices, GovAction, GovActionId,
@@ -1339,6 +1475,284 @@ mod tests {
         let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
         let drep = &app.vectors().drep_id;
         let path = format!("/governance/dreps/{drep}/metadata");
+        assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    fn drep_delegators_path(drep: &str) -> String {
+        format!("/governance/dreps/{drep}/delegators")
+    }
+
+    async fn get_drep_delegators(app: &TestApp, path: &str) -> Vec<DrepDelegatorsInner> {
+        let (status, body) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        serde_json::from_slice(&body).expect("failed to parse drep delegators")
+    }
+
+    fn synthetic_drep() -> DRep {
+        DRep::Key(SyntheticBlockConfig::default().drep_keyhash.into())
+    }
+
+    /// Overwrites the synthetic DRep state with the given registration bounds.
+    fn seed_drep(
+        domain: &ToyDomain,
+        registered_at: Option<(BlockSlot, TxOrder)>,
+        unregistered_at: Option<(BlockSlot, TxOrder)>,
+    ) {
+        let drep = synthetic_drep();
+        let mut state = DRepState::new(drep.clone());
+        state.registered_at = registered_at;
+        state.unregistered_at = unregistered_at;
+
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&drep_to_entity_key(&drep), &state)
+            .expect("failed to write drep");
+        writer.commit().expect("failed to commit drep");
+    }
+
+    /// Slot and tx order of the synthetic account's latest vote delegation.
+    /// Every synthetic tx carries the delegation, so it is the last tx of the
+    /// last block.
+    fn last_vote_delegation(
+        vectors: &dolos_testing::synthetic::SyntheticVectors,
+    ) -> (BlockSlot, TxOrder) {
+        let last = vectors.blocks.last().expect("synthetic chain has blocks");
+        (last.slot, last.tx_hashes.len() - 1)
+    }
+
+    fn tip_epoch(domain: &ToyDomain) -> Epoch {
+        let summary = dolos_cardano::eras::load_era_summary::<ToyDomain>(domain.state())
+            .expect("era summary");
+        let tip = domain
+            .state()
+            .read_cursor()
+            .expect("cursor read failed")
+            .expect("missing tip")
+            .slot();
+        summary.slot_epoch(tip).0
+    }
+
+    fn seeded_credential(seed: u8) -> StakeCredential {
+        StakeCredential::AddrKeyhash([seed; 28].into())
+    }
+
+    fn seeded_stake_address(seed: u8) -> String {
+        stake_cred_to_address(&seeded_credential(seed), Network::Testnet)
+            .to_bech32()
+            .expect("failed to encode stake address")
+    }
+
+    /// Writes an account that holds `utxo_sum` lovelace and delegates its
+    /// vote to `drep` at `delegated_at`.
+    fn seed_delegator(
+        domain: &ToyDomain,
+        seed: u8,
+        drep: DRep,
+        delegated_at: (BlockSlot, TxOrder),
+        utxo_sum: u64,
+    ) {
+        let epoch = tip_epoch(domain);
+        let credential = seeded_credential(seed);
+
+        let mut account = AccountState::new(epoch, credential.clone());
+        account.registered_at = Some(delegated_at.0);
+        account.stake = EpochValue::with_live(
+            epoch,
+            Stake {
+                utxo_sum,
+                ..Default::default()
+            },
+        );
+        account.drep = EpochValue::with_live(epoch, DRepDelegation::Delegated(drep));
+        account.vote_delegated_at = Some(delegated_at);
+
+        let key = EntityKey::from(minicbor::to_vec(&credential).expect("encode credential"));
+        let writer = domain
+            .state()
+            .start_writer()
+            .expect("failed to start writer");
+        writer
+            .write_entity_typed(&key, &account)
+            .expect("failed to write account");
+        writer.commit().expect("failed to commit account");
+    }
+
+    fn delegator(seed: u8, amount: u64) -> DrepDelegatorsInner {
+        DrepDelegatorsInner {
+            address: seeded_stake_address(seed),
+            amount: amount.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_happy_path() {
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+
+        let (status, body) = app.get_bytes(&format!("/accounts/{stake_address}")).await;
+        assert_eq!(status, StatusCode::OK);
+        let account: blockfrost_openapi::models::account_content::AccountContent =
+            serde_json::from_slice(&body).expect("failed to parse account");
+
+        let legacy = get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].address, stake_address);
+        assert_eq!(legacy[0].amount, account.controlled_amount);
+
+        let cip129_id = bech32_drep(&synthetic_drep()).expect("failed to encode drep id");
+        let cip129 = get_drep_delegators(&app, &drep_delegators_path(&cip129_id)).await;
+        assert_eq!(cip129, legacy);
+    }
+
+    /// Three seeded delegators join the synthetic one, each at a later
+    /// position. A fourth one delegated before the DRep registration and
+    /// must not appear.
+    #[tokio::test]
+    async fn governance_drep_delegators_paginated() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (slot, _) = last_vote_delegation(vectors);
+            let drep = synthetic_drep();
+            seed_delegator(domain, 0x41, drep.clone(), (slot - 1, 0), 1_000);
+            seed_delegator(domain, 0x42, drep.clone(), (slot + 1, 0), 2_000);
+            seed_delegator(domain, 0x43, drep.clone(), (slot + 1, 1), 3_000);
+            seed_delegator(domain, 0x44, drep, (slot + 2, 0), 4_000);
+        });
+        let base = drep_delegators_path(&app.vectors().drep_id);
+
+        let asc = get_drep_delegators(&app, &base).await;
+        assert_eq!(asc.len(), 4);
+        assert_eq!(asc[0].address, app.vectors().stake_address);
+        assert_eq!(
+            asc[1..],
+            [
+                delegator(0x42, 2_000),
+                delegator(0x43, 3_000),
+                delegator(0x44, 4_000)
+            ]
+        );
+
+        let page_1 = get_drep_delegators(&app, &format!("{base}?count=3&page=1")).await;
+        let page_2 = get_drep_delegators(&app, &format!("{base}?count=3&page=2")).await;
+        let page_3 = get_drep_delegators(&app, &format!("{base}?count=3&page=3")).await;
+        assert_eq!(page_1, asc[..3]);
+        assert_eq!(page_2, asc[3..]);
+        assert!(page_3.is_empty());
+
+        let desc = get_drep_delegators(&app, &format!("{base}?order=desc")).await;
+        let reversed: Vec<_> = asc.iter().rev().cloned().collect();
+        assert_eq!(desc, reversed);
+
+        let desc_page_2 =
+            get_drep_delegators(&app, &format!("{base}?order=desc&count=3&page=2")).await;
+        assert_eq!(desc_page_2, reversed[3..]);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_bad_request() {
+        let app = TestApp::new();
+        let path = drep_delegators_path(invalid_drep());
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+
+        let path = format!("{}?count=0", drep_delegators_path(&app.vectors().drep_id));
+        assert_status(&app, &path, StatusCode::BAD_REQUEST).await;
+    }
+
+    /// Blockfrost answers `200 []` for a well-formed DRep id it has never seen.
+    #[tokio::test]
+    async fn governance_drep_delegators_unknown_drep_is_empty() {
+        let app = TestApp::new();
+        let rows = get_drep_delegators(&app, &drep_delegators_path(&missing_drep())).await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_special_dreps() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (slot, _) = last_vote_delegation(vectors);
+            seed_delegator(domain, 0x51, DRep::Abstain, (slot, 0), 5_000);
+            seed_delegator(domain, 0x52, DRep::NoConfidence, (slot, 1), 6_000);
+        });
+
+        let abstain = get_drep_delegators(&app, &drep_delegators_path("drep_always_abstain")).await;
+        assert_eq!(abstain, [delegator(0x51, 5_000)]);
+
+        let no_confidence =
+            get_drep_delegators(&app, &drep_delegators_path("drep_always_no_confidence")).await;
+        assert_eq!(no_confidence, [delegator(0x52, 6_000)]);
+
+        // The seeded accounts do not leak into a regular DRep's list.
+        let regular =
+            get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert_eq!(regular.len(), 1);
+        assert_eq!(regular[0].address, app.vectors().stake_address);
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_retired_drep_is_empty() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            seed_drep(domain, Some((1, 0)), Some((2, 0)))
+        });
+
+        let rows = get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert!(rows.is_empty());
+    }
+
+    /// A delegation in the same tx as the DRep registration counts. One made
+    /// before the DRep's latest registration does not.
+    #[tokio::test]
+    async fn governance_drep_delegators_honor_registration_cutoff() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        let same_tx = TestApp::new_with_cfg_and_setup(cfg.clone(), |domain, vectors| {
+            seed_drep(domain, Some(last_vote_delegation(vectors)), None)
+        });
+        let rows =
+            get_drep_delegators(&same_tx, &drep_delegators_path(&same_tx.vectors().drep_id)).await;
+        assert_eq!(rows.len(), 1);
+
+        let reregistered = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let (slot, order) = last_vote_delegation(vectors);
+            seed_drep(domain, Some((slot, order + 1)), None)
+        });
+        let rows = get_drep_delegators(
+            &reregistered,
+            &drep_delegators_path(&reregistered.vectors().drep_id),
+        )
+        .await;
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn governance_drep_delegators_internal_error() {
+        let app = TestApp::new_with_fault(Some(TestFault::StateStoreError));
+        let path = drep_delegators_path(&app.vectors().drep_id);
         assert_status(&app, &path, StatusCode::INTERNAL_SERVER_ERROR).await;
     }
 
