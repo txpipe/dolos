@@ -13,16 +13,17 @@
 //!   prefix scan windowed from either end.
 //!
 //! Only the first appearance of a pair is stored. The write batch cannot read
-//! its own pending inserts, so the writer threads a `seen` set through
-//! [`apply`] to dedup pairs inside one batch; the pair entry dedups across
-//! batches. When a replay reaches an appearance earlier than the stored one,
-//! [`apply`] moves the pair to it.
+//! its own writes, so the writer threads a [`PendingPairs`] map through
+//! [`apply`] and [`undo`]: what one writer inserted or removed is what its
+//! later calls see, and pairs a batch repeats are deduped there. When a replay
+//! reaches an appearance earlier than the stored one, [`apply`] moves the pair
+//! to it.
 //!
 //! The keyspace is not swept by `prune_history`: its entries are first
 //! appearances, so removing one below the cutoff would drop an address the
 //! account may still use. A rollback removes entries through [`undo`].
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use dolos_core::{BlockSlot, StakeAddressAppearance};
 use fjall::{Keyspace, OwnedWriteBatch, Readable};
@@ -84,10 +85,32 @@ fn decode_sort_key(value: &[u8]) -> Option<(BlockSlot, u32)> {
     Some((slot, order))
 }
 
-/// Insert the first appearance of each pair in one block.
+/// The pairs one writer has touched, with the position each holds once the
+/// pending batch commits: `Some` after an insert, `None` after a removal.
 ///
-/// `seen` dedups pairs inside the current write batch: the batch cannot
-/// read its own pending inserts, and one batch spans many blocks.
+/// The batch cannot read its own writes, and one writer spans many blocks,
+/// so [`apply`] and [`undo`] consult this before the committed store. It also
+/// dedups the pairs a batch repeats.
+pub type PendingPairs = HashMap<Vec<u8>, Option<(BlockSlot, u32)>>;
+
+/// The position a pair holds as this writer sees it: the pending batch first,
+/// the committed store second.
+fn position_of<R: Readable>(
+    keyspace: &Keyspace,
+    readable: &R,
+    pending: &PendingPairs,
+    pair_key: &[u8],
+) -> Result<Option<(BlockSlot, u32)>, Error> {
+    if let Some(position) = pending.get(pair_key) {
+        return Ok(*position);
+    }
+
+    Ok(readable
+        .get(keyspace, pair_key)?
+        .and_then(|value| decode_sort_key(&value)))
+}
+
+/// Insert the first appearance of each pair in one block.
 ///
 /// A stored pair keeps its position unless this appearance is earlier. A log
 /// that started mid-chain holds the first appearance it saw, not the first on
@@ -97,37 +120,26 @@ pub fn apply<R: Readable>(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
     readable: &R,
-    seen: &mut HashSet<Vec<u8>>,
+    pending: &mut PendingPairs,
     slot: BlockSlot,
     appearances: &[StakeAddressAppearance],
 ) -> Result<(), Error> {
     for appearance in appearances {
         let pair_key = build_pair_key(&appearance.stake, &appearance.address);
+        let position = (slot, appearance.order);
 
-        if seen.contains(&pair_key) {
-            continue;
-        }
-
-        if let Some(stored) = readable.get(keyspace, &pair_key)? {
-            match decode_sort_key(&stored) {
-                Some((stored_slot, stored_order))
-                    if (slot, appearance.order) < (stored_slot, stored_order) =>
-                {
-                    batch.remove(
-                        keyspace,
-                        build_ordered_key(
-                            &appearance.stake,
-                            stored_slot,
-                            stored_order,
-                            &appearance.address,
-                        ),
-                    );
-                }
-                _ => {
-                    seen.insert(pair_key);
-                    continue;
-                }
+        match position_of(keyspace, readable, pending, &pair_key)? {
+            Some(stored) if position < stored => {
+                batch.remove(
+                    keyspace,
+                    build_ordered_key(&appearance.stake, stored.0, stored.1, &appearance.address),
+                );
             }
+            Some(stored) => {
+                pending.insert(pair_key, Some(stored));
+                continue;
+            }
+            None => {}
         }
 
         batch.insert(
@@ -135,7 +147,6 @@ pub fn apply<R: Readable>(
             pair_key.clone(),
             encode_sort_key(slot, appearance.order),
         );
-
         batch.insert(
             keyspace,
             build_ordered_key(
@@ -147,7 +158,7 @@ pub fn apply<R: Readable>(
             [],
         );
 
-        seen.insert(pair_key);
+        pending.insert(pair_key, Some(position));
     }
 
     Ok(())
@@ -161,17 +172,14 @@ pub fn undo<R: Readable>(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
     readable: &R,
+    pending: &mut PendingPairs,
     slot: BlockSlot,
     appearances: &[StakeAddressAppearance],
 ) -> Result<(), Error> {
     for appearance in appearances {
         let pair_key = build_pair_key(&appearance.stake, &appearance.address);
 
-        let Some(value) = readable.get(keyspace, &pair_key)? else {
-            continue;
-        };
-
-        let Some((first_slot, order)) = decode_sort_key(&value) else {
+        let Some((first_slot, order)) = position_of(keyspace, readable, pending, &pair_key)? else {
             continue;
         };
 
@@ -179,11 +187,13 @@ pub fn undo<R: Readable>(
             continue;
         }
 
-        batch.remove(keyspace, pair_key);
+        batch.remove(keyspace, pair_key.clone());
         batch.remove(
             keyspace,
-            build_ordered_key(&appearance.stake, slot, order, &appearance.address),
+            build_ordered_key(&appearance.stake, first_slot, order, &appearance.address),
         );
+
+        pending.insert(pair_key, None);
     }
 
     Ok(())
