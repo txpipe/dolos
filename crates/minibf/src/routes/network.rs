@@ -19,6 +19,22 @@ struct ChainModelBuilder<'a> {
     genesis: &'a Genesis,
 }
 
+/// The padded Byron/placeholder rows carry a fixed safe-zone constant per
+/// network (not derived from `mutable_slots`, which only becomes
+/// meaningful once Shelley's `active_slots_coeff` is in effect); every
+/// later era uses `mutable_slots`. Mirrors the per-branch literals
+/// `dolos_cardano::pad_era_history` bakes into those same rows.
+fn safe_zone_for(genesis: &Genesis, protocol: u16) -> i32 {
+    if protocol < 2 {
+        match genesis.shelley.network_magic {
+            Some(2) => 864,
+            _ => 4320,
+        }
+    } else {
+        mutable_slots(genesis) as i32
+    }
+}
+
 impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
     type SortKey = ();
 
@@ -32,151 +48,33 @@ impl<'a> IntoModel<Vec<NetworkErasInner>> for ChainModelBuilder<'a> {
             .transpose()?
             .unwrap_or_default() as u64;
 
-        let mut out = vec![];
+        let padded = dolos_cardano::pad_era_history(&self.eras, self.tip, self.genesis)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-        // Special, hardcoded stuff.
-        let known_hardforks = [2, 3, 4, 5, 7, 9];
-        let mut previous = match self.genesis.shelley.network_magic {
-            Some(764824073) => {
-                let epoch_length = 21600;
-                let slot_length = 20;
-                let safe_zone = 4320;
-                let end_epoch = 208;
-
-                NetworkErasInner {
-                    start: Box::new(NetworkErasInnerStart {
-                        time: 0,
-                        slot: 0,
-                        epoch: 0,
-                    }),
-                    end: Box::new(NetworkErasInnerEnd {
-                        time: end_epoch * epoch_length * slot_length,
-                        slot: end_epoch * epoch_length,
-                        epoch: end_epoch,
-                    }),
-                    parameters: Box::new(NetworkErasInnerParameters {
-                        epoch_length,
-                        slot_length,
-                        safe_zone,
-                    }),
-                }
-            }
-            Some(1) => {
-                let epoch_length = 21600;
-                let slot_length = 20;
-                let safe_zone = 4320;
-                let end_epoch = 4;
-
-                NetworkErasInner {
-                    start: Box::new(NetworkErasInnerStart {
-                        time: 0,
-                        slot: 0,
-                        epoch: 0,
-                    }),
-                    end: Box::new(NetworkErasInnerEnd {
-                        time: end_epoch * epoch_length * slot_length,
-                        slot: end_epoch * epoch_length,
-                        epoch: end_epoch,
-                    }),
-                    parameters: Box::new(NetworkErasInnerParameters {
-                        epoch_length,
-                        slot_length,
-                        safe_zone,
-                    }),
-                }
-            }
-            Some(2) => {
-                let epoch_length = 4320;
-                let slot_length = 20;
-                let safe_zone = 864;
-                let end_epoch = 0;
-
-                out.push(NetworkErasInner {
-                    start: Box::new(NetworkErasInnerStart {
-                        time: 0,
-                        slot: 0,
-                        epoch: 0,
-                    }),
-                    end: Box::new(NetworkErasInnerEnd {
-                        time: end_epoch * epoch_length * slot_length,
-                        slot: end_epoch * epoch_length,
-                        epoch: end_epoch,
-                    }),
-                    parameters: Box::new(NetworkErasInnerParameters {
-                        epoch_length,
-                        slot_length,
-                        safe_zone,
-                    }),
-                });
-
-                // In the case of preview, we add the skipped eras
-                let other = NetworkErasInner {
-                    start: Box::new(NetworkErasInnerStart {
-                        time: 0,
-                        slot: 0,
-                        epoch: 0,
-                    }),
-                    end: Box::new(NetworkErasInnerEnd {
-                        time: end_epoch * epoch_length * slot_length,
-                        slot: end_epoch * epoch_length,
-                        epoch: end_epoch,
-                    }),
-                    parameters: Box::new(NetworkErasInnerParameters {
-                        epoch_length: self.genesis.shelley.epoch_length.unwrap() as i32,
-                        slot_length: self.genesis.shelley.slot_length.unwrap() as i32,
-                        safe_zone: mutable_slots(self.genesis) as i32,
-                    }),
-                };
-                out.push(other.clone());
-                out.push(other.clone());
-                out.push(other.clone());
-                other
-            }
-            _ => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-        };
-
-        let eras: Vec<_> = self
-            .eras
+        let out = padded
             .iter()
-            .filter(|(protocol, _)| known_hardforks.contains(protocol))
+            .map(|era| {
+                let end = era.end.as_ref();
+
+                NetworkErasInner {
+                    start: Box::new(NetworkErasInnerStart {
+                        time: era.start.timestamp.saturating_sub(system_start) as i32,
+                        slot: era.start.slot as i32,
+                        epoch: era.start.epoch as i32,
+                    }),
+                    end: Box::new(NetworkErasInnerEnd {
+                        time: end.map_or(0, |e| e.timestamp.saturating_sub(system_start) as i32),
+                        slot: end.map_or(0, |e| e.slot as i32),
+                        epoch: end.map_or(0, |e| e.epoch as i32),
+                    }),
+                    parameters: Box::new(NetworkErasInnerParameters {
+                        epoch_length: era.epoch_length as i32,
+                        slot_length: era.slot_length as i32,
+                        safe_zone: safe_zone_for(self.genesis, era.protocol),
+                    }),
+                }
+            })
             .collect();
-
-        for (_, era) in eras {
-            let start_time = era.slot_time(era.start.slot);
-            let start_delta = start_time - system_start;
-
-            // Calculate for the final one. The rest will be overwritten
-            let (end_slot, end_epoch) = (self.tip, era.slot_epoch(self.tip).0);
-            let end_time = era.slot_time(end_slot);
-            let end_delta = end_time - system_start;
-
-            previous.end = Box::new(NetworkErasInnerEnd {
-                time: start_delta as i32,
-                slot: era.start.slot as i32,
-                epoch: era.start.epoch as i32,
-            });
-            let current = NetworkErasInner {
-                start: Box::new(NetworkErasInnerStart {
-                    time: start_delta as i32,
-                    slot: era.start.slot as i32,
-                    epoch: era.start.epoch as i32,
-                }),
-                end: Box::new(NetworkErasInnerEnd {
-                    time: end_delta as i32,
-                    slot: end_slot as i32,
-                    epoch: end_epoch as i32,
-                }),
-                parameters: Box::new(NetworkErasInnerParameters {
-                    epoch_length: era.epoch_length as i32,
-                    slot_length: era.slot_length as i32,
-                    safe_zone: dolos_cardano::mutable_slots(self.genesis) as i32,
-                }),
-            };
-
-            out.push(previous.clone());
-            previous = current;
-        }
-        out.push(previous);
 
         Ok(out)
     }

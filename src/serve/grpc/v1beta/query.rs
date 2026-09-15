@@ -1050,8 +1050,21 @@ where
 
         info!("received new grpc query - read_era_summary");
 
-        let chain_summary = dolos_cardano::load_era_summary::<D>(self.domain.state())
+        let genesis = self.domain.genesis();
+
+        let raw_eras = dolos_cardano::load_era_summary_with_protocols::<D>(self.domain.state())
             .map_err(|e| Status::internal(format!("failed to load era summary: {e}")))?;
+
+        let tip = self
+            .domain
+            .state()
+            .read_cursor()
+            .map_err(into_status)?
+            .map(|p| p.slot())
+            .unwrap_or(0);
+
+        let padded_eras = dolos_cardano::pad_era_history(&raw_eras, tip, &genesis)
+            .map_err(|e| Status::internal(format!("failed to pad era summary: {e}")))?;
 
         let active_pparams = dolos_cardano::load_effective_pparams::<D>(self.domain.state())
             .map_err(|e| Status::internal(format!("failed to load current pparams: {e}")))?;
@@ -1060,8 +1073,8 @@ where
             .mapper
             .map_pparams(dolos_cardano::utils::pparams_to_pallas(&active_pparams));
 
-        let summaries = chain_summary
-            .iter_all()
+        let summaries = padded_eras
+            .iter()
             .map(|era| map_era_summary(era, active_protocol, &active_params))
             .collect();
 
@@ -1281,6 +1294,41 @@ mod tests {
         assert_eq!(start.slot, 0);
         assert_eq!(start.time % 1000, 0);
         assert!(start.time >= 1_666_656_000_000);
+    }
+
+    #[tokio::test]
+    async fn read_era_summary_pads_the_full_historical_table() {
+        let domain = ToyDomain::new_with_genesis(
+            Arc::new(dolos_cardano::include::preview::load()),
+            None,
+            None,
+        );
+        let service = QueryServiceImpl::new(domain);
+
+        let response = QueryService::read_era_summary(
+            &service,
+            Request::new(u5c::query::ReadEraSummaryRequest { field_mask: None }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+        let summaries = match response.summary {
+            Some(u5c::query::read_era_summary_response::Summary::Cardano(cardano)) => {
+                cardano.summaries
+            }
+            _ => panic!("missing cardano era summaries"),
+        };
+
+        // Preview's tracked on-chain state never records byron/shelley/
+        // allegra/mary as real eras (genesis jumps straight to alonzo) —
+        // if these names show up, padding kicked in (#1331).
+        assert_eq!(summaries.first().unwrap().name, "byron");
+        let names: HashSet<_> = summaries.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains("shelley"));
+        assert!(names.contains("allegra"));
+        assert!(names.contains("mary"));
+        assert!(names.contains("alonzo"));
     }
 
     #[tokio::test]
