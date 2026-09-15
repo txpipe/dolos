@@ -67,7 +67,10 @@ Two entry shapes, discriminated by a tag byte:
 Each `(stake, address)` pair is stored once, at its first on-chain appearance;
 `order` is the transaction index in the high 16 bits and the output index in
 the low 16. The pair entry is the write-path probe and the undo key; the
-ordered entry is what a page read walks, from either end. The entry stores the
+ordered entry is what a page read walks, from either end. A write that finds
+the pair stored at a later position moves it: a log that started mid-chain
+(an upgraded store) holds the first appearance it saw until a replay from
+origin (`doctor rebuild-state --rewrite-logs`) reaches the earlier one. The entry stores the
 full address bytes: the payment part is not derivable from the stake
 credential, and the page must return each address exactly as it appeared.
 Pointer addresses never reach the log — `shelley_address_to_stake_address`

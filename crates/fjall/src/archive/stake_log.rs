@@ -15,7 +15,8 @@
 //! Only the first appearance of a pair is stored. The write batch cannot read
 //! its own pending inserts, so the writer threads a `seen` set through
 //! [`apply`] to dedup pairs inside one batch; the pair entry dedups across
-//! batches.
+//! batches. When a replay reaches an appearance earlier than the stored one,
+//! [`apply`] moves the pair to it.
 //!
 //! The keyspace is not swept by `prune_history`: its entries are first
 //! appearances, so removing one below the cutoff would drop an address the
@@ -87,6 +88,11 @@ fn decode_sort_key(value: &[u8]) -> Option<(BlockSlot, u32)> {
 ///
 /// `seen` dedups pairs inside the current write batch: the batch cannot
 /// read its own pending inserts, and one batch spans many blocks.
+///
+/// A stored pair keeps its position unless this appearance is earlier. A log
+/// that started mid-chain holds the first appearance it saw, not the first on
+/// chain; a replay from origin (`doctor rebuild-state --rewrite-logs`) reaches
+/// the earlier one and moves the pair to it.
 pub fn apply<R: Readable>(
     batch: &mut OwnedWriteBatch,
     keyspace: &Keyspace,
@@ -102,9 +108,26 @@ pub fn apply<R: Readable>(
             continue;
         }
 
-        if readable.get(keyspace, &pair_key)?.is_some() {
-            seen.insert(pair_key);
-            continue;
+        if let Some(stored) = readable.get(keyspace, &pair_key)? {
+            match decode_sort_key(&stored) {
+                Some((stored_slot, stored_order))
+                    if (slot, appearance.order) < (stored_slot, stored_order) =>
+                {
+                    batch.remove(
+                        keyspace,
+                        build_ordered_key(
+                            &appearance.stake,
+                            stored_slot,
+                            stored_order,
+                            &appearance.address,
+                        ),
+                    );
+                }
+                _ => {
+                    seen.insert(pair_key);
+                    continue;
+                }
+            }
         }
 
         batch.insert(
