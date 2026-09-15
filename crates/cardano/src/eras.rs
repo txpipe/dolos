@@ -411,8 +411,7 @@ pub fn pad_era_history(
     // both need to agree on what counts as one era.
     let deduped: Vec<&(u16, EraSummary)> = {
         let mut last_group: Option<u16> = None;
-        eras
-            .iter()
+        eras.iter()
             .filter(|(protocol, _)| {
                 let group = era_group(*protocol);
                 let is_new_era = last_group != Some(group);
@@ -471,8 +470,7 @@ pub fn pad_era_history(
                 // (if unpadded) table instead of a hard failure.
                 let (first, rest) = remaining.split_first().ok_or_else(|| {
                     ChainError::GenesisFieldMissing(
-                        "no recorded eras to build history for unrecognized network magic"
-                            .into(),
+                        "no recorded eras to build history for unrecognized network magic".into(),
                     )
                 })?;
                 let (protocol, era) = *first;
