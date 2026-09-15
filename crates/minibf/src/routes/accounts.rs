@@ -22,7 +22,7 @@ use blockfrost_openapi::models::{
 
 use dolos_cardano::{
     indexes::{AsyncCardanoQueryExt, CardanoStateIndexExt, SlotOrder},
-    model::{AccountState, DRepState},
+    model::{AccountState, DRepState, PoolState},
     pallas_extras, AccountEpochLog, ChainSummary, FixedNamespace, PoolHash,
 };
 use dolos_core::async_query::BlockMetaResolver;
@@ -224,27 +224,105 @@ where
     Ok(Json(model))
 }
 
+/// Whether a pool registration the pool state still holds names the
+/// credential, as reward account or owner.
+///
+/// db-sync registers a credential the moment a certificate names it, so
+/// Blockfrost answers `200 []` for a credential seen only as a pool reward
+/// account or owner. Dolos writes no `AccountState` for those, so the bare
+/// existence guard would 404. This scan runs only on the would-be-404 path,
+/// so the hot path pays nothing.
+///
+/// Known gap: `PoolState` keeps only the `next`, `live`, `mark`, `set` and
+/// `go` parameter versions. A second registration in the same epoch
+/// overwrites `next`, and each epoch transition rotates the oldest version
+/// out of `go`. A credential named only by such a replaced registration is
+/// gone from every version, so it still 404s. db-sync remembers it forever.
+/// Closing the gap needs the state layer to record the credential when the
+/// certificate names it. That is the same fix #1325 needs for proposal return
+/// addresses.
+fn account_appears_in_pool_registrations<D>(
+    domain: &Facade<D>,
+    account: &StakeAddress,
+) -> Result<bool, StatusCode>
+where
+    Option<PoolState>: From<D::Entity>,
+    D: Domain + Clone + Send + Sync + 'static,
+{
+    let reward_account = account.to_vec();
+
+    // Pool owners are always key hashes, so a script account can only match
+    // through the reward account.
+    let owner_hash = match account.payload() {
+        StakePayload::Stake(hash) => Some(*hash),
+        StakePayload::Script(_) => None,
+    };
+
+    for item in domain.iter_cardano_entities::<PoolState>(None)? {
+        let (_, pool) = item.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        // Check every snapshot slot the entity still holds, so a credential a
+        // recent re-registration replaced is still found: `live` for a new
+        // pool, `next` for a mid-epoch re-registration, `mark`/`set`/`go` for
+        // the older values.
+        let snapshots = [
+            pool.snapshot.live(),
+            pool.snapshot.next(),
+            pool.snapshot.mark(),
+            pool.snapshot.set(),
+            pool.snapshot.go(),
+        ];
+
+        for snapshot in snapshots.into_iter().flatten() {
+            if snapshot.params.reward_account == reward_account {
+                return Ok(true);
+            }
+
+            if owner_hash.is_some_and(|hash| snapshot.params.pool_owners.contains(&hash)) {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+/// `GET /accounts/{stake_address}/addresses`.
+///
+/// Blockfrost declares only `count`, `page` and `order` for this endpoint.
+/// The shared query struct also accepts `from` and `to`; they are ignored
+/// here, as Blockfrost ignores them, so the list always covers the account's
+/// whole history.
 pub async fn by_stake_addresses<D>(
     Path(stake_address): Path<String>,
-    Query(params): Query<PaginationParameters>,
+    Query(mut params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<AccountAddressesContentInner>>, Error>
 where
     Option<AccountState>: From<D::Entity>,
+    Option<PoolState>: From<D::Entity>,
     D: Domain + Clone + Send + Sync + 'static,
 {
+    // Drop `from`/`to` before validation: Blockfrost never reads them here,
+    // so a malformed or reversed window is ignored rather than rejected.
+    params.from = None;
+    params.to = None;
+
     let pagination = Pagination::try_from(params)?;
     pagination.enforce_max_scan_limit(domain.config.max_scan_items())?;
     let network = domain.get_network_id()?;
     let account_key = parse_account_key_param(&stake_address, network)?;
-    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())? {
+    if !domain.cardano_entity_exists::<AccountState>(account_key.entity_key.as_slice())?
+        && !account_appears_in_pool_registrations(&domain, &account_key.address)?
+    {
         return Err(StatusCode::NOT_FOUND.into());
     }
 
-    let (start_slot, end_slot) = pagination.start_and_end_slots(&domain).await?;
+    // `from`/`to` are ignored, so the scan always covers the whole history.
+    let end_slot = domain.get_tip_slot()?;
     let stream = domain.query().blocks_by_stake_stream(
         &account_key.address.to_vec(),
-        start_slot,
+        0,
         end_slot,
         SlotOrder::from(pagination.order),
     );
@@ -1355,6 +1433,7 @@ mod tests {
         account_transactions_content_inner::AccountTransactionsContentInner,
         account_withdrawal_content_inner::AccountWithdrawalContentInner,
     };
+    use dolos_cardano::model::{EpochValue, PoolParams, PoolSnapshot};
     use dolos_core::{ArchiveWriter as _, EraCbor, StateWriter as _, UtxoSetDelta};
     use dolos_testing::{
         synthetic::SyntheticBlockConfig, toy_domain::ToyDomain, utxo_with_value, MIN_UTXO_AMOUNT,
@@ -1523,6 +1602,173 @@ mod tests {
         );
         let _: Vec<AccountAddressesContentInner> =
             serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_pool_only_account_returns_empty_list() {
+        let app = TestApp::new();
+
+        // The synthetic chain registers a pool owned by key hash [2u8; 28].
+        // That credential never appears in an address or certificate, so no
+        // account state exists for it. Blockfrost still answers with an empty
+        // list because the credential is known through the pool.
+        let owner = StakeAddress::new(Network::Testnet, StakePayload::Stake(Hash::from([2u8; 28])));
+        let owner = owner.to_bech32().expect("failed to encode owner address");
+
+        let path = format!("/accounts/{owner}/addresses");
+        let (status, bytes) = app.get_bytes(&path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        let addresses: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+        assert!(addresses.is_empty());
+    }
+
+    /// A pool state whose only link to an account is its reward account.
+    fn reward_only_pool(operator: [u8; 28], reward_account: Vec<u8>) -> PoolState {
+        let params = PoolParams {
+            vrf_keyhash: Hash::from([0u8; 32]),
+            pledge: 0,
+            cost: 0,
+            margin: pallas::ledger::primitives::conway::RationalNumber {
+                numerator: 0,
+                denominator: 1,
+            },
+            reward_account,
+            pool_owners: vec![],
+            relays: vec![],
+            pool_metadata: None,
+        };
+        let snapshot = PoolSnapshot {
+            is_retired: false,
+            blocks_minted: 0,
+            params,
+            is_new: false,
+        };
+        PoolState {
+            operator: Hash::from(operator),
+            snapshot: EpochValue::with_live(3, snapshot),
+            blocks_minted_total: 0,
+            register_slot: 0,
+            retiring_epoch: None,
+            deposit: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_pool_reward_account_returns_empty_list() {
+        // The synthetic pool pays rewards to the registered fixture account,
+        // so the chain only exercises the owner path of the fallback. Two
+        // extra pools cover the reward account path: one pays a key hash and
+        // one pays a script hash. Neither credential has an account state.
+        let key_hash_account =
+            StakeAddress::new(Network::Testnet, StakePayload::Stake(Hash::from([7u8; 28])));
+        let script_account = StakeAddress::new(
+            Network::Testnet,
+            StakePayload::Script(Hash::from([8u8; 28])),
+        );
+        let pools = [
+            ([70u8; 28], key_hash_account.to_vec()),
+            ([80u8; 28], script_account.to_vec()),
+        ];
+
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
+            let writer = domain.state().start_writer().expect("state writer");
+            for (operator, reward_account) in &pools {
+                let pool = reward_only_pool(*operator, reward_account.clone());
+                writer
+                    .write_entity_typed(&EntityKey::from(operator.as_slice()), &pool)
+                    .expect("failed to write pool state");
+            }
+            writer.commit().expect("failed to commit pool state");
+        });
+
+        for account in [key_hash_account, script_account] {
+            let account = account.to_bech32().expect("failed to encode stake address");
+
+            // No account state exists: the bare account endpoint has no
+            // fallback, so it must still answer 404.
+            assert_status(&app, &format!("/accounts/{account}"), StatusCode::NOT_FOUND).await;
+
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{account}/addresses"))
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{account}: unexpected status {status} with body: {}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let addresses: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse account addresses");
+            assert!(addresses.is_empty(), "{account}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accounts_by_stake_addresses_ignores_from_and_to() {
+        // Blockfrost declares no `from`/`to` for this endpoint and its query
+        // binds neither, so a windowed request answers the full list. The
+        // window below starts at the newest first appearance: honoring it
+        // would drop every older address.
+        let app = TestApp::new();
+        let stake_address = app.vectors().stake_address.as_str();
+
+        let newest_first_appearance = app
+            .vectors()
+            .account_address_bounds
+            .iter()
+            .map(|(_, min, _)| *min)
+            .max()
+            .expect("vectors carry account addresses");
+        let last_block = app
+            .vectors()
+            .account_address_bounds
+            .iter()
+            .map(|(_, _, max)| *max)
+            .max()
+            .expect("vectors carry account addresses");
+
+        let (status, bytes) = app
+            .get_bytes(&format!("/accounts/{stake_address}/addresses"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let full: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse addresses");
+        assert!(full.len() > 1, "the window must have something to drop");
+
+        let (status, bytes) = app
+            .get_bytes(&format!(
+                "/accounts/{stake_address}/addresses?from={newest_first_appearance}&to={last_block}"
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let windowed: Vec<AccountAddressesContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse windowed addresses");
+
+        assert_eq!(windowed, full);
+
+        // Blockfrost answers 200 for a malformed or reversed window too,
+        // because it never parses these parameters on this endpoint.
+        for query in ["from=garbage", "from=100&to=50"] {
+            let (status, bytes) = app
+                .get_bytes(&format!("/accounts/{stake_address}/addresses?{query}"))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            let ignored: Vec<AccountAddressesContentInner> =
+                serde_json::from_slice(&bytes).expect("failed to parse addresses");
+            assert_eq!(ignored, full, "{query}");
+        }
     }
 
     #[tokio::test]
