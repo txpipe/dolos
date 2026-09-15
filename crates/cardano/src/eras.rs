@@ -328,11 +328,23 @@ pub fn load_era_summary_with_protocols<D: Domain>(
     .collect()
 }
 
-/// Eras where a hard fork actually changes the reported era name, as
-/// opposed to an intra-era protocol version bump (e.g. 5→6 stay
-/// "alonzo", 7→8 stay "babbage", 9→10 stay "conway"). Mirrors
-/// `protocol_to_era_name`'s grouping in the gRPC/Ogmios mapping code.
-const KNOWN_HARDFORKS: [u16; 6] = [2, 3, 4, 5, 7, 9];
+/// Groups a raw protocol-major number by the era name it reports, mirroring
+/// `protocol_to_era_name`'s ranges in the gRPC/Ogmios mapping code: 5 and 6
+/// both report "alonzo", 7 and 8 both report "babbage", 9 and 10 both
+/// report "conway". The group id is the lowest protocol number in the
+/// range, except it is *not* assumed to be the one a node actually recorded
+/// first — some genesis files (e.g. Preview's) start directly at the upper
+/// value of a range (protocol 6), so callers must dedupe by this group
+/// rather than filtering for a fixed set of "opening" literals.
+fn era_group(protocol: u16) -> u16 {
+    match protocol {
+        0..=1 => 0,
+        5..=6 => 5,
+        7..=8 => 7,
+        9..=10 => 9,
+        other => other,
+    }
+}
 
 fn parse_system_start(genesis: &Genesis) -> Result<u64, ChainError> {
     genesis
@@ -442,10 +454,14 @@ pub fn pad_era_history(
             }
         };
 
-    for (protocol, era) in eras
-        .iter()
-        .filter(|(protocol, _)| KNOWN_HARDFORKS.contains(protocol))
-    {
+    let mut last_group: Option<u16> = None;
+
+    for (protocol, era) in eras.iter().filter(|(protocol, _)| {
+        let group = era_group(*protocol);
+        let is_new_era = last_group != Some(group);
+        last_group = Some(group);
+        is_new_era
+    }) {
         let start_time = era.slot_time(era.start.slot);
         let end_epoch = era.slot_epoch(tip).0;
         let end_time = era.slot_time(tip);
@@ -694,6 +710,27 @@ mod pad_era_history_tests {
             assert_eq!(row.start.epoch, end.epoch);
             assert_eq!(row.start.timestamp, end.timestamp);
         }
+    }
+
+    #[test]
+    fn keeps_an_era_whose_first_recorded_protocol_is_the_upper_value_of_its_range() {
+        // Preview's genesis sets Alonzo's protocolVersion.major to 6 (the
+        // intra-era-bump value), not 5 — so the *first* era Preview ever
+        // records as on-chain state is protocol 6, and protocol 5 never
+        // appears at all. Filtering for a fixed set of "opening" literals
+        // (the old `KNOWN_HARDFORKS = [2,3,4,5,7,9]` list) dropped this
+        // era entirely, since 6 was treated as an intra-era duplicate of a
+        // protocol-5 entry that was never actually recorded.
+        let genesis = crate::include::preview::load();
+        let system_start = parse_system_start(&genesis).unwrap();
+        let tip = 50_000_000;
+
+        let eras = vec![era(6, 0, 0, system_start, 432_000, 1)];
+
+        let padded = pad_era_history(&eras, tip, &genesis).unwrap();
+
+        let protocols: Vec<u16> = padded.iter().map(|e| e.protocol).collect();
+        assert_eq!(protocols, vec![0, 2, 3, 4, 6]);
     }
 
     #[test]
