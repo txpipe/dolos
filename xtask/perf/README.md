@@ -34,6 +34,12 @@ Match corpus, host, build settings, cache, durability and load across arms.
 Missing counters are unavailable, not zero; simulated cold-cache results are
 not equivalent to physical cold reads.
 
+Paired minibf acceptance also requires a measured-duration floor. Fixed-count
+smoke runs remain useful harness checks but cannot pass merely because they meet
+the sample count. Live multi-body replay is diagnostic coverage of the full
+work-unit lifecycle and automatic archive encoding; it does not change or claim
+equivalence with production's single-body tip-sync cadence.
+
 ## Layout and compatibility
 
 `xtask::perf::{storage,minibf}` share measurement, provenance, load generation

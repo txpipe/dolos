@@ -166,83 +166,8 @@ fn snapshot_roundtrip(workspace: &ScenarioWorkspace) {
     assert_daemon_starts(workspace);
 }
 
-/// The stele roundtrip: publish to a directory, wipe, restore from it.
-///
-/// The same five phases as the tarball roundtrip above, and the two run side by
-/// side because the commands do: `bootstrap snapshot` and `bootstrap stelae`
-/// are siblings, not one replacing the other. What differs is what crosses
-/// between the phases — a directory of deterministic CBOR layers and one
-/// canonical document, rather than a gzip tar of the storage engines' own files
-/// — so this is also the check that the format survives a real preview ledger,
-/// which no in-process fixture reaches.
-///
-/// The wipe is `--force` on the restore command itself rather than a separate
-/// bootstrap: a stele carries the genesis-derived state in its own layers, so
-/// restoring onto a genesis-applied node would be writing over data the stele
-/// already has, and the operator's one-command flow is the one worth testing.
-fn stele_roundtrip(workspace: &ScenarioWorkspace) {
-    println!("e2e stele roundtrip start: {}", workspace.name());
-
-    // Phase 1: Sync some blocks
-    let original_summary = sync_and_summarize(workspace);
-
-    // Phase 2: Publish a stele
-    //
-    // `publish` refuses a directory that already holds one; the workspace is
-    // fresh per test, so this path has never been written to.
-    let stele_path = workspace.path().join("stele");
-
-    let mut cmd = prepare_scenario_process(workspace);
-    let publish = cmd
-        .args(["snapshot", "publish", "--output-dir"])
-        .arg(&stele_path)
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .output()
-        .expect("failed to run snapshot publish");
-
-    assert!(
-        publish.status.success(),
-        "snapshot publish failed: {}",
-        String::from_utf8_lossy(&publish.stderr)
-    );
-
-    assert!(
-        stele_path.join("inscription.json").is_file(),
-        "publish wrote no inscription"
-    );
-
-    // Phase 3: Wipe data and restore from the stele
-    let mut cmd = prepare_scenario_process(workspace);
-    let restore = cmd
-        .args(["bootstrap", "stelae", "--force", "--source"])
-        .arg(format!("file://{}", stele_path.display()))
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .output()
-        .expect("failed to run bootstrap stelae");
-
-    assert!(
-        restore.status.success(),
-        "bootstrap stelae failed: {}",
-        String::from_utf8_lossy(&restore.stderr)
-    );
-
-    // Phase 4: Verify cursors match
-    assert_summaries_match(&original_summary, &fetch_summary(workspace));
-
-    // Phase 5: Verify daemon starts from restored data
-    assert_daemon_starts(workspace);
-}
-
 #[test]
 #[ignore]
 fn snapshot_roundtrip_for_preview_full_explicit() {
     snapshot_roundtrip(&ScenarioWorkspace::new(&SCENARIOS[0]));
-}
-
-#[test]
-#[ignore]
-fn stele_roundtrip_for_preview_full_explicit() {
-    stele_roundtrip(&ScenarioWorkspace::new(&SCENARIOS[0]));
 }

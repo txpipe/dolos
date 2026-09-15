@@ -166,12 +166,15 @@ crates/snapshot/          # package `dolos-snapshot` — the io.txpipe.dolos.car
   restore.rs      # layer selection and restore into store writes
   planning.rs     # one epoch selection, one reading of the plan it produces
   registry.rs     # store-typed publish/preview/restore over OCI; Point, verify, inspect
-  publisher.rs    # publishing as a sequence of steps a command drives
   node.rs         # registry auth and scratch-dir policy from node configuration
-  backfill.rs     # feature `backfill`: the epoch-at-a-time publisher daemon
 
 crates/mithril/           # package `dolos-mithril` — the aggregator fetch; no stelae dependency
 ```
+
+The Cardano publisher executable, one-shot policy and epoch-at-a-time backfill
+state machine moved to `txpipe/stelae`. Dolos retains the profile and headless
+engine/snapshot facades that application consumes; see
+[`docs/publisher-migration.md`](../docs/publisher-migration.md).
 
 The Dolos-side crate keeps the name `snapshot` because that is this project's word for the artifact (`dolos snapshot`, `[snapshot]`, `tests/e2e/snapshot.rs`); `stele` is the protocol's word for the same thing. The planned `sign.rs` (Ed25519 detached signatures, trusted keys, k-of-n) has not been built: signing stays specified above and unimplemented, and nothing else in this section is aspirational.
 
@@ -179,10 +182,11 @@ Everything is built against the engine-agnostic core traits (`ArchiveStore`, `St
 
 ### CLI and configuration
 
-- `dolos snapshot publish [--repo oci://…] [--output-dir DIR] [--epochs N..M] [--dry-run]` — export layers; `--output-dir` writes blobs + inscription + the `blobs.json` sidecar to disk, `--repo` pushes with blob-skip and moves tags.
 - `dolos snapshot digest` — compute and print the canonical inscription and its sha256 from local stores (what independent verifiers run and sign).
 - `dolos snapshot verify | inspect`; `sign --key FILE` belongs to the signature
   phase, which is specified and not yet built ("Code layout" above).
+- Cardano publication and backfill are `stelae-publisher` commands. Dolos no
+  longer ships producer commands.
 - `dolos bootstrap snapshot` gains source-scheme dispatch: `oci://` → new path; https template / `--file` → legacy tarball, unchanged. `--point epoch-E|latest`; existing `--continue` drives resume; `sync.max_history` bounds how much history is fetched (subsumes the old `full`/`ledger` variants).
 
 ```toml
@@ -222,7 +226,7 @@ The resolution is `dolos::common::stele_registry_auth`, a pure function of `[ste
 
 **1b. Dolos profile core** — `crates/snapshot`: `DolosProfile`, layer readers/writers, and the three trait additions with backend impls and adapter enums. Verified by per-layer roundtrip unit tests and golden-digest tests (fixed input → asserted sha256, catching encoding drift).
 
-**2. Local export/restore e2e** — `export.rs`/`restore.rs` (including the `digests` layer writer), `publish --output-dir`, `bootstrap snapshot --source file://`. Verified by an e2e cloned from `tests/e2e/snapshot.rs`; cross-check restored stores against an `import_blocks`-built node; determinism test (two independently synced nodes → identical inscription digests), which is where any entity-encoding nondeterminism surfaces; audit `crates/cardano/src/model/*` as needed.
+**2. Local export/restore e2e** — `export.rs`/`restore.rs` (including the `digests` layer writer), `SnapshotSource::publish_directory`, `dolos bootstrap stelae --source file://`. Verified by an e2e cloned from `tests/e2e/snapshot.rs`; cross-check restored stores against an `import_blocks`-built node; determinism test (two independently synced nodes → identical inscription digests), which is where any entity-encoding nondeterminism surfaces; audit `crates/cardano/src/model/*` as needed.
 
 **3. OCI transport** — push with blob-skip, pull missing-only, tags. Verified against a local registry (`zot`/`registry:2`) spawned by the test; delta assertions (publish E then E+1 → only new blobs upload; pre-seeded restore fetches only missing); kill-and-`--continue` resume.
 

@@ -16,7 +16,7 @@ use std::{
     str::FromStr,
 };
 
-use dolos::storage::{CURRENT_STORAGE_VERSION, MIGRATION_GUIDE_URL};
+use dolos::storage::{BOOTSTRAP_GUIDE_URL, CURRENT_STORAGE_VERSION};
 
 use crate::{data::cleanup, feedback::Feedback};
 
@@ -595,8 +595,8 @@ impl ConfigEditor {
             StorageUpgrade::Unreadable => Err(miette!(
                 "found a `{CONFIG_FILE}` this dolos cannot read, so the storage it configures \
                  cannot be located. Remove the data directory your existing `{CONFIG_FILE}` \
-                 names, then delete the file and run `dolos init` again — see the migration \
-                 guide at {MIGRATION_GUIDE_URL}"
+                 names, then delete the file and run `dolos init` again — see the bootstrap \
+                 guide at {BOOTSTRAP_GUIDE_URL}"
             )),
             StorageUpgrade::Offer => {
                 let delete = Confirm::new("Your storage is incompatible with the current version. Do you want to delete data and bootstrap?")
@@ -624,7 +624,7 @@ impl ConfigEditor {
             return Err(miette!(
                 "storage upgrade declined, leaving the existing setup untouched. Dolos will \
                  keep refusing to start against it until the data is re-bootstrapped — see \
-                 the migration guide at {MIGRATION_GUIDE_URL}"
+                 the bootstrap guide at {BOOTSTRAP_GUIDE_URL}"
             ));
         }
 
@@ -941,8 +941,8 @@ mod tests {
             .expect("declining aborts the init");
 
         assert!(
-            error.to_string().contains(MIGRATION_GUIDE_URL),
-            "the abort must point at the migration guide: {error}"
+            error.to_string().contains(BOOTSTRAP_GUIDE_URL),
+            "the abort must point at the bootstrap guide: {error}"
         );
         assert!(
             all_present(&files),
@@ -1057,8 +1057,8 @@ mod tests {
             .expect("an unreadable config aborts the init");
 
         assert!(
-            error.to_string().contains(MIGRATION_GUIDE_URL),
-            "the abort must point at the migration guide: {error}"
+            error.to_string().contains(BOOTSTRAP_GUIDE_URL),
+            "the abort must point at the bootstrap guide: {error}"
         );
         assert!(
             all_present(&files),
@@ -1149,7 +1149,7 @@ is_testnet = true
             .err()
             .expect("an unreadable config aborts the init");
 
-        assert!(error.to_string().contains(MIGRATION_GUIDE_URL));
+        assert!(error.to_string().contains(BOOTSTRAP_GUIDE_URL));
         assert_eq!(std::fs::read_to_string(&config_file).unwrap(), unreadable);
         assert!(all_present(&files), "the abort must delete nothing");
 

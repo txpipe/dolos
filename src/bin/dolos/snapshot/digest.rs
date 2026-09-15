@@ -48,7 +48,10 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use dolos_core::config::RootConfig;
-use dolos_snapshot::export::{self, Following, Plan, Predecessor};
+use dolos_snapshot::{
+    export::{Following, Plan, Predecessor},
+    facade::{SnapshotSource as _, StoreSnapshot},
+};
 use miette::{Context as _, IntoDiagnostic as _};
 
 use super::EpochRange;
@@ -98,6 +101,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     };
 
     let plan = super::planned(config, &stores, &selection, "planning the reproduction")?;
+    let snapshot = StoreSnapshot::new(&stores.archive, &stores.state);
 
     super::report_plan(&plan)?;
 
@@ -112,7 +116,7 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
 
     let predecessor: &dyn Predecessor = match &previous {
         Some(following) => following,
-        None => &export::First,
+        None => &dolos_snapshot::export::First,
     };
 
     match previous.as_ref().map(Predecessor::history) {
@@ -120,7 +124,8 @@ pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
         None => eprintln!("history:  none; this reproduction starts a chain"),
     }
 
-    let document = export::digest_document(&plan, &stores.archive, &stores.state, predecessor)
+    let document = snapshot
+        .digest_document(&plan, predecessor)
         .into_diagnostic()
         .context("reproducing the stele")?;
 

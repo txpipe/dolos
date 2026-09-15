@@ -90,6 +90,47 @@ impl std::fmt::Display for Issue {
     }
 }
 
+/// One invariant that cannot be asserted at this particular store position.
+///
+/// This is deliberately not an [`Issue`]: a known structural limit must stay
+/// visible to the operator without making a consistent store fail the check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotAssertable {
+    pub check: CheckKind,
+    pub detail: String,
+}
+
+impl NotAssertable {
+    pub fn new(check: CheckKind, detail: impl Into<String>) -> Self {
+        Self {
+            check,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for NotAssertable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.check, self.detail)
+    }
+}
+
+/// Findings from one check, separating inconsistencies from structural skips.
+#[derive(Debug, Default)]
+pub struct CheckResult {
+    pub issues: Vec<Issue>,
+    pub not_assertable: Vec<NotAssertable>,
+}
+
+impl From<Vec<Issue>> for CheckResult {
+    fn from(issues: Vec<Issue>) -> Self {
+        Self {
+            issues,
+            not_assertable: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 pub struct Args {
     /// check to run; repeatable, runs all of them when omitted
@@ -121,6 +162,7 @@ struct Timing {
     check: CheckKind,
     elapsed: Duration,
     issues: usize,
+    not_assertable: usize,
 }
 
 pub fn run(
@@ -141,10 +183,10 @@ pub fn run(
         let started = Instant::now();
 
         let found = match check {
-            CheckKind::Cursors => cursors::run(&stores),
-            CheckKind::ArchiveContinuity => archive::run(&stores, &progress),
-            CheckKind::AccountEpochs => accounts::run(&stores, &progress),
-            CheckKind::EpochLog => epoch_log::run(&stores),
+            CheckKind::Cursors => cursors::run(&stores).map(CheckResult::from),
+            CheckKind::ArchiveContinuity => archive::run(&stores, &progress).map(CheckResult::from),
+            CheckKind::AccountEpochs => accounts::run(&stores, &progress).map(CheckResult::from),
+            CheckKind::EpochLog => epoch_log::run(&stores).map(CheckResult::from),
             CheckKind::Totals => totals::run(&stores, &genesis, &progress),
         };
 
@@ -156,27 +198,38 @@ pub fn run(
 
         let found = found?;
 
-        for issue in &found {
+        for issue in &found.issues {
             eprintln!("{issue}");
+        }
+
+        for skipped in &found.not_assertable {
+            println!("{skipped}");
         }
 
         timings.push(Timing {
             check,
             elapsed,
-            issues: found.len(),
+            issues: found.issues.len(),
+            not_assertable: found.not_assertable.len(),
         });
 
-        issues.extend(found);
+        issues.extend(found.issues);
     }
 
     println!();
 
     for timing in &timings {
+        let skipped = match timing.not_assertable {
+            0 => String::new(),
+            count => format!(", {count} not assertable at this tip"),
+        };
+
         println!(
-            "{:<20} {:>10.2?}  {} issue(s)",
+            "{:<20} {:>10.2?}  {} issue(s){}",
             timing.check.name(),
             timing.elapsed,
-            timing.issues
+            timing.issues,
+            skipped,
         );
     }
 
@@ -195,13 +248,15 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolos_cardano::model::{AccountState, EpochState, PoolState, SingletonEntity as _};
+    use dolos_cardano::model::{
+        AccountState, EpochState, PoolParams, PoolSnapshot, PoolState, SingletonEntity as _,
+    };
     use dolos_cardano::FixedNamespace as _;
     use dolos_core::{ArchiveStore as _, Domain as _, StateStore as _, WalStore as _};
     use dolos_core::{ArchiveWriter as _, ChainPoint, EntityKey, StateWriter as _};
     use dolos_testing::blocks::make_conway_block_with_prev;
     use dolos_testing::toy_domain::ToyDomain;
-    use pallas::ledger::primitives::conway::DRep;
+    use pallas::ledger::primitives::conway::{DRep, RationalNumber};
     use pallas::ledger::primitives::StakeCredential;
 
     fn live_epoch(domain: &ToyDomain) -> EpochState {
@@ -278,11 +333,20 @@ mod tests {
         let (found, referent_issues) =
             totals::recompute(domain.state(), anchors, |_, _| {}).unwrap();
         issues.extend(referent_issues);
-        issues.extend(totals::check_pots(
-            &totals::live_pots(&epoch).expect("harness epoch can be placed at the tip"),
-            &found,
-            domain.genesis().shelley.max_lovelace_supply,
-        ));
+        issues.extend(
+            totals::check_pots(
+                &totals::live_pots(&epoch).expect("harness epoch can be placed at the tip"),
+                &found,
+                totals::SupplyCheck::Exact {
+                    max_supply: domain
+                        .genesis()
+                        .shelley
+                        .max_lovelace_supply
+                        .expect("the test genesis fixes a maximum supply"),
+                },
+            )
+            .issues,
+        );
 
         issues
     }
@@ -436,13 +500,39 @@ mod tests {
 
         let operator = pallas::crypto::hash::Hash::<28>::from([0x77; 28]);
 
+        let snapshot = |is_retired| PoolSnapshot {
+            is_retired,
+            blocks_minted: 0,
+            params: PoolParams {
+                vrf_keyhash: pallas::crypto::hash::Hash::from([0; 32]),
+                pledge: 0,
+                cost: 0,
+                margin: RationalNumber {
+                    numerator: 0,
+                    denominator: 1,
+                },
+                reward_account: vec![0; 29],
+                pool_owners: Vec::new(),
+                relays: Vec::new(),
+                pool_metadata: None,
+            },
+            is_new: false,
+        };
+
         let pool = PoolState {
             operator,
-            snapshot: dolos_cardano::model::EpochValue::new(epoch.number),
+            snapshot: dolos_cardano::model::EpochValue::with_live(epoch.number, snapshot(false)),
             blocks_minted_total: 0,
             register_slot: 0,
             retiring_epoch: None,
             deposit: 500_000_000,
+        };
+
+        let retired_operator = pallas::crypto::hash::Hash::<28>::from([0x78; 28]);
+        let retired_pool = PoolState {
+            operator: retired_operator,
+            snapshot: dolos_cardano::model::EpochValue::with_live(epoch.number, snapshot(true)),
+            ..pool.clone()
         };
 
         let credential = StakeCredential::AddrKeyhash([0x43; 28].into());
@@ -458,12 +548,17 @@ mod tests {
         writer
             .write_entity_typed(&EntityKey::from(operator), &pool)
             .unwrap();
+        writer
+            .write_entity_typed(&EntityKey::from(retired_operator), &retired_pool)
+            .unwrap();
         writer.write_entity_typed(&key, &account).unwrap();
         writer.commit().unwrap();
 
-        let (_, issues) = totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
+        let (found, issues) =
+            totals::recompute(domain.state(), Default::default(), |_, _| {}).unwrap();
 
         assert!(issues.is_empty(), "{issues:#?}");
+        assert_eq!(found.registered_pools, 1);
     }
 
     /// The corruption fixture for the other side of the same check: the same
