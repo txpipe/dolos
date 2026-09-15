@@ -58,7 +58,7 @@
 //! leaves, and an LSM memtable sorts its batch regardless of arrival order.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ops::{Bound, Range};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -475,15 +475,15 @@ impl ArchiveStore {
 /// overlay first and the committed state second — the reads redb gets for
 /// free from its transaction seeing its own writes.
 ///
-/// `stake_pairs_seen` plays the same role for the stake address log: the
-/// pairs this writer has already inserted, since the batch cannot read its
-/// own pending inserts and one batch spans many blocks.
+/// `stake_pairs` plays the same role for the stake address log: the pairs
+/// this writer has inserted or removed, since the batch cannot read its own
+/// writes and one writer spans many blocks and may both apply and undo.
 pub struct ArchiveWriter {
     store: ArchiveStore,
     batch: Mutex<OwnedWriteBatch>,
     pending_blocks: Mutex<Vec<(ChainPoint, RawBlock)>>,
     overlay: Mutex<HashMap<BlockSlot, Vec<BlockLocation>>>,
-    stake_pairs_seen: Mutex<HashSet<Vec<u8>>>,
+    stake_pairs: Mutex<stake_log::PendingPairs>,
     #[cfg(test)]
     fail_index_commit: bool,
 }
@@ -495,7 +495,7 @@ impl ArchiveWriter {
             store: store.clone(),
             pending_blocks: Mutex::new(Vec::new()),
             overlay: Mutex::new(HashMap::new()),
-            stake_pairs_seen: Mutex::new(HashSet::new()),
+            stake_pairs: Mutex::new(stake_log::PendingPairs::new()),
             #[cfg(test)]
             fail_index_commit: false,
         }
@@ -587,14 +587,14 @@ impl CoreArchiveWriter for ArchiveWriter {
         tags::apply(&mut batch, &self.store.tags, deltas)?;
 
         let snapshot = self.store.db.snapshot();
-        let mut seen = self.stake_pairs_seen.lock().unwrap();
+        let mut pending = self.stake_pairs.lock().unwrap();
 
         for block in deltas {
             stake_log::apply(
                 &mut batch,
                 &self.store.stake_log,
                 &snapshot,
-                &mut seen,
+                &mut pending,
                 block.slot,
                 &block.stake_addresses,
             )?;
@@ -610,12 +610,14 @@ impl CoreArchiveWriter for ArchiveWriter {
         tags::undo(&mut batch, &self.store.tags, deltas)?;
 
         let snapshot = self.store.db.snapshot();
+        let mut pending = self.stake_pairs.lock().unwrap();
 
         for block in deltas.iter().rev() {
             stake_log::undo(
                 &mut batch,
                 &self.store.stake_log,
                 &snapshot,
+                &mut pending,
                 block.slot,
                 &block.stake_addresses,
             )?;
