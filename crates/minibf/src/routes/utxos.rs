@@ -42,6 +42,10 @@ const UTXO_CHUNK: usize = 1024;
 
 /// Loads one page of the UTxOs in `refs` that `filter` keeps. Only the last
 /// page can have fewer than `count` rows.
+///
+/// `from` / `to` on the pagination are ignored: Blockfrost does not accept
+/// them on the address and script UTxO endpoints. Use
+/// [`load_utxo_models_in_height_range`] for the endpoints that do.
 pub async fn load_utxo_models<D, T>(
     domain: &Facade<D>,
     refs: HashSet<TxoRef>,
@@ -53,6 +57,56 @@ where
     T: serde::Serialize,
     for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
 {
+    load_utxo_models_filtered(domain, refs, pagination, filter, |_| true).await
+}
+
+/// Like [`load_utxo_models`] but honours `from` / `to` as an inclusive block
+/// height range, the way Blockfrost's `/assets/{asset}/utxos` does.
+///
+/// An output whose creation block was pruned by `sync.max_history` has no
+/// known height. It is older than every retained block, so it is kept only
+/// when the range has no lower bound.
+pub async fn load_utxo_models_in_height_range<D, T>(
+    domain: &Facade<D>,
+    refs: HashSet<TxoRef>,
+    pagination: Pagination,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let range = pagination.clone();
+
+    load_utxo_models_filtered(
+        domain,
+        refs,
+        pagination,
+        UtxoFilter::All,
+        move |height| match height {
+            Some(height) => !range.should_skip(height, 0),
+            None => range.from.is_none(),
+        },
+    )
+    .await
+}
+
+/// The page, with `keep` deciding by block height, before the sort and the
+/// cut, which rows stay; `None` is an output whose creation block was pruned.
+async fn load_utxo_models_filtered<D, T>(
+    domain: &Facade<D>,
+    refs: HashSet<TxoRef>,
+    pagination: Pagination,
+    filter: UtxoFilter,
+    keep: impl Fn(Option<u64>) -> bool,
+) -> Result<Vec<T>, StatusCode>
+where
+    D: Domain + Clone + Send + Sync + 'static,
+    T: serde::Serialize,
+    for<'a> UtxoOutputModelBuilder<'a>: IntoModel<T, SortKey = (u64, usize, u32)>,
+{
+    let chain = domain.get_chain_summary()?;
+
     let utxos = select_utxos(domain, refs, filter, UTXO_CHUNK).await?;
 
     let mut block_meta = BlockMetaResolver::new(domain.query());
@@ -72,6 +126,7 @@ where
                 block_data,
             )
         })
+        .filter(|(_, _, _, block_data)| keep(block_data.as_ref().map(|data| data.height)))
         .collect();
 
     match pagination.order {
@@ -96,7 +151,8 @@ where
         let builder = UtxoOutputModelBuilder::from_output(tx_hash, txo_idx, output);
 
         let builder = if let Some(x) = block_data {
-            builder.with_block_data(x)
+            let block_time = chain.slot_time(x.slot);
+            builder.with_block_data(x).with_block_time(block_time)
         } else {
             builder
         };
