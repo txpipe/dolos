@@ -50,10 +50,12 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
             if let Ok((hrp, payload)) = bech32::decode(drep_id) {
                 return match (hrp.as_str(), payload.len()) {
                     ("drep", 29) => {
-                        let header_byte = payload.first().ok_or(StatusCode::BAD_REQUEST)?;
+                        let header_byte = *payload.first().ok_or(StatusCode::BAD_REQUEST)?;
 
-                        // A DRep header has 0010 in the first four bits.
-                        if header_byte & 0b11110000 != 0b00100000 {
+                        // A CIP-129 DRep header is the key prefix or the script prefix.
+                        if header_byte != pallas_extras::DREP_KEY_PREFIX
+                            && header_byte != pallas_extras::DREP_SCRIPT_PREFIX
+                        {
                             return Err(StatusCode::BAD_REQUEST);
                         }
 
@@ -86,13 +88,17 @@ fn parse_drep_id(drep_id: &str) -> Result<(String, Vec<u8>, bool, bool), StatusC
             let payload = hex::decode(drep_id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
             match payload.len() {
-                29 if payload[0] & 0b11110000 == 0b00100000 => Ok((
-                    bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
-                        .map_err(|_| StatusCode::BAD_REQUEST)?,
-                    payload,
-                    false,
-                    false,
-                )),
+                29 if payload[0] == pallas_extras::DREP_KEY_PREFIX
+                    || payload[0] == pallas_extras::DREP_SCRIPT_PREFIX =>
+                {
+                    Ok((
+                        bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+                            .map_err(|_| StatusCode::BAD_REQUEST)?,
+                        payload,
+                        false,
+                        false,
+                    ))
+                }
                 28 => Ok((
                     bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
                         .map_err(|_| StatusCode::BAD_REQUEST)?,
@@ -1172,6 +1178,22 @@ mod tests {
         );
         assert!(is_legacy);
         assert!(!is_special_case);
+    }
+
+    #[test]
+    fn parse_drep_id_rejects_invalid_cip129_header() {
+        // 0x20 has the DRep high nibble. 0x20 is not a DRep key or script header.
+        let mut payload = vec![0x20u8];
+        payload.extend_from_slice(&[7u8; 28]);
+
+        let bech32_id = bech32(bech32::Hrp::parse("drep").unwrap(), &payload)
+            .expect("failed to encode drep id");
+
+        assert_eq!(parse_drep_id(&bech32_id), Err(StatusCode::BAD_REQUEST));
+        assert_eq!(
+            parse_drep_id(&hex::encode(&payload)),
+            Err(StatusCode::BAD_REQUEST)
+        );
     }
 
     #[tokio::test]
