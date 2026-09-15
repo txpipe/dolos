@@ -1,4 +1,5 @@
-use dolos_core::{ChainError, Genesis, TxOrder};
+use crate::model::CertPosition;
+use dolos_core::{CertIndex, ChainError, Genesis, TxOrder};
 
 use super::WorkDeltas;
 use pallas::ledger::primitives::alonzo::{
@@ -115,6 +116,7 @@ impl BlockVisitor for AccountVisitor {
         block: &MultiEraBlock,
         _: &MultiEraTx,
         order: &TxOrder,
+        cert_index: CertIndex,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         let epoch = self.epoch.expect("value set in root");
@@ -137,8 +139,7 @@ impl BlockVisitor for AccountVisitor {
             deltas.add_for_entity(VoteDelegation::new(
                 cert.delegator,
                 cert.drep,
-                block.slot(),
-                *order,
+                CertPosition::new(block.slot(), *order, cert_index),
                 epoch,
             ));
         }

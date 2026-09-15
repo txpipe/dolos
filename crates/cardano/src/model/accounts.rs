@@ -1,4 +1,6 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{BlockSlot, CertIndex, EntityKey, NsKey, TxOrder};
+
+use crate::model::CertPosition;
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     crypto::hash::Hash,
@@ -126,6 +128,12 @@ pub struct AccountState {
     #[n(7)]
     #[cbor(default)]
     pub retired_pool: Option<PoolHash>,
+
+    // Backward-compatible addition: absent in pre-existing rows, decodes as
+    // 0. Index 8 must not be reused for anything else.
+    #[n(8)]
+    #[cbor(default)]
+    pub vote_delegated_cert: CertIndex,
 }
 
 entity_boilerplate!(AccountState, "accounts");
@@ -179,6 +187,7 @@ pub(crate) mod testing {
             pool in any_epoch_value(any_pool_delegation().boxed()),
             drep in any_epoch_value(any_drep_delegation().boxed()),
             vote_delegated_at in prop::option::of((root::any_slot(), root::any_tx_order())),
+            vote_delegated_cert in root::any_tx_order(),
             retired_pool in prop::option::of(root::any_pool_hash()),
         ) -> AccountState {
             // ESTART rotates stake/pool/drep in lockstep, so a healthy account
@@ -192,6 +201,7 @@ pub(crate) mod testing {
                 pool: crate::model::epoch_value::testing::rebase(pool, epoch),
                 drep: crate::model::epoch_value::testing::rebase(drep, epoch),
                 vote_delegated_at,
+                vote_delegated_cert,
                 retired_pool,
             }
         }
@@ -207,6 +217,7 @@ impl AccountState {
             pool: EpochValue::new(epoch),
             drep: EpochValue::new(epoch),
             vote_delegated_at: None,
+            vote_delegated_cert: 0,
             deregistered_at: None,
             retired_pool: None,
         }
@@ -276,6 +287,12 @@ impl AccountState {
             Some(DRepDelegation::Delegated(drep)) => Some(drep),
             _ => None,
         }
+    }
+
+    /// Position of the latest vote delegation certificate.
+    pub fn vote_delegation_position(&self) -> Option<CertPosition> {
+        self.vote_delegated_at
+            .map(|at| CertPosition::from_parts(at, self.vote_delegated_cert))
     }
 }
 
@@ -515,29 +532,25 @@ impl dolos_core::EntityDelta for StakeDelegation {
 pub struct VoteDelegation {
     pub(crate) cred: StakeCredential,
     pub(crate) drep: DRep,
-    pub(crate) vote_delegated_at: (BlockSlot, TxOrder),
+    pub(crate) position: CertPosition,
     pub(crate) epoch: Epoch,
 
     // undo
     pub(crate) prev_drep: Option<EpochValue<DRepDelegation>>,
     pub(crate) prev_vote_delegated_at: Option<(BlockSlot, TxOrder)>,
+    pub(crate) prev_vote_delegated_cert: CertIndex,
 }
 
 impl VoteDelegation {
-    pub fn new(
-        cred: StakeCredential,
-        drep: DRep,
-        slot: BlockSlot,
-        order: TxOrder,
-        epoch: Epoch,
-    ) -> Self {
+    pub fn new(cred: StakeCredential, drep: DRep, position: CertPosition, epoch: Epoch) -> Self {
         Self {
             cred,
             drep,
-            vote_delegated_at: (slot, order),
+            position,
             epoch,
             prev_drep: None,
             prev_vote_delegated_at: None,
+            prev_vote_delegated_cert: 0,
         }
     }
 }
@@ -556,9 +569,11 @@ impl dolos_core::EntityDelta for VoteDelegation {
         // save undo
         self.prev_drep = Some(entity.drep.clone());
         self.prev_vote_delegated_at = entity.vote_delegated_at;
+        self.prev_vote_delegated_cert = entity.vote_delegated_cert;
 
         // apply changes
-        entity.vote_delegated_at = Some(self.vote_delegated_at);
+        entity.vote_delegated_at = Some(self.position.tx_at());
+        entity.vote_delegated_cert = self.position.cert_index;
         entity
             .drep
             .replace(DRepDelegation::Delegated(self.drep.clone()), self.epoch);
@@ -567,6 +582,7 @@ impl dolos_core::EntityDelta for VoteDelegation {
     fn undo(&self, entity: &mut Option<AccountState>) {
         let entity = entity.as_mut().expect("existing account");
         entity.vote_delegated_at = self.prev_vote_delegated_at;
+        entity.vote_delegated_cert = self.prev_vote_delegated_cert;
         entity.drep = self.prev_drep.clone().expect("apply captured drep");
     }
 }
@@ -1103,9 +1119,10 @@ mod prop_tests {
             drep in root::any_drep(),
             slot in root::any_slot(),
             order in root::any_tx_order(),
+            cert in root::any_tx_order(),
             epoch in root::any_epoch(),
         ) -> VoteDelegation {
-            VoteDelegation::new(cred, drep, slot, order, epoch)
+            VoteDelegation::new(cred, drep, CertPosition::new(slot, order, cert), epoch)
         }
     }
 

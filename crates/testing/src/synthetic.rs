@@ -132,6 +132,14 @@ impl Default for SyntheticBlockConfig {
 
 pub type BlockGovActions = Vec<Vec<GovAction>>;
 
+/// Index of the DRep registration certificate inside every synthetic sample
+/// transaction.
+pub const DREP_REGISTRATION_CERT_INDEX: usize = 3;
+
+/// Index of the vote delegation certificate inside every synthetic sample
+/// transaction.
+pub const VOTE_DELEGATION_CERT_INDEX: usize = 4;
+
 #[derive(Clone, Debug)]
 pub struct SyntheticVectors {
     pub address: String,
@@ -783,14 +791,22 @@ fn sample_transaction(
     // registers the DRep.
     let vote_delegation = Certificate::VoteDeleg(stake_cred, DRep::Key(drep_keyhash.into()));
 
-    let certificates = NonEmptySet::try_from(vec![
+    let certificates = vec![
         registration,
         delegation,
         pool_cert,
         drep_cert,
         vote_delegation,
-    ])
-    .expect("non-empty certificates");
+    ];
+    debug_assert!(matches!(
+        certificates[DREP_REGISTRATION_CERT_INDEX],
+        Certificate::RegDRepCert(..)
+    ));
+    debug_assert!(matches!(
+        certificates[VOTE_DELEGATION_CERT_INDEX],
+        Certificate::VoteDeleg(..)
+    ));
+    let certificates = NonEmptySet::try_from(certificates).expect("non-empty certificates");
 
     let body = TransactionBody {
         inputs: Set::from(vec![input]),

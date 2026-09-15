@@ -23,8 +23,8 @@ use blockfrost_openapi::models::{
 };
 use dolos_cardano::{
     model::{
-        drep_from_entity_key, AccountState, DRepState, FixedNamespace as _, ProposalAction,
-        ProposalState,
+        drep_from_entity_key, AccountState, CertPosition, DRepState, FixedNamespace as _,
+        ProposalAction, ProposalState,
     },
     pallas_extras, ChainSummary, PParamsSet,
 };
@@ -197,15 +197,9 @@ impl<'a> DrepModelBuilder<'a> {
             return false;
         }
 
-        let Some(state) = self.state.as_ref() else {
-            return false;
-        };
-
-        match (state.registered_at, state.unregistered_at) {
-            (Some(registered), Some(unregistered)) => unregistered > registered,
-            (Some(_), None) => false,
-            _ => false,
-        }
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.is_unregistered())
     }
 
     fn is_drep_active(&self) -> bool {
@@ -370,7 +364,7 @@ impl IntoModel<DrepDelegatorsInner> for DrepDelegatorModelBuilder {
 
 /// One account that delegates its vote to the requested DRep.
 struct DrepDelegatorRow {
-    delegated_at: Option<(BlockSlot, TxOrder)>,
+    delegated_at: Option<CertPosition>,
     key: EntityKey,
     delegator: StakeCredential,
     live_stake: u64,
@@ -379,15 +373,16 @@ struct DrepDelegatorRow {
 impl DrepDelegatorRow {
     fn new(key: EntityKey, account: AccountState) -> Self {
         Self {
-            delegated_at: account.vote_delegated_at,
+            delegated_at: account.vote_delegation_position(),
             key,
             live_stake: account.live_stake(),
             delegator: account.credential,
         }
     }
 
-    /// Blockfrost orders delegators by their latest vote delegation.
-    fn sort_key(&self) -> (Option<(BlockSlot, TxOrder)>, &EntityKey) {
+    /// Blockfrost orders delegators by their latest vote delegation
+    /// certificate, down to its position inside the transaction.
+    fn sort_key(&self) -> (Option<CertPosition>, &EntityKey) {
         (self.delegated_at, &self.key)
     }
 }
@@ -395,6 +390,8 @@ impl DrepDelegatorRow {
 /// Whether Blockfrost counts `account` as a delegator of `drep`.
 ///
 /// A delegation made before the DRep's latest registration does not count.
+/// Blockfrost compares transaction ids here, so a delegation in the
+/// registration's own transaction counts whatever its certificate index.
 fn delegates_to(
     account: &AccountState,
     drep: &DRep,
@@ -1301,7 +1298,13 @@ mod tests {
     use bech32::{Bech32, Hrp};
     use dolos_cardano::model::{drep_to_entity_key, DRepDelegation, EpochValue, GovPurpose, Stake};
     use dolos_core::StateWriter as _;
-    use dolos_testing::{synthetic::SyntheticBlockConfig, toy_domain::ToyDomain};
+    use dolos_testing::{
+        synthetic::{
+            SyntheticBlockConfig, SyntheticVectors, DREP_REGISTRATION_CERT_INDEX,
+            VOTE_DELEGATION_CERT_INDEX,
+        },
+        toy_domain::ToyDomain,
+    };
     use itertools::Itertools;
     use pallas::{
         codec::{minicbor, utils::Bytes},
@@ -1541,13 +1544,15 @@ mod tests {
     /// Overwrites the synthetic DRep state with the given registration bounds.
     fn seed_drep(
         domain: &ToyDomain,
-        registered_at: Option<(BlockSlot, TxOrder)>,
-        unregistered_at: Option<(BlockSlot, TxOrder)>,
+        registered_at: Option<CertPosition>,
+        unregistered_at: Option<CertPosition>,
     ) {
         let drep = synthetic_drep();
         let mut state = DRepState::new(drep.clone());
-        state.registered_at = registered_at;
-        state.unregistered_at = unregistered_at;
+        state.registered_at = registered_at.map(|at| at.tx_at());
+        state.registered_cert = registered_at.map_or(0, |at| at.cert_index);
+        state.unregistered_at = unregistered_at.map(|at| at.tx_at());
+        state.unregistered_cert = unregistered_at.map_or(0, |at| at.cert_index);
 
         let writer = domain
             .state()
@@ -1559,14 +1564,16 @@ mod tests {
         writer.commit().expect("failed to commit drep");
     }
 
-    /// Slot and tx order of the synthetic account's latest vote delegation.
-    /// Every synthetic tx carries the delegation, so it is the last tx of the
+    /// Position of the synthetic account's latest vote delegation. Every
+    /// synthetic tx carries the delegation, so it is in the last tx of the
     /// last block.
-    fn last_vote_delegation(
-        vectors: &dolos_testing::synthetic::SyntheticVectors,
-    ) -> (BlockSlot, TxOrder) {
+    fn last_vote_delegation(vectors: &SyntheticVectors) -> CertPosition {
         let last = vectors.blocks.last().expect("synthetic chain has blocks");
-        (last.slot, last.tx_hashes.len() - 1)
+        CertPosition::new(
+            last.slot,
+            last.tx_hashes.len() - 1,
+            VOTE_DELEGATION_CERT_INDEX,
+        )
     }
 
     fn tip_epoch(domain: &ToyDomain) -> Epoch {
@@ -1597,14 +1604,14 @@ mod tests {
         domain: &ToyDomain,
         seed: u8,
         drep: DRep,
-        delegated_at: (BlockSlot, TxOrder),
+        delegated_at: CertPosition,
         utxo_sum: u64,
     ) {
         let epoch = tip_epoch(domain);
         let credential = seeded_credential(seed);
 
         let mut account = AccountState::new(epoch, credential.clone());
-        account.registered_at = Some(delegated_at.0);
+        account.registered_at = Some(delegated_at.slot);
         account.stake = EpochValue::with_live(
             epoch,
             Stake {
@@ -1613,7 +1620,8 @@ mod tests {
             },
         );
         account.drep = EpochValue::with_live(epoch, DRepDelegation::Delegated(drep));
-        account.vote_delegated_at = Some(delegated_at);
+        account.vote_delegated_at = Some(delegated_at.tx_at());
+        account.vote_delegated_cert = delegated_at.cert_index;
 
         let key = EntityKey::from(minicbor::to_vec(&credential).expect("encode credential"));
         let writer = domain
@@ -1664,12 +1672,13 @@ mod tests {
             ..Default::default()
         };
         let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let (slot, _) = last_vote_delegation(vectors);
+            let slot = last_vote_delegation(vectors).slot;
             let drep = synthetic_drep();
-            seed_delegator(domain, 0x41, drep.clone(), (slot - 1, 0), 1_000);
-            seed_delegator(domain, 0x42, drep.clone(), (slot + 1, 0), 2_000);
-            seed_delegator(domain, 0x43, drep.clone(), (slot + 1, 1), 3_000);
-            seed_delegator(domain, 0x44, drep, (slot + 2, 0), 4_000);
+            let at = |slot, tx| CertPosition::new(slot, tx, 0);
+            seed_delegator(domain, 0x41, drep.clone(), at(slot - 1, 0), 1_000);
+            seed_delegator(domain, 0x42, drep.clone(), at(slot + 1, 0), 2_000);
+            seed_delegator(domain, 0x43, drep.clone(), at(slot + 1, 1), 3_000);
+            seed_delegator(domain, 0x44, drep, at(slot + 2, 0), 4_000);
         });
         let base = drep_delegators_path(&app.vectors().drep_id);
 
@@ -1727,9 +1736,10 @@ mod tests {
             ..Default::default()
         };
         let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let (slot, _) = last_vote_delegation(vectors);
-            seed_delegator(domain, 0x51, DRep::Abstain, (slot, 0), 5_000);
-            seed_delegator(domain, 0x52, DRep::NoConfidence, (slot, 1), 6_000);
+            let slot = last_vote_delegation(vectors).slot;
+            let at = |tx| CertPosition::new(slot, tx, 0);
+            seed_delegator(domain, 0x51, DRep::Abstain, at(0), 5_000);
+            seed_delegator(domain, 0x52, DRep::NoConfidence, at(1), 6_000);
         });
 
         let abstain = get_drep_delegators(&app, &drep_delegators_path("drep_always_abstain")).await;
@@ -1754,15 +1764,20 @@ mod tests {
             ..Default::default()
         };
         let app = TestApp::new_with_cfg_and_setup(cfg, |domain, _| {
-            seed_drep(domain, Some((1, 0)), Some((2, 0)))
+            seed_drep(
+                domain,
+                Some(CertPosition::new(1, 0, 0)),
+                Some(CertPosition::new(2, 0, 0)),
+            )
         });
 
         let rows = get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
         assert!(rows.is_empty());
     }
 
-    /// A delegation in the same tx as the DRep registration counts. One made
-    /// before the DRep's latest registration does not.
+    /// A delegation in the same tx as the DRep registration counts, whatever
+    /// the certificate order inside that tx. One made before the DRep's latest
+    /// registration tx does not.
     #[tokio::test]
     async fn governance_drep_delegators_honor_registration_cutoff() {
         let cfg = SyntheticBlockConfig {
@@ -1771,16 +1786,23 @@ mod tests {
             ..Default::default()
         };
 
-        let same_tx = TestApp::new_with_cfg_and_setup(cfg.clone(), |domain, vectors| {
-            seed_drep(domain, Some(last_vote_delegation(vectors)), None)
-        });
-        let rows =
-            get_drep_delegators(&same_tx, &drep_delegators_path(&same_tx.vectors().drep_id)).await;
-        assert_eq!(rows.len(), 1);
+        for registration_cert in [DREP_REGISTRATION_CERT_INDEX, VOTE_DELEGATION_CERT_INDEX + 1] {
+            let same_tx = TestApp::new_with_cfg_and_setup(cfg.clone(), |domain, vectors| {
+                let delegated = last_vote_delegation(vectors);
+                let registered =
+                    CertPosition::new(delegated.slot, delegated.tx_order, registration_cert);
+                seed_drep(domain, Some(registered), None)
+            });
+            let rows =
+                get_drep_delegators(&same_tx, &drep_delegators_path(&same_tx.vectors().drep_id))
+                    .await;
+            assert_eq!(rows.len(), 1, "registration cert {registration_cert}");
+        }
 
         let reregistered = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
-            let (slot, order) = last_vote_delegation(vectors);
-            seed_drep(domain, Some((slot, order + 1)), None)
+            let delegated = last_vote_delegation(vectors);
+            let registered = CertPosition::new(delegated.slot, delegated.tx_order + 1, 0);
+            seed_drep(domain, Some(registered), None)
         });
         let rows = get_drep_delegators(
             &reregistered,
@@ -1788,6 +1810,80 @@ mod tests {
         )
         .await;
         assert!(rows.is_empty());
+    }
+
+    /// Two delegations in one tx list in certificate order, not in key order.
+    #[tokio::test]
+    async fn governance_drep_delegators_order_same_tx_by_cert_index() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+        let app = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let slot = last_vote_delegation(vectors).slot + 1;
+            let drep = synthetic_drep();
+            // key order would list 0x71 first; certificate order lists 0x72 first
+            seed_delegator(
+                domain,
+                0x72,
+                drep.clone(),
+                CertPosition::new(slot, 0, 0),
+                2_000,
+            );
+            seed_delegator(domain, 0x71, drep, CertPosition::new(slot, 0, 1), 1_000);
+        });
+
+        let rows = get_drep_delegators(&app, &drep_delegators_path(&app.vectors().drep_id)).await;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1..], [delegator(0x72, 2_000), delegator(0x71, 1_000)]);
+    }
+
+    /// A DRep that registers and retires in one tx is retired. One that
+    /// retires and registers again in one tx is registered.
+    #[tokio::test]
+    async fn governance_drep_delegators_same_tx_retirement() {
+        let cfg = SyntheticBlockConfig {
+            block_count: 5,
+            txs_per_block: 3,
+            ..Default::default()
+        };
+
+        let retired = TestApp::new_with_cfg_and_setup(cfg.clone(), |domain, vectors| {
+            let at = last_vote_delegation(vectors);
+            seed_drep(
+                domain,
+                Some(CertPosition::new(at.slot, at.tx_order, 0)),
+                Some(CertPosition::new(at.slot, at.tx_order, 1)),
+            )
+        });
+        let drep_id = retired.vectors().drep_id.clone();
+        let rows = get_drep_delegators(&retired, &drep_delegators_path(&drep_id)).await;
+        assert!(rows.is_empty());
+
+        let (status, body) = retired
+            .get_bytes(&format!("/governance/dreps/{drep_id}"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let model: blockfrost_openapi::models::drep::Drep =
+            serde_json::from_slice(&body).expect("failed to parse drep");
+        assert!(model.retired);
+        assert!(!model.active);
+
+        let reregistered = TestApp::new_with_cfg_and_setup(cfg, |domain, vectors| {
+            let at = last_vote_delegation(vectors);
+            seed_drep(
+                domain,
+                Some(CertPosition::new(at.slot, at.tx_order, 1)),
+                Some(CertPosition::new(at.slot, at.tx_order, 0)),
+            )
+        });
+        let rows = get_drep_delegators(
+            &reregistered,
+            &drep_delegators_path(&reregistered.vectors().drep_id),
+        )
+        .await;
+        assert_eq!(rows.len(), 1);
     }
 
     #[tokio::test]

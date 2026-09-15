@@ -51,6 +51,7 @@ macro_rules! entity_boilerplate {
 
 pub mod accounts;
 pub mod assets;
+pub mod certs;
 pub mod datums;
 pub mod dreps;
 pub mod epoch_value;
@@ -68,6 +69,7 @@ pub(crate) mod testing;
 
 pub use accounts::*;
 pub use assets::*;
+pub use certs::*;
 pub use datums::*;
 pub use dreps::*;
 pub use epoch_value::*;

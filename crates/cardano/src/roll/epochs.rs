@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use dolos_core::{BrokenInvariant, ChainError, Genesis, TxOrder, TxoRef};
+use dolos_core::{BrokenInvariant, CertIndex, ChainError, Genesis, TxOrder, TxoRef};
 use pallas::ledger::{
     primitives::{
         alonzo::{InstantaneousRewardSource, InstantaneousRewardTarget, MoveInstantaneousReward},
@@ -182,6 +182,7 @@ impl BlockVisitor for EpochStateVisitor {
         _: &MultiEraBlock,
         _: &MultiEraTx,
         _: &TxOrder,
+        _: CertIndex,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if pallas_extras::cert_as_stake_registration(cert).is_some() {

@@ -1,6 +1,6 @@
 use std::ops::Deref;
 
-use dolos_core::{ChainError, Genesis, TxOrder};
+use dolos_core::{CertIndex, ChainError, Genesis, TxOrder};
 use pallas::crypto::hash::{Hash, Hasher};
 use pallas::ledger::primitives::Epoch;
 use pallas::ledger::traverse::{MultiEraBlock, MultiEraCert, MultiEraTx};
@@ -48,6 +48,7 @@ impl BlockVisitor for PoolStateVisitor {
         block: &MultiEraBlock,
         _: &MultiEraTx,
         _: &TxOrder,
+        _: CertIndex,
         cert: &MultiEraCert,
     ) -> Result<(), ChainError> {
         if let Some(cert) = pallas_extras::cert_as_pool_registration(cert) {

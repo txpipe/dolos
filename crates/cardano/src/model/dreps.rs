@@ -1,4 +1,4 @@
-use dolos_core::{BlockSlot, EntityKey, NsKey, TxOrder};
+use dolos_core::{BlockSlot, CertIndex, EntityKey, NsKey, TxOrder};
 use pallas::{
     codec::minicbor::{self, Decode, Encode},
     ledger::primitives::{
@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::FixedNamespace as _;
+use crate::model::CertPosition;
 use crate::pallas_extras;
 
 pub fn drep_to_entity_key(value: &DRep) -> EntityKey {
@@ -148,6 +149,16 @@ pub struct DRepState {
     // anything else.
     #[n(8)]
     pub expiry: Option<DRepExpiry>,
+
+    // Backward-compatible additions: absent in pre-existing rows, decode as
+    // 0. Indexes 9 and 10 must not be reused for anything else.
+    #[n(9)]
+    #[cbor(default)]
+    pub registered_cert: CertIndex,
+
+    #[n(10)]
+    #[cbor(default)]
+    pub unregistered_cert: CertIndex,
 }
 
 impl DRepState {
@@ -162,11 +173,25 @@ impl DRepState {
             identifier,
             anchor: None,
             expiry: None,
+            registered_cert: 0,
+            unregistered_cert: 0,
         }
     }
 
+    /// Position of the latest registration certificate.
+    pub fn registration_position(&self) -> Option<CertPosition> {
+        self.registered_at
+            .map(|at| CertPosition::from_parts(at, self.registered_cert))
+    }
+
+    /// Position of the latest unregistration certificate.
+    pub fn unregistration_position(&self) -> Option<CertPosition> {
+        self.unregistered_at
+            .map(|at| CertPosition::from_parts(at, self.unregistered_cert))
+    }
+
     pub fn is_unregistered(&self) -> bool {
-        match (self.registered_at, self.unregistered_at) {
+        match (self.registration_position(), self.unregistration_position()) {
             (Some(registered_at), Some(unregistered_at)) => registered_at < unregistered_at,
             (_, None) => false,
             (None, Some(unregistered_at)) => {
@@ -210,6 +235,8 @@ pub(crate) mod testing {
             deposit in root::any_lovelace(),
             anchor in prop::option::of(root::any_anchor()),
             expiry in prop::option::of(any_drep_expiry()),
+            registered_cert in root::any_tx_order(),
+            unregistered_cert in root::any_tx_order(),
         ) -> DRepState {
             DRepState {
                 identifier,
@@ -221,6 +248,8 @@ pub(crate) mod testing {
                 deposit,
                 anchor,
                 expiry,
+                registered_cert,
+                unregistered_cert,
             }
         }
     }
@@ -231,34 +260,28 @@ pub(crate) mod testing {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepRegistration {
     pub(crate) drep: DRep,
-    pub(crate) slot: BlockSlot,
-    pub(crate) txorder: TxOrder,
+    pub(crate) position: CertPosition,
     pub(crate) deposit: u64,
     pub(crate) anchor: Option<Anchor>,
 
     // undo
     pub(crate) was_new: bool,
     pub(crate) prev_registered_at: Option<(BlockSlot, TxOrder)>,
+    pub(crate) prev_registered_cert: CertIndex,
     pub(crate) prev_voting_power: u64,
     pub(crate) prev_deposit: u64,
 }
 
 impl DRepRegistration {
-    pub fn new(
-        drep: DRep,
-        slot: BlockSlot,
-        txorder: TxOrder,
-        deposit: u64,
-        anchor: Option<Anchor>,
-    ) -> Self {
+    pub fn new(drep: DRep, position: CertPosition, deposit: u64, anchor: Option<Anchor>) -> Self {
         Self {
             drep,
-            slot,
-            txorder,
+            position,
             deposit,
             anchor,
             was_new: false,
             prev_registered_at: None,
+            prev_registered_cert: 0,
             prev_voting_power: 0,
             prev_deposit: 0,
         }
@@ -279,11 +302,13 @@ impl dolos_core::EntityDelta for DRepRegistration {
 
         // save undo info
         self.prev_registered_at = entity.registered_at;
+        self.prev_registered_cert = entity.registered_cert;
         self.prev_voting_power = entity.voting_power;
         self.prev_deposit = entity.deposit;
 
         // apply changes
-        entity.registered_at = Some((self.slot, self.txorder));
+        entity.registered_at = Some(self.position.tx_at());
+        entity.registered_cert = self.position.cert_index;
         entity.voting_power = self.deposit;
         entity.deposit = self.deposit;
     }
@@ -295,6 +320,7 @@ impl dolos_core::EntityDelta for DRepRegistration {
         }
         let entity = entity.as_mut().expect("existing drep");
         entity.registered_at = self.prev_registered_at;
+        entity.registered_cert = self.prev_registered_cert;
         entity.voting_power = self.prev_voting_power;
         entity.deposit = self.prev_deposit;
     }
@@ -303,24 +329,24 @@ impl dolos_core::EntityDelta for DRepRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DRepUnRegistration {
     pub(crate) drep: DRep,
-    pub(crate) slot: BlockSlot,
-    pub(crate) txorder: TxOrder,
+    pub(crate) position: CertPosition,
 
     // undo data
     pub(crate) prev_voting_power: Option<u64>,
     pub(crate) prev_deposit: Option<u64>,
     pub(crate) prev_unregistered_at: Option<(BlockSlot, TxOrder)>,
+    pub(crate) prev_unregistered_cert: CertIndex,
 }
 
 impl DRepUnRegistration {
-    pub fn new(drep: DRep, slot: BlockSlot, txorder: TxOrder) -> Self {
+    pub fn new(drep: DRep, position: CertPosition) -> Self {
         Self {
             drep,
-            slot,
-            txorder,
+            position,
             prev_voting_power: None,
             prev_deposit: None,
             prev_unregistered_at: None,
+            prev_unregistered_cert: 0,
         }
     }
 }
@@ -338,11 +364,13 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
         // save undo data
         self.prev_voting_power = Some(entity.voting_power);
         self.prev_unregistered_at = entity.unregistered_at;
+        self.prev_unregistered_cert = entity.unregistered_cert;
         self.prev_deposit = Some(entity.deposit);
 
         // apply changes
         entity.voting_power = 0;
-        entity.unregistered_at = Some((self.slot, self.txorder));
+        entity.unregistered_at = Some(self.position.tx_at());
+        entity.unregistered_cert = self.position.cert_index;
         entity.deposit = 0;
     }
 
@@ -352,6 +380,7 @@ impl dolos_core::EntityDelta for DRepUnRegistration {
             .expect("can't undo unregister on missing drep");
         state.voting_power = self.prev_voting_power.unwrap_or(0);
         state.unregistered_at = self.prev_unregistered_at;
+        state.unregistered_cert = self.prev_unregistered_cert;
         state.deposit = self.prev_deposit.unwrap_or(0);
     }
 }
@@ -765,10 +794,11 @@ mod prop_tests {
             drep in root::any_drep(),
             slot in root::any_slot(),
             txorder in root::any_tx_order(),
+            cert in root::any_tx_order(),
             deposit in root::any_lovelace(),
             anchor in prop::option::of(root::any_anchor()),
         ) -> DRepRegistration {
-            DRepRegistration::new(drep, slot, txorder, deposit, anchor)
+            DRepRegistration::new(drep, CertPosition::new(slot, txorder, cert), deposit, anchor)
         }
     }
 
@@ -777,8 +807,9 @@ mod prop_tests {
             drep in root::any_drep(),
             slot in root::any_slot(),
             txorder in root::any_tx_order(),
+            cert in root::any_tx_order(),
         ) -> DRepUnRegistration {
-            DRepUnRegistration::new(drep, slot, txorder)
+            DRepUnRegistration::new(drep, CertPosition::new(slot, txorder, cert))
         }
     }
 
@@ -1127,6 +1158,23 @@ mod compat_tests {
         assert_eq!(decoded.identifier, legacy.identifier);
         assert_eq!(decoded.anchor, legacy.anchor);
         assert_eq!(decoded.expiry, None);
+        assert_eq!(decoded.registered_cert, 0);
+        assert_eq!(decoded.unregistered_cert, 0);
+    }
+
+    /// A registration and an unregistration in one transaction compare by
+    /// certificate index.
+    #[test]
+    fn same_transaction_certificates_order_by_index() {
+        let mut state = DRepState::new(DRep::Key([3u8; 28].into()));
+        state.registered_at = Some((100, 1));
+        state.registered_cert = 0;
+        state.unregistered_at = Some((100, 1));
+        state.unregistered_cert = 1;
+        assert!(state.is_unregistered());
+
+        state.registered_cert = 2;
+        assert!(!state.is_unregistered());
     }
 
     #[test]

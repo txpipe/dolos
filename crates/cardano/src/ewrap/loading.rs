@@ -14,7 +14,8 @@ use std::{
     sync::Arc,
 };
 
-use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore, TxOrder};
+use crate::model::CertPosition;
+use dolos_core::{BlockSlot, ChainError, Domain, EntityKey, Genesis, StateStore};
 use pallas::codec::minicbor;
 use pallas::ledger::primitives::{
     conway::{DRep, GovActionId},
@@ -659,10 +660,10 @@ impl BoundaryWork {
     /// latest one, when it falls in the closing epoch. Carried into
     /// `retiring_dreps` so the drops visitor can tell which delegations
     /// predate it — see [`BoundaryWork::clears_drep_delegation`].
-    fn is_retiring_drep(&self, drep: &DRepState) -> Option<(BlockSlot, TxOrder)> {
-        let unregistered_at = drep.unregistered_at?;
+    fn is_retiring_drep(&self, drep: &DRepState) -> Option<CertPosition> {
+        let unregistered_at = drep.unregistration_position()?;
 
-        let (unregistered_epoch, _) = self.chain_summary.slot_epoch(unregistered_at.0);
+        let (unregistered_epoch, _) = self.chain_summary.slot_epoch(unregistered_at.slot);
 
         (self.starting_epoch_no() == unregistered_epoch + 1).then_some(unregistered_at)
     }
@@ -709,10 +710,12 @@ impl BoundaryWork {
     /// so a DRep registered mid-epoch counts and one unregistered mid-epoch
     /// does not.
     fn is_drep_registered_as_of(drep: &DRepState, boundary_slot: BlockSlot) -> bool {
-        let registered = drep.registered_at.filter(|(slot, _)| *slot < boundary_slot);
+        let registered = drep
+            .registration_position()
+            .filter(|at| at.slot < boundary_slot);
         let unregistered = drep
-            .unregistered_at
-            .filter(|(slot, _)| *slot < boundary_slot);
+            .unregistration_position()
+            .filter(|at| at.slot < boundary_slot);
 
         match (registered, unregistered) {
             (Some(registered), Some(unregistered)) => registered > unregistered,
@@ -1633,7 +1636,7 @@ impl BoundaryWork {
 mod tests {
     use std::collections::BTreeMap;
 
-    use dolos_core::{Domain as _, EntityDelta as _, StateStore as _, StateWriter as _};
+    use dolos_core::{Domain as _, EntityDelta as _, StateStore as _, StateWriter as _, TxOrder};
     use dolos_testing::toy_domain::ToyDomain;
     use pallas::ledger::primitives::StakeCredential;
 
@@ -1674,6 +1677,7 @@ mod tests {
             pool: EpochValue::new(5),
             drep: EpochValue::new(5),
             vote_delegated_at: None,
+            vote_delegated_cert: 0,
             deregistered_at: None,
             credential: credential.clone(),
             retired_pool: None,
@@ -1784,6 +1788,7 @@ mod tests {
                 None,
             ),
             vote_delegated_at: None,
+            vote_delegated_cert: 0,
             deregistered_at: None,
             credential,
             retired_pool: None,
@@ -1806,6 +1811,8 @@ mod tests {
             identifier,
             anchor: None,
             expiry: None,
+            registered_cert: 0,
+            unregistered_cert: 0,
         }
     }
 
@@ -2199,12 +2206,16 @@ mod tests {
 
         for cert in certs {
             match cert {
-                Cert::Reg(slot, order) => {
-                    DRepRegistration::new(identifier.clone(), *slot, *order, 500, None)
-                        .apply(&mut entity)
-                }
+                Cert::Reg(slot, order) => DRepRegistration::new(
+                    identifier.clone(),
+                    CertPosition::new(*slot, *order, 0),
+                    500,
+                    None,
+                )
+                .apply(&mut entity),
                 Cert::UnReg(slot, order) => {
-                    DRepUnRegistration::new(identifier.clone(), *slot, *order).apply(&mut entity)
+                    DRepUnRegistration::new(identifier.clone(), CertPosition::new(*slot, *order, 0))
+                        .apply(&mut entity)
                 }
             }
         }
@@ -2417,6 +2428,7 @@ mod tests {
             pool: EpochValue::from_parts(live_epoch, None, None, None, None, delegation),
             drep: EpochValue::new(live_epoch),
             vote_delegated_at: None,
+            vote_delegated_cert: 0,
             retired_pool: None,
         }
     }
@@ -2720,6 +2732,7 @@ mod ratification_tests {
                 None,
             ),
             vote_delegated_at: None,
+            vote_delegated_cert: 0,
             deregistered_at: None,
             credential,
             retired_pool: None,
@@ -2859,6 +2872,8 @@ mod ratification_tests {
             identifier: drep(),
             anchor: None,
             expiry: None,
+            registered_cert: 0,
+            unregistered_cert: 0,
         };
 
         writer

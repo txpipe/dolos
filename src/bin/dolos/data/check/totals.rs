@@ -116,6 +116,7 @@
 use std::collections::{HashMap, HashSet};
 
 use dolos_cardano::eras::load_chain_summary_from_state;
+use dolos_cardano::model::CertPosition;
 use dolos_cardano::model::{
     drep_to_entity_key, AccountState, DRepDelegation, DRepState, EpochState, EraSummary,
     PoolDelegation, PoolHash, PoolState, SingletonEntity as _,
@@ -123,7 +124,7 @@ use dolos_cardano::model::{
 use dolos_cardano::pots::{apply_delta, EpochIncentives, PotDelta, Pots};
 use dolos_cardano::ChainSummary;
 use dolos_cardano::FixedNamespace as _;
-use dolos_core::{ArchiveStore as _, BlockSlot, EntityKey, Genesis, StateStore, TxOrder};
+use dolos_core::{ArchiveStore as _, BlockSlot, EntityKey, Genesis, StateStore};
 use indicatif::ProgressBar;
 use miette::{Context as _, IntoDiagnostic as _};
 use pallas::ledger::primitives::conway::DRep;
@@ -651,7 +652,7 @@ pub struct DRepFacts {
     /// unregistered — the position `BoundaryWork::clears_drep_delegation`
     /// measures a delegation against. `None` on a registered row, including
     /// one that unregistered and registered again.
-    pub unregistered_at: Option<(BlockSlot, TxOrder)>,
+    pub unregistered_at: Option<CertPosition>,
 }
 
 /// The chain positions the vote-delegation rules are measured against.
@@ -823,19 +824,19 @@ fn dangling_vote_referent(account: &AccountState, referents: &Referents) -> Opti
     // Rule 2.
     let (Some(unregistered_at), Some(delegated_at), Some(live_epoch_start)) = (
         facts.unregistered_at,
-        account.vote_delegated_at,
+        account.vote_delegation_position(),
         referents.anchors.live_epoch_start,
     ) else {
         return None;
     };
 
-    if delegated_at < unregistered_at && unregistered_at.0 < live_epoch_start {
+    if delegated_at < unregistered_at && unregistered_at.slot < live_epoch_start {
         return Some(format!(
             "vote delegation to drep {} made at slot {}, which the boundary after that drep \
              retired at slot {} owed a drop",
             describe_drep(drep),
-            delegated_at.0,
-            unregistered_at.0,
+            delegated_at.slot,
+            unregistered_at.slot,
         ));
     }
 
@@ -942,7 +943,7 @@ pub fn load_referents<S: StateStore>(state: &S, anchors: Anchors) -> miette::Res
             // any boundary owes a drop against.
             unregistered_at: drep
                 .is_unregistered()
-                .then_some(drep.unregistered_at)
+                .then_some(drep.unregistration_position())
                 .flatten(),
         };
 
@@ -1876,7 +1877,7 @@ mod tests {
             &drep,
             DRepFacts {
                 identifier: drep.clone(),
-                unregistered_at: Some((200, 0)),
+                unregistered_at: Some(CertPosition::new(200, 0, 0)),
             },
             Anchors {
                 live_epoch_start: Some(500),
@@ -1902,7 +1903,7 @@ mod tests {
             &drep,
             DRepFacts {
                 identifier: drep.clone(),
-                unregistered_at: Some((200, 0)),
+                unregistered_at: Some(CertPosition::new(200, 0, 0)),
             },
             Anchors {
                 live_epoch_start: Some(500),
@@ -1925,7 +1926,7 @@ mod tests {
             &drep,
             DRepFacts {
                 identifier: drep.clone(),
-                unregistered_at: Some((600, 0)),
+                unregistered_at: Some(CertPosition::new(600, 0, 0)),
             },
             Anchors {
                 live_epoch_start: Some(500),
@@ -1991,7 +1992,7 @@ mod tests {
             &drep,
             DRepFacts {
                 identifier: drep.clone(),
-                unregistered_at: Some((200, 0)),
+                unregistered_at: Some(CertPosition::new(200, 0, 0)),
             },
             Anchors::default(),
         );
