@@ -1806,6 +1806,7 @@ mod tests {
             identifier,
             anchor: None,
             expiry: None,
+            first_seen_at: None,
         }
     }
 
@@ -2859,6 +2860,7 @@ mod ratification_tests {
             identifier: drep(),
             anchor: None,
             expiry: None,
+            first_seen_at: Some((0, 0)),
         };
 
         writer
