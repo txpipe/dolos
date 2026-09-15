@@ -785,6 +785,11 @@ pub struct MinibfConfig {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_scan_items: Option<u64>,
+    /// Optional base path for all Blockfrost API endpoints (e.g., "/api/v0").
+    /// When set, all API routes will be nested under this path.
+    /// Set to "/api/v0" for full Blockfrost OpenAPI specification compliance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ipfs_gateways: Option<Vec<String>>,
 }
@@ -797,6 +802,7 @@ impl MinibfConfig {
             token_registry_url: None,
             url: None,
             max_scan_items: None,
+            base_path: None,
             ipfs_gateways: None,
         }
     }
@@ -817,6 +823,36 @@ impl MinibfConfig {
 
     pub fn max_scan_items(&self) -> u64 {
         self.max_scan_items.unwrap_or(default_max_scan_items())
+    }
+
+    /// The base path with any trailing slash removed. Returns `None` when no
+    /// base path is set. [`MinibfConfig::validate`] makes sure that the value
+    /// is correct. Then the router can nest under the value with no more
+    /// checks.
+    pub fn base_path(&self) -> Option<String> {
+        self.base_path
+            .as_deref()
+            .map(|base_path| base_path.trim_end_matches('/').to_string())
+    }
+
+    /// Rejects a `base_path` that the router cannot nest under. This check runs
+    /// at config-parse time. As a result, a malformed value stops startup and
+    /// does not stop a running `serve` process.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(configured_base_path) = self.base_path.as_deref() {
+            let base_path = configured_base_path.trim_end_matches('/');
+            if base_path.is_empty()
+                || !base_path.starts_with('/')
+                || base_path.contains(['*', '?', '#'])
+                || base_path.chars().any(char::is_whitespace)
+            {
+                return Err(format!(
+                    "base_path \"{configured_base_path}\" is not valid. Use a base_path that starts with '/' and does not contain '*', '?', '#', or whitespace."
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     /// These are the base URLs of the HTTP gateways, in order. The gateways
@@ -1197,6 +1233,20 @@ pub struct RootConfig {
     pub telemetry: TelemetryConfig,
 }
 
+impl RootConfig {
+    /// Makes sure that the config values are correct when a plain
+    /// deserialization cannot check them. Callers run this check one time,
+    /// directly after the config loads. As a result, a malformed value stops
+    /// startup and does not stop a running service.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(minibf) = &self.serve.minibf {
+            minibf.validate()?;
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1297,5 +1347,15 @@ mod tests {
             panic!("expected the fjall backend");
         };
         assert_eq!(cfg.cache, Some(16));
+    }
+
+    #[test]
+    fn minibf_validation_error_uses_configured_base_path() {
+        let mut config = MinibfConfig::new("[::]:0".parse().unwrap());
+        config.base_path = Some("/".into());
+
+        let error = config.validate().unwrap_err();
+
+        assert!(error.contains("base_path \"/\""), "{error}");
     }
 }
