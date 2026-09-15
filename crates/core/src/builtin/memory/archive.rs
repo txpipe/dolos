@@ -42,7 +42,7 @@
 //! conformance suite is checked against.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{btree_map::Entry, BTreeMap, BTreeSet, VecDeque};
 use std::ops::{Bound, Range};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -390,19 +390,32 @@ impl ArchiveWriter for MemoryArchiveWriter {
                 }
                 // Only the first appearance of a pair is kept; the membership
                 // map is the probe, and it sees this batch's earlier inserts.
+                // An appearance earlier than the stored one moves the pair: a
+                // log that started mid-chain holds the first appearance it
+                // saw until a replay from origin reaches the real one.
                 Op::InsertStakeAddress(slot, app) => {
                     let pair = (app.stake.clone(), app.address.clone());
+                    let position = (slot, app.order);
 
-                    if let std::collections::btree_map::Entry::Vacant(entry) =
-                        tables.stake_log_pairs.entry(pair)
-                    {
-                        entry.insert((slot, app.order));
-                        tables.stake_log.entry(app.stake).or_default().insert((
-                            slot,
-                            app.order,
-                            app.address,
-                        ));
+                    match tables.stake_log_pairs.entry(pair) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(position);
+                        }
+                        Entry::Occupied(mut entry) if position < *entry.get() => {
+                            let (stored_slot, stored_order) = entry.insert(position);
+
+                            if let Some(set) = tables.stake_log.get_mut(&app.stake) {
+                                set.remove(&(stored_slot, stored_order, app.address.clone()));
+                            }
+                        }
+                        Entry::Occupied(_) => continue,
                     }
+
+                    tables.stake_log.entry(app.stake).or_default().insert((
+                        slot,
+                        app.order,
+                        app.address,
+                    ));
                 }
                 // Removed only when the undone block is the pair's stored
                 // first appearance; a pair seen earlier stays untouched.

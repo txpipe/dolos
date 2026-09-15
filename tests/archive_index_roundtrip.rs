@@ -336,6 +336,11 @@ macro_rules! conformance_suite {
             fn stake_log_round_trips_and_pages() {
                 super::stake_log_round_trips_and_pages::<$backend>();
             }
+
+            #[test]
+            fn stake_log_replay_moves_a_pair_to_an_earlier_appearance() {
+                super::stake_log_replay_moves_a_pair_to_an_earlier_appearance::<$backend>();
+            }
         }
     };
 }
@@ -1528,4 +1533,79 @@ fn stake_log_round_trips_and_pages<B: Backend>() {
     // undoing the first appearance removes it
     undo_one(delta(1, vec![appearance(0, &stake_a, 0x01)]));
     assert_eq!(page(&stake_a, 0, 10, false), vec![addr(0x02)]);
+}
+
+/// A log that started mid-chain holds the first appearance it saw. A replay
+/// from origin (`doctor rebuild-state --rewrite-logs`) reaches the earlier
+/// appearance and must move the pair there, with no stale entry left behind
+/// and undo following the new position. Later appearances never move a pair.
+fn stake_log_replay_moves_a_pair_to_an_earlier_appearance<B: Backend>() {
+    let (store, _guard) = B::open();
+
+    let stake = vec![0xAA; 29];
+    let addr = |b: u8| vec![b; 57];
+
+    let appearance = |address: u8| StakeAddressAppearance {
+        order: 0,
+        stake: stake.clone(),
+        address: addr(address),
+    };
+
+    let delta = |slot: BlockSlot, items: Vec<StakeAddressAppearance>| ArchiveIndexDelta {
+        slot,
+        block_hash: hash32(0x0C, slot, 0),
+        block_number: Some(slot),
+        stake_addresses: items,
+        ..Default::default()
+    };
+
+    let page = |reverse: bool| {
+        store
+            .addresses_by_stake_log(&stake, 0, 10, reverse)
+            .expect("addresses_by_stake_log failed")
+    };
+
+    // the log started at slot 90: B is first seen at 95, A only at a repeat
+    // at 100, though A's first on-chain appearance is slot 10
+    apply(
+        &store,
+        &[
+            delta(95, vec![appearance(0x0B)]),
+            delta(100, vec![appearance(0x0A)]),
+        ],
+    );
+    assert_eq!(page(false), vec![addr(0x0B), addr(0x0A)]);
+
+    // a replay from origin, in one writer: A at 10 moves the pair, the repeat
+    // at 50 and the already-stored positions of B and A change nothing
+    apply(
+        &store,
+        &[
+            delta(10, vec![appearance(0x0A)]),
+            delta(50, vec![appearance(0x0A)]),
+            delta(95, vec![appearance(0x0B)]),
+            delta(100, vec![appearance(0x0A)]),
+        ],
+    );
+    assert_eq!(page(false), vec![addr(0x0A), addr(0x0B)]);
+    assert_eq!(page(true), vec![addr(0x0B), addr(0x0A)]);
+
+    // a later appearance never moves a pair
+    apply(&store, &[delta(200, vec![appearance(0x0A)])]);
+    assert_eq!(page(false), vec![addr(0x0A), addr(0x0B)]);
+
+    let undo_one = |d: ArchiveIndexDelta| {
+        let writer = store.start_writer().expect("start_writer failed");
+        writer
+            .undo_index(std::slice::from_ref(&d))
+            .expect("undo_index failed");
+        writer.commit().expect("commit failed");
+    };
+
+    // the old position no longer owns the pair; the new one does
+    undo_one(delta(100, vec![appearance(0x0A)]));
+    assert_eq!(page(false), vec![addr(0x0A), addr(0x0B)]);
+
+    undo_one(delta(10, vec![appearance(0x0A)]));
+    assert_eq!(page(false), vec![addr(0x0B)]);
 }
