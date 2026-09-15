@@ -481,6 +481,10 @@ where
             get(routes::blocks::by_hash_or_number_addresses::<D>),
         )
         .route(
+            "/blocks/epoch/{epoch_number}/slot/{slot_number}",
+            get(routes::blocks::by_epoch_slot::<D>),
+        )
+        .route(
             "/blocks/slot/{slot_number}",
             get(routes::blocks::by_slot::<D>),
         )
@@ -659,6 +663,14 @@ where
         .route(
             "/governance/proposals/{gov_action_id}/withdrawals",
             get(routes::governance::proposal_withdrawals_by_gov_action::<D>),
+        )
+        .route(
+            "/governance/proposals/{tx_hash}/{cert_index}/parameters",
+            get(routes::governance::proposal_parameters::<D>),
+        )
+        .route(
+            "/governance/proposals/{gov_action_id}/parameters",
+            get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
         .with_state(facade)
         .layer(

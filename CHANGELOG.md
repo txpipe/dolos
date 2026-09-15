@@ -2,6 +2,83 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0-alpha.0] - 2026-09-11
+
+### 🚀 Features
+
+- *(minibf)* Implement `/governance/proposals` endpoint (#1275)
+- *(minibf)* Implement `/utils/addresses/xpub/{xpub}/{role}/{index}` (#1278)
+- *(minibf)* Add `/assets/{subject}/txs` endpoint (#1220)
+- *(minibf)* Add `/accounts/{stake_address}/history` endpoint (#1293)
+- *(minibf)* Add `/assets` endpoints (#1294)
+- *(config)* [**breaking**] Remove the non-live redb state and index backends (#1301)
+- *(archive)* [**breaking**] Retire the redb archive backend (#1302)
+- *(archive)* Prune the archive index entries with the blocks (#1306)
+- *(minibf)* Governance proposals withdrawals (#1279)
+- *(archive)* Compressed segment codec with a seekable zstd layout (#1308)
+- *(archive)* Mixed raw and compressed segments with a recoverable transition (#1309)
+- *(archive)* Offline sealing, dictionary training and restore commands (#1310)
+- *(minibf)* Add `/governance/proposals/{tx_hash}/{cert_index}`, /governance/proposals/{gov_action_id} endpoints (#1219)
+- *(archive)* Write benchmarks and a bundled zstd dictionary (#1311)
+- *(archive)* [**breaking**] Append every block as one compressed frame at its physical location (#1312)
+- *(storage)* Bump the storage version to v4 (#1282)
+- *(archive)* Automatically select bounded parallel encoding (#1317)
+- *(bench)* Add minibf performance regression harness (#1318)
+- *(minibf)* Add `/governance/proposals/*/metadata` routes (#1295)
+- *(minibf)* Add `/accounts/{stake_address}/addresses/total` (#1195)
+- *(minibf)* Add `/blocks/epoch/{epoch_number}/slot/{slot_number}` (#1322)
+
+### 🐛 Bug Fixes
+
+- *(ci)* Keep the Windows job off `getrusage` (#1267)
+- *(cli)* Don't swallow driver errors (#999)
+- *(cli)* Let a fatal driver failure reach the exit status (#1269)
+- *(snapshot)* Size backfill's immutable chunks from the chain's own k (#1268)
+- *(minibf)* Report null active stake for the preprod epoch gap (#1263)
+- *(cardano)* Gate the roll crawl on transaction validity (#1266)
+- *(minibf)* Attribute pool-deposit refunds to the correct reward epoch (#1276)
+- *(snapshot)* The state cursor marks the whole restore, not the tip (#1297)
+- *(snapshot)* Improve pre-flight space check to account for already downloaded bytes (#1299)
+- *(storage)* Close index dissolution follow-ups (#1307)
+- *(core)* Share block metadata resolution for queries (#1316)
+- *(ci)* Respect unavailable Windows CPU counters (#1324)
+
+### 🚜 Refactor
+
+- *(stelae)* Move the dolos-free residue out of the profile (#1285)
+- *(stelae)* Make the chained-publish lifecycle profile-generic (#1286)
+- *(stelae)* Make the snapshot and restore commands parse and render (#1288)
+- *(stelae)* Move the backfill daemon into the profile crate (#1289)
+- *(stelae)* Close out the repo-split leftovers (#1290)
+- *(stelae)* Consume the stelae crates as a pinned git dependency (#1291)
+- *(state)* [**breaking**] Host the live-UTxO tags in the state store (#1303)
+- *(archive)* [**breaking**] Host the archive tags and exact lookups in the archive store (#1304)
+- *(storage)* [**breaking**] Remove the standalone index store (#1305)
+
+### 📚 Documentation
+
+- *(minibf)* Reconcile the endpoint coverage table with the router (#1261)
+
+### 🔧 Continuous Integration
+
+- Pin the cargo fmt nightly to 2026-08-27 (#1284)
+- Lint PR titles for conventional commits (#1300)
+
+### ⚡ Performance
+
+- *(snapshot)* Produce a publish's layers from a pool of workers (#1272)
+- *(stelae)* Send 4 MiB upload chunks instead of 1 MiB (#1273)
+- *(stelae)* Push a layer that fits as one request (#1277)
+
+### 🧪 Testing
+
+- Compare the cross-backend walk against the seeded rows directly (#1258)
+- *(archive)* Accept the direct-write cutover end to end and move the benchmarks into xtask (#1313)
+
+### ⚙️ Miscellaneous Tasks
+
+- Officialize next version as v2 (#1328)
+
 ## [1.7.0-alpha.1] - 2026-08-24
 
 ### 🚀 Features
@@ -54,6 +131,10 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - Increase surface of dolos-devs code ownership (#1231)
+
+### Release
+
+- V1.7.0-alpha.1
 
 ## [1.7.0-alpha.0] - 2026-08-16
 

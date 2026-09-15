@@ -1,55 +1,38 @@
-//! Publishing this node's data as a Stelae snapshot.
+//! Inspecting and reproducing this node's Stelae snapshot profile.
 //!
 //! Dolos's own word is "snapshot"; the protocol's is "stele". The translation
 //! happens here and nowhere else — see `crates/snapshot/PROFILE.md` and
 //! `adrs/004_stelae_snapshots.md`.
 //!
-//! `publish` writes one; `digest` says what one *would* be; `verify` checks a
-//! published one, digests only; `inspect` reads one's table of contents
-//! without pulling a layer. `sign` is the rest of the
-//! publisher-productization slice, and restore is its own.
-//!
-//! Publishing into a registry is the OCI transport, behind `dolos-snapshot`'s
-//! `oci` feature — which this binary's dependency enables unconditionally (root
-//! `Cargo.toml`), so every shipped `dolos` has `--repo`.
+//! `digest` says what one *would* be; `verify` checks a published one and can
+//! reproduce it; `inspect` reads one's table of contents without pulling a
+//! layer. Publisher commands live in the Stelae publisher application, and
+//! restore remains under `dolos bootstrap stelae`.
 //!
 //! ## One epoch selection, however many commands take one
 //!
 //! [`EpochRange`] is the profile crate's rather than either command's, because
-//! a publisher that names "epochs 500 through 519" to one and gets a different
-//! window from the other is a publisher verifying a different stele than the
-//! one they published — and being told it matches. One parser, one restriction,
-//! one reading of the plan they produce: [`dolos_snapshot::planning`].
+//! digest and `verify --reproduce` must select the same records. One parser,
+//! one restriction, one reading of the plan they produce:
+//! [`dolos_snapshot::planning`].
 
 use clap::{Parser, Subcommand};
 use dolos_core::config::RootConfig;
 use dolos_snapshot::{
-    export::{self, Plan},
+    export::Plan,
+    facade::{Selection, SnapshotSource as _, StoreSnapshot},
     planning::{self, PlanReport},
 };
 use miette::{Context as _, IntoDiagnostic as _};
 
-use crate::feedback::Feedback;
-
-#[cfg(feature = "mithril")]
-mod backfill;
 mod digest;
 mod inspect;
-mod publish;
 mod verify;
 
 pub use dolos_snapshot::planning::EpochRange;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// writes a stele to a local directory or an OCI repository
-    Publish(publish::Args),
-
-    /// replays mithril history one epoch at a time, publishing a stele at
-    /// each boundary into an OCI repository
-    #[cfg(feature = "mithril")]
-    Backfill(backfill::Args),
-
     /// computes a stele's inscription and identity without writing one
     Digest(digest::Args),
 
@@ -68,37 +51,18 @@ pub struct Args {
     command: Command,
 }
 
-pub fn run(config: &RootConfig, args: &Args, feedback: &Feedback) -> miette::Result<()> {
+pub fn run(config: &RootConfig, args: &Args) -> miette::Result<()> {
     match &args.command {
-        // `feedback` reaches `publish` alone: it is the only one of the four
-        // that waits on a store walk and a network, and the other three are
-        // over in the time it takes to print what they found.
-        Command::Publish(x) => publish::run(config, x, feedback),
-        #[cfg(feature = "mithril")]
-        Command::Backfill(x) => backfill::run(config, x, feedback),
         Command::Digest(x) => digest::run(config, x),
         Command::Verify(x) => verify::run(config, x),
         Command::Inspect(x) => inspect::run(config, x),
     }
 }
 
-/// The three knobs every command that walks these stores takes.
-///
-/// Spelled per command rather than flattened into one clap group, because the
-/// help text is not the same everywhere: `verify` takes all three only under
-/// `--reproduce`, and says so. What is shared is what they mean, which is
-/// [`dolos_snapshot::planning`]'s.
-pub struct Selection {
-    pub epochs: Option<EpochRange>,
-    pub index_band: Option<std::num::NonZeroUsize>,
-    pub producers: Option<std::num::NonZeroUsize>,
-}
-
 /// This node's plan, narrowed by the operator's selection.
 ///
-/// One sequence for `publish`, `digest` and `verify --reproduce`, because a
-/// node that gave them different plans would be verifying a different document
-/// than the one it published — and being told it does not match. `what` is the
+/// One sequence for `digest` and `verify --reproduce`, because a node that gave
+/// them different plans would be verifying a different document. `what` is the
 /// word the failing command uses for the plan it was building.
 pub fn planned(
     config: &RootConfig,
@@ -112,24 +76,19 @@ pub fn planned(
         .into_diagnostic()
         .context("reading snapshot.state_epochs")?;
 
-    let plan = export::plan(&stores.state, u64::from(genesis.network_magic()), retained)
+    StoreSnapshot::new(&stores.archive, &stores.state)
+        .selected_plan(u64::from(genesis.network_magic()), retained, *selection)
         .into_diagnostic()
-        .context(what)?;
-
-    let plan = planning::restrict(plan, selection.epochs);
-    let plan = planning::banded(plan, selection.index_band);
-
-    Ok(planning::produced(plan, selection.producers))
+        .context(what)
 }
 
 /// The report every command opens with: where the node stands and what the
 /// selection covers.
 ///
-/// The numbers are [`PlanReport`]'s, so a publisher comparing a `digest` run
-/// against the `publish` that produced a stele is comparing the same
-/// arithmetic. What is here is the four lines it is said in. Written to
-/// `stderr`, because `digest` puts a document on `stdout` and a report
-/// interleaved with it would not be one.
+/// The numbers are [`PlanReport`]'s, so a verifier comparing a `digest` run
+/// against a published stele is comparing the same arithmetic. What is here is
+/// the four lines it is said in. Written to `stderr`, because `digest` puts a
+/// document on `stdout` and a report interleaved with it would not be one.
 pub fn report_plan(plan: &Plan) -> miette::Result<()> {
     let report = PlanReport::read(plan).into_diagnostic()?;
 
@@ -147,15 +106,14 @@ pub fn report_plan(plan: &Plan) -> miette::Result<()> {
             "epochs:   {}..={} ({} of them, slots {}..={})",
             span.first, span.last, span.count, span.start_slot, span.end_slot,
         ),
-        // The state tip alone is a legitimate publish; say so rather than
+        // The state tip alone is a legitimate plan; say so rather than
         // printing an empty range and looking like a mistake.
         None => eprintln!("epochs:   none selected; the state tip only"),
     }
 
     // Printed always and not only when it is set, because an empty list is a
-    // choice with consequences — it is what makes this publisher's parameters
-    // differ from a co-signer's that retains dumps, and the line is where an
-    // operator sees the two do not match.
+    // choice with consequences — it is what can make this reproduction's
+    // parameters differ from a published stele's.
     eprintln!(
         "dumps:    {:?} retained ({} due at this sequence)",
         report.retained, report.dumps_due,

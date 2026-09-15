@@ -97,19 +97,12 @@ impl Default for Feedback {
     }
 }
 
-/// A stele transfer, drawn while it happens.
-///
-/// The one renderer for both directions, because both report through one seam
-/// and an operator watching a publish and an operator watching a restore want
-/// the same three things: which layer of how many, how much of the blob in
-/// flight has moved, and that records are still going past. What differs
-/// between the two commands is the words, which is
-/// [`SteleProgress::publishing`] and [`SteleProgress::restoring`].
+/// A stele restore, drawn while it happens.
 ///
 /// Three bars rather than one because the three move on entirely different
 /// clocks: a layer boundary can be a minute apart on mainnet, a blob's bytes
 /// tick continuously, and the record counter is the only thing that moves at
-/// all during the epoch scan that dominates a publish.
+/// all during a layer's record scan.
 pub struct SteleProgress {
     verb: &'static str,
     layers: ProgressBar,
@@ -118,11 +111,6 @@ pub struct SteleProgress {
 }
 
 impl SteleProgress {
-    /// The renderer `dolos snapshot publish` reports through.
-    pub fn publishing(feedback: &Feedback) -> Arc<Self> {
-        Self::new(feedback, "publishing")
-    }
-
     /// The renderer `dolos bootstrap stelae` reports through.
     pub fn restoring(feedback: &Feedback) -> Arc<Self> {
         Self::new(feedback, "restoring")
@@ -318,8 +306,7 @@ impl Progress for SteleProgress {
 
 /// The mithril client's download and validation as progress bars.
 ///
-/// Built fresh per download round by both callers that fetch — `bootstrap
-/// mithril` and `snapshot backfill` — so a window's bars are its own.
+/// Built for `bootstrap mithril` so each download's bars are its own.
 #[cfg(feature = "mithril")]
 pub struct MithrilFeedback {
     aggregate_pb: indicatif::ProgressBar,
@@ -356,11 +343,9 @@ impl MithrilFeedback {
 
 /// A round's bars leave the terminal with the round.
 ///
-/// Both callers build a receiver per download round against one shared
-/// [`MultiProgress`], and a finished bar stays drawn until it is cleared — so
-/// without this, a backfill daemon accumulates two dead bars per window for
-/// as long as it runs. Tied to drop rather than to a method because the
-/// receiver crosses the daemon seam as an opaque `Arc` and never comes back.
+/// A finished bar stays drawn until it is cleared. Tied to drop rather than to
+/// a method because the receiver crosses the client seam as an opaque `Arc`
+/// and never comes back.
 #[cfg(feature = "mithril")]
 impl Drop for MithrilFeedback {
     fn drop(&mut self) {

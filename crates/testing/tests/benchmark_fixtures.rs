@@ -106,3 +106,80 @@ fn persistent_wal_is_anchored_at_imported_tip_before_live_replay() {
     assert_eq!(domain.state().read_cursor().unwrap(), Some(imported_tip));
     domain.bootstrap().unwrap();
 }
+
+#[tokio::test]
+async fn batched_live_replay_runs_wal_archive_state_and_notifications() {
+    use dolos_core::{Domain, StateStore, SyncExt, TipEvent, TipSubscription, WalStore};
+    use dolos_testing::performance::{ApiFixture, FixtureShape};
+
+    let fixture = ApiFixture::new(MemoryStores::open(), FixtureShape::default()).unwrap();
+    let imported_tip = fixture.domain.state().read_cursor().unwrap().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let domain = fixture
+        .domain
+        .with_persistent_wal(directory.path().join("wal"))
+        .unwrap();
+    let mut tips = domain.watch_tip(Some(imported_tip.clone())).unwrap();
+
+    assert_eq!(domain.roll_forward_batch(Vec::new()).unwrap(), None);
+    let replay = fixture.tail[..3].to_vec();
+    let expected = replay
+        .iter()
+        .map(|raw| pallas::ledger::traverse::MultiEraBlock::decode(raw).unwrap())
+        .map(|block| (block.slot(), block.hash()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        domain.roll_forward_batch(replay).unwrap(),
+        Some(expected.last().unwrap().0)
+    );
+
+    assert_eq!(
+        domain.state().read_cursor().unwrap(),
+        Some(dolos_core::ChainPoint::Specific(
+            expected.last().unwrap().0,
+            expected.last().unwrap().1,
+        ))
+    );
+    assert_eq!(
+        domain.archive().get_tip().unwrap().unwrap().0,
+        expected.last().unwrap().0
+    );
+    assert_eq!(
+        domain
+            .wal()
+            .iter_blocks(Some(imported_tip), None)
+            .unwrap()
+            .count(),
+        4
+    );
+    for (slot, hash) in expected {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), tips.next_tip())
+            .await
+            .unwrap();
+        assert!(
+            matches!(event, TipEvent::Apply(point, _) if point == dolos_core::ChainPoint::Specific(slot, hash))
+        );
+    }
+}
+
+#[test]
+fn batched_live_replay_propagates_writer_failures() {
+    use dolos_core::SyncExt;
+    use dolos_testing::{
+        faults::{FaultyToyDomain, TestFault},
+        synthetic::{build_synthetic_blocks, SyntheticBlockConfig},
+        toy_domain::ToyDomain,
+    };
+    use std::sync::Arc;
+
+    let (blocks, _, config) = build_synthetic_blocks(SyntheticBlockConfig::default());
+    let inner = ToyDomain::new_with_genesis_and_config(
+        Arc::new(dolos_cardano::include::preview::load()),
+        config,
+        None,
+        None,
+    );
+    let domain = FaultyToyDomain::new(inner, TestFault::ArchiveStoreError);
+
+    assert!(domain.roll_forward_batch(blocks[..2].to_vec()).is_err());
+}

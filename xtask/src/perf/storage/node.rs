@@ -1453,7 +1453,8 @@ mod tests {
             "127.0.0.1:3900".parse().unwrap(),
         );
         assert!(toml.contains("version = \"v3\""));
-        assert!(toml.contains("byron_path = \"/g/byron.json\""));
+        let byron = Path::new("/g").join("byron.json");
+        assert!(toml.contains(&format!("byron_path = {:?}", byron.display().to_string())));
         assert!(toml.contains("[serve.grpc]\nlisten_address = \"127.0.0.1:3900\""));
         assert!(toml.contains("magic = 42\nis_testnet = true"));
         assert!(!toml.contains("minibf"));
