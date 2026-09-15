@@ -433,7 +433,7 @@ checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
  "rand 0.8.6",
- "rand_core 0.5.1",
+ "rand_core 0.6.4",
  "serde",
  "unicode-normalization",
 ]
@@ -515,9 +515,9 @@ dependencies = [
 
 [[package]]
 name = "blockfrost-openapi"
-version = "0.1.91"
+version = "0.1.93"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baaf3130c1ec8d5680aeda15e847ba6c109cc31a83f2aa293465b160992f9853"
+checksum = "401502ac33b8683713fc126b37eb8c6f23019aee9f3e91eb42ca124d6f814a58"
 dependencies = [
  "serde",
  "serde_json",
