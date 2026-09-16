@@ -676,7 +676,6 @@ where
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
         .fallback(routes::invalid_path)
-        .method_not_allowed_fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -788,20 +787,6 @@ mod tests {
                 "unexpected body for {path}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn wrong_method_answers_with_blockfrost_invalid_path() {
-        let app = TestApp::new();
-
-        // `/blocks/latest` is GET-only; Blockfrost answers a wrong method with
-        // the same 400 "Invalid path." as an unknown route, not an empty 405.
-        let (status, bytes) = app
-            .post_bytes("/blocks/latest", "application/json", Vec::new())
-            .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        let body: Value = serde_json::from_slice(&bytes).expect("json body for wrong method");
-        assert_eq!(body["message"], json!("Invalid path."));
     }
 
     #[tokio::test]
