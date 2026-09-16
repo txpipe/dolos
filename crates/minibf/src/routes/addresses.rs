@@ -1160,4 +1160,58 @@ mod tests {
         let parsed = parse_address(addr);
         assert!(matches!(parsed, Err(Error::InvalidAddress)));
     }
+
+    /// The address UTxO list has no height range, so a UTxO whose creation
+    /// block was pruned stays listed and sorts first, as the oldest.
+    #[tokio::test]
+    async fn addresses_utxos_keep_pruned_rows() {
+        use dolos_core::ArchiveStore as _;
+        use dolos_testing::synthetic::SyntheticBlockConfig;
+
+        let full = TestApp::new();
+        let address = full.vectors().address.clone();
+        let (status, bytes) = full.get_bytes(&format!("/addresses/{address}/utxos")).await;
+        assert_eq!(status, StatusCode::OK);
+        let all: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse utxos");
+
+        // five blocks in five consecutive slots; a two-slot window drops two
+        let pruned = TestApp::new_with_cfg_and_setup(
+            SyntheticBlockConfig {
+                block_count: 5,
+                txs_per_block: 3,
+                ..Default::default()
+            },
+            |domain, _| {
+                domain
+                    .archive()
+                    .prune_history(2, None)
+                    .expect("failed to prune the synthetic archive");
+            },
+        );
+        let pruned_txs: std::collections::HashSet<&str> = pruned.vectors().blocks[..2]
+            .iter()
+            .flat_map(|b| b.tx_hashes.iter().map(String::as_str))
+            .collect();
+
+        let (status, bytes) = pruned
+            .get_bytes(&format!("/addresses/{address}/utxos"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed: Vec<AddressUtxoContentInner> =
+            serde_json::from_slice(&bytes).expect("failed to parse utxos");
+
+        assert_eq!(listed.len(), all.len(), "pruning must not drop rows here");
+
+        let is_pruned = |x: &AddressUtxoContentInner| pruned_txs.contains(x.tx_hash.as_str());
+
+        let retained: Vec<_> = listed.iter().filter(|x| !is_pruned(x)).cloned().collect();
+        let expected: Vec<_> = all.iter().filter(|x| !is_pruned(x)).cloned().collect();
+        assert_eq!(retained, expected, "retained rows keep chain order");
+
+        // the pruned rows come first
+        let pruned_rows = listed.len() - retained.len();
+        assert!(pruned_rows > 0, "fixture needs pruned rows");
+        assert!(listed[..pruned_rows].iter().all(is_pruned));
+    }
 }
