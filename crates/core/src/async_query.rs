@@ -350,21 +350,17 @@ where
         .await
     }
 
-    /// Resolve transaction metadata while reading and decoding each selected
-    /// archive body at most once.
-    ///
-    /// Exact index lookups are retained for every distinct transaction hash,
-    /// [`LOCATE_CHUNK`] hashes per blocking task, one chunk after another.
-    /// Their slots are grouped after the last chunk, then each group uses one
-    /// blocking task under the domain's limiter, at most
-    /// [`QueryLimiter::fan_out`] at a time. Results are owned; decoded blocks
-    /// and body buffers are dropped inside those bounded tasks.
-    async fn block_meta_by_tx_hashes(
+    /// The slot each tx was included in, from the archive index alone. No
+    /// block body is read, so this is the cheap way to order many txs by
+    /// chain position; a tx the archive no longer knows maps to `None`.
+    pub async fn slots_by_tx_hashes(
         &self,
-        requested: Vec<TxHash>,
-    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
-        let mut located = Vec::with_capacity(requested.len());
-        for chunk in requested.chunks(LOCATE_CHUNK) {
+        tx_hashes: Vec<TxHash>,
+    ) -> Result<Vec<(TxHash, Option<BlockSlot>)>, DomainError> {
+        // [`LOCATE_CHUNK`] hashes per blocking task, one chunk after another,
+        // so a large set never holds one slot of the limiter for long.
+        let mut located = Vec::with_capacity(tx_hashes.len());
+        for chunk in tx_hashes.chunks(LOCATE_CHUNK) {
             let chunk = chunk.to_vec();
             let slots = self
                 .run_blocking(move |domain| {
@@ -379,6 +375,38 @@ where
                 .await?;
             located.extend(slots);
         }
+
+        Ok(located)
+    }
+
+    /// Resolve transaction metadata while reading and decoding each selected
+    /// archive body at most once.
+    ///
+    /// Exact index lookups are retained for every distinct transaction hash,
+    /// [`LOCATE_CHUNK`] hashes per blocking task, one chunk after another.
+    /// Their slots are grouped after the last chunk, then each group uses one
+    /// blocking task under the domain's limiter, at most
+    /// [`QueryLimiter::fan_out`] at a time. Results are owned; decoded blocks
+    /// and body buffers are dropped inside those bounded tasks.
+    async fn block_meta_by_tx_hashes(
+        &self,
+        requested: Vec<TxHash>,
+    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
+        let located = self.slots_by_tx_hashes(requested).await?;
+        self.block_meta_by_located(located).await
+    }
+
+    /// Block metadata for txs whose slot is already known, so a caller that
+    /// located them with [`Self::slots_by_tx_hashes`] does not pay the index
+    /// lookup twice. Each distinct slot has its block read and decoded once;
+    /// a tx with no slot, or one missing from its block, maps to `None`.
+    ///
+    /// The second value is the number of block bodies read.
+    pub async fn block_meta_by_located(
+        &self,
+        located: Vec<(TxHash, Option<BlockSlot>)>,
+    ) -> Result<(Vec<(TxHash, Option<BlockRefMeta>)>, usize), DomainError> {
+        let requested: Vec<TxHash> = located.iter().map(|(hash, _)| *hash).collect();
 
         let mut fetched = HashMap::new();
         let mut groups: HashMap<BlockSlot, Vec<TxHash>> = HashMap::new();
