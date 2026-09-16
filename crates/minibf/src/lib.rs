@@ -19,11 +19,7 @@ use std::{
     ops::{Deref, Range},
 };
 use tower::Layer;
-use tower_http::{
-    cors::CorsLayer,
-    normalize_path::{NormalizePath, NormalizePathLayer},
-    trace,
-};
+use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
 use tracing::Level;
 
 use dolos_core::{
@@ -348,7 +344,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> NormalizePath<Router>
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -365,7 +361,7 @@ where
     })
 }
 
-pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> NormalizePath<Router>
+pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -713,12 +709,13 @@ where
         } else {
             CorsLayer::new()
         });
-    // Wrap the router so trailing slashes are trimmed *before* routing. Added
-    // via `Router::layer` the normalizer runs after route matching and never
-    // affects it (`/blocks/latest/` would miss its route); wrapping restores
-    // the pre-#860 behaviour, and `axum::serve` consumes the wrapped service
-    // through `ServiceExt::into_make_service` below.
-    NormalizePathLayer::trim_trailing_slash().layer(app)
+    // Added via `Router::layer`, NormalizePathLayer runs *after* route matching
+    // and never trims before routing (`/blocks/latest/` would miss its route).
+    // Wrap the router with it and nest that behind an outer `Router` via
+    // `fallback_service`, so trimming happens before routing while the public
+    // return type stays `Router` (the wrapped type is an implementation detail).
+    let normalized = NormalizePathLayer::trim_trailing_slash().layer(app);
+    Router::new().fallback_service(normalized)
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
