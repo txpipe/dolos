@@ -19,7 +19,7 @@ use crate::{
     error::Error,
     hacks,
     inputs::{for_each_touched_output, InputDeps},
-    mapping::{BlockModelBuilder, IntoModel as _},
+    mapping::{blocks::BlockModelBuilder, IntoModel as _},
     pagination::{Order, Pagination, PaginationParameters},
     Facade,
 };
