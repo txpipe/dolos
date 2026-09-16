@@ -19,6 +19,7 @@ use dolos_testing::{
 };
 use http_body_util::BodyExt;
 use tower::util::ServiceExt;
+use tower_http::normalize_path::NormalizePath;
 
 use crate::{build_router_with_facade, Facade};
 
@@ -93,7 +94,7 @@ impl TestDomainBuilder {
 }
 
 pub struct TestApp {
-    router: Router,
+    router: NormalizePath<Router>,
     _domain: dolos_testing::faults::FaultyToyDomain,
     vectors: SyntheticVectors,
 }

@@ -18,7 +18,12 @@ use std::{
     collections::HashMap,
     ops::{Deref, Range},
 };
-use tower_http::{cors::CorsLayer, normalize_path::NormalizePathLayer, trace};
+use tower::Layer;
+use tower_http::{
+    cors::CorsLayer,
+    normalize_path::{NormalizePath, NormalizePathLayer},
+    trace,
+};
 use tracing::Level;
 
 use dolos_core::{
@@ -343,7 +348,7 @@ impl<D: Domain> Facade<D> {
 
 pub struct Driver;
 
-pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> Router
+pub fn build_router<D>(cfg: MinibfConfig, domain: D) -> NormalizePath<Router>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -360,7 +365,7 @@ where
     })
 }
 
-pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> Router
+pub(crate) fn build_router_with_facade<D>(facade: Facade<D>) -> NormalizePath<Router>
 where
     D: Domain + SubmitExt + Clone + Send + Sync + 'static,
     Option<AccountState>: From<D::Entity>,
@@ -675,6 +680,7 @@ where
             get(routes::governance::proposal_parameters_by_gov_action::<D>),
         )
         .fallback(routes::invalid_path)
+        .method_not_allowed_fallback(routes::invalid_path)
         .with_state(facade)
         .layer(
             trace::TraceLayer::new_for_http()
@@ -707,7 +713,12 @@ where
         } else {
             CorsLayer::new()
         });
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+    // Wrap the router so trailing slashes are trimmed *before* routing. Added
+    // via `Router::layer` the normalizer runs after route matching and never
+    // affects it (`/blocks/latest/` would miss its route); wrapping restores
+    // the pre-#860 behaviour, and `axum::serve` consumes the wrapped service
+    // through `ServiceExt::into_make_service` below.
+    NormalizePathLayer::trim_trailing_slash().layer(app)
 }
 
 impl<D: Domain + SubmitExt, C: CancelToken> dolos_core::Driver<D, C> for Driver
@@ -745,15 +756,14 @@ mod tests {
 
     use crate::test_support::TestApp;
 
-    /// The paths measured against Blockfrost on the issue: unknown
-    /// endpoints, missing segments and an empty trailing segment.
+    /// Paths measured against Blockfrost on the issue that match no route:
+    /// unknown endpoints and missing segments.
     const UNMATCHED_PATHS: &[&str] = &[
         "/nonexistent",
         "/foo/bar/baz",
         "/txs",
         "/blocks/latest/nope",
         "/blocks/epoch/2/slot",
-        "/blocks/slot/",
     ];
 
     #[tokio::test]
@@ -776,7 +786,7 @@ mod tests {
                 json!({
                     "status_code": 400,
                     "error": "Bad Request",
-                    "message": "Invalid path. Please check https://docs.blockfrost.io/",
+                    "message": "Invalid path.",
                 }),
                 "unexpected body for {path}"
             );
@@ -784,10 +794,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matched_route_still_reports_a_missing_component_as_not_found() {
+    async fn wrong_method_answers_with_blockfrost_invalid_path() {
         let app = TestApp::new();
-        let missing = "f".repeat(64);
-        let (status, _) = app.get_bytes(&format!("/blocks/{missing}")).await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // `/blocks/latest` is GET-only; Blockfrost answers a wrong method with
+        // the same 400 "Invalid path." as an unknown route, not an empty 405.
+        let (status, bytes) = app
+            .post_bytes("/blocks/latest", "application/json", Vec::new())
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(&bytes).expect("json body for wrong method");
+        assert_eq!(body["message"], json!("Invalid path."));
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_is_trimmed_before_routing() {
+        let app = TestApp::new();
+
+        // `/blocks/latest/` normalizes to `/blocks/latest` and resolves, the
+        // same 200 Blockfrost returns — a regression guard for the layer order.
+        let (status, _) = app.get_bytes("/blocks/latest/").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // `/blocks/slot/` normalizes to `/blocks/slot`, which the
+        // `/blocks/{hash_or_number}` route rejects as a malformed hash (the
+        // same 400 Blockfrost returns), not the invalid-path fallback.
+        let (status, bytes) = app.get_bytes("/blocks/slot/").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let body: Value = serde_json::from_slice(&bytes).expect("json body for /blocks/slot/");
+        assert_eq!(body["message"], json!("Missing or malformed block hash."));
     }
 }

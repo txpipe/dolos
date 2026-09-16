@@ -202,7 +202,7 @@ impl IntoResponse for Error {
                 Json(ErrorBody::new(
                     400,
                     "Bad Request",
-                    "Invalid path. Please check https://docs.blockfrost.io/",
+                    "Invalid path.",
                 )),
             )
                 .into_response(),
