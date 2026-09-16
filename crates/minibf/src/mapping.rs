@@ -175,9 +175,9 @@ pub fn bech32_drep(drep: &DRep) -> Result<String, StatusCode> {
 
 /// CIP-129 credential ID for the constitutional committee.
 ///
-/// The header byte contains the role in the high nibble (cold `0x1`, hot `0x0`).
-/// It contains the credential kind in the low nibble (key `0x2`, script `0x3`).
-/// The 28-byte hash follows the header byte. The `cc_cold` or `cc_hot`
+/// The header byte contains the role in the high nibble (cold `0x1`, hot
+/// `0x0`). It contains the credential kind in the low nibble (key `0x2`, script
+/// `0x3`). The 28-byte hash follows the header byte. The `cc_cold` or `cc_hot`
 /// bech32 payload contains this header. The `..._hex` field that Blockfrost
 /// returns is the bare hash.
 fn bech32_committee(

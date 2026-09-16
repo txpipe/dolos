@@ -2885,7 +2885,8 @@ mod tests {
 
     #[test]
     fn committee_credential_ids_follow_cip0129() {
-        // For a cold key, the high nibble is 0x1 (cold), and the low nibble is 0x2 (key).
+        // For a cold key, the high nibble is 0x1 (cold), and the low nibble is 0x2
+        // (key).
         let cold =
             bech32_committee_cold(&cc_cold_key(1)).expect("The encoder cannot encode the cold ID.");
         let (hrp, payload) = bech32::decode(&cold).expect("The decoder cannot decode the cold ID.");
