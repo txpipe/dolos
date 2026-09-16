@@ -17,7 +17,7 @@ use std::collections::BTreeSet;
 
 use crate::{
     error::Error,
-    hacks,
+    hacks::genesis_block as genesis,
     inputs::{for_each_touched_output, InputDeps},
     mapping::{blocks::BlockModelBuilder, IntoModel as _},
     pagination::{Order, Pagination, PaginationParameters},
@@ -136,18 +136,14 @@ where
         Ok(block) => block,
         Err(Error::Code(StatusCode::NOT_FOUND)) => {
             if Either::Right(0) == hash_or_number {
-                if let Some(block) =
-                    hacks::genesis_block_for_domain(&domain).map_err(Error::Code)?
-                {
+                if let Some(block) = genesis::genesis_block(&domain).map_err(Error::Code)? {
                     return Ok(Json(block));
                 }
             }
 
             if let Either::Left(hash) = &hash_or_number {
-                if hacks::is_genesis_hash_for_domain(&domain, hash).map_err(Error::Code)? {
-                    if let Some(block) =
-                        hacks::genesis_block_for_domain(&domain).map_err(Error::Code)?
-                    {
+                if genesis::is_genesis_hash(&domain, hash).map_err(Error::Code)? {
+                    if let Some(block) = genesis::genesis_block(&domain).map_err(Error::Code)? {
                         return Ok(Json(block));
                     }
                 }
@@ -167,7 +163,7 @@ where
     let chain = domain.get_chain_summary()?;
 
     let mut model = build_block_model(&domain, &block, &tip, &chain).await?;
-    hacks::maybe_set_genesis_previous_block(&domain, &mut model);
+    genesis::set_genesis_previous_block(&domain, &mut model);
 
     Ok(Json(model))
 }
@@ -224,11 +220,11 @@ where
         .map(|body| build_block_model(&domain, body, &tip, &chain));
     let mut output = try_join_all(futures).await?;
 
-    let mut block_0 = hacks::genesis_block_for_domain(&domain).map_err(Error::Code)?;
+    let mut block_0 = genesis::genesis_block(&domain).map_err(Error::Code)?;
 
     if let Some(_genesis) = block_0.as_ref() {
         for block in output.iter_mut() {
-            hacks::maybe_set_genesis_previous_block(&domain, block);
+            genesis::set_genesis_previous_block(&domain, block);
         }
 
         let to = from.saturating_add(pagination.count);
@@ -262,9 +258,7 @@ where
 
     let hash_or_number = parse_hash_or_number(&hash_or_number)?;
     let is_genesis = match &hash_or_number {
-        Either::Left(hash) => {
-            hacks::is_genesis_hash_for_domain(&domain, hash).map_err(Error::Code)?
-        }
+        Either::Left(hash) => genesis::is_genesis_hash(&domain, hash).map_err(Error::Code)?,
         _ => false,
     };
 
@@ -323,7 +317,7 @@ where
     let mut output = try_join_all(futures).await?;
     if is_genesis {
         for block in output.iter_mut() {
-            hacks::maybe_set_genesis_previous_block(&domain, block);
+            genesis::set_genesis_previous_block(&domain, block);
         }
     }
     let output = match pagination.order {
@@ -347,7 +341,7 @@ where
     let chain = domain.get_chain_summary()?;
 
     let mut model = build_block_model(&domain, &tip, &tip, &chain).await?;
-    hacks::maybe_set_genesis_previous_block(&domain, &mut model);
+    genesis::set_genesis_previous_block(&domain, &mut model);
 
     Ok(Json(model))
 }
@@ -374,7 +368,7 @@ where
     let chain = domain.get_chain_summary()?;
 
     let mut model = build_block_model(&domain, &block, &tip, &chain).await?;
-    hacks::maybe_set_genesis_previous_block(&domain, &mut model);
+    genesis::set_genesis_previous_block(&domain, &mut model);
 
     Ok(Json(model))
 }
@@ -425,7 +419,7 @@ where
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let mut model = build_block_model(&domain, &block, &tip, &chain).await?;
-    hacks::maybe_set_genesis_previous_block(&domain, &mut model);
+    genesis::set_genesis_previous_block(&domain, &mut model);
 
     Ok(Json(model))
 }
