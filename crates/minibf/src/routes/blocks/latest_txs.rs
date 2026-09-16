@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Query, State},
     Json,
 };
 use dolos_core::Domain;
@@ -10,10 +10,9 @@ use crate::{
     Facade,
 };
 
-use super::{load_block_by_hash_or_number, paged_block_txs, parse_hash_or_number};
+use super::{paged_block_txs, tip_block};
 
-pub async fn by_hash_or_number_txs<D>(
-    Path(hash_or_number): Path<String>,
+pub async fn latest_txs<D>(
     Query(params): Query<PaginationParameters>,
     State(domain): State<Facade<D>>,
 ) -> Result<Json<Vec<String>>, Error>
@@ -21,24 +20,22 @@ where
     D: Domain + Clone + Send + Sync + 'static,
 {
     let pagination = Pagination::try_from(params)?;
-    let hash_or_number = parse_hash_or_number(&hash_or_number)?;
-    let block = load_block_by_hash_or_number(&domain, &hash_or_number).await?;
+    let tip = tip_block(&domain)?;
 
-    Ok(Json(paged_block_txs(&block, &pagination)?))
+    Ok(Json(paged_block_txs(&tip, &pagination)?))
 }
 
 #[cfg(test)]
 mod tests {
-
-    use crate::test_support::TestApp;
     use axum::http::StatusCode;
 
+    use crate::test_support::TestApp;
+
     #[tokio::test]
-    async fn blocks_by_hash_or_number_txs_order_asc() {
+    async fn blocks_latest_txs_order_asc() {
         let app = TestApp::new();
-        let block = app.vectors().blocks.first().expect("missing block vectors");
-        let path = format!("/blocks/{}/txs?order=asc", block.block_hash);
-        let (status, bytes) = app.get_bytes(&path).await;
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=asc").await;
         assert_eq!(status, StatusCode::OK);
 
         let txs: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse asc txs");
@@ -47,11 +44,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocks_by_hash_or_number_txs_order_desc() {
+    async fn blocks_latest_txs_order_desc() {
         let app = TestApp::new();
-        let block = app.vectors().blocks.first().expect("missing block vectors");
-        let path = format!("/blocks/{}/txs?order=desc", block.block_hash);
-        let (status, bytes) = app.get_bytes(&path).await;
+        let block = app.vectors().blocks.last().expect("missing block vectors");
+        let (status, bytes) = app.get_bytes("/blocks/latest/txs?order=desc").await;
         assert_eq!(status, StatusCode::OK);
 
         let txs: Vec<String> = serde_json::from_slice(&bytes).expect("failed to parse desc txs");

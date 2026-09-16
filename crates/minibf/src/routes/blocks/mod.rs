@@ -12,18 +12,28 @@ use crate::{
 };
 
 mod addresses;
+mod by_epoch_slot;
 mod by_hash_or_number;
 mod by_slot;
 mod latest;
+mod latest_txs;
+mod latest_txs_cbor;
+mod next;
+mod previous;
 mod txs;
+mod txs_cbor;
 
 pub use addresses::by_hash_or_number_addresses;
-pub use by_hash_or_number::{
-    by_hash_or_number, by_hash_or_number_next, by_hash_or_number_previous,
-};
-pub use by_slot::{by_epoch_slot, by_slot};
-pub use latest::{latest, latest_txs, latest_txs_cbor};
-pub use txs::{by_hash_or_number_txs, by_hash_or_number_txs_cbor};
+pub use by_epoch_slot::by_epoch_slot;
+pub use by_hash_or_number::by_hash_or_number;
+pub use by_slot::by_slot;
+pub use latest::latest;
+pub use latest_txs::latest_txs;
+pub use latest_txs_cbor::latest_txs_cbor;
+pub use next::by_hash_or_number_next;
+pub use previous::by_hash_or_number_previous;
+pub use txs::by_hash_or_number_txs;
+pub use txs_cbor::by_hash_or_number_txs_cbor;
 
 use crate::hacks::genesis_block as genesis;
 use crate::mapping::blocks::BlockModelBuilder;
@@ -175,6 +185,7 @@ where
 #[cfg(test)]
 mod testing {
     use axum::http::StatusCode;
+    use blockfrost_openapi::models::block_content::BlockContent;
 
     use crate::test_support::TestApp;
 
@@ -194,5 +205,24 @@ mod testing {
             "unexpected status {status} with body: {}",
             String::from_utf8_lossy(&bytes)
         );
+    }
+
+    /// Preview genesis hash, the network the test domain runs on.
+    pub const GENESIS_HASH: &str = crate::hacks::GENESIS_HASH_PREVIEW;
+
+    pub async fn get_blocks(app: &TestApp, path: &str) -> Vec<BlockContent> {
+        let (status, bytes) = app.get_bytes(path).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "unexpected status {status} with body: {}",
+            String::from_utf8_lossy(&bytes)
+        );
+
+        serde_json::from_slice(&bytes).expect("failed to parse blocks")
+    }
+
+    pub fn hashes(blocks: &[BlockContent]) -> Vec<&str> {
+        blocks.iter().map(|b| b.hash.as_str()).collect()
     }
 }
