@@ -1643,12 +1643,15 @@ mod lifecycle_tests {
 
         let stake = vec![0x5Au8; 29];
         let address = vec![0x00u8; 57];
+        let block_hash = vec![0xABu8; 32];
+        let block_number = 7u64;
+        let tx_hash = vec![0xCDu8; 32];
 
         let delta = ArchiveIndexDelta {
             slot: 100,
-            block_hash: vec![0xAB; 32],
-            block_number: Some(7),
-            tx_hashes: vec![vec![0xCD; 32]],
+            block_hash: block_hash.clone(),
+            block_number: Some(block_number),
+            tx_hashes: vec![tx_hash.clone()],
             tags: vec![Tag::new("account_certs", vec![1, 2, 3])],
             stake_addresses: vec![StakeAddressAppearance {
                 order: 0,
@@ -1665,12 +1668,17 @@ mod lifecycle_tests {
         let page = store.addresses_by_stake_log(&stake, 0, 10, false).unwrap();
         assert_eq!(page, vec![address]);
 
-        // the tag and exact entries the delta carried were not written
+        // the tag entry the delta carried was not written
         let slots: Vec<u64> = store
             .slots_by_tag("account_certs", &[1, 2, 3], 0, u64::MAX)
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(slots.is_empty());
+
+        // nor was any of its three exact entries
+        assert!(store.slot_by_block_hash(&block_hash).unwrap().is_none());
+        assert!(store.slot_by_block_number(block_number).unwrap().is_none());
+        assert!(store.slot_by_tx_hash(&tx_hash).unwrap().is_none());
     }
 }
